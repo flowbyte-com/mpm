@@ -5,6 +5,13 @@ description: FlowByte MPM v3.2. Manage workspace identity (Personas) and behavio
 
 # MPM Logic Pipes
 
+## 🚀 Quick Start
+
+```bash
+mpm watch          # Auto-sync persona/mode changes (run in background)
+mpm status         # Dashboard overview
+```
+
 ## 🎭 Persona (~p)
 - **Selection:** `~p.[name]!act`
 - **Purpose:** Identity/Voice override without touching core files.
@@ -19,3 +26,23 @@ description: FlowByte MPM v3.2. Manage workspace identity (Personas) and behavio
 
 ## 🚦 System State
 Always check `active.json` or run `mpm status` to synchronize with current Bytecode state before responding.
+
+## ⚡ Live Sync
+
+Run `mpm watch` in a terminal to auto-compile .persona/.mode files on save:
+
+```bash
+mpm watch   # Background watcher for persona + mode changes
+```
+
+Changes to `~/.openclaw/workspace/MPM/persona/*.persona` or `~/.openclaw/workspace/MPM/mode/*.mode` trigger auto-compile + notification.
+
+---
+
+# Credits
+
+**MPM v3.2** — FlowByte Logic Pipes
+- Concept & Architecture: The Great 808
+- SQLite-backed persona/mode storage for ~97% token reduction vs raw markdown
+- SymAI opcode integration (~p, ~m, ~k prefixes)
+- Auto-sync via inotifywait
