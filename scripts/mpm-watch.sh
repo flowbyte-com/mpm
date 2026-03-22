@@ -1,11 +1,16 @@
 #!/bin/bash
-# ⚡ MPM Watcher - Live-Sync Persona/Mode Changes
+# ⚡ MPM Watcher - Live-Sync Persona/Mode + Memory Changes
 
 PERSONAS_DIR="$HOME/.openclaw/workspace/MPM/persona"
 MODES_DIR="$HOME/.openclaw/workspace/MPM/mode"
+MEMORY_DIR="$HOME/.openclaw/workspace/memory"
 SCRIPT_DIR="$HOME/.openclaw/workspace/skills/mpm/scripts"
 
-echo "📡 MPM Watcher Active. Monitoring for Silicon-Native updates..."
+echo "📡 MPM Watcher Active. Monitoring Persona, Mode & Memory..."
+
+# Start memory watcher in background
+"$SCRIPT_DIR/memory-watch.sh" &
+echo "🧠 Memory watcher started (PID: $!)"
 
 # Watch both directories for file closures (saves)
 inotifywait -m -r "$PERSONAS_DIR" "$MODES_DIR" -e close_write | while read path action file; do

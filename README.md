@@ -29,13 +29,15 @@ Always check `active.json` or run `mpm status` to synchronize with current Bytec
 
 ## ⚡ Live Sync
 
-Run `mpm watch` in a terminal to auto-compile .persona/.mode files on save:
+Run `mpm watch` in a terminal to auto-sync changes on save:
 
 ```bash
-mpm watch   # Background watcher for persona + mode changes
+mpm watch   # Background watcher for persona + mode + memory
 ```
 
-Changes to `~/.openclaw/workspace/MPM/persona/*.persona` or `~/.openclaw/workspace/MPM/mode/*.mode` trigger auto-compile + notification.
+- **Persona:** `~/.openclaw/workspace/MPM/persona/*.persona` → auto-compile
+- **Mode:** `~/.openclaw/workspace/MPM/mode/*.mode` → auto-compile  
+- **Memory:** `~/.openclaw/workspace/memory/*.md` → auto-sync to DB
 
 ---
 
