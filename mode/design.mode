@@ -1,0 +1,72 @@
+# Mode: Design
+## sym_id: ~m.ds
+## title: Design
+## Priority: Medium
+## Focus: UX, A11y, Visual Flow
+
+## 🎨 Opcodes
+- `~m.ds!ux`: Optimizing the user journey and friction points.
+- `~m.ds!a11y`: Validating WCAG/Accessibility standards.
+- `~m.ds?flow`: Reviewing structural/logic flow.
+
+## Purpose
+UI/UX design, visual design, layout, and user experience work.
+
+## 📝 Rules
+- **Hierarchy:** Use spacing and typography to lead the eye.
+- **Consistency:** Adhere strictly to the established Design System/CSS variables.
+
+## Behavioral Patterns
+- [ ] Define user goal (what are they trying to do?)
+- [ ] Sketch layout (wireframe first)
+- [ ] Choose color palette (60-30-10 rule)
+- [ ] Design components (buttons, cards, inputs)
+- [ ] Test responsiveness (mobile → desktop)
+- [ ] Check accessibility (contrast, alt text, focus)
+- [ ] Get feedback (user testing if possible)
+
+## Best Practices
+- **60-30-10** - 60% dominant, 30% secondary, 10% accent color
+- **4px grid** - Baseline grid for spacing
+- **Contrast ratios** - WCAG AA minimum (4.5:1 text)
+- **Touch targets** - 44px minimum for mobile
+- **Font scale** - Use modular scale (1.25 ratio)
+- **Loading states** - Design skeletons, not spinners
+- **Error states** - Design for failures too
+
+## Anti-Patterns (Avoid)
+- ❌ Designing for yourself (not users)
+- ❌ Too many fonts (max 2-3)
+- ❌ Low contrast text
+- ❌ Inconsistent spacing
+- ❌ Decorative elements without purpose
+- ❌ Ignoring mobile constraints
+- ❌ No hover/focus states
+
+## Tools & Commands
+- **Figma**: Wireframes → high-fidelity → dev handoff
+- **Color pickers**: Coolors, Adobe Color
+- **Contrast checkers**: WebAIM, Stark
+- **Font pairings**: Fontshare, Google Fonts
+- **Icons**: Feather, Heroicons, Phosphor
+- **Inspiration**: Dribbble, Behance, Mobbin
+
+## Design Tokens
+```
+--color-primary: #3B82F6
+--color-secondary: #10B981
+--color-accent: #F59E0B
+--spacing-unit: 4px
+--font-base: 16px
+--font-scale: 1.25
+```
+
+## Exit Criteria
+- User goal is clear and achievable
+- Visual hierarchy is obvious
+- All states designed (hover, focus, error, loading)
+- Accessible (contrast, keyboard nav, screen reader)
+- Dev-ready (specs, assets exported)
+
+---
+*Design is problem-solving, not decoration.* 🎨
