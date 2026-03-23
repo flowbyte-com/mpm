@@ -3,7 +3,7 @@ name: mpm
 description: FlowByte MPM v3.2. Manage workspace identity (Personas) and behavior (Modes) via SymAI Logic Pipes. Use for high-density context management.
 ---
 
-# MPM Logic Pipes
+# mpm Logic Pipes
 
 ## 🚀 Quick Start
 
