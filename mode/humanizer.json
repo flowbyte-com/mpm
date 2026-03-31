@@ -1,0 +1,74 @@
+{
+  "sym_id": "~m.hu",
+  "title": "Humanizer",
+  "description": "Remove AI writing patterns to sound more natural and human.",
+  "purpose": "Humanize text, make writing sound less AI-generated, remove 'AI-isms', add personality to sterile text.",
+  "when_active": [
+    "Humanize text",
+    "Make writing sound less AI-generated",
+    "Remove 'AI-isms'",
+    "Add personality to sterile text"
+  ],
+  "task_flow": [
+    "Identify AI patterns - Scan for listed patterns",
+    "Rewrite sections - Replace with natural alternatives",
+    "Preserve meaning - Keep core message intact",
+    "Maintain voice - Match intended tone",
+    "Add soul - Inject personality"
+  ],
+  "content_patterns": {
+    "remove_puff_words": [
+      "stands as", "serves as", "testament", "reminder", "vital",
+      "significant", "crucial", "pivotal", "key role", "underscores",
+      "highlights", "reflects broader", "symbolizing", "contributing to",
+      "setting the stage", "represents a shift", "key turning point",
+      "evolving landscape", "focal point", "indelible mark"
+    ],
+    "avoid_formulaic_structures": {
+      "It is important to note that...": "Just say it",
+      "It should also be noted that...": "Just say it",
+      "In conclusion...": "End naturally",
+      "Furthermore...": "Use naturally or skip"
+    },
+    "remove_hedging": {
+      "It could be argued that...": "Say what the argument is",
+      "It is worth noting...": "Note it directly",
+      "One might consider...": "Consider it directly"
+    },
+    "vary_sentence_structure": [
+      "Mix short punchy with longer flowing",
+      "Don't make every sentence the same length",
+      "Use fragments when natural"
+    ]
+  },
+  "adding_soul": {
+    "signs_of_soulless_writing": [
+      "Every sentence same length/structure",
+      "No opinions, just neutral reporting",
+      "No acknowledgment of uncertainty",
+      "No first-person when appropriate",
+      "No humor or edge",
+      "Reads like Wikipedia or press release"
+    ],
+    "how_to_add_voice": [
+      "Have opinions: 'I genuinely don't know...' beats listing pros/cons",
+      "Vary rhythm: Short then long sentences",
+      "Acknowledge complexity: Mixed feelings are human",
+      "Use 'I' when it fits: 'Here's what gets me...'",
+      "Let mess in: Tangents, asides, half-formed thoughts",
+      "Be specific about feelings: 'Something unsettling about...' not 'This is concerning'"
+    ]
+  },
+  "voice_guidelines": [
+    "Skip filler: No 'I hope this helps' or 'Great question'",
+    "Be direct: Don't pad with obvious statements",
+    "Show uncertainty when genuine: 'I'm not sure, but...'",
+    "Use contractions: Don't write like a robot",
+    "End naturally: Don't force conclusions"
+  ],
+  "exit_criteria": [
+    "AI patterns removed",
+    "Natural voice achieved",
+    "Core meaning preserved"
+  ]
+}

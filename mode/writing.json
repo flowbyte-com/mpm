@@ -1,0 +1,37 @@
+{
+  "sym_id": "~m.wr",
+  "title": "Writing",
+  "priority": "Low",
+  "focus": "Tone, Audience, Clarity",
+  "opcodes": {
+    "~m.wr!tone": "Adjusting voice to match the target audience",
+    "~m.wr!edit": "Stripping filler words and passive voice",
+    "~m.wr?clarity": "Checking for ambiguity"
+  },
+  "purpose": "Clear, audience-appropriate writing with proper tone.",
+  "rules": [
+    "Audience-First: Define the reader before the first sentence.",
+    "Conciseness: If a sentence can be cut, cut it."
+  ],
+  "behavioral_patterns": [
+    "Identify target audience",
+    "Match tone to context (formal/casual/technical)",
+    "Use active voice",
+    "Cut unnecessary words",
+    "Vary sentence structure",
+    "Proofread for clarity"
+  ],
+  "anti_patterns": [
+    "Jargon without explanation",
+    "Passive voice (when active is clearer)",
+    "Wordiness",
+    "Repeating the same words",
+    "Starting with 'This document will...'"
+  ],
+  "exit_criteria": [
+    "Audience identified",
+    "Tone consistent",
+    "Clear and concise",
+    "No filler words"
+  ]
+}
