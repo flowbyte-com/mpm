@@ -1652,8 +1652,10 @@ func becomeDaemonAndExecute() {
 // handleExit performs centralized cleanup
 // Uses sync.Once to ensure it runs exactly once even with concurrent calls
 func handleExit() {
+	fmt.Fprintf(os.Stderr, "[DEBUG] handleExit: starting\n")
 	cleanupMutex.Lock()
 	cleanupSync.Do(func() {
+		fmt.Fprintf(os.Stderr, "[DEBUG] handleExit: inside cleanupSync.Do\n")
 		isShuttingDown.Store(true)
 
 		// Check if this is a reboot (socket removal handled by reboot logic)
@@ -3258,14 +3260,17 @@ func startWatchDaemon() error {
 // stopWatchDaemon sends SIGTERM to the watch subprocess and waits for it to exit.
 // Uses targeted signal (not process group) to avoid killing unrelated processes.
 func stopWatchDaemon() error {
+	fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: watchPid=%d, watchCmd=%v\n", watchPid, watchCmd)
 	if watchPid == 0 {
 		return fmt.Errorf("watch daemon not running")
 	}
 
 	proc, err := os.FindProcess(watchPid)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: FindProcess error: %v\n", err)
 		return fmt.Errorf("failed to find watch process: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: sending SIGTERM to PID %d\n", watchPid)
 
 	// Send SIGTERM to the specific PID only (not the process group).
 	// Using process group (-proc.Pid) can affect unrelated processes if
@@ -3467,6 +3472,7 @@ func handleLifecycleClient(op *LifecycleOp) bool {
 // handleShutdown performs graceful daemon shutdown
 func handleShutdown(force bool, conn net.Conn) {
 	enc := json.NewEncoder(conn)
+	fmt.Fprintf(os.Stderr, "[DEBUG] handleShutdown called (shuttingDown=%v, rebooting=%v)\n", isShuttingDown.Load(), isRebooting.Load())
 
 	if !force {
 		// Phase 1: Save session
@@ -3482,7 +3488,9 @@ func handleShutdown(force bool, conn net.Conn) {
 
 	// Give response time to be sent, then exit
 	go func() {
+		fmt.Fprintf(os.Stderr, "[DEBUG] shutdown goroutine: sleeping 200ms before handleExit\n")
 		time.Sleep(200 * time.Millisecond)
+		fmt.Fprintf(os.Stderr, "[DEBUG] shutdown goroutine: calling handleExit\n")
 		handleExit()
 	}()
 }
