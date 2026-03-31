@@ -1682,11 +1682,16 @@ func handleExit() {
 		fmt.Fprintf(os.Stderr, "[DEBUG] clearQueue done\n")
 
 		// Close the listener first to stop accepting new connections
+		println("[DEBUG] about to lock listenerMutex")
 		listenerMutex.Lock()
+		println("[DEBUG] listenerMutex locked")
 		if listener != nil {
 			listener.Close()
 		}
 		listenerMutex.Unlock()
+		println("[DEBUG] listenerMutex unlocked, listener closed")
+
+		// Kill all subprocesses in our process group
 
 		// Kill all subprocesses in our process group
 		// NOTE: Removed killProcessGroup() call - it sends SIGTERM to the entire
