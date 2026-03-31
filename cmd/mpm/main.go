@@ -1652,13 +1652,16 @@ func becomeDaemonAndExecute() {
 // handleExit performs centralized cleanup
 // Uses sync.Once to ensure it runs exactly once even with concurrent calls
 func handleExit() {
+	println("[DEBUG handleExit] starting")
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "[PANIC in handleExit] %v\n", r)
 		}
 	}()
 
+	println("[DEBUG handleExit] acquiring cleanupMutex")
 	cleanupMutex.Lock()
+	println("[DEBUG handleExit] acquired cleanupMutex")
 	isShuttingDown.Store(true)
 
 	// Check if this is a reboot (socket removal handled by reboot logic)
@@ -1669,47 +1672,66 @@ func handleExit() {
 	}
 
 	// Stop heartbeat first to avoid sending "dying" heartbeats
+	println("[DEBUG handleExit] calling closeHeartbeat")
 	closeHeartbeat()
+	println("[DEBUG handleExit] closeHeartbeat done")
 
 	// Clear the queue (reject pending tasks)
+	println("[DEBUG handleExit] calling clearQueue")
 	clearQueue()
+	println("[DEBUG handleExit] clearQueue done")
 
 	// Close the listener to stop accepting new connections.
 	// Close in a goroutine since listener.Close() can block waiting for
 	// in-flight Accept() calls to complete.
 	// Capture listener value before setting to nil to avoid nil pointer panic in goroutine.
+	println("[DEBUG handleExit] closing listener")
 	if listener != nil {
 		l := listener
 		listener = nil
 		go func() { l.Close() }()
 	}
+	println("[DEBUG handleExit] listener closed (async)")
 
 	// Explicitly stop watch daemon for clean shutdown
+	println("[DEBUG handleExit] checking watchPid")
 	if watchPid != 0 {
+		println("[DEBUG handleExit] calling stopWatchDaemon, watchPid=", watchPid)
 		stopWatchDaemon()
+		println("[DEBUG handleExit] stopWatchDaemon RETURNED")
+	} else {
+		println("[DEBUG handleExit] watchPid is 0, skipping stopWatchDaemon")
 	}
 
-	// Release the PID lock on clean shutdown
+	println("[DEBUG handleExit] about to call releaseDaemonLock")
 	lockPath := sockPath + ".lock"
 	releaseDaemonLock(lockPath)
+	println("[DEBUG handleExit] lock released")
 
 	// Remove the socket file ONLY on true shutdown (not reboot)
 	// On reboot, the socket is removed by executeReboot() before spawning child
 	if !isRebooting.Load() {
+		println("[DEBUG handleExit] removing socket")
 		os.Remove(sockPath)
+		println("[DEBUG handleExit] socket removed")
 	}
 
 	// Flush and close logs
+	println("[DEBUG handleExit] closing logger")
 	closeLogger()
+	println("[DEBUG handleExit] logger closed")
 
 	// Close webhook system
+	println("[DEBUG handleExit] closing webhook")
 	closeWebhook()
+	println("[DEBUG handleExit] webhook closed")
 
 	if isRebooting.Load() {
 		logInfo("daemon", daemonPid, "Reboot complete")
 	} else {
 		logInfo("daemon", daemonPid, "Daemon stopped")
 	}
+	println("[DEBUG handleExit] calling os.Exit(0)")
 	os.Exit(0)
 	cleanupMutex.Unlock()
 }
@@ -3256,41 +3278,46 @@ func startWatchDaemon() error {
 	return nil
 }
 
-// stopWatchDaemon sends SIGTERM to the watch subprocess and waits for it to exit.
-// Uses targeted signal (not process group) to avoid killing unrelated processes.
+// stopWatchDaemon sends SIGTERM to the watch subprocess.
+// Returns immediately after signaling — does not wait for process exit.
+// The watch monitor goroutine (started in startWatchDaemon) handles reaping.
 func stopWatchDaemon() error {
-	fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: watchPid=%d, watchCmd=%v\n", watchPid, watchCmd)
 	if watchPid == 0 {
 		return fmt.Errorf("watch daemon not running")
 	}
 
 	proc, err := os.FindProcess(watchPid)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: FindProcess error: %v\n", err)
 		return fmt.Errorf("failed to find watch process: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[DEBUG] stopWatchDaemon: sending SIGTERM to PID %d\n", watchPid)
 
-	// Send SIGTERM to the specific PID only (not the process group).
-	// Using process group (-proc.Pid) can affect unrelated processes if
-	// the PGID happens to match another process, or reparent the child to systemd.
+	// Send SIGTERM to the watch process.
+	// Note: we send to the PID directly (not process group) to avoid affecting
+	// unrelated processes. The watch is its own process group leader (Setpgid: true),
+	// but we only signal the specific PID.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		// Process may have already exited
 		if !errors.Is(err, os.ErrProcessDone) {
 			return fmt.Errorf("failed to signal watch: %w", err)
 		}
 	}
 
-	// Wait for the watch process to actually exit so it doesn't get reparented to systemd.
-	// This also prevents the goroutine in startWatchDaemon from racing with pid cleanup.
-	if watchCmd != nil {
-		watchCmd.Wait()
-		watchCmd = nil
+	// Don't call watchCmd.Wait() here — the monitor goroutine in startWatchDaemon
+	// handles that. Calling Wait() on an exec.Cmd with Setpgid:true can deadlock
+	// because of how Go manages the process group pipe state.
+	// The monitor goroutine will set watchPid = 0 when the process exits.
+	// We give it up to 500ms to clean up.
+	for i := 0; i < 50; i++ {
+		if watchPid == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	logInfo("watch", daemonPid, fmt.Sprintf("Watch daemon stopped (PID: %d was)", watchPid))
+	// Force cleanup if monitor goroutine didn't complete in time
 	watchPid = 0
+	watchCmd = nil
 
+	logInfo("watch", daemonPid, "Watch daemon stopped")
 	return nil
 }
 
@@ -3471,7 +3498,6 @@ func handleLifecycleClient(op *LifecycleOp) bool {
 // handleShutdown performs graceful daemon shutdown
 func handleShutdown(force bool, conn net.Conn) {
 	enc := json.NewEncoder(conn)
-	fmt.Fprintf(os.Stderr, "[DEBUG] handleShutdown called (shuttingDown=%v, rebooting=%v)\n", isShuttingDown.Load(), isRebooting.Load())
 
 	if !force {
 		// Phase 1: Save session
@@ -3485,11 +3511,11 @@ func handleShutdown(force bool, conn net.Conn) {
 	// Phase 3: Exit
 	enc.Encode(Message{Output: "  ✅ [3/3] Daemon stopped.\n", Done: true, ExitCode: 0})
 
-	// NOTE: Call handleExit synchronously. The listener close below will break
-	// the Accept loop, allowing dispatchDaemon to return and the handler goroutine
-	// to exit cleanly. Then os.Exit(0) terminates the process.
-	time.Sleep(200 * time.Millisecond)
-	handleExit()
+	// Call handleExit in a goroutine and return.
+	// Calling it synchronously would block the handler goroutine, preventing
+	// the connection from draining. The goroutine calls os.Exit(0),
+	// which terminates the entire process.
+	go handleExit()
 }
 
 // handleReboot performs daemon restart
@@ -3629,13 +3655,20 @@ func acquireDaemonLock(lockPath string) error {
 // releaseDaemonLock removes the PID lock file if it belongs to this process.
 // This is called on clean shutdown; stale locks are cleaned up by the next startup.
 func releaseDaemonLock(lockPath string) {
+	println("[DEBUG releaseDaemonLock] starting, path=", lockPath)
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
+		println("[DEBUG releaseDaemonLock] ReadFile error:", err.Error())
 		return
 	}
 	trimmed := strings.TrimSpace(string(data))
+	println("[DEBUG releaseDaemonLock] file content:", trimmed)
 	if pid, err := strconv.Atoi(trimmed); err == nil && pid == os.Getpid() {
+		println("[DEBUG releaseDaemonLock] matching PID, removing lock")
 		os.Remove(lockPath)
+		println("[DEBUG releaseDaemonLock] lock removed")
+	} else {
+		println("[DEBUG releaseDaemonLock] PID mismatch or parse error, not removing")
 	}
 }
 
