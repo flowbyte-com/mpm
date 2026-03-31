@@ -1652,87 +1652,65 @@ func becomeDaemonAndExecute() {
 // handleExit performs centralized cleanup
 // Uses sync.Once to ensure it runs exactly once even with concurrent calls
 func handleExit() {
-	fmt.Fprintf(os.Stderr, "[DEBUG] handleExit: starting\n")
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[PANIC in handleExit] %v\n", r)
+		}
+	}()
+
 	cleanupMutex.Lock()
-	cleanupSync.Do(func() {
-		fmt.Fprintf(os.Stderr, "[DEBUG] handleExit: inside cleanupSync.Do\n")
-		isShuttingDown.Store(true)
+	isShuttingDown.Store(true)
 
-		// Check if this is a reboot (socket removal handled by reboot logic)
-		if isRebooting.Load() {
-			logInfo("daemon", daemonPid, "Rebooting...")
-		} else {
-			logInfo("daemon", daemonPid, "Shutting down...")
-		}
+	// Check if this is a reboot (socket removal handled by reboot logic)
+	if isRebooting.Load() {
+		logInfo("daemon", daemonPid, "Rebooting...")
+	} else {
+		logInfo("daemon", daemonPid, "Shutting down...")
+	}
 
-		// Stop heartbeat first to avoid sending "dying" heartbeats
-		fmt.Fprintf(os.Stderr, "[DEBUG] calling closeHeartbeat\n")
-		closeHeartbeat()
-		fmt.Fprintf(os.Stderr, "[DEBUG] closeHeartbeat done\n")
+	// Stop heartbeat first to avoid sending "dying" heartbeats
+	closeHeartbeat()
 
-		fmt.Fprintf(os.Stderr, "[DEBUG] calling clearQueue\n")
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "[DEBUG] clearQueue panicked: %v\n", r)
-				}
-			}()
-			clearQueue()
-		}()
-		fmt.Fprintf(os.Stderr, "[DEBUG] clearQueue done\n")
+	// Clear the queue (reject pending tasks)
+	clearQueue()
 
-		// Close the listener first to stop accepting new connections
-		println("[DEBUG] about to lock listenerMutex")
-		listenerMutex.Lock()
-		println("[DEBUG] listenerMutex locked")
-		if listener != nil {
-			listener.Close()
-		}
-		listenerMutex.Unlock()
-		println("[DEBUG] listenerMutex unlocked, listener closed")
+	// Close the listener to stop accepting new connections.
+	// Close in a goroutine since listener.Close() can block waiting for
+	// in-flight Accept() calls to complete.
+	// Capture listener value before setting to nil to avoid nil pointer panic in goroutine.
+	if listener != nil {
+		l := listener
+		listener = nil
+		go func() { l.Close() }()
+	}
 
-		// Kill all subprocesses in our process group
-
-		// Kill all subprocesses in our process group
-		// NOTE: Removed killProcessGroup() call - it sends SIGTERM to the entire
-		// process group INCLUDING the main daemon itself, causing premature termination.
-		// The watch daemon is cleaned up via stopWatchDaemon() below, and os.Exit(0)
-		// cleanly terminates the main process without needing killProcessGroup.
-
-		// Explicitly stop watch daemon for clean shutdown
-		if watchPid != 0 {
-			fmt.Fprintf(os.Stderr, "[DEBUG] calling stopWatchDaemon (watchPid=%d)\n", watchPid)
-			stopWatchDaemon()
-		} else {
-			fmt.Fprintf(os.Stderr, "[DEBUG] watchPid is 0, skipping stopWatchDaemon\n")
-		}
-
-		// Flush stderr before exit
-		os.Stderr.Sync()
+	// Explicitly stop watch daemon for clean shutdown
+	if watchPid != 0 {
+		stopWatchDaemon()
+	}
 
 	// Release the PID lock on clean shutdown
 	lockPath := sockPath + ".lock"
 	releaseDaemonLock(lockPath)
 
-		// Remove the socket file ONLY on true shutdown (not reboot)
-		// On reboot, the socket is removed by executeReboot() before spawning child
-		if !isRebooting.Load() {
-			os.Remove(sockPath)
-		}
+	// Remove the socket file ONLY on true shutdown (not reboot)
+	// On reboot, the socket is removed by executeReboot() before spawning child
+	if !isRebooting.Load() {
+		os.Remove(sockPath)
+	}
 
-		// Flush and close logs
-		closeLogger()
+	// Flush and close logs
+	closeLogger()
 
-		// Close webhook system
-		closeWebhook()
+	// Close webhook system
+	closeWebhook()
 
-		if isRebooting.Load() {
-			logInfo("daemon", daemonPid, "Reboot complete")
-		} else {
-			logInfo("daemon", daemonPid, "Daemon stopped")
-		}
-		os.Exit(0)
-	})
+	if isRebooting.Load() {
+		logInfo("daemon", daemonPid, "Reboot complete")
+	} else {
+		logInfo("daemon", daemonPid, "Daemon stopped")
+	}
+	os.Exit(0)
 	cleanupMutex.Unlock()
 }
 
@@ -3507,10 +3485,9 @@ func handleShutdown(force bool, conn net.Conn) {
 	// Phase 3: Exit
 	enc.Encode(Message{Output: "  ✅ [3/3] Daemon stopped.\n", Done: true, ExitCode: 0})
 
-	// Give response time to be sent, then exit
-	// NOTE: We must call handleExit synchronously here, not in a goroutine.
-	// If we spawn a goroutine and os.Exit(0) in dispatchDaemon fires first,
-	// the goroutine never runs and the daemon never actually exits.
+	// NOTE: Call handleExit synchronously. The listener close below will break
+	// the Accept loop, allowing dispatchDaemon to return and the handler goroutine
+	// to exit cleanly. Then os.Exit(0) terminates the process.
 	time.Sleep(200 * time.Millisecond)
 	handleExit()
 }
