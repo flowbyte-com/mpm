@@ -1666,10 +1666,20 @@ func handleExit() {
 		}
 
 		// Stop heartbeat first to avoid sending "dying" heartbeats
+		fmt.Fprintf(os.Stderr, "[DEBUG] calling closeHeartbeat\n")
 		closeHeartbeat()
+		fmt.Fprintf(os.Stderr, "[DEBUG] closeHeartbeat done\n")
 
-		// Clear the queue (reject pending tasks)
-		clearQueue()
+		fmt.Fprintf(os.Stderr, "[DEBUG] calling clearQueue\n")
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[DEBUG] clearQueue panicked: %v\n", r)
+				}
+			}()
+			clearQueue()
+		}()
+		fmt.Fprintf(os.Stderr, "[DEBUG] clearQueue done\n")
 
 		// Close the listener first to stop accepting new connections
 		listenerMutex.Lock()
@@ -1686,8 +1696,14 @@ func handleExit() {
 
 		// Explicitly stop watch daemon for clean shutdown
 		if watchPid != 0 {
+			fmt.Fprintf(os.Stderr, "[DEBUG] calling stopWatchDaemon (watchPid=%d)\n", watchPid)
 			stopWatchDaemon()
+		} else {
+			fmt.Fprintf(os.Stderr, "[DEBUG] watchPid is 0, skipping stopWatchDaemon\n")
 		}
+
+		// Flush stderr before exit
+		os.Stderr.Sync()
 
 	// Release the PID lock on clean shutdown
 	lockPath := sockPath + ".lock"
@@ -3487,12 +3503,11 @@ func handleShutdown(force bool, conn net.Conn) {
 	enc.Encode(Message{Output: "  ✅ [3/3] Daemon stopped.\n", Done: true, ExitCode: 0})
 
 	// Give response time to be sent, then exit
-	go func() {
-		fmt.Fprintf(os.Stderr, "[DEBUG] shutdown goroutine: sleeping 200ms before handleExit\n")
-		time.Sleep(200 * time.Millisecond)
-		fmt.Fprintf(os.Stderr, "[DEBUG] shutdown goroutine: calling handleExit\n")
-		handleExit()
-	}()
+	// NOTE: We must call handleExit synchronously here, not in a goroutine.
+	// If we spawn a goroutine and os.Exit(0) in dispatchDaemon fires first,
+	// the goroutine never runs and the daemon never actually exits.
+	time.Sleep(200 * time.Millisecond)
+	handleExit()
 }
 
 // handleReboot performs daemon restart
