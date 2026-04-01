@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -296,6 +298,12 @@ func (d *watcherDaemon) sweepDirectory(dir string) {
 			// Route A: Process and delete .md memory files
 			d.processMarkdownFile(path, true)
 
+		case ".json":
+			// Route C: OpenClaw system config files — parse, hash, store (never delete)
+			if nameLower == "sessions.json" || nameLower == "workspace.json" || nameLower == "config.json" {
+				d.processSessionsConfig(path)
+			}
+
 		case ".jsonl":
 			// Skip in sweep — only process via handleLockRemoved when .lock is explicitly
 			// removed (signals session complete). Without a .lock, the session is still being
@@ -466,7 +474,174 @@ func (d *watcherDaemon) processSessionFile(path string, isStartup bool) {
 	d.deleteFile(path, "processed successfully")
 }
 
-// readJSONLines reads a JSONL file and returns individual lines as strings
+// processSessionsConfig handles Route C: OpenClaw system config files (sessions.json, workspace.json, etc.)
+// Reads, hashes, parses structured data, and stores in system_config table.
+// Does NOT delete the source file — it's a live config that OpenClaw manages.
+func (d *watcherDaemon) processSessionsConfig(path string) {
+	name := filepath.Base(path)
+
+	// Read raw content
+	rawBytes, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "   ❌ Failed to read %s: %v\n", name, err)
+		return
+	}
+	rawJSON := string(rawBytes)
+
+	// Compute content hash for change detection
+	hash := sha256.Sum256(rawBytes)
+	contentHash := hex.EncodeToString(hash[:])
+
+	// Parse structured snapshot from sessions.json
+	snapshot, err := d.parseSessionsSnapshot(rawBytes)
+	if err != nil {
+		if d.verbose {
+			fmt.Printf("   ⚠️  Failed to parse %s as sessions config: %v\n", name, err)
+		}
+		snapshot = nil
+	}
+
+	snapshotJSON := ""
+	if snapshot != nil {
+		bytes, _ := json.Marshal(snapshot)
+		snapshotJSON = string(bytes)
+	}
+
+	// Save to system_config (hash-check prevents duplicate writes)
+	updated, err := d.db.SaveSystemConfig(name, rawJSON, contentHash, snapshotJSON)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "   ❌ Failed to save system config %s: %v\n", name, err)
+		return
+	}
+
+	if updated {
+		fmt.Printf("   📡 System config updated: %s\n", name)
+	} else {
+		if d.verbose {
+			fmt.Printf("   ⏭️  System config unchanged: %s\n", name)
+		}
+	}
+}
+
+// parseSessionsSnapshot extracts a structured, queryable snapshot from sessions.json bytes
+// Returns a flat map with the most useful fields, or nil on parse failure.
+func (d *watcherDaemon) parseSessionsSnapshot(data []byte) (map[string]interface{}, error) {
+	var sessions map[string]json.RawMessage
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, err
+	}
+
+	// sessions.json is a map of sessionKey -> sessionData
+	// We only care about the main "agent:main:main" session (or first key available)
+	var sessionData map[string]interface{}
+	for key, raw := range sessions {
+		if err := json.Unmarshal(raw, &sessionData); err != nil {
+			continue
+		}
+		// Use the first/primary session data available
+		if key == "agent:main:main" {
+			break
+		}
+		break // use first available
+	}
+
+	if sessionData == nil {
+		return nil, fmt.Errorf("no session data found")
+	}
+
+	snapshot := map[string]interface{}{
+		"session_key":      "",
+		"session_id":      "",
+		"channel":          "",
+		"model":            "",
+		"provider":         "",
+		"skills_count":     0,
+		"skills":           []string{},
+		"workspace_files":  []string{},
+		"system_prompt_chars": 0,
+		"context_tokens":   0,
+		"runtime_ms":       int64(0),
+		"updated_at":       int64(0),
+	}
+
+	// Extract top-level fields
+	if v, ok := sessionData["sessionId"].(string); ok {
+		snapshot["session_id"] = v
+	}
+	if v, ok := sessionData["model"].(string); ok {
+		snapshot["model"] = v
+	}
+	if v, ok := sessionData["modelProvider"].(string); ok {
+		snapshot["provider"] = v
+	}
+	if v, ok := sessionData["contextTokens"].(float64); ok {
+		snapshot["context_tokens"] = int(v)
+	}
+	if v, ok := sessionData["runtimeMs"].(float64); ok {
+		snapshot["runtime_ms"] = int64(v)
+	}
+	if v, ok := sessionData["updatedAt"].(float64); ok {
+		snapshot["updated_at"] = int64(v)
+	}
+
+	// Extract channel from deliveryContext
+	if dc, ok := sessionData["deliveryContext"].(map[string]interface{}); ok {
+		if v, ok := dc["channel"].(string); ok {
+			snapshot["channel"] = v
+		}
+	}
+
+	// Extract origin label
+	if origin, ok := sessionData["origin"].(map[string]interface{}); ok {
+		if v, ok := origin["label"].(string); ok {
+			snapshot["origin_label"] = v
+		}
+	}
+
+	// Extract skills
+	var skillNames []string
+	if ss, ok := sessionData["skillsSnapshot"].(map[string]interface{}); ok {
+		if skills, ok := ss["skills"].([]interface{}); ok {
+			for _, s := range skills {
+				if m, ok := s.(map[string]interface{}); ok {
+					if name, ok := m["name"].(string); ok {
+						skillNames = append(skillNames, name)
+					}
+				}
+			}
+		}
+	}
+	snapshot["skills"] = skillNames
+	snapshot["skills_count"] = len(skillNames)
+
+	// Extract workspace files
+	var wsFiles []string
+	if ss, ok := sessionData["skillsSnapshot"].(map[string]interface{}); ok {
+		if spr, ok := ss["systemPromptReport"].(map[string]interface{}); ok {
+			if files, ok := spr["injectedWorkspaceFiles"].([]interface{}); ok {
+				for _, f := range files {
+					if m, ok := f.(map[string]interface{}); ok {
+						if name, ok := m["name"].(string); ok {
+							wsFiles = append(wsFiles, name)
+						}
+					}
+				}
+			}
+		}
+		if sp, ok := ss["systemPrompt"].(map[string]interface{}); ok {
+			if v, ok := sp["chars"].(float64); ok {
+				snapshot["system_prompt_chars"] = int(v)
+			}
+		}
+	}
+	snapshot["workspace_files"] = wsFiles
+
+	return snapshot, nil
+}
+
+// sha256 and hex imported at top of file (already present)
+
+
 func (d *watcherDaemon) readJSONLines(path string) ([]string, error) {
 	file, err := os.Open(path)
 	if err != nil {

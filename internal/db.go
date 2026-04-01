@@ -178,6 +178,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 			id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, content TEXT NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
+
+		`CREATE TABLE IF NOT EXISTS system_config (
+			key TEXT PRIMARY KEY,
+			raw_json TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			config_snapshot JSON
+		);`,
 	}
 
 	for _, sqlQuery := range baseStatements {
@@ -315,6 +323,77 @@ func (dm *DatabaseManager) SavePersona(name, content string) (string, error) {
 	id := GenerateID()
 	_, err := dm.DB.Exec(`INSERT OR REPLACE INTO personas (id, name, content) VALUES (?, ?, ?)`, id, name, content)
 	return id, err
+}
+
+// SaveSystemConfig stores or updates a system config entry (keyed by source file name)
+// Only updates if the content hash has changed (skip duplicate writes)
+// Returns (updated bool, error)
+func (dm *DatabaseManager) SaveSystemConfig(key, rawJSON, contentHash string, snapshotJSON string) (bool, error) {
+	var existingHash string
+	err := dm.DB.QueryRow(`SELECT content_hash FROM system_config WHERE key = ?`, key).Scan(&existingHash)
+	if err == nil && existingHash == contentHash {
+		// Unchanged — skip the write
+		return false, nil
+	}
+	// Insert or replace with new content
+	_, err = dm.DB.Exec(`INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapshot) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+		key, rawJSON, contentHash, snapshotJSON)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// GetSystemConfig retrieves a system config entry by key
+func (dm *DatabaseManager) GetSystemConfig(key string) (map[string]interface{}, error) {
+	var rawJSON, contentHash, snapshotJSON string
+	var updatedAt time.Time
+	err := dm.DB.QueryRow(`SELECT raw_json, content_hash, updated_at, config_snapshot FROM system_config WHERE key = ?`, key).
+		Scan(&rawJSON, &contentHash, &updatedAt, &snapshotJSON)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot map[string]interface{}
+	if snapshotJSON != "" {
+		json.Unmarshal([]byte(snapshotJSON), &snapshot)
+	}
+	return map[string]interface{}{
+		"key":          key,
+		"raw_json":     rawJSON,
+		"content_hash": contentHash,
+		"updated_at":   updatedAt,
+		"snapshot":     snapshot,
+	}, nil
+}
+
+// GetAllSystemConfigs returns all system config entries
+func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, error) {
+	rows, err := dm.DB.Query(`SELECT key, raw_json, content_hash, updated_at, config_snapshot FROM system_config ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []map[string]interface{}
+	for rows.Next() {
+		var key, rawJSON, contentHash, snapshotJSON string
+		var updatedAt time.Time
+		if err := rows.Scan(&key, &rawJSON, &contentHash, &updatedAt, &snapshotJSON); err != nil {
+			return nil, err
+		}
+		var snapshot map[string]interface{}
+		if snapshotJSON != "" {
+			json.Unmarshal([]byte(snapshotJSON), &snapshot)
+		}
+		configs = append(configs, map[string]interface{}{
+			"key":          key,
+			"raw_json":     rawJSON,
+			"content_hash": contentHash,
+			"updated_at":   updatedAt,
+			"snapshot":     snapshot,
+		})
+	}
+	return configs, nil
 }
 
 // ==================== VECTOR SEARCH ====================
