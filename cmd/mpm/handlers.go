@@ -1006,7 +1006,7 @@ func handleModeHelp(conn net.Conn) {
 	output := `mpm mode - Mode operations
 
 Usage:
-  mpm mode                   Interactive multi-mode selection (fzf, auto-compiles)
+  mpm mode                   Interactive multi-mode selection (TUI, auto-compiles)
   mpm mode list              List available modes
   mpm mode active            Show active modes
   mpm mode add <name>        Add a mode to active list
@@ -1124,16 +1124,15 @@ func handleModeClear(conn net.Conn) {
 }
 
 func handleModeSelect(conn net.Conn) {
-	// Check for fzf
-	if !isFzfAvailable() {
-		sendResponse(conn, "", "fzf not found. Install fzf to use interactive mode selection.\n", true, 1)
-		return
-	}
-
 	mm := internal.NewModeManager("")
 	modes, err := mm.List()
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to list modes: %v", err), true, 1)
+		return
+	}
+
+	if len(modes) == 0 {
+		sendResponse(conn, "No modes available.\n", "", true, 0)
 		return
 	}
 
@@ -1144,20 +1143,20 @@ func handleModeSelect(conn net.Conn) {
 		activeSet[m] = true
 	}
 
-	// Build mode list for fzf
-	var modeLines []string
+	// Build selector items
+	items := make([]selectorItem, 0, len(modes))
 	for _, m := range modes {
-		selected := ""
+		subtitle := ""
 		if activeSet[m.Name] {
-			selected = " [active]"
+			subtitle = "[active]"
 		}
-		modeLines = append(modeLines, fmt.Sprintf("%s%s", m.Name, selected))
+		items = append(items, selectorItem{name: m.Name, subtitle: subtitle})
 	}
 
-	// Run fzf with multi-select
-	selected, err := runFzf(modeLines, "--multi")
+	// Run PTY selector (multi-select)
+	selected, err := runSelectorPTY(items, true, activeSet)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("fzf error: %v", err), true, 1)
+		sendResponse(conn, "", fmt.Sprintf("Selector error: %v", err), true, 1)
 		return
 	}
 
@@ -1166,16 +1165,8 @@ func handleModeSelect(conn net.Conn) {
 		return
 	}
 
-	// Extract mode names (remove [active] suffix)
-	var newModes []string
-	for _, s := range selected {
-		name := strings.TrimSpace(s)
-		name = strings.TrimSuffix(name, " [active]")
-		newModes = append(newModes, name)
-	}
-
 	// Set new active modes
-	err = mm.SetActive(newModes)
+	err = mm.SetActive(selected)
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to set modes: %v", err), true, 1)
 		return
@@ -1184,11 +1175,11 @@ func handleModeSelect(conn net.Conn) {
 	// Auto-compile modes
 	compiledCount, compileErr := mm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Active modes updated: %s\n\n", strings.Join(newModes, ", ")), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
+		sendResponse(conn, fmt.Sprintf("Active modes updated: %s\n\n", strings.Join(selected, ", ")), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
 		return
 	}
 
-	sendResponse(conn, fmt.Sprintf("Active modes updated: %s\nCompiled %d mode(s).\n", strings.Join(newModes, ", "), compiledCount), "", true, 0)
+	sendResponse(conn, fmt.Sprintf("Active modes updated: %s\nCompiled %d mode(s).\n", strings.Join(selected, ", "), compiledCount), "", true, 0)
 }
 
 // ============================================================================
@@ -1226,7 +1217,7 @@ func handlePersonaHelp(conn net.Conn) {
 	output := `mpm persona - Persona operations
 
 Usage:
-  mpm persona                   Interactive persona selection (fzf, auto-compiles)
+  mpm persona                   Interactive persona selection (TUI, auto-compiles)
   mpm persona list              List available personas
   mpm persona active            Show active persona
   mpm persona set <name>        Set active persona
@@ -1321,12 +1312,6 @@ func handlePersonaClear(conn net.Conn) {
 }
 
 func handlePersonaSelect(conn net.Conn) {
-	// Check for fzf
-	if !isFzfAvailable() {
-		sendResponse(conn, "", "fzf not found. Install fzf to use interactive persona selection.\n", true, 1)
-		return
-	}
-
 	pm := internal.NewPersonaManager("")
 	personas, err := pm.List()
 	if err != nil {
@@ -1334,37 +1319,39 @@ func handlePersonaSelect(conn net.Conn) {
 		return
 	}
 
-	// Get currently active persona
-	activePersona, _ := pm.GetActive()
-
-	// Build persona list for fzf
-	var personaLines []string
-	for _, p := range personas {
-		selected := ""
-		if p.Name == activePersona {
-			selected = " [active]"
-		}
-		personaLines = append(personaLines, fmt.Sprintf("%s%s", p.Name, selected))
-	}
-
-	// Run fzf (single select for persona)
-	selected, err := runFzf(personaLines, "--single")
-	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("fzf error: %v", err), true, 1)
+	if len(personas) == 0 {
+		sendResponse(conn, "No personas available.\n", "", true, 0)
 		return
 	}
 
-	if len(selected) == 0 || selected[0] == "" {
+	// Get currently active persona
+	activePersona, _ := pm.GetActive()
+	activeSet := map[string]bool{activePersona: true}
+
+	// Build selector items
+	items := make([]selectorItem, 0, len(personas))
+	for _, p := range personas {
+		subtitle := ""
+		if p.Name == activePersona {
+			subtitle = "[active]"
+		}
+		items = append(items, selectorItem{name: p.Name, subtitle: subtitle})
+	}
+
+	// Run PTY selector (single-select for persona)
+	selected, err := runSelectorPTY(items, false, activeSet)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Selector error: %v", err), true, 1)
+		return
+	}
+
+	if len(selected) == 0 {
 		sendResponse(conn, "No persona selected.\n", "", true, 0)
 		return
 	}
 
-	// Extract persona name (remove [active] suffix)
-	name := strings.TrimSpace(selected[0])
-	name = strings.TrimSuffix(name, " [active]")
-
 	// Set new active persona
-	err = pm.SetActive(name)
+	err = pm.SetActive(selected[0])
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to set persona: %v", err), true, 1)
 		return
@@ -1373,11 +1360,11 @@ func handlePersonaSelect(conn net.Conn) {
 	// Auto-compile persona
 	compiledCount, compileErr := pm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Persona set: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
+		sendResponse(conn, fmt.Sprintf("Persona set: %s\n\n", selected[0]), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
 		return
 	}
 
-	sendResponse(conn, fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", name, compiledCount), "", true, 0)
+	sendResponse(conn, fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", selected[0], compiledCount), "", true, 0)
 }
 
 // ============================================================================
