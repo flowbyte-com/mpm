@@ -42,7 +42,7 @@ DB-first agent state management with SQLite-only. Manage personas, modes, memory
 symai/projects/mpm/
 ├── mpm                            # Compiled binary (Golang)
 ├── src/db/                        # SQLite databases (consolidated)
-│   ├── mpm_memory.db              # Main database (memories, sessions, topics)
+│   ├── mpm.db              # Main database (memories, sessions, topics)
 │   ├── init.sql                   # Database initialization script
 │   └── schema.sql                 # Database schema
 ├── mode/                          # Mode configurations (JSON)
@@ -64,8 +64,8 @@ Add these lines to `~/.bashrc` (or `~/.zshrc`):
 
 ```bash
 # MPM - Memory-Persona-Mode Manager
-export PATH="/home/node/.openclaw/workspace/projects/mpm:$PATH"
-export MPM_WORKSPACE="/home/node/.openclaw/workspace"
+export PATH="$HOME/.openclaw/workspace/projects/mpm:$PATH"
+export MPM_WORKSPACE="$HOME/.openclaw/workspace"
 ```
 
 Then reload:
@@ -119,14 +119,14 @@ See [`docs/getting-started/quick-start.md`](docs/getting-started/quick-start.md)
 Edit `mpm_config.json` in the MPM project directory:
 
 ```bash
-nano /home/node/.openclaw/workspace/projects/mpm/mpm_config.json
+nano $HOME/.openclaw/workspace/projects/mpm/mpm_config.json
 ```
 
 ```json
 {
-  "workspace": "/home/node/.openclaw/workspace",
-  "memory_dir": "/home/node/.openclaw/workspace/memory",
-  "sessions_dir": "/home/node/.openclaw/agents/main/sessions"
+  "workspace": "$HOME/.openclaw/workspace",
+  "memory_dir": "$HOME/.openclaw/workspace/memory",
+  "sessions_dir": "$HOME/.openclaw/agents/main/sessions"
 }
 ```
 

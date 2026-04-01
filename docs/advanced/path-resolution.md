@@ -10,12 +10,12 @@ MPM enforces a hard separation between **input watch directories** and **output 
 ```
 INPUT (Watch Daemon)          OUTPUT (Database)
 ─────────────────────         ──────────────────────
-.memory_dir   ──────────►    mpm/src/db/mpm_memory.db  (SQLite)
-.sessions_dir ──────────►    mpm/src/db/mpm_memory.db  (sessions table)
+.memory_dir   ──────────►    mpm/src/db/mpm.db  (SQLite)
+.sessions_dir ──────────►    mpm/src/db/mpm.db  (sessions table)
                               mpm/src/db/mirror.jsonl   (audit mirror)
 ```
 
-> **CRITICAL:** The database is **ALWAYS** created at `mpm/src/db/mpm_memory.db`. Under no circumstances does MPM create storage databases outside of `mpm/src/db/`.
+> **CRITICAL:** The database is **ALWAYS** created at `mpm/src/db/mpm.db`. Under no circumstances does MPM create storage databases outside of `mpm/src/db/`.
 
 ## Priority System (Workspace Detection)
 
@@ -30,10 +30,10 @@ All processed data is **written to** the MPM internal database:
 
 | File | Purpose |
 |------|---------|
-| `mpm/src/db/mpm_memory.db` | Unified SQLite database (all tables: memories, sessions, topics, modes, personas) |
+| `mpm/src/db/mpm.db` | Unified SQLite database (all tables: memories, sessions, topics, modes, personas) |
 | `mpm/src/db/mirror.jsonl` | Audit mirror of all stored content (JSONL, append-only) |
 
-**The output path is never configurable.** It is always `mpm/src/db/mpm_memory.db`.
+**The output path is never configurable.** It is always `mpm/src/db/mpm.db`.
 
 ## Input Paths (Watch Directories — Configurable)
 
@@ -92,7 +92,7 @@ mpm config set sessions_dir <path> # Set sessions watch directory
         └── mpm/
             ├── mpm                          ← Binary
             ├── src/db/
-            │   ├── mpm_memory.db            ← ALWAYS here (output)
+            │   ├── mpm.db            ← ALWAYS here (output)
             │   └── mirror.jsonl             ← ALWAYS here (output)
             ├── mode/                        ← Mode configs
             ├── persona/                     ← Persona configs

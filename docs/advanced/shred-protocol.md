@@ -135,12 +135,12 @@ mpm memory list | grep <id>
 # Should return empty
 
 # 2. Direct database verification
-sqlite3 ~/.openclaw/workspace/memory/mpm_memory.db \
+sqlite3 ~/.openclaw/workspace/memory/mpm.db \
   "SELECT COUNT(*) FROM memories WHERE id = '<id>';"
 # Expected: 0
 
 # 3. Check FTS5 index
-sqlite3 ~/.openclaw/workspace/memory/mpm_memory.db \
+sqlite3 ~/.openclaw/workspace/memory/mpm.db \
   "SELECT COUNT(*) FROM memories_fts WHERE rowid = '<id>';"
 # Expected: 0
 ```

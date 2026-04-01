@@ -55,7 +55,7 @@ MPM (Memory-Persona-Mode Manager) is a **100% SQLite-native** agent state manage
                     │
                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ SQLite Database (mpm_memory.db)                             │
+│ SQLite Database (mpm.db)                             │
 │ • FTS5 virtual tables (memories_fts, sessions_fts)         │
 │ • Vector search (L2 distance fallback)                      │
 │ • All schemas consolidated into single DB                   │
@@ -182,17 +182,17 @@ mpm memory search "test"
 
 ### Config File Location
 ```
-/home/node/.openclaw/workspace/projects/mpm/mpm_config.json
+$HOME/.openclaw/workspace/projects/mpm/mpm_config.json
 ```
 
 ### Default Paths
-- **Database:** `~/.openclaw/workspace/memory/mpm_memory.db`
+- **Database:** `~/.openclaw/workspace/memory/mpm.db`
 - **Memory:** `~/.openclaw/workspace/memory/`
 - **Sessions:** `~/.openclaw/agents/main/sessions/`
 
 ### Environment Variables
 ```bash
-export MPM_WORKSPACE="/home/node/.openclaw/workspace"
+export MPM_WORKSPACE="$HOME/.openclaw/workspace"
 export MPM_MEMORY_DIR="/custom/memory/path"
 export MPM_SESSIONS_DIR="/custom/sessions/path"
 ```
@@ -204,7 +204,7 @@ export MPM_SESSIONS_DIR="/custom/sessions/path"
 ### Current Version: 6.0.0 (2026-03-27)
 
 **Major Changes:**
-- ✅ Single SQLite database (mpm_memory.db)
+- ✅ Single SQLite database (mpm.db)
 - ✅ FTS5 search with `snippet()` highlighting
 - ✅ Shred protocol for hard deletes
 - ✅ Native PDF/EPUB parsing

@@ -62,11 +62,11 @@ type MemoryStore struct {
 // OUTPUT paths are ALWAYS inside mpm/src/db/.
 // INPUT paths are the directories watched by the fsnotify daemon.
 type MemoryPaths struct {
-	// OUTPUT (write destination — ALWAYS mpm/src/db/mpm_memory.db)
+	// OUTPUT (write destination — ALWAYS mpm/src/db/mpm.db)
 	MemorySavePath  string `json:"memory_save_path"`  // Legacy alias for SQLiteDBPath
 	SessionSavePath string `json:"session_save_path"` // Legacy alias for SQLiteDBPath
 	MirrorFilePath  string `json:"mirror_file_path"` // Internal: mpm/src/db/mirror.jsonl
-	SQLiteDBPath    string `json:"sqlite_db_path"`   // Internal: ALWAYS mpm/src/db/mpm_memory.db
+	SQLiteDBPath    string `json:"sqlite_db_path"`   // Internal: ALWAYS mpm/src/db/mpm.db
 
 	// INPUT (watch directories for the fsnotify daemon)
 	MemoryPath  string `json:"memory_path"`  // Watch daemon: dir for .md files
@@ -76,10 +76,10 @@ type MemoryPaths struct {
 // DefaultMemoryPaths returns the default memory paths for MPM.
 // DefaultMemoryPaths returns the canonical MPM storage paths.
 //
-// OUTPUT (Internal Storage — ALWAYS mpm/src/db/mpm_memory.db):
-//   - SQLiteDBPath:    mpm/src/db/mpm_memory.db (unified database)
+// OUTPUT (Internal Storage — ALWAYS mpm/src/db/mpm.db):
+//   - SQLiteDBPath:    mpm/src/db/mpm.db (unified database)
 //   - MirrorFilePath: mpm/src/db/mirror.jsonl (audit mirror)
-//   - SessionSavePath: mpm/src/db/mpm_memory.db (session data stored HERE, not a dir)
+//   - SessionSavePath: mpm/src/db/mpm.db (session data stored HERE, not a dir)
 //
 // INPUT (Watch Directories — for the fsnotify daemon):
 //   - MemoryPath:  Config memory_dir OR ~/.openclaw/workspace/memory (OpenClaw memory dir)
@@ -89,7 +89,7 @@ type MemoryPaths struct {
 func DefaultMemoryPaths() MemoryPaths {
 	mpmDir := config.GetMPMDir()
 	internalDBPath := filepath.Join(mpmDir, "src", "db")
-	sqliteDBPath := filepath.Join(internalDBPath, "mpm_memory.db")
+	sqliteDBPath := filepath.Join(internalDBPath, "mpm.db")
 
 	// Load config for external watch directories
 	cfg, _ := config.LoadConfig()
@@ -106,11 +106,11 @@ func DefaultMemoryPaths() MemoryPaths {
 	}
 
 	return MemoryPaths{
-		// OUTPUT (internal storage — ALWAYS mpm/src/db/mpm_memory.db)
+		// OUTPUT (internal storage — ALWAYS mpm/src/db/mpm.db)
 		MemorySavePath:  sqliteDBPath, // Legacy alias
-		SessionSavePath: sqliteDBPath, // Session data stored HERE (mpm_memory.db)
+		SessionSavePath: sqliteDBPath, // Session data stored HERE (mpm.db)
 		MirrorFilePath:  filepath.Join(internalDBPath, "mirror.jsonl"),
-		SQLiteDBPath:    sqliteDBPath, // Internal: ALWAYS mpm/src/db/mpm_memory.db
+		SQLiteDBPath:    sqliteDBPath, // Internal: ALWAYS mpm/src/db/mpm.db
 
 		// INPUT (watch directories for the fsnotify daemon)
 		MemoryPath:  memoryPath,  // Watch daemon: directory to scan for .md files
@@ -119,7 +119,7 @@ func DefaultMemoryPaths() MemoryPaths {
 }
 
 // NewMemoryStore creates a new memory store with secure defaults.
-// The database is ALWAYS created at mpm/src/db/mpm_memory.db (enforced by DefaultMemoryPaths).
+// The database is ALWAYS created at mpm/src/db/mpm.db (enforced by DefaultMemoryPaths).
 // NOTE: Does NOT create directories — fails if paths don't exist.
 func NewMemoryStore(_ string) *MemoryStore {
 	paths := DefaultMemoryPaths()
