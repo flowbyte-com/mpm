@@ -1251,7 +1251,10 @@ func main() {
 
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
-		exitCode := RunSelectorStandalone()
+		exitCode := 0
+		if !RunSelectorStandalone() {
+			exitCode = 1
+		}
 		os.Exit(exitCode)
 	}
 

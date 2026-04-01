@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1588,30 +1587,6 @@ func sendResponse(conn net.Conn, output, errMsg string, done bool, exitCode int)
 	if flusher, ok := conn.(interface{ Flush() error }); ok {
 		flusher.Flush()
 	}
-}
-
-func isFzfAvailable() bool {
-	_, err := exec.LookPath("fzf")
-	return err == nil
-}
-
-func runFzf(options []string, extraFlags string) ([]string, error) {
-	cmd := exec.Command("fzf", strings.Fields(extraFlags)...)
-	cmd.Stdin = strings.NewReader(strings.Join(options, "\n"))
-	
-	var out strings.Builder
-	cmd.Stdout = &out
-	
-	err := cmd.Run()
-	if err != nil {
-		return nil, err
-	}
-
-	selected := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if selected[0] == "" {
-		return []string{}, nil
-	}
-	return selected, nil
 }
 
 func getMemoryStore() *internal.MemoryStore {
