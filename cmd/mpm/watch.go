@@ -271,10 +271,20 @@ func (d *watcherDaemon) sweepDirectory(dir string) {
 		name := entry.Name()
 		path := filepath.Join(dir, name)
 
-		// Skip conflicted files
-		if strings.Contains(strings.ToLower(name), "conflicted") {
+		// Skip conflicted files and OpenClaw system files
+		nameLower := strings.ToLower(name)
+		if strings.Contains(nameLower, "conflicted") {
 			if d.verbose {
 				fmt.Printf("   ⏭️  Skipping conflicted file: %s\n", name)
+			}
+			continue
+		}
+
+		// Skip OpenClaw system metadata files (not session data)
+		switch nameLower {
+		case "sessions.json", "session.json", "workspace.json", "config.json":
+			if d.verbose {
+				fmt.Printf("   ⏭️  Skipping OpenClaw system file: %s\n", name)
 			}
 			continue
 		}
