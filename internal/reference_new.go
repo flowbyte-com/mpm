@@ -47,11 +47,11 @@ type ReferenceDB struct {
 }
 
 // NewReferenceDB creates a new reference database
-// Updated for new path structure: workspace/src/db/mpm_memory.db (consolidated)
+// Updated for new path structure: workspace/src/db/mpm.db (consolidated)
 func NewReferenceDB(dbPath string) *ReferenceDB {
 	if dbPath == "" {
 		// Use config.GetDBPath() for portable installations
-		dbPath = config.GetDBPath("mpm_memory")
+		dbPath = config.GetDBPath("mpm")
 	}
 	return &ReferenceDB{DatabasePath: dbPath}
 }

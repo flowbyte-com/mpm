@@ -158,7 +158,7 @@ Daemon started on /run/user/1000/mpm.sock
 ✗ Pre-flight health check FAILED:
 
   [Error] Database Integrity: Database corruption detected
-         Database: /workspace/src/db/mpm_memory.db (2.4 MB)
+         Database: /workspace/src/db/mpm.db (2.4 MB)
          Integrity check result: errors found
 
 Daemon aborted startup. Please fix the above issues.

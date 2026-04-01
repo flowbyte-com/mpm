@@ -2492,8 +2492,8 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 func runDoctorDatabaseChecks(report *DoctorReport) {
 	fmt.Printf("  %s%sDatabase Integrity%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
 
-	// The database is ALWAYS at mpm/src/db/mpm_memory.db
-	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm_memory.db")
+	// The database is ALWAYS at mpm/src/db/mpm.db
+	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
 
 	info, err := os.Stat(dbPath)
 	if err != nil || info.IsDir() {
@@ -3020,8 +3020,8 @@ func runDirectoryCheck(result *PreFlightResult) {
 func runDatabaseCheck(result *PreFlightResult) {
 	start := time.Now()
 
-	// The database is ALWAYS at mpm/src/db/mpm_memory.db
-	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm_memory.db")
+	// The database is ALWAYS at mpm/src/db/mpm.db
+	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
 
 	info, err := os.Stat(dbPath)
 	if err != nil || info.IsDir() {

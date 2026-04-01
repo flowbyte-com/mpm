@@ -68,7 +68,7 @@ This document describes the security architecture and implementation of the SymA
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                  Storage Layer                               │
-│  • SQLite Database (mpm_memory.db)                         │
+│  • SQLite Database (mpm.db)                         │
 │  • JSONL Mirror (mirror.jsonl)                              │
 │  • File Permissions (0600/0700)                             │
 └─────────────────────────────────────────────────────────────┘
@@ -169,7 +169,7 @@ mpm memory list | grep <id>
 # Should return empty
 
 # 2. Verify via direct DB query
-sqlite3 ~/.openclaw/workspace/memory/mpm_memory.db \
+sqlite3 ~/.openclaw/workspace/memory/mpm.db \
   "SELECT COUNT(*) FROM memories WHERE id = '<id>';"
 # Should return: 0
 

@@ -6,7 +6,7 @@ The `config` package provides path resolution for MPM using a cascading priority
 
 ## Core Principle: Output is Always Internal
 
-**All database storage is at `mpm/src/db/mpm_memory.db`.** This path is not configurable.
+**All database storage is at `mpm/src/db/mpm.db`.** This path is not configurable.
 
 The configurable paths (`memory_dir`, `sessions_dir`) are **input/watch directories only** — directories the fsnotify daemon monitors.
 
@@ -22,7 +22,7 @@ Returns the base workspace directory:
 Returns the MPM project root: `<workspace>/projects/mpm/`
 
 ### `GetDBPath(filename string) string`
-Returns a path under `mpm/src/db/`: e.g., `GetDBPath("mpm_memory.db")` → `<workspace>/projects/mpm/src/db/mpm_memory.db`
+Returns a path under `mpm/src/db/`: e.g., `GetDBPath("mpm.db")` → `<workspace>/projects/mpm/src/db/mpm.db`
 
 ### `GetSessionsPath() string`
 Returns the configured `sessions_dir` (input/watch directory):
@@ -61,7 +61,7 @@ Expands `~` to home directory; resolves relative paths against workspace.
 
 | File | Always At |
 |------|-----------|
-| SQLite DB | `mpm/src/db/mpm_memory.db` |
+| SQLite DB | `mpm/src/db/mpm.db` |
 | JSONL Mirror | `mpm/src/db/mirror.jsonl` |
 
 ## Environment Variables

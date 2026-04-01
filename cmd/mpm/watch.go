@@ -125,7 +125,7 @@ func cmdWatch(args []string) bool {
 // resolveWatchDirs determines which directories to watch for the daemon
 // Priority: 1) CLI flags, 2) Config file (memory_dir/sessions_dir), 3) OpenClaw workspace defaults
 // NOTE: These are the paths the DAEMON watches for OpenClaw-created .md and session files.
-//       The MPM database is separate and always at mpm/src/db/mpm_memory.db.
+//       The MPM database is separate and always at mpm/src/db/mpm.db.
 func resolveWatchDirs(memDir, sesDir string) []string {
 	var dirs []string
 

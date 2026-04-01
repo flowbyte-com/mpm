@@ -235,7 +235,7 @@ Personas and modes work together:
 Personas are stored as JSON files:
 
 ```
-/home/node/.openclaw/workspace/persona/
+$HOME/.openclaw/workspace/persona/
 ├── default/
 │   └── persona.json
 ├── developer/

@@ -1,6 +1,6 @@
 // db.go - Unified SQLite database for MPM
 // Version: 2026-03-28 (Single Database Refactor)
-// Description: Manages a single unified database at src/db/mpm_memory.db
+// Description: Manages a single unified database at src/db/mpm.db
 
 package internal
 
@@ -20,6 +20,10 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// dbFileName is the canonical filename for the MPM database.
+// Previously mpm_memory.db - renamed 2026-04-01 to reflect its unified nature.
+const dbFileName = "mpm.db"
 
 // SQLiteConnection is a wrapper for sql.DB for backwards compatibility with existing code
 type SQLiteConnection struct {
@@ -115,7 +119,7 @@ type DatabaseManager struct {
 }
 
 // NewDatabaseManager creates a new database manager with single unified database.
-// The database is ALWAYS at mpm/src/db/mpm_memory.db regardless of projectRoot.
+// The database is ALWAYS at mpm/src/db/mpm.db regardless of projectRoot.
 // projectRoot is kept for API compatibility but is ignored for path resolution.
 func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	// CRITICAL: Always use GetMPMDir() to locate the database.
@@ -127,7 +131,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dbDir, "mpm_memory.db")
+	dbPath := filepath.Join(dbDir, dbFileName)
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)

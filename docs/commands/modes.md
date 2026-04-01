@@ -236,7 +236,7 @@ Personas provide the foundation; modes adjust behavior:
 Modes are stored as JSON files:
 
 ```
-/home/node/.openclaw/workspace/mode/
+$HOME/.openclaw/workspace/mode/
 ├── debug/
 │   └── mode.json
 ├── concise/

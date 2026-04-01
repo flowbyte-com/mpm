@@ -70,8 +70,8 @@ const MPMDataDir = "mpm"
 //   /workspace/         ← User-configurable (workspace root)
 //   └── symai/          ← Project folder
 //       └── projects/   ← MPM Go binary
-//           ├── src/db/         ← SQLite databases (mpm_memory.db - consolidated)
-//           │   ├── mpm_memory.db ← Main database
+//           ├── src/db/         ← SQLite databases (mpm.db - consolidated)
+//           │   ├── mpm.db ← Main database
 //           │   ├── init.sql     ← Initialization script
 //           │   └── schema.sql   ← Database schema
 //           ├── mode/           ← Mode configurations (JSON files)
@@ -152,7 +152,7 @@ func GetDBPath(filename string) string {
 // GetMemoryPath returns the memory directory path for MPM's internal database.
 // Priority: 1) Config file memory_dir, 2) MPM internal fallback (mpm/src/db)
 // NOTE: The memory_dir from config is for the WATCH DAEMON to process OpenClaw files.
-//       The MPM database (mpm_memory.db) ALWAYS lives at mpm/src/db/mpm_memory.db.
+//       The MPM database (mpm.db) ALWAYS lives at mpm/src/db/mpm.db.
 func GetMemoryPath() string {
 	if config, err := LoadConfig(); err == nil && config.MemoryDir != "" {
 		return ResolveEnvPath(config.MemoryDir)

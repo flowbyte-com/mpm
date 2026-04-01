@@ -185,7 +185,7 @@ LIMIT ? OFFSET ?
 
 1. **Rebuild indexes periodically:**
    ```bash
-   sqlite3 mpm_memory.db "INSERT INTO memories_fts(memories) VALUES('optimize');"
+   sqlite3 mpm.db "INSERT INTO memories_fts(memories) VALUES('optimize');"
    ```
 
 2. **Use appropriate chunk sizes:** Large documents are chunked. Smaller chunks = more precise search.
