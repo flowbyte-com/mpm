@@ -1318,8 +1318,10 @@ func main() {
 			PrintHelp()
 			return
 		}
-		// No daemon - show help
+		// No daemon - show help and start daemon in background (OpenClaw UX pattern)
 		PrintHelp()
+		// Start daemon silently for next run (becomeDaemonAndExecute spawns subprocess and exits)
+		becomeDaemonAndExecute()
 		return
 	}
 
