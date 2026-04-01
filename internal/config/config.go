@@ -214,7 +214,8 @@ func GetMPMDir() string {
 		}
 	}
 
-	// Fallback: resolve from workspace
+	// Fallback: resolve from workspace (always use GetWorkspace to avoid /projects/mpm
+	// when the walk reaches filesystem root /)
 	return filepath.Join(GetWorkspace(), "projects", "mpm")
 }
 

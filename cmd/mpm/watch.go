@@ -177,6 +177,19 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// isSystemFile returns true for OpenClaw live session registry and config files
+// that must NEVER be processed or deleted by the watch daemon.
+// These files are managed by OpenClaw at runtime and changes are detected via
+// fsnotify — they are processed via parseSessionsSnapshot into system_config table.
+func isSystemFile(name string) bool {
+	nameLower := strings.ToLower(name)
+	switch nameLower {
+	case "sessions.json", "session.json", "workspace.json", "config.json":
+		return true
+	}
+	return false
+}
+
 // =============================================================================
 // WatcherDaemon - Main daemon structure
 // =============================================================================
@@ -334,6 +347,11 @@ func (d *watcherDaemon) handleEvent(event fsnotify.Event) {
 
 	// Skip conflicted files
 	if strings.Contains(strings.ToLower(name), "conflicted") {
+		return
+	}
+
+	// Skip OpenClaw live session registry and config files — never process
+	if isSystemFile(name) {
 		return
 	}
 
