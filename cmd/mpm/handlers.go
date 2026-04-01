@@ -1033,7 +1033,11 @@ func handleModeList(conn net.Conn) {
 	output.WriteString(fmt.Sprintf("Available modes (%d):\n\n", len(modes)))
 
 	for _, m := range modes {
-		output.WriteString(fmt.Sprintf("  %s\n", m.Name))
+		name := m.Name
+		if name == "" {
+			name = m.Title // fallback to title for modes that use title instead of name
+		}
+		output.WriteString(fmt.Sprintf("  %s\n", name))
 		if m.Description != "" {
 			output.WriteString(fmt.Sprintf("      %s\n", m.Description))
 		}
@@ -1151,7 +1155,7 @@ func handleModeSelect(conn net.Conn) {
 	}
 
 	// Run fzf with multi-select
-	selected, err := runFzf(modeLines, "--multi --sync")
+	selected, err := runFzf(modeLines, "--multi")
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("fzf error: %v", err), true, 1)
 		return

@@ -34,8 +34,8 @@ type PersonaManager struct {
 // Updated for new path structure: workspace/persona/ (pristine root)
 func NewPersonaManager(basePath string) *PersonaManager {
 	if basePath == "" {
-		// Use config.GetWorkspace() for portable installations
-		basePath = config.GetWorkspace()
+		// Use config.GetMPMDir() so personas are found at projects/mpm/persona/
+		basePath = config.GetMPMDir()
 	}
 
 	return &PersonaManager{
