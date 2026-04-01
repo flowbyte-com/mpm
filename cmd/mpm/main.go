@@ -112,6 +112,10 @@ func dispatchDirect(args []string) bool {
 	case "fortune":
 		handleFortuneDirect()
 		return true
+
+	case "start":
+		handleStartCommand()
+		return true
 	}
 
 	return false
@@ -1314,10 +1318,9 @@ func main() {
 			PrintHelp()
 			return
 		}
-		// No daemon - spawn one
-		becomeDaemonAndExecute()
-		// becomeDaemonAndExecute() never returns - it spawns subprocess and exits
-		os.Exit(0)
+		// No daemon - show help
+		PrintHelp()
+		return
 	}
 
 	// Check if command needs daemon
@@ -1512,6 +1515,24 @@ func handleFortune(conn net.Conn) {
 // handleFortuneDirect runs fortune standalone (no daemon needed)
 func handleFortuneDirect() {
 	fmt.Print(GetFortuneOracle())
+}
+
+// handleStartCommand starts the daemon if not already running
+func handleStartCommand() {
+	// Check if daemon already running
+	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	if err == nil {
+		// Daemon is running
+		conn.Close()
+		fmt.Println("Daemon already running.")
+		// Optionally show status? Could call tryClient() but that would send command.
+		// For simplicity, just exit.
+		return
+	}
+	// No daemon - start it
+	becomeDaemonAndExecute()
+	// becomeDaemonAndExecute() never returns - it spawns subprocess and exits
+	os.Exit(0)
 }
 
 // ============================================================================
@@ -3689,6 +3710,7 @@ func printHelp() {
 	fmt.Println("  reboot               Graceful daemon restart")
 	fmt.Println("  reboot --force       Immediate restart (skip session save)")
 	fmt.Println("  logs                 Stream daemon log entries")
+	fmt.Println("  start               Start daemon if not running")
 	fmt.Println()
 	fmt.Println("Gateway (Daemon) Commands:")
 	fmt.Println("  gateway              Gateway control (see 'mpm gateway help')")
