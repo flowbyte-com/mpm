@@ -975,7 +975,8 @@ func handleSessionList(conn net.Conn, args []string) {
 
 func handleMode(conn net.Conn, args []string) {
 	if len(args) < 1 {
-		handleModeHelp(conn)
+		// Interactive selection by default (replaces ~m hotkey behavior)
+		handleModeSelect(conn)
 		return
 	}
 
@@ -1005,18 +1006,17 @@ func handleModeHelp(conn net.Conn) {
 	output := `mpm mode - Mode operations
 
 Usage:
+  mpm mode                   Interactive multi-mode selection (fzf, auto-compiles)
   mpm mode list              List available modes
-  mpm mode active           Show active modes
+  mpm mode active            Show active modes
   mpm mode add <name>        Add a mode to active list
-  mpm mode remove <name>    Remove a mode from active list
-  mpm mode clear            Clear all active modes
-  mpm mode select           Interactive multi-mode selection (fzf, auto-compiles)
+  mpm mode remove <name>     Remove a mode from active list
+  mpm mode clear             Clear all active modes
 
 Examples:
-  mpm mode list
+  mpm mode                   # Pick multiple modes, auto-compiles
   mpm mode add developer
   mpm mode remove developer
-  mpm mode select           # Pick multiple modes, auto-compiles
 `
 	sendResponse(conn, output, "", true, 0)
 }
@@ -1193,7 +1193,8 @@ func handleModeSelect(conn net.Conn) {
 
 func handlePersona(conn net.Conn, args []string) {
 	if len(args) < 1 {
-		handlePersonaHelp(conn)
+		// Interactive selection by default (replaces ~p hotkey behavior)
+		handlePersonaSelect(conn)
 		return
 	}
 
@@ -1221,16 +1222,15 @@ func handlePersonaHelp(conn net.Conn) {
 	output := `mpm persona - Persona operations
 
 Usage:
+  mpm persona                   Interactive persona selection (fzf, auto-compiles)
   mpm persona list              List available personas
-  mpm persona active           Show active persona
+  mpm persona active            Show active persona
   mpm persona set <name>        Set active persona
   mpm persona clear             Clear active persona
-  mpm persona select            Interactive persona selection (fzf, auto-compiles)
 
 Examples:
-  mpm persona list
+  mpm persona                   # Pick one persona, auto-compiles
   mpm persona set 808
-  mpm persona select            # Pick one persona, auto-compiles
 `
 	sendResponse(conn, output, "", true, 0)
 }
