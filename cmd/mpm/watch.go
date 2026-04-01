@@ -307,8 +307,11 @@ func (d *watcherDaemon) sweepDirectory(dir string) {
 			d.processMarkdownFile(path, true)
 
 		case ".json":
-			// Route C: OpenClaw system config files — parse, hash, store (never delete)
-			if nameLower == "sessions.json" || nameLower == "workspace.json" || nameLower == "config.json" {
+			// Route C: OpenClaw static config files — parse, hash, store (never delete)
+			// NOTE: sessions.json is a LIVE session registry (managed by OpenClaw at runtime).
+			// Do NOT process it here — it changes on every message and causes desktop indexing
+			// conflicts. Only process workspace.json and config.json which are truly static.
+			if nameLower == "workspace.json" || nameLower == "config.json" {
 				d.processSessionsConfig(path)
 			}
 
@@ -358,7 +361,36 @@ func (d *watcherDaemon) handleLockRemoved(lockPath string) {
 		return
 	}
 
+	// Guard: check if the .jsonl is still being written (modified recently).
+	// A session's .jsonl should be cold (≥60s old) once the .lock is removed.
+	// If it's fresh, the session is still alive and we must NOT eat it.
+	if d.isRecentlyModified(jsonlPath, 60) {
+		fmt.Printf("   ⏭️  Skip %s — still being written (session active)\n", filepath.Base(jsonlPath))
+		return
+	}
+
+	// Extra safety: grace period delay before processing.
+	// After .lock removal, OpenClaw may still be flushing final writes.
+	time.Sleep(3 * time.Second)
+
+	// Re-check after delay: if file was modified during sleep, skip it.
+	if d.isRecentlyModified(jsonlPath, 5) {
+		fmt.Printf("   ⏭️  Skip %s — modified during grace period\n", filepath.Base(jsonlPath))
+		return
+	}
+
 	d.processSessionFile(jsonlPath, false)
+}
+
+// isRecentlyModified returns true if the file was modified within the last `seconds`.
+// This is used to detect sessions that are still alive (being written to).
+func (d *watcherDaemon) isRecentlyModified(path string, seconds int) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age < time.Duration(seconds)*time.Second
 }
 
 // =============================================================================
