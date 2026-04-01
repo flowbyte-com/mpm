@@ -1312,13 +1312,19 @@ func main() {
 			// Daemon is running and handled it (status/ping)
 			return
 		}
-		// Daemon not running - check if socket exists (daemon may have socket but not be responsive)
+		// Daemon not running - check if socket exists (might be stale from killed daemon)
 		if _, err := os.Stat(sockPath); err == nil {
-			// Socket exists - daemon might be starting up, show command list
-			PrintHelp()
-			return
+			// Socket exists - check if daemon is actually listening
+			if conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond); err == nil {
+				conn.Close()
+				// Daemon is running
+				PrintHelp()
+				return
+			}
+			// Stale socket - remove it and continue to start daemon
+			os.Remove(sockPath)
 		}
-		// No daemon - show help and start daemon in background (OpenClaw UX pattern)
+		// Show help and start daemon in background (OpenClaw UX pattern)
 		PrintHelp()
 		// Start daemon silently for next run (becomeDaemonAndExecute spawns subprocess and exits)
 		becomeDaemonAndExecute()
@@ -1527,11 +1533,15 @@ func handleStartCommand() {
 		// Daemon is running
 		conn.Close()
 		fmt.Println("Daemon already running.")
-		// Optionally show status? Could call tryClient() but that would send command.
-		// For simplicity, just exit.
 		return
 	}
-	// No daemon - start it
+	// Stale socket file? Clean it up before starting
+	if _, statErr := os.Stat(sockPath); statErr == nil {
+		os.Remove(sockPath)
+		fmt.Println("Removed stale socket. Starting daemon...")
+	} else {
+		fmt.Println("Starting daemon...")
+	}
 	becomeDaemonAndExecute()
 	// becomeDaemonAndExecute() never returns - it spawns subprocess and exits
 	os.Exit(0)
@@ -2776,6 +2786,22 @@ func runDoctorDaemonStatusCheck(report *DoctorReport, conn net.Conn) {
 
 func runDoctorApplyFixes(report *DoctorReport) {
 	fmt.Printf("  %s%sApplying Fixes%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
+
+	// Clean up stale socket file
+	if _, err := os.Stat(sockPath); err == nil {
+		// Socket exists - check if daemon is actually listening
+		conn, dialErr := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+		if dialErr != nil {
+			// No daemon listening - stale socket
+			os.Remove(sockPath)
+			fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Stale Socket Removed")
+			fmt.Printf("          Removed: %s\n\n", sockPath)
+		} else {
+			conn.Close()
+			fmt.Printf("    [%s] %s\n", colorGreen("SKIP"), "Socket In Use")
+			fmt.Printf("          Daemon is active\n\n")
+		}
+	}
 
 	// Fix socket directory permissions
 	socketDir := filepath.Dir(sockPath)
