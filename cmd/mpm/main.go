@@ -1249,6 +1249,12 @@ func main() {
 	// Initialize random seed for jitter
 	rand.Seed(time.Now().UnixNano())
 
+	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
+	if os.Getenv("MPM_SELECT") == "1" {
+		exitCode := RunSelectorStandalone()
+		os.Exit(exitCode)
+	}
+
 	// If MPM_DIRECT=1, we're already in a daemon subprocess — execute command directly
 	// but NEVER spawn a new daemon (that causes infinite loop)
 	isDaemonSubprocess := os.Getenv("MPM_DIRECT") == "1"
