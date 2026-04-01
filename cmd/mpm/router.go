@@ -195,6 +195,9 @@ func (r *CommandRouter) handleStandalone(cmdName string) int {
 	case "logs":
 		handleLogsCommand()
 		return 0
+	case "start":
+		handleStartCommand()
+		return 0
 	default:
 		r.unknownCommand(cmdName)
 		return 1
