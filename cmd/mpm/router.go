@@ -47,6 +47,7 @@ func NewRouter() *CommandRouter {
 	// Register all commands
 	r.Commands = map[string]*Command{
 		// Lifecycle commands (need daemon)
+		"start":    {Name: "start", Description: "Start daemon"},
 		"status":   {Name: "status", Description: "Show daemon status", NeedsDaemon: true},
 		"shutdown": {Name: "shutdown", Description: "Gracefully stop daemon", NeedsDaemon: true},
 		"stop":     {Name: "stop", Description: "Alias for shutdown", Aliases: []string{"shutdown"}, NeedsDaemon: true},
@@ -144,7 +145,7 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleVersion()
 	case "help":
 		return r.handleHelp()
-	case "doctor", "fortune", "logs":
+	case "doctor", "fortune", "logs", "start":
 		// Standalone commands - don't need daemon
 		return r.handleStandalone(cmd.Name)
 	case "watch":

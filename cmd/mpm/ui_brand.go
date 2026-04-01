@@ -82,6 +82,7 @@ func init() {
 		{
 			Name: "System Management",
 			Commands: []commandEntry{
+				{"start", "Start daemon", false, ""},
 				{"status", "Show daemon status", true, ""},
 				{"shutdown", "Gracefully stop daemon", true, ""},
 				{"stop", "Alias for shutdown", true, ""},
