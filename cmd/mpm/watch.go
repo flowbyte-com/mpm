@@ -282,11 +282,19 @@ func (d *watcherDaemon) sweepDirectory(dir string) {
 			continue
 		}
 
-		// Skip OpenClaw system metadata files (not session data)
+		// Skip OpenClaw system files that should never be processed
+		// sessions.json is a LIVE file managed by OpenClaw — reading it causes race conditions
 		switch nameLower {
-		case "sessions.json", "session.json", "workspace.json", "config.json":
+		case "sessions.json", "session.json":
+			// sessions.json/session.json are live session registries — never process
 			if d.verbose {
-				fmt.Printf("   ⏭️  Skipping OpenClaw system file: %s\n", name)
+				fmt.Printf("   ⏭️  Skipping live session registry: %s\n", name)
+			}
+			continue
+		case "workspace.json", "config.json":
+			// These are config files — skip in sweep, only process via fsnotify events if needed
+			if d.verbose {
+				fmt.Printf("   ⏭️  Skipping OpenClaw system config: %s\n", name)
 			}
 			continue
 		}
