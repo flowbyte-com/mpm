@@ -21,7 +21,7 @@ type Mode struct {
 	Patterns     string      `json:"patterns"`
 	Checklist    string      `json:"checklist"`
 	AntiPatterns interface{} `json:"anti_patterns"` // Accept string or array
-	Tools        string      `json:"tools"`
+	Tools        interface{} `json:"tools"`        // Accept string or array
 	JSONData     string      `json:"-"`
 }
 
