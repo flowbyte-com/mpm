@@ -183,8 +183,14 @@ func dirExists(path string) bool {
 // fsnotify — they are processed via parseSessionsSnapshot into system_config table.
 func isSystemFile(name string) bool {
 	nameLower := strings.ToLower(name)
+	// Exact matches for live OpenClaw system files
 	switch nameLower {
 	case "sessions.json", "session.json", "workspace.json", "config.json":
+		return true
+	}
+	// Also skip sessions.json with any suffix/prefix pattern (e.g. Nextcloud sync conflicts
+	// like "sessions [conflicted 8].json" or "sessions-2026-04-01.json")
+	if strings.HasPrefix(nameLower, "sessions") && strings.HasSuffix(nameLower, ".json") {
 		return true
 	}
 	return false
@@ -370,6 +376,16 @@ func (d *watcherDaemon) handleEvent(event fsnotify.Event) {
 func (d *watcherDaemon) handleLockRemoved(lockPath string) {
 	// Derive .jsonl path from .lock path
 	jsonlPath := strings.TrimSuffix(lockPath, ".lock")
+
+	// SAFETY: Verify it is actually a .jsonl file before processing.
+	// This prevents accidental processing of files like sessions.json
+	// if OpenClaw ever creates sessions.json.lock.
+	if strings.ToLower(filepath.Ext(jsonlPath)) != ".jsonl" {
+		if d.verbose {
+			fmt.Printf("   ⏭️  Lock removed for non-.jsonl file: %s — skipping\n", filepath.Base(jsonlPath))
+		}
+		return
+	}
 
 	// Verify .jsonl exists
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {

@@ -16,6 +16,8 @@ import (
 	"sort"
 	"time"
 
+	"mpm/internal/config"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -112,9 +114,15 @@ type DatabaseManager struct {
 	DB *sql.DB
 }
 
-// NewDatabaseManager creates a new database manager with single unified database
+// NewDatabaseManager creates a new database manager with single unified database.
+// The database is ALWAYS at mpm/src/db/mpm_memory.db regardless of projectRoot.
+// projectRoot is kept for API compatibility but is ignored for path resolution.
 func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
-	dbDir := filepath.Join(projectRoot, "src", "db")
+	// CRITICAL: Always use GetMPMDir() to locate the database.
+	// Using projectRoot (GetWorkspace) would create databases at workspace/src/db/
+	// which is WRONG — MPM runtime data lives under projects/mpm/src/db/.
+	mpmDir := config.GetMPMDir()
+	dbDir := filepath.Join(mpmDir, "src", "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
