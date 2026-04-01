@@ -2928,10 +2928,10 @@ func runDirectoryCheck(result *PreFlightResult) {
 	// Determine workspace and data directories
 	workspace := config.GetWorkspace()
 	dirs := []string{
-		filepath.Dir(sockPath),                 // Socket directory (XDG_RUNTIME_DIR or ~/.mpm)
-		filepath.Join(workspace, "mode"),       // Mode configurations
-		filepath.Join(workspace, "persona"),    // Persona configurations
-		filepath.Join(workspace, "src", "db"),  // Database directory
+		filepath.Dir(sockPath),                      // Socket directory (XDG_RUNTIME_DIR or ~/.mpm)
+		filepath.Join(workspace, "mode"),          // Mode configurations
+		config.GetPersonaPath(),                     // Persona configurations (correct path: projects/mpm/persona)
+		filepath.Join(workspace, "src", "db"),     // Database directory
 	}
 
 	// Also check sessions directory (may not exist yet)
@@ -3072,7 +3072,7 @@ func openDatabase(path string) (*sql.DB, error) {
 func runPersonaCheck(result *PreFlightResult) {
 	start := time.Now()
 
-	personaPath := filepath.Join(config.GetWorkspace(), "persona")
+	personaPath := config.GetPersonaPath()
 	details := []string{}
 
 	// Check if persona directory exists
