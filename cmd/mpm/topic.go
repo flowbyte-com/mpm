@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -45,7 +46,7 @@ func topicCmdHelp() int {
 Usage: mpm topic <subcommand> [args]
 
 Subcommands:
-  create <name> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--desc description]
+  create [--today | --yesterday | --from YYYY-MM-DD --to YYYY-MM-DD] [--desc description]
     Create a new topic. Optionally scope to a date range.
 
   add <memory-id> <topic-name>
@@ -64,7 +65,10 @@ Subcommands:
     Delete a topic (memories are NOT deleted).
 
 Examples:
-  mpm topic create "Data Pipeline" --from 2026-04-01 --to 2026-04-02
+  mpm topic create --today
+  mpm topic create --yesterday
+  mpm topic create --today --yesterday
+  mpm topic create "My Range" --from 2026-04-01 --to 2026-04-02
   mpm topic add abc123 "Data Pipeline"
   mpm topic show "Data Pipeline"
   mpm topic delete "Old Sessions"
@@ -75,20 +79,21 @@ Examples:
 // --- create ---
 
 func topicCreate(args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm topic create <name> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--desc description]\n")
-		return 1
-	}
-	name := strings.Join(args, " ")
-	var fromDate, toDate, description string
+	var name, fromDate, toDate, description string
+	var useToday, useYesterday bool
+
+	today := time.Now().UTC().Format("2006-01-02")
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 
 	i := 0
-	for i < len(args) && !strings.HasPrefix(args[i], "--") {
-		i++
-	}
-	name = strings.Join(args[:i], " ")
 	for i < len(args) {
 		switch args[i] {
+		case "--today":
+			useToday = true
+			i++
+		case "--yesterday":
+			useYesterday = true
+			i++
 		case "--from":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "❌ --from requires a date (YYYY-MM-DD)\n")
@@ -111,9 +116,35 @@ func topicCreate(args []string) int {
 			description = args[i+1]
 			i += 2
 		default:
-			fmt.Fprintf(os.Stderr, "❌ Unknown flag: %s\n", args[i])
-			return 1
+			// First non-flag arg is the name (for custom range case)
+			if name == "" && !strings.HasPrefix(args[i], "--") {
+				name = args[i]
+				i++
+			} else {
+				fmt.Fprintf(os.Stderr, "❌ Unknown flag: %s\n", args[i])
+				return 1
+			}
 		}
+	}
+
+	// Handle --today / --yesterday shortcuts
+	if useToday || useYesterday {
+		if useToday && useYesterday {
+			name = "today"
+			fromDate = yesterday
+			toDate = today
+		} else if useToday {
+			name = "today"
+			fromDate = today
+			toDate = today
+		} else {
+			name = "yesterday"
+			fromDate = yesterday
+			toDate = yesterday
+		}
+	} else if name == "" {
+		fmt.Fprintf(os.Stderr, "❌ Usage: mpm topic create [--today | --yesterday | --from DATE --to DATE | name]\n")
+		return 1
 	}
 
 	if name == "" {
@@ -121,12 +152,19 @@ func topicCreate(args []string) int {
 		return 1
 	}
 
+	// Check if topic already exists (idempotent for --today/--yesterday)
 	dbMgr, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ DB: %v\n", err)
 		return 1
 	}
 	defer dbMgr.Close()
+
+	existingID, _ := dbMgr.GetTopicByName(name)
+	if existingID != "" {
+		fmt.Printf("⏭️  Topic '%s' already exists (id: %s)\n", name, existingID[:8])
+		return 0
+	}
 
 	topicID, err := dbMgr.CreateTopic(name, description, fromDate, toDate)
 	if err != nil {
