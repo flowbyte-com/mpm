@@ -96,9 +96,11 @@ func NewRouter() *CommandRouter {
 
 // Execute routes and runs the command
 func (r *CommandRouter) Execute(args []string) int {
-	// Handle empty command - start daemon
+	// Handle empty command - launch TUI menu
 	if len(args) == 0 {
-		becomeDaemonAndExecute()
+		// Start daemon first (TUI needs it), then launch menu
+		handleStartCommand()
+		StartTUI()
 		return 0
 	}
 

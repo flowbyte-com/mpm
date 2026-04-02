@@ -1316,27 +1316,21 @@ func main() {
 	// Parse flags
 	args = router.parseFlags(args)
 	if len(args) == 0 || args[0] == "" {
-		// No command - check if daemon is already running
-		if tryClient() {
-			// Daemon is running and handled it (status/ping)
+		// No command - launch TUI (ensure daemon is running first)
+		// Check directly if daemon is listening without trying to dispatch empty args
+		if conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond); err == nil {
+			conn.Close()
+			// Daemon is running - launch TUI
+			StartTUI()
 			return
 		}
-		// Daemon not running - check if socket exists (might be stale from killed daemon)
+		// Stale socket?
 		if _, err := os.Stat(sockPath); err == nil {
-			// Socket exists - check if daemon is actually listening
-			if conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond); err == nil {
-				conn.Close()
-				// Daemon is running
-				PrintHelp()
-				return
-			}
-			// Stale socket - remove it and continue to start daemon
 			os.Remove(sockPath)
 		}
-		// Show help and start daemon in background (OpenClaw UX pattern)
-		PrintHelp()
-		// Start daemon silently for next run (becomeDaemonAndExecute spawns subprocess and exits)
-		becomeDaemonAndExecute()
+		// Daemon not running - start it, then launch TUI
+		handleStartCommand()
+		StartTUI()
 		return
 	}
 
@@ -1539,21 +1533,47 @@ func handleStartCommand() {
 	// Check if daemon already running
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err == nil {
-		// Daemon is running
 		conn.Close()
-		fmt.Println("Daemon already running.")
+		fmt.Println("🟢 Daemon already running.")
 		return
 	}
-	// Stale socket file? Clean it up before starting
+	// Stale socket file? Clean it up
 	if _, statErr := os.Stat(sockPath); statErr == nil {
 		os.Remove(sockPath)
 		fmt.Println("Removed stale socket. Starting daemon...")
-	} else {
-		fmt.Println("Starting daemon...")
 	}
-	becomeDaemonAndExecute()
-	// becomeDaemonAndExecute() never returns - it spawns subprocess and exits
-	os.Exit(0)
+
+	// Start daemon in background (suppress its output - daemon logs to syslog)
+	fmt.Print("Starting daemon...")
+	args := []string{}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), "MPM_DIRECT=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	devNull, _ := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("\n❌ Failed to start daemon: %v\n", err)
+		fmt.Println("   Run `mpm doctor` to diagnose.")
+		return
+	}
+
+	// Wait for daemon to come up (poll socket for up to 5s)
+	fmt.Print(" Waiting")
+	for i := 0; i < 10; i++ {
+		time.Sleep(500 * time.Millisecond)
+		fmt.Print(".")
+		conn, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			fmt.Println()
+			fmt.Println("🟢 Daemon started. Socket active.")
+			return
+		}
+	}
+	fmt.Println()
+	fmt.Println("❌ Daemon failed to start within 5 seconds.")
+	fmt.Println("   Run `mpm doctor` to diagnose.")
 }
 
 // ============================================================================
