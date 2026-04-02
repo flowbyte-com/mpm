@@ -60,7 +60,7 @@ func NewRouter() *CommandRouter {
 		"help":      {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
 		"doctor":    {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
 		"synthesize": {Name: "synthesize", Description: "Synthesize session facts via LLM", MinArgs: 1},
-		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1},
+		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
 		"topics":   {Name: "topics", Description: "List all topic names", MinArgs: 0},
 		"watch":     {Name: "watch", Description: "Watch daemon for memory ingestion"},
 		"menu":      {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
