@@ -337,8 +337,10 @@ func (r *CommandRouter) handleDashboard() int {
 }
 
 func (r *CommandRouter) handleMenu() int {
-	// Route menu command to daemon for execution
-	return r.handleDaemonCommand("menu", []string{"menu"})
+	// Ensure daemon is running before launching TUI (TUI calls mpm mode/persona set)
+	handleStartCommand()
+	StartTUI()
+	return 0
 }
 
 func (r *CommandRouter) handleDaemonCommand(cmd string, args []string) int {
