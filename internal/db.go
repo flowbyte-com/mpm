@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"mpm/internal/config"
@@ -164,14 +165,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 
 		`CREATE TABLE IF NOT EXISTS topics (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP, embedding BLOB
+			parent_topic_id TEXT, tags JSON, is_active INTEGER DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, embedding BLOB
 		);`,
 
 		`CREATE TABLE IF NOT EXISTS topic_memberships (
-			session_id TEXT NOT NULL, topic_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (session_id, topic_id),
-			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-			FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
+			memory_id TEXT, session_id TEXT, topic_id TEXT NOT NULL,
+			role TEXT DEFAULT 'related', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (memory_id, topic_id), PRIMARY KEY (session_id, topic_id),
+			CHECK (memory_id IS NOT NULL OR session_id IS NOT NULL)
 		);`,
 
 		`CREATE TABLE IF NOT EXISTS memories (
@@ -204,6 +207,35 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		if _, err := dm.DB.Exec(sqlQuery); err != nil {
 			return fmt.Errorf("failed to execute SQL: %w\nSQL: %s", err, sqlQuery)
 		}
+	}
+
+	// Migration: add new columns to existing databases (no-op if already present)
+	migrations := []string{
+		`ALTER TABLE topics ADD COLUMN parent_topic_id TEXT`,
+		`ALTER TABLE topics ADD COLUMN tags JSON`,
+		`ALTER TABLE topics ADD COLUMN is_active INTEGER DEFAULT 1`,
+		`ALTER TABLE topics ADD COLUMN updated_at DATETIME`,
+		`ALTER TABLE topic_memberships ADD COLUMN memory_id TEXT`,
+		`ALTER TABLE topic_memberships ADD COLUMN role TEXT DEFAULT 'related'`,
+		`ALTER TABLE memories ADD COLUMN session_id TEXT`,
+		// v5: add summary column to sessions for LLM-generated session summaries
+		`ALTER TABLE sessions ADD COLUMN summary TEXT`,
+	}
+	for _, sql := range migrations {
+		dm.DB.Exec(sql) // SQLite ignores duplicate column errors
+	}
+
+	// Indexes for fast lookups
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_topic ON topic_memberships(topic_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_memory ON topic_memberships(memory_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_session ON topic_memberships(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)`,
+	}
+	for _, sql := range indexes {
+		dm.DB.Exec(sql)
 	}
 
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
@@ -275,6 +307,13 @@ func (dm *DatabaseManager) SaveSession(sessionID, content, sourcePath string, me
 	_, err := dm.DB.Exec(`INSERT INTO sessions (id, session_id, content, content_hash, source_path, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
 		id, sessionID, content, contentHash, sourcePath, metadataJSON)
 	return id, err
+}
+
+// UpdateSessionSummary upserts the LLM-generated summary for a session.
+// Uses the session_id as the unique key.
+func (dm *DatabaseManager) UpdateSessionSummary(sessionID, summary string) error {
+	_, err := dm.DB.Exec(`UPDATE sessions SET summary = ? WHERE session_id = ?`, summary, sessionID)
+	return err
 }
 
 func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error) {
@@ -592,4 +631,215 @@ func GenerateID() string {
 	timestamp := time.Now().UnixNano()
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
 	return hex.EncodeToString(hash[:])[:16]
+}
+
+// =============================================================================
+// Topic Management (exported for CLI use)
+// =============================================================================
+
+// CreateTopic creates a new topic and returns its ID
+func (dm *DatabaseManager) CreateTopic(name, description, fromDate, toDate string) (string, error) {
+	topicID := GenerateID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	tagsJSON := "{}"
+	if fromDate != "" || toDate != "" {
+		tags := map[string]string{}
+		if fromDate != "" {
+			tags["from_date"] = fromDate
+		}
+		if toDate != "" {
+			tags["to_date"] = toDate
+		}
+		bytes, _ := json.Marshal(tags)
+		tagsJSON = string(bytes)
+	}
+	descStr := description
+	if descStr == "" {
+		descStr = "{}"
+	}
+	_, err := dm.DB.Exec(`
+		INSERT INTO topics (id, name, description, created_at, tags, is_active, updated_at)
+		VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		topicID, name, descStr, now, tagsJSON, now)
+	return topicID, err
+}
+
+// GetOrCreateTopic looks up a topic by name, creating it if not found
+func (dm *DatabaseManager) GetOrCreateTopic(name string) (string, error) {
+	var id string
+	err := dm.DB.QueryRow(`SELECT id FROM topics WHERE name = ? AND is_active = 1`, name).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	return dm.CreateTopic(name, "", "", "")
+}
+
+// GetTopicByName returns a topic ID by name
+func (dm *DatabaseManager) GetTopicByName(name string) (string, error) {
+	var id string
+	err := dm.DB.QueryRow(`SELECT id FROM topics WHERE name = ? AND is_active = 1`, name).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("topic not found")
+	}
+	return id, err
+}
+
+// GetTopic returns a topic record by ID
+func (dm *DatabaseManager) GetTopic(id string) (map[string]interface{}, error) {
+	var name, desc, createdAt, tagsJSON string
+	err := dm.DB.QueryRow(
+		`SELECT name, COALESCE(description,''), created_at, COALESCE(tags,'{}') FROM topics WHERE id = ?`, id).Scan(
+		&name, &desc, &createdAt, &tagsJSON)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("topic not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]interface{}{
+		"id": id, "name": name, "description": desc, "created_at": createdAt, "tags": tagsJSON,
+	}
+	if strings.Contains(tagsJSON, "from_date") {
+		var tags map[string]string
+		json.Unmarshal([]byte(tagsJSON), &tags)
+		if v, ok := tags["from_date"]; ok {
+			result["from_date"] = v
+		}
+		if v, ok := tags["to_date"]; ok {
+			result["to_date"] = v
+		}
+	}
+	return result, nil
+}
+
+// ListTopics returns all active topics with memory counts
+func (dm *DatabaseManager) ListTopics() ([]map[string]interface{}, error) {
+	rows, err := dm.DB.Query(`
+		SELECT t.id, t.name, t.created_at, COALESCE(t.tags,'{}'),
+			   COUNT(tm.memory_id) as memory_count
+		FROM topics t
+		LEFT JOIN topic_memberships tm ON tm.topic_id = t.id AND tm.memory_id IS NOT NULL
+		WHERE t.is_active = 1
+		GROUP BY t.id
+		ORDER BY t.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var topics []map[string]interface{}
+	for rows.Next() {
+		var id, name, createdAt, tagsJSON string
+		var memoryCount int
+		if err := rows.Scan(&id, &name, &createdAt, &tagsJSON, &memoryCount); err != nil {
+			continue
+		}
+		m := map[string]interface{}{"id": id, "name": name, "created_at": createdAt, "memory_count": memoryCount, "tags": tagsJSON}
+		if strings.Contains(tagsJSON, "from_date") {
+			var tags map[string]string
+			json.Unmarshal([]byte(tagsJSON), &tags)
+			if v, ok := tags["from_date"]; ok {
+				m["from_date"] = v
+			}
+			if v, ok := tags["to_date"]; ok {
+				m["to_date"] = v
+			}
+		}
+		topics = append(topics, m)
+	}
+	return topics, nil
+}
+
+// GetTopicMemories returns memories in a topic (manual + auto from date range)
+func (dm *DatabaseManager) GetTopicMemories(topicID string) ([]map[string]interface{}, error) {
+	topic, err := dm.GetTopic(topicID)
+	if err != nil {
+		return nil, err
+	}
+	fromDate, _ := topic["from_date"].(string)
+	toDate, _ := topic["to_date"].(string)
+
+	rows, err := dm.DB.Query(`
+		SELECT m.id, m.content, m.session_id, m.tags, m.created_at, tm.role
+		FROM topic_memberships tm
+		JOIN memories m ON m.id = tm.memory_id
+		WHERE tm.topic_id = ?
+		ORDER BY tm.created_at DESC
+	`, topicID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []map[string]interface{}
+	seen := make(map[string]bool)
+
+	for rows.Next() {
+		var memID, content, sessionID, tags, createdAt, role string
+		if err := rows.Scan(&memID, &content, &sessionID, &tags, &createdAt, &role); err != nil {
+			continue
+		}
+		seen[memID] = true
+		memories = append(memories, map[string]interface{}{
+			"id": memID, "content": content, "session_id": sessionID, "tags": tags, "created_at": createdAt, "role": role,
+		})
+	}
+
+	if fromDate != "" {
+		to := toDate
+		if to == "" {
+			to = fromDate
+		}
+		autoRows, err := dm.DB.Query(`
+			SELECT id, content, session_id, tags, created_at FROM memories
+			WHERE created_at >= ? AND created_at <= ? AND deleted_at IS NULL
+			ORDER BY created_at DESC LIMIT 50
+		`, fromDate+"T00:00:00Z", to+"T23:59:59Z")
+		if err == nil {
+			defer autoRows.Close()
+			for autoRows.Next() {
+				var memID, content, sessionID, tags, createdAt string
+				if err := autoRows.Scan(&memID, &content, &sessionID, &tags, &createdAt); err != nil {
+					continue
+				}
+				if !seen[memID] {
+					seen[memID] = true
+					memories = append(memories, map[string]interface{}{
+						"id": memID, "content": content, "session_id": sessionID, "tags": tags, "created_at": createdAt, "role": "auto",
+					})
+				}
+			}
+		}
+	}
+	return memories, nil
+}
+
+// AddMemoryToTopic adds a memory to a topic
+func (dm *DatabaseManager) AddMemoryToTopic(memoryID, topicID, role string) error {
+	if role == "" {
+		role = "manual"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := dm.DB.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+		memoryID, topicID, now, role)
+	return err
+}
+
+// RemoveMemoryFromTopic removes a memory from a topic
+func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) error {
+	_, err := dm.DB.Exec(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, memoryID, topicID)
+	return err
+}
+
+// DeleteTopic soft-deletes a topic (memories are NOT deleted)
+func (dm *DatabaseManager) DeleteTopic(topicID string) error {
+	_, err := dm.DB.Exec(`DELETE FROM topic_memberships WHERE topic_id = ?`, topicID)
+	if err != nil {
+		return err
+	}
+	_, err = dm.DB.Exec(`UPDATE topics SET is_active = 0 WHERE id = ?`, topicID)
+	return err
 }

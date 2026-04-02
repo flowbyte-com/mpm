@@ -172,6 +172,9 @@ func InsertOpenClawDocument(db *sql.DB, doc *OpenClawMarkdown) (*IngestResult, e
 	sessionID := generateID()
 	result.SessionID = sessionID
 
+	// Extract auto-tags from source path and content
+	autoTags := extractAutoTags(doc)
+
 	// Prepare metadata
 	metadata := map[string]interface{}{
 		"doc_type": doc.DocType,
@@ -194,10 +197,12 @@ func InsertOpenClawDocument(db *sql.DB, doc *OpenClawMarkdown) (*IngestResult, e
 	// Insert main content as a memory if substantial
 	if len(doc.Content) > 100 {
 		memoryID := generateID()
+		tags := append([]string{"main"}, autoTags...)
+		tagsJSON, _ := json.Marshal(tags)
 		_, err := db.Exec(`
 			INSERT INTO memories (id, collection, content, session_id, tags, metadata)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, memoryID, strings.ToLower(doc.DocType), doc.Content, sessionID, `["main"]`, `{"type":"body"}`)
+		`, memoryID, strings.ToLower(doc.DocType), doc.Content, sessionID, string(tagsJSON), `{"type":"body"}`)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert memory: %w", err)
 		}
@@ -214,7 +219,7 @@ func InsertOpenClawDocument(db *sql.DB, doc *OpenClawMarkdown) (*IngestResult, e
 		}
 		result.TopicIDs = append(result.TopicIDs, topicID)
 
-		// Create membership link
+		// Create membership link for session
 		_, err = db.Exec(`
 			INSERT OR IGNORE INTO topic_memberships (session_id, topic_id)
 			VALUES (?, ?)
@@ -226,7 +231,7 @@ func InsertOpenClawDocument(db *sql.DB, doc *OpenClawMarkdown) (*IngestResult, e
 		// Insert topic content as memory
 		if len(topic.Content) > 50 {
 			memoryID := generateID()
-			tags := []string{"topic", sanitizeTopicName(topic.Name)}
+			tags := append([]string{"topic", sanitizeTopicName(topic.Name)}, autoTags...)
 			tagsJSON, _ := json.Marshal(tags)
 			_, err := db.Exec(`
 				INSERT INTO memories (id, collection, content, session_id, tags, metadata)
@@ -235,11 +240,68 @@ func InsertOpenClawDocument(db *sql.DB, doc *OpenClawMarkdown) (*IngestResult, e
 			if err == nil {
 				result.MemoryIDs = append(result.MemoryIDs, memoryID)
 				result.RowsInserted++
+
+				// Create membership link for this memory (TODO-007)
+				db.Exec(`
+					INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id)
+					VALUES (?, ?)
+				`, memoryID, topicID)
 			}
 		}
 	}
 
 	return result, nil
+}
+
+// extractAutoTags extracts project, date, keyword, and entity tags from the document
+func extractAutoTags(doc *OpenClawMarkdown) []string {
+	tagsSet := make(map[string]bool)
+
+	// 1. Project tags from source path
+	projectRegex := regexp.MustCompile(`flowbyte/(\w+)`)
+	matches := projectRegex.FindAllStringSubmatch(doc.SourcePath, -1)
+	for _, match := range matches {
+		tagsSet["project:"+match[1]] = true
+	}
+
+	// Also check content for project references
+	matches = projectRegex.FindAllStringSubmatch(doc.Content, -1)
+	for _, match := range matches {
+		tagsSet["project:"+match[1]] = true
+	}
+
+	// 2. Date tags - extract YYYY-MM-DD from source path or content
+	dateRegex := regexp.MustCompile(`(\d{4}-\d{2}-\d{2})`)
+	if match := dateRegex.FindStringSubmatch(doc.SourcePath); len(match) > 1 {
+		tagsSet["date:"+match[1]] = true
+	}
+	if match := dateRegex.FindStringSubmatch(doc.Content); len(match) > 1 {
+		tagsSet["date:"+match[1]] = true
+	}
+
+	// 3. Keyword tags - pattern matching
+	keywordPatterns := []string{"bug", "feature", "decision", "lesson", "fix", "refactor", "todo", "hack", "note"}
+	contentLower := strings.ToLower(doc.Content)
+	for _, kw := range keywordPatterns {
+		pattern := regexp.MustCompile(`\b` + kw + `\b`)
+		if pattern.MatchString(contentLower) {
+			tagsSet["keyword:"+kw] = true
+		}
+	}
+
+	// 4. Entity tags - @mentions
+	mentionRegex := regexp.MustCompile(`@(\w+)`)
+	mentionMatches := mentionRegex.FindAllStringSubmatch(doc.Content, -1)
+	for _, m := range mentionMatches {
+		tagsSet["person:"+m[1]] = true
+	}
+
+	// Convert set to slice
+	tags := make([]string, 0, len(tagsSet))
+	for tag := range tagsSet {
+		tags = append(tags, tag)
+	}
+	return tags
 }
 
 // insertTopic inserts a topic or returns existing ID

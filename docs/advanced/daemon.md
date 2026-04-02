@@ -275,7 +275,7 @@ $ mpm doctor --fix    # Attempt auto-repairs
   ▸ Environment Variables
 
     [PASS] MPM_WORKSPACE
-          /home/user/.openclaw/workspace/projects/mpm
+          /home/user/.openclaw/workspace/flowbyte/mpm
 
 ─────────────────────────────────────────────────────────────
 

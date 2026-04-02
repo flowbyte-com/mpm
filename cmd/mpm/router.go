@@ -86,7 +86,7 @@ func NewRouter() *CommandRouter {
 		"memory":   {Name: "memory", Description: "Memory operations", NeedsDaemon: true},
 		"mode":     {Name: "mode", Description: "Mode operations", NeedsDaemon: true},
 		"persona":  {Name: "persona", Description: "Persona operations", NeedsDaemon: true},
-		"topic":    {Name: "topic", Description: "Topic operations", NeedsDaemon: true},
+		"topic":    {Name: "topic", Description: "Topic management", MinArgs: 1},
 		"session":  {Name: "session", Description: "Session operations", NeedsDaemon: true},
 	}
 
@@ -154,6 +154,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSynthesize(args)
 	case "recall":
 		return handleRecall(args)
+	case "topic":
+		return topicCmd(args)
 	case "watch":
 		// watch - if no args, start watch daemon standalone
 		// if args provided, route to daemon for status/start/stop/restart

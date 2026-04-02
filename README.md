@@ -28,13 +28,6 @@ DB-first agent state management with SQLite-only. Manage personas, modes, memory
 | Add reference | `mpm reference add /path/to/file.pdf` |
 | Save session | `mpm ss` |
 
-### Quicklinks
-
-| Shortcut | Command |
-|----------|---------|
-| `~p.<name>` | Quick persona (e.g., `~p.default`) |
-| `~m+<name>` | Quick mode add (e.g., `~m+debug`) |
-| `~m.clr` | Clear all modes |
 
 ## Architecture
 
@@ -64,7 +57,7 @@ Add these lines to `~/.bashrc` (or `~/.zshrc`):
 
 ```bash
 # MPM - Memory-Persona-Mode Manager
-export PATH="$HOME/.openclaw/workspace/projects/mpm:$PATH"
+export PATH="$HOME/.openclaw/workspace/flowbyte/mpm:$PATH"
 export MPM_WORKSPACE="$HOME/.openclaw/workspace"
 ```
 
@@ -92,7 +85,7 @@ mpm --help             # All commands
 
 ### Enable via OpenClaw
 ```bash
-openclaw skills enable MPM
+openclaw skills enable mpm
 ```
 
 ### Manual Config
@@ -100,7 +93,7 @@ Add to `~/.openclaw/openclaw.json`:
 ```json
 "skills": {
   "entries": {
-    "MPM": { "enabled": true }
+    "mpm": { "enabled": true }
   }
 }
 ```
@@ -119,7 +112,7 @@ See [`docs/getting-started/quick-start.md`](docs/getting-started/quick-start.md)
 Edit `mpm_config.json` in the MPM project directory:
 
 ```bash
-nano $HOME/.openclaw/workspace/projects/mpm/mpm_config.json
+nano $HOME/.openclaw/workspace/flowbyte/mpm/mpm_config.json
 ```
 
 ```json
