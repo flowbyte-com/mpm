@@ -61,6 +61,7 @@ func NewRouter() *CommandRouter {
 		"doctor":    {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
 		"synthesize": {Name: "synthesize", Description: "Synthesize session facts via LLM", MinArgs: 1},
 		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1},
+		"topics":   {Name: "topics", Description: "List all topic names", MinArgs: 0},
 		"watch":     {Name: "watch", Description: "Watch daemon for memory ingestion"},
 		"menu":      {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
 
@@ -154,6 +155,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSynthesize(args)
 	case "recall":
 		return handleRecall(args)
+	case "topics":
+		return topicList(args)
 	case "topic":
 		return topicCmd(args)
 	case "watch":

@@ -24,6 +24,8 @@ func topicCmd(args []string) int {
 		return topicCreate(args[2:])
 	case "add":
 		return topicAdd(args[2:])
+	case "rm":
+		return topicRm(args[2:])
 	case "remove":
 		return topicRemove(args[2:])
 	case "list":
@@ -31,7 +33,7 @@ func topicCmd(args []string) int {
 	case "show":
 		return topicShow(args[2:])
 	case "delete":
-		return topicDelete(args[2:])
+		return topicRm(args[2:])
 	case "help":
 		return topicCmdHelp()
 	default:
@@ -61,8 +63,10 @@ Subcommands:
   show <topic-name>
     Show memories in a topic (manual + auto from date range).
 
+  rm <topic-name>
+    Delete a topic by name (memories are NOT deleted).
   delete <topic-name>
-    Delete a topic (memories are NOT deleted).
+    Alias for rm.
 
 Examples:
   mpm topic create --today
@@ -366,9 +370,9 @@ func topicShow(args []string) int {
 
 // --- delete ---
 
-func topicDelete(args []string) int {
+func topicRm(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm topic delete <topic-name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm topic rm <topic-name>\n")
 		return 1
 	}
 	topicName := strings.Join(args, " ")
