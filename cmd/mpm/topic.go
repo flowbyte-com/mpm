@@ -20,19 +20,17 @@ func topicCmd(args []string) int {
 		return topicCmdHelp()
 	}
 	switch args[1] {
-	case "create":
+	case "create", "mk":
 		return topicCreate(args[2:])
 	case "add":
 		return topicAdd(args[2:])
-	case "rm":
-		return topicRm(args[2:])
 	case "remove":
 		return topicRemove(args[2:])
-	case "list":
+	case "list", "ls":
 		return topicList(args[2:])
-	case "show":
+	case "show", "cat":
 		return topicShow(args[2:])
-	case "delete":
+	case "rm", "delete":
 		return topicRm(args[2:])
 	case "help":
 		return topicCmdHelp()
