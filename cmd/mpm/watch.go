@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -416,6 +417,25 @@ func (d *watcherDaemon) handleLockRemoved(lockPath string) {
 	d.processSessionFile(jsonlPath, false)
 }
 
+// triggerSynthesisAsync fires LLM synthesis for a completed session.
+// Runs as a detached subprocess so it outlives the daemon restart.
+func (d *watcherDaemon) triggerSynthesisAsync(sessionUUID, jsonlPath string) {
+	binary, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[synth] failed to find binary: %v\n", err)
+		return
+	}
+	go func() {
+		cmd := exec.Command(binary, "synthesize", sessionUUID)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[synth] %s: %v\n", sessionUUID[:8], err)
+			return
+		}
+		fmt.Printf("   🔮 %s", string(out))
+	}()
+}
+
 // isRecentlyModified returns true if the file was modified within the last `seconds`.
 // This is used to detect sessions that are still alive (being written to).
 func (d *watcherDaemon) isRecentlyModified(path string, seconds int) bool {
@@ -544,6 +564,10 @@ func (d *watcherDaemon) processSessionFile(path string, isStartup bool) {
 
 	// Check for topic clustering
 	d.checkTopicClustering()
+
+	// Fire LLM synthesis (non-blocking) — keeps .jsonl for synthesis, runs in background
+	sessionUUID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	go d.triggerSynthesisAsync(sessionUUID, path)
 
 	d.deleteFile(path, "processed successfully")
 }
