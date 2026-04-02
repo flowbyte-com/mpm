@@ -19,7 +19,7 @@
 
 MPM is included in your OpenClaw workspace at:
 ```
-$HOME/.openclaw/workspace/projects/mpm/
+$HOME/.openclaw/workspace/flowbyte/mpm/
 ```
 
 ### 1. Add to PATH
@@ -28,7 +28,7 @@ Add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 # MPM - Memory-Persona-Mode Manager
-export PATH="$HOME/.openclaw/workspace/projects/mpm:$PATH"
+export PATH="$HOME/.openclaw/workspace/flowbyte/mpm:$PATH"
 
 # OpenClaw workspace (required for correct path detection)
 export MPM_WORKSPACE="$HOME/.openclaw/workspace"
@@ -50,7 +50,7 @@ $ mpm config show
 │ MPM Configuration                                          │
 ├─────────────────────────────────────────────────────────────┤
 │  Workspace:     $HOME/.openclaw/workspace             │
-│  Database:      $HOME/.openclaw/workspace/projects/mpm/src/db/mpm.db
+│  Database:      $HOME/.openclaw/workspace/flowbyte/mpm/src/db/mpm.db
 │  Sessions:      $HOME/.openclaw/agents/main/sessions  │
 │  Memory:        $HOME/.openclaw/workspace/memory      │
 └─────────────────────────────────────────────────────────────┘
@@ -169,7 +169,7 @@ mpm topic members <id>     # List topic members
 | `command not found: mpm` | PATH not set | Add MPM to PATH (see Installation step 1) |
 | `Wrong workspace` | MPM_WORKSPACE not set | `export MPM_WORKSPACE="$HOME/.openclaw/workspace"` |
 | `Database not found` | First run, no DB yet | Run `mpm status` to initialize |
-| `Permission denied` | File permissions | `chmod 755 $HOME/.openclaw/workspace/projects/mpm/mpm` |
+| `Permission denied` | File permissions | `chmod 755 $HOME/.openclaw/workspace/flowbyte/mpm/mpm` |
 | `FTS5 not available` | SQLite version | MPM uses built-in FTS5; update SQLite if issue persists |
 
 ### Diagnostic Commands
@@ -182,7 +182,7 @@ echo $PATH | grep mpm
 mpm config show
 
 # Verify database
-ls -la ~/.openclaw/workspace/projects/mpm/src/db/
+ls -la ~/.openclaw/workspace/flowbyte/mpm/src/db/
 
 # Test search
 mpm memory search "test"

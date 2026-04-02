@@ -174,14 +174,14 @@ They share the same SQLite database but communicate through different channels:
 mpm config show
 
 # Ensure memory_dir and sessions_dir are set
-cat /home/v/.openclaw/workspace/projects/mpm/mpm_config.json
+cat $HOME/.openclaw/workspace/flowbyte/mpm/mpm_config.json
 ```
 
 ### Files not being processed
 1. Check verbose mode: `mpm watch --v`
 2. Verify file permissions (must be writable)
 3. Check for `.lock` files blocking `.jsonl` processing
-4. Review JSONL mirror: `tail -20 /home/v/.openclaw/workspace/projects/mpm/src/db/mirror.jsonl`
+4. Review JSONL mirror: `tail -20 $HOME/.openclaw/workspace/flowbyte/mpm/src/db/mirror.jsonl`
 
 ### "Sensitive content blocked"
 - Content matched a blocked pattern (API key, password, etc.)

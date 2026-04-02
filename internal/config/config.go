@@ -65,7 +65,7 @@ const MPMDataDir = "mpm"
 // 4. Current Working Directory (os.Getwd)
 //
 // This enables portable installations - the same binary can work from any directory.
-// All MPM runtime data resides within workspace/projects/mpm/ (src/, mode/, persona/)
+// All MPM runtime data resides within workspace/flowbyte/mpm/ (src/, mode/, persona/)
 // Recommended structure:
 //   /workspace/         ← User-configurable (workspace root)
 //   └── symai/          ← Project folder
@@ -79,56 +79,57 @@ const MPMDataDir = "mpm"
 //           ├── toxicphrases.txt ← Cognitive firewall file
 //           └── src/            ← Source code (hidden from end users)
 func GetWorkspace() string {
-	// 1. Check CLI flag via environment variable (set by CLI)
+	// 1. Check environment variable (CLI flag or env var)
 	if workspace := os.Getenv("MPM_WORKSPACE"); workspace != "" {
 		return workspace
 	}
 
-	// 2. Check environment variable (fallback)
-	if envWorkspace := os.Getenv("MPM_WORKSPACE"); envWorkspace != "" {
-		return envWorkspace
-	}
-
-	// 3. Resolve relative to executable location
+	// 2. Resolve relative to executable location
 	execPath, err := os.Executable()
 	if err == nil {
 		// Get the directory containing the binary
 		execDir := filepath.Dir(execPath)
-		
+
 		// Check if we're in a "bin/" directory (standard layout)
 		if filepath.Base(execDir) == "bin" {
-			// bin/ -> parent directory
-			parent := filepath.Dir(execDir)
-			// If parent is projects/, return its parent (symai)
-			if filepath.Base(parent) == "projects" {
+			parent := filepath.Dir(execDir)   // e.g. .../flowbyte/mpm or .../projects
+			parentBase := filepath.Base(parent)
+			// If parent is projects/ or workspace/, workspace is the grandparent
+			if parentBase == "projects" || parentBase == "workspace" {
 				return filepath.Dir(parent)
 			}
-			return parent
+			// Parent is the project root (e.g. flowbyte/mpm or symai).
+			// Workspace is the grandparent (.../flowbyte or .../symai).
+			if parentBase == "mpm" || parentBase == "symai" || parentBase == "desp" {
+				return filepath.Dir(parent)
+			}
+			// Generic project dir — workspace is the grandparent
+			return filepath.Dir(parent)
 		}
-		
+
 		// If we're already in symai/, return it
 		base := filepath.Base(execDir)
 		if base == "symai" {
 			return execDir
 		}
-		
+
 		// If we're in projects/, return parent (symai)
 		if base == "projects" {
 			return execDir
 		}
-		
+
 		// Fallback: look for parent symai directory
 		parent := filepath.Dir(execDir)
 		parentBase := filepath.Base(parent)
 		if parentBase == "symai" {
 			return parent
 		}
-		
+
 		// If we're in projects/mpm/, return parent (symai)
 		if parentBase == "projects" {
 			return filepath.Dir(parent)
 		}
-		
+
 		// Fallback: return current working directory
 		cwd, _ := os.Getwd()
 		return cwd

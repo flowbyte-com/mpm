@@ -182,7 +182,7 @@ mpm memory search "test"
 
 ### Config File Location
 ```
-$HOME/.openclaw/workspace/projects/mpm/mpm_config.json
+$HOME/.openclaw/workspace/flowbyte/mpm/mpm_config.json
 ```
 
 ### Default Paths
@@ -246,9 +246,9 @@ MPM blocks **17 regex patterns** before any content touches storage:
 
 ## Support
 
-- **Main Documentation:** `~/.openclaw/workspace/projects/mpm/docs/`
-- **Source Code:** `~/.openclaw/workspace/projects/mpm/`
-- **Database:** `~/.openclaw/workspace/projects/mpm/src/db/`
+- **Main Documentation:** `~/.openclaw/workspace/flowbyte/mpm/docs/`
+- **Source Code:** `~/.openclaw/workspace/flowbyte/mpm/`
+- **Database:** `~/.openclaw/workspace/flowbyte/mpm/src/db/`
 
 ---
 
