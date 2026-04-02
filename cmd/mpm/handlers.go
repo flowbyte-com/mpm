@@ -78,7 +78,7 @@ func handleMemoryAdd(conn net.Conn, args []string) {
 	content := strings.Join(args, " ")
 	store := getMemoryStore()
 	
-	mem, err := store.AddMemory(content, "memories", nil, nil, "cli")
+	mem, err := store.AddMemory(content, "memories", nil, nil, "", "cli")
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to add memory: %v", err), true, 1)
 		return
@@ -867,7 +867,7 @@ func handleSessionAdd(conn net.Conn, args []string) {
 	store := getMemoryStore()
 	
 	// Add to session collection
-	mem, err := store.AddMemory(content, "session", nil, nil, "cli")
+	mem, err := store.AddMemory(content, "session", nil, nil, "", "cli")
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to add session: %v", err), true, 1)
 		return

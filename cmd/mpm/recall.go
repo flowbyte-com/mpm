@@ -1,0 +1,191 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"mpm/internal"
+)
+
+// =============================================================================
+// mpm recall <query> — Search memories for relevant context
+// =============================================================================
+
+func handleRecall(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: mpm recall <query>\n")
+		return 1
+	}
+	query := strings.Join(args[1:], " ")
+	query = strings.TrimSpace(query)
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "Empty query.\n")
+		return 1
+	}
+
+	dbPath := internal.DefaultMemoryPaths().SQLiteDBPath
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	// Keyword search using LIKE + FTS5 fallback
+	rows, err := keywordSearch(db, query, 15)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Search failed: %v\n", err)
+		return 1
+	}
+	defer rows.Close()
+
+	type recallEntry struct {
+		content     string
+		sessionID   string
+		createdAt   time.Time
+		tags        string
+		synthesized bool
+	}
+	var entries []recallEntry
+	for rows.Next() {
+		var id, content, sessionID, tags, createdAt string
+		if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
+			continue
+		}
+		if content == "" {
+			continue
+		}
+		entry := recallEntry{
+			content:   content,
+			sessionID: sessionID,
+			tags:      tags,
+		}
+		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			entry.createdAt = t
+		}
+		if strings.Contains(tags, "synthesized") {
+			entry.synthesized = true
+		}
+		entries = append(entries, entry)
+	}
+
+	if len(entries) == 0 {
+		fmt.Printf("No memories found for: %s\n", query)
+		return 0
+	}
+
+	// Sort by recency
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].createdAt.After(entries[j].createdAt)
+	})
+
+	cyan := "\033[36m"
+	magenta := "\033[35m"
+	reset := "\033[0m"
+	bold := "\033[1m"
+
+	fmt.Printf("%s%sRecall — %s%s\n\n", bold, cyan, query, reset)
+
+	for i, e := range entries {
+		age := ""
+		if !e.createdAt.IsZero() {
+			age = formatAge(e.createdAt)
+		}
+
+		content := e.content
+		if len(content) > 250 {
+			content = content[:250] + "..."
+		}
+		content = stripMarkdown(content)
+
+		sessionTag := ""
+		if e.sessionID != "" {
+			sessionTagLen := 8
+			if len(e.sessionID) < sessionTagLen {
+				sessionTagLen = len(e.sessionID)
+			}
+			sessionTag = fmt.Sprintf(" %s[%s]%s", magenta, e.sessionID[:sessionTagLen], reset)
+		}
+		synthTag := ""
+		if e.synthesized {
+			synthTag = fmt.Sprintf(" %s[synth]%s", magenta, reset)
+		}
+		ageTag := ""
+		if age != "" {
+			ageTag = fmt.Sprintf(" %s%s%s", magenta, age, reset)
+		}
+
+
+		fmt.Printf("%s%d.%s %s%s%s\n    %s\n\n",
+			cyan, i+1, reset,
+			sessionTag, ageTag, synthTag,
+			content)
+	}
+
+	fmt.Printf("%s%d results%s\n", cyan, len(entries), reset)
+	return 0
+}
+
+func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
+	// Try FTS5 first
+	likePattern := "%" + query + "%"
+	ftsQuery := `
+		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
+		FROM memories m
+		LEFT JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE m.deleted_at IS NULL AND (
+			fts.content MATCH '` + query + `'
+			OR m.content LIKE '` + likePattern + `'
+			OR m.tags LIKE '` + likePattern + `'
+		)
+		ORDER BY m.created_at DESC
+		LIMIT ` + fmt.Sprintf("%d", limit)
+
+	rows, err := db.Query(ftsQuery)
+	if err == nil {
+		return rows, nil
+	}
+
+	// Fallback to plain LIKE search
+	likeQuery := `
+		SELECT id, content, session_id, tags, created_at
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (content LIKE '` + likePattern + `' OR tags LIKE '` + likePattern + `')
+		ORDER BY created_at DESC
+		LIMIT ` + fmt.Sprintf("%d", limit)
+	return db.Query(likeQuery)
+}
+
+func stripMarkdown(s string) string {
+	s = regexp.MustCompile(`(?m)^#+\s*`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\*(.*?)\*`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile("`([^`]+)`").ReplaceAllString(s, "$1")
+	return strings.TrimSpace(s)
+}
+
+func formatAge(t time.Time) string {
+	age := time.Since(t)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		days := int(age.Hours() / 24)
+		if days == 1 {
+			return "yesterday"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
+}
+

@@ -2264,6 +2264,10 @@ func colorCyan(s string) string {
 	return "\033[36m" + s + "\033[0m"
 }
 
+func colorMagenta(s string) string {
+	return "\033[35m" + s + "\033[0m"
+}
+
 func colorGreen(s string) string {
 	return ansiGreen + s + ansiReset
 }

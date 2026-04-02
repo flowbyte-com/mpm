@@ -56,11 +56,13 @@ func NewRouter() *CommandRouter {
 		"logs":     {Name: "logs", Description: "Tail daemon logs", NeedsDaemon: true},
 
 		// Standalone commands
-		"version":  {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
-		"help":     {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
-		"doctor":   {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
-		"watch":    {Name: "watch", Description: "Watch daemon for memory ingestion"},
-		"menu":     {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
+		"version":   {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
+		"help":      {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
+		"doctor":    {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
+		"synthesize": {Name: "synthesize", Description: "Synthesize session facts via LLM", MinArgs: 1},
+		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1},
+		"watch":     {Name: "watch", Description: "Watch daemon for memory ingestion"},
+		"menu":      {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
 
 		// Fun/OpenCLAW commands
 		"fortune": {
@@ -147,7 +149,11 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleHelp()
 	case "doctor", "fortune", "logs", "start":
 		// Standalone commands - don't need daemon
-		return r.handleStandalone(cmd.Name)
+		return r.handleStandalone(cmd.Name, args)
+	case "synthesize":
+		return handleSynthesize(args)
+	case "recall":
+		return handleRecall(args)
 	case "watch":
 		// watch - if no args, start watch daemon standalone
 		// if args provided, route to daemon for status/start/stop/restart
@@ -177,7 +183,7 @@ func (r *CommandRouter) Execute(args []string) int {
 }
 
 // handleStandalone runs commands that don't need the daemon
-func (r *CommandRouter) handleStandalone(cmdName string) int {
+func (r *CommandRouter) handleStandalone(cmdName string, args []string) int {
 	switch cmdName {
 	case "help":
 		PrintHelp()
