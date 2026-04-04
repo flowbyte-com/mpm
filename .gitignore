@@ -2,3 +2,21 @@ __pycache__/
 *.pyc
 .vscode/
 *.log
+
+# Compiled binaries
+mpm
+bin/
+
+# Runtime state
+MEMORY.md
+active.json
+
+# Runtime data
+memory/
+projects/
+.claude/
+
+# SQLite
+src/db/*.db
+src/db/*.db-shm
+src/db/*.db-wal
