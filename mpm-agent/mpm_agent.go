@@ -888,6 +888,122 @@ func truncate(s string, maxLen int) string {
 	return s[:half] + fmt.Sprintf("\n...(%d chars truncated)...\n", len(s)-maxLen) + s[len(s)-half:]
 }
 
+// ============================================================================
+// Context Building
+// ============================================================================
+
+// buildSystemPrompt creates the system prompt with tools and context
+func buildSystemPrompt(memories, directives, references string) string {
+	var sb strings.Builder
+	sb.WriteString("You are mpm-agent — MPM's companion AI agent. ")
+	sb.WriteString("You have access to tools listed below. Use them to help the user.\n\n")
+	sb.WriteString("## Tools\n")
+	for _, t := range toolDefinitions {
+		fn := t["function"].(map[string]interface{})
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", fn["name"], fn["description"]))
+	}
+	sb.WriteString("\n## Guidelines\n")
+	sb.WriteString("- Use tools when they help answer the user's question\n")
+	sb.WriteString("- Be concise and practical\n")
+	sb.WriteString("- When using shell, explain what you're doing briefly\n")
+	sb.WriteString("- Format file paths and code in code blocks\n\n")
+	if memories != "" {
+		sb.WriteString("## Relevant Memories\n")
+		sb.WriteString(memories)
+		sb.WriteString("\n\n")
+	}
+	if directives != "" {
+		sb.WriteString("## Prime Directives\n")
+		sb.WriteString(directives)
+		sb.WriteString("\n\n")
+	}
+	if references != "" {
+		sb.WriteString("## Reference Material\n")
+		sb.WriteString(references)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("## Current Date\n")
+	sb.WriteString(time.Now().Format("2006-01-02"))
+	return sb.String()
+}
+
+// retrieveMemories returns formatted relevant memories from MPM DB
+func retrieveMemories(db *sql.DB, query string, limit int) string {
+	if query == "" {
+		return ""
+	}
+	rows, err := db.Query(`
+		SELECT content, tags FROM memories
+		JOIN memories_fts fts ON memories.rowid = fts.rowid
+		WHERE memories_fts MATCH ? AND deleted_at IS NULL
+		ORDER BY rank LIMIT ?
+	`, query, limit)
+	if err != nil {
+		like := "%" + query + "%"
+		rows, err = db.Query(`
+			SELECT content, tags FROM memories
+			WHERE (content LIKE ? OR tags LIKE ?) AND deleted_at IS NULL
+			ORDER BY created_at DESC LIMIT ?
+		`, like, like, limit)
+		if err != nil {
+			return ""
+		}
+	}
+	defer rows.Close()
+	var results []string
+	for rows.Next() {
+		var content, tags string
+		rows.Scan(&content, &tags)
+		results = append(results, fmt.Sprintf("- %s", truncate(content, 300)))
+	}
+	return strings.Join(results, "\n")
+}
+
+// retrieveDirectives returns all prime directives
+func retrieveDirectives(db *sql.DB) string {
+	rows, err := db.Query(`
+		SELECT content FROM memories
+		WHERE metadata LIKE '%is_prime_directive%' AND deleted_at IS NULL
+		ORDER BY created_at DESC LIMIT 20
+	`)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var results []string
+	for rows.Next() {
+		var content string
+		rows.Scan(&content)
+		results = append(results, fmt.Sprintf("- %s", truncate(content, 200)))
+	}
+	return strings.Join(results, "\n")
+}
+
+// retrieveReferences returns formatted reference chunks
+func retrieveReferences(db *sql.DB, query string, limit int) string {
+	if query == "" {
+		return ""
+	}
+	rows, err := db.Query(`
+		SELECT r.title, rc.content FROM reference_chunks rc
+		JOIN reference_docs r ON rc.doc_id = r.id
+		JOIN reference_chunks_fts fts ON rc.rowid = fts.rowid
+		WHERE reference_chunks_fts MATCH ?
+		ORDER BY rank LIMIT ?
+	`, query, limit)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	var results []string
+	for rows.Next() {
+		var title, content string
+		rows.Scan(&title, &content)
+		results = append(results, fmt.Sprintf("### %s\n%s", title, truncate(content, 400)))
+	}
+	return strings.Join(results, "\n---\n")
+}
+
 func main() {
 	fmt.Println("mpm-agent v0.1.0 — not yet implemented")
 	os.Exit(0)
