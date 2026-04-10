@@ -3821,7 +3821,7 @@ func printHelp() {
 		Foreground(lipgloss.Color("#FFD700"))
 
 	cmdStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888"))
+		Foreground(lipgloss.Color("#CCCCCC"))
 
 	daemonStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#00FF88"))
@@ -3832,71 +3832,78 @@ func printHelp() {
 	noteStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#888888"))
 
-	// Box dimensions
-	width := 80
+	// Box width
+	width := 76
 
-	header := borderStyle.Render("╭" + strings.Repeat("─", width-2) + "╮")
-	divider := borderStyle.Render("├" + strings.Repeat("─", width-2) + "┤")
-	footer := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	header := borderStyle.Render("╭" + strings.Repeat("─", width) + "╮")
+	divider := borderStyle.Render("├" + strings.Repeat("─", width) + "┤")
+	footer := borderStyle.Render("╰" + strings.Repeat("─", width) + "╯")
+
+	// Helper: pad a plain string to a fixed width, then apply style
+	padRight := func(s string, w int) string {
+		n := len(s)
+		if n > w {
+			return s[:w-1] + " "
+		}
+		return s + strings.Repeat(" ", w-n)
+	}
 
 	// Build content
 	var b strings.Builder
 
 	b.WriteString(header + "\n")
-	b.WriteString(fmt.Sprintf("│ %s  —  Memory-Persona-Mode Manager%*s │\n",
-		headerStyle.Render("mpm"), width-42, ""))
+	title := "mpm  —  Memory-Persona-Mode Manager"
+	b.WriteString(fmt.Sprintf("│ %s%*s │\n", headerStyle.Render(title), width-len(title)-1, ""))
 	b.WriteString(divider + "\n")
 
 	// Core Commands
-	b.WriteString("│" + sectionStyle.Render(" Core Commands") + strings.Repeat(" ", width-17) + "│\n")
+	b.WriteString(fmt.Sprintf("│ %s │\n", sectionStyle.Render("Core Commands")))
 	coreCmds := [][2]string{
 		{"status", "Show current status"},
 		{"dashboard", "Live terminal dashboard"},
-		{"persona", "Persona management [*>]"},
-		{"mode", "Mode management [*>]"},
-		{"memory", "Memory management [*>]"},
-		{"session", "Session management [*>]"},
-		{"topics", "Topic operations [*>]"},
-		{"compile", "Compile JSON to database [*>]"},
-		{"reference", "Reference library [*>]"},
-		{"lesson", "Lesson operations [*>]"},
-		{"recall", "Semantic memory search [*]"},
-		{"synthesize", "Generate memory summaries [*]"},
+		{"persona", "Persona management"},
+		{"mode", "Mode management"},
+		{"memory", "Memory management"},
+		{"session", "Session management"},
+		{"topics", "Topic operations"},
+		{"compile", "Compile JSON to database"},
+		{"reference", "Reference library"},
+		{"lesson", "Lesson operations"},
+		{"recall", "Semantic memory search"},
+		{"synthesize", "Generate memory summaries"},
 	}
 	for _, c := range coreCmds {
-		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
-		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
-			cmdStyle.Render(c[0]), 18-lipgloss.Width(c[0]), "",
-			daemonStyle.Render(c[1]), pad, ""))
+		name := padRight(c[0], 14)
+		desc := padRight(c[1], width - 20)
+		b.WriteString(fmt.Sprintf("│  %s   %s │\n", cmdStyle.Render(name), daemonStyle.Render(desc)))
 	}
 
-	b.WriteString("│\n")
+	b.WriteString(divider + "\n")
 
 	// System Management
-	b.WriteString("│" + sectionStyle.Render(" System Management") + strings.Repeat(" ", width-21) + "│\n")
+	b.WriteString(fmt.Sprintf("│ %s │\n", sectionStyle.Render("System Management")))
 	sysCmds := [][2]string{
-		{"shutdown", "Graceful daemon shutdown [*]"},
-		{"shutdown --force", "Immediate shutdown [*]"},
-		{"reboot", "Graceful daemon restart [*]"},
-		{"reboot --force", "Immediate restart [*]"},
-		{"logs", "Tail daemon logs [*]"},
+		{"shutdown", "Graceful daemon shutdown"},
+		{"shutdown --force", "Immediate shutdown"},
+		{"reboot", "Graceful daemon restart"},
+		{"reboot --force", "Immediate restart"},
+		{"logs", "Tail daemon logs"},
 		{"start", "Start daemon"},
-		{"stop", "Alias for shutdown [*]"},
-		{"restart", "Alias for reboot [*]"},
+		{"stop", "Alias for shutdown"},
+		{"restart", "Alias for reboot"},
 	}
 	for _, c := range sysCmds {
-		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
-		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
-			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
-			daemonStyle.Render(c[1]), pad, ""))
+		name := padRight(c[0], 20)
+		desc := padRight(c[1], width - 26)
+		b.WriteString(fmt.Sprintf("│  %s   %s │\n", cmdStyle.Render(name), daemonStyle.Render(desc)))
 	}
 
-	b.WriteString("│\n")
+	b.WriteString(divider + "\n")
 
 	// Gateway
-	b.WriteString("│" + sectionStyle.Render(" Gateway (Daemon) Commands") + strings.Repeat(" ", width-31) + "│\n")
+	b.WriteString(fmt.Sprintf("│ %s │\n", sectionStyle.Render("Gateway (Daemon) Commands")))
 	gwCmds := [][2]string{
-		{"gateway", "Gateway control (see 'mpm gateway help') [>]"},
+		{"gateway", "Gateway control (see 'mpm gateway help')"},
 		{"gateway help", "Show gateway commands"},
 		{"gateway start", "Start or connect to gateway"},
 		{"gateway stop", "Stop the gateway"},
@@ -3904,34 +3911,31 @@ func printHelp() {
 		{"gateway status", "Show gateway status"},
 	}
 	for _, c := range gwCmds {
-		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
-		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
-			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
-			subCmdStyle.Render(c[1]), pad, ""))
+		name := padRight(c[0], 20)
+		desc := padRight(c[1], width - 26)
+		b.WriteString(fmt.Sprintf("│  %s   %s │\n", cmdStyle.Render(name), subCmdStyle.Render(desc)))
 	}
 
-	b.WriteString("│\n")
+	b.WriteString(divider + "\n")
 
 	// Information
-	b.WriteString("│" + sectionStyle.Render(" Information") + strings.Repeat(" ", width-17) + "│\n")
+	b.WriteString(fmt.Sprintf("│ %s │\n", sectionStyle.Render("Information")))
 	infoCmds := [][2]string{
 		{"doctor", "Run diagnostics"},
 		{"tui", "Launch mode/persona picker"},
-		{"fortune", "Crustafarian wisdom"},
 		{"help", "Show this help"},
 		{"version", "Show version info"},
 	}
 	for _, c := range infoCmds {
-		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
-		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
-			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
-			noteStyle.Render(c[1]), pad, ""))
+		name := padRight(c[0], 20)
+		desc := padRight(c[1], width - 26)
+		b.WriteString(fmt.Sprintf("│  %s   %s │\n", cmdStyle.Render(name), noteStyle.Render(desc)))
 	}
 
 	b.WriteString(divider + "\n")
-	b.WriteString(fmt.Sprintf("│  %s  Show this help         %s  Show version                │\n",
-		noteStyle.Render("-h, --help"), noteStyle.Render("-v, --version")))
-	b.WriteString(fmt.Sprintf("│  %s daemon required                                %s has subcommands           │\n",
+	b.WriteString(fmt.Sprintf("│  %s   %s   %s  Show version                │\n",
+		noteStyle.Render("-h, --help"), noteStyle.Render("Show this help"), noteStyle.Render("-v, --version")))
+	b.WriteString(fmt.Sprintf("│  %s daemon required              %s has subcommands           │\n",
 		daemonStyle.Render("*"), subCmdStyle.Render(">")))
 	b.WriteString(footer + "\n")
 
