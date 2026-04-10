@@ -17,14 +17,14 @@ These are all derived from `GetMPMDir()` → `GetWorkspace()`:
 
 | Path | Default |
 |------|---------|
-| **Workspace root** | `$HOME/.openclaw/workspace` |
-| **MPM binary dir** | `$HOME/.openclaw/workspace/flowbyte/mpm/bin/` |
-| **Database** | `$HOME/.openclaw/workspace/flowbyte/mpm/src/db/mpm.db` |
-| **JSONL mirror** | `$HOME/.openclaw/workspace/flowbyte/mpm/src/db/mirror.jsonl` |
-| **Mode configs** | `$HOME/.openclaw/workspace/flowbyte/mpm/mode/` |
-| **Persona configs** | `$HOME/.openclaw/workspace/flowbyte/mpm/persona/` |
-| **Watch: memory** | `$HOME/.openclaw/workspace/memory/` |
-| **Watch: sessions** | `$HOME/.openclaw/agents/main/sessions/` |
+| **Workspace root** | `$HOME` |
+| **MPM binary dir** | `$HOME/mpm/bin/` |
+| **Database** | `$HOME/mpm/src/db/mpm.db` |
+| **JSONL mirror** | `$HOME/mpm/src/db/mirror.jsonl` |
+| **Mode configs** | `$HOME/mpm/mode/` |
+| **Persona configs** | `$HOME/mpm/persona/` |
+| **Watch: memory** | `$MPM_WORKSPACE/memory/` |
+| **Watch: sessions** | `$MPM_WORKSPACE/sessions/` |
 | **Socket** | `/run/user/uid/mpm.sock` |
 
 ## How It Works
@@ -32,15 +32,13 @@ These are all derived from `GetMPMDir()` → `GetWorkspace()`:
 `GetWorkspace()` in `internal/config/config.go` walks upward from the executable's directory:
 
 ```
-Executable: .../flowbyte/mpm/bin/mpm
-  execDir:  .../flowbyte/mpm/bin
-  parent:   .../flowbyte/mpm     ← base = "mpm"
-  → workspace = filepath.Dir(parent) = .../flowbyte
+Executable: .../mpm/bin/mpm
+  execDir:  .../mpm/bin
+  parent:   .../mpm     ← base = "mpm"
+  → workspace = filepath.Dir(parent) = ...
 ```
 
-Special cases exist for `bin/`, `projects/`, `workspace/` directory layouts.
-
-`GetMPMDir()` returns `filepath.Join(workspace, "mpm")` which gives the proper `.../flowbyte/mpm` path.
+`GetMPMDir()` returns `filepath.Join(workspace, "mpm")` which gives `.../mpm`.
 
 ## Customization
 
@@ -53,7 +51,7 @@ export MPM_WORKSPACE=/opt/mpm
 ### Via config file:
 
 ```json
-// $HOME/.openclaw/workspace/flowbyte/mpm/mpm_config.json
+// $MPM_WORKSPACE/mpm/mpm_config.json
 {
   "memory_dir": "/custom/memory",
   "sessions_dir": "/custom/sessions",
