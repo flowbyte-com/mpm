@@ -1,40 +1,36 @@
 package internal
 
 import (
-	"path/filepath"
 	"testing"
 )
 
 func TestLessonStoreInit(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
 
-	// Verify tables exist
+	// Verify lessons table exists
 	var count int
-	err = store.db.QueryRow("SELECT COUNT(*) FROM lessons").Scan(&count)
+	err = dm.db.QueryRow("SELECT COUNT(*) FROM lessons").Scan(&count)
 	if err != nil {
 		t.Errorf("Failed to query lessons: %v", err)
 	}
 }
 
 func TestLessonStoreAddAndGet(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
+
+	// Wipe existing lessons to ensure clean state
+	dm.db.Exec("DELETE FROM lessons")
 
 	// Add a lesson
-	lesson, err := store.AddLesson("Check file extensions before executing", LessonTypeWarning, []string{"safety", "files"}, "")
+	lesson, err := dm.AddLesson("Check file extensions before executing", LessonTypeWarning, []string{"safety", "files"}, "")
 	if err != nil {
 		t.Fatalf("AddLesson failed: %v", err)
 	}
@@ -47,7 +43,7 @@ func TestLessonStoreAddAndGet(t *testing.T) {
 	}
 
 	// Retrieve it
-	retrieved, err := store.GetLesson(lesson.ID)
+	retrieved, err := dm.GetLesson(lesson.ID)
 	if err != nil {
 		t.Fatalf("GetLesson failed: %v", err)
 	}
@@ -58,24 +54,24 @@ func TestLessonStoreAddAndGet(t *testing.T) {
 }
 
 func TestLessonStoreDeduplication(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
+
+	// Wipe existing lessons to ensure clean state
+	dm.db.Exec("DELETE FROM lessons")
 
 	content := "Test deduplication content"
 
 	// Add same content twice
-	lesson1, err := store.AddLesson(content, LessonTypeInsight, nil, "")
+	lesson1, err := dm.AddLesson(content, LessonTypeInsight, nil, "")
 	if err != nil {
 		t.Fatalf("AddLesson failed: %v", err)
 	}
 
-	lesson2, err := store.AddLesson(content, LessonTypeInsight, nil, "")
+	lesson2, err := dm.AddLesson(content, LessonTypeInsight, nil, "")
 	if err != nil {
 		t.Fatalf("AddLesson failed: %v", err)
 	}
@@ -89,30 +85,30 @@ func TestLessonStoreDeduplication(t *testing.T) {
 		t.Errorf("Expected reinforcement 1, got: %d", lesson1.ReinforcementCount)
 	}
 
-	retrieved, _ := store.GetLesson(lesson1.ID)
+	retrieved, _ := dm.GetLesson(lesson1.ID)
 	if retrieved.ReinforcementCount != 2 {
 		t.Errorf("Expected reinforcement 2 after duplicate add, got: %d", retrieved.ReinforcementCount)
 	}
 }
 
 func TestLessonStoreListLessons(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
+
+	// Wipe any existing lessons from previous test runs using this dm
+	dm.db.Exec("DELETE FROM lessons")
 
 	// Add lessons of different types
-	store.AddLesson("Warning 1", LessonTypeWarning, nil, "")
-	store.AddLesson("Practice 1", LessonTypePractice, nil, "")
-	store.AddLesson("Insight 1", LessonTypeInsight, nil, "")
-	store.AddLesson("Warning 2", LessonTypeWarning, nil, "")
+	dm.AddLesson("Warning 1", LessonTypeWarning, nil, "")
+	dm.AddLesson("Practice 1", LessonTypePractice, nil, "")
+	dm.AddLesson("Insight 1", LessonTypeInsight, nil, "")
+	dm.AddLesson("Warning 2", LessonTypeWarning, nil, "")
 
 	// List all
-	all, err := store.ListLessons("")
+	all, err := dm.ListLessons("")
 	if err != nil {
 		t.Fatalf("ListLessons failed: %v", err)
 	}
@@ -121,7 +117,7 @@ func TestLessonStoreListLessons(t *testing.T) {
 	}
 
 	// List by type
-	warnings, err := store.ListLessons(LessonTypeWarning)
+	warnings, err := dm.ListLessons(string(LessonTypeWarning))
 	if err != nil {
 		t.Fatalf("ListLessons failed: %v", err)
 	}
@@ -129,7 +125,7 @@ func TestLessonStoreListLessons(t *testing.T) {
 		t.Errorf("Expected 2 warnings, got: %d", len(warnings))
 	}
 
-	practices, err := store.ListLessons(LessonTypePractice)
+	practices, err := dm.ListLessons(string(LessonTypePractice))
 	if err != nil {
 		t.Fatalf("ListLessons failed: %v", err)
 	}
@@ -139,40 +135,37 @@ func TestLessonStoreListLessons(t *testing.T) {
 }
 
 func TestLessonStoreDelete(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
 
-	lesson, _ := store.AddLesson("To be deleted", LessonTypeInsight, nil, "")
+	lesson, _ := dm.AddLesson("To be deleted", LessonTypeInsight, nil, "")
 
-	err = store.DeleteLesson(lesson.ID)
+	err = dm.DeleteLesson(lesson.ID)
 	if err != nil {
 		t.Fatalf("DeleteLesson failed: %v", err)
 	}
 
-	_, err = store.GetLesson(lesson.ID)
+	_, err = dm.GetLesson(lesson.ID)
 	if err == nil {
 		t.Error("Expected error after deleting lesson, got nil")
 	}
 }
 
 func TestLessonStoreStats(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
+
+	// Wipe existing lessons to ensure clean state
+	dm.db.Exec("DELETE FROM lessons")
 
 	// Get initial stats
-	stats, err := store.GetLessonStats()
+	stats, err := dm.GetLessonStats()
 	if err != nil {
 		t.Fatalf("GetLessonStats failed: %v", err)
 	}
@@ -182,12 +175,12 @@ func TestLessonStoreStats(t *testing.T) {
 	}
 
 	// Add lessons
-	store.AddLesson("W1", LessonTypeWarning, nil, "")
-	store.AddLesson("W2", LessonTypeWarning, nil, "")
-	store.AddLesson("P1", LessonTypePractice, nil, "")
-	store.AddLesson("I1", LessonTypeInsight, nil, "")
+	dm.AddLesson("W1", LessonTypeWarning, nil, "")
+	dm.AddLesson("W2", LessonTypeWarning, nil, "")
+	dm.AddLesson("P1", LessonTypePractice, nil, "")
+	dm.AddLesson("I1", LessonTypeInsight, nil, "")
 
-	stats, err = store.GetLessonStats()
+	stats, err = dm.GetLessonStats()
 	if err != nil {
 		t.Fatalf("GetLessonStats failed: %v", err)
 	}
@@ -203,19 +196,17 @@ func TestLessonStoreStats(t *testing.T) {
 }
 
 func TestLessonStoreSearch(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "lessons.sqlite")
-
-	store := NewLessonStore(dbPath)
-	err := store.Init()
+	dm, err := NewDatabaseManager(t.TempDir())
 	if err != nil {
-		t.Fatalf("Init failed: %v", err)
+		t.Fatalf("NewDatabaseManager failed: %v", err)
 	}
+	defer dm.Close()
 
-	store.AddLesson("Always validate paths before rm -rf", LessonTypeWarning, []string{"safety"}, "")
-	store.AddLesson("Use gofmt for Go code formatting", LessonTypePractice, []string{"go", "style"}, "")
+	dm.db.Exec("DELETE FROM lessons")
+	dm.AddLesson("Always validate paths before rm -rf", LessonTypeWarning, []string{"safety"}, "")
+	dm.AddLesson("Use gofmt for Go code formatting", LessonTypePractice, []string{"go", "style"}, "")
 
-	results, err := store.SearchLessons("validate", 10)
+	results, err := dm.SearchLessons("validate", 10)
 	if err != nil {
 		t.Fatalf("SearchLessons failed: %v", err)
 	}

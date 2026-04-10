@@ -1,5 +1,5 @@
 {
-  "sym_id": "~m.808",
+  "sym_id": "808",
   "title": "The_Great_808",
   "version": "1.0",
   "status": "ACTIVE",
@@ -49,8 +49,8 @@
   },
   "symai_opcodes": {
     "~k.808": "Check 808 status/heartbeat",
-    "~m.808!act": "Activate 808 mode",
-    "~p.808?": "Query 808 identity"
+    "808!act": "Activate 808 mode",
+    "808?": "Query 808 identity"
   },
   "exit_criteria": [
     "Task completed efficiently",

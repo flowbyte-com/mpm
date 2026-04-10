@@ -1,12 +1,12 @@
 {
-  "sym_id": "~m.ds",
+  "sym_id": "ds",
   "title": "Design",
   "priority": "Medium",
   "focus": "UX, A11y, Visual Flow",
   "opcodes": {
-    "~m.ds!ux": "Optimizing the user journey and friction points",
-    "~m.ds!a11y": "Validating WCAG/Accessibility standards",
-    "~m.ds?flow": "Reviewing structural/logic flow"
+    "ds!ux": "Optimizing the user journey and friction points",
+    "ds!a11y": "Validating WCAG/Accessibility standards",
+    "ds?flow": "Reviewing structural/logic flow"
   },
   "purpose": "UI/UX design, visual design, layout, and user experience work.",
   "rules": [

@@ -1,12 +1,12 @@
 {
-  "sym_id": "~m.rs",
+  "sym_id": "rs",
   "title": "Research",
   "priority": "Low",
   "focus": "Source Verification",
   "opcodes": {
-    "~m.rs!scan": "Broad information gathering",
-    "~m.rs?cite": "Verifying sources and cross-referencing facts",
-    "~m.rs$synth": "Compressing findings into a structured summary"
+    "rs!scan": "Broad information gathering",
+    "rs?cite": "Verifying sources and cross-referencing facts",
+    "rs$synth": "Compressing findings into a structured summary"
   },
   "purpose": "Deep research, fact-finding, and source verification.",
   "rules": [

@@ -1,5 +1,5 @@
 {
-  "sym_id": "~m.symai",
+  "sym_id": "symai",
   "title": "SymAI Protocol Enforcer",
   "version": "3.2",
   "status": "ACTIVE",
@@ -36,12 +36,12 @@
     }
   },
   "mpm_command_mapping": {
-    "~p.o!act": "mpm persona load oracle",
-    "~p.h!act": "mpm persona load harley",
-    "~p.clr": "mpm persona clear",
+    "o!act": "mpm persona load oracle",
+    "h!act": "mpm persona load harley",
+    "clr": "mpm persona clear",
     "~p?": "mpm persona list",
-    "~m.symai!act": "mpm mode load symai",
-    "~m.clr": "mpm mode clear",
+    "symai!act": "mpm mode load symai",
+    "clr": "mpm mode clear",
     "~k.backup": "mpm backup",
     "~k.diag": "mpm status"
   },

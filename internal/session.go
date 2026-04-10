@@ -29,10 +29,18 @@ func NewSessionStore(args ...string) *SessionStore {
 	if len(args) >= 1 {
 		basePath = args[0]
 	}
-	// Create MemoryStore first (this initializes the DB)
+	// Create MemoryStore first and initialize its DB
 	memoryStore := NewMemoryStore(basePath)
+	if err := memoryStore.InitSQLite(); err != nil {
+		// Return store anyway - count queries will fail gracefully
+		return &SessionStore{
+			DB:          nil,
+			BasePath:    basePath,
+			MemoryStore: memoryStore,
+		}
+	}
 	// Share the same initialized DB connection
-	dm := &DatabaseManager{DB: memoryStore.DB.DB}
+	dm := &DatabaseManager{db: memoryStore.DB.DB}
 	return &SessionStore{
 		DB:          dm,
 		BasePath:    basePath,
@@ -97,7 +105,7 @@ func (ss *SessionStore) GetSession(sessionID string) (*Session, error) {
 	}
 	// Find by session_id field
 	query := `SELECT id, session_id, content, created_at, metadata FROM sessions WHERE session_id = ? LIMIT 1`
-	row := ss.DB.DB.QueryRow(query, sessionID)
+	row := ss.DB.db.QueryRow(query, sessionID)
 
 	var id, sessID, content, createdAt, metadataJSON string
 	err := row.Scan(&id, &sessID, &content, &createdAt, &metadataJSON)
@@ -137,7 +145,7 @@ func (ss *SessionStore) GetYesterdaySessions() ([]*Session, error) {
 }
 
 func (ss *SessionStore) querySessions(query string, args ...interface{}) ([]*Session, error) {
-	rows, err := ss.DB.DB.Query(query, args...)
+	rows, err := ss.DB.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -208,4 +216,23 @@ func (ss *SessionStore) getActiveModes() []string {
 		return []string{"standard"}
 	}
 	return active.Modes
+}
+
+// GetSessionCount returns the number of sessions
+func (ss *SessionStore) GetSessionCount() (int, error) {
+	if ss.DB == nil {
+		return 0, fmt.Errorf("database not initialized")
+	}
+	var count int
+	err := ss.DB.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count)
+	return count, err
+}
+
+// GetRecentSessions returns the most recent sessions ordered by creation date
+func (ss *SessionStore) GetRecentSessions(limit int) ([]*Session, error) {
+	if ss.DB == nil {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+	query := `SELECT id, session_id, content, created_at FROM sessions ORDER BY created_at DESC LIMIT ?`
+	return ss.querySessions(query, limit)
 }

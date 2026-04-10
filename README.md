@@ -1,3 +1,12 @@
+## ⚖️ License & Commercial Use
+
+MPM is dual-licensed:
+
+1. **Open Source (AGPLv3):** Free for personal use, open-source projects, and non-commercial tinkering.
+2. **Commercial License:** If you are a commercial entity integrating MPM into proprietary, closed-source agents or hosting it as part of a service, you must purchase a commercial license. 
+
+**For commercial licensing, enterprise support, or custom integrations, contact: v@flowbyte.com
+
 # SymAI MPM (Memory-Persona-Mode) v6.0.0
 
 DB-first agent state management with SQLite-only. Manage personas, modes, memory, and reference library with secure embedded storage.

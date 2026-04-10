@@ -1,12 +1,12 @@
 {
-  "sym_id": "~m.wr",
+  "sym_id": "wr",
   "title": "Writing",
   "priority": "Low",
   "focus": "Tone, Audience, Clarity",
   "opcodes": {
-    "~m.wr!tone": "Adjusting voice to match the target audience",
-    "~m.wr!edit": "Stripping filler words and passive voice",
-    "~m.wr?clarity": "Checking for ambiguity"
+    "wr!tone": "Adjusting voice to match the target audience",
+    "wr!edit": "Stripping filler words and passive voice",
+    "wr?clarity": "Checking for ambiguity"
   },
   "purpose": "Clear, audience-appropriate writing with proper tone.",
   "rules": [

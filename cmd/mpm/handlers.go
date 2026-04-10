@@ -69,6 +69,67 @@ Examples:
 	sendResponse(conn, output, "", true, 0)
 }
 
+// ============================================================================
+// Handler: prime-directives
+// ============================================================================
+
+func handlePrimeDirectives(conn net.Conn) {
+	store := getMemoryStore()
+	if store == nil {
+		sendResponse(conn, "", "Error: memory store not available\n", true, 1)
+		return
+	}
+	if store.DB == nil {
+		if err := store.InitSQLite(); err != nil {
+			sendResponse(conn, "", fmt.Sprintf("Error initializing memory store: %v\n", err), true, 1)
+			return
+		}
+	}
+
+	rows, err := store.DB.Query(`
+		SELECT id, collection, content, metadata, created_at
+		FROM memories
+		WHERE is_prime_directive = 1
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Error querying prime directives: %v\n", err), true, 1)
+		return
+	}
+	defer rows.Close()
+
+	var output strings.Builder
+	output.WriteString("\n🛸 808 PRIME DIRECTIVES 🛸\n")
+	output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+
+	count := 0
+	for rows.Next() {
+		var id, collection, content, metadata, created string
+		if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
+			continue
+		}
+		output.WriteString(fmt.Sprintf("[%s] %s\n\n", id, collection))
+		// Print content, word-wrapped at 70 chars
+		content = strings.TrimSpace(content)
+		for i := 0; i < len(content); i += 70 {
+			end := i + 70
+			if end > len(content) {
+				end = len(content)
+			}
+			output.WriteString(content[i:end] + "\n")
+		}
+		output.WriteString("\n")
+		count++
+	}
+
+	if count == 0 {
+		output.WriteString("No prime directives found. Run the session that defines them.\n")
+	}
+
+	output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
 func handleMemoryAdd(conn net.Conn, args []string) {
 	if len(args) == 0 {
 		sendResponse(conn, "", "Usage: mpm memory add <content>", true, 1)
@@ -938,33 +999,306 @@ func handleSessionShow(conn net.Conn, args []string) {
 }
 
 func handleSessionList(conn net.Conn, args []string) {
-	store := getMemoryStore()
+	store := getSessionStore()
 
-	memories, err := store.GetRecent(20)
+	sessions, err := store.GetRecentSessions(20)
 	if err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to list sessions: %v", err), true, 1)
 		return
 	}
 
-	if len(memories) == 0 {
+	if len(sessions) == 0 {
 		sendResponse(conn, "No sessions stored.\n", "", true, 0)
 		return
 	}
 
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("Recent %d sessions:\n\n", len(memories)))
+	output.WriteString(fmt.Sprintf("Recent %d sessions:\n\n", len(sessions)))
 
-	for _, mem := range memories {
-		snippet := mem.Content
+	for _, sess := range sessions {
+		snippet := sess.Content
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, mem.Created[:10]))
+		output.WriteString(fmt.Sprintf("[%s] %s\n", sess.ID, sess.Created[:10]))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+// ============================================================================
+// Handler: reference
+// ============================================================================
+
+func handleReference(conn net.Conn, args []string) {
+	if len(args) < 1 {
+		handleReferenceHelp(conn)
+		return
+	}
+
+	subCmd := args[0]
+	switch subCmd {
+	case "help":
+		handleReferenceHelp(conn)
+	case "list":
+		handleReferenceList(conn)
+	case "add":
+		handleReferenceAdd(conn, args[1:])
+	case "search":
+		handleReferenceSearch(conn, args[1:])
+	case "get":
+		handleReferenceGet(conn, args[1:])
+	case "shred":
+		handleReferenceShred(conn, args[1:])
+	case "scan":
+		handleReferenceScan(conn)
+	default:
+		handleReferenceHelp(conn)
+	}
+}
+
+func handleReferenceHelp(conn net.Conn) {
+	output := `mpm reference - Reference library
+
+Usage:
+  mpm reference add <file>    Ingest a document (PDF/EPUB/md/txt)
+  mpm reference list           List all documents
+  mpm reference search <query> Search document content
+  mpm reference get <id>      Show full document
+  mpm reference shred <id>     Remove a document
+  mpm reference scan           Scan reference dir and ingest all
+
+Examples:
+  mpm reference add book.pdf
+  mpm reference list
+  mpm reference search "machiavelli"
+  mpm reference shred abc123
+`
+	sendResponse(conn, output, "", true, 0)
+}
+
+func handleReferenceList(conn net.Conn) {
+	store := getReferenceStore()
+	refs := store.List()
+
+	if len(refs) == 0 {
+		sendResponse(conn, "No references stored. Add some with: mpm reference add <file>\n", "", true, 0)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("References (%d):\n\n", len(refs)))
+
+	for _, ref := range refs {
+		output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
+		output.WriteString(fmt.Sprintf("    %s\n", ref.Created[:10]))
+		if len(ref.Tags) > 0 {
+			output.WriteString(fmt.Sprintf("    Tags: %s\n", strings.Join(ref.Tags, ", ")))
+		}
+		output.WriteString("\n")
+	}
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleReferenceAdd(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm reference add <file>\n", true, 1)
+		return
+	}
+
+	filePath := args[0]
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		sendResponse(conn, "", fmt.Sprintf("File not found: %s\n", filePath), true, 1)
+		return
+	}
+
+	// Parse file based on extension
+	ext := strings.ToLower(filepath.Ext(filePath))
+	var content string
+	var parseErr error
+
+	switch ext {
+	case ".pdf":
+		content, parseErr = internal.ParsePDF(filePath)
+	case ".epub":
+		content, parseErr = internal.ParseEPUB(filePath)
+	case ".txt", ".md":
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			sendResponse(conn, "", fmt.Sprintf("Failed to read file: %v\n", err), true, 1)
+			return
+		}
+		content = string(data)
+	default:
+		// Try as plain text
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			sendResponse(conn, "", fmt.Sprintf("Unsupported file type: %s\n", ext), true, 1)
+			return
+		}
+		content = string(data)
+	}
+
+	if parseErr != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to parse file: %v\n", parseErr), true, 1)
+		return
+	}
+
+	title := filepath.Base(filePath)
+	store := getReferenceStore()
+
+	// Use the ReferenceStore.Add which writes to JSON
+	_, err := store.Add(title, filePath, nil, content)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to add reference: %v\n", err), true, 1)
+		return
+	}
+
+	sendResponse(conn, fmt.Sprintf("Reference added: %s\n", title), "", true, 0)
+}
+
+func handleReferenceSearch(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm reference search <query>\n", true, 1)
+		return
+	}
+
+	query := strings.Join(args, " ")
+	store := getReferenceStore()
+	results := store.Search(query)
+
+	if len(results) == 0 {
+		sendResponse(conn, fmt.Sprintf("No references found matching: %s\n", query), "", true, 0)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("Found %d references matching \"%s\":\n\n", len(results), query))
+
+	for _, ref := range results {
+		output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
+		snippet := ref.Content
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "..."
+		}
+		output.WriteString(fmt.Sprintf("    %s\n\n", strings.ReplaceAll(snippet, "\n", " ")))
+	}
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleReferenceGet(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm reference get <id>\n", true, 1)
+		return
+	}
+
+	id := args[0]
+	store := getReferenceStore()
+
+	ref, err := store.GetByID(id)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Reference not found: %s\n", id), true, 1)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
+	output.WriteString(fmt.Sprintf("Created: %s\n", ref.Created))
+	if len(ref.Tags) > 0 {
+		output.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(ref.Tags, ", ")))
+	}
+	output.WriteString(fmt.Sprintf("\n%s\n", ref.Content))
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleReferenceShred(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm reference shred <id>\n", true, 1)
+		return
+	}
+
+	id := args[0]
+	store := getReferenceStore()
+
+	if err := store.Remove(id); err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to remove reference: %v\n", err), true, 1)
+		return
+	}
+
+	sendResponse(conn, fmt.Sprintf("Reference removed: %s\n", id), "", true, 0)
+}
+
+func handleReferenceScan(conn net.Conn) {
+	store := getReferenceStore()
+	paths := internal.DefaultMemoryPaths()
+	refDir := filepath.Join(paths.SessionSavePath, "reference")
+
+	if _, err := os.Stat(refDir); os.IsNotExist(err) {
+		sendResponse(conn, "No reference directory found. Create it and add files, then run scan.\n", "", true, 0)
+		return
+	}
+
+	entries, err := os.ReadDir(refDir)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to read reference directory: %v\n", err), true, 1)
+		return
+	}
+
+	var output strings.Builder
+	count := 0
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		filePath := filepath.Join(refDir, entry.Name())
+		ext := strings.ToLower(filepath.Ext(filePath))
+
+		if ext != ".pdf" && ext != ".epub" && ext != ".txt" && ext != ".md" {
+			continue
+		}
+
+		// Parse file
+		var content string
+		var parseErr error
+
+		switch ext {
+		case ".pdf":
+			content, parseErr = internal.ParsePDF(filePath)
+		case ".epub":
+			content, parseErr = internal.ParseEPUB(filePath)
+		case ".txt", ".md":
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				continue
+			}
+			content = string(data)
+		default:
+			continue
+		}
+
+		if parseErr != nil {
+			output.WriteString(fmt.Sprintf("Skipped (parse error): %s\n", entry.Name()))
+			continue
+		}
+
+		title := entry.Name()
+		_, err = store.Add(title, filePath, nil, content)
+		if err != nil {
+			output.WriteString(fmt.Sprintf("Failed: %s - %v\n", entry.Name(), err))
+			continue
+		}
+
+		count++
+	}
+
+	output.WriteString(fmt.Sprintf("\nScanned %d references from %s\n", count, refDir))
 	sendResponse(conn, output.String(), "", true, 0)
 }
 
@@ -1450,6 +1784,247 @@ func handleLlmStatus(conn net.Conn) {
 }
 
 // ============================================================================
+// Handler: lesson
+// ============================================================================
+
+func handleLesson(conn net.Conn, args []string) {
+	if len(args) < 1 {
+		handleLessonHelp(conn)
+		return
+	}
+
+	subCmd := args[0]
+	switch subCmd {
+	case "help":
+		handleLessonHelp(conn)
+	case "add":
+		handleLessonAdd(conn, args[1:])
+	case "list":
+		handleLessonList(conn, args[1:])
+	case "search":
+		handleLessonSearch(conn, args[1:])
+	case "get":
+		handleLessonGet(conn, args[1:])
+	case "shred":
+		handleLessonShred(conn, args[1:])
+	case "stats":
+		handleLessonStats(conn)
+	default:
+		handleLessonHelp(conn)
+	}
+}
+
+func handleLessonHelp(conn net.Conn) {
+	output := `mpm lesson - Lesson operations
+
+Usage:
+  mpm lesson add <content> [--type warning|practice|insight] [--tags tags]
+  mpm lesson list [--type warning|practice|insight]
+  mpm lesson search <query>
+  mpm lesson get <id>
+  mpm lesson shred <id>
+  mpm lesson stats
+
+Examples:
+  mpm lesson add "Check file extensions before executing" --type warning --tags safety,files
+  mpm lesson add "Use gofmt for Go code formatting" --type practice --tags go,style
+  mpm lesson list
+  mpm lesson list --type warning
+  mpm lesson search "safety"
+  mpm lesson get abc123
+  mpm lesson shred abc123
+  mpm lesson stats
+
+Lesson types:
+  warning  - "don't do X" (negative lessons)
+  practice - "do Y" (positive lessons, best practices)
+  insight  - "X leads to Y" (causal knowledge, default)
+`
+	sendResponse(conn, output, "", true, 0)
+}
+
+func handleLessonAdd(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags]", true, 1)
+		return
+	}
+
+	content := ""
+	lessonType := "insight"
+	var tags []string
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--type":
+			if i+1 < len(args) {
+				lessonType = args[i+1]
+				i += 2
+			} else {
+				i++
+			}
+		case "--tags":
+			if i+1 < len(args) {
+				tags = strings.Split(args[i+1], ",")
+				i += 2
+			} else {
+				i++
+			}
+		default:
+			if content == "" {
+				content = strings.Join(args[i:], " ")
+			}
+			break
+		}
+	}
+
+	if content == "" {
+		sendResponse(conn, "", "Usage: mpm lesson add <content>", true, 1)
+		return
+	}
+
+	lessonStore := internal.NewLessonStore("")
+	lesson, err := lessonStore.AddLesson(content, internal.LessonType(lessonType), tags, "")
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to add lesson: %v", err), true, 1)
+		return
+	}
+
+	sendResponse(conn, fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", true, 0)
+}
+
+func handleLessonList(conn net.Conn, args []string) {
+	lessonType := ""
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--type=") {
+			lessonType = strings.TrimPrefix(arg, "--type=")
+		}
+	}
+
+	lessonStore := internal.NewLessonStore("")
+	lessons, err := lessonStore.ListLessons(internal.LessonType(lessonType))
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to list lessons: %v", err), true, 1)
+		return
+	}
+
+	if len(lessons) == 0 {
+		sendResponse(conn, "No lessons stored.\n", "", true, 0)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("Lessons (%d):\n\n", len(lessons)))
+	for _, l := range lessons {
+		typeLabel := string(l.Type)
+		output.WriteString(fmt.Sprintf("[%s] [%s] %s\n", l.ID, typeLabel, l.Created[:10]))
+		snippet := l.Content
+		if len(snippet) > 100 {
+			snippet = snippet[:100] + "..."
+		}
+		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
+	}
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleLessonSearch(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm lesson search <query>", true, 1)
+		return
+	}
+
+	query := strings.Join(args, " ")
+	lessonStore := internal.NewLessonStore("")
+	results, err := lessonStore.SearchLessons(query, 20)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
+		return
+	}
+
+	if len(results) == 0 {
+		sendResponse(conn, "No lessons found.\n", "", true, 0)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("Found %d lessons:\n\n", len(results)))
+	for _, l := range results {
+		snippet := l.Content
+		if len(snippet) > 100 {
+			snippet = snippet[:100] + "..."
+		}
+		output.WriteString(fmt.Sprintf("[%s] [%s]\n    %s\n\n", l.ID, l.Type, snippet))
+	}
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleLessonGet(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm lesson get <id>", true, 1)
+		return
+	}
+
+	id := args[0]
+	lessonStore := internal.NewLessonStore("")
+	lesson, err := lessonStore.GetLesson(id)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Lesson not found: %s\n", id), true, 1)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("ID:      %s\n", lesson.ID))
+	output.WriteString(fmt.Sprintf("Type:    %s\n", lesson.Type))
+	output.WriteString(fmt.Sprintf("Created: %s\n", lesson.Created))
+	output.WriteString(fmt.Sprintf("Reinforcement: %d\n", lesson.ReinforcementCount))
+	if len(lesson.Tags) > 0 {
+		output.WriteString(fmt.Sprintf("Tags:    %s\n", strings.Join(lesson.Tags, ", ")))
+	}
+	output.WriteString("\n")
+	output.WriteString(lesson.Content)
+	output.WriteString("\n")
+
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
+func handleLessonShred(conn net.Conn, args []string) {
+	if len(args) == 0 {
+		sendResponse(conn, "", "Usage: mpm lesson shred <id>", true, 1)
+		return
+	}
+
+	id := args[0]
+	lessonStore := internal.NewLessonStore("")
+	err := lessonStore.DeleteLesson(id)
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to shred lesson: %v", err), true, 1)
+		return
+	}
+
+	sendResponse(conn, fmt.Sprintf("Lesson shredded: %s\n", id), "", true, 0)
+}
+
+func handleLessonStats(conn net.Conn) {
+	lessonStore := internal.NewLessonStore("")
+	stats, err := lessonStore.GetLessonStats()
+	if err != nil {
+		sendResponse(conn, "", fmt.Sprintf("Failed to get stats: %v", err), true, 1)
+		return
+	}
+
+	var output strings.Builder
+	output.WriteString("Lesson Statistics:\n\n")
+	output.WriteString(fmt.Sprintf("Total: %d\n", stats["total_lessons"]))
+	output.WriteString("\nBy type:\n")
+	byType := stats["by_type"].(map[string]int)
+	for t, count := range byType {
+		output.WriteString(fmt.Sprintf("  %s: %d\n", t, count))
+	}
+	sendResponse(conn, output.String(), "", true, 0)
+}
+
 // ============================================================================
 // Handler: menu
 // ============================================================================
@@ -1597,6 +2172,37 @@ func getMemoryStore() *internal.MemoryStore {
 func getSessionDir() string {
 	paths := internal.DefaultMemoryPaths()
 	return paths.SessionSavePath
+}
+
+func getSessionStore() *internal.SessionStore {
+	paths := internal.DefaultMemoryPaths()
+	return internal.NewSessionStore(paths.SessionSavePath)
+}
+
+func getReferenceStore() *internal.ReferenceStore {
+	paths := internal.DefaultMemoryPaths()
+	return internal.NewReferenceStore(paths.MemoryPath)
+}
+
+// getStatusCounts returns memory, session, topic, and reference counts
+func getStatusCounts() (memories int, sessions int, topics int, references int) {
+	memStore := getMemoryStore()
+	sessStore := getSessionStore()
+	refStore := getReferenceStore()
+
+	if m, err := memStore.GetMemoryCount(); err == nil {
+		memories = m
+	}
+	if s, err := sessStore.GetSessionCount(); err == nil {
+		sessions = s
+	}
+	if t, err := memStore.GetTopicCount(); err == nil {
+		topics = t
+	}
+	if r, err := refStore.GetReferenceCount(); err == nil {
+		references = r
+	}
+	return
 }
 
 func min(a, b int) int {

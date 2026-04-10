@@ -1,12 +1,12 @@
 {
-  "sym_id": "~m.pr",
+  "sym_id": "pr",
   "title": "Programming",
   "priority": "High",
   "focus": "DRY, TDD, Clean Code",
   "opcodes": {
-    "~m.pr!code": "Implementation/Refactoring logic",
-    "~m.pr?test": "Validating logic via TDD/Unit tests",
-    "~m.pr$dry": "Enforcing DRY (Don't Repeat Yourself) principles"
+    "pr!code": "Implementation/Refactoring logic",
+    "pr?test": "Validating logic via TDD/Unit tests",
+    "pr$dry": "Enforcing DRY (Don't Repeat Yourself) principles"
   },
   "purpose": "Writing, reviewing, refactoring, and maintaining code with excellence.",
   "rules": [
