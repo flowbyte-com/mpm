@@ -3653,14 +3653,16 @@ func handleReboot(force bool, conn net.Conn) {
 	// Signal that we're rebooting (not just stopping)
 	isRebooting.Store(true)
 
-	// Phase 3: Spawn new process and exit
-	enc.Encode(Message{Output: "  ✅ [3/3] Daemon restarted.\n", Done: true, ExitCode: 0})
+	// Phase 3: Spawn new process and wait for it to be ready
+	// This is synchronous - we don't send "restarted" until the new socket exists
+	enc.Encode(Message{Output: "  🔄 [3/3] Spawning new daemon...\n", Done: false})
 
-	// Give response time to be sent, then do the actual reboot
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		executeReboot()
-	}()
+	// Do the actual reboot - blocks until new daemon socket is ready
+	executeReboot()
+
+	// If we get here, executeReboot failed and returned (didn't exit)
+	// Send failure message
+	enc.Encode(Message{Output: "  ❌ Reboot failed - please check logs\n", Done: true, ExitCode: 1})
 }
 
 // flushSession - sessions are now auto-saved at startup, no manual save needed
@@ -3670,6 +3672,7 @@ func flushSession() {
 
 // executeReboot spawns a new daemon process and exits the current one.
 // Uses exec.Command instead of syscall.ForkExec to avoid multi-threaded fork issues.
+// Waits for the new daemon to create its socket before exiting.
 func executeReboot() {
 	// Stop the watch daemon first to avoid orphaned watch processes.
 	// The watch was started with Setpgid:true, so we send SIGTERM directly.
@@ -3698,6 +3701,27 @@ func executeReboot() {
 	}
 
 	logInfo("lifecycle", daemonPid, fmt.Sprintf("Reboot: new daemon spawned (pid %d)", cmd.Process.Pid))
+
+	// Wait for the new daemon to create its socket before exiting.
+	// This prevents the old daemon from exiting before the new one is ready.
+	// Retry for up to 5 seconds, checking if socket exists.
+	sockDir := filepath.Dir(sockPath)
+	os.MkdirAll(sockDir, 0700)
+	ready := false
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !ready {
+		logError("lifecycle", daemonPid, fmt.Sprintf("Reboot failed: new daemon socket not created at %s", sockPath))
+		return
+	}
+
+	logInfo("lifecycle", daemonPid, fmt.Sprintf("Reboot: new daemon ready on %s", sockPath))
 
 	// Parent process exits. The child (new daemon) continues running with fresh state.
 	os.Exit(0)
