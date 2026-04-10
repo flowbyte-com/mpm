@@ -4,13 +4,13 @@ Personas define *who* the AI is — identity, voice, and character.
 
 ## Creating a Persona
 
-Duplicate `_template.md` and name it after your persona (e.g., `mentor.md`).
+Duplicate `_template.json` and name it after your persona (e.g., `mentor.json`).
 
 ## Format
 
-Personas use a markdown-based format with YAML frontmatter for structured fields.
+Personas use JSON with a defined schema.
 
-### Frontmatter Fields
+### Fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -20,16 +20,10 @@ Personas use a markdown-based format with YAML frontmatter for structured fields
 | `creature` | No | What kind of entity, e.g. "AI assistant", "Ancient philosopher" |
 | `vibe` | No | 1-2 sentence character description |
 | `emoji` | No | Associated emoji(s) |
-
-### Sections (all optional)
-
-- **Identity Override** — name, title, creature, vibe, emoji
-- **Voice & Tone** — how it speaks
-- **Behavioral Rules** — what it does and doesn't do
-- **Context** — background information
-- **Activation** — how/when it loads
-
-Any markdown content after the frontmatter is free-form.
+| `voice` | No | How it speaks |
+| `behavioral_rules` | No | Array of rules this persona follows |
+| `anti_patterns` | No | What this persona avoids |
+| `context` | No | Background information |
 
 ## Activate a Persona
 
