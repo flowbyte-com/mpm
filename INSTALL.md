@@ -10,13 +10,15 @@ MPM (Memory-Persona-Mode Manager) — SQLite-native agent state management for O
 
 ## Step 1: Build
 
+The recommended location for MPM is your home directory:
+
 ```bash
-git clone https://github.com/flowbyte-com/mpm.git
-cd mpm
+git clone https://github.com/flowbyte-com/mpm.git ~/mpm
+cd ~/mpm
 make build
 ```
 
-This creates `./bin/mpm` — the main binary.
+This creates `~/mpm/bin/mpm` — the main binary.
 
 ## Step 2: Install System-Wide (Optional)
 
@@ -31,9 +33,11 @@ make install PREFIX=$HOME/.local
 Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
-export PATH="$HOME/.openclaw/workspace/flowbyte/mpm/bin:$PATH"
-export MPM_WORKSPACE="$HOME/.openclaw/workspace"
+export PATH="$HOME/mpm/bin:$PATH"
+export MPM_WORKSPACE="$HOME"
 ```
+
+> **Note:** MPM auto-detects its location from the binary path, so `MPM_WORKSPACE` is optional but recommended for clarity. Without it, MPM walks up from the binary to find the project root.
 
 Reload:
 ```bash
@@ -107,7 +111,7 @@ mpm status             # Verify it's running
 ## Directory Layout
 
 ```
-~/.openclaw/workspace/flowbyte/mpm/
+~/mpm/
 ├── bin/mpm                      # Compiled binary
 ├── src/db/
 │   ├── mpm.db                   # SQLite database
@@ -132,7 +136,7 @@ Priority: `MPM_WORKSPACE` env var → executable-relative → CWD fallback
 
 ### mpm_config.json
 
-Located at `$MPM_WORKSPACE/flowbyte/mpm/mpm_config.json`. Controls:
+Located at `$MPM_WORKSPACE/mpm/mpm_config.json`. Controls:
 
 - Watch directories (memory, sessions)
 - External databases to poll
@@ -172,7 +176,7 @@ go build -o bin/mpm ./cmd/mpm   # Direct build to see errors
 ## Upgrading
 
 ```bash
-cd mpm
+cd ~/mpm
 git pull
 make clean build
 mpm restart
@@ -181,8 +185,7 @@ mpm restart
 ## Uninstall
 
 ```bash
-sudo rm /usr/local/bin/mpm    # If installed system-wide
-rm -rf ~/.openclaw/workspace/flowbyte/mpm   # Remove data
+rm -rf ~/mpm   # Remove data and binary
 ```
 
 (Remove the PATH and MPM_WORKSPACE lines from your shell config too.)
@@ -194,7 +197,7 @@ MPM is designed to be used by AI agents. Add this to your agent's system prompt 
 ```markdown
 # MPM - Memory-Persona-Mode Manager
 
-MPM is my persistent memory layer at ~/.openclaw/workspace/flowbyte/mpm/
+MPM is my persistent memory layer at ~/mpm/
 
 ## Key Commands
 - mpm start / stop / restart — Daemon lifecycle

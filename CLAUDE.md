@@ -9,7 +9,7 @@ MPM (Memory-Persona-Mode) is a SQLite-native agent state management system for O
 ## Building & Testing
 
 ```bash
-cd /home/v/.openclaw/workspace/flowbyte/mpm
+cd ~/mpm
 make build    # Build binary to bin/mpm
 make test     # Run Go tests
 make install  # Install to /usr/local/bin/mpm

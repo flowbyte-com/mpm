@@ -111,7 +111,7 @@ mpm stop
 ## Directory Layout
 
 ```
-~/.openclaw/workspace/flowbyte/mpm/
+~/mpm/
 ├── bin/mpm                    # Compiled binary
 ├── src/db/
 │   ├── mpm.db                # SQLite database
@@ -133,7 +133,7 @@ Edit `mpm_config.json` to configure watch directories and external databases:
   "sessions_dirs": [],
   "external_dbs": [
     {
-      "path": "~/.openclaw/memory/main.sqlite",
+      "path": "$HOME/.openclaw/memory/main.sqlite",
       "label": "openclaw",
       "interval_seconds": 30
     }
