@@ -1004,6 +1004,102 @@ func retrieveReferences(db *sql.DB, query string, limit int) string {
 	return strings.Join(results, "\n---\n")
 }
 
+// ============================================================================
+// Agent Loop
+// ============================================================================
+
+// conversationTurn is a single user/assistant exchange
+type conversationTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// runAgentLoop runs the agent with the given query and streaming setting.
+func runAgentLoop(query string, streaming bool, cfg *Config) error {
+	db, err := OpenDB()
+	if err != nil {
+		return fmt.Errorf("mpm-agent needs MPM running. Start with 'mpm start': %w", err)
+	}
+	defer db.Close()
+
+	// Build context
+	memories := retrieveMemories(db, query, 5)
+	directives := retrieveDirectives(db)
+	references := retrieveReferences(db, query, 3)
+
+	systemPrompt := buildSystemPrompt(memories, directives, references)
+
+	// Conversation: system + user
+	messages := []map[string]interface{}{
+		{"role": "system", "content": systemPrompt},
+		{"role": "user", "content": query},
+	}
+
+	for attempt := 0; attempt < 10; attempt++ {
+		var accumulated strings.Builder
+		var lastResp *LLMResponse
+		_, err := LLMCall(cfg, messages, toolDefinitions, streaming, func(token string) {
+			if streaming {
+				fmt.Print(token)
+				os.Stdout.Sync()
+			}
+			accumulated.WriteString(token)
+		}, func(resp *LLMResponse) {
+			lastResp = resp
+		})
+		if err != nil {
+			return fmt.Errorf("LLM error: %w", err)
+		}
+
+		if streaming {
+			fmt.Println()
+		}
+
+		// If no tool calls, we're done
+		if lastResp == nil || len(lastResp.Choices) == 0 {
+			break
+		}
+		msg := lastResp.Choices[0].Message
+		if msg == nil || len(msg.ToolCalls) == 0 {
+			break
+		}
+
+		// Execute tool calls and append results
+		for _, tc := range msg.ToolCalls {
+			args := make(map[string]interface{})
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": tc.ID,
+					"content":      fmt.Sprintf("error parsing arguments: %v", err),
+				})
+				continue
+			}
+			handler, ok := toolHandlers[tc.Function.Name]
+			if !ok {
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": tc.ID,
+					"content":      fmt.Sprintf("unknown tool: %s", tc.Function.Name),
+				})
+				continue
+			}
+			result, err := handler(args, db)
+			if err != nil {
+				result = "error: " + err.Error()
+			}
+			result = truncate(result, 800)
+			messages = append(messages, map[string]interface{}{
+				"role":         "tool",
+				"tool_call_id": tc.ID,
+				"content":      result,
+			})
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	fmt.Println("mpm-agent v0.1.0 — not yet implemented")
 	os.Exit(0)
