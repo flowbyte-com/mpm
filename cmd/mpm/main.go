@@ -3894,6 +3894,7 @@ func printHelp() {
 	infoCmds := [][2]string{
 		{"doctor", "Run diagnostics"},
 		{"tui", "Launch mode/persona picker"},
+		{"prime-directives", "Show 808 prime directives"},
 		{"help", "Show this help"},
 		{"version", "Show version info"},
 	}
