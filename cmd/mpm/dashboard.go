@@ -153,7 +153,7 @@ func (m dashboardModel) View() string {
 
 	// Header
 	sb.WriteString("\n")
-	sb.WriteString(headerStyle.Render("  🤖 SymAI mpm Dashboard"))
+	sb.WriteString(headerStyle.Render("  🤖 Flowbyte mpm Dashboard"))
 	sb.WriteString("\n")
 	sb.WriteString(borderStyle.Render("  " + strings.Repeat("─", m.width-4)))
 	sb.WriteString("\n\n")
