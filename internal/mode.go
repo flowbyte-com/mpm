@@ -35,7 +35,7 @@ type ModeManager struct {
 // Updated for new path structure: workspace/mode/ (pristine root)
 func NewModeManager(basePath string) *ModeManager {
 	if basePath == "" {
-		// Use config.GetMPMDir() so modes are found at projects/mpm/mode/
+		// Use config.GetMPMDir() so modes are found at mpm/mode/
 		basePath = config.GetMPMDir()
 	}
 

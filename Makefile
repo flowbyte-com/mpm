@@ -13,7 +13,7 @@ BUILD_DIR   := bin
 PREFIX      ?= /usr/local
 
 VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
-BUILD_LDFLAGS := -ldflags "-X main.buildVersion=808-$(VERSION)"
+BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 
 .PHONY: all build install clean test help
 
@@ -23,7 +23,7 @@ all: build
 build:
 	@mkdir -p $(BUILD_DIR)
 	go build $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/mpm
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME) (808-$(VERSION))"
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME) (mpm-std)"
 
 # Install to PREFIX/bin
 install: build

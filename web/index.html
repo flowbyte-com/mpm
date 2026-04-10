@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MPM — Memory·Persona·Mode</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav>
+    <div class="nav-brand">MPM</div>
+    <div class="nav-links">
+      <button class="nav-btn active" data-view="search">Search</button>
+      <button class="nav-btn" data-view="memories">Memories</button>
+      <button class="nav-btn" data-view="topics">Topics</button>
+      <button class="nav-btn" data-view="lessons">Lessons</button>
+      <button class="nav-btn" data-view="directives">Directives</button>
+    </div>
+    <div class="nav-status" id="status"></div>
+  </nav>
+
+  <main>
+    <!-- Search View -->
+    <section id="view-search" class="view active">
+      <div class="search-box">
+        <input type="text" id="search-input" placeholder="Search memories, topics, lessons..." autofocus>
+        <button id="search-btn">Search</button>
+      </div>
+      <div id="search-results"></div>
+    </section>
+
+    <!-- Memories View -->
+    <section id="view-memories" class="view">
+      <div class="view-header">
+        <h2>Memories</h2>
+        <div class="view-controls">
+          <select id="memories-collection-filter">
+            <option value="">All collections</option>
+          </select>
+          <button id="add-memory-btn" class="btn-primary">+ Add Memory</button>
+        </div>
+      </div>
+      <div id="memories-list"></div>
+      <div id="memories-pagination" class="pagination"></div>
+    </section>
+
+    <!-- Topics View -->
+    <section id="view-topics" class="view">
+      <div class="view-header">
+        <h2>Topics</h2>
+        <button id="add-topic-btn" class="btn-primary">+ New Topic</button>
+      </div>
+      <div id="topics-list"></div>
+    </section>
+
+    <!-- Lessons View -->
+    <section id="view-lessons" class="view">
+      <div class="view-header">
+        <h2>Lessons</h2>
+        <div class="view-controls">
+          <select id="lessons-type-filter">
+            <option value="">All types</option>
+            <option value="insight">Insight</option>
+            <option value="warning">Warning</option>
+            <option value="practice">Practice</option>
+          </select>
+          <button id="add-lesson-btn" class="btn-primary">+ Add Lesson</button>
+        </div>
+      </div>
+      <div id="lessons-list"></div>
+    </section>
+
+    <!-- Directives View -->
+    <section id="view-directives" class="view">
+      <div class="view-header">
+        <h2>Prime Directives</h2>
+      </div>
+      <div id="directives-list"></div>
+    </section>
+  </main>
+
+  <!-- Modals -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button class="modal-close" id="modal-close">&times;</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Keyboard hints -->
+  <div class="kbd-hint">
+    <kbd>/</kbd> search · <kbd>Esc</kbd> close · <kbd>g</kbd>+<kbd>m</kbd> memories
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

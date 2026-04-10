@@ -47,11 +47,11 @@ type ReferenceDB struct {
 }
 
 // NewReferenceDB creates a new reference database
-// Updated for new path structure: workspace/src/db/mpm.db (consolidated)
+// Updated for new path structure: flowbyte/mpm/src/db/mpm.db (consolidated)
 func NewReferenceDB(dbPath string) *ReferenceDB {
 	if dbPath == "" {
-		// Use config.GetDBPath() for portable installations
-		dbPath = config.GetDBPath("mpm")
+		// Use the correct MPM database path
+		dbPath = filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
 	}
 	return &ReferenceDB{DatabasePath: dbPath}
 }
@@ -446,4 +446,22 @@ func ChunkReference(content string, chunkSize int) []Chunk {
 	}
 
 	return chunks
+}
+
+// GetReferenceCount returns the number of reference documents
+func (rdb *ReferenceDB) GetReferenceCount() (int, error) {
+	if rdb.db == nil {
+		return 0, fmt.Errorf("database not initialized")
+	}
+	var count int
+	err := rdb.db.QueryRow(`SELECT COUNT(*) FROM reference_docs`).Scan(&count)
+	return count, err
+}
+
+// GetReferenceCount returns the number of reference documents via ReferenceStore
+func (rs *ReferenceStore) GetReferenceCount() (int, error) {
+	if rs.MetadataDB == nil {
+		return 0, fmt.Errorf("metadata database not initialized")
+	}
+	return rs.MetadataDB.GetReferenceCount()
 }

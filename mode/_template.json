@@ -1,0 +1,33 @@
+{
+  "sym_id": "template",
+  "title": "Template Mode",
+  "name": "Template",
+  "subtitle": "One-line description",
+  "vibe": "Describe the mindset and approach in 1-2 sentences.",
+  "purpose": "What this mode is used for.",
+  "voice": "How it communicates — tone, style, any verbal quirks.",
+  "behavioral_rules": [
+    "Rule 1 — something this mode always does",
+    "Rule 2 — another hard rule",
+    "Rule 3 — a third principle"
+  ],
+  "best_practices": [
+    "Tip 1 — something that works well in this mode",
+    "Tip 2 — another useful practice"
+  ],
+  "anti_patterns": [
+    "Anti-pattern 1 — what this mode should NOT do",
+    "Anti-pattern 2 — common mistakes to avoid"
+  ],
+  "key_quotes": [
+    "A relevant quote or saying",
+    "Another relevant quote"
+  ],
+  "exit_criteria": [
+    "Situation 1 — when NOT to use this mode",
+    "Situation 2 — another case where a different mode is better"
+  ],
+  "reference": "",
+  "created_by": "Your name",
+  "created_date": "2026-04-04"
+}

@@ -10,13 +10,6 @@ import (
 	"time"
 )
 
-// Build flavors
-const (
-	BuildStandard = "standard"
-	BuildFun      = "fun"
-	BuildOpenCLAW = "openclaw"
-)
-
 // Command describes a single command
 type Command struct {
 	Name        string
@@ -25,23 +18,18 @@ type Command struct {
 	MinArgs     int
 	MaxArgs     int
 	NeedsDaemon bool
-	BuildFlavor string // "", "fun", "openclaw"
 }
 
 // CommandRouter routes commands to handlers
 type CommandRouter struct {
-	Commands    map[string]*Command
-	socketPath  string
-	buildFlavor string
-	buildInfo   string
+	Commands   map[string]*Command
+	socketPath string
 }
 
 // NewRouter creates a new command router
 func NewRouter() *CommandRouter {
 	r := &CommandRouter{
-		socketPath:  socketPath(),
-		buildFlavor: getBuildFlavor(),
-		buildInfo:   buildVersion,
+		socketPath: socketPath(),
 	}
 
 	// Register all commands
@@ -63,21 +51,14 @@ func NewRouter() *CommandRouter {
 		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
 		"topics":   {Name: "topics", Description: "List all topic names", MinArgs: 0},
 		"watch":     {Name: "watch", Description: "Watch daemon for memory ingestion"},
+		"web":       {Name: "web", Description: "Start web UI server", MinArgs: 0},
 		"menu":      {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
 
-		// Fun/OpenCLAW commands
-		"fortune": {
-			Name:        "fortune",
-			Description: "Crustafarian wisdom oracle",
-			MinArgs:     0,
-			MaxArgs:     0,
-			BuildFlavor: "fun",
-		},
+		// OpenCLAW commands
 		"dashboard": {
 			Name:        "dashboard",
 			Description: "Real-time TUI dashboard",
 			NeedsDaemon: true,
-			BuildFlavor: "openclaw",
 		},
 
 		// Daemon subcommands
@@ -88,7 +69,11 @@ func NewRouter() *CommandRouter {
 		"mode":     {Name: "mode", Description: "Mode operations", NeedsDaemon: true},
 		"persona":  {Name: "persona", Description: "Persona operations", NeedsDaemon: true},
 		"topic":    {Name: "topic", Description: "Topic management", MinArgs: 1},
-		"session":  {Name: "session", Description: "Session operations", NeedsDaemon: true},
+		"session":   {Name: "session", Description: "Session operations", NeedsDaemon: true},
+		"reference": {Name: "reference", Description: "Reference library", NeedsDaemon: true},
+		"lesson":     {Name: "lesson", Description: "Lesson operations", NeedsDaemon: true},
+		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0, NeedsDaemon: true},
+		"ingest":    {Name: "ingest", Description: "Import memories from external SQLite sources"},
 	}
 
 	return r
@@ -127,12 +112,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return 1
 	}
 
-	// Check build flavor compatibility
-	if cmd.BuildFlavor != "" && r.buildFlavor != cmd.BuildFlavor && r.buildFlavor != "openclaw" {
-		r.incompatibleBuild(cmd.Name, cmd.BuildFlavor)
-		return 1
-	}
-
 	// Validate arguments
 	if len(args)-1 < cmd.MinArgs {
 		r.errorf("[!] Error: %s requires %d argument(s)\n", cmd.Name, cmd.MinArgs)
@@ -150,13 +129,17 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleVersion()
 	case "help":
 		return r.handleHelp()
-	case "doctor", "fortune", "logs", "start":
+	case "doctor", "logs", "start":
 		// Standalone commands - don't need daemon
 		return r.handleStandalone(cmd.Name, args)
 	case "synthesize":
 		return handleSynthesize(args)
 	case "recall":
 		return handleRecall(args)
+	case "ingest":
+		return handleIngest(args)
+	case "web":
+		return handleWeb(args)
 	case "topics":
 		return topicList(args)
 	case "topic":
@@ -197,13 +180,6 @@ func (r *CommandRouter) handleStandalone(cmdName string, args []string) int {
 		return 0
 	case "doctor":
 		runDoctorCommand()
-		return 0
-	case "fortune":
-		if r.buildFlavor == BuildStandard {
-			r.errorf("[!] Error: fortune requires 'fun' or 'openclaw' build\n")
-			return 1
-		}
-		handleFortuneDirect()
 		return 0
 	case "logs":
 		handleLogsCommand()
@@ -285,8 +261,7 @@ func (r *CommandRouter) parseFlags(args []string) []string {
 // ============================================================================
 
 func (r *CommandRouter) handleVersion() int {
-	flavor := getBuildFlavor()
-	fmt.Printf("SymAI mpm %s (%s)\n", buildVersion, flavor)
+	fmt.Printf("SymAI mpm %s\n", buildVersion)
 	return 0
 }
 
@@ -436,9 +411,9 @@ func (r *CommandRouter) streamResponse(conn net.Conn) {
 // Output Helpers
 // ============================================================================
 
-// PrintHelp shows dynamic help based on build flavor
+// PrintHelp shows the lipgloss-styled help menu
 func PrintHelp() {
-	printBuildAwareHelp()
+	printHelp()
 }
 
 func (r *CommandRouter) printCmd(name string, needsDaemon bool) {
@@ -458,11 +433,6 @@ func (r *CommandRouter) unknownCommand(name string) {
 	fmt.Printf("    Run 'mpm help' for available commands.\n")
 }
 
-func (r *CommandRouter) incompatibleBuild(cmd, required string) {
-	// Use the build-aware ghost command handler
-	printGhostCommandError(cmd)
-}
-
 func (r *CommandRouter) daemonNotRunning(cmd string) {
 	r.errorf("[!] Error: daemon is not running\n")
 	fmt.Printf("    The '%s' command requires the daemon.\n", cmd)
@@ -471,22 +441,4 @@ func (r *CommandRouter) daemonNotRunning(cmd string) {
 
 func (r *CommandRouter) errorf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
-}
-
-// ============================================================================
-// Build Detection
-// ============================================================================
-
-func getBuildFlavor() string {
-	// Detect based on build version string
-	if strings.Contains(buildVersion, "openclaw") {
-		return BuildOpenCLAW
-	}
-	if strings.Contains(buildVersion, "fun") {
-		return BuildFun
-	}
-	if strings.Contains(buildVersion, "std") {
-		return BuildStandard
-	}
-	return BuildStandard
 }

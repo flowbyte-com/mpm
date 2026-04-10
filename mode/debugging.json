@@ -1,12 +1,12 @@
 {
-  "sym_id": "~m.db",
+  "sym_id": "db",
   "title": "Debugging",
   "priority": "High",
   "focus": "Root Cause, Log Scans",
   "opcodes": {
-    "~m.db!scan": "Systematic log/stack trace analysis",
-    "~m.db?repro": "Reproducing the fault state",
-    "~m.db!fix": "Applying a verified root-cause correction"
+    "db!scan": "Systematic log/stack trace analysis",
+    "db?repro": "Reproducing the fault state",
+    "db!fix": "Applying a verified root-cause correction"
   },
   "purpose": "Finding, understanding, and fixing bugs efficiently.",
   "rules": [

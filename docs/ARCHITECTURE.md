@@ -47,6 +47,17 @@ CLI (mpm) ───────────────────────�
 - **`mpm restart`** — stop + start
 - Stale socket cleanup is automatic on startup
 
+### Two-Process Architecture
+
+MPM runs as **two independent daemon processes**:
+
+1. **Main daemon** — handles CLI commands via Unix socket, manages SQLite database, compiles modes/personas
+2. **Watch daemon** — filesystem monitoring via `fsnotify`, auto-ingests content independently
+
+This separation is intentional: the watch daemon runs independently so filesystem monitoring doesn't block command handling. Both processes are started together via `mpm start` and stopped together via `mpm stop`.
+
+You can also run `mpm watch` standalone (without the main daemon) for manual file monitoring.
+
 ## Watch Daemon
 
 Two directories are monitored:
@@ -62,7 +73,7 @@ See [WATCH.md](WATCH.md) for full details.
 
 ## Database Schema (`mpm.db`)
 
-All tables live in a single SQLite database at `projects/mpm/src/db/mpm.db`.
+All tables live in a single SQLite database at `src/db/mpm.db` (resolved via path config: `MPM_WORKSPACE` → executable-relative → CWD).
 
 ### Core Tables
 
@@ -78,6 +89,7 @@ All tables live in a single SQLite database at `projects/mpm/src/db/mpm.db`.
 | `reference_docs` | Reference library documents |
 | `reference_chunks` | Reference document chunks for vector search |
 | `lessons` | Learned lessons (warnings, practices, insights) |
+| `lessons_fts` | FTS5 full-text search index for lessons |
 
 ### FTS5 Indexes
 

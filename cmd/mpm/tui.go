@@ -405,7 +405,7 @@ func (m *Model) View() string {
 	personaPane := m.renderPersonaList()
 	previewPane := m.renderPreview()
 
-	lists := lipgloss.JoinHorizontal(lipgloss.Top, modePane, personaPane)
+	lists := lipgloss.JoinVertical(lipgloss.Top, modePane, personaPane)
 
 	return fmt.Sprintf(
 		"%s\n\n  %s\n\n%s\n%s\n\n%s\n",
@@ -711,9 +711,33 @@ func newPersonaDelegate() list.ItemDelegate {
 // StartTUI is the entry point for `mpm tui`
 // ---------------------------------------------------------------------------
 func StartTUI() {
+	// Check terminal size before launching
+	if !checkTerminalSize() {
+		return
+	}
 	m := newTUIModel()
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// checkTerminalSize verifies the terminal is large enough for the TUI
+func checkTerminalSize() bool {
+	cols := 80
+	lines := 24
+	if c := os.Getenv("COLUMNS"); c != "" {
+		if n, err := fmt.Sscanf(c, "%d", &cols); err == nil && n > 0 {
+		}
+	}
+	if l := os.Getenv("LINES"); l != "" {
+		if n, err := fmt.Sscanf(l, "%d", &lines); err == nil && n > 0 {
+		}
+	}
+	if cols < 80 || lines < 20 {
+		fmt.Fprintf(os.Stderr, "\n  mpm tui requires at least 80x24 terminal\n")
+		fmt.Fprintf(os.Stderr, "  Current: %dx%d\n\n", cols, lines)
+		return false
+	}
+	return true
 }

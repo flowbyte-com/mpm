@@ -133,34 +133,30 @@ func handleRecall(args []string) int {
 }
 
 func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
-	// Try FTS5 first
-	likePattern := "%" + query + "%"
+	// Try FTS5 first — use table-level MATCH with JOIN pattern (same as QueryMemory)
 	ftsQuery := `
 		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
 		FROM memories m
-		LEFT JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE m.deleted_at IS NULL AND (
-			fts.content MATCH '` + query + `'
-			OR m.content LIKE '` + likePattern + `'
-			OR m.tags LIKE '` + likePattern + `'
-		)
-		ORDER BY m.created_at DESC
-		LIMIT ` + fmt.Sprintf("%d", limit)
+		JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+		ORDER BY fts.rank
+		LIMIT ?`
 
-	rows, err := db.Query(ftsQuery)
+	rows, err := db.Query(ftsQuery, query, limit)
 	if err == nil {
 		return rows, nil
 	}
 
-	// Fallback to plain LIKE search
+	// FTS5 failed (malformed query or unavailable) — fallback to LIKE search
+	likePattern := "%" + query + "%"
 	likeQuery := `
 		SELECT id, content, session_id, tags, created_at
 		FROM memories
 		WHERE deleted_at IS NULL
-		  AND (content LIKE '` + likePattern + `' OR tags LIKE '` + likePattern + `')
+		  AND (content LIKE ? OR tags LIKE ?)
 		ORDER BY created_at DESC
-		LIMIT ` + fmt.Sprintf("%d", limit)
-	return db.Query(likeQuery)
+		LIMIT ?`
+	return db.Query(likeQuery, likePattern, likePattern, limit)
 }
 
 func stripMarkdown(s string) string {

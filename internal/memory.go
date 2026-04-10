@@ -204,7 +204,7 @@ func (s *MemoryStore) InitSQLite() error {
 			role TEXT DEFAULT 'related',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (memory_id, topic_id),
-			PRIMARY KEY (session_id, topic_id),
+			UNIQUE (session_id, topic_id),
 			CHECK (memory_id IS NOT NULL OR session_id IS NOT NULL)
 		)`,
 		`CREATE TABLE IF NOT EXISTS "references" (
@@ -249,7 +249,7 @@ func (s *MemoryStore) InitSQLite() error {
 		}
 	}
 
-	// Create FTS5 virtual tables
+	// Create FTS5 virtual tables (optional — falls back to LIKE if FTS5 unavailable)
 	fts := []struct {
 		name  string
 		cols  string
@@ -260,14 +260,21 @@ func (s *MemoryStore) InitSQLite() error {
 		{"topics_fts", "name, description, tags", "topics"},
 		{"references_fts", "title, tags, content", "references"},
 	}
+	ftsAvailable := true
 	for _, ft := range fts {
 		s.DB.Exec("DROP TABLE IF EXISTS " + ft.name)
 		if _, err := s.DB.Exec("CREATE VIRTUAL TABLE " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')"); err != nil {
-			return fmt.Errorf("failed to create %s: %w", ft.name, err)
+			fmt.Fprintf(os.Stderr, "Warning: FTS5 not available (%s), search will use LIKE fallback: %v\n", ft.name, err)
+			ftsAvailable = false
+			break
 		}
 	}
 
-	// Create triggers
+	// Create triggers only if FTS5 is available
+	if !ftsAvailable {
+		fmt.Fprintf(os.Stderr, "Warning: FTS5 not available — memories will not be full-text indexed until FTS5 is supported\n")
+		return nil
+	}
 	triggers := []string{
 		`CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags) END`,
 		`CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid END`,
@@ -300,7 +307,14 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	if collection == "" {
 		collection = "memories"
 	}
-	
+
+	// Ensure database is initialized
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+
 	// Check for sensitive content BEFORE processing
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		s.logSensitiveAttempt(content, reason)
@@ -346,11 +360,14 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	// Add to SQLite
 	metadataJSON, _ := json.Marshal(fullMetadata)
 	tagsJSON, _ := json.Marshal(tags)
-	
+
+	// Use empty string when sessionID is empty (schema has NOT NULL DEFAULT '')
+	sessID := sessionID
+
 	_, err := s.DB.Exec(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, mem.ID, collection, content, sessionID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID)
+	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +494,8 @@ func isSensitiveContent(content string) (bool, string) {
 		{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
 		{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
 		{"AWS Access Key ID", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
-		{"AWS Secret Key", regexp.MustCompile(`[A-Za-z0-9/+=]{40}`)},
+		// AWS Secret Access Keys are 40-char Base64 strings — too broad to detect reliably
+		// without context. The Access Key ID above is the actionable identifier.
 		{"Slack Token", regexp.MustCompile(`xox[baprs]-[0-9]+-[0-9]+`)},
 		{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
 		{"Stripe Test Key", regexp.MustCompile(`sk_test_[0-9a-zA-Z]{24,}`)},
@@ -675,7 +693,12 @@ func (s *MemoryStore) GetByTag(tag string, collection string) ([]*Memory, error)
 // GetByID retrieves a memory by ID from SQLite
 func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	if s.DB == nil {
-		return nil, nil
+		if err := s.InitSQLite(); err != nil {
+			return nil, fmt.Errorf("failed to initialize database: %v", err)
+		}
+		if s.DB == nil {
+			return nil, nil
+		}
 	}
 	
 	var mem Memory
@@ -683,7 +706,7 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	var embedding []byte
 	var createdAt, sessionID string
 	
-	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND deleted_at IS NULL", id).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
+	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL", id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -710,32 +733,41 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 // GetRecent retrieves recent memories from SQLite
 func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 	memories := make([]*Memory, 0)
-	
+
 	if s.DB == nil {
-		return memories, nil
+		if err := s.InitSQLite(); err != nil {
+			return memories, nil
+		}
+		if s.DB == nil {
+			return memories, nil
+		}
 	}
-	
-	rows, err := s.DB.Query("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?", n)
+
+	sqlQuery := fmt.Sprintf("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %d", n)
+
+	rows, err := s.DB.Query(sqlQuery)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
 		var createdAt string
-		var sessionID string
-		
+		var sessionID sql.NullString
+
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 		if err != nil {
 			continue
 		}
-		
-		mem.SessionID = sessionID
+
+		if sessionID.Valid {
+			mem.SessionID = sessionID.String
+		}
 		mem.Created = createdAt
-		
+
 		if len(tagsJSON) > 0 {
 			json.Unmarshal(tagsJSON, &mem.Tags)
 		}
@@ -745,10 +777,10 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		if len(embedding) > 0 {
 			json.Unmarshal(embedding, &mem.Embedding)
 		}
-		
+
 		memories = append(memories, &mem)
 	}
-	
+
 	return memories, nil
 }
 
@@ -815,6 +847,32 @@ func (s *MemoryStore) Stats() map[string]interface{} {
 	return stats
 }
 
+// GetMemoryCount returns the number of active (non-deleted) memories
+func (s *MemoryStore) GetMemoryCount() (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+
+	var count int
+	err := s.DB.QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL").Scan(&count)
+	return count, err
+}
+
+// GetTopicCount returns the number of active topics
+func (s *MemoryStore) GetTopicCount() (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+
+	var count int
+	err := s.DB.QueryRow("SELECT COUNT(*) FROM topics WHERE is_active = 1").Scan(&count)
+	return count, err
+}
+
 // splitLines splits text into lines
 func splitLines(text string) []string {
 	var lines []string
@@ -849,44 +907,91 @@ func (s *MemoryStore) ExportMirror(path string) (string, error) {
 	return path, nil
 }
 
-// FullTextSearch performs fast substring search using trigram-like approach
+// scanMemoryRows scans sql.Rows into []*Memory with a score function.
+func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string) float64, query string) ([]*Memory, error) {
+	var memories []*Memory
+	for rows.Next() {
+		var id, coll, content, sessionID, tagsJSON, metadataJSON, createdAt string
+		var embeddingJSON []byte
+		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt)
+		if err != nil {
+			continue
+		}
+		mem := &Memory{
+			ID:         id,
+			Content:    content,
+			Created:    createdAt,
+			Collection: coll,
+			Metadata:   make(map[string]interface{}),
+		}
+		if sessionID != "" {
+			mem.Metadata["session_id"] = sessionID
+		}
+		if tagsJSON != "" {
+			json.Unmarshal([]byte(tagsJSON), &mem.Tags)
+		}
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &mem.Metadata)
+		}
+		if len(embeddingJSON) > 0 {
+			json.Unmarshal(embeddingJSON, &mem.Embedding)
+		}
+		mem.Metadata["_score"] = scoreFunc(content, query)
+		mem.Metadata["_search_type"] = "text"
+		memories = append(memories, mem)
+	}
+	return memories, rows.Err()
+}
+
+// FullTextSearch performs substring search using FTS5 or SQLite LIKE.
+// Used as the text-search leg of hybrid search alongside vector search.
 func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]*Memory, error) {
 	if collection == "" {
-		collection = "memories_public"
+		collection = "memories"
 	}
-	
-	// Get recent memories from mirror and filter
-	allMemories, err := s.GetRecent(1000)
-	if err != nil {
-		return nil, err
+	if n <= 0 {
+		n = 20
 	}
-	
-	queryLower := strings.ToLower(query)
-	var results []*Memory
-	
-	for _, mem := range allMemories {
-		if strings.Contains(strings.ToLower(mem.Content), queryLower) {
-			// Initialize metadata if needed
-			if mem.Metadata == nil {
-				mem.Metadata = make(map[string]interface{})
-			}
-			// Add score based on frequency
-			count := strings.Count(strings.ToLower(mem.Content), queryLower)
-			mem.Metadata["_score"] = float64(count)
-			mem.Metadata["_search_type"] = "text"
-			results = append(results, mem)
+
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, err
 		}
 	}
-	
-	// Sort by score
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Metadata["_score"].(float64) > results[j].Metadata["_score"].(float64)
-	})
-	
-	if len(results) > n {
-		return results[:n], nil
+
+	// Strategy 1: FTS5 MATCH — fast, ranked
+	ftsQuery := `
+		SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at
+		FROM memories m
+		JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ? AND m.collection = ?
+		ORDER BY fts.rank
+		LIMIT ?`
+	rows, err := s.DB.Query(ftsQuery, query, collection, n)
+	if err == nil {
+		return scanMemoryRows(rows, func(content, q string) float64 {
+			// FTS5 rank is implicit order; score by BM25-adjacent frequency
+			return float64(strings.Count(strings.ToLower(content), strings.ToLower(q)))
+		}, query)
 	}
-	return results, nil
+
+	// Strategy 2: LIKE fallback — handles malformed FTS5 queries or no FTS5
+	searchPattern := "%" + query + "%"
+	likeQuery := `
+		SELECT id, collection, content, session_id, tags, metadata, embedding, created_at
+		FROM memories
+		WHERE collection = ? AND (content LIKE ? OR tags LIKE ?)
+		ORDER BY created_at DESC
+		LIMIT ?`
+	rows2, err := s.DB.Query(likeQuery, collection, searchPattern, searchPattern, n)
+	if err == nil {
+		return scanMemoryRows(rows2, func(content, q string) float64 {
+			return float64(strings.Count(strings.ToLower(content), strings.ToLower(q)))
+		}, query)
+	}
+
+	// Strategy 3: recent rows as last resort
+	return s.GetRecent(n)
 }
 
 // MetadataFilter searches by metadata criteria using SQLite pushdown
@@ -1301,11 +1406,11 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 
 	var memories []*Memory
 
-	// Sessions are stored in memories table with collection='sessions'
+	// Sessions are stored in memories table with collection='session' (singular)
 	rows, err := s.DB.Query(`
-		SELECT id, content, created_at, metadata, tags
+		SELECT id, collection, content, created_at, metadata, tags
 		FROM memories
-		WHERE collection = 'sessions' AND content MATCH ?
+		WHERE collection = 'session' AND content MATCH ?
 		ORDER BY rank
 		LIMIT ?
 	`, query, limit)
@@ -1313,9 +1418,9 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 		// FTS5 not available, use substring search
 		searchTerm := "%" + query + "%"
 		rows, err = s.DB.Query(`
-			SELECT id, content, created_at, metadata, tags
+			SELECT id, collection, content, created_at, metadata, tags
 			FROM memories
-			WHERE collection = 'sessions' AND content LIKE ?
+			WHERE collection = 'session' AND content LIKE ?
 			ORDER BY created_at DESC
 			LIMIT ?
 		`, searchTerm, limit)
@@ -1329,7 +1434,7 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 		var m Memory
 		var tagsJSON, metadataJSON sql.NullString
 
-		if err := rows.Scan(&m.ID, &m.Content, &m.Created, &metadataJSON, &tagsJSON); err != nil {
+		if err := rows.Scan(&m.ID, &m.Collection, &m.Content, &m.Created, &metadataJSON, &tagsJSON); err != nil {
 			continue
 		}
 

@@ -31,7 +31,7 @@ func (dm *DatabaseManager) SearchWithSnippet(opts SearchOptions) ([]map[string]i
 	ORDER BY rank 
 	LIMIT ?`, ftsTable, ftsTable, ftsTable)
 
-	rows, err := dm.DB.Query(query, opts.Query, opts.Limit)
+	rows, err := dm.db.Query(query, opts.Query, opts.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("FTS5 search failed: %w", err)
 	}
@@ -67,7 +67,7 @@ func (dm *DatabaseManager) Shred(opts SearchOptions) error {
 	// 2. Corrected Verification: Check the actual content table
 	var count int
 	verifyQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", opts.Table)
-	err := dm.DB.QueryRow(verifyQuery, opts.ID).Scan(&count)
+	err := dm.db.QueryRow(verifyQuery, opts.ID).Scan(&count)
 
 	if err != nil {
 		return fmt.Errorf("shred verification failed: %w", err)

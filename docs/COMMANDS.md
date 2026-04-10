@@ -212,4 +212,3 @@ mpm lesson add "Deleting .git causes irreversible history loss" --type warning -
 |---------|-------------|
 | `mpm help` | Show help menu. |
 | `mpm version` | Show version and build info. |
-| `mpm fortune` 🦞 | Crustafarian wisdom. |
