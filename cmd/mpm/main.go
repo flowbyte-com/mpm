@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
@@ -3804,59 +3806,136 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
-// printHelp displays the mpm help text with SymAI branding
+// printHelp displays the mpm help text with lipgloss styling
 func printHelp() {
-	fmt.Println()
-	fmt.Println("  mpm - Memory-Persona-Mode Manager")
-	fmt.Println()
-	fmt.Println("Usage: mpm <command> [subcommand] [options]")
-	fmt.Println()
-	fmt.Println("Core Commands:")
-	fmt.Println("  status               Show current status")
-	fmt.Println("  dashboard            Live terminal dashboard")
-	fmt.Println("  web [port]           Start HTTP web dashboard")
-	fmt.Println("  persona              Persona management")
-	fmt.Println("  mode                 Mode management")
-	fmt.Println("  memory               Memory management")
-	fmt.Println("  session              Session management")
-	fmt.Println("  ss                   Quick session save")
-	fmt.Println("  compile              Compile JSON files to database")
-	fmt.Println("  reference            Reference library management")
-	fmt.Println()
-	fmt.Println("System Management:")
-	fmt.Println("  shutdown             Graceful daemon shutdown")
-	fmt.Println("  shutdown --force     Immediate shutdown (skip session save)")
-	fmt.Println("  reboot               Graceful daemon restart")
-	fmt.Println("  reboot --force       Immediate restart (skip session save)")
-	fmt.Println("  logs                 Stream daemon log entries")
-	fmt.Println("  start               Start daemon if not running")
-	fmt.Println()
-	fmt.Println("Gateway (Daemon) Commands:")
-	fmt.Println("  gateway              Gateway control (see 'mpm gateway help')")
-	fmt.Println("  gateway help        Show gateway commands")
-	fmt.Println("  gateway start       Start or connect to gateway")
-	fmt.Println("  gateway stop        Stop the gateway")
-	fmt.Println("  gateway restart     Restart the gateway")
-	fmt.Println("  gateway status      Show gateway status")
-	fmt.Println()
-	fmt.Println("Run 'mpm <command> help' for more options (e.g., 'mpm session help')")
-	fmt.Println()
-	fmt.Println("Quick Examples:")
-	fmt.Println("  ~p                              Select persona (fzf)")
-	fmt.Println("  ~m                              Select modes (fzf)")
-	fmt.Println("  mpm ss                          Quick session save")
-	fmt.Println("  mpm persona set default         Activate persona")
-	fmt.Println("  mpm mode add code              Add mode to stack")
-	fmt.Println("  mpm mode clear                  Clear all modes")
-	fmt.Println("  mpm compile all                 Rebuild database from JSON")
-	fmt.Println("  mpm session list                View recent sessions")
-	fmt.Println("  mpm memory search \"docker\"      Find memories about topic")
-	fmt.Println("  mpm reference add book.pdf      Add reference library file")
-	fmt.Println("  mpm reference search \"strategy\" Find in references")
-	fmt.Println("  mpm watch                      Start fsnotify file watcher daemon")
-	fmt.Println("  mpm watch --dry-run            Test without deleting files")
-	fmt.Println("  mpm watch --once               Run startup sweep only")
-	fmt.Println()
+	// Define styles
+	borderStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00D9FF")).
+		Bold(true)
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Bold(true)
+
+	sectionStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFD700"))
+
+	cmdStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888"))
+
+	daemonStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00FF88"))
+
+	subCmdStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FF00FF"))
+
+	noteStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888"))
+
+	// Box dimensions
+	width := 80
+
+	header := borderStyle.Render("╭" + strings.Repeat("─", width-2) + "╮")
+	divider := borderStyle.Render("├" + strings.Repeat("─", width-2) + "┤")
+	footer := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+
+	// Build content
+	var b strings.Builder
+
+	b.WriteString(header + "\n")
+	b.WriteString(fmt.Sprintf("│ %s  —  Memory-Persona-Mode Manager%*s │\n",
+		headerStyle.Render("mpm"), width-42, ""))
+	b.WriteString(divider + "\n")
+
+	// Core Commands
+	b.WriteString("│" + sectionStyle.Render(" Core Commands") + strings.Repeat(" ", width-17) + "│\n")
+	coreCmds := [][2]string{
+		{"status", "Show current status"},
+		{"dashboard", "Live terminal dashboard"},
+		{"persona", "Persona management [*>]"},
+		{"mode", "Mode management [*>]"},
+		{"memory", "Memory management [*>]"},
+		{"session", "Session management [*>]"},
+		{"topics", "Topic operations [*>]"},
+		{"compile", "Compile JSON to database [*>]"},
+		{"reference", "Reference library [*>]"},
+		{"lesson", "Lesson operations [*>]"},
+		{"recall", "Semantic memory search [*]"},
+		{"synthesize", "Generate memory summaries [*]"},
+	}
+	for _, c := range coreCmds {
+		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
+		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
+			cmdStyle.Render(c[0]), 18-lipgloss.Width(c[0]), "",
+			daemonStyle.Render(c[1]), pad, ""))
+	}
+
+	b.WriteString("│\n")
+
+	// System Management
+	b.WriteString("│" + sectionStyle.Render(" System Management") + strings.Repeat(" ", width-21) + "│\n")
+	sysCmds := [][2]string{
+		{"shutdown", "Graceful daemon shutdown [*]"},
+		{"shutdown --force", "Immediate shutdown [*]"},
+		{"reboot", "Graceful daemon restart [*]"},
+		{"reboot --force", "Immediate restart [*]"},
+		{"logs", "Tail daemon logs [*]"},
+		{"start", "Start daemon"},
+		{"stop", "Alias for shutdown [*]"},
+		{"restart", "Alias for reboot [*]"},
+	}
+	for _, c := range sysCmds {
+		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
+		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
+			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
+			daemonStyle.Render(c[1]), pad, ""))
+	}
+
+	b.WriteString("│\n")
+
+	// Gateway
+	b.WriteString("│" + sectionStyle.Render(" Gateway (Daemon) Commands") + strings.Repeat(" ", width-31) + "│\n")
+	gwCmds := [][2]string{
+		{"gateway", "Gateway control (see 'mpm gateway help') [>]"},
+		{"gateway help", "Show gateway commands"},
+		{"gateway start", "Start or connect to gateway"},
+		{"gateway stop", "Stop the gateway"},
+		{"gateway restart", "Restart the gateway"},
+		{"gateway status", "Show gateway status"},
+	}
+	for _, c := range gwCmds {
+		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
+		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
+			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
+			subCmdStyle.Render(c[1]), pad, ""))
+	}
+
+	b.WriteString("│\n")
+
+	// Information
+	b.WriteString("│" + sectionStyle.Render(" Information") + strings.Repeat(" ", width-17) + "│\n")
+	infoCmds := [][2]string{
+		{"doctor", "Run diagnostics"},
+		{"tui", "Launch mode/persona picker"},
+		{"fortune", "Crustafarian wisdom"},
+		{"help", "Show this help"},
+		{"version", "Show version info"},
+	}
+	for _, c := range infoCmds {
+		pad := width - 5 - lipgloss.Width(c[0]) - lipgloss.Width(c[1])
+		b.WriteString(fmt.Sprintf("│  %s%*s %s%*s │\n",
+			cmdStyle.Render(c[0]), 20-lipgloss.Width(c[0]), "",
+			noteStyle.Render(c[1]), pad, ""))
+	}
+
+	b.WriteString(divider + "\n")
+	b.WriteString(fmt.Sprintf("│  %s  Show this help         %s  Show version                │\n",
+		noteStyle.Render("-h, --help"), noteStyle.Render("-v, --version")))
+	b.WriteString(fmt.Sprintf("│  %s daemon required                                %s has subcommands           │\n",
+		daemonStyle.Render("*"), subCmdStyle.Render(">")))
+	b.WriteString(footer + "\n")
+
+	fmt.Print(b.String())
 }
 
 // printGatewayHelp outputs gateway-specific help

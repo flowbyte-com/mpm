@@ -139,8 +139,15 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
+		// Bound width/height to prevent strings.Repeat panic with huge values
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.width < 40 || m.width > 1000 {
+			m.width = 120
+		}
+		if m.height < 10 || m.height > 200 {
+			m.height = 40
+		}
 		return m, nil
 	}
 
