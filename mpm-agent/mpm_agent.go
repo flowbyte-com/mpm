@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -1100,7 +1101,99 @@ func runAgentLoop(query string, streaming bool, cfg *Config) error {
 	return nil
 }
 
+// ============================================================================
+// CLI
+// ============================================================================
+
 func main() {
-	fmt.Println("mpm-agent v0.1.0 — not yet implemented")
-	os.Exit(0)
+	args := os.Args[1:]
+	cfg, err := LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	batch := false
+	var query string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--batch":
+			batch = true
+		case "--help", "-h":
+			printHelp()
+			os.Exit(0)
+		default:
+			if !strings.HasPrefix(args[i], "-") {
+				query = strings.Join(args[i:], " ")
+				break
+			}
+		}
+	}
+
+	if query != "" {
+		if err := runAgentLoop(query, !batch, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	repl(cfg)
+}
+
+func printHelp() {
+	fmt.Print(`mpm-agent — MPM companion agent
+
+Usage:
+  mpm-agent [options] [query]    Run query or start REPL
+  mpm-agent --help               Show this help
+
+Options:
+  --batch   Disable streaming (batch mode)
+
+Modes:
+  No query  REPL mode — type queries interactively
+  With query Single-shot mode — streaming response
+
+Tools available:
+  read_file, write_file, shell, web_search, web_fetch
+  mpm_memory_search, mpm_lesson_search, mpm_directive_list
+  mpm_reference_search, mpm_mode_list, mpm_persona_list
+  mpm_lesson_add, mpm_mode_set, mpm_persona_set
+  mpm_directive_add, mpm_synthesize
+
+Environment:
+  MINIMAX_API_KEY   API key (or set in mpm_config.json)
+  MPM_WORKSPACE     MPM workspace path
+`)
+}
+
+func repl(cfg *Config) {
+	fmt.Println("mpm-agent REPL (Ctrl+C to exit)")
+	fmt.Println("Type your query and press Enter.")
+	fmt.Println()
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("> ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF || strings.Contains(err.Error(), "closed") {
+				break
+			}
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == "exit" || line == "quit" {
+			break
+		}
+		fmt.Println()
+		if err := runAgentLoop(line, true, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
+		}
+		fmt.Println()
+	}
 }
