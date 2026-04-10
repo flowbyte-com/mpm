@@ -34,10 +34,10 @@ Add to `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 export PATH="$HOME/mpm/bin:$PATH"
-export MPM_WORKSPACE="$HOME"
+export MPM_WORKSPACE="$HOME/mpm"
 ```
 
-> **Note:** MPM auto-detects its location from the binary path, so `MPM_WORKSPACE` is optional but recommended for clarity. Without it, MPM walks up from the binary to find the project root.
+> **Note:** `MPM_WORKSPACE=$HOME/mpm` keeps all state (memory/sessions dirs, socket) inside the `~/mpm` tree. Without it, MPM auto-detects from the binary path but watch dirs fall back to `$HOME/memory/` and `$HOME/sessions/`.
 
 Reload:
 ```bash
