@@ -49,6 +49,8 @@ mpm-agent --help
 | `mpm_lesson_search` | `{"query": "debugging"}` | Matching lessons |
 | `mpm_mode_list` | `{}` | Available modes |
 | `mpm_persona_list` | `{}` | Available personas |
+| `mpm_directive_list` | `{}` | All prime directives |
+| `mpm_reference_search` | `{"query": "Go concurrency"}` | FTS5 results from reference library |
 
 ### MPM (write)
 | Tool | Input | Output |
@@ -56,6 +58,8 @@ mpm-agent --help
 | `mpm_lesson_add` | `{"content": "Don't do X", "type": "warning", "tags": "safety"}` | Lesson ID |
 | `mpm_mode_set` | `{"mode": "research"}` | Success/error |
 | `mpm_persona_set` | `{"persona": "oracle"}` | Success/error |
+| `mpm_directive_add` | `{"content": "Always validate inputs before processing"}` | Directive ID |
+| `mpm_directive_set` | `{"id": "...", "active": true}` | Success/error |
 | `mpm_synthesize` | `{"session_uuid": "..."}` | Synthesis result |
 
 ## Agent Loop
@@ -75,9 +79,11 @@ for {
 
 On each loop iteration:
 1. Retrieve top N memories via FTS5 `MATCH` (N=5, configurable)
-2. Format as markdown section: `## Relevant Memories`
-3. Prepend to system prompt
-4. Conversation history (last M turns) appended after memories
+2. Retrieve prime directives (`is_prime_directive=1` memories)
+3. Retrieve relevant reference chunks via FTS5 (N=3, configurable)
+4. Format as markdown sections: `## Relevant Memories`, `## Prime Directives`, `## Reference Material`
+5. Prepend to system prompt
+6. Conversation history (last M turns) appended after memories
 
 ## Output Truncation
 
