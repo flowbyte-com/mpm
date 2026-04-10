@@ -1317,17 +1317,17 @@ func main() {
 		// Check directly if daemon is listening without trying to dispatch empty args
 		if conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond); err == nil {
 			conn.Close()
-			// Daemon is running - launch TUI
-			StartTUI()
+			// Daemon is running - launch dashboard
+			StartDashboard(sockPath)
 			return
 		}
 		// Stale socket?
 		if _, err := os.Stat(sockPath); err == nil {
 			os.Remove(sockPath)
 		}
-		// Daemon not running - start it, then launch TUI
+		// Daemon not running - start it, then launch dashboard
 		handleStartCommand()
-		StartTUI()
+		StartDashboard(sockPath)
 		return
 	}
 
