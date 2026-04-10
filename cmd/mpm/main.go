@@ -3248,9 +3248,9 @@ func getSessionsDir() string {
 	if config, err := config.LoadConfig(); err == nil && config.SessionsDir != "" {
 		return config.SessionsDir
 	}
-	// Fallback to workspace
+	// Fallback to workspace (workspace IS the mpm directory, so sessions is a sibling)
 	workspace := config.GetWorkspace()
-	return filepath.Join(workspace, "mpm", "sessions")
+	return filepath.Join(workspace, "sessions")
 }
 
 // fileExists checks if a file exists
