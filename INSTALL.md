@@ -117,7 +117,7 @@ mpm status             # Verify it's running
 │   ├── mpm.db                   # SQLite database
 │   └── mirror.jsonl             # Audit log
 ├── mode/                        # Mode configurations (JSON)
-├── persona/                     # Persona configurations (Markdown)
+├── persona/                     # Persona configurations (JSON)
 ├── docs/                        # Documentation
 └── mpm_config.json             # Configuration
 ```
@@ -136,7 +136,7 @@ Priority: `MPM_WORKSPACE` env var → executable-relative → CWD fallback
 
 ### mpm_config.json
 
-Located at `$MPM_WORKSPACE/mpm/mpm_config.json`. Controls:
+Located at `$MPM_WORKSPACE/mpm_config.json`. Controls:
 
 - Watch directories (memory, sessions)
 - External databases to poll
@@ -181,6 +181,18 @@ git pull
 make clean build
 mpm restart
 ```
+
+## Keeping in Sync
+
+If you develop on MPM (clone at dev path) and install at `~/mpm/`:
+
+```bash
+# From dev clone — sync source to install
+rsync -av --exclude='.git' --exclude='bin/mpm' --exclude='mpm-agent/mpm_agent' --exclude='*.db-shm' --exclude='*.db-wal' . ~/mpm/
+make -C ~/mpm build && cp ~/mpm/bin/mpm ~/mpm/bin/mpm
+```
+
+> **Important:** Never run `git` commands from the `~/mpm/` install directory — it's a synced copy, not a git repo. Do all development in your dev clone.
 
 ## Uninstall
 
