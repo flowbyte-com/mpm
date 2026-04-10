@@ -1,192 +1,179 @@
-## ⚖️ License & Commercial Use
+# MPM — Memory-Persona-Mode Manager
 
-MPM is dual-licensed:
+**MPM** is a SQLite-native agent state management system for OpenClaw agents. It provides persistent memory, session management, topic organization, mode/persona configurations, a reference document library, and learned lessons — all indexed with FTS5 full-text search.
 
-1. **Open Source (AGPLv3):** Free for personal use, open-source projects, and non-commercial tinkering.
-2. **Commercial License:** If you are a commercial entity integrating MPM into proprietary, closed-source agents or hosting it as part of a service, you must purchase a commercial license. 
+Built with Go. No external dependencies. Single binary.
 
-**For commercial licensing, enterprise support, or custom integrations, contact: v@flowbyte.com
+---
 
-# SymAI MPM (Memory-Persona-Mode) v6.0.0
+## What It Does
 
-DB-first agent state management with SQLite-only. Manage personas, modes, memory, and reference library with secure embedded storage.
+MPM gives your AI agent long-term memory and persistent identity:
+
+| Capability | What It Means |
+|------------|----------------|
+| **Memory** | Searchable facts distilled from sessions |
+| **Sessions** | Full transcript archive |
+| **Topics** | Hierarchical knowledge organization |
+| **Modes** | Stackable behavioral contexts (debug, research, ship...) |
+| **Personas** | Identity switching without prompt engineering |
+| **References** | RAG-ready document library (PDF, EPUB, markdown) |
+| **Lessons** | "Don't do X" / "Do Y" wisdom from experience |
+| **Watch Daemon** | Auto-ingest from filesystem or external DB |
+
+---
+
+## Compatibility
+
+- **OpenClaw agents** — Primary use case. MPM is the memory layer for OpenClaw.
+- **Any AI agent** — Works standalone via CLI. Can ingest from any JSONL session format.
+- **Platform** — Linux, macOS (Unix-like systems with fsnotify support)
+- **Database** — SQLite with FTS5 (built into Go's sqlite3 driver)
+- **Requirements** — Go 1.18+, ~50MB disk space
+
+---
+
+## Use Cases
+
+- **Long-running agentic workflows** — Memory persists across sessions
+- **Multi-project agents** — Separate databases per project via `MPM_WORKSPACE`
+- **Shared team memory** — Reference library shared across agents
+- **Personal AI coding assistant** — Your code patterns, preferences, lessons learned
+- **Agent-to-agent memory transfer** — External DB polling syncs from OpenClaw
+
+---
+
+## Quick Start
+
+```bash
+# Build
+make build
+
+# Start daemon (starts both main daemon + watch daemon)
+./bin/mpm start
+
+# Check status
+./bin/mpm status
+
+# Add a memory
+./bin/mpm memory add "Use sqlite3 Vacuum after bulk deletes"
+
+# Search memories
+./bin/mpm recall sqlite
+
+# Stop
+./bin/mpm stop
+```
+
+---
+
+## Installation
+
+See [INSTALL.md](INSTALL.md) for full installation instructions including:
+
+- Building from source
+- Installing system-wide (`make install`)
+- Shell configuration (PATH)
+- OpenClaw workspace setup
+- Configuration
+
+---
 
 ## Documentation
 
-**Full documentation:** [`docs/`](docs/)  
-**Quick Start:** [`docs/getting-started/quick-start.md`](docs/getting-started/quick-start.md)
+| Doc | What It Covers |
+|-----|----------------|
+| **[INSTALL.md](INSTALL.md)** | Installation, build, shell setup, config |
+| **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | First-time setup, daemon management |
+| **[docs/COMMANDS.md](docs/COMMANDS.md)** | Full CLI reference |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How MPM works internally |
+| **[docs/WATCH.md](docs/WATCH.md)** | Watch daemon, auto-ingestion, external DB |
+| **[docs/SYNTH.md](docs/SYNTH.md)** | LLM session synthesis pipeline |
+| **[docs/PATH_CONFIG.md](docs/PATH_CONFIG.md)** | Path resolution, MPM_WORKSPACE |
+| **[mode/README.md](mode/README.md)** | Creating and using modes |
+| **[persona/README.md](persona/README.md)** | Creating and using personas |
 
-### Key Features
+---
 
-- **Personas** - Define *who* the assistant is (default, corporate, creative, etc.)
-- **Modes** - Configure *how* it behaves (stackable for layered behavior)
-- **Memory** - Semantic knowledge base with SQLite vector search
-- **References** - Document library with chunking and vector search
-- **FTS5 Search** - Full-text search with `snippet()` highlighting
-- **Shred Protocol** - True hard delete with `DELETE` + `VACUUM`
+## Key Commands
 
-### Quick Reference
+```bash
+# Daemon
+mpm start              # Start daemon + watch daemon
+mpm stop               # Stop gracefully
+mpm status             # Status dashboard
 
-| Task | Command |
-|------|---------|
-| Show status | `mpm status` |
-| Select persona | `mpm persona set <name>` |
-| Add mode | `mpm mode add <name>` |
-| Search | `mpm memory search "query"` |
-| Watch directories | `mpm watch [--v] [--dry-run]` |
-| Add reference | `mpm reference add /path/to/file.pdf` |
-| Save session | `mpm ss` |
+# Memory
+mpm memory add "<text>"           # Add a memory
+mpm recall <query>                 # FTS5 search
+mpm memory list                    # List recent
 
+# Sessions
+mpm session list                   # List sessions
+mpm synthesize <uuid>              # LLM extract facts from session
+
+# Topics
+mpm topic add <name>              # Create topic
+mpm topic list                    # List all
+
+# Modes & Personas
+mpm mode                           # Interactive mode picker (multi-select)
+mpm persona                        # Interactive persona picker (single-select)
+
+# Lessons
+mpm lesson add "Don't do X" --type warning    # Add warning
+mpm lesson list                              # List all
+mpm lesson search debugging                   # Find lessons
+
+# Reference Library
+mpm reference add ./docs/guide.pdf   # Ingest PDF/EPUB/markdown
+mpm reference search <query>          # Search content
+```
+
+---
 
 ## Architecture
 
 ```
-symai/projects/mpm/
-├── mpm                            # Compiled binary (Golang)
-├── src/db/                        # SQLite databases (consolidated)
-│   ├── mpm.db              # Main database (memories, sessions, topics)
-│   ├── init.sql                   # Database initialization script
-│   └── schema.sql                 # Database schema
-├── mode/                          # Mode configurations (JSON)
-├── persona/                       # Persona configurations (JSON)
-├── src/                           # Source code (hidden from end users)
-│   ├── cmd/                       # CLI entry points
-│   ├── internal/                  # Core library
-│   │   ├── config/                # Path resolution (portable)
-│   │   └── ...
-│   └── go.mod                     # Go module definition
-└── docs/                          # Documentation
+CLI (mpm) ────── Unix socket ──────> Main Daemon ──> SQLite (mpm.db)
+                                          │
+                                          └──> Watch Daemon (fsnotify)
+                                                     ├── memory/*.md  → ingest as memory
+                                                     ├── sessions/*.lock → derive session
+                                                     └── external DBs → poll every 30s
 ```
 
-## Quick Start
+- **Main daemon** — CLI commands, SQLite, session synthesis
+- **Watch daemon** — Filesystem monitoring, auto-ingestion (runs independently)
 
-### 1. Add to Your Shell Configuration
+---
 
-Add these lines to `~/.bashrc` (or `~/.zshrc`):
+## Security
 
-```bash
-# MPM - Memory-Persona-Mode Manager
-export PATH="$HOME/.openclaw/workspace/flowbyte/mpm:$PATH"
-export MPM_WORKSPACE="$HOME/.openclaw/workspace"
-```
+All content is scanned against 17 regex patterns before writing. Blocked: API keys (OpenAI, GitHub, AWS, Stripe, Slack), JWTs, private keys, SSH keys, database URLs, `password=`/`secret=` patterns.
 
-Then reload:
-```bash
-source ~/.bashrc
-```
+Blocked content is logged to `mirror.jsonl` but never stored in the database.
 
-### 2. Check Status
-```bash
-mpm status             # Full dashboard
-mpm --help             # All commands
-```
+See [docs/security/security.md](docs/security/security.md) for full threat model.
 
-## Documentation Structure
+---
 
-| Section | Description |
-|---------|-------------|
-| **getting-started/** | Installation and quick start |
-| **commands/** | CLI command reference |
-| **advanced/** | FTS5 search, shred protocol, native ingestion |
-| **security/** | Threat model and security implementation |
+## Database
 
-## Installation
+Location: `src/db/mpm.db` (SQLite with FTS5 indexes)
 
-### Enable via OpenClaw
-```bash
-openclaw skills enable mpm
-```
+Key tables: `memories`, `sessions`, `topics`, `topic_memberships`, `modes`, `personas`, `reference_docs`, `reference_chunks`, `lessons`
 
-### Manual Config
-Add to `~/.openclaw/openclaw.json`:
-```json
-"skills": {
-  "entries": {
-    "mpm": { "enabled": true }
-  }
-}
-```
+Path resolution: `MPM_WORKSPACE` env var → executable-relative → CWD fallback.
 
-### Verify
-```bash
-mpm status
-```
-
-## Setup
-
-See [`docs/getting-started/quick-start.md`](docs/getting-started/quick-start.md) for detailed setup instructions.
-
-### Customizing Paths
-
-Edit `mpm_config.json` in the MPM project directory:
-
-```bash
-nano $HOME/.openclaw/workspace/flowbyte/mpm/mpm_config.json
-```
-
-```json
-{
-  "workspace": "$HOME/.openclaw/workspace",
-  "memory_dir": "$HOME/.openclaw/workspace/memory",
-  "sessions_dir": "$HOME/.openclaw/agents/main/sessions"
-}
-```
-
-**Changes take effect immediately** - no rebuild or restart needed!
-
-## Credits
-
-**Created by:**
-- **v** (human developer)
-- **Great_808** (The Great 808 - AI agent)
-
-**First release:** 2026-03-20
-
-**Core Principle:** *"Memory is sacred."*  
-Treat what you remember with care. Curate, don't hoard.
-
-## See Also
-
-- **[docs/](docs/)** - Full documentation
-- **[src/](src/)** - Implementation details
-- **[SET-UP.md](SET-UP.md)** - Detailed setup guide
-- **[STRUCTURE.md](STRUCTURE.md)** - Project structure
+---
 
 ## License
 
 Part of the OpenClaw agent ecosystem.
 
+**Created by:** v (human) + Great_808 (AI)
+
 ---
 
-**Status:** ✅ Production Ready  
-**Last Updated:** 2026-03-30
-
-### New in v6.0.1 (2026-03-30):
-
-**Watch Daemon (fsnotify-based file watcher):**
-- `mpm watch [--v] [--dry-run] [--once]` - Monitor directories for auto-ingestion
-- Route A (.md): Create/Write → sanitize → ingest as LTM → delete
-- Route B (.lock): Remove → process matching .jsonl → extract facts → delete
-- Startup sweep processes existing files on daemon start
-
-**New in v6.0.0 (2026-03-27):
-
-**FTS5 Search (Full-Text Search with Highlighting):**
-- `mpm session search "docker"` - Search sessions with highlighted results
-- `mpm topic search "ai"` - Search topics with `snippet()` highlighting
-- `mpm memory search "kubernetes"` - Search memories with FTS5
-
-**Shred Protocol (Hard Delete with VACUUM):**
-- `mpm session shred <id>` - Hard delete session (irreversible + VACUUM)
-- `mpm topic shred <id>` - Hard delete topic (cascading + VACUUM)
-- `mpm memory shred <id>` - Hard delete memory (VACUUM)
-
-**Database Schema:**
-- FTS5 virtual tables added to all three tiers
-- Sync triggers to keep FTS5 in sync
-- `snippet()` function for search result highlighting
-
-**Native Document Ingestion:**
-- PDF parsing: `github.com/ledongthuc/pdf` (pure Go)
-- EPUB parsing: `archive/zip` + `golang.org/x/net/html`
-- No external tools (Calibre, Python pdfplumber, etc.) needed
+**Status:** Production Ready
