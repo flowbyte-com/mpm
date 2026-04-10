@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -22,6 +23,38 @@ import (
 	mpminternal "mpm/internal"
 
 	"github.com/fsnotify/fsnotify"
+)
+
+// ---------------------------------------------------------------------------
+// Pre-compiled regex patterns (compiled once at package init, not per-call)
+// ---------------------------------------------------------------------------
+
+// extractFacts patterns — matched against session JSON lines
+var factPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^.*"(name|key|value|path|url|endpoint|config|setting|preference)":\s*".*"$`),
+	regexp.MustCompile(`(?i)^.*'(name|key|value|path|url|endpoint|config|setting|preference)':\s*'.*'$`),
+	regexp.MustCompile(`(?i)^\s*[-*]\s+[A-Z].*:.*`),
+	regexp.MustCompile(`(?i)^(user|preference|config|setting|path|name|key|value)[\s:-]+.+`),
+}
+
+var skipPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^(okay|ok|yes|yeah|yep|sure|great|thanks|thank you|i think|i believe|i feel)`),
+	regexp.MustCompile(`(?i)^(the user|they|them|this is|here is|i'll|i will|i can|i could|let me|would you|could you)`),
+	regexp.MustCompile(`^//.*`),
+	regexp.MustCompile(`^\s*#.*`),
+}
+
+// looksLikeFact patterns
+var looksLikeFactPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^(my |the |user )?[a-z]+ [a-z]+ is|are|has|was|were`),
+	regexp.MustCompile(`(?i)^(remember|note|fact|important|preference)`),
+	regexp.MustCompile(`(?i)^\(.*\) `),
+}
+
+// extractKeywords patterns
+var (
+	hashPattern  = regexp.MustCompile(`#([a-zA-Z][a-zA-Z0-9_-]*)`)
+	camelPattern = regexp.MustCompile(`([A-Z][a-z]+[A-Z][a-zA-Z]*)`)
 )
 
 // =============================================================================
@@ -95,6 +128,14 @@ func cmdWatch(args []string) bool {
 	daemon.startupSweep()
 	fmt.Printf("✅ Startup sweep complete. Watching for changes...\n\n")
 
+	// Start external DB polling goroutines
+	cfg, _ := config.LoadConfig()
+	externalDBs := cfg.GetExternalDbs()
+	if len(externalDBs) > 0 {
+		fmt.Printf("🔄 Starting %d external DB poller(s)...\n", len(externalDBs))
+		startExternalDBPolling(externalDBs, *dryRun, *verbose)
+	}
+
 	// Setup signal handling for graceful shutdown
 	done := make(chan bool)
 	go daemon.handleSignals(done)
@@ -124,7 +165,7 @@ func cmdWatch(args []string) bool {
 }
 
 // resolveWatchDirs determines which directories to watch for the daemon
-// Priority: 1) CLI flags, 2) Config file (memory_dir/sessions_dir), 3) OpenClaw workspace defaults
+// Priority: 1) CLI flags, 2) Config file (memory_dirs/sessions_dirs), 3) OpenClaw workspace defaults
 // NOTE: These are the paths the DAEMON watches for OpenClaw-created .md and session files.
 //       The MPM database is separate and always at mpm/src/db/mpm.db.
 func resolveWatchDirs(memDir, sesDir string) []string {
@@ -133,32 +174,49 @@ func resolveWatchDirs(memDir, sesDir string) []string {
 	// Load config for fallback paths
 	cfg, _ := config.LoadConfig()
 
-	// Determine memory directory to watch
-	if memDir == "" {
-		memDir = cfg.MemoryDir
-	}
+	// Determine memory directories to watch (array from config)
+	memoryDirs := cfg.GetMemoryDirs()
 	if memDir != "" {
+		// CLI flag overrides config
 		resolved := config.ResolveEnvPath(memDir)
 		if dirExists(resolved) {
 			dirs = append(dirs, resolved)
+		}
+	} else if len(memoryDirs) > 0 {
+		// Use array from config
+		for _, md := range memoryDirs {
+			resolved := config.ResolveEnvPath(md)
+			if dirExists(resolved) {
+				dirs = append(dirs, resolved)
+			}
 		}
 	} else {
 		// Default: OpenClaw workspace memory directory
 		workspace := config.GetWorkspace()
 		defaultMem := filepath.Join(workspace, "memory")
-		if dirExists(defaultMem) {
-			dirs = append(dirs, defaultMem)
+		// Always add mpm root memory/ as watched dir (agents write there)
+		// mkdir if missing so fsnotify can attach to it when created
+		if !dirExists(defaultMem) {
+			os.MkdirAll(defaultMem, 0755)
 		}
+		dirs = append(dirs, defaultMem)
 	}
 
-	// Determine sessions directory to watch
-	if sesDir == "" {
-		sesDir = cfg.SessionsDir
-	}
+	// Determine sessions directories to watch (array from config)
+	sessionsDirs := cfg.GetSessionsDirs()
 	if sesDir != "" {
+		// CLI flag overrides config
 		resolved := config.ResolveEnvPath(sesDir)
 		if dirExists(resolved) {
 			dirs = append(dirs, resolved)
+		}
+	} else if len(sessionsDirs) > 0 {
+		// Use array from config
+		for _, sd := range sessionsDirs {
+			resolved := config.ResolveEnvPath(sd)
+			if dirExists(resolved) {
+				dirs = append(dirs, resolved)
+			}
 		}
 	} else {
 		// Default: OpenClaw agents sessions directory
@@ -176,6 +234,143 @@ func resolveWatchDirs(memDir, sesDir string) []string {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// startExternalDBPolling starts goroutines to poll each configured external DB.
+// Each goroutine gets its own DatabaseManager connection (created once, reused per poll).
+func startExternalDBPolling(dbs []config.ExternalDB, dryRun, verbose bool) {
+	for _, db := range dbs {
+		go pollExternalDB(db, dryRun, verbose)
+	}
+}
+
+// pollExternalDB polls an external SQLite DB at the configured interval,
+// ingesting new memories since the last cursor.
+func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool) {
+	interval := dbCfg.IntervalSeconds
+	if interval <= 0 {
+		interval = 30
+	}
+
+	if verbose {
+		fmt.Printf("🔄 Starting external DB poller: %s (label=%s, interval=%ds)\n",
+			dbCfg.Path, dbCfg.Label, interval)
+	}
+
+	// Create DatabaseManager once (reused across all polls)
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: can't open MPM DB: %v\n", dbCfg.Label, err)
+		}
+		return
+	}
+	defer dm.Close()
+
+	// Run immediately on startup, then on interval
+	pollOnce(&dbCfg, dm, dryRun, verbose)
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		pollOnce(&dbCfg, dm, dryRun, verbose)
+	}
+}
+
+// pollOnce performs one poll cycle for an external DB.
+// The dm (DatabaseManager) is passed in and reused — caller manages its lifecycle.
+func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun, verbose bool) {
+	// Open read-only connection to external DB
+	extDB, err := sql.Open("sqlite3", dbCfg.Path+"?mode=ro")
+	if err != nil {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: open failed: %v\n", dbCfg.Label, err)
+		}
+		return
+	}
+	defer extDB.Close()
+
+	cursor, err := dm.GetExternalDBCursor(dbCfg.Label)
+	if err != nil {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: get cursor failed: %v\n", dbCfg.Label, err)
+		}
+		cursor = ""
+	}
+
+	// Query for new rows since cursor
+	query := `
+		SELECT id, content, session_id, tags, created_at
+		FROM memories
+		WHERE deleted_at IS NULL
+	`
+	var rows *sql.Rows
+	if cursor != "" {
+		rows, err = extDB.Query(query+" AND created_at > ? ORDER BY created_at ASC", cursor)
+	} else {
+		rows, err = extDB.Query(query+" ORDER BY created_at ASC")
+	}
+	if err != nil {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: query failed: %v\n", dbCfg.Label, err)
+		}
+		return
+	}
+	defer rows.Close()
+
+	var latestCursor string
+	count := 0
+	for rows.Next() {
+		var id, content, sessionID, tags, createdAt string
+		if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
+			continue
+		}
+		latestCursor = createdAt
+
+		if dryRun {
+			if verbose {
+				fmt.Printf("   [dry-run] would ingest: id=%s, session=%s\n", id, sessionID)
+			}
+			continue
+		}
+
+		// Check for duplicate before insert
+		existing, _ := dm.GetMemory(id)
+		if existing != nil {
+			continue // already ingested
+		}
+
+		// Ingest the memory
+		tagsMap := map[string]interface{}{"source": dbCfg.Label, "external_db": true}
+		metadata := map[string]interface{}{
+			"source_label": dbCfg.Label,
+			"source_id":    id,
+		}
+		embedding := mpminternal.HashEmbed(content)
+		_, err := dm.SaveMemory("memories", content, sessionID, tagsMap, metadata, embedding)
+		if err != nil {
+			if verbose {
+				fmt.Printf("⚠️  external DB %s: save failed for id=%s: %v\n", dbCfg.Label, id, err)
+			}
+			continue
+		}
+		count++
+	}
+
+	// Persist cursor
+	if latestCursor != "" {
+		if err := dm.SetExternalDBCursor(dbCfg.Label, latestCursor); err != nil {
+			if verbose {
+				fmt.Printf("⚠️  external DB %s: set cursor failed: %v\n", dbCfg.Label, err)
+			}
+		}
+	}
+
+	if verbose && count > 0 {
+		fmt.Printf("✅ external DB %s: ingested %d new memories (cursor=%s)\n",
+			dbCfg.Label, count, latestCursor)
+	}
 }
 
 // isSystemFile returns true for OpenClaw live session registry and config files
@@ -254,7 +449,7 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 
 // IsReady returns true if the daemon is properly initialized
 func (d *watcherDaemon) IsReady() bool {
-	return d != nil && d.db != nil && d.db.DB != nil
+	return d != nil && d.db != nil && d.db.IsOpen()
 }
 
 // handleSignals handles graceful shutdown on SIGINT/SIGTERM
@@ -848,22 +1043,6 @@ func (d *watcherDaemon) extractFacts(lines []string) []string {
 		}
 	}()
 
-	// Patterns that indicate declarative statements worth preserving
-	factPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^.*"(name|key|value|path|url|endpoint|config|setting|preference)":\s*".*"$`), // JSON key-value pairs
-		regexp.MustCompile(`(?i)^.*'(name|key|value|path|url|endpoint|config|setting|preference)':\s*'.*'$`), // JSON single-quoted
-		regexp.MustCompile(`(?i)^\s*[-*]\s+[A-Z].*:.*`),                                                     // Bullet points with capital first letter (likely facts)
-		regexp.MustCompile(`(?i)^(user|preference|config|setting|path|name|key|value)[\s:-]+.+`),            // Explicit fact patterns
-	}
-
-	// Patterns to skip (conversational filler) - only for non-JSON lines
-	skipPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^(okay|ok|yes|yeah|yep|sure|great|thanks|thank you|i think|i believe|i feel)`),
-		regexp.MustCompile(`(?i)^(the user|they|them|this is|here is|i'll|i will|i can|i could|let me|would you|could you)`),
-		regexp.MustCompile(`^//.*`),   // Comments
-		regexp.MustCompile(`^\s*#.*`), // Code/comments
-	}
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if len(line) < 5 {
@@ -990,13 +1169,8 @@ func (d *watcherDaemon) looksLikeFact(text string) bool {
 			return false
 		}
 	}
-	// Look for explicit fact patterns
-	factPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^(my |the |user )?[a-z]+ [a-z]+ is|are|has|was|were`),
-		regexp.MustCompile(`(?i)^(remember|note|fact|important|preference)`),
-		regexp.MustCompile(`(?i)^\(.*\) `), // Message metadata prefix
-	}
-	for _, p := range factPatterns {
+	// Look for explicit fact patterns (pre-compiled at package level)
+	for _, p := range looksLikeFactPatterns {
 		if p.MatchString(text) {
 			return true
 		}
@@ -1013,8 +1187,7 @@ func (d *watcherDaemon) extractKeywords(content string) []string {
 	var tags []string
 	seen := make(map[string]bool)
 
-	// Extract # tags
-	hashPattern := regexp.MustCompile(`#([a-zA-Z][a-zA-Z0-9_-]*)`)
+	// Extract # tags (hashPattern pre-compiled at package level)
 	for _, match := range hashPattern.FindAllStringSubmatch(content, -1) {
 		tag := strings.ToLower(match[1])
 		if !seen[tag] && len(tag) > 2 {
@@ -1023,8 +1196,7 @@ func (d *watcherDaemon) extractKeywords(content string) []string {
 		}
 	}
 
-	// Extract CamelCase words (potential project/component names)
-	camelPattern := regexp.MustCompile(`([A-Z][a-z]+[A-Z][a-zA-Z]*)`)
+	// Extract CamelCase words (camelPattern pre-compiled at package level)
 	for _, match := range camelPattern.FindAllStringSubmatch(content, -1) {
 		tag := strings.ToLower(match[1])
 		if !seen[tag] && len(tag) > 2 {
@@ -1142,7 +1314,7 @@ func (d *watcherDaemon) getLTMMemories() ([]LTMemory, error) {
 	// Query memories with weight >= 10 (LTM flag)
 	query := `SELECT id, content, tags, metadata, created_at FROM memories WHERE metadata LIKE '%is_long_term":true%' OR metadata LIKE '%weight":10%' LIMIT 1000`
 
-	rows, err := d.db.DB.Query(query)
+	rows, err := d.db.SQLDB().Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,7 +1367,7 @@ func (d *watcherDaemon) findTopicByTag(tag string) (*Topic, error) {
 	query := `SELECT id, name, description, tags, created_at FROM topics WHERE name LIKE ? OR tags LIKE ? LIMIT 1`
 	tagPattern := "%" + tag + "%"
 
-	row := d.db.DB.QueryRow(query, tagPattern, tagPattern)
+	row := d.db.SQLDB().QueryRow(query, tagPattern, tagPattern)
 	var t Topic
 	err := row.Scan(&t.ID, &t.Name, &t.Description, &t.Tags, &t.CreatedAt)
 	if err != nil {
@@ -1211,7 +1383,7 @@ func (d *watcherDaemon) createTopicFromCluster(tag string, memoryIDs []string) (
 
 	// Create the topic
 	topicID := mpminternal.GenerateID()
-	_, err := d.db.DB.Exec(`
+	_, err := d.db.SQLDB().Exec(`
 		INSERT INTO topics (id, name, description, tags)
 		VALUES (?, ?, ?, ?)
 	`, topicID, topicName, topicDesc, tag)
@@ -1223,7 +1395,7 @@ func (d *watcherDaemon) createTopicFromCluster(tag string, memoryIDs []string) (
 	for _, memID := range memoryIDs {
 		// Get session_id from memory
 		var sessionID string
-		row := d.db.DB.QueryRow("SELECT session_id FROM memories WHERE id = ?", memID)
+		row := d.db.SQLDB().QueryRow("SELECT session_id FROM memories WHERE id = ?", memID)
 		if err := row.Scan(&sessionID); err != nil {
 			continue
 		}
@@ -1234,7 +1406,7 @@ func (d *watcherDaemon) createTopicFromCluster(tag string, memoryIDs []string) (
 		}
 
 		// Insert membership link
-		d.db.DB.Exec(`
+		d.db.SQLDB().Exec(`
 			INSERT OR IGNORE INTO topic_memberships (session_id, topic_id)
 			VALUES (?, ?)
 		`, sessionID, topicID)

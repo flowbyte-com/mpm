@@ -15,40 +15,16 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	configpkg "mpm/internal/config"
 	mpminternal "mpm/internal"
 )
 
-// getOpenClawModelBaseURL reads OpenClaw config and returns the base URL for a provider.
-func getOpenClawModelBaseURL(provider string) string {
-	cfgPath := os.ExpandEnv("$HOME/.openclaw/openclaw.json")
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return ""
-	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
-	}
-	models, ok := cfg["models"].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	providers, ok := models["providers"].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	p, ok := providers[provider].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	if baseURL, ok := p["baseUrl"].(string); ok {
-		return strings.TrimSuffix(baseURL, "/")
-	}
-	return ""
-}
+// SynthConfig holds LLM settings for synthesis.
+// Passed from mpm_config.json via LoadConfig.
+type SynthConfig = configpkg.SynthConfig
 
 // =============================================================================
-// mpm synthesize <uuid> — LLM-powered session fact extraction via MiniMax API
+// mpm synthesize <uuid> — LLM-powered session fact extraction
 // =============================================================================
 
 func handleSynthesize(args []string) int {
@@ -60,14 +36,13 @@ func handleSynthesize(args []string) int {
 
 	// Try .jsonl file first, then fall back to sessions table
 	jsonlPath := findSessionJSONL(uuid)
-	var lines []string
 	var sessionContent string
 	var meta sessionMetaRaw
 	var transcript string
 	var err error
 
 	if jsonlPath != "" {
-		lines, err = readJSONLinesRaw(jsonlPath)
+		lines, err := readJSONLinesRaw(jsonlPath)
 		if err != nil || len(lines) == 0 {
 			fmt.Fprintf(os.Stderr, "❌ Failed to read session file: %v\n", err)
 			return 1
@@ -96,9 +71,12 @@ func handleSynthesize(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	result, err := callSynthesisLLM(ctx, prompt)
+	result, topics, memories, err := callSynthesisLLM(ctx, prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Synthesis failed: %v\n", err)
+		if strings.Contains(err.Error(), "API key required") {
+			fmt.Fprintf(os.Stderr, "   Hint: add synth.api_key to mpm_config.json, or set MINIMAX_API_KEY\n")
+		}
 		return 1
 	}
 
@@ -118,8 +96,8 @@ func handleSynthesize(args []string) int {
 
 	// Ensure session exists in sessions table (FK: memories.session_id → sessions.id)
 	sessionDBID, err := dbMgr.SaveSession(fullUUID, result.SessionSummary, jsonlPath, map[string]interface{}{
-		"model":    meta.Model,
-		"provider": meta.Provider,
+		"model":                meta.Model,
+		"provider":             meta.Provider,
 		"synthesized_session": true,
 	})
 	if err != nil {
@@ -128,26 +106,26 @@ func handleSynthesize(args []string) int {
 	}
 
 	stored := 0
-	for _, fact := range result.Memories {
+	for _, fact := range memories {
 		fact = strings.TrimSpace(fact)
-		if fact == "" || fact == "null" || fact == "[]" {
+		if fact == "" {
 			continue
 		}
 		tags := map[string]interface{}{
 			"synthesized": true,
-			"session-id":  uuid,
-			"source":      "llm-synthesis",
+			"session-id": uuid,
+			"source":     "llm-synthesis",
 		}
-		for _, t := range result.Topics {
+		for _, t := range topics {
 			tags[strings.ToLower(strings.TrimSpace(t))] = true
 		}
 		metadata := map[string]interface{}{
 			"is_long_term": true,
-			"weight":        8,
-			"source_path":   jsonlPath,
-			"session_id":    uuid,
-			"synthesized":   true,
-			"summary":       result.SessionSummary,
+			"weight":       8,
+			"source_path":  jsonlPath,
+			"session_id":  uuid,
+			"synthesized": true,
+			"summary":     result.SessionSummary,
 		}
 		embedding := mpminternal.HashEmbed(fact)
 		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, tags, metadata, embedding)
@@ -158,16 +136,27 @@ func handleSynthesize(args []string) int {
 		stored++
 	}
 
-	fmt.Printf("✅ Synthesized %d facts | topics: %v | summary: %s\n",
-		stored, result.Topics, truncateStr(result.SessionSummary, 80))
+	// Report outcome clearly
+	if stored == 0 && len(memories) == 0 {
+		fmt.Println("⏭️  No memorable facts found — session was transient.")
+	} else if stored == 0 && len(memories) > 0 {
+		// LLM returned facts but all DB saves failed
+		fmt.Printf("❌ Failed to store any facts (%d extracted, all saves failed). Summary: %s\n", len(memories), truncateStr(result.SessionSummary, 80))
+	} else if stored == 0 {
+		// Facts were empty/filtered
+		fmt.Printf("⚠️  Extracted 0 facts (%d were empty/filtered). Summary: %s\n", len(memories), truncateStr(result.SessionSummary, 80))
+	} else {
+		fmt.Printf("✅ Stored %d facts | topics: %v\n", stored, topics)
+		fmt.Printf("   Summary: %s\n", truncateStr(result.SessionSummary, 120))
+	}
 	return 0
 }
 
-// SynthesisResult mirrors the LLM JSON output
+// SynthesisResult holds the raw LLM JSON output before null handling.
 type SynthesisResult struct {
-	SessionSummary string   `json:"session_summary"`
-	Topics         []string `json:"topics"`
-	Memories       []string `json:"memories"`
+	SessionSummary string          `json:"session_summary"`
+	Topics        json.RawMessage `json:"topics"`
+	Memories      json.RawMessage `json:"memories"`
 }
 
 // findFullSessionUUID looks up the full session UUID from the DB by prefix
@@ -213,7 +202,7 @@ func getSessionFromDB(uuid string) (string, error) {
 	// Try prefix match
 	rows, err := db.Query(`SELECT id, content FROM sessions WHERE id LIKE ? || '%' OR session_id LIKE ? || '%' LIMIT 1`, uuid, uuid)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("session not found: %s", uuid)
 	}
 	defer rows.Close()
 	if rows.Next() {
@@ -230,14 +219,13 @@ func findSessionJSONL(uuid string) string {
 	dirs := []string{
 		"/home/v/.openclaw/agents/main/sessions",
 	}
-	prefix := uuid
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), uuid) {
 				continue
 			}
 			if strings.HasSuffix(e.Name(), ".jsonl") {
@@ -383,7 +371,7 @@ Write facts in the third person (e.g., "User decided to...", "Architecture shift
 Each memory must be standalone and make perfect sense out of context.
 
 OUTPUT FORMAT:
-You must respond strictly with a valid JSON object matching the requested schema. Do not wrap the JSON in markdown formatting blocks or include any introductory text.`
+You must respond strictly with a valid JSON object matching the requested schema. Do not wrap the JSON in markdown formatting blocks or include any text.`
 
 func buildSynthesisPrompt(meta sessionMetaRaw, transcript string) string {
 	return fmt.Sprintf(`Session ID: %s
@@ -396,20 +384,61 @@ Transcript:
 		transcript)
 }
 
-func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, error) {
-	apiKey := os.Getenv("MINIMAX_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("MINIMAX_API_KEY not set in environment")
+// callSynthesisLLM calls the configured LLM for synthesis.
+// Credentials are read from mpm_config.json (synth section) with env var fallback.
+func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, []string, []string, error) {
+	// Load synth config from mpm_config.json
+	cfg, err := configpkg.LoadConfig()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	if baseURL == "" {
-		// Try to read from OpenClaw config
-		baseURL = getOpenClawModelBaseURL("minimax")
+	var sc *configpkg.SynthConfig
+	if cfg.Synth != nil {
+		sc = cfg.Synth
+	} else {
+		sc = &configpkg.SynthConfig{}
 	}
-	if baseURL == "" {
-		baseURL = "https://api.minimax.io/anthropic"
+
+	// Resolve API key: config wins, then env var
+	apiKey := sc.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("MINIMAX_API_KEY")
 	}
+	if apiKey == "" {
+		return nil, nil, nil, fmt.Errorf("API key required: set synth.api_key in mpm_config.json or MINIMAX_API_KEY env var")
+	}
+
+	// Resolve base URL: config wins, then known provider defaults
+	baseURL := sc.BaseURL
+	if baseURL == "" {
+		switch sc.Model {
+		case "MiniMax-M2.7", "minimax/MiniMax-M2.7":
+			baseURL = "https://api.minimax.io/anthropic"
+		default:
+			// Local and OpenAI-compatible defaults
+			baseURL = "http://localhost:11434/v1"
+		}
+	}
+
+	// Resolve model
+	model := sc.Model
+	if model == "" {
+		model = "MiniMax-M2.7"
+	}
+
+	// Resolve max tokens
+	maxTokens := sc.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+
+	// Resolve timeout
+	timeoutSecs := sc.TimeoutSecs
+	if timeoutSecs <= 0 {
+		timeoutSecs = 300
+	}
+	timeout := time.Duration(timeoutSecs) * time.Second
 
 	messages := []map[string]interface{}{
 		{"role": "system", "content": synthesisSystemPrompt},
@@ -417,34 +446,34 @@ func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, err
 	}
 
 	body := map[string]interface{}{
-		"model":      "MiniMax-M2.7",
-		"max_tokens": 1024,
-		"messages":   messages,
+		"model":       model,
+		"max_tokens":  maxTokens,
+		"messages":    messages,
 	}
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, nil, nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
@@ -454,7 +483,7 @@ func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, err
 		} `json:"content"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	var responseText string
@@ -465,27 +494,43 @@ func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, err
 		}
 	}
 	if responseText == "" {
-		return nil, fmt.Errorf("no text block in response")
+		return nil, nil, nil, fmt.Errorf("no text block in response")
 	}
+
 	// Strip markdown code fences
 	for _, fence := range []string{"```json", "```", "`"} {
 		responseText = strings.TrimPrefix(responseText, fence)
 	}
 	responseText = strings.TrimSpace(responseText)
+
 	// Extract first JSON object
 	start := strings.Index(responseText, "{")
 	end := strings.LastIndex(responseText, "}")
 	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("no JSON object found in response: %s", truncateStr(responseText, 300))
+		return nil, nil, nil, fmt.Errorf("no JSON object found in response: %s", truncateStr(responseText, 300))
 	}
 	responseText = responseText[start : end+1]
 
-	var synthesisResult SynthesisResult
-	if err := json.Unmarshal([]byte(responseText), &synthesisResult); err != nil {
-		return nil, fmt.Errorf("failed to parse synthesis JSON: %w\nRaw: %s", err, truncateStr(responseText, 300))
+	var sr SynthesisResult
+	if err := json.Unmarshal([]byte(responseText), &sr); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse synthesis JSON: %w\nRaw: %s", err, truncateStr(responseText, 300))
 	}
 
-	return &synthesisResult, nil
+	// Handle null/missing array fields safely
+	var topics, memories []string
+
+	if len(sr.Topics) > 0 && string(sr.Topics) != "null" {
+		if err := json.Unmarshal(sr.Topics, &topics); err != nil {
+			topics = nil
+		}
+	}
+	if len(sr.Memories) > 0 && string(sr.Memories) != "null" {
+		if err := json.Unmarshal(sr.Memories, &memories); err != nil {
+			memories = nil
+		}
+	}
+
+	return &sr, topics, memories, nil
 }
 
 func truncateStr(s string, maxLen int) string {
