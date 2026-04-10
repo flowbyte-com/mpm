@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,7 +43,12 @@ var (
 // resolvePath resolves a path: MPM_WORKSPACE env var → executable-relative → CWD
 func resolvePath(envKey, defaultRel string) string {
 	if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
-		return ws + "/flowbyte/mpm/" + defaultRel
+		// If workspace ends with "mpm", it's already the project root
+		if filepath.Base(ws) == "mpm" {
+			return filepath.Join(ws, defaultRel)
+		}
+		// Otherwise treat workspace as workspace root and mpm is a subdir
+		return filepath.Join(ws, "mpm", defaultRel)
 	}
 	exec, err := os.Executable()
 	if err == nil {
