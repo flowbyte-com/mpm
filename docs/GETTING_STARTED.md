@@ -1,17 +1,21 @@
 # Getting Started with MPM
 
+MPM (Memory-Persona-Mode Manager) — SQLite-native agent state management.
+
 ## Prerequisites
 
 - Go 1.18+
-- OpenClaw workspace at `$HOME/.openclaw/workspace`
 - Unix-like OS (Linux/macOS)
+- ~50MB disk space
 
 ## Build
 
 ```bash
-cd $HOME/.openclaw/workspace/flowbyte/mpm
-go build -o bin/mpm ./cmd/mpm
+cd ~/.openclaw/workspace/flowbyte/mpm
+make build
 ```
+
+This creates `bin/mpm`. Run it directly with `./bin/mpm` or add it to your PATH.
 
 ## Start the Daemon
 
@@ -32,13 +36,13 @@ Sample output:
 ╔══════════════════════════════════════════════════╗
 ║  SymAI mpm 🦞 Crustafarian Edition             ║
 ╠══════════════════════════════════════════════════╣
-║  Version:     dev                          ║
+║  Version:     dev                               ║
 ║  Uptime:      42s                               ║
-║  Mode:        research                           ║
+║  Mode:        research                          ║
 ║  Persona:     default                           ║
 ║  Database:    OK (811 KB)                       ║
-║  Memories:    20                                ║
-║  Sessions:    11                                ║
+║  Memories:    20                               ║
+║  Sessions:    11                               ║
 ║  Watch:       Running (PID: 48201)              ║
 ╚══════════════════════════════════════════════════╝
 ```
@@ -52,10 +56,10 @@ mpm memory add "Remember to check the propane levels every Sunday"
 ## Search Memories
 
 ```bash
-mpm memory search propane
+mpm recall propane
 ```
 
-## Switch Mode (Interactive TUI)
+## Switch Mode
 
 ```bash
 mpm mode
@@ -63,7 +67,7 @@ mpm mode
 
 Opens a three-column TUI picker — use arrows/tab to navigate, space to multi-select, enter to confirm.
 
-## Switch Persona (Interactive TUI)
+## Switch Persona
 
 ```bash
 mpm persona
@@ -71,11 +75,31 @@ mpm persona
 
 Single-select TUI — pick one, enter to confirm.
 
+## Add a Lesson
+
+Lessons capture hard-won wisdom:
+
+```bash
+mpm lesson add "Check file extensions before running rm" --type warning --tags safety
+mpm lesson add "Use gofmt before committing Go code" --type practice --tags go,style
+```
+
+Lesson types:
+- `warning` — "don't do X" (negative lessons, cost was felt)
+- `practice` — "do Y" (positive lessons, best practices discovered)
+- `insight` — "X leads to Y" (causal knowledge, default)
+
+List and search lessons:
+```bash
+mpm lesson list
+mpm lesson search debugging
+```
+
 ## View Diagnostics
 
 ```bash
 mpm doctor         # Check for issues
-mpm doctor --fix   # Attempt auto-repair
+mpm doctor --fix  # Attempt auto-repair
 ```
 
 ## Stop the Daemon
@@ -84,74 +108,45 @@ mpm doctor --fix   # Attempt auto-repair
 mpm stop
 ```
 
----
-
 ## Directory Layout
 
 ```
-flowbyte/mpm/
-├── bin/
-│   └── mpm          # Main binary
-├── cmd/mpm/
-│   ├── main.go      # Entry point
-│   ├── handlers.go  # Command handlers
-│   ├── router.go    # CLI routing
-│   ├── watch.go     # Watch daemon
-│   └── ...
-├── src/
-│   ├── db/
-│   │   ├── mpm.db          # SQLite database
-│   │   └── mirror.jsonl     # Audit log
-│   └── internal/
-│       ├── config/         # Path resolution
-│       ├── memory.go       # Memory + sensitive blocking
-│       ├── mode.go         # Mode management
-│       └── persona.go      # Persona management
-├── docs/                   # This documentation
-└── archive/                # Deprecated docs
+~/.openclaw/workspace/flowbyte/mpm/
+├── bin/mpm                    # Compiled binary
+├── src/db/
+│   ├── mpm.db                # SQLite database
+│   └── mirror.jsonl          # Audit log
+├── mode/                     # Mode configurations (JSON)
+├── persona/                  # Persona configurations (Markdown)
+├── docs/                     # This documentation
+├── internal/                 # Source code
+└── mpm_config.json          # Configuration
 ```
 
----
+## Configuration
 
-## Agent-Driven Workflows
+Edit `mpm_config.json` to configure watch directories and external databases:
 
-MPM works best when your agent knows about it. Add lines to your agent's system/memory files for auto-discovery:
-
-```markdown
-# MPM memory system at ~/.openclaw/workspace/flowbyte/mpm
-# CLI: mpm start, mpm memory add, mpm persona, mpm mode, etc.
-# Personas: default, oracle, machiavelli, whiterabbit, caterpillar, cheshire, hatter, queen, alice
-# Modes: ask, creative, debug, default, design, direct, grow, plan, research, ship
+```json
+{
+  "memory_dirs": [],
+  "sessions_dirs": [],
+  "external_dbs": [
+    {
+      "path": "~/.openclaw/memory/main.sqlite",
+      "label": "openclaw",
+      "interval_seconds": 30
+    }
+  ],
+  "synth": {
+    "model": "MiniMax-M2.7",
+    "api_key": "",
+    "base_url": ""
+  }
+}
 ```
 
-**Most CLI tasks can be done by asking your agent directly:**
-- "Add this meeting notes to mpm memory"
-- "Switch my mpm persona to the mad hatter"
-- "Search mpm memories for anything about Go generics"
-- "Create a new persona inspired by this reference document"
-- "What lessons has mpm collected about debugging?"
-
-Your agent acts as the frontend — MPM is the persistent memory layer underneath.
-
----
-
-## Lessons
-
-Lessons are distilled wisdom — warnings you've learned, practices that work, and insights from experience. Unlike raw memories, lessons are deduplicated and reinforced over time.
-
-```bash
-mpm lesson add "Check file extensions before running rm" --type warning --tags safety
-mpm lesson add "Use gofmt before committing Go code" --type practice --tags go,style
-mpm lesson list                        # See all lessons
-mpm lesson search debugging            # Find lessons about debugging
-```
-
-Lesson types:
-- `warning` — "don't do X" (cost was felt)
-- `practice` — "do Y" (best practices discovered)
-- `insight` — "X leads to Y" (causal knowledge)
-
----
+See [WATCH.md](WATCH.md) for details on auto-ingestion and [SYNTH.md](SYNTH.md) for synthesis configuration.
 
 ## Next Steps
 
@@ -159,7 +154,8 @@ Lesson types:
 - [ARCHITECTURE.md](ARCHITECTURE.md) — How MPM works internally
 - [PATH_CONFIG.md](PATH_CONFIG.md) — Path resolution explained
 - [WATCH.md](WATCH.md) — Watch daemon details
+- [INSTALL.md](../INSTALL.md) — System-wide installation
 
 ---
 
-**Last Updated:** 2026-04-04
+**Last Updated:** 2026-04-10
