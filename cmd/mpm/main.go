@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -107,10 +106,6 @@ func dispatchDirect(args []string) bool {
 
 	case "doctor":
 		runDoctorCommand()
-		return true
-
-	case "fortune":
-		handleFortuneDirect()
 		return true
 
 	case "start":
@@ -345,6 +340,10 @@ type DaemonStatus struct {
 	WebhookEnabled    bool     `json:"webhook_enabled"`
 	HeartbeatInterval string   `json:"heartbeat_interval"`
 	PreFlightStatus   string   `json:"preflight_status"` // "Passed", "Repaired", "Failed", or "Unknown"
+	Memories          int      `json:"memories"`
+	Sessions          int      `json:"sessions"`
+	Topics            int      `json:"topics"`
+	References        int      `json:"references"`
 }
 
 // Message is the socket protocol
@@ -1156,6 +1155,7 @@ func isWorkCommand(args []string) bool {
 		"compile":   true,
 		"shred":     true,
 		"watch":     true,
+		"lesson":    true,
 	}
 
 	if metaCommands[args[0]] {
@@ -1288,9 +1288,6 @@ func main() {
 				os.Exit(0)
 			case "logs":
 				handleLogsCommand()
-				os.Exit(0)
-			case "fortune":
-				handleFortuneDirect()
 				os.Exit(0)
 			default:
 				// mode, persona, llm, memory, compile, shred, ss - need daemon state
@@ -1512,20 +1509,6 @@ func getLogPath() string {
 	sp := socketPath()
 	logDir := filepath.Dir(sp)
 	return filepath.Join(logDir, logFileName)
-}
-
-// handleFortune returns Crustafarian wisdom to daemon client
-func handleFortune(conn net.Conn) {
-	resp := Message{
-		Output: GetFortuneOracle(),
-		Done:   true,
-	}
-	json.NewEncoder(conn).Encode(resp)
-}
-
-// handleFortuneDirect runs fortune standalone (no daemon needed)
-func handleFortuneDirect() {
-	fmt.Print(GetFortuneOracle())
 }
 
 // handleStartCommand starts the daemon if not already running
@@ -1844,10 +1827,6 @@ func handleConnection(conn net.Conn) {
 			// Start the Bubbletea TUI dashboard
 			StartDashboard(sockPath)
 			return
-		case "fortune":
-			// Crustafarian wisdom
-			handleFortune(conn)
-			return
 		case "mode":
 			// Mode operations with fzf selector
 			handleMode(conn, msg.Args[1:])
@@ -1875,6 +1854,10 @@ func handleConnection(conn net.Conn) {
 		case "topic":
 			// Topic operations
 			handleTopic(conn, msg.Args[1:])
+			return
+		case "lesson":
+			// Lesson operations
+			handleLesson(conn, msg.Args[1:])
 			return
 		case "watch":
 			// Watch daemon operations
@@ -1959,6 +1942,13 @@ func handleStatus(conn net.Conn) {
 		HeartbeatInterval: formatHeartbeatInterval(),
 		PreFlightStatus:   preflightStatus,
 	}
+
+	// Get memory, session, topic, and reference counts
+	memCount, sessCount, topicCount, refCount := getStatusCounts()
+	status.Memories = memCount
+	status.Sessions = sessCount
+	status.Topics = topicCount
+	status.References = refCount
 
 	logInfo("status", daemonPid, "Status requested")
 
@@ -3347,46 +3337,95 @@ func startWatchDaemon() error {
 	return nil
 }
 
-// stopWatchDaemon sends SIGTERM to the watch subprocess.
-// Returns immediately after signaling — does not wait for process exit.
-// The watch monitor goroutine (started in startWatchDaemon) handles reaping.
+// stopWatchDaemon sends SIGTERM to the watch subprocess and waits for it to exit.
 func stopWatchDaemon() error {
 	if watchPid == 0 {
 		return fmt.Errorf("watch daemon not running")
 	}
 
-	proc, err := os.FindProcess(watchPid)
-	if err != nil {
-		return fmt.Errorf("failed to find watch process: %w", err)
-	}
-
-	// Send SIGTERM to the watch process.
-	// Note: we send to the PID directly (not process group) to avoid affecting
-	// unrelated processes. The watch is its own process group leader (Setpgid: true),
-	// but we only signal the specific PID.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if !errors.Is(err, os.ErrProcessDone) {
-			return fmt.Errorf("failed to signal watch: %w", err)
+	// Debug: write to file
+	debugWrite := func(msg string) {
+		if f, err := os.OpenFile("/tmp/mpm_shutdown_debug.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			f.WriteString(fmt.Sprintf("  stopWatchDaemon: %s at %v\n", msg, time.Now()))
+			f.Close()
 		}
 	}
+	debugWrite(fmt.Sprintf("START PID=%d", watchPid))
 
-	// Don't call watchCmd.Wait() here — the monitor goroutine in startWatchDaemon
-	// handles that. Calling Wait() on an exec.Cmd with Setpgid:true can deadlock
-	// because of how Go manages the process group pipe state.
-	// The monitor goroutine will set watchPid = 0 when the process exits.
-	// We give it up to 500ms to clean up.
-	for i := 0; i < 50; i++ {
-		if watchPid == 0 {
+	// Send SIGTERM directly via syscall.Kill
+	err := syscall.Kill(watchPid, syscall.SIGTERM)
+	debugWrite(fmt.Sprintf("Kill(SIGTERM) err=%v", err))
+
+	if err != nil {
+		if err == syscall.ESRCH {
+			debugWrite("Process already gone (ESRCH)")
+			watchPid = 0
+			watchCmd = nil
+			return nil
+		}
+		debugWrite(fmt.Sprintf("Kill failed: %v", err))
+		return fmt.Errorf("failed to signal watch: %w", err)
+	}
+
+	debugWrite("SIGTERM sent, waiting...")
+
+	// Wait for process using WNOHANG (non-blocking) in a loop.
+	deadline := time.Now().Add(10 * time.Second)
+	iterations := 0
+	for {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(watchPid, &status, syscall.WNOHANG, nil)
+		iterations++
+
+		if err == nil && pid == watchPid {
+			// Successfully reaped
+			debugWrite(fmt.Sprintf("Watch daemon reaped (status %d)", status.ExitStatus()))
+			watchPid = 0
+			watchCmd = nil
+			return nil
+		}
+		// pid == 0 means child still running; ECHILD means not our child (process group mismatch)
+		if err != nil && err != syscall.ECHILD {
+			debugWrite(fmt.Sprintf("Wait4 unexpected error: %v", err))
+		}
+		if err == syscall.ECHILD {
+			// Process is not our child - likely in a different process group
+			// It may still be running, but we can't wait for it
+			debugWrite(fmt.Sprintf("Watch daemon not our child (ECHILD) - may still be running"))
+			watchPid = 0
+			watchCmd = nil
+			return nil
+		}
+		if time.Now().After(deadline) {
+			debugWrite(fmt.Sprintf("Deadline hit after %d iterations", iterations))
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Force cleanup if monitor goroutine didn't complete in time
+	// Timeout: force kill with SIGKILL
+	debugWrite("Sending SIGKILL")
+	syscall.Kill(watchPid, syscall.SIGKILL)
+	// Wait briefly for SIGKILL to take effect
+	for i := 0; i < 20; i++ {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(watchPid, &status, syscall.WNOHANG, nil)
+		if err == syscall.ECHILD {
+			debugWrite("SIGKILL: process not our child")
+			watchPid = 0
+			watchCmd = nil
+			return nil
+		}
+		if pid != 0 {
+			debugWrite(fmt.Sprintf("SIGKILL reaped (pid=%d)", pid))
+			watchPid = 0
+			watchCmd = nil
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	watchPid = 0
 	watchCmd = nil
-
-	logInfo("watch", daemonPid, "Watch daemon stopped")
 	return nil
 }
 
@@ -3447,7 +3486,7 @@ func activateDefaultMode() {
 	}
 
 	// Set the default 808 mode
-	defaultMode := "~m.808"
+	defaultMode := "808"
 
 	// Initialize mode manager if not already done
 	if modeManager == nil {
@@ -3468,7 +3507,7 @@ func activateDefaultMode() {
 			logWarn("mode", daemonPid, fmt.Sprintf("Failed to activate default 808 mode: %v", err))
 			return
 		}
-		logInfo("mode", daemonPid, "Activated default mode: ~m.808 (The_Great_808)")
+		logInfo("mode", daemonPid, "Activated default mode: 808 (The_Great_808)")
 	}
 }
 
@@ -3580,12 +3619,22 @@ func handleShutdown(force bool, conn net.Conn) {
 	// Phase 3: Exit
 	enc.Encode(Message{Output: "  ✅ [3/3] Daemon stopped.\n", Done: true, ExitCode: 0})
 
-	// NOTE: We call handleExit in a goroutine and return.
-	// handleExit calls os.Exit(0) which terminates the process immediately,
-	// so we can't wait for it. The response above may not be fully received
-	// by the client before the process exits, but the important thing is
-	// that the daemon shuts down cleanly.
-	go handleExit()
+	// Perform synchronous cleanup and exit.
+	// Note: We don't close the listener here - doing so synchronously would unblock
+	// the accept loop and cause main() to return while we're still cleaning up.
+	// The signal handler will close the listener when it runs handleExit().
+	isShuttingDown.Store(true)
+	closeHeartbeat()
+	clearQueue()
+
+	if watchPid != 0 {
+		stopWatchDaemon()
+	}
+
+	os.Remove(sockPath)
+	closeLogger()
+	closeWebhook()
+	os.Exit(0)
 }
 
 // handleReboot performs daemon restart
@@ -3619,54 +3668,39 @@ func flushSession() {
 	logInfo("lifecycle", daemonPid, "Session auto-saved at startup (ss command deprecated)")
 }
 
-// executeReboot spawns a new daemon process and exits the current one
+// executeReboot spawns a new daemon process and exits the current one.
+// Uses exec.Command instead of syscall.ForkExec to avoid multi-threaded fork issues.
 func executeReboot() {
-	// Step 1: Remove the socket file FIRST (atomic guarantee)
-	// This ensures no new connections can be made to the old daemon
-	socketToRemove := sockPath
-	listenerMutex.Lock()
-	if listener != nil {
-		listener.Close()
+	// Stop the watch daemon first to avoid orphaned watch processes.
+	// The watch was started with Setpgid:true, so we send SIGTERM directly.
+	if watchPid != 0 {
+		syscall.Kill(watchPid, syscall.SIGTERM)
+		// Don't wait - just signal and continue. The watch will die or be orphaned.
+		watchPid = 0
 	}
-	listenerMutex.Unlock()
 
-	// Remove socket file to signal we're going down
-	os.Remove(socketToRemove)
-
-	// Step 2: Fork a new process
-	// We use syscall.ForkExec for proper process inheritance
+	// Spawn new daemon subprocess using exec.Command
 	binary, err := os.Executable()
 	if err != nil {
 		logError("lifecycle", daemonPid, fmt.Sprintf("Reboot failed: could not get executable: %v", err))
-		handleExit() // Fall back to regular exit
 		return
 	}
 
-	// Prepare environment - inherit all current env vars
-	env := os.Environ()
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "MPM_DIRECT=1")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Add MPM_DIRECT=1 to child so it knows to run as daemon
-	env = append(env, "MPM_DIRECT=1")
-
-	// Use syscall.ForkExec for clean process replacement
-	// This replaces the current process entirely
-	attr := &syscall.ProcAttr{
-		Dir:   "", // Inherit current directory
-		Env:   env,
-		Files: []uintptr{os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd()},
-		Sys:   &syscall.SysProcAttr{},
-	}
-
-	// ForkExec the new daemon
-	_, err = syscall.ForkExec(binary, []string{binary}, attr)
-	if err != nil {
+	if err := cmd.Start(); err != nil {
 		logError("lifecycle", daemonPid, fmt.Sprintf("Reboot failed: %v", err))
-		handleExit() // Fall back to regular exit
 		return
 	}
 
-	logInfo("lifecycle", daemonPid, "Reboot complete - new daemon started")
-	handleExit()
+	logInfo("lifecycle", daemonPid, fmt.Sprintf("Reboot: new daemon spawned (pid %d)", cmd.Process.Pid))
+
+	// Parent process exits. The child (new daemon) continues running with fresh state.
+	os.Exit(0)
 }
 
 // ============================================================================
@@ -3787,8 +3821,8 @@ func printHelp() {
 	fmt.Println("  ~p                              Select persona (fzf)")
 	fmt.Println("  ~m                              Select modes (fzf)")
 	fmt.Println("  mpm ss                          Quick session save")
-	fmt.Println("  mpm persona set ~p.default      Activate persona")
-	fmt.Println("  mpm mode add ~m.code            Add mode to stack")
+	fmt.Println("  mpm persona set default         Activate persona")
+	fmt.Println("  mpm mode add code              Add mode to stack")
 	fmt.Println("  mpm mode clear                  Clear all modes")
 	fmt.Println("  mpm compile all                 Rebuild database from JSON")
 	fmt.Println("  mpm session list                View recent sessions")
