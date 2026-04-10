@@ -15,9 +15,9 @@ MPM resolves all paths dynamically — no hardcoded absolute paths. This enables
 
 These are all derived from `GetMPMDir()` → `GetWorkspace()`:
 
-| Path | Default |
+| Path | Default (MPM_WORKSPACE=$HOME/mpm) |
 |------|---------|
-| **Workspace root** | `$HOME` |
+| **Workspace root** | `$HOME/mpm` |
 | **MPM binary dir** | `$HOME/mpm/bin/` |
 | **Database** | `$HOME/mpm/src/db/mpm.db` |
 | **JSONL mirror** | `$HOME/mpm/src/db/mirror.jsonl` |
