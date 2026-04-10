@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"mpm/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -120,7 +122,7 @@ func loadModesFromDisk(mpmDir string) ([]map[string]interface{}, []string, []str
 	paths := []string{
 		filepath.Join(mpmDir, "mode"),
 		filepath.Join(mpmDir, "..", "mpm", "mode"),
-		"/home/v/.openclaw/workspace/flowbyte/mpm/mode",
+		config.GetModePath(),
 	}
 	var modeDir string
 	for _, p := range paths {
@@ -180,7 +182,7 @@ func loadPersonasFromDisk(mpmDir string) ([]map[string]interface{}, []string, []
 	paths := []string{
 		filepath.Join(mpmDir, "persona"),
 		filepath.Join(mpmDir, "..", "mpm", "persona"),
-		"/home/v/.openclaw/workspace/flowbyte/mpm/persona",
+		config.GetPersonaPath(),
 	}
 	var personaDir string
 	for _, p := range paths {
@@ -263,10 +265,7 @@ func cleanMarkdown(s string) string {
 // Init
 // ---------------------------------------------------------------------------
 func newTUIModel() *Model {
-	mpmDir := "/home/v/.openclaw/workspace/flowbyte/mpm"
-	if _, err := os.Stat(mpmDir); os.IsNotExist(err) {
-		mpmDir = "/home/v/.openclaw/workspace"
-	}
+	mpmDir := config.GetMPMDir()
 
 	modeRaw, mNames, mDescs := loadModesFromDisk(mpmDir)
 	personaRaw, pNames, pDescs := loadPersonasFromDisk(mpmDir)
@@ -377,7 +376,7 @@ func (m *Model) applyModes() tea.Msg {
 	for idx := range toApply {
 		if idx >= 0 && idx < len(m.modeList.Items()) {
 			item := m.modeList.Items()[idx].(ModeItem)
-			exec.Command("/home/v/.openclaw/workspace/flowbyte/mpm/mpm", "mode", "set", modeNames[item.idx]).Run()
+			exec.Command(filepath.Join(config.GetMPMDir(), "bin", "mpm"), "mode", "set", modeNames[item.idx]).Run()
 		}
 	}
 	m.selectedModes = make(map[int]bool)
@@ -388,7 +387,7 @@ func (m *Model) applyPersona() tea.Msg {
 	idx := m.personaList.Index()
 	if idx >= 0 && idx < len(m.personaList.Items()) {
 		item := m.personaList.Items()[idx].(PersonaItemWrap)
-		exec.Command("/home/v/.openclaw/workspace/flowbyte/mpm/mpm", "persona", "set", personaNames[item.idx]).Run()
+		exec.Command(filepath.Join(config.GetMPMDir(), "bin", "mpm"), "persona", "set", personaNames[item.idx]).Run()
 	}
 	return nil
 }
@@ -633,7 +632,7 @@ func (m *Model) renderFooter() string {
 	var parts []string
 
 	// MPM daemon status
-	sockPath := "/home/v/.openclaw/workspace/flowbyte/mpm/mpm.sock"
+	sockPath := socketPath()
 	if _, err := os.Stat(sockPath); err == nil {
 		parts = append(parts, fmt.Sprintf("daemon %s running", StatusOK))
 	} else {
