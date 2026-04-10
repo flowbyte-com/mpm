@@ -92,6 +92,7 @@ func newDashboardModel(sockPath string) dashboardModel {
 		memoryHistory: make([]int, 60),
 		connected:    false,
 		uptimeSecs:   0,
+		width:        120, // Safe default; will be updated on resize
 	}
 }
 
