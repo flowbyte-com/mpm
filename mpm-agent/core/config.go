@@ -9,12 +9,13 @@ import (
 
 // MiniBotConfig is the top-level config for mini-bot.
 type MiniBotConfig struct {
-	Identity   IdentityConfig   `json:"identity"`
-	Synth      SynthConfig     `json:"synth"`
-	Telegram   TelegramConfig  `json:"telegram"`
-	MCP        MCPConfig       `json:"mcp"`
-	SelfImprove SelfImproveConfig `json:"self_improve"`
-	Paths      PathsConfig     `json:"paths"`
+	Identity    IdentityConfig       `json:"identity"`
+	Synth      SynthConfig          `json:"synth"`
+	Telegram   TelegramConfig       `json:"telegram"`
+	MCP        MCPConfig            `json:"mcp"`
+	SelfImprove SelfImproveConfig   `json:"self_improve"`
+	Paths      PathsConfig          `json:"paths"`
+	Profiles   map[string][]string  `json:"profiles"`
 }
 
 type IdentityConfig struct {
@@ -75,6 +76,12 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 			DB: "mini-bot.db",
 			Identity: "IDENTITY.md",
 			MCPSocket: "mini-bot-mcp.sock",
+		},
+		Profiles: map[string][]string{
+			"standard": {
+				"read_file", "write_file", "ReadFileSemantic", "ReadFileCompare",
+				"WebSynthesize", "jq",
+			},
 		},
 	}
 }
