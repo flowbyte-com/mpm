@@ -1,4 +1,4 @@
-// mpm-agent-mcp is an MCP server that exposes MPM tools to Claude Code.
+// mini-bot-mcp is an MCP server that exposes MPM tools over stdio.
 package main
 
 import (
@@ -8,15 +8,14 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
-
-	"mpm-agent/core"
 )
 
 // MCP JSON-RPC types
 type jsonRPCRequest struct {
 	JSONRPC string                 `json:"jsonrpc"`
-	ID     interface{}            `json:"id"`
+	ID     interface{}             `json:"id"`
 	Method  string                 `json:"method"`
 	Params  map[string]interface{} `json:"params,omitempty"`
 }
@@ -25,34 +24,23 @@ type jsonRPCResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
 	ID     interface{} `json:"id"`
 	Result interface{} `json:"result,omitempty"`
-	Error  *jsonError   `json:"error,omitempty"`
+	Error  *jsonError  `json:"error,omitempty"`
 }
 
 type jsonError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    interface{}  `json:"data,omitempty"`
 }
 
-// Token authentication state
-var (
-	expectedToken string
-	tokenChecked  bool
-)
+// MCP server capabilities
+var serverCapabilities = map[string]interface{}{
+	"tools": map[string]interface{}{},
+}
 
 func main() {
-	// Load config to check if token auth is required
-	cfg, err := core.LoadConfig()
-	if err == nil && cfg.APIToken != "" {
-		expectedToken = cfg.APIToken
-		log.Printf("[mcp] API token auth enabled")
-	}
-
-	db, err := core.OpenDB()
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
+	log.SetFlags(0)
+	log.SetOutput(os.Stderr)
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -71,88 +59,96 @@ func main() {
 
 		var req jsonRPCRequest
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			continue // ignore malformed lines
+			continue
 		}
 
-		var resp jsonRPCResponse
-		resp.JSONRPC = "2.0"
-		resp.ID = req.ID
+		resp := handleRequest(req)
+		respBytes, _ := json.Marshal(resp)
+		fmt.Println(string(respBytes))
+	}
+}
 
-		// Token validation on initialize
-		if req.Method == "initialize" && expectedToken != "" && !tokenChecked {
-			token := os.Getenv("MPM_API_TOKEN")
-			if token != expectedToken {
-				log.Printf("[mcp] invalid token from %v", req.ID)
-				resp.Error = &jsonError{Code: -32000, Message: "unauthorized: invalid API token"}
-				respBytes, _ := json.Marshal(resp)
-				fmt.Println(string(respBytes))
-				continue
-			}
-			tokenChecked = true
-			log.Printf("[mcp] token validated for %v", req.ID)
+func handleRequest(req jsonRPCRequest) jsonRPCResponse {
+	resp := jsonRPCResponse{JSONRPC: "2.0", ID: req.ID}
+
+	switch req.Method {
+	case "initialize":
+		resp.Result = map[string]interface{}{
+			"protocolVersion": "2025-11-25",
+			"capabilities":    serverCapabilities,
+			"serverInfo": map[string]interface{}{
+				"name":    "mini-bot-mcp",
+				"version": "1.0.0",
+			},
+		}
+	case "tools/list":
+		// Single tool: execute_mpm_command
+		resp.Result = map[string]interface{}{
+			"tools": []map[string]interface{}{
+				{
+					"name":        "execute_mpm_command",
+					"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
+					"inputSchema": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"command": map[string]interface{}{
+								"type":        "string",
+								"description": "The MPM command arguments (e.g., 'recall hello' runs 'mpm recall hello')",
+							},
+						},
+						"required": []string{"command"},
+					},
+				},
+			},
+		}
+	case "tools/call":
+		name, _ := req.Params["name"].(string)
+		arguments, _ := req.Params["arguments"].(map[string]interface{})
+		if arguments == nil {
+			arguments = map[string]interface{}{}
 		}
 
-		switch req.Method {
-		case "initialize":
-			resp.Result = map[string]interface{}{
-				"protocolVersion": "2025-11-25",
-				"capabilities": map[string]interface{}{
-					"tools": map[string]interface{}{},
-				},
-				"serverInfo": map[string]interface{}{
-					"name":    "mpm",
-					"version": "1.0.0",
-				},
-			}
-		case "tools/list":
-			tools := core.ToolDefinitions()
-			// Convert mpm-agent tool format to MCP tool format
-			mcpTools := make([]map[string]interface{}, 0, len(tools))
-			for _, t := range tools {
-				fn, ok := t["function"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				name, _ := fn["name"].(string)
-				desc, _ := fn["description"].(string)
-				params, _ := fn["parameters"].(map[string]interface{})
-				mcpTools = append(mcpTools, map[string]interface{}{
-					"name":        name,
-					"description": desc,
-					"inputSchema": params,
-				})
-			}
-			resp.Result = map[string]interface{}{
-				"tools": mcpTools,
-			}
-		case "tools/call":
-			name, _ := req.Params["name"].(string)
-			rawArgs, _ := req.Params["arguments"].(map[string]interface{})
-			if rawArgs == nil {
-				rawArgs = make(map[string]interface{})
-			}
-			// Core expects args as map[string]interface{}
-			result, err := core.CallTool(name, rawArgs, db)
+		if name == "execute_mpm_command" {
+			cmdStr, _ := arguments["command"].(string)
+			output, err := execMPM(cmdStr)
 			if err != nil {
 				resp.Result = map[string]interface{}{
 					"content": []map[string]interface{}{
-						{"type": "text", "text": fmt.Sprintf("error: %v", err)},
+						{"type": "text", "text": fmt.Sprintf("error: %v\n%v", err, output)},
 					},
 					"isError": true,
 				}
 			} else {
 				resp.Result = map[string]interface{}{
 					"content": []map[string]interface{}{
-						{"type": "text", "text": result},
+						{"type": "text", "text": output},
 					},
 					"isError": false,
 				}
 			}
-		default:
-			resp.Error = &jsonError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)}
+		} else {
+			resp.Result = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": fmt.Sprintf("unknown tool: %s", name)},
+				},
+				"isError": true,
+			}
 		}
-
-		respBytes, _ := json.Marshal(resp)
-		fmt.Println(string(respBytes))
+	default:
+		resp.Error = &jsonError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)}
 	}
+
+	return resp
+}
+
+// execMPM runs "mpm <cmd>" and returns stdout.
+func execMPM(cmd string) (string, error) {
+	args := strings.Fields(cmd)
+	if len(args) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	cmdExec := exec.Command("mpm", args...)
+	cmdExec.Env = append(os.Environ(), "MPM_WORKSPACE="+os.Getenv("MPM_WORKSPACE"))
+	out, err := cmdExec.CombinedOutput()
+	return string(out), err
 }
