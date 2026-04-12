@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +25,82 @@ var (
 	htmlTagPattern   = regexp.MustCompile(`<[^>]+>`)
 	listPattern      = regexp.MustCompile(`^\d+\.`)
 )
+
+// ToolDefinition describes a callable tool.
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema map[string]interface{}
+}
+
+// toolRegistry stores all registered tools.
+var toolRegistry = make(map[string]ToolDefinition)
+var toolsMu sync.RWMutex
+
+// RegisterTool adds a tool to the registry.
+func RegisterTool(name string, def ToolDefinition) {
+	toolsMu.Lock()
+	defer toolsMu.Unlock()
+	toolRegistry[name] = def
+}
+
+// GetTool returns a tool definition by name.
+func GetTool(name string) (ToolDefinition, bool) {
+	toolsMu.RLock()
+	defer toolsMu.RUnlock()
+	def, ok := toolRegistry[name]
+	return def, ok
+}
+
+// ListTools returns all registered tools.
+func ListTools() []ToolDefinition {
+	toolsMu.RLock()
+	defer toolsMu.RUnlock()
+	result := make([]ToolDefinition, 0, len(toolRegistry))
+	for _, def := range toolRegistry {
+		result = append(result, def)
+	}
+	return result
+}
+
+// ListToolsByProfile returns tools matching the given profile (list of tool names).
+func ListToolsByProfile(profile []string) []ToolDefinition {
+	toolsMu.RLock()
+	defer toolsMu.RUnlock()
+	result := make([]ToolDefinition, 0, len(profile))
+	for _, name := range profile {
+		if def, ok := toolRegistry[name]; ok {
+			result = append(result, def)
+		}
+	}
+	return result
+}
+
+// restrictPath validates path is within mpm-agent directory tree.
+// Returns resolved absolute path or error if outside sandbox.
+func restrictPath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	// Get mpm-agent root: executable is in <root>/cmd/telegram or <root>/cmd/mini-bot
+	execPath, err := os.Executable()
+	var root string
+	if err == nil {
+		root = filepath.Dir(filepath.Dir(execPath)) // dir of bin -> project root
+	}
+	if root == "" || root == "." {
+		root, _ = os.Getwd()
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("invalid root: %w", err)
+	}
+	if !strings.HasPrefix(absPath, rootAbs) {
+		return "", fmt.Errorf("path outside mpm-agent sandbox: %s", path)
+	}
+	return absPath, nil
+}
 
 // ExecuteSteps runs a list of steps sequentially and returns results.
 // Each step is a map with "tool", "args", and optional "checkpoint".
@@ -92,40 +170,98 @@ func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, err
 // executeTool runs a single tool by name with args.
 func executeTool(tool string, args map[string]interface{}) (string, error) {
 	switch tool {
-	case "shell":
-		var cmd string
-		if c, ok := args["command"].(string); ok {
-			cmd = c
-		}
-		out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
-		if err != nil {
-			return string(out), err
-		}
-		return string(out), nil
 	case "read_file":
-		var path string
-		if p, ok := args["path"].(string); ok {
-			path = p
+		path, _ := args["path"].(string)
+		if path == "" {
+			return "", fmt.Errorf("read_file: path is required")
 		}
-		content, err := os.ReadFile(path)
+		restricted, err := restrictPath(path)
+		if err != nil {
+			return "", err
+		}
+		content, err := os.ReadFile(restricted)
 		if err != nil {
 			return "", err
 		}
 		return string(content), nil
+
 	case "write_file":
-		var path string
-		if p, ok := args["path"].(string); ok {
-			path = p
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		if path == "" {
+			return "", fmt.Errorf("write_file: path is required")
 		}
-		var content string
-		if c, ok := args["content"].(string); ok {
-			content = c
-		}
-		err := os.WriteFile(path, []byte(content), 0644)
+		restricted, err := restrictPath(path)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Written %d bytes", len(content)), nil
+		if dir := filepath.Dir(restricted); dir != "" && dir != "." {
+			os.MkdirAll(dir, 0755)
+		}
+		err = os.WriteFile(restricted, []byte(content), 0644)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Written %d bytes to %s", len(content), restricted), nil
+
+	case "ReadFileSemantic":
+		path, _ := args["path"].(string)
+		mode, _ := args["mode"].(string)
+		if path == "" {
+			return "", fmt.Errorf("ReadFileSemantic: path is required")
+		}
+		restricted, err := restrictPath(path)
+		if err != nil {
+			return "", err
+		}
+		return ReadFileSemantic(restricted, mode), nil
+
+	case "ReadFileCompare":
+		pathA, _ := args["pathA"].(string)
+		pathB, _ := args["pathB"].(string)
+		if pathA == "" || pathB == "" {
+			return "", fmt.Errorf("ReadFileCompare: pathA and pathB are required")
+		}
+		resA, err := restrictPath(pathA)
+		if err != nil {
+			return "", err
+		}
+		resB, err := restrictPath(pathB)
+		if err != nil {
+			return "", err
+		}
+		return ReadFileCompare(resA, resB), nil
+
+	case "WebSynthesize":
+		query, _ := args["query"].(string)
+		if query == "" {
+			return "", fmt.Errorf("WebSynthesize: query is required")
+		}
+		result, err := WebSynthesize(query)
+		if err != nil {
+			return "", err
+		}
+		return result, nil
+
+	case "jq":
+		filter, _ := args["filter"].(string)
+		file, _ := args["file"].(string)
+		if filter == "" || file == "" {
+			return "", fmt.Errorf("jq: filter and file are required")
+		}
+		restricted, err := restrictPath(file)
+		if err != nil {
+			return "", err
+		}
+		if !strings.HasSuffix(restricted, ".json") && !strings.HasSuffix(restricted, ".jsonl") {
+			return "", fmt.Errorf("jq: only *.json and *.jsonl files allowed")
+		}
+		out, err := exec.Command("jq", filter, restricted).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("jq error: %v\n%s", err, string(out))
+		}
+		return string(out), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tool)
 	}
@@ -437,4 +573,108 @@ func unescapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "&#39;", "'")
 	s = strings.ReplaceAll(s, "&nbsp;", " ")
 	return s
+}
+
+// init registers all standard tools on package load.
+func init() {
+	RegisterTool("read_file", ToolDefinition{
+		Name:        "read_file",
+		Description: "Read the full contents of a file within the mpm-agent directory.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Relative or absolute path to the file",
+				},
+			},
+			"required": []string{"path"},
+		},
+	})
+	RegisterTool("write_file", ToolDefinition{
+		Name:        "write_file",
+		Description: "Write content to a file within the mpm-agent directory. Creates or overwrites.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Relative or absolute path to the file",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "The content to write",
+				},
+			},
+			"required": []string{"path", "content"},
+		},
+	})
+	RegisterTool("ReadFileSemantic", ToolDefinition{
+		Name:        "ReadFileSemantic",
+		Description: "Read a file with semantic understanding. Modes: summary (structure overview), code (function/type lines), compare (diff two files).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the file",
+				},
+				"mode": map[string]interface{}{
+					"type":        "string",
+					"description": "Mode: summary, code, compare",
+				},
+			},
+			"required": []string{"path"},
+		},
+	})
+	RegisterTool("ReadFileCompare", ToolDefinition{
+		Name:        "ReadFileCompare",
+		Description: "Compare two files and show a diff-like output with line-level changes.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pathA": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the first file",
+				},
+				"pathB": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the second file",
+				},
+			},
+			"required": []string{"pathA", "pathB"},
+		},
+	})
+	RegisterTool("WebSynthesize", ToolDefinition{
+		Name:        "WebSynthesize",
+		Description: "Search the web using DuckDuckGo and produce a synthesized answer with citations.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "The search query",
+				},
+			},
+			"required": []string{"query"},
+		},
+	})
+	RegisterTool("jq", ToolDefinition{
+		Name:        "jq",
+		Description: "Execute a jq filter on a JSON file. Only *.json and *.jsonl files within mpm-agent are allowed.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"filter": map[string]interface{}{
+					"type":        "string",
+					"description": "The jq filter expression (e.g., '.name' or '.[]|.id')",
+				},
+				"file": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the JSON file (*.json or *.jsonl)",
+				},
+			},
+			"required": []string{"filter", "file"},
+		},
+	})
 }
