@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,8 +20,9 @@ import (
 
 // chatSettings holds per-chat preferences.
 type chatSettings struct {
-	thinkLevel int  // 0=off, 1=brief, 2=normal, 3=verbose
-	verbose    bool // if true, don't strip thinking blocks from responses
+	thinkLevel  int    // 0=off, 1=brief, 2=normal, 3=verbose
+	verbose    bool   // if true, don't strip thinking blocks from responses
+	toolProfile string // active tool profile name, default "standard"
 }
 
 // Handler routes incoming Telegram updates to the agent.
@@ -136,7 +138,7 @@ func (h *Handler) getSettings(chatID int64) *chatSettings {
 	if ok {
 		return v.(*chatSettings)
 	}
-	s := &chatSettings{thinkLevel: 2, verbose: false}
+	s := &chatSettings{thinkLevel: 2, verbose: false, toolProfile: "standard"}
 	h.chatSettings.Store(chatID, s)
 	return s
 }
@@ -245,8 +247,41 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		}
 		return true, fmt.Sprintf("Think: %s | Verbose: %s", labels[level], verb)
 
+	case "/tools":
+		profiles := make([]string, 0, len(h.agentConfig.Profiles))
+		for name := range h.agentConfig.Profiles {
+			profiles = append(profiles, name)
+		}
+		sort.Strings(profiles)
+
+		if len(parts) == 1 {
+			current := h.getSettings(chatID).toolProfile
+			if current == "" {
+				current = "standard"
+			}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("Current: %s\n\nAvailable profiles:\n", current))
+			for _, name := range profiles {
+				marker := ""
+				if name == current {
+					marker = " ✓"
+				}
+				sb.WriteString(fmt.Sprintf("  /tools %s%s\n", name, marker))
+			}
+			sb.WriteString("\nUse /tools <name> to switch.")
+			return true, sb.String()
+		}
+
+		newProfile := parts[1]
+		if _, ok := h.agentConfig.Profiles[newProfile]; !ok {
+			return true, fmt.Sprintf("Unknown profile: %s", newProfile)
+		}
+		cs := h.getSettings(chatID)
+		cs.toolProfile = newProfile
+		return true, fmt.Sprintf("Tool profile: %s", newProfile)
+
 	case "/":
-		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/status — show current settings"
+		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/tools [name] — show or switch tool profiles\n/status — show current settings"
 
 	default:
 		return false, ""
@@ -283,12 +318,8 @@ func (h *Handler) startTyping(ctx *th.Context, chatID int64) {
 
 // agentReply runs the MPM agent for the given chat and user message.
 func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
-	log.Printf("[telegram] agentReply start: %q", userText)
-
 	// Load existing history
-	t0 := time.Now()
 	history, err := h.sm.Get(chatID)
-	log.Printf("[telegram] history loaded in %v: %d msgs", time.Since(t0), len(history))
 	if err != nil {
 		return "", fmt.Errorf("load history: %w", err)
 	}
@@ -304,8 +335,21 @@ func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
 	}
 	defer db.Close()
 
-	// Call RunAgent with correct signature: (query, db, binaryDir)
-	responseText, err := core.RunAgent(userText, db, binaryDir)
+	// Resolve identity path from config
+	identityPath := core.ResolveIdentityPath(binaryDir, h.agentConfig.Paths.Identity)
+
+	// Get active tool profile
+	profile := h.getSettings(chatID).toolProfile
+	if profile == "" {
+		profile = "standard"
+	}
+	profileTools := h.agentConfig.Profiles[profile]
+	if profileTools == nil {
+		profileTools = []string{}
+	}
+
+	// Call RunAgent with history and tool profile
+	responseText, err := core.RunAgent(userText, history, db, identityPath, &h.agentConfig.Synth, profileTools)
 	if err != nil {
 		return "", fmt.Errorf("agent error: %w", err)
 	}
@@ -320,7 +364,59 @@ func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
 		// Non-fatal: don't fail the reply
 	}
 
+	// Self-improvement: anchor user messages and extract lessons
+	// Pass dbPath instead of db connection since the goroutine outlives agentReply's defer
+	dbPath := core.ResolveMiniBotDBPath()
+	go h.selfImprove(dbPath, chatID, userText, responseText)
+
 	return responseText, nil
+}
+
+// selfImprove extracts lessons and creates anchors from the conversation.
+// Runs after each response in a goroutine to avoid blocking the reply.
+// Opens its own db connection since the caller's connection is closed on return.
+func (h *Handler) selfImprove(dbPath string, chatID int64, userText, responseText string) {
+	db, err := core.OpenDBForPath(dbPath)
+	if err != nil {
+		log.Printf("[telegram] selfImprove: open db: %v", err)
+		return
+	}
+	defer db.Close()
+
+	sessionID := fmt.Sprintf("telegram:%d", chatID)
+
+	// Anchor the user's message if it's substantial (weight based on length)
+	if len(userText) > 50 {
+		weight := 1
+		if len(userText) > 200 {
+			weight = 2
+		}
+		if err := core.InsertAnchor(db, userText, "user_message", sessionID, weight); err != nil {
+			log.Printf("[telegram] InsertAnchor error: %v", err)
+		}
+	}
+
+	// Extract a lesson if the exchange was informative (response has useful content)
+	if len(responseText) > 100 && len(userText) > 20 {
+		lessonContent := fmt.Sprintf("User asked: %s | Response covered: %s",
+			truncate(userText, 100), truncate(responseText, 200))
+		lesson := core.Lesson{
+			ID:       generateID(),
+			Content:  lessonContent,
+			Type:     "exchange",
+			Tags:     "telegram,conversation",
+		}
+		if err := core.ExtractLesson(db, lesson); err != nil {
+			log.Printf("[telegram] ExtractLesson error: %v", err)
+		}
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
 }
 
 // sendText sends a plain text message using a background context
