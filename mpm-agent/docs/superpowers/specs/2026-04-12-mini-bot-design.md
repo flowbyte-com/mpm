@@ -337,12 +337,14 @@ New tool: `web_synthesize(query)`
 
 - Track interaction weight during conversation
 - When threshold exceeded, write to `anchors` table
+- **Idempotent**: anchors are unique on (content, context, session_id). Duplicate calls update weight to MAX(current, new) — no duplicates, strongest signal wins
 - Anchors loaded as high-priority context on every call
 
 ### Mechanism 2: Lesson Extraction (auto)
 
 - On session end (or every N messages), if complexity > `lesson_complexity_threshold`
 - Generate a lesson and write to `lessons` table
+- **Idempotent**: lessons are unique on content. Duplicate lessons increment `reinforcement_count` instead of creating new rows — repeated insights get stronger
 - Recall lessons on similar future tasks
 
 ### Mechanism 3: Identity Patching (approval required)
