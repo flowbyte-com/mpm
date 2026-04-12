@@ -13,14 +13,35 @@ import (
 	"time"
 )
 
+// Package-level compiled regexes for web scraping
+var (
+	linkPattern      = regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([^<]+)</a>`)
+	altPattern       = regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*>([^<]+)</a>`)
+	urlSchemePattern = regexp.MustCompile(`^https?://`)
+	scriptPattern    = regexp.MustCompile(`<script[^>]*>[\s\S]*?</script>`)
+	stylePattern     = regexp.MustCompile(`<style[^>]*>[\s\S]*?</style>`)
+	htmlTagPattern   = regexp.MustCompile(`<[^>]+>`)
+	listPattern      = regexp.MustCompile(`^\d+\.`)
+)
+
 // ExecuteSteps runs a list of steps sequentially and returns results.
 // Each step is a map with "tool", "args", and optional "checkpoint".
 func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
 	for i, step := range steps {
-		tool, _ := step["tool"].(string)
-		args, _ := step["args"].(map[string]interface{})
-		checkpoint, hasCheckpoint := step["checkpoint"].(string)
+		var tool string
+		if t, ok := step["tool"].(string); ok {
+			tool = t
+		}
+		var args map[string]interface{}
+		if a, ok := step["args"].(map[string]interface{}); ok {
+			args = a
+		}
+		var checkpoint string
+		var hasCheckpoint bool
+		if cp, ok := step["checkpoint"].(string); ok {
+			checkpoint, hasCheckpoint = cp, true
+		}
 
 		stepResult := map[string]interface{}{
 			"step": i,
@@ -72,22 +93,34 @@ func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, err
 func executeTool(tool string, args map[string]interface{}) (string, error) {
 	switch tool {
 	case "shell":
-		cmd, _ := args["command"].(string)
+		var cmd string
+		if c, ok := args["command"].(string); ok {
+			cmd = c
+		}
 		out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
 		if err != nil {
 			return string(out), err
 		}
 		return string(out), nil
 	case "read_file":
-		path, _ := args["path"].(string)
+		var path string
+		if p, ok := args["path"].(string); ok {
+			path = p
+		}
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return "", err
 		}
 		return string(content), nil
 	case "write_file":
-		path, _ := args["path"].(string)
-		content, _ := args["content"].(string)
+		var path string
+		if p, ok := args["path"].(string); ok {
+			path = p
+		}
+		var content string
+		if c, ok := args["content"].(string); ok {
+			content = c
+		}
 		err := os.WriteFile(path, []byte(content), 0644)
 		if err != nil {
 			return "", err
@@ -219,7 +252,7 @@ func summarizeDocument(text string) string {
 
 		if len(trimmed) > 50 && !strings.HasPrefix(trimmed, "#") &&
 			(strings.Contains(trimmed, ":") || strings.Contains(trimmed, ".") ||
-				strings.Contains(trimmed, "-") || regexp.MustCompile(`^\d+\.`).MatchString(trimmed)) {
+				strings.Contains(trimmed, "-") || listPattern.MatchString(trimmed)) {
 			keySections = append(keySections, fmt.Sprintf("  Line %d: %s", i+1, truncated(trimmed, 70)))
 		}
 	}
@@ -285,7 +318,10 @@ func WebSynthesize(query string) (string, error) {
 		return "", fmt.Errorf("web search: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 15000))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 15000))
+	if err != nil {
+		return "", fmt.Errorf("reading response body: %w", err)
+	}
 
 	html := string(body)
 
@@ -297,11 +333,9 @@ func WebSynthesize(query string) (string, error) {
 
 	// DuckDuckGo HTML result patterns
 	// Pattern: <a href="URL" class="result__a">TITLE</a>
-	linkPattern := regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([^<]+)</a>`)
 	matches := linkPattern.FindAllStringSubmatch(html, -1)
 
 	// Also try alternative pattern for result titles
-	altPattern := regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*>([^<]+)</a>`)
 	altMatches := altPattern.FindAllStringSubmatch(html, -1)
 
 	seen := make(map[string]bool)
@@ -326,7 +360,7 @@ func WebSynthesize(query string) (string, error) {
 				url := strings.TrimSpace(m[1])
 				title := strings.TrimSpace(m[2])
 				if url != "" && !seen[url] && len(title) > 5 &&
-					regexp.MustCompile(`^https?://`).MatchString(url) {
+					urlSchemePattern.MatchString(url) {
 					seen[url] = true
 					citations = append(citations, struct {
 						title string
@@ -385,10 +419,10 @@ func WebSynthesize(query string) (string, error) {
 // stripHTML removes HTML tags from text.
 func stripHTML(html string) string {
 	// Remove script and style blocks
-	html = regexp.MustCompile(`<script[^>]*>[\s\S]*?</script>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`<style[^>]*>[\s\S]*?</style>`).ReplaceAllString(html, "")
+	html = scriptPattern.ReplaceAllString(html, "")
+	html = stylePattern.ReplaceAllString(html, "")
 	// Remove all HTML tags
-	html = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(html, "")
+	html = htmlTagPattern.ReplaceAllString(html, "")
 	// Decode HTML entities
 	html = unescapeHTML(html)
 	return strings.TrimSpace(html)
