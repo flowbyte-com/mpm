@@ -56,7 +56,7 @@ Process name is set via `os.Args[0] = "mini-bot"` at program start.
 
 ### Location
 
-`IDENTITY.md` is read from the **same directory as the running binary** at startup.
+`IDENTITY.md` is read from the **same directory as the running binary** at startup, and can be hot-reloaded on demand.
 
 ### Format
 
@@ -79,13 +79,64 @@ Boundaries: never fabricate facts, always admit uncertainty, no political advice
 
 **Identity drift prevention:** The core identity in IDENTITY.md is the bot's true self. MPM personas never overwrite it — they are temporary costumes that can be removed. The bot always knows who it is.
 
+### Reload Behavior
+
+IDENTITY.md is loaded at startup and kept stable during conversations. Three reload triggers:
+- **Startup only** — full load into memory
+- **On-demand** — `mini-bot reload identity` command reloads from disk
+- **Hot reload** — if `identity_hot_reload: true` in config, re-reads file on change (via fsnotify)
+
+This keeps identity stable mid-conversation but allows evolution between sessions.
+
+### Identity Forking (Branching)
+
+mini-bot can **fork its identity** to create a variant persona for a specific task or experiment:
+
+```
+mini-bot fork <branch-name>     Create a new identity branch from current IDENTITY.md
+mini-bot fork <branch-name> --from <source>   Fork from a specific branch
+mini-bot switch <branch-name>    Switch active identity to a branch
+mini-bot branch list             List all identity branches
+mini-bot branch diff <a> <b>     Compare two branches
+mini-bot branch promote <branch>   Promote branch to main (with approval)
+```
+
+**Storage:**
+- `IDENTITY.md` — main branch (stable)
+- `IDENTITIES/` directory — branch variants
+  ```
+  IDENTITIES/
+  ├── main.md          ← current IDENTITY.md
+  ├── analyst-v2.md    ← fork for testing
+  └── critic-branch.md
+  ```
+- `identities.json` — branch metadata (parent, created_at, status: active|promoted|deprecated)
+
+**Fork flow:**
+1. `mini-bot fork experiment-v1` — copies current IDENTITY.md to `IDENTITIES/experiment-v1.md`
+2. Bot runs with `experiment-v1` identity variant
+3. If variant works better, `mini-bot branch promote experiment-v1` — merges changes into main
+4. If not, `mini-bot branch delete experiment-v1` — discards variant
+
+This gives git-branch-style identity development with approval gates for promotion.
+
 ---
 
-## 3. Database Schema (mini-bot.db)
+## 3. Environment Isolation
 
-All paths are relative to the binary directory. The database is created on first startup if it doesn't exist.
+mini-bot runs as **separate instances per environment** (alpha, beta, production). Each instance has its own:
 
-### Schema
+- `mini-bot.db` — independent memory, sessions, lessons, anchors
+- `IDENTITY.md` — instance-specific identity (can fork/promote independently)
+- `mini-bot-config.json` — instance-specific config
+
+**Why separate:** Alpha breaks → Beta catches → Production is sacred. Clean isolation means experimental self-improvement in alpha never pollutes production.
+
+**Cross-env promotion:** Identity branches can be promoted across environments by copying `IDENTITIES/<branch>.md` files and merging.
+
+---
+
+## 4. Database Schema (mini-bot.db)
 
 ```sql
 -- Core memories with FTS5 search
@@ -179,6 +230,9 @@ All configuration in one file, alongside the binary.
     "anchor_threshold": 3,
     "lesson_complexity_threshold": 7,
     "identity_patch_approval_required": true
+  },
+  "identity": {
+    "hot_reload": false
   },
   "paths": {
     "db": "mini-bot.db",
