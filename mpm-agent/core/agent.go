@@ -1,8 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -13,8 +19,8 @@ import (
 
 // BuildSystemPromptWithIdentity builds the full system prompt.
 // Priority: IDENTITY.md (core, stable) + persona (costume overlay) + mode (behavior rules)
-func BuildSystemPromptWithIdentity(binaryDir, personaContent, modeContent string, memories, directives, references []string, anchors []Anchor) string {
-	identity, _ := LoadIdentity(binaryDir)
+func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent string, memories, directives, references []string, anchors []Anchor) string {
+	identity, _ := LoadIdentity(identityPath)
 
 	var sb strings.Builder
 
@@ -160,14 +166,37 @@ func retrieveReferences(db *sql.DB, query string, limit int) []string {
 	return results
 }
 
+// apiMessage is a chat message for the Anthropic API.
+type apiMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// toolUse represents a tool call from the API.
+type toolUse struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Input map[string]interface{} `json:"input"`
+}
+
+// mpmExec runs an MPM command and returns stdout.
+func mpmExec(cmd string) (string, error) {
+	args := strings.Fields(cmd)
+	if len(args) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	cmdExec := exec.Command("mpm", args...)
+	cmdExec.Env = append(os.Environ(), "MPM_WORKSPACE="+os.Getenv("MPM_WORKSPACE"))
+	out, err := cmdExec.CombinedOutput()
+	return string(out), err
+}
+
 // RunAgent runs a single agent query with full identity and context.
-// Returns the response text or error.
-func RunAgent(query string, db *sql.DB, binaryDir string) (string, error) {
+// identityPath is the resolved path to IDENTITY.md.
+// toolProfile is the list of tool names to expose to the AI.
+func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string) (string, error) {
 	// Get anchors as high-priority context
 	anchors, _ := GetRecentAnchors(db, 5)
-
-	// Get recent lessons for context
-	lessons, _ := GetRecentLessons(db, 3)
 
 	// Build context arrays
 	memories := retrieveMemories(db, query, 5)
@@ -175,14 +204,184 @@ func RunAgent(query string, db *sql.DB, binaryDir string) (string, error) {
 	references := retrieveReferences(db, query, 3)
 
 	// Build system prompt with identity-first approach
-	systemPrompt := BuildSystemPromptWithIdentity(binaryDir, "", "",
+	systemPrompt := BuildSystemPromptWithIdentity(identityPath, "", "",
 		memories, directives, references, anchors)
 
-	// Include lessons in system prompt if available
-	if len(lessons) > 0 {
-		// Lessons are already embedded via BuildSystemPromptWithIdentity's anchor section
-		// but we can also add them separately if needed
+	// Build messages array: history + current user message
+	messages := make([]apiMessage, 0, len(history)+1)
+	for _, h := range history {
+		role, _ := h["role"].(string)
+		content, _ := h["content"].(string)
+		if role == "" {
+			role = "user"
+		}
+		messages = append(messages, apiMessage{Role: role, Content: content})
+	}
+	messages = append(messages, apiMessage{Role: "user", Content: query})
+
+	// Build tool list from active profile (includes execute_mpm_command + local tools)
+	availableTools := buildToolList(toolProfile)
+
+	// Tool loop: call API, execute tools, repeat
+	maxIterations := 5
+	for iteration := 0; iteration < maxIterations; iteration++ {
+		responseText, toolCalls, err := callSynthAPIWithTools(systemPrompt, messages, cfg, availableTools)
+		if err != nil {
+			return "", err
+		}
+
+		// If no tool calls, return the text response
+		if len(toolCalls) == 0 {
+			return responseText, nil
+		}
+
+		// Execute each tool call and append results to messages
+		for _, tc := range toolCalls {
+			var result string
+			var err error
+			switch tc.Name {
+			case "execute_mpm_command":
+				cmd, _ := tc.Input["command"].(string)
+				result, err = mpmExec(cmd)
+			default:
+				// Local tools from core/tools.go
+				result, err = executeTool(tc.Name, tc.Input)
+			}
+			if err != nil {
+				result = fmt.Sprintf("error: %v", err)
+			}
+			messages = append(messages, apiMessage{
+				Role:    "user",
+				Content: fmt.Sprintf(`[tool result for %s]: %s`, tc.Name, result),
+			})
+		}
 	}
 
-	return systemPrompt, nil
+	// Max iterations reached
+	return "(tool loop limit reached)", nil
+}
+
+// buildToolList returns MCP tool + local tools for the given profile.
+func buildToolList(profile []string) []map[string]interface{} {
+	tools := []map[string]interface{}{
+		{
+			"name":        "execute_mpm_command",
+			"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "The MPM command arguments (e.g., 'recall hello' runs 'mpm recall hello')",
+					},
+				},
+				"required": []string{"command"},
+			},
+		},
+	}
+	// Add local tools from registry for this profile
+	for _, name := range profile {
+		def, ok := GetTool(name)
+		if !ok {
+			continue
+		}
+		tools = append(tools, map[string]interface{}{
+			"name":        def.Name,
+			"description": def.Description,
+			"inputSchema": def.InputSchema,
+		})
+	}
+	return tools
+}
+
+// callSynthAPIWithTools makes an Anthropic API call and returns response text and any tool calls.
+func callSynthAPIWithTools(systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, error) {
+	if cfg.APIKey == "" {
+		return "", nil, fmt.Errorf("no API key configured")
+	}
+
+	type anthropicRequest struct {
+		Model     string                    `json:"model"`
+		MaxTokens int                       `json:"max_tokens"`
+		System    string                    `json:"system"`
+		Messages  []apiMessage              `json:"messages"`
+		Tools     []map[string]interface{} `json:"tools,omitempty"`
+	}
+
+	type anthropicResponse struct {
+		Type        string `json:"type"`
+		Content     []struct {
+			Type  string                 `json:"type"`
+			Text  string                 `json:"text"`
+			Name  string                 `json:"name"`
+			ID    string                 `json:"id"`
+			Input map[string]interface{} `json:"input"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+	}
+
+	reqBody := anthropicRequest{
+		Model:     cfg.Model,
+		MaxTokens: cfg.MaxTokens,
+		System:    systemPrompt,
+		Messages:  messages,
+		Tools:     tools,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/v1/messages"
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", cfg.APIKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	timeout := time.Duration(cfg.TimeoutSecs) * time.Second
+	if timeout == 0 {
+		timeout = 300 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("API call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result anthropicResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	// Collect text response and tool calls
+	var textResponse string
+	var toolCalls []toolUse
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			textResponse = block.Text
+		} else if block.Type == "tool_use" {
+			toolCalls = append(toolCalls, toolUse{
+				Type:  block.Type,
+				Name:  block.Name,
+				Input: block.Input,
+			})
+		}
+	}
+
+	return textResponse, toolCalls, nil
 }
