@@ -115,8 +115,10 @@ func OpenDBForPath(dbPath string) (*sql.DB, error) {
 }
 
 // generateID returns a random hex string ID for database records.
+// Uses crypto/rand which can only fail in theoretically impossible conditions
+// (no entropy available), so error is ignored.
 func generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	rand.Read(b) //nolint:errcheck // crypto/rand only fails if system has no entropy
 	return fmt.Sprintf("%x", b)
 }

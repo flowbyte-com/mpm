@@ -30,6 +30,16 @@ func TestAnchorInsert(t *testing.T) {
 	if len(anchors) == 0 {
 		t.Error("expected at least one anchor")
 	}
+	// Verify full anchor data
+	if anchors[0].Content != "test anchor content" {
+		t.Errorf("expected content 'test anchor content', got %q", anchors[0].Content)
+	}
+	if anchors[0].Context != "test context" {
+		t.Errorf("expected context 'test context', got %q", anchors[0].Context)
+	}
+	if anchors[0].SessionID != "session123" {
+		t.Errorf("expected session_id 'session123', got %q", anchors[0].SessionID)
+	}
 	if anchors[0].Weight != 3 {
 		t.Errorf("expected weight 3, got %d", anchors[0].Weight)
 	}
@@ -47,8 +57,12 @@ func TestAnchorIdempotent(t *testing.T) {
 	defer db.Close()
 
 	// Insert same anchor twice with different weights
-	InsertAnchor(db, "same content", "same context", "session456", 2)
-	InsertAnchor(db, "same content", "same context", "session456", 5)
+	if err := InsertAnchor(db, "same content", "same context", "session456", 2); err != nil {
+		t.Fatalf("InsertAnchor failed: %v", err)
+	}
+	if err := InsertAnchor(db, "same content", "same context", "session456", 5); err != nil {
+		t.Fatalf("InsertAnchor failed: %v", err)
+	}
 
 	// Should have MAX(2,5) = 5, not two anchors
 	anchors, _ := GetRecentAnchors(db, 10)
