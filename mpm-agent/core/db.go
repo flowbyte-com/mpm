@@ -67,7 +67,7 @@ func InitMiniBotDB(dbPath string) error {
 
 	CREATE TABLE IF NOT EXISTS lessons (
 		id TEXT PRIMARY KEY,
-		content TEXT NOT NULL,
+		content TEXT NOT NULL UNIQUE,
 		type TEXT DEFAULT 'insight',
 		tags TEXT,
 		created_at TEXT,
