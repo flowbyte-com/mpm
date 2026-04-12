@@ -161,6 +161,8 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		if err := h.sm.Save(chatID, nil); err != nil {
 			return true, fmt.Sprintf("Failed to clear session: %v", err)
 		}
+		// Clear loaded toolkits for this session
+		core.ClearSessionToolkits(fmt.Sprintf("telegram:%d", chatID))
 		return true, "Session cleared. Starting fresh."
 
 	case "/reasoning":
@@ -348,8 +350,11 @@ func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
 		profileTools = []string{}
 	}
 
-	// Call RunAgent with history and tool profile
-	responseText, err := core.RunAgent(userText, history, db, identityPath, &h.agentConfig.Synth, profileTools)
+	// Session ID for toolkit state
+	sessionID := fmt.Sprintf("telegram:%d", chatID)
+
+	// Call RunAgent with history, tool profile, session ID, and toolkit map
+	responseText, err := core.RunAgent(userText, history, db, identityPath, &h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits)
 	if err != nil {
 		return "", fmt.Errorf("agent error: %w", err)
 	}

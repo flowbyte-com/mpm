@@ -9,13 +9,14 @@ import (
 
 // MiniBotConfig is the top-level config for mini-bot.
 type MiniBotConfig struct {
-	Identity    IdentityConfig       `json:"identity"`
-	Synth      SynthConfig          `json:"synth"`
-	Telegram   TelegramConfig       `json:"telegram"`
-	MCP        MCPConfig            `json:"mcp"`
-	SelfImprove SelfImproveConfig   `json:"self_improve"`
-	Paths      PathsConfig          `json:"paths"`
-	Profiles   map[string][]string  `json:"profiles"`
+	Identity     IdentityConfig       `json:"identity"`
+	Synth       SynthConfig          `json:"synth"`
+	Telegram    TelegramConfig       `json:"telegram"`
+	MCP         MCPConfig            `json:"mcp"`
+	SelfImprove SelfImproveConfig    `json:"self_improve"`
+	Paths       PathsConfig          `json:"paths"`
+	Profiles    map[string][]string  `json:"profiles"`
+	Toolkits    map[string][]string  `json:"toolkits"` // toolkit name → tool names
 }
 
 type IdentityConfig struct {
@@ -79,8 +80,24 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 		},
 		Profiles: map[string][]string{
 			"standard": {
+				// Base tools — always available, never unloaded
+				"list_toolkits", "load_toolkit", "unload_toolkit",
+				"execute_mpm_command",
+			},
+		},
+		Toolkits: map[string][]string{
+			"files": {
 				"read_file", "write_file", "ReadFileSemantic", "ReadFileCompare",
-				"WebSynthesize", "jq",
+			},
+			"web": {
+				"WebSynthesize",
+			},
+			"jq": {
+				"jq",
+			},
+			"mpm": {
+				// All MPM commands accessible via execute_mpm_command
+				// This toolkit just documents the capability
 			},
 		},
 	}

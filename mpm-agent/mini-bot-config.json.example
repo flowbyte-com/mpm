@@ -33,12 +33,25 @@
   },
   "profiles": {
     "standard": [
+      "list_toolkits",
+      "load_toolkit",
+      "unload_toolkit",
+      "execute_mpm_command"
+    ]
+  },
+  "toolkits": {
+    "files": [
       "read_file",
       "write_file",
       "ReadFileSemantic",
-      "ReadFileCompare",
-      "WebSynthesize",
+      "ReadFileCompare"
+    ],
+    "web": [
+      "WebSynthesize"
+    ],
+    "jq": [
       "jq"
-    ]
+    ],
+    "mpm": []
   }
 }

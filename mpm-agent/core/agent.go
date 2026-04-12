@@ -193,8 +193,10 @@ func mpmExec(cmd string) (string, error) {
 
 // RunAgent runs a single agent query with full identity and context.
 // identityPath is the resolved path to IDENTITY.md.
-// toolProfile is the list of tool names to expose to the AI.
-func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string) (string, error) {
+// toolProfile is the list of base tool names (framework tools).
+// sessionID is used to scope LoadedToolkits per conversation.
+// toolkitMap maps toolkit names to tool names (from config).
+func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string) (string, error) {
 	// Get anchors as high-priority context
 	anchors, _ := GetRecentAnchors(db, 5)
 
@@ -219,12 +221,12 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 	}
 	messages = append(messages, apiMessage{Role: "user", Content: query})
 
-	// Build tool list from active profile (includes execute_mpm_command + local tools)
-	availableTools := buildToolList(toolProfile)
-
 	// Tool loop: call API, execute tools, repeat
 	maxIterations := 5
 	for iteration := 0; iteration < maxIterations; iteration++ {
+		// Rebuild tool list: base tools + loaded toolkit tools (dynamic)
+		availableTools := buildToolListWithLoaded(toolProfile, sessionID, toolkitMap)
+
 		responseText, toolCalls, err := callSynthAPIWithTools(systemPrompt, messages, cfg, availableTools)
 		if err != nil {
 			return "", err
@@ -239,7 +241,37 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 		for _, tc := range toolCalls {
 			var result string
 			var err error
+
+			// Framework tools — intercepted here, not executed
 			switch tc.Name {
+			case "load_toolkit":
+				name, _ := tc.Input["name"].(string)
+				if name == "" {
+					result = "error: name is required"
+				} else {
+					LoadToolkit(sessionID, name)
+					result = fmt.Sprintf("Toolkit '%s' loaded. You now have access to: %v",
+						name, toolkitMap[name])
+				}
+				// Continue loop with updated availableTools
+				messages = append(messages, apiMessage{
+					Role:    "user",
+					Content: fmt.Sprintf("[%s result]: %s", tc.Name, result),
+				})
+				continue
+			case "unload_toolkit":
+				name, _ := tc.Input["name"].(string)
+				if name == "" {
+					result = "error: name is required"
+				} else {
+					UnloadToolkit(sessionID, name)
+					result = fmt.Sprintf("Toolkit '%s' unloaded.", name)
+				}
+				messages = append(messages, apiMessage{
+					Role:    "user",
+					Content: fmt.Sprintf("[%s result]: %s", tc.Name, result),
+				})
+				continue
 			case "execute_mpm_command":
 				cmd, _ := tc.Input["command"].(string)
 				result, err = mpmExec(cmd)
@@ -247,12 +279,13 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 				// Local tools from core/tools.go
 				result, err = executeTool(tc.Name, tc.Input)
 			}
+
 			if err != nil {
 				result = fmt.Sprintf("error: %v", err)
 			}
 			messages = append(messages, apiMessage{
 				Role:    "user",
-				Content: fmt.Sprintf(`[tool result for %s]: %s`, tc.Name, result),
+				Content: fmt.Sprintf("[%s result]: %s", tc.Name, result),
 			})
 		}
 	}
@@ -261,28 +294,30 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 	return "(tool loop limit reached)", nil
 }
 
-// buildToolList returns MCP tool + local tools for the given profile.
-func buildToolList(profile []string) []map[string]interface{} {
-	tools := []map[string]interface{}{
-		{
-			"name":        "execute_mpm_command",
-			"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"command": map[string]interface{}{
-						"type":        "string",
-						"description": "The MPM command arguments (e.g., 'recall hello' runs 'mpm recall hello')",
-					},
+// buildToolListWithLoaded returns base tools + dynamically loaded toolkit tools.
+func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap map[string][]string) []map[string]interface{} {
+	var tools []map[string]interface{}
+
+	// Always include execute_mpm_command
+	tools = append(tools, map[string]interface{}{
+		"name":        "execute_mpm_command",
+		"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{
+					"type":        "string",
+					"description": "The MPM command arguments (e.g., 'recall hello' runs 'mpm recall hello')",
 				},
-				"required": []string{"command"},
 			},
+			"required": []string{"command"},
 		},
-	}
-	// Add local tools from registry for this profile
-	for _, name := range profile {
+	})
+
+	// Add base framework tools (list_toolkits, load_toolkit, unload_toolkit)
+	for _, name := range baseTools {
 		def, ok := GetTool(name)
-		if !ok {
+		if !ok || name == "execute_mpm_command" {
 			continue
 		}
 		tools = append(tools, map[string]interface{}{
@@ -291,6 +326,37 @@ func buildToolList(profile []string) []map[string]interface{} {
 			"inputSchema": def.InputSchema,
 		})
 	}
+
+	// Add tools from loaded toolkits
+	loaded := GetLoadedToolkits(sessionID)
+	for _, tkName := range loaded {
+		tkTools, ok := toolkitMap[tkName]
+		if !ok {
+			continue
+		}
+		for _, toolName := range tkTools {
+			def, ok := GetTool(toolName)
+			if !ok {
+				continue
+			}
+			// Avoid duplicates
+			exists := false
+			for _, t := range tools {
+				if t["name"] == toolName {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				tools = append(tools, map[string]interface{}{
+					"name":        def.Name,
+					"description": def.Description,
+					"inputSchema": def.InputSchema,
+				})
+			}
+		}
+	}
+
 	return tools
 }
 

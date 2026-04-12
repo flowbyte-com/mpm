@@ -68,7 +68,36 @@ func GetBinaryDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Dir(execPath)
+	dir := filepath.Dir(execPath)
+	// Resolve symlinks to get the real path
+	realPath, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return realPath
+}
+
+// ResolveIdentityPath returns the absolute path to IDENTITY.md.
+// It checks (in order): agentConfig paths.identity, binaryDir/IDENTITY.md, CWD/IDENTITY.md.
+func ResolveIdentityPath(binaryDir string, identityPath string) string {
+	// If identityPath is absolute, use it directly
+	if filepath.IsAbs(identityPath) {
+		return identityPath
+	}
+	// Try relative to CWD first
+	cwdIdentity := filepath.Join(".", identityPath)
+	if _, err := os.Stat(cwdIdentity); err == nil {
+		return cwdIdentity
+	}
+	// Try relative to binary dir
+	if binaryDir != "" {
+		binaryIdentity := filepath.Join(binaryDir, identityPath)
+		if _, err := os.Stat(binaryIdentity); err == nil {
+			return binaryIdentity
+		}
+	}
+	// Fallback to CWD
+	return cwdIdentity
 }
 
 // readIdentityFileFrom reads IDENTITY.md from a specific directory.

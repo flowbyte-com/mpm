@@ -37,6 +37,11 @@ type ToolDefinition struct {
 var toolRegistry = make(map[string]ToolDefinition)
 var toolsMu sync.RWMutex
 
+// LoadedToolkits tracks which toolkits are currently loaded per-session.
+// Key: sessionID, Value: map of toolkit name → true
+var LoadedToolkits = make(map[string]map[string]bool)
+var loadedMu sync.RWMutex
+
 // RegisterTool adds a tool to the registry.
 func RegisterTool(name string, def ToolDefinition) {
 	toolsMu.Lock()
@@ -74,6 +79,46 @@ func ListToolsByProfile(profile []string) []ToolDefinition {
 		}
 	}
 	return result
+}
+
+// LoadToolkit activates a toolkit for a session. Idempotent.
+func LoadToolkit(sessionID, toolkit string) {
+	loadedMu.Lock()
+	defer loadedMu.Unlock()
+	if LoadedToolkits[sessionID] == nil {
+		LoadedToolkits[sessionID] = make(map[string]bool)
+	}
+	LoadedToolkits[sessionID][toolkit] = true
+}
+
+// UnloadToolkit deactivates a toolkit for a session.
+func UnloadToolkit(sessionID, toolkit string) {
+	loadedMu.Lock()
+	defer loadedMu.Unlock()
+	if LoadedToolkits[sessionID] != nil {
+		delete(LoadedToolkits[sessionID], toolkit)
+	}
+}
+
+// GetLoadedToolkits returns the list of loaded toolkit names for a session.
+func GetLoadedToolkits(sessionID string) []string {
+	loadedMu.RLock()
+	defer loadedMu.RUnlock()
+	if LoadedToolkits[sessionID] == nil {
+		return nil
+	}
+	var names []string
+	for k := range LoadedToolkits[sessionID] {
+		names = append(names, k)
+	}
+	return names
+}
+
+// ClearSessionToolkits removes all toolkit state for a session.
+func ClearSessionToolkits(sessionID string) {
+	loadedMu.Lock()
+	defer loadedMu.Unlock()
+	delete(LoadedToolkits, sessionID)
 }
 
 // restrictPath validates path is within mpm-agent directory tree.
@@ -261,6 +306,48 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 			return "", fmt.Errorf("jq error: %v\n%s", err, string(out))
 		}
 		return string(out), nil
+
+	case "list_toolkits":
+		// Returns available toolkits and their tools
+		loaded := GetLoadedToolkits("telegram")
+		var sb strings.Builder
+		sb.WriteString("Available toolkits:\n")
+		// Hardcoded for now — toolkits are registered at init
+		toolkitInfo := map[string]string{
+			"files": "read_file, write_file, ReadFileSemantic, ReadFileCompare — file operations in mpm-agent/",
+			"web":  "WebSynthesize — DuckDuckGo search with citations",
+			"jq":   "jq — query and transform JSON files",
+			"mpm":  "execute_mpm_command — all MPM CLI commands (recall, mode, persona, etc.)",
+		}
+		for name, desc := range toolkitInfo {
+			loadedMark := ""
+			for _, l := range loaded {
+				if l == name {
+					loadedMark = " [LOADED]"
+					break
+				}
+			}
+			sb.WriteString(fmt.Sprintf("  %s%s — %s\n", name, loadedMark, desc))
+		}
+		sb.WriteString("\nUse load_toolkit(\"<name>\") to load a toolkit.")
+		return sb.String(), nil
+
+	case "load_toolkit":
+		// This is intercepted in the agent loop — but if called directly, execute here
+		name, _ := args["name"].(string)
+		if name == "" {
+			return "", fmt.Errorf("load_toolkit: name is required")
+		}
+		LoadToolkit("telegram", name)
+		return fmt.Sprintf("Toolkit '%s' loaded.", name), nil
+
+	case "unload_toolkit":
+		name, _ := args["name"].(string)
+		if name == "" {
+			return "", fmt.Errorf("unload_toolkit: name is required")
+		}
+		UnloadToolkit("telegram", name)
+		return fmt.Sprintf("Toolkit '%s' unloaded.", name), nil
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tool)
@@ -675,6 +762,42 @@ func init() {
 				},
 			},
 			"required": []string{"filter", "file"},
+		},
+	})
+	RegisterTool("list_toolkits", ToolDefinition{
+		Name:        "list_toolkits",
+		Description: "List available toolkits and their current load status.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{},
+		},
+	})
+	RegisterTool("load_toolkit", ToolDefinition{
+		Name:        "load_toolkit",
+		Description: "Load a toolkit to unlock its tools. Use list_toolkits to see available options.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "Toolkit name to load",
+				},
+			},
+			"required": []string{"name"},
+		},
+	})
+	RegisterTool("unload_toolkit", ToolDefinition{
+		Name:        "unload_toolkit",
+		Description: "Unload a toolkit to free up context space.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "Toolkit name to unload",
+				},
+			},
+			"required": []string{"name"},
 		},
 	})
 }

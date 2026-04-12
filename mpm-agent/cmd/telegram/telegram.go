@@ -47,11 +47,14 @@ func main() {
 	}
 	log.Printf("mini-bot-telegram[%d]: Model: %s @ %s", pid, agentCfg.Synth.Model, agentCfg.Synth.BaseURL)
 
-	// Load identity
+	// Load identity - resolve path from config, not just binary dir
 	binaryDir := core.GetBinaryDir()
-	identity, _ := core.LoadIdentity(binaryDir)
+	identityPath := core.ResolveIdentityPath(binaryDir, agentCfg.Paths.Identity)
+	identity, _ := core.LoadIdentity(identityPath)
 	if identity != nil {
-		log.Printf("mini-bot-telegram[%d]: Identity: %s v%s", pid, identity.Name, identity.Version)
+		log.Printf("mini-bot-telegram[%d]: Identity: %s v%s (%s)", pid, identity.Name, identity.Version, identityPath)
+	} else {
+		log.Printf("mini-bot-telegram[%d]: Identity not found at %s", pid, identityPath)
 	}
 
 	// Open session database
