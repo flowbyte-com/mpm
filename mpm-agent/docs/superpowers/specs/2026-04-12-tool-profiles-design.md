@@ -1,154 +1,147 @@
-# Tool Profiles Design — mini-bot Telegram
+# Tool Profiles + Toolkit Lazy-Loading Design — mini-bot Telegram
 
 ## Overview
 
-Add a tool profile system to mini-bot Telegram. Profiles are named collections of tools. The Standard profile is always available; additional profiles build on top of it.
+Add a tool profile system to mini-bot Telegram. Profiles are named collections of **base tools** (framework operations). The actual implementation tools are organized into **Toolkits**, which are dynamically loaded by the AI at runtime via `load_toolkit()` calls.
 
-## Profile: Standard
+This is the **Toolkit Lazy-Loading** pattern — the AI only sees the tools it has loaded, keeping token costs low.
 
-### File Tools (scoped to `mpm-agent/` tree)
+---
 
-| Tool | Args | Description |
-|------|------|-------------|
-| `read_file` | `path` | Read file contents |
-| `write_file` | `path`, `content` | Write content to file |
-| `ReadFileSemantic` | `path`, `mode` | Read with semantic mode: `summary`, `code`, `compare` |
-| `ReadFileCompare` | `pathA`, `pathB` | Diff two files |
+## Base Tools (Always Available)
 
-Path restriction: all file paths resolved relative to `mpm-agent/` directory. Absolute paths and `..` escapes are rejected.
-
-### Web Tool
+These 4 tools are always in context, regardless of toolkit state:
 
 | Tool | Args | Description |
 |------|------|-------------|
-| `WebSynthesize` | `query` | DuckDuckGo search + synthesis with citations |
+| `list_toolkits` | — | List available toolkits and their load status |
+| `load_toolkit` | `name` | Load a toolkit to unlock its tools |
+| `unload_toolkit` | `name` | Unload a toolkit to free context space |
+| `execute_mpm_command` | `command` | Execute an MPM CLI command (e.g. `recall hello` runs `mpm recall hello`) |
 
-### Shell/JQ Tool
+---
 
-| Tool | Args | Description |
-|------|------|-------------|
-| `jq` | `filter`, `file` | Run `jq` filter on JSON file. Restricted to `*.json` and `*.jsonl` files in `mpm-agent/` |
+## Available Toolkits
 
-### MPM Commands (via `mpm` binary)
+Toolkits are collections of tools loaded on demand. The AI calls `load_toolkit("name")` to activate one.
 
-These invoke `mpm <cmd> [args]` via shell and return stdout.
+| Toolkit | Tools | Description |
+|---------|-------|-------------|
+| `files` | `read_file`, `write_file`, `ReadFileSemantic`, `ReadFileCompare` | File operations scoped to `mpm-agent/` tree |
+| `web` | `WebSynthesize` | DuckDuckGo search + synthesis with citations |
+| `jq` | `jq` | Query JSON files with jq filters (*.json, *.jsonl only) |
+| `mpm` | *(via execute_mpm_command)* | All MPM CLI commands accessible |
 
-| Tool | MPM Equivalent | Description |
-|------|----------------|-------------|
-| `mpm_recall` | `mpm recall <q>` | Search memories for context |
-| `mpm_topics` | `mpm topics` | List all topic names |
-| `mpm_mode` | `mpm mode [name]` | Show current or set mode |
-| `mpm_persona` | `mpm persona [name]` | Show current or set persona |
-| `mpm_memory` | `mpm memory <args>` | Memory operations |
-| `mpm_topic` | `mpm topic <args>` | Topic management |
-| `mpm_session` | `mpm session <args>` | Session operations |
-| `mpm_lesson` | `mpm lesson <args>` | Lesson operations |
-| `mpm_reference` | `mpm reference <args>` | Reference library |
-| `mpm_version` | `mpm version` | Show version info |
-| `mpm_doctor` | `mpm doctor` | Run diagnostics |
-| `mpm_compile` | `mpm compile` | Compile project |
-| `mpm_shred` | `mpm shred` | Secure memory wipe |
-| `mpm_ingest` | `mpm ingest <args>` | Import external memories |
-| `mpm_stats` | `mpm stats` | Show MPM statistics |
+### File Path Restriction
 
-**Path constraint**: `mpm` binary must be in `PATH` or resolvable via `MPM_WORKSPACE`.
+All file tools are scoped to the `mpm-agent/` directory tree. Absolute paths and `..` escapes outside the sandbox are rejected.
+
+---
 
 ## Profile Switching
 
-**`/tools`** command shows an inline keyboard with available profiles:
+**`/tools`** command (Telegram):
 
 ```
-[Standard]  [MCP-Admin*]  [Research*]
+Current: standard
+
+Available profiles:
+  /tools standard ✓
+  /tools mcp-admin*
+  /tools research*
+
+Use /tools <name> to switch.
 ```
 
-Profiles marked `*` are future extensions (out of scope for this spec).
+Profiles are stored per-chat in `chatSettings`. The AI also manages toolkit loading dynamically via `load_toolkit()` calls — no `/tools` command needed for that.
 
-Selecting a profile:
-1. Stores the active profile name in `chatSettings` for that chat
-2. Returns confirmation: "Tool profile: Standard"
-3. The AI agent loop uses the profile's tool list for tool calls
-
-**`/tools <name>`** — directly switch to named profile.
-
-**`/tools`** (no args) — show inline menu.
+---
 
 ## Architecture
 
 ### Tool Registry
 
-`core/tools.go` expanded with:
-- `ToolDefinition` struct: `{name, description, inputSchema}`
-- `RegisterTool(name, def)` — add tool to registry
-- `GetTool(name)` — fetch tool definition
-- `ListTools()` — all registered tools
-- `ListToolsByProfile(profile)` — tools in a profile
-
-Profile definitions in `core/config.go`:
+`core/tools.go`:
 ```go
-type ToolProfile struct {
-    Name  string
-    Tools []string  // tool names
+type ToolDefinition struct {
+    Name        string
+    Description string
+    InputSchema map[string]interface{}
 }
 
+var toolRegistry = make(map[string]ToolDefinition)  // all registered tools
+var LoadedToolkits = make(map[string]map[string]bool) // sessionID → toolkit name → true
+```
+
+### Config Structure
+
+`core/config.go`:
+```go
 type MiniBotConfig struct {
     ...
-    Profiles map[string][]string `json:"profiles"`  // profile name → tool names
+    Profiles  map[string][]string  // profile name → base tool names
+    Toolkits  map[string][]string  // toolkit name → tool names
 }
 ```
 
-Default profiles in `DefaultMiniBotConfig()`:
+Default config:
 ```go
 Profiles: map[string][]string{
-    "standard": {
-        "read_file", "write_file", "ReadFileSemantic", "ReadFileCompare",
-        "WebSynthesize", "jq",
-        "mpm_recall", "mpm_topics", "mpm_mode", "mpm_persona",
-        "mpm_memory", "mpm_topic", "mpm_session", "mpm_lesson",
-        "mpm_reference", "mpm_version", "mpm_doctor", "mpm_compile",
-        "mpm_shred", "mpm_ingest", "mpm_stats",
-    },
-}
+    "standard": {"list_toolkits", "load_toolkit", "unload_toolkit", "execute_mpm_command"},
+},
+Toolkits: map[string][]string{
+    "files": {"read_file", "write_file", "ReadFileSemantic", "ReadFileCompare"},
+    "web":  {"WebSynthesize"},
+    "jq":   {"jq"},
+    "mpm":  {},
+},
 ```
 
-### Tool Execution
+### Toolkit Interception in Tool Loop
 
-`executeTool(tool string, args map[string]interface{}) (string, error)` expanded:
-- MPM tools: exec `mpm <cmd> <args...>` via `exec.Command`, return stdout/stderr
-- File tools: current implementation + path restriction to `mpm-agent/`
-- `jq`: validate file extension, run `jq` command
-- `WebSynthesize`: existing implementation
+`RunAgent` in `core/agent.go` intercepts `load_toolkit` and `unload_toolkit` locally — **no API call is made**. These are framework operations:
+
+```
+LLM calls load_toolkit("files")
+         ↓
+Agent loop intercepts (recognizes as framework tool)
+         ↓
+Updates LoadedToolkits[sessionID]["files"] = true
+         ↓
+Appends "[load_toolkit result]" to messages
+         ↓
+Re-calls API with updated tool list (now includes files tools)
+         ↓
+LLM uses read_file, write_file, etc.
+```
+
+`buildToolListWithLoaded()` merges:
+- `execute_mpm_command` (always)
+- Base tools from profile (`list_toolkits`, `load_toolkit`, `unload_toolkit`)
+- Tools from loaded toolkits (deduped)
 
 ### AI Tool Loop
 
-`RunAgent` in `agent.go` updated:
-1. Build system prompt (unchanged)
-2. Call API with available tools from active profile in tool schema
-3. If API returns a tool call, execute via `executeTool`
-4. Collect result, re-call API with result
-5. Repeat until no more tool calls (max 5 iterations to prevent loops)
-6. Return final text response
+`RunAgent` in `core/agent.go`:
+1. Build system prompt
+2. Build tool list: base + dynamically loaded toolkit tools
+3. Call API with tools
+4. If API returns a tool call:
+   - If `load_toolkit`/`unload_toolkit` → update state locally, re-call
+   - If `execute_mpm_command` → exec `mpm <args>`, return output
+   - If other → execute via `executeTool`
+5. Append result, re-call API
+6. Repeat until no more tool calls (max 5 iterations)
 
-### Telegram `/tools` Command
+### Telegram Session Cleanup
 
-In `handler.go`, `handleCommand`:
-- `/tools` — send inline keyboard with profile buttons
-- `/tools standard` — switch to standard profile, confirm
+`/new`, `/clear` clears both session history AND `LoadedToolkits` for that chat (via `ClearSessionToolkits`).
 
-Inline keyboard sent via `telego.EditMessageText` with inline keyboard markup.
-
-## Implementation Order
-
-1. Define `ToolDefinition` struct and registry in `core/tools.go`
-2. Add profile config to `MiniBotConfig` in `core/config.go`
-3. Expand `executeTool` with MPM commands, `jq`, path restriction
-4. Wire tool registry into `RunAgent` tool loop
-5. Add `/tools` command to handler
-6. Register Standard profile as default
+---
 
 ## Files to Modify
 
-- `core/tools.go` — registry + `executeTool` expansion
-- `core/config.go` — profile definitions in config
-- `core/agent.go` — tool loop in `RunAgent`
-- `cmd/telegram/handler.go` — `/tools` command
-- `cmd/telegram/config.go` — Telegram config (no change needed)
+- `core/tools.go` — ToolDefinition registry, LoadedToolkits map, executeTool
+- `core/config.go` — Profiles + Toolkits in MiniBotConfig
+- `core/agent.go` — RunAgent with toolkit interception, buildToolListWithLoaded
+- `cmd/telegram/handler.go` — sessionID passed to RunAgent, /tools command, /new clears toolkits
