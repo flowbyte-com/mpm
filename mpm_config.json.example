@@ -1,0 +1,14 @@
+{
+  "synth": {
+    "model": "MiniMax-M2.7",
+    "api_key": "",
+    "base_url": "https://api.minimax.io/anthropic",
+    "max_tokens": 4096,
+    "timeout_seconds": 300
+  },
+  "telegram": {
+    "bot_token": "",
+    "polling": true,
+    "allowed_users": []
+  }
+}
