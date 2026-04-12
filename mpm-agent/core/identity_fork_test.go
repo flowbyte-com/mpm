@@ -20,7 +20,7 @@ Core traits: helpful`
 
 	// Fork the identity
 	branchName := "experimental"
-	if err := ForkIdentity(dir, branchName); err != nil {
+	if err := ForkIdentity(dir, branchName, "main"); err != nil {
 		t.Fatalf("ForkIdentity failed: %v", err)
 	}
 
@@ -77,7 +77,7 @@ Type: assistant`
 	// Fork multiple branches
 	branches := []string{"feature-a", "feature-b", "hotfix"}
 	for _, name := range branches {
-		if err := ForkIdentity(dir, name); err != nil {
+		if err := ForkIdentity(dir, name, "main"); err != nil {
 			t.Fatalf("ForkIdentity(%s) failed: %v", name, err)
 		}
 	}
@@ -164,7 +164,7 @@ Core traits: helpful`
 
 	// Fork a branch
 	branchName := "experimental"
-	if err := ForkIdentity(dir, branchName); err != nil {
+	if err := ForkIdentity(dir, branchName, "main"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -220,7 +220,7 @@ Type: assistant`
 
 	// Fork a branch
 	branchName := "experimental"
-	if err := ForkIdentity(dir, branchName); err != nil {
+	if err := ForkIdentity(dir, branchName, "main"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -283,10 +283,10 @@ Core traits: helpful`
 	}
 
 	// Fork two branches
-	if err := ForkIdentity(dir, "branch-a"); err != nil {
+	if err := ForkIdentity(dir, "branch-a", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ForkIdentity(dir, "branch-b"); err != nil {
+	if err := ForkIdentity(dir, "branch-b", "main"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -321,10 +321,10 @@ Type: assistant`
 	}
 
 	// Fork two branches with same content
-	if err := ForkIdentity(dir, "branch-a"); err != nil {
+	if err := ForkIdentity(dir, "branch-a", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ForkIdentity(dir, "branch-b"); err != nil {
+	if err := ForkIdentity(dir, "branch-b", "main"); err != nil {
 		t.Fatal(err)
 	}
 

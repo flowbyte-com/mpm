@@ -19,7 +19,7 @@ type IdentityBranch struct {
 }
 
 // ForkIdentity creates a new branch from the current IDENTITY.md.
-func ForkIdentity(binaryDir, branchName string) error {
+func ForkIdentity(binaryDir, branchName, parentBranch string) error {
 	// Read current IDENTITY.md
 	identityPath := filepath.Join(binaryDir, "IDENTITY.md")
 	identityData, err := os.ReadFile(identityPath)
@@ -51,9 +51,12 @@ func ForkIdentity(binaryDir, branchName string) error {
 	}
 
 	// Add new branch
+	if parentBranch == "" {
+		parentBranch = "main"
+	}
 	branches = append(branches, IdentityBranch{
 		Name:      branchName,
-		Parent:    "",
+		Parent:    parentBranch,
 		CreatedAt: time.Now().Format(time.RFC3339),
 		Status:    "active",
 	})
@@ -154,7 +157,8 @@ func PromoteIdentityBranch(binaryDir, branchName string) error {
 	for i := range branches {
 		if branches[i].Name == branchName {
 			branches[i].Status = "promoted"
-			break
+		} else if branches[i].Status == "active" || branches[i].Status == "promoted" {
+			branches[i].Status = "deprecated"
 		}
 	}
 
