@@ -309,8 +309,11 @@ func InitMiniBotDB(dbPath string) error {
         context TEXT,
         weight INTEGER DEFAULT 1,
         session_id TEXT,
-        created_at TEXT
+        created_at TEXT,
+        UNIQUE(content, context, session_id)
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_anchors_dedup ON anchors(content, context, session_id);
 
     CREATE TABLE IF NOT EXISTS tools (
         id TEXT PRIMARY KEY,
@@ -407,12 +410,18 @@ type Anchor struct {
 }
 
 // InsertAnchor saves a high-priority anchor to mini-bot.db.
+// Idempotent: if an anchor with same content+context+session_id exists, updates weight instead of duplicating.
 func InsertAnchor(db *sql.DB, content, context, sessionID string, weight int) error {
     id := generateID()
     now := time.Now().Format(time.RFC3339)
+
+    // Idempotent: upsert based on content+context+session_id
     _, err := db.Exec(`
         INSERT INTO anchors (id, content, context, weight, session_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content, context, session_id) DO UPDATE SET
+            weight = MAX(weight, excluded.weight),
+            created_at = excluded.created_at
     `, id, content, context, weight, sessionID, now)
     return err
 }
@@ -791,12 +800,19 @@ type Lesson struct {
 }
 
 // ExtractLesson saves a new lesson to mini-bot.db.
+// Idempotent: if a lesson with same content exists, increments reinforcement_count instead of duplicating.
 func ExtractLesson(db *sql.DB, content, lessonType, tags string) error {
     id := generateID()
     now := time.Now().Format(time.RFC3339)
+
+    // Idempotent: upsert based on content, increment reinforcement on conflict
     _, err := db.Exec(`
         INSERT INTO lessons (id, content, type, tags, created_at, reinforcement_count)
         VALUES (?, ?, ?, ?, ?, 1)
+        ON CONFLICT(content) DO UPDATE SET
+            reinforcement_count = reinforcement_count + 1,
+            tags = COALESCE(lessons.tags, excluded.tags),
+            created_at = excluded.created_at
     `, id, content, lessonType, tags, now)
     return err
 }
