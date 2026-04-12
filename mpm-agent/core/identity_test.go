@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,12 +17,29 @@ Core traits: precise, analytical`
 		t.Fatal(err)
 	}
 
-	content := readIdentityFileFrom(dir)
-	if content == "" {
-		t.Error("expected identity content, got empty")
+	id, err := LoadIdentity(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !containsField(content, "Type:") {
-		t.Error("expected Type field in identity")
+
+	if id == nil {
+		t.Fatal("expected non-nil Identity")
+	}
+
+	if id.Name != "TestBot" {
+		t.Errorf("expected Name 'TestBot', got '%s'", id.Name)
+	}
+
+	if id.Version != "1.0" {
+		t.Errorf("expected Version '1.0', got '%s'", id.Version)
+	}
+
+	if id.Type != "test assistant" {
+		t.Errorf("expected Type 'test assistant', got '%s'", id.Type)
+	}
+
+	if id.Traits != "precise, analytical" {
+		t.Errorf("expected Traits 'precise, analytical', got '%s'", id.Traits)
 	}
 }
 
@@ -81,5 +99,5 @@ func TestLoadIdentityFileNotFound(t *testing.T) {
 }
 
 func containsField(text, field string) bool {
-	return len(text) > 0 && len(field) > 0 && len(text) >= len(field)
+	return strings.Contains(text, field)
 }
