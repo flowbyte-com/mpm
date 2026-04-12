@@ -718,7 +718,10 @@ git commit -m "feat: add mini-bot-config.json with self-improve settings"
 ## Task 4: Self-Improvement System (Lessons, Identity Patching, Tool Registry)
 
 **Files:**
-- Modify: `mpm-agent/core/selfimprove.go` (new file)
+- Create: `mpm-agent/core/selfimprove.go` (new file)
+- Create: `mpm-agent/core/identity_fork.go` (identity branching)
+
+### 4a: Core Self-Improvement
 
 - [ ] **Step 1: Write test for lesson extraction**
 
@@ -843,14 +846,12 @@ func GetLessonsByTag(db *sql.DB, tag string, limit int) ([]Lesson, error) {
 }
 
 // ProposeIdentityPatch writes a proposed change to IDENTITY_PATCH.md.
-// Returns the path to the patch file.
 func ProposeIdentityPatch(binaryDir, patchContent string) error {
     path := filepath.Join(binaryDir, "IDENTITY_PATCH.md")
     return os.WriteFile(path, []byte(patchContent), 0644)
 }
 
 // ApplyIdentityPatch merges IDENTITY_PATCH.md into IDENTITY.md.
-// Reads IDENTITY.md, appends patch content, writes back.
 func ApplyIdentityPatch(binaryDir string) error {
     identityPath := filepath.Join(binaryDir, "IDENTITY.md")
     patchPath := filepath.Join(binaryDir, "IDENTITY_PATCH.md")
@@ -870,7 +871,6 @@ func ApplyIdentityPatch(binaryDir string) error {
         return fmt.Errorf("write merged identity: %w", err)
     }
 
-    // Remove patch file after successful merge
     os.Remove(patchPath)
     return nil
 }
@@ -922,6 +922,227 @@ Expected: PASS
 ```bash
 git add core/selfimprove.go core/selfimprove_test.go
 git commit -m "feat: add self-improvement system (lessons, identity patching, tool registry)"
+```
+
+### 4b: Identity Forking
+
+- [ ] **Step 1: Write test for identity branching**
+
+```go
+// mpm-agent/core/identity_fork_test.go
+package core
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+func TestForkIdentity(t *testing.T) {
+    dir := t.TempDir()
+
+    // Create main identity
+    mainIdentity := `# MainBot v1.0
+Type: assistant
+Core traits: careful`
+    if err := os.WriteFile(filepath.Join(dir, "IDENTITY.md"), []byte(mainIdentity), 0644); err != nil {
+        t.Fatal(err)
+    }
+    os.MkdirAll(filepath.Join(dir, "IDENTITIES"), 0755)
+
+    // Fork the identity
+    branchName := "experiment-v1"
+    err := ForkIdentity(dir, branchName, "")
+    if err != nil {
+        t.Fatalf("ForkIdentity failed: %v", err)
+    }
+
+    // Verify branch file exists
+    branchPath := filepath.Join(dir, "IDENTITIES", "experiment-v1.md")
+    if _, err := os.Stat(branchPath); os.IsNotExist(err) {
+        t.Errorf("expected branch file at %s", branchPath)
+    }
+
+    // Verify branches.json was updated
+    metaPath := filepath.Join(dir, "IDENTITIES", "branches.json")
+    if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+        t.Errorf("expected branches.json at %s", metaPath)
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./core -run TestForkIdentity -v`
+Expected: FAIL — ForkIdentity doesn't exist
+
+- [ ] **Step 3: Write identity forking implementation**
+
+```go
+// mpm-agent/core/identity_fork.go
+package core
+
+import (
+    "encoding/json"
+    "fmt"
+    "os"
+    "path/filepath"
+    "time"
+)
+
+// IdentityBranch represents a branch in the identity version history.
+type IdentityBranch struct {
+    Name      string `json:"name"`
+    Parent    string `json:"parent"`
+    CreatedAt string `json:"created_at"`
+    Status    string `json:"status"` // active, promoted, deprecated
+}
+
+// ForkIdentity creates a new identity branch from current IDENTITY.md.
+func ForkIdentity(binaryDir, branchName, parentBranch string) error {
+    // Read current main identity
+    mainPath := filepath.Join(binaryDir, "IDENTITY.md")
+    data, err := os.ReadFile(mainPath)
+    if err != nil {
+        return fmt.Errorf("read identity: %w", err)
+    }
+
+    // Ensure IDENTITIES directory exists
+    identitiesDir := filepath.Join(binaryDir, "IDENTITIES")
+    if err := os.MkdirAll(identitiesDir, 0755); err != nil {
+        return fmt.Errorf("create identities dir: %w", err)
+    }
+
+    // Write branch file
+    branchPath := filepath.Join(identitiesDir, branchName+".md")
+    if err := os.WriteFile(branchPath, data, 0644); err != nil {
+        return fmt.Errorf("write branch: %w", err)
+    }
+
+    // Update branches.json
+    branchesPath := filepath.Join(identitiesDir, "branches.json")
+    var branches []IdentityBranch
+
+    if existing, err := os.ReadFile(branchesPath); err == nil {
+        json.Unmarshal(existing, &branches)
+    }
+
+    parent := "main"
+    if parentBranch != "" {
+        parent = parentBranch
+    }
+
+    branches = append(branches, IdentityBranch{
+        Name:      branchName,
+        Parent:    parent,
+        CreatedAt: time.Now().Format(time.RFC3339),
+        Status:    "active",
+    })
+
+    data, _ = json.MarshalIndent(branches, "", "  ")
+    if err := os.WriteFile(branchesPath, data, 0644); err != nil {
+        return fmt.Errorf("write branches: %w", err)
+    }
+
+    return nil
+}
+
+// ListIdentityBranches returns all identity branches.
+func ListIdentityBranches(binaryDir string) ([]IdentityBranch, error) {
+    branchesPath := filepath.Join(binaryDir, "IDENTITIES", "branches.json")
+    data, err := os.ReadFile(branchesPath)
+    if err != nil {
+        return nil, err
+    }
+    var branches []IdentityBranch
+    if err := json.Unmarshal(data, &branches); err != nil {
+        return nil, err
+    }
+    return branches, nil
+}
+
+// SwitchIdentityBranch switches the active identity to a branch.
+func SwitchIdentityBranch(binaryDir, branchName string) error {
+    branchPath := filepath.Join(binaryDir, "IDENTITIES", branchName+".md")
+    data, err := os.ReadFile(branchPath)
+    if err != nil {
+        return fmt.Errorf("read branch %s: %w", branchName, err)
+    }
+    mainPath := filepath.Join(binaryDir, "IDENTITY.md")
+    return os.WriteFile(mainPath, data, 0644)
+}
+
+// PromoteIdentityBranch merges a branch into main.
+func PromoteIdentityBranch(binaryDir, branchName string) error {
+    // Read branch content
+    branchPath := filepath.Join(binaryDir, "IDENTITIES", branchName+".md")
+    data, err := os.ReadFile(branchPath)
+    if err != nil {
+        return fmt.Errorf("read branch: %w", err)
+    }
+
+    // Read current main
+    mainPath := filepath.Join(binaryDir, "IDENTITY.md")
+    mainData, err := os.ReadFile(mainPath)
+    if err != nil {
+        return fmt.Errorf("read main: %w", err)
+    }
+
+    // Backup current main as main.backup
+    if err := os.WriteFile(mainPath+".backup", mainData, 0644); err != nil {
+        return fmt.Errorf("backup main: %w", err)
+    }
+
+    // Overwrite main with branch content
+    if err := os.WriteFile(mainPath, data, 0644); err != nil {
+        return fmt.Errorf("promote branch: %w", err)
+    }
+
+    // Mark branch as promoted
+    branchesPath := filepath.Join(binaryDir, "IDENTITIES", "branches.json")
+    var branches []IdentityBranch
+    if existing, err := os.ReadFile(branchesPath); err == nil {
+        json.Unmarshal(existing, &branches)
+    }
+    for i := range branches {
+        if branches[i].Name == branchName {
+            branches[i].Status = "promoted"
+        }
+    }
+    out, _ := json.MarshalIndent(branches, "", "  ")
+    os.WriteFile(branchesPath, out, 0644)
+
+    return nil
+}
+
+// CompareIdentityBranches returns diff between two branches.
+func CompareIdentityBranches(binaryDir, a, b string) (string, error) {
+    aPath := filepath.Join(binaryDir, "IDENTITIES", a+".md")
+    bPath := filepath.Join(binaryDir, "IDENTITIES", b+".md")
+
+    aData, err := os.ReadFile(aPath)
+    if err != nil {
+        return "", fmt.Errorf("read branch %s: %w", a, err)
+    }
+    bData, err := os.ReadFile(bPath)
+    if err != nil {
+        return "", fmt.Errorf("read branch %s: %w", b, err)
+    }
+
+    return fmt.Sprintf("--- %s\n+++ %s\n%s", a, b, diff strings(string(aData), string(bData))), nil
+}
+```
+
+- [ ] **Step 4: Run identity fork test to verify it passes**
+
+Run: `go test ./core -run TestForkIdentity -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add core/identity_fork.go core/identity_fork_test.go
+git commit -m "feat: add identity forking system (git-branch style branching)"
 ```
 
 ---
