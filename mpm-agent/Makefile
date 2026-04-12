@@ -1,28 +1,31 @@
-BINARY_NAME := mpm-agent
-BUILD_DIR   := .
-
 .PHONY: all build install clean test-core
+
+BIN := bin
+BINS := $(BIN)/mini-bot $(BIN)/mini-bot-telegram $(BIN)/mini-bot-mcp
 
 all: build
 
-build:
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) .
+build: $(BINS)
 
-# mini-bot build targets
-mini-bot: cmd/mini-bot/main.go core/*.go
-	go build -o bin/mini-bot ./cmd/mini-bot
+$(BIN):
+	mkdir -p $(BIN)
 
-mini-bot-telegram: cmd/telegram/*.go core/*.go
-	go build -o bin/mini-bot-telegram ./cmd/telegram
+$(BIN)/mini-bot: cmd/mini-bot/main.go cmd/mini-bot/repl.go core/*.go | $(BIN)
+	go build -o $@ ./cmd/mini-bot
 
-mini-bot-mcp: cmd/mcp/*.go core/*.go
-	go build -o bin/mini-bot-mcp ./cmd/mcp
+$(BIN)/mini-bot-telegram: cmd/telegram/*.go core/*.go | $(BIN)
+	go build -o $@ ./cmd/telegram
+
+$(BIN)/mini-bot-mcp: cmd/mcp/main.go core/*.go | $(BIN)
+	go build -o $@ ./cmd/mcp
+
+install: $(BINS)
+	install -Dm755 $(BIN)/mini-bot /usr/local/bin/mini-bot
+	install -Dm755 $(BIN)/mini-bot-telegram /usr/local/bin/mini-bot-telegram
+	install -Dm755 $(BIN)/mini-bot-mcp /usr/local/bin/mini-bot-mcp
+
+clean:
+	rm -rf $(BIN)
 
 test-core:
 	CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go test ./core/...
-
-install: build
-	install -Dm755 $(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
-
-clean:
-	rm -f $(BINARY_NAME)
