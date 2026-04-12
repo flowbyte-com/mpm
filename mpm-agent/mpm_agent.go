@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"mpm-agent/core"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -1112,12 +1114,25 @@ func runAgentLoop(query string, streaming bool, cfg *Config) error {
 // ============================================================================
 
 func main() {
+	pid := os.Getpid()
+	log.Printf("mini-bot[%d]: Starting...", pid)
+
 	args := os.Args[1:]
 	cfg, err := LoadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
 	}
+
+	binaryDir := core.GetBinaryDir()
+	identity, _ := core.LoadIdentity(binaryDir)
+	identityName, identityVersion := "unknown", "unknown"
+	if identity != nil {
+		identityName = identity.Name
+		identityVersion = identity.Version
+	}
+	log.Printf("mini-bot[%d]: Loaded identity: %s v%s", pid, identityName, identityVersion)
+	log.Printf("mini-bot[%d]: Database: %s", pid, core.ResolveMiniBotDBPath())
 
 	batch := false
 	var query string
