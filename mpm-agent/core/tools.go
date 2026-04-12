@@ -1,12 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -107,12 +109,7 @@ func ReadFileSemantic(path, mode string) string {
 	text := string(content)
 	switch mode {
 	case "summary":
-		lines := strings.Split(text, "\n")
-		if len(lines) > 5 {
-			return fmt.Sprintf("File has %d lines. Key lines:\n%s\n...(%d more lines)",
-				len(lines), strings.Join(lines[:5], "\n"), len(lines)-5)
-		}
-		return text
+		return summarizeDocument(text)
 	case "code":
 		var codeLines []string
 		for i, line := range strings.Split(text, "\n") {
@@ -125,11 +122,143 @@ func ReadFileSemantic(path, mode string) string {
 			return "No code structures found"
 		}
 		return strings.Join(codeLines, "\n")
+	case "compare":
+		return "compare mode requires path in format: fileA::fileB"
 	case "full":
 		return truncate(text, 2000)
 	default:
 		return truncate(text, 2000)
 	}
+}
+
+// ReadFileCompare compares two files and returns a diff-like output.
+func ReadFileCompare(pathA, pathB string) string {
+	contentA, err := os.ReadFile(pathA)
+	if err != nil {
+		return fmt.Sprintf("error reading %s: %v", pathA, err)
+	}
+	contentB, err := os.ReadFile(pathB)
+	if err != nil {
+		return fmt.Sprintf("error reading %s: %v", pathB, err)
+	}
+
+	linesA := strings.Split(strings.TrimRight(string(contentA), "\n"), "\n")
+	linesB := strings.Split(strings.TrimRight(string(contentB), "\n"), "\n")
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("Compare: %s :: %s\n\n", pathA, pathB))
+	result.WriteString(fmt.Sprintf("File A: %d lines | File B: %d lines\n\n", len(linesA), len(linesB)))
+
+	// Simple line-by-line comparison
+	maxLines := len(linesA)
+	if len(linesB) > maxLines {
+		maxLines = len(linesB)
+	}
+
+	added, removed, modified := 0, 0, 0
+	var diffLines []string
+
+	for i := 0; i < maxLines; i++ {
+		var lineA, lineB string
+		if i < len(linesA) {
+			lineA = linesA[i]
+		}
+		if i < len(linesB) {
+			lineB = linesB[i]
+		}
+
+		if lineA == lineB {
+			diffLines = append(diffLines, fmt.Sprintf("  %4d: %s", i+1, lineA))
+		} else {
+			if lineA == "" {
+				diffLines = append(diffLines, fmt.Sprintf("+ %4d: %s", i+1, lineB))
+				added++
+			} else if lineB == "" {
+				diffLines = append(diffLines, fmt.Sprintf("- %4d: %s", i+1, lineA))
+				removed++
+			} else {
+				diffLines = append(diffLines, fmt.Sprintf("- %4d: %s", i+1, lineA))
+				diffLines = append(diffLines, fmt.Sprintf("+ %4d: %s", i+1, lineB))
+				modified++
+			}
+		}
+	}
+
+	result.WriteString(fmt.Sprintf("Stats: %d added, %d removed, %d modified\n\n", added, removed, modified))
+	result.WriteString("Diff:\n")
+	result.WriteString(strings.Join(diffLines, "\n"))
+
+	return result.String()
+}
+
+// summarizeDocument extracts structure and key points from text.
+func summarizeDocument(text string) string {
+	lines := strings.Split(text, "\n")
+	totalLines := len(lines)
+
+	var headers []string
+	var keySections []string
+	var inCodeBlock bool
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if inCodeBlock || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if (strings.HasPrefix(trimmed, "#") && len(trimmed) > 1) ||
+			(len(trimmed) > 3 && len(trimmed) < 80 && trimmed == strings.ToUpper(trimmed) &&
+				!strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, " ")) {
+			headers = append(headers, fmt.Sprintf("  Line %d: %s", i+1, truncated(trimmed, 60)))
+		}
+
+		if len(trimmed) > 50 && !strings.HasPrefix(trimmed, "#") &&
+			(strings.Contains(trimmed, ":") || strings.Contains(trimmed, ".") ||
+				strings.Contains(trimmed, "-") || regexp.MustCompile(`^\d+\.`).MatchString(trimmed)) {
+			keySections = append(keySections, fmt.Sprintf("  Line %d: %s", i+1, truncated(trimmed, 70)))
+		}
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("## Document Summary\n\nFile has %d lines.\n\n", totalLines))
+
+	if len(headers) > 0 {
+		result.WriteString("### Structure (Headers)\n")
+		for _, h := range headers {
+			result.WriteString(h + "\n")
+		}
+		result.WriteString("\n")
+	}
+
+	if len(keySections) > 0 {
+		result.WriteString("### Key Sections\n")
+		for _, s := range keySections[:10] {
+			result.WriteString(s + "\n")
+		}
+		if len(keySections) > 10 {
+			result.WriteString(fmt.Sprintf("  ... (%d more sections)\n", len(keySections)-10))
+		}
+		result.WriteString("\n")
+	}
+
+	result.WriteString("### Preview\n")
+	previewLines := 8
+	if totalLines < previewLines {
+		previewLines = totalLines
+	}
+	for i := 0; i < previewLines; i++ {
+		result.WriteString(fmt.Sprintf("  %4d: %s\n", i+1, truncated(lines[i], 80)))
+	}
+	if totalLines > previewLines {
+		result.WriteString(fmt.Sprintf("  ... (%d more lines)\n", totalLines-previewLines))
+	}
+
+	return result.String()
 }
 
 // truncate truncates text to maxLen characters.
@@ -140,7 +269,12 @@ func truncate(text string, maxLen int) string {
 	return text[:maxLen] + "..."
 }
 
-// WebSynthesize searches for a query and produces a synthesized answer.
+// truncated is a local alias for truncate to avoid conflicts.
+func truncated(text string, maxLen int) string {
+	return truncate(text, maxLen)
+}
+
+// WebSynthesize searches for a query and produces a synthesized answer with proper citations.
 func WebSynthesize(query string) (string, error) {
 	searchURL := "https://duckduckgo.com/html/?q=" + url.QueryEscape(query)
 	req, _ := http.NewRequest("GET", searchURL, nil)
@@ -151,22 +285,122 @@ func WebSynthesize(query string) (string, error) {
 		return "", fmt.Errorf("web search: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8000))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 15000))
 
-	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	html := string(body)
+
+	// Parse titles and URLs from search results
+	var citations []struct {
+		title string
+		url   string
+	}
+
+	// DuckDuckGo HTML result patterns
+	// Pattern: <a href="URL" class="result__a">TITLE</a>
+	linkPattern := regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([^<]+)</a>`)
+	matches := linkPattern.FindAllStringSubmatch(html, -1)
+
+	// Also try alternative pattern for result titles
+	altPattern := regexp.MustCompile(`<a href="(https?://[^"]+)"[^>]*>([^<]+)</a>`)
+	altMatches := altPattern.FindAllStringSubmatch(html, -1)
+
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		if len(m) == 3 {
+			url := strings.TrimSpace(m[1])
+			title := strings.TrimSpace(unescapeHTML(m[2]))
+			if url != "" && !seen[url] && len(title) > 5 {
+				seen[url] = true
+				citations = append(citations, struct {
+					title string
+					url   string
+				}{title: title, url: url})
+			}
+		}
+	}
+
+	// Fallback: try alternative matches
+	if len(citations) == 0 {
+		for _, m := range altMatches {
+			if len(m) == 3 {
+				url := strings.TrimSpace(m[1])
+				title := strings.TrimSpace(m[2])
+				if url != "" && !seen[url] && len(title) > 5 &&
+					regexp.MustCompile(`^https?://`).MatchString(url) {
+					seen[url] = true
+					citations = append(citations, struct {
+						title string
+						url   string
+					}{title: title, url: url})
+				}
+			}
+		}
+	}
+
+	// Extract key facts from content
+	lines := strings.Split(html, "\n")
 	var facts []string
-	for i, line := range lines {
-		if i > 15 {
-			break
-		}
-		if len(line) > 30 {
-			facts = append(facts, truncate(line, 200))
+	for _, line := range lines {
+		// Look for result snippets
+		if strings.Contains(line, "result__snippet") || strings.Contains(line, "snippet") {
+			// Extract text between tags
+			text := stripHTML(line)
+			if len(text) > 30 {
+				facts = append(facts, truncate(strings.TrimSpace(text), 200))
+			}
 		}
 	}
 
-	if len(facts) == 0 {
-		return "No results found for: " + query, nil
+	// Build output
+	var result bytes.Buffer
+	result.WriteString(fmt.Sprintf("## Synthesis for: %s\n\n", query))
+
+	if len(citations) > 0 {
+		result.WriteString("### Sources\n")
+		for i, c := range citations {
+			if i >= 5 { // Limit to 5 sources
+				break
+			}
+			result.WriteString(fmt.Sprintf("%d. [%s](%s)\n", i+1, c.title, c.url))
+		}
+		result.WriteString("\n")
 	}
 
-	return fmt.Sprintf("## Synthesis for: %s\n\n%s\n\nSources: web search", query, strings.Join(facts, "\n")), nil
+	if len(facts) > 0 {
+		result.WriteString("### Key Information\n")
+		factCount := 5
+		if len(facts) < factCount {
+			factCount = len(facts)
+		}
+		for _, fact := range facts[:factCount] {
+			result.WriteString(fmt.Sprintf("- %s\n", fact))
+		}
+	} else {
+		result.WriteString("No additional details found.\n")
+	}
+
+	return result.String(), nil
+}
+
+// stripHTML removes HTML tags from text.
+func stripHTML(html string) string {
+	// Remove script and style blocks
+	html = regexp.MustCompile(`<script[^>]*>[\s\S]*?</script>`).ReplaceAllString(html, "")
+	html = regexp.MustCompile(`<style[^>]*>[\s\S]*?</style>`).ReplaceAllString(html, "")
+	// Remove all HTML tags
+	html = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(html, "")
+	// Decode HTML entities
+	html = unescapeHTML(html)
+	return strings.TrimSpace(html)
+}
+
+// unescapeHTML converts common HTML entities to characters.
+func unescapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
+	return s
 }
