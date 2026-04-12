@@ -1,9 +1,6 @@
-// mpm-agent — MPM companion agent
-// MIT License
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -904,7 +901,7 @@ func truncate(s string, maxLen int) string {
 // buildSystemPrompt creates the system prompt with tools and context
 func buildSystemPrompt(memories, directives, references string) string {
 	var sb strings.Builder
-	sb.WriteString("You are mpm-agent — MPM's companion AI agent. ")
+	sb.WriteString("You are mini-bot — MPM's companion AI agent. ")
 	sb.WriteString("You have access to tools listed below. Use them to help the user.\n\n")
 	sb.WriteString("## Tools\n")
 	for _, t := range toolDefinitions {
@@ -1027,7 +1024,7 @@ type conversationTurn struct {
 func runAgentLoop(query string, streaming bool, cfg *Config) error {
 	db, err := OpenDB()
 	if err != nil {
-		return fmt.Errorf("mpm-agent needs MPM running. Start with 'mpm start': %w", err)
+		return fmt.Errorf("mini-bot needs MPM running. Start with 'mpm start': %w", err)
 	}
 	defer db.Close()
 
@@ -1109,12 +1106,19 @@ func runAgentLoop(query string, streaming bool, cfg *Config) error {
 	return nil
 }
 
+// runQuery runs a single query with streaming output
+func runQuery(query string, streaming bool, cfg *Config) error {
+	return runAgentLoop(query, streaming, cfg)
+}
+
 // ============================================================================
 // CLI
 // ============================================================================
 
 func main() {
 	pid := os.Getpid()
+	os.Args[0] = fmt.Sprintf("mini-bot[%d]", pid)
+
 	log.Printf("mini-bot[%d]: Starting...", pid)
 
 	args := os.Args[1:]
@@ -1164,11 +1168,11 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Print(`mpm-agent — MPM companion agent
+	fmt.Print(`mini-bot — MPM companion agent
 
 Usage:
-  mpm-agent [options] [query]    Run query or start REPL
-  mpm-agent --help               Show this help
+  mini-bot [options] [query]    Run query or start REPL
+  mini-bot --help               Show this help
 
 Options:
   --batch   Disable streaming (batch mode)
@@ -1188,33 +1192,4 @@ Environment:
   MINIMAX_API_KEY   API key (or set in mpm_config.json)
   MPM_WORKSPACE     MPM workspace path
 `)
-}
-
-func repl(cfg *Config) {
-	fmt.Println("mpm-agent REPL (Ctrl+C to exit)")
-	fmt.Println("Type your query and press Enter.")
-	fmt.Println()
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("> ")
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF || strings.Contains(err.Error(), "closed") {
-				break
-			}
-			continue
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if line == "exit" || line == "quit" {
-			break
-		}
-		fmt.Println()
-		if err := runAgentLoop(line, true, cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
-		}
-		fmt.Println()
-	}
 }
