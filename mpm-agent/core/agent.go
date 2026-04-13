@@ -224,7 +224,7 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 	messages = append(messages, apiMessage{Role: "user", Content: query})
 
 	// Tool loop: call API, execute tools, repeat
-	maxIterations := 5
+	maxIterations := 10
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		// Rebuild tool list: base tools + loaded toolkit tools (dynamic)
 		availableTools := buildToolListWithLoaded(toolProfile, sessionID, toolkitMap)
