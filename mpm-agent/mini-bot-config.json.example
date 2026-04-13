@@ -29,14 +29,33 @@
   "paths": {
     "db": "mini-bot.db",
     "identity": "IDENTITY.md",
-    "mcp_socket": "mini-bot-mcp.sock"
+    "mcp_socket": "mini-bot-mcp.sock",
+    "workspace_root": "$HOME"
   },
   "profiles": {
     "standard": [
       "list_toolkits",
       "load_toolkit",
       "unload_toolkit",
-      "execute_mpm_command"
+      "execute_mpm_command",
+      "read_file",
+      "write_file",
+      "ReadFileSemantic",
+      "ReadFileCompare",
+      "WebSynthesize",
+      "jq"
+    ],
+    "coding": [
+      "list_toolkits",
+      "load_toolkit",
+      "unload_toolkit",
+      "execute_mpm_command",
+      "rg",
+      "sg",
+      "repomap",
+      "git_status",
+      "git_commit",
+      "git_diff"
     ]
   },
   "toolkits": {
@@ -52,6 +71,15 @@
     "jq": [
       "jq"
     ],
-    "mpm": []
+    "mpm": [],
+    "minimax": [
+      "generate_image",
+      "synthesize_speech",
+      "web_search",
+      "understand_image"
+    ],
+    "shell": [
+      "execute_shell"
+    ]
   }
 }

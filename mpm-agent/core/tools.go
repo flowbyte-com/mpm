@@ -147,6 +147,163 @@ func restrictPath(path string) (string, error) {
 	return absPath, nil
 }
 
+// resolveWorkspace returns the absolute workspace root path.
+func resolveWorkspace(configured string) string {
+	if configured == "" || configured == "." {
+		cwd, _ := os.Getwd()
+		return cwd
+	}
+	return os.ExpandEnv(configured)
+}
+
+// runRg executes ripgrep with JSON output, truncates at 50 results.
+func runRg(query, path, fileFilter string) (string, error) {
+	absPath := path
+	if absPath == "" {
+		absPath = resolveWorkspace("")
+	}
+	args := []string{"--json", query, absPath}
+	if fileFilter != "" {
+		args = []string{"--json", "--glob", fileFilter, query, absPath}
+	}
+	cmd := exec.Command("rg", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("rg error: %v\n%s", err, string(out))
+	}
+	// Truncate at 50 lines
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) > 50 {
+		lines = lines[:50]
+		result := strings.Join(lines, "\n")
+		return result + "\n[Truncated at 50 results. Please refine your search.]", nil
+	}
+	return string(out), nil
+}
+
+// runSg executes ast-grep. If rule is provided use --rule, else use --query.
+func runSg(path, rule, query string) (string, error) {
+	absPath := path
+	if absPath == "" {
+		return "", fmt.Errorf("sg: path is required")
+	}
+	var cmd *exec.Cmd
+	if rule != "" {
+		cmd = exec.Command("sg", "query", "--rule", rule, absPath)
+	} else if query != "" {
+		cmd = exec.Command("sg", "query", "--query", query, absPath)
+	} else {
+		// List available rules
+		cmd = exec.Command("sg", "lsm")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("sg lsm error: %v\n%s", err, string(out))
+		}
+		return string(out), nil
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("sg error: %v\n%s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// runRepomap generates a symbol map using find + grep.
+func runRepomap(path string, depth int) (string, error) {
+	absPath := path
+	if absPath == "" {
+		absPath = resolveWorkspace("")
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Repo Map (depth=%d)\n\n", depth))
+
+	cmd := exec.Command("find", absPath, "-maxdepth", fmt.Sprintf("%d", depth), "-name", "*.go", "-type", "f")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("find .go files: %v", err)
+	}
+
+	files := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	count := 0
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		relPath, _ := filepath.Rel(absPath, f)
+		grepCmd := exec.Command("rg", "--json", `^\s*(func|type|struct)\s+`, f)
+		grepOut, _ := grepCmd.CombinedOutput()
+		sb.WriteString(fmt.Sprintf("- %s:\n", relPath))
+		for _, line := range strings.Split(strings.TrimRight(string(grepOut), "\n"), "\n") {
+			if strings.Contains(line, `"text"`) {
+				sb.WriteString("  " + line + "\n")
+			}
+		}
+		count++
+		if count >= 20 {
+			sb.WriteString("\n... (cap at 20 files)\n")
+			break
+		}
+	}
+	return sb.String(), nil
+}
+
+// runGitStatus returns git status output.
+func runGitStatus(repoPath string) (string, error) {
+	absRepo := repoPath
+	if absRepo == "" {
+		absRepo = resolveWorkspace("")
+	}
+	cmd := exec.Command("git", "-C", absRepo, "status", "--porcelain")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git status error: %v", err)
+	}
+	return string(out), nil
+}
+
+// runGitCommit creates a commit.
+func runGitCommit(message string) (string, error) {
+	cmd := exec.Command("git", "add", "-A")
+	cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", message)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git commit error: %v\n%s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// runGitDiff returns git diff output.
+func runGitDiff(file string) (string, error) {
+	repo := resolveWorkspace("")
+	var cmd *exec.Cmd
+	if file != "" {
+		cmd = exec.Command("git", "-C", repo, "diff", "--", file)
+	} else {
+		cmd = exec.Command("git", "-C", repo, "diff")
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git diff error: %v", err)
+	}
+	return string(out), nil
+}
+
+// runShell executes an arbitrary shell command.
+func runShell(command, cwd string) (string, error) {
+	absCwd := cwd
+	if absCwd == "" {
+		absCwd = resolveWorkspace("")
+	}
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = absCwd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("shell error: %v\n%s", err, string(out))
+	}
+	return string(out), nil
+}
+
 // ExecuteSteps runs a list of steps sequentially and returns results.
 // Each step is a map with "tool", "args", and optional "checkpoint".
 func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, error) {
@@ -314,10 +471,11 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		sb.WriteString("Available toolkits:\n")
 		// Hardcoded for now — toolkits are registered at init
 		toolkitInfo := map[string]string{
-			"files": "read_file, write_file, ReadFileSemantic, ReadFileCompare — file operations in mpm-agent/",
-			"web":  "WebSynthesize — DuckDuckGo search with citations",
-			"jq":   "jq — query and transform JSON files",
-			"mpm":  "execute_mpm_command — all MPM CLI commands (recall, mode, persona, etc.)",
+			"files":  "read_file, write_file, ReadFileSemantic, ReadFileCompare — file operations in mpm-agent/",
+			"web":    "WebSynthesize — DuckDuckGo search with citations",
+			"jq":     "jq — query and transform JSON files",
+			"mpm":    "execute_mpm_command — all MPM CLI commands (recall, mode, persona, etc.)",
+			"minimax": "generate_image, synthesize_speech, web_search, understand_image — MiniMax Token Plan features",
 		}
 		for name, desc := range toolkitInfo {
 			loadedMark := ""
@@ -348,6 +506,55 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		}
 		UnloadToolkit("telegram", name)
 		return fmt.Sprintf("Toolkit '%s' unloaded.", name), nil
+
+	case "rg":
+		query, _ := args["query"].(string)
+		searchPath, _ := args["path"].(string)
+		fileFilter, _ := args["file_filter"].(string)
+		if query == "" {
+			return "", fmt.Errorf("rg: query is required")
+		}
+		return runRg(query, searchPath, fileFilter)
+
+	case "sg":
+		path, _ := args["path"].(string)
+		rule, _ := args["rule"].(string)
+		q, _ := args["query"].(string)
+		if path == "" {
+			return "", fmt.Errorf("sg: path is required")
+		}
+		return runSg(path, rule, q)
+
+	case "repomap":
+		path, _ := args["path"].(string)
+		depth, _ := args["depth"].(int)
+		if depth == 0 {
+			depth = 2
+		}
+		return runRepomap(path, depth)
+
+	case "git_status":
+		repo, _ := args["repo"].(string)
+		return runGitStatus(repo)
+
+	case "git_commit":
+		message, _ := args["message"].(string)
+		if message == "" {
+			return "", fmt.Errorf("git_commit: message is required")
+		}
+		return runGitCommit(message)
+
+	case "git_diff":
+		file, _ := args["file"].(string)
+		return runGitDiff(file)
+
+	case "execute_shell":
+		command, _ := args["command"].(string)
+		cwd, _ := args["cwd"].(string)
+		if command == "" {
+			return "", fmt.Errorf("execute_shell: command is required")
+		}
+		return runShell(command, cwd)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tool)
@@ -798,6 +1005,163 @@ func init() {
 				},
 			},
 			"required": []string{"name"},
+		},
+	})
+
+	// MiniMax Token Plan tools
+	RegisterTool("generate_image", ToolDefinition{
+		Name:        "generate_image",
+		Description: "Generate an image from a text prompt using MiniMax image-01. Returns a local file path.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"prompt": map[string]interface{}{
+					"type":        "string",
+					"description": "Text description of the image to generate",
+				},
+			},
+			"required": []string{"prompt"},
+		},
+	})
+
+	RegisterTool("synthesize_speech", ToolDefinition{
+		Name:        "synthesize_speech",
+		Description: "Convert text to speech using MiniMax Speech 2.8. Returns a local .mp3 file path.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"text": map[string]interface{}{
+					"type":        "string",
+					"description": "Text to convert to speech",
+				},
+				"voice": map[string]interface{}{
+					"type":        "string",
+					"description": "Voice ID (optional, defaults to male-qn-qingse)",
+				},
+			},
+			"required": []string{"text"},
+		},
+	})
+
+	RegisterTool("web_search", ToolDefinition{
+		Name:        "web_search",
+		Description: "Search the web using MiniMax and return synthesized results with sources.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Search query",
+				},
+			},
+			"required": []string{"query"},
+		},
+	})
+
+	RegisterTool("understand_image", ToolDefinition{
+		Name:        "understand_image",
+		Description: "Analyze an image using MiniMax vision. Ask questions about local image files.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"image_path": map[string]interface{}{
+					"type":        "string",
+					"description": "Local path to the image file",
+				},
+				"prompt": map[string]interface{}{
+					"type":        "string",
+					"description": "Question or analysis request for the image",
+				},
+			},
+			"required": []string{"image_path", "prompt"},
+		},
+	})
+
+	// Coding tools
+	RegisterTool("rg", ToolDefinition{
+		Name:        "rg",
+		Description: "Search files using ripgrep. Returns JSON results (first 50). Use for finding code patterns, function definitions, imports.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query":       map[string]interface{}{"type": "string", "description": "Regex search pattern"},
+				"path":        map[string]interface{}{"type": "string", "description": "Directory to search (default: workspace root)"},
+				"file_filter": map[string]interface{}{"type": "string", "description": "Glob filter, e.g. *.go"},
+			},
+			"required": []string{"query"},
+		},
+	})
+
+	RegisterTool("sg", ToolDefinition{
+		Name:        "sg",
+		Description: "Run ast-grep code analysis. Use 'rule' for named rules (e.g. return-error-no-log) or 'query' for custom patterns.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":  map[string]interface{}{"type": "string", "description": "Directory or file to analyze"},
+				"rule":  map[string]interface{}{"type": "string", "description": "ast-grep rule name (e.g. return-error-no-log)"},
+				"query": map[string]interface{}{"type": "string", "description": "Custom ast-grep query pattern"},
+			},
+			"required": []string{"path"},
+		},
+	})
+
+	RegisterTool("repomap", ToolDefinition{
+		Name:        "repomap",
+		Description: "Generate a symbol map of a project (functions, structs, types). Use depth to control traversal depth.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":  map[string]interface{}{"type": "string", "description": "Project root (default: workspace root)"},
+				"depth": map[string]interface{}{"type": "integer", "description": "Traversal depth (default: 2)"},
+			},
+		},
+	})
+
+	RegisterTool("git_status", ToolDefinition{
+		Name:        "git_status",
+		Description: "Show git worktree status. Returns list of modified, staged, untracked files.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"repo": map[string]interface{}{"type": "string", "description": "Repository path (default: workspace root)"},
+			},
+		},
+	})
+
+	RegisterTool("git_commit", ToolDefinition{
+		Name:        "git_commit",
+		Description: "Create a git commit with the given message.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"message": map[string]interface{}{"type": "string", "description": "Commit message"},
+			},
+			"required": []string{"message"},
+		},
+	})
+
+	RegisterTool("git_diff", ToolDefinition{
+		Name:        "git_diff",
+		Description: "Show uncommitted changes. Use 'file' to diff a specific file.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file": map[string]interface{}{"type": "string", "description": "Specific file to diff (default: all)"},
+			},
+		},
+	})
+
+	RegisterTool("execute_shell", ToolDefinition{
+		Name:        "execute_shell",
+		Description: "Execute an arbitrary shell command. Requires HITL approval via Telegram.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{"type": "string", "description": "Shell command to execute"},
+				"cwd":     map[string]interface{}{"type": "string", "description": "Working directory (default: workspace root)"},
+			},
+			"required": []string{"command"},
 		},
 	})
 }

@@ -17,6 +17,14 @@ type MiniBotConfig struct {
 	Paths       PathsConfig          `json:"paths"`
 	Profiles    map[string][]string  `json:"profiles"`
 	Toolkits    map[string][]string  `json:"toolkits"` // toolkit name → tool names
+	Retry       RetryConfig          `json:"retry"`
+}
+
+// RetryConfig controls retry behavior for API calls.
+type RetryConfig struct {
+	MaxRetries int `json:"max_retries"`           // Maximum number of retries on overloaded errors (default 5)
+	BaseDelay int `json:"base_delay_seconds"`    // Initial retry delay in seconds (default 1)
+	MaxDelay  int `json:"max_delay_seconds"`     // Maximum retry delay in seconds (default 30)
 }
 
 type IdentityConfig struct {
@@ -52,9 +60,10 @@ type SelfImproveConfig struct {
 }
 
 type PathsConfig struct {
-	DB        string `json:"db"`
-	Identity  string `json:"identity"`
-	MCPSocket string `json:"mcp_socket"`
+	DB            string `json:"db"`
+	Identity      string `json:"identity"`
+	MCPSocket     string `json:"mcp_socket"`
+	WorkspaceRoot string `json:"workspace_root"` // e.g. "$HOME", default "."
 }
 
 // DefaultMiniBotConfig returns the default config.
@@ -73,16 +82,29 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 			LessonComplexityThreshold: 7,
 			IdentityPatchApprovalRequired: true,
 		},
+		Retry: RetryConfig{
+			MaxRetries:   5,
+			BaseDelay:    1,
+			MaxDelay:     30,
+		},
 		Paths: PathsConfig{
-			DB: "mini-bot.db",
-			Identity: "IDENTITY.md",
-			MCPSocket: "mini-bot-mcp.sock",
+			DB:            "mini-bot.db",
+			Identity:      "IDENTITY.md",
+			MCPSocket:     "mini-bot-mcp.sock",
+			WorkspaceRoot: os.ExpandEnv("$HOME"),
 		},
 		Profiles: map[string][]string{
 			"standard": {
-				// Base tools — always available, never unloaded
 				"list_toolkits", "load_toolkit", "unload_toolkit",
 				"execute_mpm_command",
+				"read_file", "write_file", "ReadFileSemantic", "ReadFileCompare",
+				"WebSynthesize", "jq",
+			},
+			"coding": {
+				"list_toolkits", "load_toolkit", "unload_toolkit",
+				"execute_mpm_command",
+				"rg", "sg", "repomap",
+				"git_status", "git_commit", "git_diff",
 			},
 		},
 		Toolkits: map[string][]string{
@@ -97,7 +119,12 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 			},
 			"mpm": {
 				// All MPM commands accessible via execute_mpm_command
-				// This toolkit just documents the capability
+			},
+			"minimax": {
+				"generate_image", "synthesize_speech", "web_search", "understand_image",
+			},
+			"shell": {
+				"execute_shell",
 			},
 		},
 	}
@@ -132,6 +159,14 @@ func LoadMiniBotConfig(configPath string) (*MiniBotConfig, error) {
 	}
 	if cfg.SelfImprove.LessonComplexityThreshold == 0 {
 		cfg.SelfImprove.LessonComplexityThreshold = defaults.SelfImprove.LessonComplexityThreshold
+	}
+	// MergeProfiles defaults so nil profiles from older configs get the standard profile
+	if cfg.Profiles == nil {
+		cfg.Profiles = defaults.Profiles
+	}
+	// MergeToolkits defaults so nil toolkits from older configs get all toolkits
+	if cfg.Toolkits == nil {
+		cfg.Toolkits = defaults.Toolkits
 	}
 
 	// Environment variable overrides

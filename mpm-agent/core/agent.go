@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -192,11 +193,12 @@ func mpmExec(cmd string) (string, error) {
 }
 
 // RunAgent runs a single agent query with full identity and context.
+// ctx is the parent context (90s timeout from handler).
 // identityPath is the resolved path to IDENTITY.md.
 // toolProfile is the list of base tool names (framework tools).
 // sessionID is used to scope LoadedToolkits per conversation.
 // toolkitMap maps toolkit names to tool names (from config).
-func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string) (string, error) {
+func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string) (string, error) {
 	// Get anchors as high-priority context
 	anchors, _ := GetRecentAnchors(db, 5)
 
@@ -227,8 +229,11 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 		// Rebuild tool list: base tools + loaded toolkit tools (dynamic)
 		availableTools := buildToolListWithLoaded(toolProfile, sessionID, toolkitMap)
 
-		responseText, toolCalls, err := callSynthAPIWithTools(systemPrompt, messages, cfg, availableTools)
+		responseText, toolCalls, err := callSynthAPIWithTools(ctx, systemPrompt, messages, cfg, availableTools)
 		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return "⚠️ Request timed out (90s). Try a simpler query.", nil
+			}
 			return "", err
 		}
 
@@ -288,9 +293,14 @@ func RunAgent(query string, history []map[string]interface{}, db *sql.DB, identi
 				Content: fmt.Sprintf("[%s result]: %s", tc.Name, result),
 			})
 		}
+
+		// Check: did we make tool calls without returning text? (loop breaker)
+		if iteration == maxIterations-1 && len(toolCalls) > 0 {
+			return "⚠️ Loop terminated: Exceeded max reasoning steps.", nil
+		}
 	}
 
-	// Max iterations reached
+	// Max iterations reached (should not reach here due to breaker above)
 	return "(tool loop limit reached)", nil
 }
 
@@ -302,7 +312,7 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 	tools = append(tools, map[string]interface{}{
 		"name":        "execute_mpm_command",
 		"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
-		"inputSchema": map[string]interface{}{
+		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"command": map[string]interface{}{
@@ -323,7 +333,7 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 		tools = append(tools, map[string]interface{}{
 			"name":        def.Name,
 			"description": def.Description,
-			"inputSchema": def.InputSchema,
+			"input_schema": def.InputSchema,
 		})
 	}
 
@@ -351,7 +361,7 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 				tools = append(tools, map[string]interface{}{
 					"name":        def.Name,
 					"description": def.Description,
-					"inputSchema": def.InputSchema,
+					"input_schema": def.InputSchema,
 				})
 			}
 		}
@@ -361,7 +371,7 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 }
 
 // callSynthAPIWithTools makes an Anthropic API call and returns response text and any tool calls.
-func callSynthAPIWithTools(systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, error) {
+func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, error) {
 	if cfg.APIKey == "" {
 		return "", nil, fmt.Errorf("no API key configured")
 	}
@@ -400,19 +410,14 @@ func callSynthAPIWithTools(systemPrompt string, messages []apiMessage, cfg *Synt
 	}
 
 	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/v1/messages"
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "", nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", cfg.APIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	timeout := time.Duration(cfg.TimeoutSecs) * time.Second
-	if timeout == 0 {
-		timeout = 300 * time.Second
-	}
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Transport: &http.Transport{}}
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -434,6 +439,20 @@ func callSynthAPIWithTools(systemPrompt string, messages []apiMessage, cfg *Synt
 		return "", nil, fmt.Errorf("parse response: %w", err)
 	}
 
+	// Check for top-level error type (e.g., MiniMax returns {"type":"error","error":...})
+	if result.Type == "error" {
+		var errResp struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error.Message != "" {
+			return "", nil, fmt.Errorf("API error: %s", errResp.Error.Message)
+		}
+		return "", nil, fmt.Errorf("API error: %s", string(respBody))
+	}
+
 	// Collect text response and tool calls
 	var textResponse string
 	var toolCalls []toolUse
@@ -446,6 +465,9 @@ func callSynthAPIWithTools(systemPrompt string, messages []apiMessage, cfg *Synt
 				Name:  block.Name,
 				Input: block.Input,
 			})
+		} else if block.Type == "error" {
+			// Error block from API — surface it as an error
+			return "", nil, fmt.Errorf("API error: %s", block.Text)
 		}
 	}
 

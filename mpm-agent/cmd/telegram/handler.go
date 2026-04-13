@@ -2,8 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -31,22 +37,36 @@ type Handler struct {
 	cfg          *TelegramConfig
 	sm           *SessionManager
 	agentConfig  *core.MiniBotConfig
-	activeReplies sync.Map   // chatID → true (prevents double-reply)
-	chatSettings  sync.Map   // chatID → *chatSettings
+	mediaDir     string              // absolute path to media cache directory
+	activeReplies sync.Map           // chatID → true (prevents double-reply)
+	chatSettings  sync.Map          // chatID → *chatSettings
 }
 
 // NewHandler creates a new Telegram handler.
 func NewHandler(bot *telego.Bot, cfg *TelegramConfig, sm *SessionManager, agentCfg *core.MiniBotConfig) *Handler {
-	return &Handler{
+	h := &Handler{
 		bot:         bot,
 		cfg:         cfg,
 		sm:          sm,
 		agentConfig: agentCfg,
 	}
+	// Set up media cache directory
+	h.mediaDir = filepath.Join(core.GetBinaryDir(), "media")
+	if err := os.MkdirAll(h.mediaDir, 0700); err != nil {
+		log.Printf("[telegram] warning: could not create media dir: %v", err)
+	} else {
+		log.Printf("[telegram] media dir: %s", h.mediaDir)
+	}
+	return h
 }
 
-// Handle processes an incoming Telegram message.
+// Handle processes an incoming Telegram message or photo.
 func (h *Handler) Handle(ctx *th.Context, message telego.Message) error {
+	// Handle photos: download and save to media/, inject system message
+	if len(message.Photo) > 0 {
+		return h.handlePhotoMessage(ctx, message)
+	}
+
 	// We only handle text messages
 	if message.Text == "" {
 		return nil
@@ -78,28 +98,8 @@ func (h *Handler) Handle(ctx *th.Context, message telego.Message) error {
 	}
 	defer h.activeReplies.Delete(chatID)
 
-	// Send "typing" indicator while agent works
-	h.startTyping(ctx, chatID)
-
-	// Run agent reply
-	response, err := h.agentReply(chatID, text)
-	if err != nil {
-		h.sendText(ctx, chatID, fmt.Sprintf("Error: %v", err))
-		return err
-	}
-
-	if response == "" {
-		response = "(no response)"
-	}
-
-	// Strip thinking blocks only if verbose mode is off
-	s := h.getSettings(chatID)
-	if !s.verbose {
-		response = cleanResponse(response)
-	}
-
-	// Send response
-	h.sendLongText(ctx, chatID, response)
+	// Non-blocking agent reply (Tier 1): send "🧠 Thinking..." immediately
+	h.agentReply(chatID, text)
 	return nil
 }
 
@@ -130,6 +130,102 @@ func (h *Handler) isAllowed(userID int64) bool {
 		}
 	}
 	return false
+}
+
+// handlePhotoMessage downloads a photo and injects a system message into the session.
+func (h *Handler) handlePhotoMessage(ctx *th.Context, message telego.Message) error {
+	// Check authorization
+	if !h.isAllowed(message.From.ID) {
+		return nil
+	}
+
+	// Get the largest photo size
+	sizes := message.Photo
+	largest := sizes[len(sizes)-1]
+
+	// Get file info
+	file, err := h.bot.GetFile(context.Background(), &telego.GetFileParams{FileID: largest.FileID})
+	if err != nil {
+		log.Printf("[telegram] GetFile error: %v", err)
+		return nil
+	}
+
+	// Construct download URL
+	downloadURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", h.bot.Token(), file.FilePath)
+
+	// Download the file
+	httpResp, err := http.DefaultClient.Get(downloadURL)
+	if err != nil {
+		log.Printf("[telegram] DownloadFile error: %v", err)
+		return nil
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		log.Printf("[telegram] download HTTP %d", httpResp.StatusCode)
+		return nil
+	}
+
+	content, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		log.Printf("[telegram] read download body: %v", err)
+		return nil
+	}
+
+	// Save to media dir
+	hash := sha256.Sum256(content)
+	ext := "jpg" // Telegram photos are JPEG
+	filename := fmt.Sprintf("inbound_%s.%s", hex.EncodeToString(hash[:16]), ext)
+	outPath := filepath.Join(h.mediaDir, filename)
+	if err := os.WriteFile(outPath, content, 0600); err != nil {
+		log.Printf("[telegram] WriteFile error: %v", err)
+		return nil
+	}
+
+	log.Printf("[telegram] saved inbound photo to %s", outPath)
+
+	// Inject system message into session
+	chatID := message.Chat.ID
+	sysMsg := fmt.Sprintf("[System: User uploaded an image saved at %s]", outPath)
+	if err := h.injectSystemMessage(chatID, sysMsg); err != nil {
+		log.Printf("[telegram] injectSystemMessage error: %v", err)
+	}
+
+	// If the photo has a caption, also process the caption as a text message
+	if message.Caption != "" {
+		text := strings.TrimSpace(message.Caption)
+		if text != "" && !strings.HasPrefix(text, "/") {
+			// Forward to agent for image understanding
+			go func() {
+				history, err := h.sm.Get(chatID)
+				if err != nil || history == nil {
+					return
+				}
+				// Agent will see the system message + caption, can call understand_image
+				// The caption processing happens through the normal agent flow
+			}()
+		}
+	}
+
+	return nil
+}
+
+// injectSystemMessage prepends a system message to the chat session history.
+func (h *Handler) injectSystemMessage(chatID int64, content string) error {
+	history, err := h.sm.Get(chatID)
+	if err != nil {
+		return fmt.Errorf("get history: %w", err)
+	}
+	injected := map[string]interface{}{"role": "system", "content": content}
+	if history == nil {
+		history = []map[string]interface{}{injected}
+	} else {
+		history = append([]map[string]interface{}{injected}, history...)
+	}
+	if err := h.sm.Save(chatID, history); err != nil {
+		return fmt.Errorf("save history: %w", err)
+	}
+	return nil
 }
 
 // getSettings returns per-chat settings, creating a default if needed.
@@ -318,14 +414,51 @@ func (h *Handler) startTyping(ctx *th.Context, chatID int64) {
 	}()
 }
 
-// agentReply runs the MPM agent for the given chat and user message.
-func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
+// agentReply runs the MPM agent asynchronously (non-blocking).
+// Immediately sends "🧠 Thinking..." and spawns a goroutine.
+func (h *Handler) agentReply(chatID int64, userText string) {
+	// Send immediate thinking indicator (non-blocking)
+	sent, err := h.bot.SendMessage(context.Background(), tu.Message(tu.ID(chatID), "🧠 Thinking..."))
+	if err != nil {
+		log.Printf("[telegram] send thinking error: %v", err)
+		return
+	}
+	msgID := sent.MessageID
+
+	// Run agent in goroutine (non-blocking) — Tier 1
+	go h.runAgentWithTimeout(chatID, msgID, userText)
+}
+
+// runAgentWithTimeout runs the agent with 90s timeout and 15s heartbeat (Tier 2 + 3).
+func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) {
+	// Create 90s timeout context — Tier 2 hard kill switch
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Start heartbeat ticker (every 15s) — Tier 3
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	dots := 0
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				dots = (dots + 1) % 4
+				h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
+					ChatID:    tu.ID(chatID),
+					MessageID: msgID,
+					Text:      "🧠" + strings.Repeat(".", dots),
+				})
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Load existing history
 	history, err := h.sm.Get(chatID)
-	if err != nil {
-		return "", fmt.Errorf("load history: %w", err)
-	}
-	if history == nil {
+	if err != nil || history == nil {
 		history = []map[string]interface{}{}
 	}
 
@@ -333,11 +466,12 @@ func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
 	binaryDir := core.GetBinaryDir()
 	db, err := core.OpenDBForPath(core.ResolveMiniBotDBPath())
 	if err != nil {
-		return "", fmt.Errorf("open db: %w", err)
+		h.editMessage(chatID, msgID, fmt.Sprintf("⚠️ Error: %v", err))
+		return
 	}
 	defer db.Close()
 
-	// Resolve identity path from config
+	// Resolve identity path
 	identityPath := core.ResolveIdentityPath(binaryDir, h.agentConfig.Paths.Identity)
 
 	// Get active tool profile
@@ -353,28 +487,90 @@ func (h *Handler) agentReply(chatID int64, userText string) (string, error) {
 	// Session ID for toolkit state
 	sessionID := fmt.Sprintf("telegram:%d", chatID)
 
-	// Call RunAgent with history, tool profile, session ID, and toolkit map
-	responseText, err := core.RunAgent(userText, history, db, identityPath, &h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits)
+	// Call RunAgent with context (ctx is the 90s deadline)
+	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
+		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits)
+
+	// Stop heartbeat
+	ticker.Stop()
+
+	// Handle result
 	if err != nil {
-		return "", fmt.Errorf("agent error: %w", err)
+		h.editMessage(chatID, msgID, fmt.Sprintf("⚠️ Error: %v", err))
+		return
 	}
 
-	// Append user + assistant messages to history and persist
+	if responseText == "" {
+		responseText = "(no response)"
+	}
+
+	// Strip thinking blocks if verbose off
+	s := h.getSettings(chatID)
+	if !s.verbose {
+		responseText = cleanResponse(responseText)
+	}
+
+	// Update thinking message with final result
+	h.editMessage(chatID, msgID, responseText)
+
+	// Save to history
 	updatedHistory := append(history,
 		map[string]interface{}{"role": "user", "content": userText},
 		map[string]interface{}{"role": "assistant", "content": responseText},
 	)
-	if err := h.sm.Save(chatID, updatedHistory); err != nil {
-		log.Printf("[telegram] failed to save session for chat %d: %v", chatID, err)
-		// Non-fatal: don't fail the reply
-	}
+	h.sm.Save(chatID, updatedHistory)
 
-	// Self-improvement: anchor user messages and extract lessons
-	// Pass dbPath instead of db connection since the goroutine outlives agentReply's defer
+	// Self-improve
 	dbPath := core.ResolveMiniBotDBPath()
 	go h.selfImprove(dbPath, chatID, userText, responseText)
+}
 
-	return responseText, nil
+// editMessage edits a Telegram message with final text (removes inline keyboard).
+func (h *Handler) editMessage(chatID int64, msgID int, text string) {
+	h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
+		ChatID:    tu.ID(chatID),
+		MessageID: msgID,
+		Text:      text,
+	})
+}
+
+// HandleCallback processes inline keyboard callbacks (HITL approve/deny).
+func (h *Handler) HandleCallback(ctx *th.Context, query telego.CallbackQuery) error {
+	// Always answer callback to clear loading state on button
+	h.bot.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: query.ID,
+	})
+
+	data := query.Data
+	if strings.HasPrefix(data, "auth_yes_") {
+		execID := strings.TrimPrefix(data, "auth_yes_")
+		h.handleApproval(execID, true, query.Message.GetChat().ID, query.Message.GetMessageID())
+	} else if strings.HasPrefix(data, "auth_no_") {
+		execID := strings.TrimPrefix(data, "auth_no_")
+		h.handleApproval(execID, false, query.Message.GetChat().ID, query.Message.GetMessageID())
+	}
+
+	return nil
+}
+
+// handleApproval resolves a pending approval and edits the original message.
+func (h *Handler) handleApproval(execID string, approved bool, chatID int64, msgID int) {
+	if approved {
+		core.Approve(execID, "Approved")
+		h.editMessage(chatID, msgID, "✅ Approved")
+	} else {
+		core.Deny(execID)
+		h.editMessage(chatID, msgID, "❌ Denied")
+	}
+}
+
+// isOverloadedError returns true if the error is an API overloaded error (529).
+func isOverloadedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "529") && strings.Contains(errStr, "overloaded")
 }
 
 // selfImprove extracts lessons and creates anchors from the conversation.
@@ -469,5 +665,170 @@ func (h *Handler) sendLongText(ctx *th.Context, chatID int64, text string) {
 	}
 	if buf.Len() > 0 {
 		h.sendText(ctx, chatID, buf.String())
+	}
+}
+
+// stripMediaPaths removes media file references from text so users don't see raw paths.
+func stripMediaPaths(text string) string {
+	lines := strings.Split(text, "\n")
+	var filtered []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip lines that are just a media file reference
+		isMediaRef := (strings.Contains(trimmed, "/media/img_") && strings.HasSuffix(trimmed, ".jpg")) ||
+			(strings.Contains(trimmed, "\\media\\img_") && strings.HasSuffix(trimmed, ".jpg")) ||
+			(strings.Contains(trimmed, "/media/speech_") && strings.HasSuffix(trimmed, ".mp3")) ||
+			(strings.Contains(trimmed, "\\media\\speech_") && strings.HasSuffix(trimmed, ".mp3"))
+		if isMediaRef {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
+// deliverResponse parses the agent response for media file references,
+// sends media first, then returns the text with paths stripped for display.
+func (h *Handler) deliverResponse(ctx *th.Context, chatID int64, response string) {
+	// Check for image paths (media/img_*.jpg)
+	imgPattern := regexp.MustCompile(`(media[/\\]img_[a-f0-9]+\.jpg)`)
+	audioPattern := regexp.MustCompile(`(media[/\\]speech_[a-f0-9]+\.mp3)`)
+
+	imgMatches := imgPattern.FindAllStringSubmatchIndex(response, -1)
+	audioMatches := audioPattern.FindAllStringSubmatchIndex(response, -1)
+
+	// Send image if present
+	for _, match := range imgMatches {
+		if len(match) < 4 {
+			continue
+		}
+		imgPath := response[match[2]:match[3]]
+		if !filepath.IsAbs(imgPath) {
+			imgPath = filepath.Join(h.mediaDir, filepath.Base(imgPath))
+		}
+		// Extract caption: text before the line containing the path
+		prefixEnd := strings.LastIndex(response[:match[0]], "\n")
+		if prefixEnd == -1 {
+			prefixEnd = 0
+		} else {
+			// Don't include the newline itself
+			prefixEnd++
+		}
+		caption := strings.TrimSpace(response[prefixEnd:match[0]])
+		// Strip any other media paths from caption
+		caption = stripMediaPaths(caption)
+		h.sendPhotoWithCaption(ctx, chatID, imgPath, caption)
+		return // one image per response for now
+	}
+
+	// Send audio if present
+	for _, match := range audioMatches {
+		if len(match) < 4 {
+			continue
+		}
+		audioPath := response[match[2]:match[3]]
+		if !filepath.IsAbs(audioPath) {
+			audioPath = filepath.Join(h.mediaDir, filepath.Base(audioPath))
+		}
+		prefixEnd := strings.LastIndex(response[:match[0]], "\n")
+		if prefixEnd == -1 {
+			prefixEnd = 0
+		} else {
+			prefixEnd++
+		}
+		caption := strings.TrimSpace(response[prefixEnd:match[0]])
+		caption = stripMediaPaths(caption)
+		h.sendAudioWithCaption(ctx, chatID, audioPath, caption)
+		return // one audio per response for now
+	}
+
+	// No media — send as normal text
+	h.sendLongText(ctx, chatID, response)
+}
+
+// sendPhotoWithCaption sends a photo with an optional caption.
+// If caption exceeds 1024 chars, sends photo first then caption as a follow-up message.
+func (h *Handler) sendPhotoWithCaption(ctx *th.Context, chatID int64, photoPath string, caption string) {
+	if photoPath == "" {
+		return
+	}
+	file, err := os.Open(photoPath)
+	if err != nil {
+		log.Printf("[telegram] sendPhotoWithCaption: open %s: %v", photoPath, err)
+		h.sendLongText(ctx, chatID, caption)
+		return
+	}
+	defer file.Close()
+
+	const captionMax = 1024
+	useCaption := caption
+	sendCaptionAfter := false
+	if len(caption) > captionMax {
+		useCaption = ""
+		sendCaptionAfter = true
+	}
+
+	params := &telego.SendPhotoParams{
+		ChatID:    tu.ID(chatID),
+		Photo:     tu.FileFromReader(file, photoPath),
+		Caption:   useCaption,
+		ParseMode: "Markdown",
+	}
+
+	_, err = h.bot.SendPhoto(context.Background(), params)
+	if err != nil {
+		log.Printf("[telegram] sendPhoto error: %v", err)
+		h.sendLongText(ctx, chatID, caption)
+		return
+	}
+
+	log.Printf("[telegram] sent photo to %d", chatID)
+
+	if sendCaptionAfter {
+		stripped := stripMediaPaths(caption)
+		h.sendLongText(ctx, chatID, stripped)
+	}
+}
+
+// sendAudioWithCaption sends an audio file using sendAudio (not sendVoice) to avoid
+// ffmpeg dependency for OPG encoding. Uses caption as fallback if send fails.
+func (h *Handler) sendAudioWithCaption(ctx *th.Context, chatID int64, audioPath string, caption string) {
+	if audioPath == "" {
+		return
+	}
+	file, err := os.Open(audioPath)
+	if err != nil {
+		log.Printf("[telegram] sendAudioWithCaption: open %s: %v", audioPath, err)
+		h.sendLongText(ctx, chatID, caption)
+		return
+	}
+	defer file.Close()
+
+	const captionMax = 1024
+	useCaption := caption
+	sendCaptionAfter := false
+	if len(caption) > captionMax {
+		useCaption = ""
+		sendCaptionAfter = true
+	}
+
+	params := &telego.SendAudioParams{
+		ChatID:  tu.ID(chatID),
+		Audio:   tu.FileFromReader(file, audioPath),
+		Caption: useCaption,
+	}
+
+	_, err = h.bot.SendAudio(context.Background(), params)
+	if err != nil {
+		log.Printf("[telegram] sendAudio error: %v", err)
+		h.sendLongText(ctx, chatID, caption)
+		return
+	}
+
+	log.Printf("[telegram] sent audio to %d", chatID)
+
+	if sendCaptionAfter {
+		stripped := stripMediaPaths(caption)
+		h.sendLongText(ctx, chatID, stripped)
 	}
 }

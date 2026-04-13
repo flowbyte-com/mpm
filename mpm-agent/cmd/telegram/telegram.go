@@ -50,11 +50,11 @@ func main() {
 	// Load identity - resolve path from config, not just binary dir
 	binaryDir := core.GetBinaryDir()
 	identityPath := core.ResolveIdentityPath(binaryDir, agentCfg.Paths.Identity)
-	identity, _ := core.LoadIdentity(identityPath)
+	identity, err := core.LoadIdentity(identityPath)
 	if identity != nil {
 		log.Printf("mini-bot-telegram[%d]: Identity: %s v%s (%s)", pid, identity.Name, identity.Version, identityPath)
 	} else {
-		log.Printf("mini-bot-telegram[%d]: Identity not found at %s", pid, identityPath)
+		log.Printf("mini-bot-telegram[%d]: Identity not found at %s: %v", pid, identityPath, err)
 	}
 
 	// Open session database
@@ -120,6 +120,9 @@ func main() {
 
 	// Handle text messages
 	bh.HandleMessage(handler.Handle, th.AnyMessageWithText())
+
+	// Handle callback queries (HITL approve/deny inline keyboards)
+	bh.HandleCallbackQuery(handler.HandleCallback, th.AnyCallbackQuery())
 
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
