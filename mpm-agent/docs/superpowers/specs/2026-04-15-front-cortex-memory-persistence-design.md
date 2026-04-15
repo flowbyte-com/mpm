@@ -65,78 +65,89 @@ func (sm *SessionManager) Save(chatID int64, messages []map[string]interface{}) 
 }
 ```
 
-### 2. Session summary row
+### 2. Session summary — idle-timer goroutine with lightweight summarization
 
-Add a separate `session_summaries` table keyed by `session_id`:
+**Why not simple truncation:** If a session has 40 messages of deep debugging and the final exchange is "Great, thanks, I'll commit that now", truncating to last message gives a useless summary. We need the whole session distilled.
 
-```sql
-CREATE TABLE session_summaries (
-    session_id TEXT PRIMARY KEY,
-    summary TEXT,           -- "Discussed persistence, tested OpenRouter"
-    last_topic TEXT,
-    created_at TEXT,
-    updated_at TEXT
-);
+**Pattern:** Same as `selfImprove` — goroutine fires after handler returns, non-blocking.
 
-CREATE TABLE identity_knowledge (
-    id TEXT PRIMARY KEY,
-    key TEXT UNIQUE,        -- "user_name", "current_project", "active_work"
-    value TEXT,
-    updated_at TEXT
-);
-```
+1. After `RunAgent` completes, spawn `go summarizeSession(chatID, messages)` if session has 10+ messages.
+2. Start a 5-minute idle timer per chat.
+3. If user messages before timer fires → reset timer.
+4. On idle timeout → use lightweight model to summarize the full session buffer into one line.
+5. On `/new` or `/clear` → cancel any pending summary goroutine for that chat.
 
-After each session (or after significant exchanges), generate a one-line summary:
+**Summary model:** Use a fast cheap model (e.g., `gemma4:31b` or `qwen3-coder-next:cloud`) via the same OpenRouter API used by the main agent. Cost is minimal — one call per idle session.
 
-- "User tested tool streaming with OpenRouter, confirmed it works"
-- "Discussed memory persistence limitations, scheduled fix for 2026-04-15"
+### 3. Front cortex context loader with hard caps
 
-### 3. Front cortex context loader
-
-On every `RunAgent` call, build a `frontCortex` struct containing:
+On every `RunAgent` call, build a `frontCortex` struct:
 
 ```go
 type frontCortex struct {
     userName     string    // from identity_knowledge
-    currentProject string   // from identity_knowledge
-    recentTopics  []string // last 5 session summaries
+    currentProject string  // from identity_knowledge
+    recentTopics  []string // last 3 session summaries (max)
     activeWork    string    // last_topic from most recent session
-    anchors       []Anchor // last 10 anchors (not 5)
+    anchors       []Anchor // last 10 anchors (max)
     recentLessons []Lesson // last 3 lessons
 }
 ```
+
+**Hard caps to prevent token bloat** (total front cortex target: ≤600 chars):
+
+| Section | Max items | Max chars |
+|---------|-----------|-----------|
+| Identity info | 4 keys | 200 |
+| Session summaries | 3 | 200 |
+| Anchors | 10 | 150 |
+| Lessons | 3 | 100 |
+| **Total** | — | **~650** |
+
+If adding an item would exceed cap, drop oldest/lowest-weight first. The agent can still access older content via FTS5 memory search.
 
 Injected into system prompt before anchors section:
 
 ```
 ## Who I'm talking to
-- User: [userName]
-- Current project: [currentProject]
+- User: [userName] | Project: [currentProject]
 - Active work: [activeWork]
 
 ## Recent context
 - [topic 1]
 - [topic 2]
-- ...
 
 ## Anchored Memories
 ...
+
+## Learned from past sessions
+...
 ```
 
-### 4. Identity knowledge injection
+### 4. Identity knowledge — explicit tool, not automatic promotion
 
-`IDENTITY.md` currently only describes the bot. Add a companion `IDENTITY_USER.md` or store in `identity_knowledge` table:
+`IDENTITY.md` only describes the bot. Identity knowledge about the user lives in `identity_knowledge` table.
 
-- `user_name`: "V"
-- `current_project`: "MPM agent development"
-- `preferences`: "likes concise responses, OpenRouter over MiniMax"
-- `active_work`: "implementing front cortex memory persistence"
+**How identity facts get stored:** A dedicated tool `update_identity_knowledge` that the agent calls explicitly when the user provides identity information. Example triggers:
 
-The agent loads this on every call. If empty, it learns from conversation over time (via anchors).
+- User says "I'm V" → agent calls `update_identity_knowledge("user_name", "V")`
+- User says "working on MPM" → agent calls `update_identity_knowledge("current_project", "MPM")`
+- User says "I prefer OpenRouter" → agent calls `update_identity_knowledge("preferences", "OpenRouter over MiniMax")`
+
+**No automatic promotion from anchors.** Anchors are context; identity_knowledge is deliberate. This prevents the system from incorrectly promoting a random conversation topic to identity.
+
+**Tool signature:**
+```go
+// update_identity_knowledge stores or updates an identity fact about the user.
+update_identity_knowledge(key: string, value: string, source: string)
+// key: "user_name" | "current_project" | "active_work" | "preferences" | "constraints"
+// value: the fact
+// source: "explicit" (user stated it) | "inferred" (agent deduced it, requires confirmation)
+```
 
 ### 5. Lessons retrieval
 
-Add `GetRecentLessons(db, 3)` call in `RunAgent` and inject into system prompt under "Learned patterns":
+Add `GetRecentLessons(db, 3)` call in `RunAgent` and inject into system prompt under "Learned from past sessions":
 
 ```
 ## Learned from past sessions
@@ -153,7 +164,7 @@ Add `GetRecentLessons(db, 3)` call in `RunAgent` and inject into system prompt u
 
 CREATE TABLE session_summaries (
     session_id TEXT PRIMARY KEY,
-    summary TEXT NOT NULL,
+    summary TEXT NOT NULL,           -- "Fixed OpenRouter endpoint, confirmed streaming works"
     last_topic TEXT,
     message_count INTEGER DEFAULT 0,
     created_at TEXT,
@@ -162,17 +173,18 @@ CREATE TABLE session_summaries (
 
 CREATE TABLE identity_knowledge (
     id TEXT PRIMARY KEY,
-    key TEXT UNIQUE NOT NULL,
+    key TEXT UNIQUE NOT NULL,       -- "user_name", "current_project", "active_work", "preferences"
     value TEXT NOT NULL,
-    source TEXT DEFAULT 'learned',  -- 'explicit' if set by user
+    source TEXT DEFAULT 'inferred', -- 'explicit' if user stated it, 'inferred' if agent deduced
     updated_at TEXT
 );
 
--- Update anchors to include all sessions (not just last 5)
--- Query: ORDER BY created_at DESC LIMIT 10 instead of 5
-
 -- New function in session.go:
 func (sm *SessionManager) UpdateSessionSummary(chatID int64, summary string, topic string) error
+func (sm *SessionManager) GetSessionSummaries(chatID int64, limit int) ([]SessionSummary, error)
+func (sm *SessionManager) SetIdentityKnowledge(key, value, source string) error
+func (sm *SessionManager) GetIdentityKnowledge(key string) (string, error)
+func (sm *SessionManager) GetAllIdentityKnowledge() (map[string]string, error)
 ```
 
 ---
@@ -181,12 +193,13 @@ func (sm *SessionManager) UpdateSessionSummary(chatID int64, summary string, top
 
 | File | Changes |
 |------|---------|
-| `core/agent.go` | Add `loadFrontCortex()` function, call it in `RunAgent`, inject into system prompt |
-| `cmd/telegram/session.go` | Fix `Save()` to merge, add `UpdateSessionSummary()`, add `GetSessionSummaries()` |
-| `cmd/telegram/handler.go` | After agent completes, call `UpdateSessionSummary()` with generated summary |
-| `core/selfimprove.go` | Add `GetRecentLessons()` call site in agent.go context builder |
+| `core/agent.go` | Add `loadFrontCortex()` function, call it in `RunAgent`, inject into system prompt; add `update_identity_knowledge` tool |
+| `cmd/telegram/session.go` | Fix `Save()` to merge, add session summary functions, identity knowledge functions |
+| `cmd/telegram/handler.go` | Spawn idle-timer summarization goroutine after agent completes; cancel on `/new`/`/clear` |
+| `core/selfimprove.go` | Add `GetRecentLessons()` call site in front cortex builder |
 | `core/anchors.go` | Increase anchor retrieval limit from 5 to 10 |
 | `core/db.go` | Add `InitFrontCortexTables()` for new tables |
+| `core/tools.go` | Add `update_identity_knowledge` to tool list |
 
 ---
 
@@ -221,12 +234,16 @@ previous session confirmed it works, 72 lessons learned, anchors from 2 days ago
 3. **Increase anchor limit to 10** — easy, immediate improvement
 4. **Add lessons to system prompt** — uses existing `GetRecentLessons()`
 5. **Add `identity_knowledge` table** — "who am I talking to"
-6. **Front cortex context builder** — wires everything together
+6. **Add `update_identity_knowledge` tool** — agent explicitly records identity facts
+7. **Front cortex context builder** — wires everything together with hard caps
+8. **Idle-timer summarization goroutine** — summarize full session after 5 min idle
 
 ---
 
 ## Notes
 
-- The session summary generation can be simple: last user message + last assistant message topic, truncated to 80 chars
-- Identity knowledge can be seeded from anchors: if user says "I'm V working on MPM", that's a weight-2 anchor that gets promoted to identity_knowledge
-- No need to store full history from old sessions — the summary + anchors + lessons provide sufficient context for the agent to reason about continuity
+- Summary generation fires after 5 min idle — non-blocking goroutine, same pattern as `selfImprove`
+- Identity knowledge promotion is **explicit only** — no automatic anchor-to-identity promotion
+- Hard caps (≤600 chars front cortex) prevent context window bloat while keeping recent context available
+- Session summaries provide cross-session continuity without storing full history
+- Cancel pending summary on `/new` or `/clear` — stale summaries from a cleared session are useless
