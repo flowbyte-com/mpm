@@ -42,6 +42,7 @@ type Handler struct {
 	activeReplies sync.Map           // chatID → true (prevents double-reply)
 	chatSettings  sync.Map          // chatID → *chatSettings
 	liveMessage   sync.Map          // chatID (int64) → *liveMessageData
+	tokenTotals   sync.Map          // chatID (int64) → *sessionTokenTotals
 }
 
 // liveMessageData holds the state for a live-streaming message in one chat.
@@ -51,6 +52,14 @@ type liveMessageData struct {
 	mu        sync.Mutex
 	dirty     bool          // buffer changed since last flush
 	flusher   *flusher      // stop via flusher field to prevent goroutine leak
+}
+
+// sessionTokenTotals holds running token usage for one chat session.
+type sessionTokenTotals struct {
+	mu          sync.Mutex
+	inputTokens  int
+	outputTokens int
+	calls        int
 }
 
 // flusher runs in background, flushes buffer edits to Telegram at ~1.1s interval.
@@ -125,6 +134,32 @@ func (r *telegramToolReporter) ToolCompleted(chatID int64, reportID string, tool
 
 func (r *telegramToolReporter) SendAlert(chatID int64, message string) {
 	r.h.sendText(nil, r.chatID, message)
+}
+
+// tokenUsageReporter implements core.TokenUsageReporter — tracks per-session token totals.
+type tokenUsageReporter struct {
+	h      *Handler
+	chatID int64
+}
+
+func (r *tokenUsageReporter) ReportUsage(chatID int64, inputTokens, outputTokens int, model string) {
+	totals := r.h.getOrCreateTokenTotals(r.chatID)
+	totals.mu.Lock()
+	totals.inputTokens += inputTokens
+	totals.outputTokens += outputTokens
+	totals.calls++
+	totals.mu.Unlock()
+}
+
+// getOrCreateTokenTotals returns or creates the token totals for a chat session.
+func (h *Handler) getOrCreateTokenTotals(chatID int64) *sessionTokenTotals {
+	v, ok := h.tokenTotals.Load(chatID)
+	if ok {
+		return v.(*sessionTokenTotals)
+	}
+	data := &sessionTokenTotals{}
+	h.tokenTotals.Store(chatID, data)
+	return data
 }
 
 // getLiveMessage returns existing liveMessageData for chatID without creating one.
@@ -453,6 +488,8 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		}
 		// Clear loaded toolkits for this session
 		core.ClearSessionToolkits(fmt.Sprintf("telegram:%d", chatID))
+		// Clear token totals
+		h.tokenTotals.Delete(chatID)
 		return true, "Session cleared. Starting fresh."
 
 	case "/reasoning":
@@ -552,6 +589,14 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		}
 		return true, fmt.Sprintf("Tool streaming: %s", state)
 
+	case "/tokens":
+		totals := h.getOrCreateTokenTotals(chatID)
+		totals.mu.Lock()
+		in, out, calls := totals.inputTokens, totals.outputTokens, totals.calls
+		totals.mu.Unlock()
+		total := in + out
+		return true, fmt.Sprintf("📊 Session tokens: in=%d | out=%d | total=%d | calls=%d", in, out, total, calls)
+
 	case "/tools":
 		profiles := make([]string, 0, len(h.agentConfig.Profiles))
 		for name := range h.agentConfig.Profiles {
@@ -586,7 +631,7 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		return true, fmt.Sprintf("Tool profile: %s", newProfile)
 
 	case "/":
-		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/tools [name] — show or switch tool profiles\n/stream [on|off] — show/hide tool progress\n/status — show current settings"
+		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/tools [name] — show or switch tool profiles\n/stream [on|off] — show/hide tool progress\n/tokens — show session token usage\n/status — show current settings"
 
 	default:
 		return false, ""
@@ -709,9 +754,12 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 		reporter = &telegramToolReporter{h: h, chatID: chatID}
 	}
 
+	// Wire token usage reporter
+	tokenReporter := &tokenUsageReporter{h: h, chatID: chatID}
+
 	// Call RunAgent with context (ctx is the 90s deadline)
 	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
-		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter)
+		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter, tokenReporter)
 
 	// Stop heartbeat
 	ticker.Stop()

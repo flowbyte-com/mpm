@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -214,6 +215,19 @@ type ToolProgressReporter interface {
 	SendAlert(chatID int64, message string)
 }
 
+// TokenUsageReporter receives per-call token usage for session-level tracking.
+type TokenUsageReporter interface {
+	// ReportUsage is called after each successful API call with usage data.
+	ReportUsage(chatID int64, inputTokens, outputTokens int, model string)
+}
+
+// TokenTotals holds running token totals for a session.
+type TokenTotals struct {
+	InputTokens  int
+	OutputTokens int
+	Calls        int
+}
+
 // summarize produces a one-line summary of a tool result.
 func summarize(toolName string, result string, err error) string {
 	if err != nil {
@@ -238,7 +252,7 @@ func summarize(toolName string, result string, err error) string {
 // toolProfile is the list of base tool names (framework tools).
 // sessionID is used to scope LoadedToolkits per conversation.
 // toolkitMap maps toolkit names to tool names (from config).
-func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter) (string, error) {
+func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, error) {
 	// Get anchors as high-priority context
 	anchors, _ := GetRecentAnchors(db, 5)
 
@@ -268,12 +282,15 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 		// Rebuild tool list: base tools + loaded toolkit tools (dynamic)
 		availableTools := buildToolListWithLoaded(toolProfile, sessionID, toolkitMap)
 
-		responseText, toolCalls, err := callSynthAPIWithTools(ctx, systemPrompt, messages, cfg, availableTools)
+		responseText, toolCalls, usage, err := callSynthAPIWithTools(ctx, systemPrompt, messages, cfg, availableTools)
 		if err != nil {
 			if ctx.Err() == context.DeadlineExceeded {
 				return "⚠️ Request timed out (90s). Try a simpler query.", nil
 			}
 			return "", err
+		}
+		if tokenReporter != nil {
+			tokenReporter.ReportUsage(chatID, usage.InputTokens, usage.OutputTokens, usage.Model)
 		}
 
 		// If no tool calls, return the text response
@@ -475,10 +492,17 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 	return tools
 }
 
-// callSynthAPIWithTools makes an Anthropic API call and returns response text and any tool calls.
-func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, error) {
+// APIUsage holds token usage from a single API call.
+type APIUsage struct {
+	InputTokens  int
+	OutputTokens int
+	Model        string
+}
+
+// callSynthAPIWithTools makes an Anthropic API call and returns response text, tool calls, and usage.
+func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, APIUsage, error) {
 	if cfg.APIKey == "" {
-		return "", nil, fmt.Errorf("no API key configured")
+		return "", nil, APIUsage{}, fmt.Errorf("no API key configured")
 	}
 
 	type anthropicRequest struct {
@@ -499,6 +523,10 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 			Input map[string]interface{} `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
+		Usage       struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 
 	reqBody := anthropicRequest{
@@ -511,13 +539,13 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshal request: %w", err)
+		return "", nil, APIUsage{}, fmt.Errorf("marshal request: %w", err)
 	}
 
 	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/v1/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, fmt.Errorf("create request: %w", err)
+		return "", nil, APIUsage{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", cfg.APIKey)
@@ -526,22 +554,22 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", nil, fmt.Errorf("API call failed: %w", err)
+		return "", nil, APIUsage{}, fmt.Errorf("API call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("read response: %w", err)
+		return "", nil, APIUsage{}, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, APIUsage{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result anthropicResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", nil, fmt.Errorf("parse response: %w", err)
+		return "", nil, APIUsage{}, fmt.Errorf("parse response: %w", err)
 	}
 
 	// Check for top-level error type (e.g., MiniMax returns {"type":"error","error":...})
@@ -553,9 +581,9 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error.Message != "" {
-			return "", nil, fmt.Errorf("API error: %s", errResp.Error.Message)
+			return "", nil, APIUsage{}, fmt.Errorf("API error: %s", errResp.Error.Message)
 		}
-		return "", nil, fmt.Errorf("API error: %s", string(respBody))
+		return "", nil, APIUsage{}, fmt.Errorf("API error: %s", string(respBody))
 	}
 
 	// Collect text response and tool calls
@@ -572,9 +600,11 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 			})
 		} else if block.Type == "error" {
 			// Error block from API — surface it as an error
-			return "", nil, fmt.Errorf("API error: %s", block.Text)
+			return "", nil, APIUsage{}, fmt.Errorf("API error: %s", block.Text)
 		}
 	}
 
-	return textResponse, toolCalls, nil
+	log.Printf("[agent] API usage: input=%d output=%d (model=%s)", result.Usage.InputTokens, result.Usage.OutputTokens, cfg.Model)
+
+	return textResponse, toolCalls, APIUsage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, Model: cfg.Model}, nil
 }
