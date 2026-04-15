@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -43,6 +45,7 @@ type Handler struct {
 	chatSettings  sync.Map          // chatID → *chatSettings
 	liveMessage   sync.Map          // chatID (int64) → *liveMessageData
 	tokenTotals   sync.Map          // chatID (int64) → *sessionTokenTotals
+	summaryTimers sync.Map          // chatID (int64) → chan struct{} (cancel pending summary)
 }
 
 // liveMessageData holds the state for a live-streaming message in one chat.
@@ -796,6 +799,10 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	// Self-improve
 	dbPath := core.ResolveMiniBotDBPath()
 	go h.selfImprove(dbPath, chatID, userText, responseText)
+
+	// Spawn idle-timer summarization (fires after 5 min idle, cancels on /new or new message)
+	go h.scheduleSessionSummary(chatID, updatedHistory)
+
 	return finalMsg
 }
 
@@ -857,6 +864,184 @@ func (h *Handler) selfImprove(dbPath string, chatID int64, userText, responseTex
 			log.Printf("[telegram] ExtractLesson error: %v", err)
 		}
 	}
+}
+
+// scheduleSessionSummary starts a 5-minute idle timer for session summarization.
+// If a new message arrives for this chat before the timer fires, the timer is cancelled
+// and a new one starts (handled by cancelOnNewMessage via summaryTimers sync.Map).
+// Cancel pending summaries on /new or /clear by calling cancelSummaryTimer(chatID).
+func (h *Handler) scheduleSessionSummary(chatID int64, messages []map[string]interface{}) {
+	if len(messages) < 10 {
+		return // Don't summarize short sessions
+	}
+
+	// Cancel any existing timer for this chat
+	h.cancelSummaryTimer(chatID)
+
+	// Create cancellation channel and store it
+	cancelCh := make(chan struct{}, 1)
+	h.summaryTimers.Store(chatID, cancelCh)
+
+	// Wait 5 minutes idle, then summarize
+	select {
+	case <-cancelCh:
+		// Cancelled — new message arrived, don't summarize
+		h.summaryTimers.Delete(chatID)
+		return
+	case <-time.After(5 * time.Minute):
+		// Idle timeout — do the summarization
+		h.summaryTimers.Delete(chatID)
+		h.summarizeSession(chatID, messages)
+	}
+}
+
+// cancelSummaryTimer cancels any pending summary timer for a chat.
+// Called when user sends a new message or /new /clear.
+func (h *Handler) cancelSummaryTimer(chatID int64) {
+	if v, ok := h.summaryTimers.LoadAndDelete(chatID); ok {
+		if ch, ok := v.(chan struct{}); ok {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// summarizeSession uses a lightweight model to summarize the session buffer
+// and stores the result in session_summaries.
+func (h *Handler) summarizeSession(chatID int64, messages []map[string]interface{}) {
+	// Build a concise text representation of the session for summarization
+	var sb strings.Builder
+	for _, m := range messages {
+		role, _ := m["role"].(string)
+		content := contentOfMsg(m)
+		if content == "" {
+			continue
+		}
+		trunc := content
+		if len(trunc) > 150 {
+			trunc = trunc[:150] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", role, trunc))
+	}
+	sessionText := sb.String()
+	if sessionText == "" {
+		return
+	}
+
+	// Generate a one-line summary using the same API the agent uses
+	summary, err := h.generateSessionSummary(sessionText)
+	if err != nil {
+		log.Printf("[telegram] summarizeSession: failed: %v", err)
+		return
+	}
+
+	// Extract last topic from last user message
+	lastTopic := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if role, _ := messages[i]["role"].(string); role == "user" {
+			lastTopic = contentOfMsg(messages[i])
+			if len(lastTopic) > 60 {
+				lastTopic = lastTopic[:60] + "..."
+			}
+			break
+		}
+	}
+
+	if err := h.sm.UpdateSessionSummary(chatID, summary, lastTopic); err != nil {
+		log.Printf("[telegram] summarizeSession: UpdateSessionSummary error: %v", err)
+	}
+}
+
+// generateSessionSummary calls the synthesis API to summarize sessionText in one sentence.
+func (h *Handler) generateSessionSummary(sessionText string) (string, error) {
+	cfg := &h.agentConfig.Synth
+	if cfg.APIKey == "" {
+		return "", fmt.Errorf("no API key")
+	}
+
+	summaryReq := struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		System    string `json:"system"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}{
+		Model:     cfg.Model,
+		MaxTokens: 100,
+		System:    "You are a concise summarizer. Reply with exactly one sentence (max 80 chars) summarizing the conversation topic. No preamble, no quotes.",
+		Messages: []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{
+			{Role: "user", Content: "Summarize this conversation in one sentence:\n\n" + sessionText},
+		},
+	}
+
+	body, err := json.Marshal(summaryReq)
+	if err != nil {
+		return "", err
+	}
+
+	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/messages"
+	req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", cfg.APIKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("summary API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			return block.Text, nil
+		}
+	}
+	return "", fmt.Errorf("no text in summary response")
+}
+
+// contentOfMsg extracts a string from a message's content field.
+func contentOfMsg(m map[string]interface{}) string {
+	switch v := m["content"].(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, part := range v {
+			if pm, ok := part.(map[string]interface{}); ok {
+				if t, ok := pm["type"].(string); ok && t == "text" {
+					if txt, ok := pm["text"].(string); ok {
+						parts = append(parts, txt)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 func truncate(s string, maxLen int) string {
