@@ -510,7 +510,7 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 
 // IsReady returns true if the daemon is properly initialized
 func (d *watcherDaemon) IsReady() bool {
-	return d != nil && d.db != nil && d.db.IsOpen()
+	return d.db != nil && d.db.IsOpen()
 }
 
 // handleSignals handles graceful shutdown on SIGINT/SIGTERM

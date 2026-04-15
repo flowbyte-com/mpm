@@ -14,6 +14,14 @@ import (
 	"mpm/internal"
 )
 
+// Pre-compiled regexes for stripMarkdown (avoid repeated recompilation)
+var (
+	stripMarkdownHeadings = regexp.MustCompile(`(?m)^#+\s*`)
+	stripMarkdownBold     = regexp.MustCompile(`\*\*(.*?)\*\*`)
+	stripMarkdownItalic   = regexp.MustCompile(`\*(.*?)\*`)
+	stripMarkdownCode     = regexp.MustCompile("`([^`]+)`")
+)
+
 // =============================================================================
 // mpm recall <query> — Search memories for relevant context
 // =============================================================================
@@ -161,6 +169,7 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 	}
 
 	// FTS5 failed (malformed query or unavailable) — fallback to LIKE search
+	fmt.Fprintf(os.Stderr, "⚠️ FTS5 query failed (query=%q): %v — falling back to LIKE\n", query, err)
 	likePattern := "%" + query + "%"
 	likeQuery := `
 		SELECT id, content, session_id, tags, created_at
@@ -225,10 +234,10 @@ func keywordSearchWithTime(db *sql.DB, query, since, until string, limit int) (*
 }
 
 func stripMarkdown(s string) string {
-	s = regexp.MustCompile(`(?m)^#+\s*`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`\*(.*?)\*`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile("`([^`]+)`").ReplaceAllString(s, "$1")
+	s = stripMarkdownHeadings.ReplaceAllString(s, "")
+	s = stripMarkdownBold.ReplaceAllString(s, "$1")
+	s = stripMarkdownItalic.ReplaceAllString(s, "$1")
+	s = stripMarkdownCode.ReplaceAllString(s, "$1")
 	return strings.TrimSpace(s)
 }
 

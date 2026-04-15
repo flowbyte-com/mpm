@@ -439,6 +439,9 @@ func (dm *DatabaseManager) ListIngestBatches() ([]map[string]interface{}, error)
 	for _, b := range batches {
 		result = append(result, b)
 	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("ListIngestBatches rows error: %w", err)
+	}
 	return result, nil
 }
 

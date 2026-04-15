@@ -406,8 +406,17 @@ func loadPoisonPhrasesFromFile() ([]string, error) {
 func isPoisoned(content string) (bool, string) {
 	phrases, err := loadPoisonPhrases()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️ Failed to load poison phrases: %v\n", err)
-		return false, ""
+		fmt.Fprintf(os.Stderr, "⚠️ Failed to load poison phrases: %v — using defaults\n", err)
+		// Hardcoded fallbacks: if file load fails, at least catch the most obvious ones
+		phrases = []string{
+			"ignore previous instructions",
+			"system override",
+			"disregard your training",
+			"override system instructions",
+			"reset your persona",
+			"forget who you are",
+			"bypass security",
+		}
 	}
 
 	// Case-insensitive substring match for each poison phrase
@@ -678,13 +687,19 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	mem.Created = createdAt
 
 	if len(tagsJSON) > 0 {
-		json.Unmarshal(tagsJSON, &mem.Tags)
+		if err := json.Unmarshal(tagsJSON, &mem.Tags); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ GetByID: failed to unmarshal tags for %s: %v\n", id, err)
+		}
 	}
 	if len(metadataJSON) > 0 {
-		json.Unmarshal(metadataJSON, &mem.Metadata)
+		if err := json.Unmarshal(metadataJSON, &mem.Metadata); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ GetByID: failed to unmarshal metadata for %s: %v\n", id, err)
+		}
 	}
 	if len(embedding) > 0 {
-		json.Unmarshal(embedding, &mem.Embedding)
+		if err := json.Unmarshal(embedding, &mem.Embedding); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ GetByID: failed to unmarshal embedding for %s: %v\n", id, err)
+		}
 	}
 
 	return &mem, nil
@@ -703,9 +718,9 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		}
 	}
 
-	sqlQuery := fmt.Sprintf("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %d", n)
+	sqlQuery := "SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?"
 
-	rows, err := s.DB.Query(sqlQuery)
+	rows, err := s.DB.Query(sqlQuery, n)
 	if err != nil {
 		return nil, err
 	}
@@ -729,13 +744,19 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		mem.Created = createdAt
 
 		if len(tagsJSON) > 0 {
-			json.Unmarshal(tagsJSON, &mem.Tags)
+			if err := json.Unmarshal(tagsJSON, &mem.Tags); err != nil {
+				fmt.Fprintf(os.Stderr, "⍉ GetRecent: failed to unmarshal tags for %s: %v\n", mem.ID, err)
+			}
 		}
 		if len(metadataJSON) > 0 {
-			json.Unmarshal(metadataJSON, &mem.Metadata)
+			if err := json.Unmarshal(metadataJSON, &mem.Metadata); err != nil {
+				fmt.Fprintf(os.Stderr, "⍉ GetRecent: failed to unmarshal metadata for %s: %v\n", mem.ID, err)
+			}
 		}
 		if len(embedding) > 0 {
-			json.Unmarshal(embedding, &mem.Embedding)
+			if err := json.Unmarshal(embedding, &mem.Embedding); err != nil {
+				fmt.Fprintf(os.Stderr, "⍉ GetRecent: failed to unmarshal embedding for %s: %v\n", mem.ID, err)
+			}
 		}
 
 		memories = append(memories, &mem)

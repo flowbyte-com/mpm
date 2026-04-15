@@ -6,6 +6,7 @@ package internal
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -383,7 +384,7 @@ func (dm *DatabaseManager) SavePersona(name, content string) (string, error) {
 func (dm *DatabaseManager) SaveSystemConfig(key, rawJSON, contentHash string, snapshotJSON string) (bool, error) {
 	var existingHash string
 	err := dm.db.QueryRow(`SELECT content_hash FROM system_config WHERE key = ?`, key).Scan(&existingHash)
-	if err == nil && existingHash == contentHash {
+	if err == nil && subtle.ConstantTimeCompare([]byte(existingHash), []byte(contentHash)) == 1 {
 		// Unchanged — skip the write
 		return false, nil
 	}
@@ -478,8 +479,13 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 		return nil, fmt.Errorf("unsupported tier: %s", tier)
 	}
 
-	query := fmt.Sprintf(`SELECT id, content, embedding, created_at FROM %s WHERE embedding IS NOT NULL AND embedding != 'null'`, tier)
-	rows, err := dm.db.Query(query)
+	// Safe: whitelist enforced above; map lookup avoids fmt.Sprintf with user data
+	baseQuery := map[string]string{
+		"sessions": "SELECT id, content, embedding, created_at FROM sessions WHERE embedding IS NOT NULL AND embedding != 'null'",
+		"memories": "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL AND embedding != 'null'",
+		"topics":   "SELECT id, content, embedding, created_at FROM topics WHERE embedding IS NOT NULL AND embedding != 'null'",
+	}[tier]
+	rows, err := dm.db.Query(baseQuery)
 	if err != nil {
 		return nil, err
 	}

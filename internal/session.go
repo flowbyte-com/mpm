@@ -114,7 +114,9 @@ func (ss *SessionStore) GetSession(sessionID string) (*Session, error) {
 	}
 
 	var metadata map[string]interface{}
-	json.Unmarshal([]byte(metadataJSON), &metadata)
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️ getSnapshot: failed to unmarshal metadata for session %s: %v\n", sessionID, err)
+	}
 
 	return &Session{
 		ID:        id,
