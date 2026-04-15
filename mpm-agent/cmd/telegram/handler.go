@@ -489,7 +489,7 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 
 	// Call RunAgent with context (ctx is the 90s deadline)
 	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
-		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits)
+		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, nil)
 
 	// Stop heartbeat
 	ticker.Stop()

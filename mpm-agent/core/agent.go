@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -192,13 +193,43 @@ func mpmExec(cmd string) (string, error) {
 	return string(out), err
 }
 
+// ToolProgressReporter receives tool execution events for streaming to UI.
+// Nil reporter means no streaming — fully backward-compatible.
+type ToolProgressReporter interface {
+	// ToolStarted is called before executing a tool. Returns a reportID
+	// used to correlate ToolStarted/ToolCompleted calls.
+	ToolStarted(chatID int64, toolName string, input map[string]interface{}) string
+	// ToolCompleted is called after a tool finishes with a one-line summary.
+	ToolCompleted(chatID int64, reportID string, toolName string, summary string)
+	// SendAlert posts a standalone risk warning to the chat (bypasses streaming).
+	SendAlert(chatID int64, message string)
+}
+
+// summarize produces a one-line summary of a tool result.
+func summarize(toolName string, result string, err error) string {
+	if err != nil {
+		return fmt.Sprintf("✗ %s: %v", toolName, err)
+	}
+	switch toolName {
+	case "read_file":
+		lines := strings.Count(result, "\n") + 1
+		return fmt.Sprintf("✓ read %d lines", lines)
+	case "write_file":
+		return "✓ wrote"
+	case "execute_shell":
+		lines := strings.Count(result, "\n") + 1
+		return fmt.Sprintf("✓ %d lines output", lines)
+	}
+	return truncate(result, 60)
+}
+
 // RunAgent runs a single agent query with full identity and context.
 // ctx is the parent context (90s timeout from handler).
 // identityPath is the resolved path to IDENTITY.md.
 // toolProfile is the list of base tool names (framework tools).
 // sessionID is used to scope LoadedToolkits per conversation.
 // toolkitMap maps toolkit names to tool names (from config).
-func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string) (string, error) {
+func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter) (string, error) {
 	// Get anchors as high-priority context
 	anchors, _ := GetRecentAnchors(db, 5)
 
@@ -278,11 +309,30 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 				})
 				continue
 			case "execute_mpm_command":
+				reportID := ""
+				if reporter != nil {
+					reportID = reporter.ToolStarted(chatID, "execute_mpm_command", tc.Input)
+				}
 				cmd, _ := tc.Input["command"].(string)
 				result, err = mpmExec(cmd)
+				if reporter != nil {
+					summary := summarize("execute_mpm_command", result, err)
+					reporter.ToolCompleted(chatID, reportID, "execute_mpm_command", summary)
+				}
 			default:
 				// Local tools from core/tools.go
+				reportID := ""
+				if reporter != nil {
+					reportID = reporter.ToolStarted(chatID, tc.Name, tc.Input)
+				}
 				result, err = executeTool(tc.Name, tc.Input)
+				if reporter != nil {
+					summary := summarize(tc.Name, result, err)
+					reporter.ToolCompleted(chatID, reportID, tc.Name, summary)
+					if isRiskyOperation(tc.Name, tc.Input, result, err) {
+						reporter.SendAlert(chatID, riskWarning(tc.Name, tc.Input, result))
+					}
+				}
 			}
 
 			if err != nil {
@@ -302,6 +352,53 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 
 	// Max iterations reached (should not reach here due to breaker above)
 	return "(tool loop limit reached)", nil
+}
+
+var riskyCommandPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\brm\s+-(rf|r)\b`),
+	regexp.MustCompile(`(?i)git\s+push\s+.*--force`),
+	regexp.MustCompile(`(?i)\bdd\b.*\bof=`),
+	regexp.MustCompile(`(?i)(mkfs|shred|wipe)\s`),
+	regexp.MustCompile(`(?i)(chmod|chown)\s+777`),
+	regexp.MustCompile(`(?i)sudo\s+rm\s+`),
+	regexp.MustCompile(`(?i):\(\)\{.*:\|.*:\}`), // fork bomb
+}
+
+var riskyWritePaths = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(^|/)(\.ssh|aws|credentials|secrets|env)($|/)`),
+	regexp.MustCompile(`(?i)/etc/|/sys/|/proc/`),
+}
+
+func isRiskyOperation(toolName string, input map[string]interface{}, result string, err error) bool {
+	switch toolName {
+	case "execute_shell":
+		cmd, _ := input["command"].(string)
+		for _, re := range riskyCommandPatterns {
+			if re.MatchString(cmd) {
+				return true
+			}
+		}
+	case "write_file":
+		path, _ := input["path"].(string)
+		for _, re := range riskyWritePaths {
+			if re.MatchString(path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func riskWarning(toolName string, input map[string]interface{}, result string) string {
+	switch toolName {
+	case "execute_shell":
+		cmd, _ := input["command"].(string)
+		return fmt.Sprintf("⚠️ DANGEROUS: execute_shell running `%s`", truncate(cmd, 100))
+	case "write_file":
+		path, _ := input["path"].(string)
+		return fmt.Sprintf("⚠️ RISKY WRITE: writing to %s", path)
+	}
+	return fmt.Sprintf("⚠️ RISKY: %s", toolName)
 }
 
 // buildToolListWithLoaded returns base tools + dynamically loaded toolkit tools.
