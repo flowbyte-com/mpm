@@ -602,6 +602,14 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		total := in + out
 		return true, fmt.Sprintf("📊 Session tokens: in=%d | out=%d | total=%d | calls=%d", in, out, total, calls)
 
+	case "/summarize":
+		history, _ := h.sm.Get(chatID)
+		if history == nil || len(history) < 10 {
+			return true, "Need at least 10 messages to summarize this session."
+		}
+		go h.summarizeSession(chatID, history)
+		return true, "🧠 Summarizing this session... will be ready in a moment."
+
 	case "/tools":
 		profiles := make([]string, 0, len(h.agentConfig.Profiles))
 		for name := range h.agentConfig.Profiles {

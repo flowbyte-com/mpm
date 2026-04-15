@@ -237,6 +237,7 @@ previous session confirmed it works, 72 lessons learned, anchors from 2 days ago
 6. **Add `update_identity_knowledge` tool** — agent explicitly records identity facts
 7. **Front cortex context builder** — wires everything together with hard caps
 8. **Idle-timer summarization goroutine** — summarize full session after 5 min idle
+9. **`/summarize` manual trigger** — user can request summary at any time (requires ≥10 messages)
 
 ---
 
