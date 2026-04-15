@@ -23,6 +23,8 @@ var defaultCommands = []telego.BotCommand{
 	{Command: "think", Description: "Set thinking level: low, med, high, adaptive"},
 	{Command: "reasoning", Description: "Toggle reasoning mode: on/off"},
 	{Command: "verbose", Description: "Toggle verbose mode: on/off"},
+	{Command: "stream", Description: "Toggle tool streaming: on/off"},
+	{Command: "tokens", Description: "Show token usage for this session"},
 	{Command: "status", Description: "Show current settings"},
 	{Command: "tools", Description: "Show or switch tool profiles: /tools [name]"},
 	{Command: "help", Description: "Show available commands"},
@@ -92,7 +94,7 @@ func main() {
 	if err != nil {
 		log.Printf("mini-bot-telegram[%d]: Warning: could not set commands: %v", pid, err)
 	} else {
-		log.Printf("mini-bot-telegram[%d]: Commands registered: new, clear, think, reasoning, verbose, tools, status, help", pid)
+		log.Printf("mini-bot-telegram[%d]: Commands registered: new, clear, think, reasoning, verbose, stream, tokens, tools, status, help", pid)
 	}
 
 	// Create handler
