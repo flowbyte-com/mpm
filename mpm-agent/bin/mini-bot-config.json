@@ -5,24 +5,18 @@
     "hot_reload": false
   },
   "synth": {
-    // MiniMax:
-    // "model": "MiniMax-M2.7",
-    // "api_key": "...",
-    // "base_url": "https://api.minimax.io/anthropic/messages",
-    // OpenRouter (endpoint: openrouter.ai/api):
-    // "model": "anthropic/claude-3.5-haiku",
-    // "api_key": "sk-or-v1-...",
-    // "base_url": "https://openrouter.ai/api",
-    "model": "MiniMax-M2.7",
-    "api_key": "",
-    "base_url": "https://api.minimax.io/anthropic",
+    "model": "openrouter/free",
+    "api_key": "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",
+    "base_url": "https://openrouter.ai/api",
     "max_tokens": 4096,
     "timeout_seconds": 300
   },
   "telegram": {
-    "bot_token": "",
+    "bot_token": "8650701190:AAGe4QxEhBgS14FE7LZKyUW2-CSefHiYukQ",
     "polling": true,
-    "allowed_users": []
+    "allowed_users": [
+      8507429405
+    ]
   },
   "mcp": {
     "token": "",
@@ -37,8 +31,44 @@
   "paths": {
     "db": "mini-bot.db",
     "identity": "IDENTITY.md",
-    "mcp_socket": "mini-bot-mcp.sock",
-    "workspace_root": "$HOME"
+    "mcp_socket": "mini-bot-mcp.sock"
+  },
+  "toolkits": {
+    "mpm_core": [
+      "list_toolkits",
+      "load_toolkit",
+      "unload_toolkit",
+      "execute_mpm_command"
+    ],
+    "files": [
+      "read_file",
+      "write_file",
+      "ReadFileSemantic",
+      "ReadFileCompare"
+    ],
+    "web": [
+      "WebSynthesize"
+    ],
+    "jq": [
+      "jq"
+    ],
+    "coding_tools": [
+      "rg",
+      "sg",
+      "repomap",
+      "git_status",
+      "git_commit",
+      "git_diff"
+    ],
+    "minimax": [
+      "generate_image",
+      "synthesize_speech",
+      "web_search",
+      "understand_image"
+    ],
+    "shell": [
+      "execute_shell"
+    ]
   },
   "profiles": {
     "standard": [
@@ -59,36 +89,13 @@
       "load_toolkit",
       "unload_toolkit",
       "execute_mpm_command",
+      "execute_shell",
       "rg",
       "sg",
       "repomap",
       "git_status",
       "git_commit",
       "git_diff"
-    ]
-  },
-  "toolkits": {
-    "files": [
-      "read_file",
-      "write_file",
-      "ReadFileSemantic",
-      "ReadFileCompare"
-    ],
-    "web": [
-      "WebSynthesize"
-    ],
-    "jq": [
-      "jq"
-    ],
-    "mpm": [],
-    "minimax": [
-      "generate_image",
-      "synthesize_speech",
-      "web_search",
-      "understand_image"
-    ],
-    "shell": [
-      "execute_shell"
     ]
   }
 }

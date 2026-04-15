@@ -381,6 +381,24 @@ func ExecuteSteps(steps []map[string]interface{}, sessionID string) ([]map[strin
 // to track which toolkits are loaded for the current session.
 func executeTool(tool string, args map[string]interface{}, sessionID string) (string, error) {
 	switch tool {
+	case "update_identity_knowledge":
+		// Tool for the agent to record facts about the user (name, project, preferences).
+		// Stored in mini-bot.db identity_knowledge table.
+		key, _ := args["key"].(string)
+		value, _ := args["value"].(string)
+		source := "inferred"
+		if s, ok := args["source"].(string); ok {
+			source = s
+		}
+		if key == "" {
+			return "", fmt.Errorf("update_identity_knowledge: key is required (user_name, current_project, active_work, preferences)")
+		}
+		dbPath := ResolveMiniBotDBPath()
+		if err := SetIdentityKnowledge(dbPath, key, value, source); err != nil {
+			return "", fmt.Errorf("update_identity_knowledge: %v", err)
+		}
+		return fmt.Sprintf("Identity knowledge updated: %s = %s", key, value), nil
+
 	case "read_file":
 		path, _ := args["path"].(string)
 		if path == "" {
@@ -1270,6 +1288,28 @@ func init() {
 				},
 			},
 			"required": []string{"filter", "file"},
+		},
+	})
+	RegisterTool("update_identity_knowledge", ToolDefinition{
+		Name:        "update_identity_knowledge",
+		Description: "Record a fact about the user (name, project, preferences) so the bot remembers across sessions.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"key": map[string]interface{}{
+					"type":        "string",
+					"description": "Identity key: user_name, current_project, active_work, preferences, or constraints",
+				},
+				"value": map[string]interface{}{
+					"type":        "string",
+					"description": "The fact to record",
+				},
+				"source": map[string]interface{}{
+					"type":        "string",
+					"description": "Source of the fact: explicit (user stated it) or inferred (agent deduced it)",
+				},
+			},
+			"required": []string{"key", "value"},
 		},
 	})
 	RegisterTool("list_toolkits", ToolDefinition{

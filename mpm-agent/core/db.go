@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -124,4 +125,34 @@ func GenerateID() string {
 	b := make([]byte, 16)
 	rand.Read(b) //nolint:errcheck // crypto/rand only fails if system has no entropy
 	return fmt.Sprintf("%x", b)
+}
+
+// SetIdentityKnowledge creates or updates an identity fact in the identity_knowledge table.
+func SetIdentityKnowledge(dbPath, key, value, source string) error {
+	db, err := OpenDBForPath(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Ensure identity_knowledge table exists
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS identity_knowledge (
+		id TEXT PRIMARY KEY,
+		key TEXT UNIQUE NOT NULL,
+		value TEXT NOT NULL,
+		source TEXT DEFAULT 'inferred',
+		updated_at TEXT
+	)`)
+
+	now := time.Now().Format(time.RFC3339)
+	id := fmt.Sprintf("identity:%s", key)
+	_, err = db.Exec(`
+		INSERT INTO identity_knowledge (id, key, value, source, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value = excluded.value,
+			source = excluded.source,
+			updated_at = excluded.updated_at
+	`, id, key, value, source, now)
+	return err
 }
