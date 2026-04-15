@@ -1282,80 +1282,122 @@ func (d *watcherDaemon) extractKeywords(content string) []string {
 	return tags
 }
 
-// checkTopicClustering implements the Topic Clustering trigger
-// When N or more LTM memories share the same tag, create a Topic record
+// checkTopicClustering implements the Topic Clustering trigger.
+// When N or more LTM memories share the same tag, create a Topic record.
+//
+// Locking strategy: holds d.mu only for the brief window needed to read the
+// cache and update it. All slow DB I/O (reading LTM memories, checking for
+// existing topics, creating new topics) happens outside the lock.
 func (d *watcherDaemon) checkTopicClustering() {
 	const clusterThreshold = 3 // N = 3 memories with same tag triggers clustering
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	// Phase 1 — determine work under lock: which tags need new topics?
+	type workItem struct {
+		tag   string
+		memIDs []string
+		existingTopicID string // non-empty if topic already exists in DB
+	}
+	var work []workItem
 
-	// Get all LTM memories (is_long_term = true, weight = 10)
-	ltmMemories, err := d.getLTMMemories()
-	if err != nil {
-		if d.verbose {
-			fmt.Fprintf(os.Stderr, "⚠️  Failed to get LTM memories: %v\n", err)
+	d.mu.Lock()
+	{
+		ltmMemories, err := d.getLTMMemories()
+		if err != nil {
+			if d.verbose {
+				fmt.Fprintf(os.Stderr, "⚠️  Failed to get LTM memories: %v\n", err)
+			}
+			d.mu.Unlock()
+			return
 		}
+
+		// Count tag occurrences
+		tagCounts := make(map[string][]string)
+		for _, mem := range ltmMemories {
+			for _, tag := range mem.Tags {
+				tagCounts[tag] = append(tagCounts[tag], mem.ID)
+			}
+		}
+
+		for tag, memIDs := range tagCounts {
+			if len(memIDs) < clusterThreshold {
+				continue
+			}
+			// Already cached?
+			if existing, ok := d.topicCache[tag]; ok {
+				existing.MemIDs = memIDs
+				existing.Count = len(memIDs)
+				existing.LastSeen = time.Now()
+				continue
+			}
+			// Mark for DB lookup (d.mu released before this runs)
+		 work = append(work, workItem{tag: tag, memIDs: memIDs})
+		}
+	}
+	d.mu.Unlock()
+
+	if len(work) == 0 {
 		return
 	}
 
-	// Count tag occurrences
-	tagCounts := make(map[string][]string) // tag -> []memoryIDs
-	for _, mem := range ltmMemories {
-		for _, tag := range mem.Tags {
-			tagCounts[tag] = append(tagCounts[tag], mem.ID)
-		}
+	// Phase 2 — slow DB I/O, no lock held
+	type createdTopic struct {
+		tag    string
+		memIDs []string
+		topicID string
+		name   string
 	}
+	var created []createdTopic
 
-	// Check for tags that meet the threshold
-	for tag, memIDs := range tagCounts {
-		if len(memIDs) < clusterThreshold {
-			continue
-		}
-
-		// Check if we already have a topic for this tag
-		if _, exists := d.topicCache[tag]; exists {
-			// Update existing cluster
-			d.topicCache[tag].MemIDs = memIDs
-			d.topicCache[tag].Count = len(memIDs)
-			d.topicCache[tag].LastSeen = time.Now()
-			continue
-		}
-
-		// Check if topic already exists in database
-		existingTopic, err := d.findTopicByTag(tag)
+	for _, item := range work {
+		// Check if topic already exists in DB
+		existingTopic, err := d.findTopicByTag(item.tag)
 		if err == nil && existingTopic != nil {
-			d.topicCache[tag] = &topicCluster{
+			d.mu.Lock()
+			d.topicCache[item.tag] = &topicCluster{
 				ID:       existingTopic.ID,
 				Name:     existingTopic.Name,
-				Tag:      tag,
-				MemIDs:   memIDs,
-				Count:    len(memIDs),
+				Tag:      item.tag,
+				MemIDs:   item.memIDs,
+				Count:    len(item.memIDs),
 				LastSeen: time.Now(),
 			}
+			d.mu.Unlock()
 			continue
 		}
 
 		// Create new topic
-		topicID, err := d.createTopicFromCluster(tag, memIDs)
+		topicID, err := d.createTopicFromCluster(item.tag, item.memIDs)
 		if err != nil {
 			if d.verbose {
-				fmt.Fprintf(os.Stderr, "⚠️  Failed to create topic for tag '%s': %v\n", tag, err)
+				fmt.Fprintf(os.Stderr, "⚠️  Failed to create topic for tag '%s': %v\n", item.tag, err)
 			}
 			continue
 		}
+		created = append(created, createdTopic{
+			tag:    item.tag,
+			memIDs: item.memIDs,
+			topicID: topicID,
+			name:   formatTopicName(item.tag),
+		})
+	}
 
-		// Add to cache
-		d.topicCache[tag] = &topicCluster{
-			ID:       topicID,
-			Name:     formatTopicName(tag),
-			Tag:      tag,
-			MemIDs:   memIDs,
-			Count:    len(memIDs),
-			LastSeen: time.Now(),
+	// Phase 3 — update cache under lock (brief)
+	if len(created) > 0 {
+		d.mu.Lock()
+		for _, c := range created {
+			d.topicCache[c.tag] = &topicCluster{
+				ID:       c.topicID,
+				Name:     c.name,
+				Tag:      c.tag,
+				MemIDs:   c.memIDs,
+				Count:    len(c.memIDs),
+				LastSeen: time.Now(),
+			}
 		}
-
-		fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", d.topicCache[tag].Name, tag, len(memIDs))
+		d.mu.Unlock()
+		for _, c := range created {
+			fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", c.name, c.tag, len(c.memIDs))
+		}
 	}
 }
 
