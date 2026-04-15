@@ -31,7 +31,7 @@ const (
 
 // BuildSystemPromptWithIdentity builds the full system prompt.
 // Priority: IDENTITY.md (core, stable) + persona (costume overlay) + mode (behavior rules)
-func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent string, memories, directives, references []string, anchors []Anchor) string {
+func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent, frontCortex string, memories, directives, references []string, anchors []Anchor, lessons []Lesson) string {
 	identity, _ := LoadIdentity(identityPath)
 
 	var sb strings.Builder
@@ -47,6 +47,11 @@ func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent str
 		}
 	} else {
 		sb.WriteString("You are mini-bot. ")
+	}
+
+	// Front cortex: persistent context from prior sessions
+	if frontCortex != "" {
+		sb.WriteString(frontCortex)
 	}
 
 	// Anchors (high-priority memories)
@@ -88,6 +93,14 @@ func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent str
 		sb.WriteString("\n## Reference Material\n")
 		for _, r := range references {
 			sb.WriteString(fmt.Sprintf("- %s\n", r))
+		}
+	}
+
+	// Learned patterns from past sessions
+	if len(lessons) > 0 {
+		sb.WriteString("\n## Learned from past sessions\n")
+		for _, l := range lessons {
+			sb.WriteString(fmt.Sprintf("- %s\n", l.Content))
 		}
 	}
 
@@ -252,9 +265,10 @@ func summarize(toolName string, result string, err error) string {
 // toolProfile is the list of base tool names (framework tools).
 // sessionID is used to scope LoadedToolkits per conversation.
 // toolkitMap maps toolkit names to tool names (from config).
-func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, error) {
+func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, frontCortex string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, error) {
 	// Get anchors as high-priority context
-	anchors, _ := GetRecentAnchors(db, 5)
+	anchors, _ := GetRecentAnchors(db, 10)
+	lessons, _ := GetRecentLessons(db, 3)
 
 	// Build context arrays
 	memories := retrieveMemories(db, query, 5)
@@ -262,8 +276,8 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 	references := retrieveReferences(db, query, 3)
 
 	// Build system prompt with identity-first approach
-	systemPrompt := BuildSystemPromptWithIdentity(identityPath, "", "",
-		memories, directives, references, anchors)
+	systemPrompt := BuildSystemPromptWithIdentity(identityPath, "", "", frontCortex,
+		memories, directives, references, anchors, lessons)
 
 	// Build messages array: history + current user message
 	messages := make([]apiMessage, 0, len(history)+1)

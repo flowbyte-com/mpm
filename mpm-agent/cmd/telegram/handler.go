@@ -757,9 +757,13 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	// Wire token usage reporter
 	tokenReporter := &tokenUsageReporter{h: h, chatID: chatID}
 
+	// Load front cortex: identity knowledge + session summaries
+	frontCortex := h.sm.LoadFrontCortex(chatID)
+	fcText := FormatFrontCortex(frontCortex)
+
 	// Call RunAgent with context (ctx is the 90s deadline)
 	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
-		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter, tokenReporter)
+		fcText, &h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter, tokenReporter)
 
 	// Stop heartbeat
 	ticker.Stop()

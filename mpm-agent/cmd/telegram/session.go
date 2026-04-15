@@ -12,6 +12,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+const maxHistoryMessages = 50
+
 // SessionManager maps a Telegram chat ID to its conversation message history.
 // History is persisted to the MPM SQLite database.
 type SessionManager struct {
@@ -88,10 +90,18 @@ func (sm *SessionManager) Get(chatID int64) ([]map[string]interface{}, error) {
 
 // Save persists the conversation history for a chat to SQLite.
 // Retries on database lock with exponential backoff.
+// Merges with existing history (keeps last 50 messages total) rather than replacing.
 func (sm *SessionManager) Save(chatID int64, messages []map[string]interface{}) error {
-	// Serialize messages
-	serializable := make([]SessionMessage, len(messages))
-	for i, m := range messages {
+	// Load existing history and merge (fixes overwriting bug)
+	existing, _ := sm.Get(chatID)
+	merged := append(existing, messages...)
+	if len(merged) > maxHistoryMessages {
+		merged = merged[len(merged)-maxHistoryMessages:]
+	}
+
+	// Serialize merged messages
+	serializable := make([]SessionMessage, len(merged))
+	for i, m := range merged {
 		serializable[i] = SessionMessage{
 			Role:    roleOf(m),
 			Content: contentOf(m),
@@ -161,7 +171,176 @@ func contentOf(m map[string]interface{}) string {
 	return ""
 }
 
-// initSessionDB creates the full mini-bot.db schema (sessions, memories, lessons, anchors, tools).
+// SessionSummary represents a one-line summary of a conversation session.
+type SessionSummary struct {
+	SessionID     string
+	Summary       string
+	LastTopic     string
+	MessageCount  int
+	CreatedAt     string
+	UpdatedAt     string
+}
+
+// UpdateSessionSummary creates or updates a session summary.
+func (sm *SessionManager) UpdateSessionSummary(chatID int64, summary string, topic string) error {
+	now := time.Now().Format(time.RFC3339)
+	key := sessionKey(chatID)
+	_, err := sm.db.Exec(`
+		INSERT INTO session_summaries (session_id, summary, last_topic, message_count, created_at, updated_at)
+		VALUES (?, ?, ?, (SELECT COUNT(*) FROM sessions WHERE session_id = ?), ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			summary = excluded.summary,
+			last_topic = excluded.last_topic,
+			message_count = excluded.message_count,
+			updated_at = excluded.updated_at
+	`, key, summary, topic, key, now, now)
+	return err
+}
+
+// GetSessionSummaries returns recent session summaries for a chat.
+func (sm *SessionManager) GetSessionSummaries(chatID int64, limit int) ([]SessionSummary, error) {
+	key := sessionKey(chatID)
+	rows, err := sm.db.Query(`
+		SELECT session_id, summary, last_topic, message_count, created_at, updated_at
+		FROM session_summaries
+		WHERE session_id = ?
+		ORDER BY updated_at DESC LIMIT ?
+	`, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var summaries []SessionSummary
+	for rows.Next() {
+		var s SessionSummary
+		if err := rows.Scan(&s.SessionID, &s.Summary, &s.LastTopic, &s.MessageCount, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			continue
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, rows.Err()
+}
+
+// SetIdentityKnowledge creates or updates an identity fact about the user.
+func (sm *SessionManager) SetIdentityKnowledge(key, value, source string) error {
+	now := time.Now().Format(time.RFC3339)
+	id := fmt.Sprintf("identity:%s", key)
+	_, err := sm.db.Exec(`
+		INSERT INTO identity_knowledge (id, key, value, source, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value = excluded.value,
+			source = excluded.source,
+			updated_at = excluded.updated_at
+	`, id, key, value, source, now)
+	return err
+}
+
+// GetAllIdentityKnowledge returns all identity knowledge as a map.
+func (sm *SessionManager) GetAllIdentityKnowledge() (map[string]string, error) {
+	rows, err := sm.db.Query(`SELECT key, value FROM identity_knowledge`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			continue
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
+// FrontCortex holds persistent context loaded on every agent call.
+// All items respect hard caps to prevent token bloat.
+type FrontCortex struct {
+	UserName      string
+	CurrentProject string
+	ActiveWork    string
+	Preferences   string
+	RecentTopics  []string // last 3 session summaries
+	Anchors       []string // "weight:N content" strings, last 10
+}
+
+// LoadFrontCortex builds front cortex from session summaries, identity knowledge, and anchors.
+// Caps: 3 summaries, 10 anchors, identity keys truncated to 200 chars.
+func (sm *SessionManager) LoadFrontCortex(chatID int64) *FrontCortex {
+	fc := &FrontCortex{}
+
+	// Identity knowledge
+	if identity, _ := sm.GetAllIdentityKnowledge(); identity != nil {
+		fc.UserName = truncateTo(identity["user_name"], 80)
+		fc.CurrentProject = truncateTo(identity["current_project"], 80)
+		fc.ActiveWork = truncateTo(identity["active_work"], 80)
+		fc.Preferences = truncateTo(identity["preferences"], 80)
+	}
+
+	// Session summaries (last 3)
+	summaries, _ := sm.GetSessionSummaries(chatID, 3)
+	for _, s := range summaries {
+		fc.RecentTopics = append(fc.RecentTopics, truncateTo(s.Summary, 100))
+	}
+
+	return fc
+}
+
+// FormatFrontCortex renders a FrontCortex as a system prompt section with hard caps.
+func FormatFrontCortex(fc *FrontCortex) string {
+	if fc == nil {
+		return ""
+	}
+	var sb strings.Builder
+
+	// Identity section (max 200 chars per field, max 4 fields = 800 chars)
+	hasIdentity := fc.UserName != "" || fc.CurrentProject != "" || fc.ActiveWork != "" || fc.Preferences != ""
+	if hasIdentity {
+		sb.WriteString("\n## Who I'm talking to\n")
+		if fc.UserName != "" {
+			sb.WriteString(fmt.Sprintf("- User: %s\n", fc.UserName))
+		}
+		if fc.CurrentProject != "" {
+			sb.WriteString(fmt.Sprintf("- Project: %s\n", fc.CurrentProject))
+		}
+		if fc.ActiveWork != "" {
+			sb.WriteString(fmt.Sprintf("- Active work: %s\n", fc.ActiveWork))
+		}
+		if fc.Preferences != "" {
+			sb.WriteString(fmt.Sprintf("- Preferences: %s\n", fc.Preferences))
+		}
+	}
+
+	// Recent context (max 3 summaries, 200 chars each)
+	if len(fc.RecentTopics) > 0 {
+		sb.WriteString("\n## Recent context\n")
+		for _, topic := range fc.RecentTopics {
+			sb.WriteString(fmt.Sprintf("- %s\n", topic))
+		}
+	}
+
+	return sb.String()
+}
+
+func truncateTo(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+// GetIdentityKnowledge returns a specific identity key.
+func (sm *SessionManager) GetIdentityKnowledge(key string) (string, error) {
+	var value string
+	err := sm.db.QueryRow(`SELECT value FROM identity_knowledge WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
+}
+
+// initSessionDB creates the full mini-bot.db schema (sessions, memories, lessons, anchors, tools, session_summaries, identity_knowledge).
 func initSessionDB(dbPath string) error {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
@@ -233,6 +412,23 @@ func initSessionDB(dbPath string) error {
 		definition TEXT,
 		source TEXT DEFAULT 'self',
 		created_at TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS session_summaries (
+		session_id TEXT PRIMARY KEY,
+		summary TEXT NOT NULL,
+		last_topic TEXT,
+		message_count INTEGER DEFAULT 0,
+		created_at TEXT,
+		updated_at TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS identity_knowledge (
+		id TEXT PRIMARY KEY,
+		key TEXT UNIQUE NOT NULL,
+		value TEXT NOT NULL,
+		source TEXT DEFAULT 'inferred',
+		updated_at TEXT
 	);
 	`
 
