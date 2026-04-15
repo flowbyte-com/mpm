@@ -485,6 +485,8 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 	}
 	switch parts[0] {
 	case "/new", "/clear":
+		// Cancel pending session summary
+		h.cancelSummaryTimer(chatID)
 		// Clear session history for this chat
 		if err := h.sm.Save(chatID, nil); err != nil {
 			return true, fmt.Sprintf("Failed to clear session: %v", err)
