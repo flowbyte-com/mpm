@@ -5,6 +5,14 @@
     "hot_reload": false
   },
   "synth": {
+    // MiniMax:
+    // "model": "MiniMax-M2.7",
+    // "api_key": "...",
+    // "base_url": "https://api.minimax.io/anthropic/messages",
+    // OpenRouter (endpoint: openrouter.ai/api):
+    // "model": "anthropic/claude-3.5-haiku",
+    // "api_key": "sk-or-v1-...",
+    // "base_url": "https://openrouter.ai/api",
     "model": "MiniMax-M2.7",
     "api_key": "",
     "base_url": "https://api.minimax.io/anthropic",

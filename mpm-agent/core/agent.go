@@ -542,7 +542,7 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 		return "", nil, APIUsage{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/v1/messages"
+	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "", nil, APIUsage{}, fmt.Errorf("create request: %w", err)
@@ -564,8 +564,15 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[agent] API error response: %s", string(respBody))
 		return "", nil, APIUsage{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
+
+	n := 300
+	if len(respBody) < n {
+		n = len(respBody)
+	}
+	log.Printf("[agent] raw response: %s", string(respBody)[:n])
 
 	var result anthropicResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
