@@ -44,15 +44,31 @@ func NewRouter() *CommandRouter {
 		"logs":     {Name: "logs", Description: "Tail daemon logs", NeedsDaemon: true},
 
 		// Standalone commands
-		"version":   {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
-		"help":      {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
-		"doctor":    {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
-		"synthesize": {Name: "synthesize", Description: "Synthesize session facts via LLM", MinArgs: 1},
-		"recall":    {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
-		"topics":   {Name: "topics", Description: "List all topic names", MinArgs: 0},
-		"watch":     {Name: "watch", Description: "Watch daemon for memory ingestion"},
-		"web":       {Name: "web", Description: "Start web UI server", MinArgs: 0},
-		"menu":      {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
+		"version":  {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
+		"help":     {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
+		"doctor":   {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
+		"recall":   {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
+		"watch":    {Name: "watch", Description: "Watch daemon for memory ingestion"},
+		"web":      {Name: "web", Description: "Start web UI server", MinArgs: 0},
+		"menu":     {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
+		"stats":    {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
+		"prune":    {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
+		"export":   {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"maintain": {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
+
+		// Simplified memory commands
+		"add":        {Name: "add", Description: "Add a new memory", MinArgs: 1},
+		"ls":         {Name: "ls", Description: "List memories", MinArgs: 0},
+		"show":       {Name: "show", Description: "Show memory details", MinArgs: 1},
+		"rm":         {Name: "rm", Description: "Delete a memory", MinArgs: 1},
+		"promote":    {Name: "promote", Description: "Make memory LTM", MinArgs: 1},
+		"reinforce":  {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
+		"weaken":     {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
+		"set-weight": {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
+		"shred":      {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
+
+		// Reference commands (simplified, no daemon)
+		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
 
 		// OpenCLAW commands
 		"dashboard": {
@@ -61,19 +77,16 @@ func NewRouter() *CommandRouter {
 			NeedsDaemon: true,
 		},
 
-		// Daemon subcommands
-		"llm":      {Name: "llm", Description: "LLM operations", NeedsDaemon: true},
-		"compile":  {Name: "compile", Description: "Compile project", NeedsDaemon: true},
-		"shred":    {Name: "shred", Description: "Secure memory wipe", NeedsDaemon: true},
-		"memory":   {Name: "memory", Description: "Memory operations", NeedsDaemon: true},
-		"mode":     {Name: "mode", Description: "Mode operations", NeedsDaemon: true},
-		"persona":  {Name: "persona", Description: "Persona operations", NeedsDaemon: true},
-		"topic":    {Name: "topic", Description: "Topic management", MinArgs: 1},
-		"session":   {Name: "session", Description: "Session operations", NeedsDaemon: true},
-		"reference": {Name: "reference", Description: "Reference library", NeedsDaemon: true},
-		"lesson":     {Name: "lesson", Description: "Lesson operations", NeedsDaemon: true},
+		// Daemon subcommands (legacy - kept for compatibility)
+		"llm":              {Name: "llm", Description: "LLM operations", NeedsDaemon: true},
+		"compile":          {Name: "compile", Description: "Compile project", NeedsDaemon: true},
+		"mode":             {Name: "mode", Description: "Mode operations", NeedsDaemon: true},
+		"persona":          {Name: "persona", Description: "Persona operations", NeedsDaemon: true},
+		"topic":            {Name: "topic", Description: "Topic management", MinArgs: 1},
+		"session":          {Name: "session", Description: "Session operations", NeedsDaemon: true},
+		"lesson":           {Name: "lesson", Description: "Lesson operations", NeedsDaemon: true},
 		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0, NeedsDaemon: true},
-		"ingest":    {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"ingest":           {Name: "ingest", Description: "Import memories from external SQLite sources"},
 	}
 
 	return r
@@ -132,19 +145,31 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "doctor", "logs", "start":
 		// Standalone commands - don't need daemon
 		return r.handleStandalone(cmd.Name, args)
-	case "synthesize":
-		return handleSynthesize(args)
 	case "recall":
 		return handleRecall(args)
 	case "ingest":
 		return handleIngest(args)
+	case "stats":
+		return handleStats(args)
+	case "prune":
+		return handlePrune(args)
+	case "export":
+		return handleExport(args)
+	case "maintain":
+		return handleMaintain(args)
 	case "web":
 		return handleWeb(args)
-	case "topics":
-		return topicList(args)
-	case "topic":
-		return topicCmd(args)
 	case "watch":
+		// Handle path management subcommands directly (no daemon)
+		if len(args) >= 2 {
+			switch args[1] {
+			case "add-path", "remove-path", "list-paths", "paths":
+				if cmdWatch(args[1:]) {
+					return 0
+				}
+				return 1
+			}
+		}
 		// watch - if no args, start watch daemon standalone
 		// if args provided, route to daemon for status/start/stop/restart
 		if len(args) < 2 {
@@ -162,6 +187,26 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleDashboard()
 	case "menu":
 		return r.handleMenu()
+	case "add":
+		return handleAdd(args)
+	case "ls":
+		return handleLs(args)
+	case "show":
+		return handleShow(args)
+	case "rm":
+		return handleRm(args)
+	case "promote":
+		return handlePromote(args)
+	case "reinforce":
+		return handleReinforce(args)
+	case "weaken":
+		return handleWeaken(args)
+	case "set-weight":
+		return handleSetWeight(args)
+	case "shred":
+		return handleShredMem(args)
+	case "reference":
+		return handleRef(args)
 	default:
 		// Daemon commands (llm, compile, shred, ss, etc.)
 		if cmd.NeedsDaemon {
@@ -271,45 +316,18 @@ func (r *CommandRouter) handleHelp() int {
 }
 
 func (r *CommandRouter) handleDashboard() int {
-	// Dashboard as CLI command: print status summary (no TUI)
-	// mpm dashboard → show quick status
+	// Dashboard as CLI command: start the bubbletea TUI dashboard
+	// Requires daemon to be running for status data
 	conn, err := r.dialDaemonWithRetry(2, 500*time.Millisecond)
 	if err != nil {
-		fmt.Println("Daemon not running. Start with: mpm")
+		fmt.Println("Daemon not running. Start with: mpm start")
 		return 1
 	}
 	defer conn.Close()
 
-	msg := Message{Args: []string{"status"}}
-	if err := json.NewEncoder(conn).Encode(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	var resp Message
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading response: %v\n", err)
-		return 1
-	}
-
-	if resp.Output != "" {
-		fmt.Print(resp.Output)
-	}
-	if resp.Error != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
-		return resp.ExitCode
-	}
-
-	// Quick links
-	fmt.Println()
-	fmt.Println("  Quick Links:")
-	fmt.Println("  ─────────────────────────────────────")
-	fmt.Println("  🌐 Dashboard:  mpm menu               (interactive TUI)")
-	fmt.Println("  📊 Status:     mpm status             (full status)")
-	fmt.Println("  📜 Logs:      mpm logs --json        (tail logs)")
-	fmt.Println("  💾 Memory:    mpm memory search       (query memory)")
-	fmt.Println("  🎭 Modes:     mpm mode list           (available modes)")
-	fmt.Println()
+	// Launch the bubbletea TUI dashboard
+	// It will connect to the daemon via socket for status
+	StartDashboard(sockPath)
 	return 0
 }
 

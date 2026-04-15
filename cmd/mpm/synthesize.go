@@ -15,8 +15,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	configpkg "mpm/internal/config"
 	mpminternal "mpm/internal"
+	configpkg "mpm/internal/config"
 )
 
 // SynthConfig holds LLM settings for synthesis.
@@ -96,8 +96,8 @@ func handleSynthesize(args []string) int {
 
 	// Ensure session exists in sessions table (FK: memories.session_id → sessions.id)
 	sessionDBID, err := dbMgr.SaveSession(fullUUID, result.SessionSummary, jsonlPath, map[string]interface{}{
-		"model":                meta.Model,
-		"provider":             meta.Provider,
+		"model":               meta.Model,
+		"provider":            meta.Provider,
 		"synthesized_session": true,
 	})
 	if err != nil {
@@ -113,8 +113,8 @@ func handleSynthesize(args []string) int {
 		}
 		tags := map[string]interface{}{
 			"synthesized": true,
-			"session-id": uuid,
-			"source":     "llm-synthesis",
+			"session-id":  uuid,
+			"source":      "llm-synthesis",
 		}
 		for _, t := range topics {
 			tags[strings.ToLower(strings.TrimSpace(t))] = true
@@ -123,12 +123,12 @@ func handleSynthesize(args []string) int {
 			"is_long_term": true,
 			"weight":       8,
 			"source_path":  jsonlPath,
-			"session_id":  uuid,
-			"synthesized": true,
-			"summary":     result.SessionSummary,
+			"session_id":   uuid,
+			"synthesized":  true,
+			"summary":      result.SessionSummary,
 		}
 		embedding := mpminternal.HashEmbed(fact)
-		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, tags, metadata, embedding)
+		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, tags, metadata, embedding, false, 1)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to store fact: %v\n", err)
 			continue
@@ -155,8 +155,8 @@ func handleSynthesize(args []string) int {
 // SynthesisResult holds the raw LLM JSON output before null handling.
 type SynthesisResult struct {
 	SessionSummary string          `json:"session_summary"`
-	Topics        json.RawMessage `json:"topics"`
-	Memories      json.RawMessage `json:"memories"`
+	Topics         json.RawMessage `json:"topics"`
+	Memories       json.RawMessage `json:"memories"`
 }
 
 // findFullSessionUUID looks up the full session UUID from the DB by prefix
@@ -258,7 +258,7 @@ func condenseTranscriptRaw(lines []string) string {
 	var out strings.Builder
 	for _, line := range lines {
 		var ev struct {
-			Type string `json:"type"`
+			Type    string `json:"type"`
 			Message struct {
 				Role    string `json:"role"`
 				Content []struct {
@@ -446,9 +446,9 @@ func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, []s
 	}
 
 	body := map[string]interface{}{
-		"model":       model,
-		"max_tokens":  maxTokens,
-		"messages":    messages,
+		"model":      model,
+		"max_tokens": maxTokens,
+		"messages":   messages,
 	}
 
 	bodyBytes, err := json.Marshal(body)

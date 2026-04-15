@@ -62,6 +62,18 @@ var (
 // =============================================================================
 
 func cmdWatch(args []string) bool {
+	// Handle path management subcommands (no daemon needed)
+	if len(args) >= 1 {
+		switch args[0] {
+		case "add-path":
+			return handleWatchAddPath(args[1:]) == 0
+		case "remove-path":
+			return handleWatchRemovePath(args[1:]) == 0
+		case "list-paths", "paths":
+			return handleWatchListPaths(args[1:]) == 0
+		}
+	}
+
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	// Watch specific directories (defaults from config)
 	watchDir := fs.String("dir", "", "Watch directory (default: memory dir from config)")
@@ -73,6 +85,10 @@ func cmdWatch(args []string) bool {
 		fmt.Println("Usage: mpm watch [options]")
 		fmt.Println("\nWatch options:")
 		fs.PrintDefaults()
+		fmt.Println("\nPath management (no daemon):")
+		fmt.Println("  mpm watch add-path <path> [--type memory|sessions]")
+		fmt.Println("  mpm watch remove-path <path>")
+		fmt.Println("  mpm watch list-paths")
 	}
 	if err := fs.Parse(args); err != nil {
 		return false
@@ -128,17 +144,20 @@ func cmdWatch(args []string) bool {
 	daemon.startupSweep()
 	fmt.Printf("✅ Startup sweep complete. Watching for changes...\n\n")
 
-	// Start external DB polling goroutines
+	// Setup signal handling for graceful shutdown
+	done := make(chan bool)
+	stopCh := make(chan struct{})
+	go daemon.handleSignals(done)
+
+	// Load config for external DBs
 	cfg, _ := config.LoadConfig()
+
+	// Start external DB polling goroutines with stop channel
 	externalDBs := cfg.GetExternalDbs()
 	if len(externalDBs) > 0 {
 		fmt.Printf("🔄 Starting %d external DB poller(s)...\n", len(externalDBs))
-		startExternalDBPolling(externalDBs, *dryRun, *verbose)
+		startExternalDBPolling(externalDBs, *dryRun, *verbose, stopCh)
 	}
-
-	// Setup signal handling for graceful shutdown
-	done := make(chan bool)
-	go daemon.handleSignals(done)
 
 	// Main event loop
 	for {
@@ -159,6 +178,7 @@ func cmdWatch(args []string) bool {
 
 		case <-done:
 			fmt.Printf("\n👋 Watch daemon shutting down...\n")
+			close(stopCh) // Signal external DB pollers to stop
 			return true
 		}
 	}
@@ -167,7 +187,8 @@ func cmdWatch(args []string) bool {
 // resolveWatchDirs determines which directories to watch for the daemon
 // Priority: 1) CLI flags, 2) Config file (memory_dirs/sessions_dirs), 3) OpenClaw workspace defaults
 // NOTE: These are the paths the DAEMON watches for OpenClaw-created .md and session files.
-//       The MPM database is separate and always at mpm/src/db/mpm.db.
+//
+//	The MPM database is separate and always at mpm/src/db/mpm.db.
 func resolveWatchDirs(memDir, sesDir string) []string {
 	var dirs []string
 
@@ -238,15 +259,16 @@ func dirExists(path string) bool {
 
 // startExternalDBPolling starts goroutines to poll each configured external DB.
 // Each goroutine gets its own DatabaseManager connection (created once, reused per poll).
-func startExternalDBPolling(dbs []config.ExternalDB, dryRun, verbose bool) {
+// The stopCh is used to signal graceful shutdown.
+func startExternalDBPolling(dbs []config.ExternalDB, dryRun, verbose bool, stopCh <-chan struct{}) {
 	for _, db := range dbs {
-		go pollExternalDB(db, dryRun, verbose)
+		go pollExternalDB(db, dryRun, verbose, stopCh)
 	}
 }
 
 // pollExternalDB polls an external SQLite DB at the configured interval,
-// ingesting new memories since the last cursor.
-func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool) {
+// ingesting new memories since the last cursor. Stop when stopCh is closed.
+func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool, stopCh <-chan struct{}) {
 	interval := dbCfg.IntervalSeconds
 	if interval <= 0 {
 		interval = 30
@@ -257,7 +279,6 @@ func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool) {
 			dbCfg.Path, dbCfg.Label, interval)
 	}
 
-	// Create DatabaseManager once (reused across all polls)
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		if verbose {
@@ -267,21 +288,28 @@ func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool) {
 	}
 	defer dm.Close()
 
-	// Run immediately on startup, then on interval
 	pollOnce(&dbCfg, dm, dryRun, verbose)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		pollOnce(&dbCfg, dm, dryRun, verbose)
+	for {
+		select {
+		case <-ticker.C:
+			pollOnce(&dbCfg, dm, dryRun, verbose)
+		case <-stopCh:
+			if verbose {
+				fmt.Printf("🛑 External DB poller %s stopping...\n", dbCfg.Label)
+			}
+			return
+		}
 	}
 }
 
 // pollOnce performs one poll cycle for an external DB.
 // The dm (DatabaseManager) is passed in and reused — caller manages its lifecycle.
+// All saves are transactional — cursor only updated if all saves succeed.
 func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun, verbose bool) {
-	// Open read-only connection to external DB
 	extDB, err := sql.Open("sqlite3", dbCfg.Path+"?mode=ro")
 	if err != nil {
 		if verbose {
@@ -299,7 +327,6 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 		cursor = ""
 	}
 
-	// Query for new rows since cursor
 	query := `
 		SELECT id, content, session_id, tags, created_at
 		FROM memories
@@ -309,7 +336,7 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 	if cursor != "" {
 		rows, err = extDB.Query(query+" AND created_at > ? ORDER BY created_at ASC", cursor)
 	} else {
-		rows, err = extDB.Query(query+" ORDER BY created_at ASC")
+		rows, err = extDB.Query(query + " ORDER BY created_at ASC")
 	}
 	if err != nil {
 		if verbose {
@@ -321,49 +348,83 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 
 	var latestCursor string
 	count := 0
-	for rows.Next() {
-		var id, content, sessionID, tags, createdAt string
-		if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
-			continue
-		}
-		latestCursor = createdAt
 
-		if dryRun {
+	if dryRun {
+		for rows.Next() {
+			var id, content, sessionID, tags, createdAt string
+			if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
+				continue
+			}
+			latestCursor = createdAt
 			if verbose {
 				fmt.Printf("   [dry-run] would ingest: id=%s, session=%s\n", id, sessionID)
 			}
-			continue
 		}
-
-		// Check for duplicate before insert
-		existing, _ := dm.GetMemory(id)
-		if existing != nil {
-			continue // already ingested
-		}
-
-		// Ingest the memory
-		tagsMap := map[string]interface{}{"source": dbCfg.Label, "external_db": true}
-		metadata := map[string]interface{}{
-			"source_label": dbCfg.Label,
-			"source_id":    id,
-		}
-		embedding := mpminternal.HashEmbed(content)
-		_, err := dm.SaveMemory("memories", content, sessionID, tagsMap, metadata, embedding)
+	} else {
+		tx, err := dm.SQLDB().Begin()
 		if err != nil {
 			if verbose {
-				fmt.Printf("⚠️  external DB %s: save failed for id=%s: %v\n", dbCfg.Label, id, err)
+				fmt.Printf("⚠️  external DB %s: transaction begin failed: %v\n", dbCfg.Label, err)
 			}
-			continue
+			return
 		}
-		count++
-	}
 
-	// Persist cursor
-	if latestCursor != "" {
-		if err := dm.SetExternalDBCursor(dbCfg.Label, latestCursor); err != nil {
-			if verbose {
-				fmt.Printf("⚠️  external DB %s: set cursor failed: %v\n", dbCfg.Label, err)
+		for rows.Next() {
+			var id, content, sessionID, tags, createdAt string
+			if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
+				continue
 			}
+			latestCursor = createdAt
+
+			existing, _ := dm.GetMemoryByExternalID(dbCfg.Label, id)
+			if existing != nil {
+				continue
+			}
+
+			tagsJSON := fmt.Sprintf(`["source:%s","external_db"]`, dbCfg.Label)
+			metadataMap := map[string]interface{}{
+				"source_label": dbCfg.Label,
+				"source_id":    id,
+			}
+			metadataJSON, _ := json.Marshal(metadataMap)
+			embedding := mpminternal.HashEmbed(content)
+			embeddingJSON, _ := json.Marshal(embedding)
+			contentHash := sha256.Sum256([]byte(content))
+			now := time.Now()
+
+			_, err := tx.Exec(`
+				INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, source_db, source_id, content_hash)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, mpminternal.GenerateID(), "memories", content, sessionID, tagsJSON, string(metadataJSON), string(embeddingJSON), now.Format(time.RFC3339), dbCfg.Label, id, hex.EncodeToString(contentHash[:]))
+			if err != nil {
+				if verbose {
+					fmt.Printf("⚠️  external DB %s: save failed for id=%s: %v\n", dbCfg.Label, id, err)
+				}
+				tx.Rollback()
+				return
+			}
+			count++
+		}
+
+		if latestCursor != "" {
+			_, err = tx.Exec(`
+				INSERT OR REPLACE INTO external_db_cursors (db_label, last_cursor, updated_at)
+				VALUES (?, ?, CURRENT_TIMESTAMP)`,
+				dbCfg.Label, latestCursor)
+			if err != nil {
+				if verbose {
+					fmt.Printf("⚠️  external DB %s: set cursor failed: %v\n", dbCfg.Label, err)
+				}
+				tx.Rollback()
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			if verbose {
+				fmt.Printf("⚠️  external DB %s: commit failed: %v\n", dbCfg.Label, err)
+			}
+			return
 		}
 	}
 
@@ -466,10 +527,10 @@ func (d *watcherDaemon) handleSignals(done chan bool) {
 // =============================================================================
 
 func (d *watcherDaemon) startupSweep() {
-		for _, dir := range d.dirs {
-				d.sweepDirectory(dir)
+	for _, dir := range d.dirs {
+		d.sweepDirectory(dir)
 	}
-	}
+}
 
 func (d *watcherDaemon) sweepDirectory(dir string) {
 	entries, err := os.ReadDir(dir)
@@ -843,18 +904,18 @@ func (d *watcherDaemon) parseSessionsSnapshot(data []byte) (map[string]interface
 	}
 
 	snapshot := map[string]interface{}{
-		"session_key":      "",
-		"session_id":      "",
-		"channel":          "",
-		"model":            "",
-		"provider":         "",
-		"skills_count":     0,
-		"skills":           []string{},
-		"workspace_files":  []string{},
+		"session_key":         "",
+		"session_id":          "",
+		"channel":             "",
+		"model":               "",
+		"provider":            "",
+		"skills_count":        0,
+		"skills":              []string{},
+		"workspace_files":     []string{},
 		"system_prompt_chars": 0,
-		"context_tokens":   0,
-		"runtime_ms":       int64(0),
-		"updated_at":       int64(0),
+		"context_tokens":      0,
+		"runtime_ms":          int64(0),
+		"updated_at":          int64(0),
 	}
 
 	// Extract top-level fields
@@ -934,7 +995,6 @@ func (d *watcherDaemon) parseSessionsSnapshot(data []byte) (map[string]interface
 
 // sha256 and hex imported at top of file (already present)
 
-
 func (d *watcherDaemon) readJSONLines(path string) ([]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -985,8 +1045,8 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 	// Generate hash-based embedding
 	embedding := mpminternal.HashEmbed(content)
 
-	// Save to database
-	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding)
+	// Save to database (LTM: isLongTerm=true, weight=10)
+	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding, true, 10)
 	if err != nil {
 		return "", err
 	}
@@ -1012,16 +1072,16 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 	// Prepare metadata
 	metadata := map[string]interface{}{
 		"is_long_term": false,
-		"weight":        1,
-		"source_path":   sourcePath,
-		"promoted_at":   time.Now().UTC().Format(time.RFC3339),
+		"weight":       1,
+		"source_path":  sourcePath,
+		"promoted_at":  time.Now().UTC().Format(time.RFC3339),
 	}
 
 	// Generate embedding
 	embedding := mpminternal.HashEmbed(content)
 
-	// Save to database
-	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding)
+	// Save to database (session memory: isLongTerm=false, weight=1)
+	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding, false, 1)
 	if err != nil {
 		return "", err
 	}
@@ -1107,9 +1167,9 @@ type sessionMessage struct {
 			Text string `json:"text,omitempty"`
 		} `json:"content"`
 	} `json:"message,omitempty"`
-	CWD       string `json:"cwd,omitempty"`
-	ModelID   string `json:"modelId,omitempty"`
-	Provider  string `json:"provider,omitempty"`
+	CWD      string `json:"cwd,omitempty"`
+	ModelID  string `json:"modelId,omitempty"`
+	Provider string `json:"provider,omitempty"`
 }
 
 // extractFromSessionLine extracts declarative facts from OpenClaw session JSON lines
@@ -1119,7 +1179,6 @@ func (d *watcherDaemon) extractFromSessionLine(line string) string {
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {
 		return ""
 	}
-
 
 	switch msg.Type {
 	case "session":
@@ -1311,8 +1370,7 @@ type LTMemory struct {
 
 // getLTMMemories retrieves all LTM memories from the database
 func (d *watcherDaemon) getLTMMemories() ([]LTMemory, error) {
-	// Query memories with weight >= 10 (LTM flag)
-	query := `SELECT id, content, tags, metadata, created_at FROM memories WHERE metadata LIKE '%is_long_term":true%' OR metadata LIKE '%weight":10%' LIMIT 1000`
+	query := `SELECT id, content, tags, metadata, created_at FROM memories WHERE (is_long_term = 1 OR weight >= 10) AND deleted_at IS NULL LIMIT 1000`
 
 	rows, err := d.db.SQLDB().Query(query)
 	if err != nil {
@@ -1477,4 +1535,197 @@ func (d *watcherDaemon) appendToMirror(id, content, collection string, tags []st
 func (d *watcherDaemon) isPoisoned(content string) (bool, string) {
 	// Use the existing poison phrase check from memory store
 	return d.memory.IsPoisonedForTest(content)
+}
+
+// =============================================================================
+// Path Management Handlers
+// =============================================================================
+
+// handleWatchAddPath adds a path to the watch configuration
+func handleWatchAddPath(args []string) int {
+	fs := flag.NewFlagSet("watch add-path", flag.ContinueOnError)
+	pathType := fs.String("type", "memory", "Path type: memory or sessions")
+	fs.Usage = func() {
+		fmt.Println("Usage: mpm watch add-path <path> [--type memory|sessions]")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: path required\n")
+		return 1
+	}
+
+	path := fs.Arg(0)
+	resolved := config.ResolveEnvPath(path)
+	if !dirExists(resolved) {
+		fmt.Fprintf(os.Stderr, "Error: directory does not exist: %s\n", resolved)
+		return 1
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		return 1
+	}
+
+	switch *pathType {
+	case "memory":
+		// Check if already exists
+		for _, p := range cfg.GetMemoryDirs() {
+			if p == path || config.ResolveEnvPath(p) == resolved {
+				fmt.Printf("Path already in memory_dirs: %s\n", path)
+				return 0
+			}
+		}
+		cfg.MemoryDirs = append(cfg.MemoryDirs, path)
+		fmt.Printf("Added to memory_dirs: %s\n", path)
+	case "sessions":
+		for _, p := range cfg.GetSessionsDirs() {
+			if p == path || config.ResolveEnvPath(p) == resolved {
+				fmt.Printf("Path already in sessions_dirs: %s\n", path)
+				return 0
+			}
+		}
+		cfg.SessionsDirs = append(cfg.SessionsDirs, path)
+		fmt.Printf("Added to sessions_dirs: %s\n", path)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: --type must be 'memory' or 'sessions'\n")
+		return 1
+	}
+
+	if err := config.SaveConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Path added successfully. Restart watch daemon to pick up changes.\n")
+	return 0
+}
+
+// handleWatchRemovePath removes a path from the watch configuration
+func handleWatchRemovePath(args []string) int {
+	fs := flag.NewFlagSet("watch remove-path", flag.ContinueOnError)
+	pathType := fs.String("type", "memory", "Path type: memory or sessions")
+	fs.Usage = func() {
+		fmt.Println("Usage: mpm watch remove-path <path> [--type memory|sessions]")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: path required\n")
+		return 1
+	}
+
+	path := fs.Arg(0)
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		return 1
+	}
+
+	resolved := config.ResolveEnvPath(path)
+	removed := false
+
+	switch *pathType {
+	case "memory":
+		var newDirs []string
+		for _, p := range cfg.GetMemoryDirs() {
+			if p == path || config.ResolveEnvPath(p) == resolved {
+				removed = true
+			} else {
+				newDirs = append(newDirs, p)
+			}
+		}
+		cfg.MemoryDirs = newDirs
+	case "sessions":
+		var newDirs []string
+		for _, p := range cfg.GetSessionsDirs() {
+			if p == path || config.ResolveEnvPath(p) == resolved {
+				removed = true
+			} else {
+				newDirs = append(newDirs, p)
+			}
+		}
+		cfg.SessionsDirs = newDirs
+	default:
+		fmt.Fprintf(os.Stderr, "Error: --type must be 'memory' or 'sessions'\n")
+		return 1
+	}
+
+	if !removed {
+		fmt.Fprintf(os.Stderr, "Path not found in %s_dirs: %s\n", *pathType, path)
+		return 1
+	}
+
+	if err := config.SaveConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Path removed. Restart watch daemon to pick up changes.\n")
+	return 0
+}
+
+// handleWatchListPaths lists all configured watch paths
+func handleWatchListPaths(args []string) int {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		return 1
+	}
+
+	fmt.Println("\n📁 Configured Watch Paths")
+	fmt.Println("══════════════════════════════════════════")
+
+	memDirs := cfg.GetMemoryDirs()
+	if len(memDirs) > 0 {
+		fmt.Printf("\n  Memory directories (%d):\n", len(memDirs))
+		for _, p := range memDirs {
+			resolved := config.ResolveEnvPath(p)
+			exists := "✅"
+			if !dirExists(resolved) {
+				exists = "❌ (missing)"
+			}
+			fmt.Printf("    • %s %s\n", exists, p)
+		}
+	} else {
+		fmt.Printf("\n  Memory directories: none configured\n")
+	}
+
+	sesDirs := cfg.GetSessionsDirs()
+	if len(sesDirs) > 0 {
+		fmt.Printf("\n  Sessions directories (%d):\n", len(sesDirs))
+		for _, p := range sesDirs {
+			resolved := config.ResolveEnvPath(p)
+			exists := "✅"
+			if !dirExists(resolved) {
+				exists = "❌ (missing)"
+			}
+			fmt.Printf("    • %s %s\n", exists, p)
+		}
+	} else {
+		fmt.Printf("\n  Sessions directories: none configured\n")
+	}
+
+	extDbs := cfg.GetExternalDbs()
+	if len(extDbs) > 0 {
+		fmt.Printf("\n  External databases (%d):\n", len(extDbs))
+		for _, db := range extDbs {
+			exists := "✅"
+			if !dirExists(db.Path) {
+				exists = "❌ (missing)"
+			}
+			fmt.Printf("    • %s %s [%s] (%ds)\n", exists, db.Path, db.Label, db.IntervalSeconds)
+		}
+	} else {
+		fmt.Printf("\n  External databases: none configured\n")
+	}
+
+	fmt.Print("\n══════════════════════════════════════════\n")
+	return 0
 }

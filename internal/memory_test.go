@@ -179,8 +179,8 @@ func TestSearchSessionsCollectionBug(t *testing.T) {
 	// This simulates what the OLD buggy code would have stored
 	_, err := store.DB.Exec(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		"test-old-bug-id", "sessions", "old buggy content", "", "[]", "{}")
+		VALUES (?, ?, ?, NULL, ?, ?, CURRENT_TIMESTAMP)`,
+		"test-old-bug-id", "sessions", "old buggy content", "[]", "{}")
 	if err != nil {
 		t.Fatalf("Insert failed: %v", err)
 	}

@@ -20,14 +20,16 @@ import (
 
 // ReferenceDoc represents a reference document in the database
 type ReferenceDoc struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	SourcePath   string   `json:"source_path"`
-	SourceType   string   `json:"source_type"`
-	Tags         []string `json:"tags"`
-	TotalChunks  int      `json:"total_chunks"`
-	LastIndexed  string   `json:"last_indexed"`
-	Created      string   `json:"created"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	SourcePath  string   `json:"source_path"`
+	SourceType  string   `json:"source_type"`
+	Tags        []string `json:"tags"`
+	Content     string   `json:"content"`
+	ContentHash string   `json:"content_hash"`
+	TotalChunks int      `json:"total_chunks"`
+	LastIndexed string   `json:"last_indexed"`
+	Created     string   `json:"created"`
 }
 
 // ReferenceChunk represents a chunk of a reference document
@@ -360,6 +362,8 @@ type Section struct {
 
 // Chunk represents a text chunk
 type Chunk struct {
+	Index   int
+	Section string
 	Content string
 }
 
@@ -392,6 +396,7 @@ func GenerateReferenceID() string {
 }
 
 // ParseMarkdownSections parses markdown content into sections
+// Each ## or ### header starts a new section with the header text as name
 func ParseMarkdownSections(content string) []Section {
 	sections := []Section{}
 	lines := strings.Split(content, "\n")
@@ -399,7 +404,7 @@ func ParseMarkdownSections(content string) []Section {
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") {
-			if currentSection != nil {
+			if currentSection != nil && currentSection.Content != "" {
 				sections = append(sections, *currentSection)
 			}
 			title := strings.TrimSpace(strings.TrimPrefix(line, "## "))
@@ -413,7 +418,7 @@ func ParseMarkdownSections(content string) []Section {
 		}
 	}
 
-	if currentSection != nil {
+	if currentSection != nil && currentSection.Content != "" {
 		sections = append(sections, *currentSection)
 	}
 
@@ -421,16 +426,35 @@ func ParseMarkdownSections(content string) []Section {
 }
 
 // ChunkReference chunks reference content into smaller pieces
+// Prefers section-based chunks (markdown headers), falls back to word-boundary chunks
 func ChunkReference(content string, chunkSize int) []Chunk {
 	chunks := []Chunk{}
+
+	// Try section-based chunking first
+	sections := ParseMarkdownSections(content)
+	if len(sections) > 1 {
+		for i, sec := range sections {
+			chunks = append(chunks, Chunk{
+				Index:   i,
+				Section: sec.Section,
+				Content: strings.TrimSpace(sec.Content),
+			})
+		}
+		return chunks
+	}
+
+	// Fall back to word-boundary chunking
 	words := strings.Fields(content)
 	var currentChunk strings.Builder
+	idx := 0
 
 	for _, word := range words {
 		if currentChunk.Len()+len(word)+1 > chunkSize && currentChunk.Len() > 0 {
 			chunks = append(chunks, Chunk{
+				Index:   idx,
 				Content: strings.TrimSpace(currentChunk.String()),
 			})
+			idx++
 			currentChunk.Reset()
 		}
 		if currentChunk.Len() > 0 {
@@ -441,6 +465,7 @@ func ChunkReference(content string, chunkSize int) []Chunk {
 
 	if currentChunk.Len() > 0 {
 		chunks = append(chunks, Chunk{
+			Index:   idx,
 			Content: strings.TrimSpace(currentChunk.String()),
 		})
 	}
@@ -461,7 +486,35 @@ func (rdb *ReferenceDB) GetReferenceCount() (int, error) {
 // GetReferenceCount returns the number of reference documents via ReferenceStore
 func (rs *ReferenceStore) GetReferenceCount() (int, error) {
 	if rs.MetadataDB == nil {
-		return 0, fmt.Errorf("metadata database not initialized")
+		return 0, fmt.Errorf("database not initialized")
 	}
 	return rs.MetadataDB.GetReferenceCount()
+}
+
+// HashContent generates a SHA256 hash of content for deduplication
+func HashContent(content string) string {
+	hash := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(hash[:])
+}
+
+// StripHTML removes HTML tags from content
+func StripHTML(htmlContent string) string {
+	r := strings.NewReader(htmlContent)
+	z := html.NewTokenizer(r)
+	var text strings.Builder
+
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken:
+			return text.String()
+		case html.TextToken:
+			t := z.Token()
+			cleanText := strings.TrimSpace(t.Data)
+			if len(cleanText) > 0 {
+				text.WriteString(cleanText)
+				text.WriteString(" ")
+			}
+		}
+	}
 }

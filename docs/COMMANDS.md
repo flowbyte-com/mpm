@@ -1,5 +1,7 @@
 # MPM Command Reference
 
+> **Everything is a memory.** Sessions, topics, lessons are just memories with different collections. This makes the CLI simple.
+
 **Conventions:**
 - `mpm <cmd>` — standalone, no daemon required
 - `(daemon)` — requires `mpm start`
@@ -7,202 +9,264 @@
 
 ---
 
-## Daemon Management
+## Core Memory Commands
 
-| Command | Description |
-|---------|-------------|
-| `mpm start` | Start daemon + watch daemon. Handles stale socket cleanup. |
-| `mpm stop` | Gracefully stop daemon and watch daemon. |
-| `mpm restart` | Stop + start. |
-| `mpm shutdown` | Alias for `stop`. |
-| `mpm status` | Status table: version, uptime, mode, persona, DB size, memory/session counts, watch PID. |
-| `mpm logs` | Tail daemon log output. |
-| `mpm doctor [--fix]` | Diagnostics. `--fix` attempts auto-repair. |
-| `mpm dashboard` (TUI) | Real-time terminal dashboard. |
+*No daemon required — fast, works anywhere*
+
+### Add Memory
+
+```bash
+mpm add <content> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--collection <name>` | Collection name (default: memories) |
+| `--tag <tag1,tag2>` | Tags (comma-separated) |
+| `--session <id>` | Session ID to associate |
+| `--weight <1-100>` | Initial importance (default: 1) |
+| `--ttl <7d,24h>` | Time to live (e.g., 7d, 24h, 2h) |
+
+**Examples:**
+```bash
+mpm add "Remember to call mom"
+mpm add "Use sqlite3 Vacuum after bulk deletes" --tag go,sqlite --weight 10
+mpm add "Temporary note" --ttl 7d
+mpm add "Project meeting notes" --collection session --tag meeting
+```
+
+### List Memories
+
+```bash
+mpm ls [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--collection <name>` | Filter by collection |
+| `--tag <tag>` | Filter by tag |
+| `--since <date>` | Since date (YYYY-MM-DD) |
+| `--until <date>` | Until date (YYYY-MM-DD) |
+| `--limit <n>` | Max results (default: 20) |
+
+**Examples:**
+```bash
+mpm ls                                    # List recent memories
+mpm ls --collection session              # List sessions
+mpm ls --tag important --limit 50        # Important memories
+mpm ls --since 2024-01-01               # Memories since date
+```
+
+### Show Memory
+
+```bash
+mpm show <id>
+```
+
+Show full details of a memory by ID.
+
+### Recall / Search
+
+```bash
+mpm recall <query> [options]
+mpm s <query>                           # Shorthand alias
+```
+
+| Option | Description |
+|--------|-------------|
+| `--since <date>` | Since date (YYYY-MM-DD) |
+| `--until <date>` | Until date (YYYY-MM-DD) |
+| `--limit <n>` | Max results (default: 15) |
+
+**Examples:**
+```bash
+mpm recall golang
+mpm recall "project management" --since 7d
+mpm s database --limit 10
+```
+
+### Delete Memory
+
+```bash
+mpm rm <id>                              # Soft delete
+mpm shred <id>                           # Secure delete (DELETE + VACUUM)
+```
+
+---
+
+## Memory Importance
+
+*No daemon required*
+
+### Promote to LTM
+
+```bash
+mpm promote <id>
+```
+
+Makes memory permanent (weight=10, is_long_term=true), clears any TTL.
+
+### Reinforce / Weaken
+
+```bash
+mpm reinforce <id> [delta]              # Increment reinforcement (default: +1)
+mpm weaken <id> [delta]                 # Decrement reinforcement (default: -1)
+```
+
+Reinforcement increases `weight` slightly and tracks usefulness.
+
+**Examples:**
+```bash
+mpm reinforce abc123                     # +1 reinforcement
+mpm reinforce abc123 5                   # +5 reinforcement
+mpm weaken def456                        # -1 reinforcement
+```
+
+### Set Weight Directly
+
+```bash
+mpm set-weight <id> <0-100>
+```
+
+**Examples:**
+```bash
+mpm set-weight abc123 50                 # Set to medium importance
+mpm set-weight abc123 100                # Maximum importance
+```
+
+---
+
+## Statistics & Maintenance
+
+*No daemon required*
+
+### Memory Stats
+
+```bash
+mpm stats
+```
+
+Shows:
+- Total/active/deleted/expired counts
+- LTM count (weight >= 10)
+- Never-accessed memories (candidates for pruning)
+- Distribution by collection
+- Top tags
+- Reinforcement distribution
+
+### Prune
+
+```bash
+mpm prune [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--older-than <duration>` | Prune memories older than (e.g., 90d, 30d, 24h) |
+| `--never-accessed` | Prune memories never accessed |
+
+**Examples:**
+```bash
+mpm prune                                # Prune expired TTL memories
+mpm prune --older-than 90d              # Prune memories older than 90 days
+mpm prune --never-accessed              # Prune forgotten memories
+```
+
+### Export
+
+```bash
+mpm export [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format json|csv` | Output format (default: json) |
+| `--collection <name>` | Filter by collection |
+| `--since <date>` | Since date (YYYY-MM-DD) |
+| `--until <date>` | Until date (YYYY-MM-DD) |
+| `--output <file>` | Output file (default: stdout) |
+
+**Examples:**
+```bash
+mpm export --format json > memories.json
+mpm export --collection session --since 2024-01-01 --format csv > sessions.csv
+```
+
+### Self-Maintenance
+
+```bash
+mpm maintain [options]
+```
+
+Run self-improvement processes (decay, consolidate, prune).
+
+| Option | Description |
+|--------|-------------|
+| `--review` | Show LTM memories not accessed recently (for spaced reinforcement) |
+| `--days <n>` | Days since access for review (default: 14) |
+
+**Examples:**
+```bash
+mpm maintain                             # Run full self-maintenance
+mpm maintain --review                    # Show memories needing reinforcement
+mpm maintain --review --days 30         # Review memories not accessed in 30 days
+```
+
+---
+
+## Daemon-Required Commands
+
+*These require `mpm start` — they affect runtime agent configuration*
+
+### Mode Operations
+
+Modes are stackable behavioral contexts.
+
+```bash
+mpm mode [name]                         # Switch mode (TUI if no name)
+mpm mode list                            # List available modes
+mpm mode active                          # Show active modes
+mpm mode add <name>                      # Add mode to stack
+mpm mode remove <name>                   # Remove from stack
+mpm mode clear                           # Clear all modes
+```
+
+**Available modes:** ask, creative, debug, default, design, direct, grow, plan, research, ship
+
+### Persona Operations
+
+One persona active at a time.
+
+```bash
+mpm persona [name]                       # Switch persona (TUI if no name)
+mpm persona list                         # List available personas
+mpm persona active                        # Show current persona
+mpm persona set <name>                   # Set by name
+mpm persona clear                        # Clear persona
+```
+
+### Prime Directives
+
+```bash
+mpm prime-directives
+```
+
+Show the 808 agent directives.
 
 ---
 
 ## Watch Daemon
 
-| Command | Description |
-|---------|-------------|
-| `mpm watch` | Start watch daemon standalone (no daemon needed). |
-| `mpm watch --v` | Verbose mode — prints all file events. |
-| `mpm watch --dry-run` | Process files but don't delete them. |
-| `mpm watch --once` | One-shot startup sweep, then exit. |
-| `mpm watch status` (daemon) | Check if watch daemon is running. |
-| `mpm watch start` (daemon) | Start watch daemon via daemon proxy. |
-| `mpm watch stop` (daemon) | Stop watch daemon via daemon proxy. |
+Auto-ingestion from filesystem.
 
-The watch daemon starts automatically with `mpm start`.
-
----
-
-## Memory Operations (daemon)
-
-| Command | Description |
-|---------|-------------|
-| `mpm memory add <content>` | Store a new memory. Scanned for sensitive content first. |
-| `mpm memory search <query>` | FTS5 full-text search with BM25 ranking. |
-| `mpm memory search-term <term>` | Substring search, 500-char snippets. |
-| `mpm memory show <id>` | Show a specific memory by ID. |
-| `mpm memory list` | List recent memories (ordered by created_at DESC). |
-| `mpm memory shred <id>` | Hard delete one memory (DELETE + VACUUM + FTS5 trigger). |
-| `mpm memory wipe -f` | Delete ALL memories. Requires `-f` flag. |
-
----
-
-## Session Operations (daemon)
-
-Sessions are auto-ingested by the watch daemon. Manual commands:
-
-| Command | Description |
-|---------|-------------|
-| `mpm session add <content>` | Manually add a session note. |
-| `mpm session search <query>` | FTS5 search across sessions. |
-| `mpm session show <id>` | Show session by ID. |
-| `mpm session list` | List recent sessions. |
-
----
-
-## Topic Operations (daemon)
-
-Topics form a hierarchical tree. Memories and sessions can belong to topics via `topic_memberships`.
-
-| Command | Description |
-|---------|-------------|
-| `mpm topic add <name> [description]` | Create a new topic. |
-| `mpm topic search <query>` | Search topics by name/description. |
-| `mpm topic show <id>` | Show topic details. |
-| `mpm topic promote <id>` | Convert topic to a permanent memory. |
-| `mpm topic list` | List recent topics. |
-| `mpm topic shred <id>` | Shred a specific topic. |
-| `mpm topic rm <name>` | Delete topic by name. |
-
----
-
-## Persona Operations (daemon)
-
-One persona active at a time. Personas are JSON configs in `persona/`.
-
-| Command | Description |
-|---------|-------------|
-| `mpm persona` (TUI) | Interactive single-select persona picker. |
-| `mpm persona list` | List all available personas. |
-| `mpm persona active` | Show current active persona. |
-| `mpm persona set <name>` | Set active persona by name. |
-| `mpm persona clear` | Clear active persona. |
-
----
-
-## Mode Operations (daemon)
-
-Modes stack — multiple can be active simultaneously. Modes are JSON configs in `mode/`.
-
-| Command | Description |
-|---------|-------------|
-| `mpm mode` (TUI) | Interactive multi-select mode picker (space to toggle, enter to confirm). |
-| `mpm mode list` | List all available modes. |
-| `mpm mode active` | Show currently active modes. |
-| `mpm mode add <name>` | Add a mode to the active stack. |
-| `mpm mode remove <name>` | Remove a mode from the stack. |
-| `mpm mode clear` | Clear all active modes. |
-
-**Available modes:** ask, creative, debug, default, design, direct, grow, plan, research, ship
-
----
-
-## Compile Operations (daemon)
-
-Modes and personas auto-compile on change. These commands force recompilation after manual JSON edits.
-
-| Command | Description |
-|---------|-------------|
-| `mpm compile mode` | Compile all mode configs. |
-| `mpm compile persona` | Compile all persona configs. |
-| `mpm compile all` | Compile everything. |
-
----
-
-## LLM Operations (daemon)
-
-| Command | Description |
-|---------|-------------|
-| `mpm llm list` | List available LLM providers. |
-| `mpm llm status` | Show current LLM configuration. |
-
----
-
-## Recall & Synthesis (daemon)
-
-| Command | Description |
-|---------|-------------|
-| `mpm recall <query>` | Search memories with contextual recall (FTS5 + SQLite). |
-| `mpm synthesize <uuid>` | Extract structured facts from a session via LLM API. |
-
----
-
-## Shred Operations (daemon)
-
-Hard delete with VACUUM. Requires `-f` flag for bulk operations.
-
-| Command | Description |
-|---------|-------------|
-| `mpm shred session <id>` | Shred specific session. |
-| `mpm shred topic <id>` | Shred specific topic. |
-| `mpm shred sessions -f` | Delete all sessions. |
-| `mpm shred memories -f` | Delete all memories. |
-| `mpm shred topics -f` | Delete all topics. |
-| `mpm shred modes -f` | Delete all compiled modes. |
-| `mpm shred personas -f` | Delete all compiled personas. |
-| `mpm shred database -f` | Delete entire database and restart. |
-
----
-
-## Reference Operations (daemon)
-
-PDF and EPUB ingested with pure-Go parsers. Other formats read as plain text. No external tools required.
-
-| Command | Description |
-|---------|-------------|
-| `mpm reference add <path>` | Ingest a document (PDF, EPUB, markdown, text, and more). |
-| `mpm reference list` | List all reference documents. |
-| `mpm reference stats` | Show library statistics (document/chunk counts). |
-| `mpm reference search <query>` | Search reference documents by content. |
-| `mpm reference get <id>` | Show full document content (all chunks). |
-| `mpm reference show <id>` | Alias for `get`. |
-| `mpm reference shred <id>` | Remove a reference document and its chunks. |
-
-**Supported formats:** PDF (`.pdf`), EPUB (`.epub`), Markdown (`.md`), Plain text (`.txt`), HTML (`.html`), and any other file read as raw text.
-
----
-
-## Lesson Operations (daemon)
-
-Lessons are distilled knowledge from experience — warnings ("don't do X"), practices ("do Y"), and insights ("X leads to Y"). Unlike memories which store raw experiences, lessons capture learned wisdom.
-
-Lessons are automatically reinforced when the same content is added again, increasing their reinforcement count to surface the most important lessons first.
-
-| Command | Description |
-|---------|-------------|
-| `mpm lesson add <content> [--type warning\|practice\|insight] [--tags tags]` | Add a new lesson. |
-| `mpm lesson list [--type warning\|practice\|insight]` | List all lessons, optionally filtered. |
-| `mpm lesson search <query>` | Search lessons by content. |
-| `mpm lesson get <id>` | Show a specific lesson. |
-| `mpm lesson shred <id>` | Delete a lesson. |
-| `mpm lesson stats` | Show lesson statistics. |
-
-**Lesson types:**
-- `warning` — "don't do X" (negative lessons, cost was felt)
-- `practice` — "do Y" (positive lessons, best practices discovered)
-- `insight` — "X leads to Y" (causal knowledge, default)
-
-**Examples:**
 ```bash
-mpm lesson add "Check file extensions before executing rm" --type warning --tags safety,files
-mpm lesson add "Use gofmt for Go code formatting" --type practice --tags go,style
-mpm lesson add "Deleting .git causes irreversible history loss" --type warning --tags git,safety
+mpm watch [options]                     # Start watch daemon (standalone)
+mpm watch --v                            # Verbose mode
+mpm watch --dry-run                      # Process files but don't delete
+mpm watch --once                         # One-shot sweep, then exit
 ```
+
+**Started automatically with `mpm start`**
 
 ---
 
@@ -210,5 +274,44 @@ mpm lesson add "Deleting .git causes irreversible history loss" --type warning -
 
 | Command | Description |
 |---------|-------------|
-| `mpm help` | Show help menu. |
-| `mpm version` | Show version and build info. |
+| `mpm start` | Start daemon + watch daemon |
+| `mpm stop` | Stop daemon gracefully |
+| `mpm restart` | Restart daemon |
+| `mpm status` | Status dashboard |
+| `mpm logs` | Tail daemon logs |
+| `mpm doctor [--fix]` | Diagnostics, `--fix` attempts auto-repair |
+| `mpm dashboard` (TUI) | Real-time terminal dashboard |
+| `mpm web` | Start web UI server |
+| `mpm ingest <path>` | Import memories from external SQLite |
+| `mpm help` | Show help |
+| `mpm version` | Show version |
+
+---
+
+## Legacy Commands
+
+*These still work but route through daemon — kept for compatibility*
+
+```bash
+mpm session ...                          # Session operations
+mpm topic ...                             # Topic operations
+mpm lesson ...                            # Lesson operations
+mpm reference ...                         # Reference library
+mpm memory ...                            # Memory operations
+```
+
+---
+
+## Relevance Scoring
+
+Memories are scored by:
+```
+score = (reinforcement_count * 2) + (weight * 1.5) + recency_bonus
+```
+
+Higher scores surface first in relevance-ordered queries.
+
+**Weight meanings:**
+- 1: Normal memory
+- 5-9: Important
+- 10+: Long-term memory (LTM)
