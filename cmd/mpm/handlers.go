@@ -967,7 +967,7 @@ func handleSessionSearch(conn net.Conn, args []string) {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, mem.Created[:10]))
+		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, datePrefix(mem.Created)))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
@@ -1022,7 +1022,7 @@ func handleSessionList(conn net.Conn, args []string) {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		output.WriteString(fmt.Sprintf("[%s] %s\n", sess.ID, sess.Created[:10]))
+		output.WriteString(fmt.Sprintf("[%s] %s\n", sess.ID, datePrefix(sess.Created)))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
@@ -1768,14 +1768,14 @@ func handleLlmStatus(conn net.Conn) {
 
 	openai := os.Getenv("OPENAI_API_KEY")
 	if openai != "" {
-		output.WriteString(fmt.Sprintf("  OPENAI_API_KEY: [set] %s...\n", openai[:min(8, len(openai))]))
+		output.WriteString("  OPENAI_API_KEY: [set] (redacted)\n")
 	} else {
 		output.WriteString("  OPENAI_API_KEY: [not set]\n")
 	}
 
 	anthropic := os.Getenv("ANTHROPIC_KEY")
 	if anthropic != "" {
-		output.WriteString(fmt.Sprintf("  ANTHROPIC_KEY:  [set] %s...\n", anthropic[:min(8, len(anthropic))]))
+		output.WriteString("  ANTHROPIC_KEY:  [set] (redacted)\n")
 	} else {
 		output.WriteString("  ANTHROPIC_KEY:  [not set]\n")
 	}
@@ -2203,6 +2203,13 @@ func getStatusCounts() (memories int, sessions int, topics int, references int) 
 		references = r
 	}
 	return
+}
+
+func datePrefix(s string) string {
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
 }
 
 func min(a, b int) int {

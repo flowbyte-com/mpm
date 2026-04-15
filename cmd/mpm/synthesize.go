@@ -202,7 +202,7 @@ func getSessionFromDB(uuid string) (string, error) {
 	// Try prefix match
 	rows, err := db.Query(`SELECT id, content FROM sessions WHERE id LIKE ? || '%' OR session_id LIKE ? || '%' LIMIT 1`, uuid, uuid)
 	if err != nil {
-		return "", fmt.Errorf("session not found: %s", uuid)
+		return "", fmt.Errorf("session not found: %s (prefix query error: %v)", uuid, err)
 	}
 	defer rows.Close()
 	if rows.Next() {
@@ -210,6 +210,9 @@ func getSessionFromDB(uuid string) (string, error) {
 		if err := rows.Scan(&id, &content); err == nil {
 			return content, nil
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("session not found: %s (rows error: %v)", uuid, err)
 	}
 	return "", fmt.Errorf("session not found: %s", uuid)
 }
