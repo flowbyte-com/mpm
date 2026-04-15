@@ -26,9 +26,10 @@ import (
 
 // chatSettings holds per-chat preferences.
 type chatSettings struct {
-	thinkLevel  int    // 0=off, 1=brief, 2=normal, 3=verbose
-	verbose    bool   // if true, don't strip thinking blocks from responses
-	toolProfile string // active tool profile name, default "standard"
+	thinkLevel    int    // 0=off, 1=brief, 2=normal, 3=verbose
+	verbose       bool   // if true, don't strip thinking blocks from responses
+	toolProfile   string // active tool profile name, default "standard"
+	streamProgress bool  // if true, stream tool progress to live message
 }
 
 // Handler routes incoming Telegram updates to the agent.
@@ -40,6 +41,199 @@ type Handler struct {
 	mediaDir     string              // absolute path to media cache directory
 	activeReplies sync.Map           // chatID → true (prevents double-reply)
 	chatSettings  sync.Map          // chatID → *chatSettings
+	liveMessage   sync.Map          // chatID (int64) → *liveMessageData
+}
+
+// liveMessageData holds the state for a live-streaming message in one chat.
+type liveMessageData struct {
+	messageID int
+	buffer    strings.Builder
+	mu        sync.Mutex
+	dirty     bool          // buffer changed since last flush
+	flusher   *flusher      // stop via flusher field to prevent goroutine leak
+}
+
+// flusher runs in background, flushes buffer edits to Telegram at ~1.1s interval.
+type flusher struct {
+	handler *Handler
+	chatID  int64
+	ticker  *time.Ticker
+	stopCh  chan struct{}
+	doneCh  chan struct{} // closed when goroutine fully exits
+}
+
+func newFlusher(h *Handler, chatID int64) *flusher {
+	f := &flusher{
+		handler: h,
+		chatID:  chatID,
+		ticker:  time.NewTicker(1100 * time.Millisecond),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+	}
+	go f.run()
+	return f
+}
+
+func (f *flusher) run() {
+	defer close(f.doneCh)
+	for {
+		select {
+		case <-f.ticker.C:
+			f.handler.flushLiveMessage(f.chatID)
+		case <-f.stopCh:
+			return
+		}
+	}
+}
+
+func (f *flusher) stop() {
+	close(f.stopCh)
+	f.ticker.Stop()
+}
+
+// telegramToolReporter implements core.ToolProgressReporter for the Telegram handler.
+type telegramToolReporter struct {
+	h      *Handler
+	chatID int64
+}
+
+func (r *telegramToolReporter) ToolStarted(chatID int64, toolName string, input map[string]interface{}) string {
+	entry := r.h.getOrCreateLiveMessage(r.chatID)
+	if entry == nil {
+		return ""
+	}
+	entry.mu.Lock()
+	if entry.buffer.Len() == 0 {
+		entry.buffer.WriteString("🧠 Working...\n")
+	}
+	entry.buffer.WriteString(fmt.Sprintf("🔧 %s...\n", toolName))
+	entry.dirty = true
+	entry.mu.Unlock()
+	return toolName
+}
+
+func (r *telegramToolReporter) ToolCompleted(chatID int64, reportID string, toolName string, summary string) {
+	entry := r.h.getLiveMessage(r.chatID)
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	entry.buffer.WriteString(fmt.Sprintf("  %s\n", summary))
+	entry.dirty = true
+	entry.mu.Unlock()
+}
+
+func (r *telegramToolReporter) SendAlert(chatID int64, message string) {
+	r.h.sendText(nil, r.chatID, message)
+}
+
+// getLiveMessage returns existing liveMessageData for chatID without creating one.
+func (h *Handler) getLiveMessage(chatID int64) *liveMessageData {
+	v, ok := h.liveMessage.Load(chatID)
+	if !ok {
+		return nil
+	}
+	return v.(*liveMessageData)
+}
+
+// getOrCreateLiveMessage returns existing liveMessageData or creates one + starts flusher.
+func (h *Handler) getOrCreateLiveMessage(chatID int64) *liveMessageData {
+	v, ok := h.liveMessage.Load(chatID)
+	if ok {
+		return v.(*liveMessageData)
+	}
+	sent, err := h.bot.SendMessage(context.Background(), tu.Message(tu.ID(chatID), "🧠 Working..."))
+	if err != nil {
+		log.Printf("[telegram] live message init error: %v", err)
+		return nil
+	}
+	data := &liveMessageData{messageID: sent.MessageID}
+	data.flusher = newFlusher(h, chatID)
+	h.liveMessage.Store(chatID, data)
+	return data
+}
+
+// flushLiveMessage sends buffer to Telegram if dirty. Called by flusher goroutine.
+func (h *Handler) flushLiveMessage(chatID int64) {
+	v, ok := h.liveMessage.Load(chatID)
+	if !ok {
+		return
+	}
+	entry := v.(*liveMessageData)
+	entry.mu.Lock()
+	if !entry.dirty {
+		entry.mu.Unlock()
+		return
+	}
+	content := entry.buffer.String()
+	entry.mu.Unlock()
+
+	const maxLen = 4000
+	if len(content) > maxLen {
+		content = truncateLiveBuffer(content, maxLen)
+	}
+
+	_, err := h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
+		ChatID:    tu.ID(chatID),
+		MessageID: entry.messageID,
+		Text:      content,
+	})
+	if err != nil {
+		log.Printf("[telegram] live message edit error: %v", err)
+		return
+	}
+	entry.mu.Lock()
+	entry.dirty = false
+	entry.mu.Unlock()
+}
+
+// truncateLiveBuffer keeps header + last 12 lines when approaching 4096 limit.
+func truncateLiveBuffer(content string, maxLen int) string {
+	lines := strings.Split(content, "\n")
+	keepFirst := 3
+	keepLast := 12
+	if len(lines) <= keepFirst+keepLast+2 {
+		return content[:maxLen]
+	}
+	omitted := len(lines) - keepFirst - keepLast
+	return strings.Join(lines[:keepFirst], "\n") +
+		fmt.Sprintf("\n... [%d older steps truncated] ...\n", omitted) +
+		strings.Join(lines[len(lines)-keepLast:], "\n")
+}
+
+// finalizeLiveMessage stops the flusher, waits for it to fully exit, then does one final edit.
+func (h *Handler) finalizeLiveMessage(chatID int64, finalText string) {
+	v, ok := h.liveMessage.Load(chatID)
+	if !ok {
+		return
+	}
+	entry := v.(*liveMessageData)
+
+	entry.mu.Lock()
+	flusher := entry.flusher
+	entry.mu.Unlock()
+
+	if flusher != nil {
+		flusher.stop()
+		<-flusher.doneCh
+	}
+
+	h.liveMessage.Delete(chatID)
+
+	entry.mu.Lock()
+	if finalText != "" {
+		entry.buffer.WriteString("\n" + finalText)
+	}
+	entry.mu.Unlock()
+
+	_, err := h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
+		ChatID:    tu.ID(chatID),
+		MessageID: entry.messageID,
+		Text:      entry.buffer.String(),
+	})
+	if err != nil {
+		h.sendText(nil, chatID, entry.buffer.String())
+	}
 }
 
 // NewHandler creates a new Telegram handler.
@@ -234,7 +428,7 @@ func (h *Handler) getSettings(chatID int64) *chatSettings {
 	if ok {
 		return v.(*chatSettings)
 	}
-	s := &chatSettings{thinkLevel: 2, verbose: false, toolProfile: "standard"}
+	s := &chatSettings{thinkLevel: 2, verbose: false, toolProfile: "standard", streamProgress: true}
 	h.chatSettings.Store(chatID, s)
 	return s
 }
@@ -343,7 +537,20 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		if level > 4 {
 			level = 4
 		}
-		return true, fmt.Sprintf("Think: %s | Verbose: %s", labels[level], verb)
+		stream := "off"
+		if s.streamProgress {
+			stream = "on"
+		}
+		return true, fmt.Sprintf("Think: %s | Verbose: %s | Stream: %s", labels[level], verb, stream)
+
+	case "/stream":
+		s := h.getSettings(chatID)
+		s.streamProgress = !s.streamProgress
+		state := "off"
+		if s.streamProgress {
+			state = "on"
+		}
+		return true, fmt.Sprintf("Tool streaming: %s", state)
 
 	case "/tools":
 		profiles := make([]string, 0, len(h.agentConfig.Profiles))
@@ -379,7 +586,7 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		return true, fmt.Sprintf("Tool profile: %s", newProfile)
 
 	case "/":
-		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/tools [name] — show or switch tool profiles\n/status — show current settings"
+		return true, "Commands:\n/new or /clear — clear session\n/think [off|low|adaptive|med|high] — set thinking level\n/reasoning [on|off] — toggle reasoning mode\n/verbose [on|off] — show/hide thinking blocks\n/tools [name] — show or switch tool profiles\n/stream [on|off] — show/hide tool progress\n/status — show current settings"
 
 	default:
 		return false, ""
@@ -430,10 +637,18 @@ func (h *Handler) agentReply(chatID int64, userText string) {
 }
 
 // runAgentWithTimeout runs the agent with 90s timeout and 15s heartbeat (Tier 2 + 3).
-func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) {
+func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) (finalMsg string) {
 	// Create 90s timeout context — Tier 2 hard kill switch
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	defer h.finalizeLiveMessage(chatID, finalMsg)
+
+	defer func() {
+		if r := recover(); r != nil {
+			finalMsg = "❌ Agent crashed or was terminated"
+			log.Printf("[telegram] agent panic recovered: %v", r)
+		}
+	}()
 
 	// Start heartbeat ticker (every 15s) — Tier 3
 	ticker := time.NewTicker(15 * time.Second)
@@ -487,9 +702,16 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	// Session ID for toolkit state
 	sessionID := fmt.Sprintf("telegram:%d", chatID)
 
+	// Wire tool progress reporter if streaming is enabled
+	settings := h.getSettings(chatID)
+	var reporter core.ToolProgressReporter
+	if settings.streamProgress {
+		reporter = &telegramToolReporter{h: h, chatID: chatID}
+	}
+
 	// Call RunAgent with context (ctx is the 90s deadline)
 	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
-		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, nil)
+		&h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter)
 
 	// Stop heartbeat
 	ticker.Stop()
@@ -505,8 +727,7 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	}
 
 	// Strip thinking blocks if verbose off
-	s := h.getSettings(chatID)
-	if !s.verbose {
+	if !settings.verbose {
 		responseText = cleanResponse(responseText)
 	}
 
@@ -523,6 +744,7 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	// Self-improve
 	dbPath := core.ResolveMiniBotDBPath()
 	go h.selfImprove(dbPath, chatID, userText, responseText)
+	return finalMsg
 }
 
 // editMessage edits a Telegram message with final text (removes inline keyboard).
