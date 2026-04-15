@@ -135,7 +135,7 @@ func ApplyIdentityPatch(binaryDir string) error {
 
 // RegisterSelfTool adds a self-generated tool to the tools table.
 func RegisterSelfTool(db *sql.DB, name, description, definition string) error {
-	id := generateID()
+	id := GenerateID()
 	now := time.Now().Format(time.RFC3339)
 	_, err := db.Exec(`
 		INSERT OR REPLACE INTO tools (id, name, description, definition, source, created_at)

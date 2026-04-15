@@ -1,6 +1,13 @@
 # MPM Documentation
 
-> **MPM (Memory-Persona-Mode Manager)** — A 100% SQLite-native agent state management system for OpenClaw agents.
+> **MPM (Memory-Persona-Mode Manager)** — A 100% SQLite-native agent state management system. Everything is a memory — the CLI is intentionally simple.
+
+## Simplified CLI Philosophy
+
+**Everything is a memory.** Sessions, topics, lessons are just memories with different collections/metadata. This means:
+- ~10 simple commands instead of 30+ nested subcommands
+- No need for `mpm session list` — just `mpm ls --collection session`
+- Memory importance via reinforcement learning, not separate "lesson" systems
 
 ## Table of Contents
 
@@ -34,6 +41,9 @@
 | Feature | Benefit |
 |---------|---------|
 | **100% SQLite** | No external dependencies, single file database |
+| **Simplified CLI** | ~10 commands instead of 30+ nested subcommands |
+| **Everything is Memory** | Sessions, topics, lessons unified under one model |
+| **Reinforcement Learning** | Memories improve with use via reinforce/weaken |
 | **FTS5 Search** | Full-text search with SQLite `snippet()` highlighting |
 | **Shred Protocol** | True hard delete with `DELETE` + `VACUUM` |
 | **Pure Go Parsing** | PDF/EPUB without external tools |

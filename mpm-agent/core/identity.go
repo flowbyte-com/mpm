@@ -16,11 +16,9 @@ type Identity struct {
 	Boundaries string
 }
 
-// LoadIdentity reads IDENTITY.md from a specific directory.
-// Returns empty Identity if file doesn't exist.
-func LoadIdentity(binaryDir string) (*Identity, error) {
-	path := filepath.Join(binaryDir, "IDENTITY.md")
-	data, err := os.ReadFile(path)
+// LoadIdentity reads IDENTITY.md from a specific path.
+func LoadIdentity(identityPath string) (*Identity, error) {
+	data, err := os.ReadFile(identityPath)
 	if err != nil {
 		return nil, err
 	}

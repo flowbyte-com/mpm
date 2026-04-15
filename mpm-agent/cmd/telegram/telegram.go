@@ -24,6 +24,8 @@ var defaultCommands = []telego.BotCommand{
 	{Command: "reasoning", Description: "Toggle reasoning mode: on/off"},
 	{Command: "verbose", Description: "Toggle verbose mode: on/off"},
 	{Command: "status", Description: "Show current settings"},
+	{Command: "tools", Description: "Show or switch tool profiles: /tools [name]"},
+	{Command: "help", Description: "Show available commands"},
 }
 
 func main() {
@@ -70,8 +72,8 @@ func main() {
 		ForceAttemptHTTP2:   false,
 		MaxConnsPerHost:     100,
 		MaxIdleConnsPerHost: 100,
-		MaxIdleConns:         100,
-		IdleConnTimeout:      90 * time.Second,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   true,
 	}
 	customClient := &http.Client{Transport: customTransport}
@@ -90,7 +92,7 @@ func main() {
 	if err != nil {
 		log.Printf("mini-bot-telegram[%d]: Warning: could not set commands: %v", pid, err)
 	} else {
-		log.Printf("mini-bot-telegram[%d]: Commands registered: new, clear, think, reasoning, verbose, status", pid)
+		log.Printf("mini-bot-telegram[%d]: Commands registered: new, clear, think, reasoning, verbose, tools, status, help", pid)
 	}
 
 	// Create handler
@@ -120,9 +122,6 @@ func main() {
 
 	// Handle text messages
 	bh.HandleMessage(handler.Handle, th.AnyMessageWithText())
-
-	// Handle callback queries (HITL approve/deny inline keyboards)
-	bh.HandleCallbackQuery(handler.HandleCallback, th.AnyCallbackQuery())
 
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)

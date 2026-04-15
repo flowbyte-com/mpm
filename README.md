@@ -1,6 +1,6 @@
 # MPM — Memory-Persona-Mode Manager
 
-**MPM** is a SQLite-native agent state management system for OpenClaw agents. It provides persistent memory, session management, topic organization, mode/persona configurations, a reference document library, and learned lessons — all indexed with FTS5 full-text search.
+**MPM** is a SQLite-native agent state management system. Everything is a **memory** — sessions, topics, lessons, references are just memories with different metadata. Simple CLI, powerful system.
 
 Built with Go. No external dependencies. Single binary.
 
@@ -12,9 +12,9 @@ MPM gives your AI agent long-term memory and persistent identity:
 
 | Capability | What It Means |
 |------------|----------------|
-| **Memory** | Searchable facts distilled from sessions |
-| **Sessions** | Full transcript archive |
-| **Topics** | Hierarchical knowledge organization |
+| **Memory** | Searchable facts with reinforcement learning |
+| **Sessions** | Full transcript archive (collection: session) |
+| **Topics** | Knowledge organization via tags |
 | **Modes** | Stackable behavioral contexts (debug, research, ship...) |
 | **Personas** | Identity switching without prompt engineering |
 | **References** | RAG-ready document library (PDF, EPUB, markdown) |
@@ -33,101 +33,102 @@ MPM gives your AI agent long-term memory and persistent identity:
 
 ---
 
-## Use Cases
-
-- **Long-running agentic workflows** — Memory persists across sessions
-- **Multi-project agents** — Separate databases per project via `MPM_WORKSPACE`
-- **Shared team memory** — Reference library shared across agents
-- **Personal AI coding assistant** — Your code patterns, preferences, lessons learned
-- **Agent-to-agent memory transfer** — External DB polling syncs from OpenClaw
-
----
-
 ## Quick Start
 
 ```bash
 # Build
 make build
 
-# Start daemon (starts both main daemon + watch daemon)
-./bin/mpm start
+# Add a memory (no daemon needed!)
+./bin/mpm add "Use sqlite3 Vacuum after bulk deletes"
 
-# Check status
-./bin/mpm status
+# List memories
+./bin/mpm ls
 
-# Add a memory
-./bin/mpm memory add "Use sqlite3 Vacuum after bulk deletes"
-
-# Search memories
+# Search
 ./bin/mpm recall sqlite
 
-# Stop
-./bin/mpm stop
+# Memory importance
+./bin/mpm promote <id>    # Make LTM
+./bin/mpm reinforce <id>   # Mark as useful
+./bin/mpm weaken <id>     # Mark as less useful
+
+# Start daemon for mode/persona changes
+./bin/mpm start
+./bin/mpm mode debug
+./bin/mpm persona helpful
 ```
 
 ---
 
-## Installation
+## Simplified CLI
 
-See [INSTALL.md](INSTALL.md) for full installation instructions including:
-
-- Building from source
-- Installing system-wide (`make install`)
-- Shell configuration (PATH)
-- OpenClaw workspace setup
-- Configuration
-
----
-
-## Documentation
-
-| Doc | What It Covers |
-|-----|----------------|
-| **[INSTALL.md](INSTALL.md)** | Installation, build, shell setup, config |
-| **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** | First-time setup, daemon management |
-| **[docs/COMMANDS.md](docs/COMMANDS.md)** | Full CLI reference |
-| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How MPM works internally |
-| **[docs/WATCH.md](docs/WATCH.md)** | Watch daemon, auto-ingestion, external DB |
-| **[docs/SYNTH.md](docs/SYNTH.md)** | LLM session synthesis pipeline |
-| **[docs/PATH_CONFIG.md](docs/PATH_CONFIG.md)** | Path resolution, MPM_WORKSPACE |
-| **[mode/README.md](mode/README.md)** | Creating and using modes |
-| **[persona/README.md](persona/README.md)** | Creating and using personas |
-
----
-
-## Key Commands
+### Core Memory Commands (no daemon needed)
 
 ```bash
-# Daemon
-mpm start              # Start daemon + watch daemon
-mpm stop               # Stop gracefully
-mpm status             # Status dashboard
+mpm add <content>                    # Add memory
+  --collection <name>                # Collection (default: memories)
+  --tag <tag1,tag2>                  # Tags
+  --weight <1-100>                  # Importance (default: 1)
+  --ttl <7d,24h>                    # Time to live
 
-# Memory
-mpm memory add "<text>"           # Add a memory
-mpm recall <query>                 # FTS5 search
-mpm memory list                    # List recent
+mpm ls                               # List memories
+  --collection <name>                 # Filter by collection
+  --tag <tag>                        # Filter by tag
+  --since YYYY-MM-DD                 # Since date
+  --until YYYY-MM-DD                 # Until date
+  --limit <n>                        # Max results
 
-# Sessions
-mpm session list                   # List sessions
-mpm synthesize <uuid>              # LLM extract facts from session
+mpm show <id>                        # Show memory details
+mpm rm <id>                          # Soft delete
+mpm recall <query>                   # Search (FTS5)
+  --since YYYY-MM-DD                 # Time range filter
+  --until YYYY-MM-DD
 
-# Topics
-mpm topic add <name>              # Create topic
-mpm topic list                    # List all
+mpm shred <id>                       # Secure delete (DELETE + VACUUM)
+```
 
-# Modes & Personas
-mpm mode                           # Interactive mode picker (multi-select)
-mpm persona                        # Interactive persona picker (single-select)
+### Memory Importance
 
-# Lessons
-mpm lesson add "Don't do X" --type warning    # Add warning
-mpm lesson list                              # List all
-mpm lesson search debugging                   # Find lessons
+```bash
+mpm promote <id>                     # Make LTM (weight=10)
+mpm reinforce <id> [delta]           # Increment reinforcement (+1)
+mpm weaken <id> [delta]              # Decrement reinforcement (-1)
+mpm set-weight <id> <0-100>          # Set weight directly
+```
 
-# Reference Library
-mpm reference add ./docs/guide.pdf   # Ingest PDF/EPUB/markdown
-mpm reference search <query>          # Search content
+### Statistics & Maintenance
+
+```bash
+mpm stats                            # Memory health dashboard
+mpm prune                            # Prune expired memories
+  --older-than 90d                  # By age
+  --never-accessed                   # Never accessed
+mpm export                           # Export to JSON/CSV
+  --format json|csv
+  --collection <name>
+  --since YYYY-MM-DD
+```
+
+### Daemon-Required Commands (runtime agent config)
+
+```bash
+mpm mode [name]                     # Switch mode (stackable)
+mpm persona [name]                   # Switch persona
+mpm prime-directives                  # Show 808 directives
+mpm watch                            # Watch daemon for auto-ingest
+mpm web                              # Web UI
+mpm dashboard                        # Real-time TUI dashboard
+```
+
+### Legacy Commands (still work, route to daemon)
+
+```bash
+mpm session ...                      # Session operations
+mpm topic ...                        # Topic operations
+mpm lesson ...                       # Lesson operations
+mpm reference ...                    # Reference library
+mpm ingest <path>                   # Import from external SQLite
 ```
 
 ---
@@ -143,8 +144,22 @@ CLI (mpm) ────── Unix socket ──────> Main Daemon ──>
                                                      └── external DBs → poll every 30s
 ```
 
-- **Main daemon** — CLI commands, SQLite, session synthesis
+- **Main daemon** — CLI commands, SQLite, session synthesis, mode/persona
 - **Watch daemon** — Filesystem monitoring, auto-ingestion (runs independently)
+
+---
+
+## Memory Model
+
+Everything is a **memory**. Collections distinguish types:
+
+| Collection | Purpose |
+|------------|---------|
+| `memories` | General memories |
+| `session` | Session facts |
+| `lessons` | Learned lessons |
+
+**Relevance scoring**: `(reinforcement_count * 2) + (weight * 1.5) + recency_bonus`
 
 ---
 
@@ -153,8 +168,6 @@ CLI (mpm) ────── Unix socket ──────> Main Daemon ──>
 All content is scanned against 17 regex patterns before writing. Blocked: API keys (OpenAI, GitHub, AWS, Stripe, Slack), JWTs, private keys, SSH keys, database URLs, `password=`/`secret=` patterns.
 
 Blocked content is logged to `mirror.jsonl` but never stored in the database.
-
-See [docs/security/security.md](docs/security/security.md) for full threat model.
 
 ---
 
@@ -165,6 +178,21 @@ Location: `src/db/mpm.db` (SQLite with FTS5 indexes)
 Key tables: `memories`, `sessions`, `topics`, `topic_memberships`, `modes`, `personas`, `reference_docs`, `reference_chunks`, `lessons`
 
 Path resolution: `MPM_WORKSPACE` env var → executable-relative → CWD fallback.
+
+---
+
+## Documentation
+
+| Doc | What It Covers |
+|-----|----------------|
+| **[INSTALL.md](INSTALL.md)** | Installation, build, shell setup |
+| **[docs/COMMANDS.md](docs/COMMANDS.md)** | Full CLI reference |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How MPM works internally |
+| **[docs/WATCH.md](docs/WATCH.md)** | Watch daemon, auto-ingestion, external DB |
+| **[docs/PATH_CONFIG.md](docs/PATH_CONFIG.md)** | Path resolution, MPM_WORKSPACE |
+| **[mode/README.md](mode/README.md)** | Creating and using modes |
+| **[persona/README.md](persona/README.md)** | Creating and using personas |
+| **[docs/security/security.md](docs/security/security.md)** | Threat model, 17 regex patterns |
 
 ---
 

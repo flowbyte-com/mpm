@@ -16,7 +16,7 @@ func TestExecuteSteps(t *testing.T) {
 		{"tool": "read_file", "args": map[string]interface{}{"path": testFile}},
 		{"checkpoint": "read file contents"},
 	}
-	results, err := ExecuteSteps(steps)
+	results, err := ExecuteSteps(steps, "test-session")
 	if err != nil {
 		t.Fatalf("ExecuteSteps failed: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestExecuteStepsError(t *testing.T) {
 		{"tool": "shell", "args": map[string]interface{}{"command": "exit 1"}},
 		{"tool": "shell", "args": map[string]interface{}{"command": "echo should not run"}},
 	}
-	results, _ := ExecuteSteps(steps)
+	results, _ := ExecuteSteps(steps, "test-session")
 	// Should stop on error
 	if len(results) != 2 {
 		t.Errorf("expected 2 results (stopped at error), got %d", len(results))
@@ -66,6 +66,9 @@ func TestReadFileSemantic(t *testing.T) {
 }
 
 func TestWebSynthesize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network test in short mode")
+	}
 	result, err := WebSynthesize("Go language")
 	if err != nil {
 		t.Fatalf("WebSynthesize failed: %v", err)

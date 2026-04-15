@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"mpm-agent/core"
 )
@@ -18,22 +16,16 @@ type TelegramConfig struct {
 
 // LoadTelegramConfig reads mini-bot-config.json and extracts the telegram block.
 func LoadTelegramConfig() (*TelegramConfig, error) {
-	configPath := core.GetConfigPath()
-	data, err := os.ReadFile(configPath)
+	cfg, err := core.LoadMiniBotConfig(core.GetConfigPath())
 	if err != nil {
-		return nil, fmt.Errorf("cannot read config at %s: %w", configPath, err)
+		return nil, fmt.Errorf("load config: %w", err)
 	}
-	var raw struct {
-		Telegram *TelegramConfig `json:"telegram"`
+	if cfg.Telegram.BotToken == "" {
+		return nil, fmt.Errorf("telegram.bot_token is not set in %s", core.GetConfigPath())
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if raw.Telegram == nil {
-		return nil, fmt.Errorf("no [telegram] section found in %s", configPath)
-	}
-	if raw.Telegram.BotToken == "" {
-		return nil, fmt.Errorf("telegram.bot_token is not set in %s", configPath)
-	}
-	return raw.Telegram, nil
+	return &TelegramConfig{
+		BotToken:     cfg.Telegram.BotToken,
+		AllowedUsers: cfg.Telegram.AllowedUsers,
+		Polling:      cfg.Telegram.Polling,
+	}, nil
 }

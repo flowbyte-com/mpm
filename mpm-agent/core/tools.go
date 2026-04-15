@@ -2,6 +2,8 @@ package core
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -121,32 +123,6 @@ func ClearSessionToolkits(sessionID string) {
 	delete(LoadedToolkits, sessionID)
 }
 
-// restrictPath validates path is within mpm-agent directory tree.
-// Returns resolved absolute path or error if outside sandbox.
-func restrictPath(path string) (string, error) {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("invalid path: %w", err)
-	}
-	// Get mpm-agent root: executable is in <root>/cmd/telegram or <root>/cmd/mini-bot
-	execPath, err := os.Executable()
-	var root string
-	if err == nil {
-		root = filepath.Dir(filepath.Dir(execPath)) // dir of bin -> project root
-	}
-	if root == "" || root == "." {
-		root, _ = os.Getwd()
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("invalid root: %w", err)
-	}
-	if !strings.HasPrefix(absPath, rootAbs) {
-		return "", fmt.Errorf("path outside mpm-agent sandbox: %s", path)
-	}
-	return absPath, nil
-}
-
 // resolveWorkspace returns the absolute workspace root path.
 func resolveWorkspace(configured string) string {
 	if configured == "" || configured == "." {
@@ -208,7 +184,7 @@ func runSg(path, rule, query string) (string, error) {
 	return string(out), nil
 }
 
-// runRepomap generates a symbol map using find + grep.
+// runRepomap generates a symbol map using find + single rg batch call.
 func runRepomap(path string, depth int) (string, error) {
 	absPath := path
 	if absPath == "" {
@@ -224,26 +200,56 @@ func runRepomap(path string, depth int) (string, error) {
 	}
 
 	files := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	count := 0
-	for _, f := range files {
-		if f == "" {
+	if len(files) == 0 || (len(files) == 1 && files[0] == "") {
+		return "", fmt.Errorf("no .go files found")
+	}
+
+	// Limit to 20 files
+	if len(files) > 20 {
+		files = files[:20]
+		sb.WriteString("... (cap at 20 files)\n\n")
+	}
+
+	// Single rg call for all files
+	args := []string{"--json", `^\s*(func|type|struct)\s+`}
+	args = append(args, files...)
+	grepCmd := exec.Command("rg", args...)
+	grepOut, err := grepCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("rg error: %v", err)
+	}
+
+	// Group output by file
+	currentFile := ""
+	for _, line := range strings.Split(strings.TrimRight(string(grepOut), "\n"), "\n") {
+		if line == "" {
 			continue
 		}
-		relPath, _ := filepath.Rel(absPath, f)
-		grepCmd := exec.Command("rg", "--json", `^\s*(func|type|struct)\s+`, f)
-		grepOut, _ := grepCmd.CombinedOutput()
-		sb.WriteString(fmt.Sprintf("- %s:\n", relPath))
-		for _, line := range strings.Split(strings.TrimRight(string(grepOut), "\n"), "\n") {
-			if strings.Contains(line, `"text"`) {
-				sb.WriteString("  " + line + "\n")
+		// Extract file path from JSON (ripgrep outputs JSON with file path)
+		if strings.Contains(line, `"type":"match"`) {
+			// Parse file from ripgrep JSON
+			var entry struct {
+				Type  string `json:"type"`
+				Path  string `json:"path"`
+				Lines string `json:"lines"`
+				Text  string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.Type == "match" {
+				if entry.Path != currentFile {
+					if currentFile != "" {
+						sb.WriteString("\n")
+					}
+					currentFile = entry.Path
+					relPath, _ := filepath.Rel(absPath, currentFile)
+					sb.WriteString(fmt.Sprintf("## %s\n", relPath))
+				}
+				if entry.Lines != "" {
+					sb.WriteString(fmt.Sprintf("  %s\n", entry.Lines))
+				}
 			}
 		}
-		count++
-		if count >= 20 {
-			sb.WriteString("\n... (cap at 20 files)\n")
-			break
-		}
 	}
+
 	return sb.String(), nil
 }
 
@@ -306,7 +312,8 @@ func runShell(command, cwd string) (string, error) {
 
 // ExecuteSteps runs a list of steps sequentially and returns results.
 // Each step is a map with "tool", "args", and optional "checkpoint".
-func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, error) {
+// sessionID is used by toolkit management tools to track loaded toolkits.
+func ExecuteSteps(steps []map[string]interface{}, sessionID string) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
 	for i, step := range steps {
 		var tool string
@@ -338,7 +345,7 @@ func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, err
 			continue
 		}
 
-		result, err := executeTool(tool, args)
+		result, err := executeTool(tool, args, sessionID)
 		stepResult["tool"] = tool
 		stepResult["result"] = result
 		if err != nil {
@@ -370,18 +377,20 @@ func ExecuteSteps(steps []map[string]interface{}) ([]map[string]interface{}, err
 }
 
 // executeTool runs a single tool by name with args.
-func executeTool(tool string, args map[string]interface{}) (string, error) {
+// sessionID is used by toolkit management tools (list_toolkits, load_toolkit, unload_toolkit)
+// to track which toolkits are loaded for the current session.
+func executeTool(tool string, args map[string]interface{}, sessionID string) (string, error) {
 	switch tool {
 	case "read_file":
 		path, _ := args["path"].(string)
 		if path == "" {
 			return "", fmt.Errorf("read_file: path is required")
 		}
-		restricted, err := restrictPath(path)
+		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("read_file: invalid path: %w", err)
 		}
-		content, err := os.ReadFile(restricted)
+		content, err := os.ReadFile(absPath)
 		if err != nil {
 			return "", err
 		}
@@ -393,18 +402,18 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if path == "" {
 			return "", fmt.Errorf("write_file: path is required")
 		}
-		restricted, err := restrictPath(path)
+		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("write_file: invalid path: %w", err)
 		}
-		if dir := filepath.Dir(restricted); dir != "" && dir != "." {
+		if dir := filepath.Dir(absPath); dir != "" && dir != "." {
 			os.MkdirAll(dir, 0755)
 		}
-		err = os.WriteFile(restricted, []byte(content), 0644)
+		err = os.WriteFile(absPath, []byte(content), 0644)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Written %d bytes to %s", len(content), restricted), nil
+		return fmt.Sprintf("Written %d bytes to %s", len(content), absPath), nil
 
 	case "ReadFileSemantic":
 		path, _ := args["path"].(string)
@@ -412,11 +421,11 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if path == "" {
 			return "", fmt.Errorf("ReadFileSemantic: path is required")
 		}
-		restricted, err := restrictPath(path)
+		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("ReadFileSemantic: invalid path: %w", err)
 		}
-		return ReadFileSemantic(restricted, mode), nil
+		return ReadFileSemantic(absPath, mode), nil
 
 	case "ReadFileCompare":
 		pathA, _ := args["pathA"].(string)
@@ -424,15 +433,15 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if pathA == "" || pathB == "" {
 			return "", fmt.Errorf("ReadFileCompare: pathA and pathB are required")
 		}
-		resA, err := restrictPath(pathA)
+		absA, err := filepath.Abs(pathA)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("ReadFileCompare: invalid pathA: %w", err)
 		}
-		resB, err := restrictPath(pathB)
+		absB, err := filepath.Abs(pathB)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("ReadFileCompare: invalid pathB: %w", err)
 		}
-		return ReadFileCompare(resA, resB), nil
+		return ReadFileCompare(absA, absB), nil
 
 	case "WebSynthesize":
 		query, _ := args["query"].(string)
@@ -451,14 +460,11 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if filter == "" || file == "" {
 			return "", fmt.Errorf("jq: filter and file are required")
 		}
-		restricted, err := restrictPath(file)
+		absFile, err := filepath.Abs(file)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("jq: invalid path: %w", err)
 		}
-		if !strings.HasSuffix(restricted, ".json") && !strings.HasSuffix(restricted, ".jsonl") {
-			return "", fmt.Errorf("jq: only *.json and *.jsonl files allowed")
-		}
-		out, err := exec.Command("jq", filter, restricted).CombinedOutput()
+		out, err := exec.Command("jq", filter, absFile).CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("jq error: %v\n%s", err, string(out))
 		}
@@ -466,15 +472,15 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 
 	case "list_toolkits":
 		// Returns available toolkits and their tools
-		loaded := GetLoadedToolkits("telegram")
+		loaded := GetLoadedToolkits(sessionID)
 		var sb strings.Builder
 		sb.WriteString("Available toolkits:\n")
 		// Hardcoded for now — toolkits are registered at init
 		toolkitInfo := map[string]string{
-			"files":  "read_file, write_file, ReadFileSemantic, ReadFileCompare — file operations in mpm-agent/",
-			"web":    "WebSynthesize — DuckDuckGo search with citations",
-			"jq":     "jq — query and transform JSON files",
-			"mpm":    "execute_mpm_command — all MPM CLI commands (recall, mode, persona, etc.)",
+			"files":   "read_file, write_file, ReadFileSemantic, ReadFileCompare — file operations in mpm-agent/",
+			"web":     "WebSynthesize — DuckDuckGo search with citations",
+			"jq":      "jq — query and transform JSON files",
+			"mpm":     "execute_mpm_command — all MPM CLI commands (recall, mode, persona, etc.)",
 			"minimax": "generate_image, synthesize_speech, web_search, understand_image — MiniMax Token Plan features",
 		}
 		for name, desc := range toolkitInfo {
@@ -496,7 +502,7 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("load_toolkit: name is required")
 		}
-		LoadToolkit("telegram", name)
+		LoadToolkit(sessionID, name)
 		return fmt.Sprintf("Toolkit '%s' loaded.", name), nil
 
 	case "unload_toolkit":
@@ -504,7 +510,7 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 		if name == "" {
 			return "", fmt.Errorf("unload_toolkit: name is required")
 		}
-		UnloadToolkit("telegram", name)
+		UnloadToolkit(sessionID, name)
 		return fmt.Sprintf("Toolkit '%s' unloaded.", name), nil
 
 	case "rg":
@@ -555,6 +561,40 @@ func executeTool(tool string, args map[string]interface{}) (string, error) {
 			return "", fmt.Errorf("execute_shell: command is required")
 		}
 		return runShell(command, cwd)
+
+	case "generate_image":
+		prompt, _ := args["prompt"].(string)
+		aspectRatio, _ := args["aspect_ratio"].(string)
+		if prompt == "" {
+			return "", fmt.Errorf("generate_image: prompt is required")
+		}
+		if aspectRatio == "" {
+			aspectRatio = "1:1"
+		}
+		return generateImage(prompt, aspectRatio)
+
+	case "synthesize_speech":
+		text, _ := args["text"].(string)
+		voice, _ := args["voice"].(string)
+		if text == "" {
+			return "", fmt.Errorf("synthesize_speech: text is required")
+		}
+		return synthesizeSpeech(text, voice)
+
+	case "web_search":
+		query, _ := args["query"].(string)
+		if query == "" {
+			return "", fmt.Errorf("web_search: query is required")
+		}
+		return webSearch(query)
+
+	case "understand_image":
+		imagePath, _ := args["image_path"].(string)
+		prompt, _ := args["prompt"].(string)
+		if imagePath == "" || prompt == "" {
+			return "", fmt.Errorf("understand_image: image_path and prompt are required")
+		}
+		return understandImage(imagePath, prompt)
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", tool)
@@ -677,13 +717,13 @@ func summarizeDocument(text string) string {
 		if (strings.HasPrefix(trimmed, "#") && len(trimmed) > 1) ||
 			(len(trimmed) > 3 && len(trimmed) < 80 && trimmed == strings.ToUpper(trimmed) &&
 				!strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, " ")) {
-			headers = append(headers, fmt.Sprintf("  Line %d: %s", i+1, truncated(trimmed, 60)))
+			headers = append(headers, fmt.Sprintf("  Line %d: %s", i+1, truncate(trimmed, 60)))
 		}
 
 		if len(trimmed) > 50 && !strings.HasPrefix(trimmed, "#") &&
 			(strings.Contains(trimmed, ":") || strings.Contains(trimmed, ".") ||
 				strings.Contains(trimmed, "-") || listPattern.MatchString(trimmed)) {
-			keySections = append(keySections, fmt.Sprintf("  Line %d: %s", i+1, truncated(trimmed, 70)))
+			keySections = append(keySections, fmt.Sprintf("  Line %d: %s", i+1, truncate(trimmed, 70)))
 		}
 	}
 
@@ -715,7 +755,7 @@ func summarizeDocument(text string) string {
 		previewLines = totalLines
 	}
 	for i := 0; i < previewLines; i++ {
-		result.WriteString(fmt.Sprintf("  %4d: %s\n", i+1, truncated(lines[i], 80)))
+		result.WriteString(fmt.Sprintf("  %4d: %s\n", i+1, truncate(lines[i], 80)))
 	}
 	if totalLines > previewLines {
 		result.WriteString(fmt.Sprintf("  ... (%d more lines)\n", totalLines-previewLines))
@@ -730,11 +770,6 @@ func truncate(text string, maxLen int) string {
 		return text
 	}
 	return text[:maxLen] + "..."
-}
-
-// truncated is a local alias for truncate to avoid conflicts.
-func truncated(text string, maxLen int) string {
-	return truncate(text, maxLen)
 }
 
 // WebSynthesize searches for a query and produces a synthesized answer with proper citations.
@@ -844,6 +879,272 @@ func WebSynthesize(query string) (string, error) {
 	}
 
 	return result.String(), nil
+}
+
+var minimaxImageCacheDir string
+var cachedAPIKey string
+
+func getMediaDir() string {
+	if minimaxImageCacheDir != "" {
+		return minimaxImageCacheDir
+	}
+	execPath, _ := os.Executable()
+	binDir := filepath.Dir(execPath)
+	mediaDir := filepath.Join(binDir, "media")
+	os.MkdirAll(mediaDir, 0755)
+	minimaxImageCacheDir = mediaDir
+	return mediaDir
+}
+
+func getMiniMaxAPIKey() string {
+	if cachedAPIKey != "" {
+		return cachedAPIKey
+	}
+	if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
+		cachedAPIKey = key
+		return key
+	}
+	cfg, _ := LoadMiniBotConfig(GetConfigPath())
+	if cfg != nil && cfg.Synth.APIKey != "" {
+		cachedAPIKey = cfg.Synth.APIKey
+		return cachedAPIKey
+	}
+	return ""
+}
+
+func generateImage(prompt, aspectRatio string) (string, error) {
+	apiKey := getMiniMaxAPIKey()
+	if apiKey == "" {
+		return "", fmt.Errorf("generate_image: MINIMAX_API_KEY not set")
+	}
+
+	url := "https://api.minimax.io/v1/image_generation"
+	payload := map[string]interface{}{
+		"model":           "image-01",
+		"prompt":          prompt,
+		"aspect_ratio":    aspectRatio,
+		"response_format": "base64",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("generate_image: marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("generate_image: request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("generate_image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("generate_image: read body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("generate_image: API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data struct {
+			ImageBase64 []string `json:"image_base64"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("generate_image: parse: %w", err)
+	}
+
+	if len(result.Data.ImageBase64) == 0 {
+		return "", fmt.Errorf("generate_image: no images returned")
+	}
+
+	mediaDir := getMediaDir()
+	for i, b64 := range result.Data.ImageBase64 {
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			continue
+		}
+		filename := filepath.Join(mediaDir, fmt.Sprintf("img_%s_%d.jpg", fmt.Sprintf("%x", time.Now().UnixNano())[:16], i))
+		if err := os.WriteFile(filename, data, 0600); err != nil {
+			continue
+		}
+		return filename, nil
+	}
+	return "", fmt.Errorf("generate_image: failed to save image")
+}
+
+func synthesizeSpeech(text, voice string) (string, error) {
+	apiKey := getMiniMaxAPIKey()
+	if apiKey == "" {
+		return "", fmt.Errorf("synthesize_speech: MINIMAX_API_KEY not set")
+	}
+
+	if voice == "" {
+		voice = "female-qn-qingse"
+	}
+
+	url := "https://api.minimax.io/v1/t2a"
+	payload := map[string]interface{}{
+		"model":           "speech-2.8",
+		"text":            text,
+		"voice_id":        voice,
+		"response_format": "mp3",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("synthesize_speech: marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("synthesize_speech: request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("synthesize_speech: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("synthesize_speech: API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	mediaDir := getMediaDir()
+	filename := filepath.Join(mediaDir, fmt.Sprintf("speech_%s.mp3", fmt.Sprintf("%x", time.Now().UnixNano())[:16]))
+	out, err := os.Create(filename)
+	if err != nil {
+		return "", fmt.Errorf("synthesize_speech: create file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", fmt.Errorf("synthesize_speech: write: %w", err)
+	}
+	return filename, nil
+}
+
+func webSearch(query string) (string, error) {
+	apiKey := getMiniMaxAPIKey()
+	if apiKey == "" {
+		return "", fmt.Errorf("web_search: MINIMAX_API_KEY not set")
+	}
+
+	url := "https://api.minimax.io/v1/search"
+	payload := map[string]interface{}{
+		"model":         "minimax-text-01",
+		"query":         query,
+		"search_result": true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("web_search: marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("web_search: request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("web_search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 15000))
+	if err != nil {
+		return "", fmt.Errorf("web_search: read: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("web_search: API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return string(respBody), nil
+}
+
+func understandImage(imagePath, prompt string) (string, error) {
+	apiKey := getMiniMaxAPIKey()
+	if apiKey == "" {
+		return "", fmt.Errorf("understand_image: MINIMAX_API_KEY not set")
+	}
+
+	absPath, err := filepath.Abs(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("understand_image: invalid path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return "", fmt.Errorf("understand_image: read: %w", err)
+	}
+
+	mediaDir := getMediaDir()
+	tmpFile := filepath.Join(mediaDir, fmt.Sprintf("tmp_%s.jpg", fmt.Sprintf("%x", time.Now().UnixNano())[:8]))
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
+		return "", fmt.Errorf("understand_image: temp file: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	url := "https://api.minimax.io/v1/image_understanding"
+	payload := map[string]interface{}{
+		"model":        "image-01",
+		"image_base64": base64.StdEncoding.EncodeToString(data),
+		"prompt":       prompt,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("understand_image: marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("understand_image: request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("understand_image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("understand_image: read: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("understand_image: API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data struct {
+			Text string `json:"text"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("understand_image: parse: %w", err)
+	}
+	return result.Data.Text, nil
 }
 
 // stripHTML removes HTML tags from text.
@@ -975,7 +1276,7 @@ func init() {
 		Name:        "list_toolkits",
 		Description: "List available toolkits and their current load status.",
 		InputSchema: map[string]interface{}{
-			"type": "object",
+			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	})
@@ -1009,74 +1310,6 @@ func init() {
 	})
 
 	// MiniMax Token Plan tools
-	RegisterTool("generate_image", ToolDefinition{
-		Name:        "generate_image",
-		Description: "Generate an image from a text prompt using MiniMax image-01. Returns a local file path.",
-		InputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"prompt": map[string]interface{}{
-					"type":        "string",
-					"description": "Text description of the image to generate",
-				},
-			},
-			"required": []string{"prompt"},
-		},
-	})
-
-	RegisterTool("synthesize_speech", ToolDefinition{
-		Name:        "synthesize_speech",
-		Description: "Convert text to speech using MiniMax Speech 2.8. Returns a local .mp3 file path.",
-		InputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"text": map[string]interface{}{
-					"type":        "string",
-					"description": "Text to convert to speech",
-				},
-				"voice": map[string]interface{}{
-					"type":        "string",
-					"description": "Voice ID (optional, defaults to male-qn-qingse)",
-				},
-			},
-			"required": []string{"text"},
-		},
-	})
-
-	RegisterTool("web_search", ToolDefinition{
-		Name:        "web_search",
-		Description: "Search the web using MiniMax and return synthesized results with sources.",
-		InputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"query": map[string]interface{}{
-					"type":        "string",
-					"description": "Search query",
-				},
-			},
-			"required": []string{"query"},
-		},
-	})
-
-	RegisterTool("understand_image", ToolDefinition{
-		Name:        "understand_image",
-		Description: "Analyze an image using MiniMax vision. Ask questions about local image files.",
-		InputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"image_path": map[string]interface{}{
-					"type":        "string",
-					"description": "Local path to the image file",
-				},
-				"prompt": map[string]interface{}{
-					"type":        "string",
-					"description": "Question or analysis request for the image",
-				},
-			},
-			"required": []string{"image_path", "prompt"},
-		},
-	})
-
 	// Coding tools
 	RegisterTool("rg", ToolDefinition{
 		Name:        "rg",
@@ -1154,7 +1387,7 @@ func init() {
 
 	RegisterTool("execute_shell", ToolDefinition{
 		Name:        "execute_shell",
-		Description: "Execute an arbitrary shell command. Requires HITL approval via Telegram.",
+		Description: "Execute an arbitrary shell command with the bot's permissions.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1164,4 +1397,5 @@ func init() {
 			"required": []string{"command"},
 		},
 	})
+
 }

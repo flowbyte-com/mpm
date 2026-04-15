@@ -22,6 +22,13 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name")
+}
+
 // dbFileName is the canonical filename for the MPM database.
 // Previously mpm_memory.db - renamed 2026-04-01 to reflect its unified nature.
 const dbFileName = "mpm.db"
@@ -68,12 +75,21 @@ func (sc *SQLiteConnection) WipeRecord(tier, id string) error {
 	return err
 }
 
-// ShredDatabase securely wipes the entire database and recreates it fresh
+// ShredDatabase securely wipes the entire database and recreates it fresh.
+// NOTE: This only works if there are no other open connections to the database.
+// Caller is responsible for ensuring all connections are closed before calling.
 func ShredDatabase(dbPath string) error {
-	// Close existing connections
+	// Close any connection we can open (best effort)
+	// Note: This may not close connections held by other DatabaseManager/MemoryStore instances
+	// Caller should ensure all connections are closed before calling this function.
 	if db, err := NewSQLiteConnection(dbPath); err == nil {
 		db.Close()
 	}
+
+	// Remove WAL and SHM files first (best effort)
+	os.Remove(dbPath + "-wal")
+	os.Remove(dbPath + "-shm")
+	os.Remove(dbPath + "-journal")
 
 	// Overwrite with zeros before delete (secure delete simulation)
 	if data, err := os.ReadFile(dbPath); err == nil {
@@ -86,14 +102,13 @@ func ShredDatabase(dbPath string) error {
 		return fmt.Errorf("failed to remove database: %w", err)
 	}
 
-	// Remove WAL and SHM files if they exist
-	os.Remove(dbPath + "-wal")
-	os.Remove(dbPath + "-shm")
-	os.Remove(dbPath + "-journal")
-
-	// Recreate fresh database
+	// Recreate fresh database using MemoryStore
 	store := NewMemoryStore("")
-	store.InitSQLite()
+	store.SQLiteDBPath = dbPath
+	if err := store.InitSQLite(); err != nil {
+		return fmt.Errorf("failed to recreate database: %w", err)
+	}
+	store.DB.Close()
 
 	return nil
 }
@@ -167,91 +182,8 @@ func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
 }
 
 func (dm *DatabaseManager) initUnifiedSchema() error {
-	// Base tables (always created)
-	baseStatements := []string{
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY, session_id TEXT NOT NULL, content TEXT NOT NULL,
-			content_hash TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			source_path TEXT, metadata JSON, embedding BLOB
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);`,
-
-		`CREATE TABLE IF NOT EXISTS topics (
-			id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
-			parent_topic_id TEXT, tags JSON, is_active INTEGER DEFAULT 1,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, embedding BLOB
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS topic_memberships (
-			memory_id TEXT, session_id TEXT, topic_id TEXT NOT NULL,
-			role TEXT DEFAULT 'related', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (memory_id, topic_id),
-			UNIQUE (session_id, topic_id),
-			CHECK (memory_id IS NOT NULL OR session_id IS NOT NULL)
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS memories (
-			id TEXT PRIMARY KEY, collection TEXT NOT NULL, content TEXT NOT NULL,
-			session_id TEXT, tags JSON, metadata JSON, embedding BLOB,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS modes (
-			id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, content TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS personas (
-			id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, content TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS system_config (
-			key TEXT PRIMARY KEY,
-			raw_json TEXT NOT NULL,
-			content_hash TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			config_snapshot JSON
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS lessons (
-			id TEXT PRIMARY KEY,
-			type TEXT NOT NULL DEFAULT 'insight',
-			content TEXT NOT NULL,
-			tags JSON,
-			reinforcement_count INTEGER DEFAULT 1,
-			source_session_id TEXT,
-			created TEXT NOT NULL,
-			content_hash TEXT
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS raw_memories (
-			id            TEXT PRIMARY KEY,
-			source_id     TEXT,
-			source_db     TEXT NOT NULL DEFAULT 'openclaw',
-			content_hash  TEXT NOT NULL,
-			text          TEXT NOT NULL,
-			metadata      TEXT NOT NULL,
-			ingested_at   REAL NOT NULL,
-			status        TEXT NOT NULL DEFAULT 'pending',
-			llm_verdict   TEXT,
-			llm_notes     TEXT,
-			reviewer_prompt TEXT,
-			expires_at    REAL,
-			import_batch  TEXT,
-			updated_at    REAL NOT NULL
-		);`,
-
-		`CREATE TABLE IF NOT EXISTS external_db_cursors (
-			db_label TEXT PRIMARY KEY,
-			last_cursor TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);`,
-	}
-
-	for _, sqlQuery := range baseStatements {
+	// Use shared schema definitions from schema.go
+	for _, sqlQuery := range BaseTables {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
 			return fmt.Errorf("failed to execute SQL: %w\nSQL: %s", err, sqlQuery)
 		}
@@ -275,26 +207,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		`ALTER TABLE memories ADD COLUMN deleted_at DATETIME`,
 	}
 	for _, sql := range migrations {
-		dm.db.Exec(sql) // SQLite ignores duplicate column errors
+		if _, err := dm.db.Exec(sql); err != nil {
+			// Log unexpected errors (SQLITE_ERROR for duplicate column is expected on re-runs)
+			if !isDuplicateColumnError(err) {
+				fmt.Fprintf(os.Stderr, "Warning: migration error (may be benign): %v\nSQL: %s\n", err, sql)
+			}
+		}
 	}
 
-	// Indexes for fast lookups
-	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_topic ON topic_memberships(topic_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_memory ON topic_memberships(memory_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_session ON topic_memberships(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)`,
-		`CREATE INDEX IF NOT EXISTS idx_lessons_type ON lessons(type)`,
-		`CREATE INDEX IF NOT EXISTS idx_lessons_reinforcement ON lessons(reinforcement_count)`,
-		// v6 ingest: raw_memories indexes
-		`CREATE INDEX IF NOT EXISTS idx_raw_memories_status ON raw_memories(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_raw_memories_expires ON raw_memories(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_raw_memories_import_batch ON raw_memories(import_batch)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id)`,
-	}
-	for _, sql := range indexes {
+	// Use shared index definitions
+	for _, sql := range CommonIndexes {
 		dm.db.Exec(sql)
 	}
 
@@ -342,6 +264,14 @@ func (dm *DatabaseManager) initFTSTables() {
 		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
+		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ai AFTER INSERT ON reference_chunks BEGIN INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ad AFTER DELETE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_chunks_au AFTER UPDATE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 	}
 
 	for _, sqlQuery := range ftsStatements {
@@ -407,7 +337,7 @@ func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error)
 	}, nil
 }
 
-func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags, metadata map[string]interface{}, embedding []float32) (string, error) {
+func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int) (string, error) {
 	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
@@ -424,8 +354,14 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 		sessionIDVal = sessionID
 	}
 
-	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON)
+	// is_long_term and weight for indexed queries
+	isLTM := 0
+	if isLongTerm {
+		isLTM = 1
+	}
+
+	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight)
 	return id, err
 }
 

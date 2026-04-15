@@ -333,7 +333,7 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 				if reporter != nil {
 					reportID = reporter.ToolStarted(chatID, tc.Name, tc.Input)
 				}
-				result, err = executeTool(tc.Name, tc.Input)
+				result, err = executeTool(tc.Name, tc.Input, sessionID)
 				if reporter != nil {
 					summary := summarize(tc.Name, result, err)
 					reporter.ToolCompleted(chatID, reportID, tc.Name, summary)

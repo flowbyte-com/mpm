@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"net"
 	"net/http"
@@ -21,6 +23,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"mpm/internal/config"
 
@@ -171,52 +175,52 @@ func printWarning(format string, args ...interface{}) {
 }
 
 const (
-	logFileName        = "daemon.json.log"
-	maxLogFileSize     = 10 * 1024 * 1024 // 10MB
-	logBufferSize      = 64 * 1024        // 64KB buffer for high-frequency logging
-	webhookBufferSize  = 1000             // Channel buffer for webhook dispatch
-	webhookTimeout     = 5 * time.Second  // HTTP request timeout
-	rateLimitWindow    = 1 * time.Second  // Rate limit window
-	rateLimitBurst     = 50               // Max events per window before batching
+	logFileName       = "daemon.json.log"
+	maxLogFileSize    = 10 * 1024 * 1024 // 10MB
+	logBufferSize     = 64 * 1024        // 64KB buffer for high-frequency logging
+	webhookBufferSize = 1000             // Channel buffer for webhook dispatch
+	webhookTimeout    = 5 * time.Second  // HTTP request timeout
+	rateLimitWindow   = 1 * time.Second  // Rate limit window
+	rateLimitBurst    = 50               // Max events per window before batching
 
 	// Heartbeat defaults
 	heartbeatInterval  = 24 * time.Hour  // Default heartbeat interval
 	heartbeatJitterMax = 5 * time.Minute // Max jitter (+/- 5 minutes)
 
 	// Worker pool defaults
-	defaultMaxWorkers   = 3
-	queueTimeout        = 30 * time.Minute
+	defaultMaxWorkers = 3
+	queueTimeout      = 30 * time.Minute
 )
 
 var (
-	startTime       = time.Now()      // Daemon start time
-	activeWorkers   int64            // Thread-safe counter for running workers
-	queuedTasks     int64            // Thread-safe counter for queued tasks
-	totalTasks      int64            // Thread-safe counter for total tasks processed
-	daemonPid       = os.Getpid()    // Captured at startup
-	sockPath        = socketPath()   // Socket path (computed once)
-	listener        net.Listener     // The socket listener (set after Listen)
-	listenerMutex   sync.Mutex       // Protects listener access
-	cleanupSync     sync.Once        // Ensures cleanup runs exactly once
-	cleanupMutex    sync.Mutex        // Extra protection for exit path
-	isShuttingDown  atomic.Bool      // Shutdown flag
-	isDaemonProcess bool            // True when this process IS the daemon
+	startTime       = time.Now()   // Daemon start time
+	activeWorkers   int64          // Thread-safe counter for running workers
+	queuedTasks     int64          // Thread-safe counter for queued tasks
+	totalTasks      int64          // Thread-safe counter for total tasks processed
+	daemonPid       = os.Getpid()  // Captured at startup
+	sockPath        = socketPath() // Socket path (computed once)
+	listener        net.Listener   // The socket listener (set after Listen)
+	listenerMutex   sync.Mutex     // Protects listener access
+	cleanupSync     sync.Once      // Ensures cleanup runs exactly once
+	cleanupMutex    sync.Mutex     // Extra protection for exit path
+	isShuttingDown  atomic.Bool    // Shutdown flag
+	isDaemonProcess bool           // True when this process IS the daemon
 
 	// Logger state
-	logFile    *os.File
-	logWriter  *bufio.Writer
-	logMutex   sync.Mutex // Protects log writes from concurrent tasks
-	logPath    string     // Path to the log file
+	logFile   *os.File
+	logWriter *bufio.Writer
+	logMutex  sync.Mutex // Protects log writes from concurrent tasks
+	logPath   string     // Path to the log file
 
 	// Webhook state
-	webhookURL      string
-	webhookChan     chan LogEntry
-	webhookWg       sync.WaitGroup
-	webhookOnce     sync.Once
-	webhookEnabled  atomic.Bool
-	rateLimitCount  int64
-	rateLimitMutex  sync.Mutex
-	rateLimitLast   time.Time
+	webhookURL     string
+	webhookChan    chan LogEntry
+	webhookWg      sync.WaitGroup
+	webhookOnce    sync.Once
+	webhookEnabled atomic.Bool
+	rateLimitCount int64
+	rateLimitMutex sync.Mutex
+	rateLimitLast  time.Time
 
 	// Heartbeat state
 	heartbeatTicker *time.Ticker
@@ -225,42 +229,42 @@ var (
 	heartbeatJitter time.Duration
 
 	// Worker pool state
-	maxWorkers      int           // Max concurrent workers (from MPM_MAX_WORKERS or default)
-	taskQueue       chan *Task    // Buffered channel for pending tasks
-	queueMutex      sync.Mutex    // Protects queue operations
-	queueMap        map[string]*QueuedTask // Track queued tasks by ID
-	queueMapMutex   sync.Mutex    // Protects queueMap
-	queueCleanupTimer *time.Ticker // Timer to clean up stale queued tasks
+	maxWorkers        int                    // Max concurrent workers (from MPM_MAX_WORKERS or default)
+	taskQueue         chan *Task             // Buffered channel for pending tasks
+	queueMutex        sync.Mutex             // Protects queue operations
+	queueMap          map[string]*QueuedTask // Track queued tasks by ID
+	queueMapMutex     sync.Mutex             // Protects queueMap
+	queueCleanupTimer *time.Ticker           // Timer to clean up stale queued tasks
 
 	// Lifecycle state
-	lifecycleChan   chan *LifecycleOp // Channel for shutdown/reboot operations
-	isRebooting     atomic.Bool        // True if daemon is rebooting (not stopping)
+	lifecycleChan chan *LifecycleOp // Channel for shutdown/reboot operations
+	isRebooting   atomic.Bool       // True if daemon is rebooting (not stopping)
 
 	// Watch daemon state
-	watchPid        int               // PID of the watch subprocess (0 if not running)
-	watchCmd        *exec.Cmd         // Reference to watch subprocess
-	watchDone       chan bool         // Signals watch shutdown complete
+	watchPid  int       // PID of the watch subprocess (0 if not running)
+	watchCmd  *exec.Cmd // Reference to watch subprocess
+	watchDone chan bool // Signals watch shutdown complete
 
 	// Pre-flight health check state
-	preflightDone   atomic.Bool        // True if pre-flight checks completed
-	preflightResult atomic.Value       // Stores PreFlightResult
+	preflightDone   atomic.Bool  // True if pre-flight checks completed
+	preflightResult atomic.Value // Stores PreFlightResult
 )
 
 // PreFlightResult holds the result of the pre-flight health check
 type PreFlightResult struct {
-	Status      string            // "Passed", "Repaired", or "Failed"
-	DurationMs  int64             // Time taken to complete checks
-	Checks      []PreFlightCheck  // Individual check results
-	Timestamp  time.Time         // When checks were run
+	Status     string           // "Passed", "Repaired", or "Failed"
+	DurationMs int64            // Time taken to complete checks
+	Checks     []PreFlightCheck // Individual check results
+	Timestamp  time.Time        // When checks were run
 }
 
 // PreFlightCheck represents a single diagnostic check
 type PreFlightCheck struct {
-	Name      string   // Check name (e.g., "Database Integrity")
-	Status    string   // "OK", "Repaired", "Warning", "Error"
-	Message   string   // Human-readable message
-	Details   []string // Additional details (paths, sizes, etc.)
-	DurationMs int64  // Time for this specific check
+	Name       string   // Check name (e.g., "Database Integrity")
+	Status     string   // "OK", "Repaired", "Warning", "Error"
+	Message    string   // Human-readable message
+	Details    []string // Additional details (paths, sizes, etc.)
+	DurationMs int64    // Time for this specific check
 }
 
 // ============================================================================
@@ -269,24 +273,24 @@ type PreFlightCheck struct {
 
 // Task represents a work command to be executed by the pool
 type Task struct {
-	ID        string      // Unique task ID
-	Args      []string    // Command arguments
-	Conn      net.Conn    // Client connection
-	EnqueuedAt time.Time  // When the task was queued
+	ID         string    // Unique task ID
+	Args       []string  // Command arguments
+	Conn       net.Conn  // Client connection
+	EnqueuedAt time.Time // When the task was queued
 }
 
 // LifecycleOp represents a shutdown or reboot operation
 type LifecycleOp struct {
-	Type    string // "shutdown" or "reboot"
-	Force   bool   // Skip session flush
-	Conn    net.Conn
+	Type  string // "shutdown" or "reboot"
+	Force bool   // Skip session flush
+	Conn  net.Conn
 }
 
 // QueuedTask tracks a task in the queue with metadata
 type QueuedTask struct {
 	Task     *Task
-	Position int64      // Queue position
-	Conn     net.Conn   // Client connection (for notification)
+	Position int64    // Queue position
+	Conn     net.Conn // Client connection (for notification)
 }
 
 // QueuedResponse is sent to client when task is queued
@@ -319,31 +323,31 @@ const (
 
 // LogEntry represents a single structured log record
 type LogEntry struct {
-	TS     string   `json:"ts"`      // RFC3339 timestamp
-	Level  LogLevel `json:"lvl"`    // Log level
-	Cmd    string   `json:"cmd"`    // Command name
-	PID    int      `json:"pid"`    // Worker subprocess PID
-	Msg    string   `json:"msg"`    // Log message
-	DurMs  *int64   `json:"dur_ms,omitempty"` // Duration in ms (optional)
+	TS    string   `json:"ts"`               // RFC3339 timestamp
+	Level LogLevel `json:"lvl"`              // Log level
+	Cmd   string   `json:"cmd"`              // Command name
+	PID   int      `json:"pid"`              // Worker subprocess PID
+	Msg   string   `json:"msg"`              // Log message
+	DurMs *int64   `json:"dur_ms,omitempty"` // Duration in ms (optional)
 }
 
 // DaemonStatus represents the status response from the daemon
 type DaemonStatus struct {
-	PID               int      `json:"pid"`
-	Uptime            string   `json:"uptime"`
-	ActiveWorkers     int64    `json:"active_workers"`
-	QueuedTasks       int64    `json:"queued_tasks"`
-	MaxWorkers        int      `json:"max_workers"`
-	TotalTasks        int64    `json:"total_tasks"`
-	Socket            string   `json:"socket"`
-	MemoryUsageKB     int64    `json:"memory_usage_kb"`
-	WebhookEnabled    bool     `json:"webhook_enabled"`
-	HeartbeatInterval string   `json:"heartbeat_interval"`
-	PreFlightStatus   string   `json:"preflight_status"` // "Passed", "Repaired", "Failed", or "Unknown"
-	Memories          int      `json:"memories"`
-	Sessions          int      `json:"sessions"`
-	Topics            int      `json:"topics"`
-	References        int      `json:"references"`
+	PID               int    `json:"pid"`
+	Uptime            string `json:"uptime"`
+	ActiveWorkers     int64  `json:"active_workers"`
+	QueuedTasks       int64  `json:"queued_tasks"`
+	MaxWorkers        int    `json:"max_workers"`
+	TotalTasks        int64  `json:"total_tasks"`
+	Socket            string `json:"socket"`
+	MemoryUsageKB     int64  `json:"memory_usage_kb"`
+	WebhookEnabled    bool   `json:"webhook_enabled"`
+	HeartbeatInterval string `json:"heartbeat_interval"`
+	PreFlightStatus   string `json:"preflight_status"` // "Passed", "Repaired", "Failed", or "Unknown"
+	Memories          int    `json:"memories"`
+	Sessions          int    `json:"sessions"`
+	Topics            int    `json:"topics"`
+	References        int    `json:"references"`
 }
 
 // Message is the socket protocol
@@ -379,11 +383,11 @@ type HeartbeatPayload struct {
 
 // ManualPulse is sent when user runs: mpm status --ping
 type ManualPulse struct {
-	Event    string   `json:"event"`
-	Type     string   `json:"type"`
-	Uptime   string   `json:"uptime"`
-	MemoryKB int64    `json:"memory_kb"`
-	Timestamp string  `json:"timestamp"`
+	Event     string `json:"event"`
+	Type      string `json:"type"`
+	Uptime    string `json:"uptime"`
+	MemoryKB  int64  `json:"memory_kb"`
+	Timestamp string `json:"timestamp"`
 }
 
 // ============================================================================
@@ -876,9 +880,9 @@ func triggerManualPulse() {
 
 	payload := ManualPulse{
 		Event:     "manual_pulse",
-		Type:     "status_ping",
-		Uptime:   formatUptime(time.Since(startTime)),
-		MemoryKB: int64(memStats.Sys / 1024),
+		Type:      "status_ping",
+		Uptime:    formatUptime(time.Since(startTime)),
+		MemoryKB:  int64(memStats.Sys / 1024),
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
@@ -1037,8 +1041,8 @@ func executeQueuedTask(task *Task) {
 	// Notify client that task is starting
 	enc := json.NewEncoder(task.Conn)
 	enc.Encode(Message{
-		Output:   fmt.Sprintf("Worker acquired. Executing %s...\n", cmdName),
-		Done:     false,
+		Output: fmt.Sprintf("Worker acquired. Executing %s...\n", cmdName),
+		Done:   false,
 	})
 
 	binary, err := os.Executable()
@@ -1141,21 +1145,21 @@ func isWorkCommand(args []string) bool {
 
 	// Meta-commands bypass the queue (these are handled internally by daemon)
 	metaCommands := map[string]bool{
-		"status":    true,
-		"stop":      true,
-		"shutdown":  true,
-		"reboot":    true,
-		"restart":   true,
-		"logs":      true,
-		"help":      true,
-		"mode":      true,
-		"persona":   true,
-		"llm":       true,
-		"memory":    true,
-		"compile":   true,
-		"shred":     true,
-		"watch":     true,
-		"lesson":    true,
+		"status":   true,
+		"stop":     true,
+		"shutdown": true,
+		"reboot":   true,
+		"restart":  true,
+		"logs":     true,
+		"help":     true,
+		"mode":     true,
+		"persona":  true,
+		"llm":      true,
+		"memory":   true,
+		"compile":  true,
+		"shred":    true,
+		"watch":    true,
+		"lesson":   true,
 	}
 
 	if metaCommands[args[0]] {
@@ -1166,9 +1170,15 @@ func isWorkCommand(args []string) bool {
 	return true
 }
 
-// generateTaskID creates a unique task ID
+// generateTaskID creates a unique task ID using crypto/rand for security-sensitive operations
 func generateTaskID() string {
-	return fmt.Sprintf("task-%d-%d", time.Now().UnixNano(), rand.Int63n(99999))
+	// Use crypto/rand for the random portion (security-sensitive)
+	n, err := cryptorand.Int(cryptorand.Reader, big.NewInt(99999))
+	if err != nil {
+		// Fallback to math/rand if crypto/rand fails (should never happen)
+		n = big.NewInt(int64(rand.Intn(99999)))
+	}
+	return fmt.Sprintf("task-%d-%s", time.Now().UnixNano(), n.String())
 }
 
 // ============================================================================
@@ -1246,8 +1256,8 @@ func handleGatewayCommand(args []string) {
 // ============================================================================
 
 func main() {
-	// Initialize random seed for jitter
-	rand.Seed(time.Now().UnixNano())
+	// Seed random for jitter (using math/rand is fine for non-security purposes like jitter)
+	// Note: crypto/rand is used for security-sensitive ID generation (generateTaskID)
 
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
@@ -1371,7 +1381,6 @@ func tryClient() bool {
 		return false // Not a daemon command, continue to becomeDaemonAndExecute
 	}
 	defer conn.Close()
-
 
 	// Check if this is a lifecycle command that needs special handling
 	lifecycleCmd := getLifecycleCommand()
@@ -2161,7 +2170,7 @@ func toJSON(v interface{}) string {
 // DoctorCheck represents a single diagnostic check result
 type DoctorCheck struct {
 	Name     string
-	Status   string   // "PASS", "WARN", "FAIL"
+	Status   string // "PASS", "WARN", "FAIL"
 	Message  string
 	Details  []string
 	Duration string
@@ -2424,10 +2433,10 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 
 	// Check critical directories
 	dirs := map[string]string{
-		"mode":       filepath.Join(workspace, "mode"),
-		"persona":    filepath.Join(workspace, "persona"),
-		"src/db":     filepath.Join(workspace, "src", "db"),
-		"sessions":   filepath.Join(workspace, "sessions"),
+		"mode":     filepath.Join(workspace, "mode"),
+		"persona":  filepath.Join(workspace, "persona"),
+		"src/db":   filepath.Join(workspace, "src", "db"),
+		"sessions": filepath.Join(workspace, "sessions"),
 	}
 
 	for name, path := range dirs {
@@ -2700,8 +2709,8 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 
 	// Check for common optional tools
 	tools := []struct {
-		name    string
-		command string
+		name     string
+		command  string
 		required bool
 	}{
 		{"fzf", "fzf --version", false},
@@ -2977,10 +2986,10 @@ func runDirectoryCheck(result *PreFlightResult) {
 	// Determine workspace and data directories
 	workspace := config.GetWorkspace()
 	dirs := []string{
-		filepath.Dir(sockPath),                      // Socket directory (XDG_RUNTIME_DIR or ~/.mpm)
-		filepath.Join(workspace, "mode"),          // Mode configurations
-		config.GetPersonaPath(),                     // Persona configurations (correct path: projects/mpm/persona)
-		filepath.Join(workspace, "src", "db"),     // Database directory
+		filepath.Dir(sockPath),                // Socket directory (XDG_RUNTIME_DIR or ~/.mpm)
+		filepath.Join(workspace, "mode"),      // Mode configurations
+		config.GetPersonaPath(),               // Persona configurations (correct path: projects/mpm/persona)
+		filepath.Join(workspace, "src", "db"), // Database directory
 	}
 
 	// Also check sessions directory (may not exist yet)
@@ -3041,10 +3050,10 @@ func runDatabaseCheck(result *PreFlightResult) {
 	if err != nil || info.IsDir() {
 		// No database found - this is OK for first run
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Database Integrity",
-			Status:    "OK",
-			Message:   "No database file found (first run expected)",
-			Details:   []string{},
+			Name:       "Database Integrity",
+			Status:     "OK",
+			Message:    "No database file found (first run expected)",
+			Details:    []string{},
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3058,10 +3067,10 @@ func runDatabaseCheck(result *PreFlightResult) {
 	sqlDB, err := openDatabase(dbPath)
 	if err != nil {
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Database Integrity",
-			Status:    "Error",
-			Message:   fmt.Sprintf("Cannot open database: %v", err),
-			Details:   details,
+			Name:       "Database Integrity",
+			Status:     "Error",
+			Message:    fmt.Sprintf("Cannot open database: %v", err),
+			Details:    details,
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3074,10 +3083,10 @@ func runDatabaseCheck(result *PreFlightResult) {
 	if err := row.Scan(&integrityResult); err != nil {
 		details = append(details, fmt.Sprintf("Integrity check failed to run: %v", err))
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Database Integrity",
-			Status:    "Warning",
-			Message:   "Integrity check query failed",
-			Details:   details,
+			Name:       "Database Integrity",
+			Status:     "Warning",
+			Message:    "Integrity check query failed",
+			Details:    details,
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3086,10 +3095,10 @@ func runDatabaseCheck(result *PreFlightResult) {
 	if integrityResult != "ok" {
 		details = append(details, fmt.Sprintf("Integrity check result: %s", integrityResult))
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Database Integrity",
-			Status:    "Error",
-			Message:   "Database corruption detected",
-			Details:   details,
+			Name:       "Database Integrity",
+			Status:     "Error",
+			Message:    "Database corruption detected",
+			Details:    details,
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3103,10 +3112,10 @@ func runDatabaseCheck(result *PreFlightResult) {
 	details = append(details, fmt.Sprintf("Tables: %d", tableCount))
 
 	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:      "Database Integrity",
-		Status:    "OK",
-		Message:   "Database valid",
-		Details:   details,
+		Name:       "Database Integrity",
+		Status:     "OK",
+		Message:    "Database valid",
+		Details:    details,
 		DurationMs: time.Since(start).Milliseconds(),
 	})
 }
@@ -3128,10 +3137,10 @@ func runPersonaCheck(result *PreFlightResult) {
 	if _, err := os.Stat(personaPath); os.IsNotExist(err) {
 		// Persona directory missing - CRITICAL
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Persona Validation",
-			Status:    "Error",
-			Message:   "Persona directory missing: " + personaPath,
-			Details:   []string{"Daemon cannot start without persona directory"},
+			Name:       "Persona Validation",
+			Status:     "Error",
+			Message:    "Persona directory missing: " + personaPath,
+			Details:    []string{"Daemon cannot start without persona directory"},
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3148,10 +3157,10 @@ func runPersonaCheck(result *PreFlightResult) {
 	if !defaultExists && !activeExists {
 		// No persona found - CRITICAL (daemon needs at least a default)
 		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:      "Persona Validation",
-			Status:    "Error",
-			Message:   "No default or active persona found",
-			Details:   details,
+			Name:       "Persona Validation",
+			Status:     "Error",
+			Message:    "No default or active persona found",
+			Details:    details,
 			DurationMs: time.Since(start).Milliseconds(),
 		})
 		return
@@ -3177,10 +3186,10 @@ func runPersonaCheck(result *PreFlightResult) {
 	}
 
 	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:      "Persona Validation",
-		Status:    "OK",
-		Message:   "Persona configuration valid",
-		Details:   details,
+		Name:       "Persona Validation",
+		Status:     "OK",
+		Message:    "Persona configuration valid",
+		Details:    details,
 		DurationMs: time.Since(start).Milliseconds(),
 	})
 }
@@ -3192,7 +3201,7 @@ func runPermissionsCheck(result *PreFlightResult) {
 
 	// Critical paths that must be writable
 	writablePaths := []string{
-		filepath.Dir(sockPath),                 // Socket directory
+		filepath.Dir(sockPath),                            // Socket directory
 		filepath.Join(config.GetWorkspace(), "src", "db"), // DB directory
 	}
 
@@ -3343,90 +3352,76 @@ func stopWatchDaemon() error {
 		return fmt.Errorf("watch daemon not running")
 	}
 
-	// Debug: write to file
-	debugWrite := func(msg string) {
-		if f, err := os.OpenFile("/tmp/mpm_shutdown_debug.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
-			f.WriteString(fmt.Sprintf("  stopWatchDaemon: %s at %v\n", msg, time.Now()))
-			f.Close()
-		}
+	// Try to find the actual PID of the watch process (might have been reused)
+	actualPid := watchPid
+	if !isProcessRunning(actualPid) {
+		// Process already gone
+		watchPid = 0
+		watchCmd = nil
+		return nil
 	}
-	debugWrite(fmt.Sprintf("START PID=%d", watchPid))
 
-	// Send SIGTERM directly via syscall.Kill
-	err := syscall.Kill(watchPid, syscall.SIGTERM)
-	debugWrite(fmt.Sprintf("Kill(SIGTERM) err=%v", err))
-
-	if err != nil {
+	// Send SIGTERM to the process group (negative PID = whole process group)
+	// This works because we started the watch with Setpgid:true
+	logInfo("watch", daemonPid, fmt.Sprintf("Stopping watch daemon (PID: %d)...", actualPid))
+	if err := syscall.Kill(-actualPid, syscall.SIGTERM); err != nil {
 		if err == syscall.ESRCH {
-			debugWrite("Process already gone (ESRCH)")
+			// Process already gone
 			watchPid = 0
 			watchCmd = nil
 			return nil
 		}
-		debugWrite(fmt.Sprintf("Kill failed: %v", err))
-		return fmt.Errorf("failed to signal watch: %w", err)
+		// If we can't send to process group, try direct PID
+		if err := syscall.Kill(actualPid, syscall.SIGTERM); err != nil {
+			if err == syscall.ESRCH {
+				watchPid = 0
+				watchCmd = nil
+				return nil
+			}
+			logWarn("watch", daemonPid, fmt.Sprintf("Failed to send SIGTERM to watch: %v", err))
+		}
 	}
 
-	debugWrite("SIGTERM sent, waiting...")
-
-	// Wait for process using WNOHANG (non-blocking) in a loop.
-	deadline := time.Now().Add(10 * time.Second)
-	iterations := 0
-	for {
-		var status syscall.WaitStatus
-		pid, err := syscall.Wait4(watchPid, &status, syscall.WNOHANG, nil)
-		iterations++
-
-		if err == nil && pid == watchPid {
-			// Successfully reaped
-			debugWrite(fmt.Sprintf("Watch daemon reaped (status %d)", status.ExitStatus()))
+	// Wait for graceful shutdown with deadline
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isProcessRunning(actualPid) {
+			logInfo("watch", daemonPid, "Watch daemon stopped gracefully")
 			watchPid = 0
 			watchCmd = nil
 			return nil
 		}
-		// pid == 0 means child still running; ECHILD means not our child (process group mismatch)
-		if err != nil && err != syscall.ECHILD {
-			debugWrite(fmt.Sprintf("Wait4 unexpected error: %v", err))
-		}
-		if err == syscall.ECHILD {
-			// Process is not our child - likely in a different process group
-			// It may still be running, but we can't wait for it
-			debugWrite(fmt.Sprintf("Watch daemon not our child (ECHILD) - may still be running"))
-			watchPid = 0
-			watchCmd = nil
-			return nil
-		}
-		if time.Now().After(deadline) {
-			debugWrite(fmt.Sprintf("Deadline hit after %d iterations", iterations))
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Timeout - force kill
+	logWarn("watch", daemonPid, "Watch daemon did not stop gracefully, sending SIGKILL")
+	if err := syscall.Kill(-actualPid, syscall.SIGKILL); err != nil {
+		// Try direct PID if process group failed
+		syscall.Kill(actualPid, syscall.SIGKILL)
+	}
+
+	// Wait for SIGKILL to take effect
+	for i := 0; i < 20; i++ {
+		if !isProcessRunning(actualPid) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Timeout: force kill with SIGKILL
-	debugWrite("Sending SIGKILL")
-	syscall.Kill(watchPid, syscall.SIGKILL)
-	// Wait briefly for SIGKILL to take effect
-	for i := 0; i < 20; i++ {
-		var status syscall.WaitStatus
-		pid, err := syscall.Wait4(watchPid, &status, syscall.WNOHANG, nil)
-		if err == syscall.ECHILD {
-			debugWrite("SIGKILL: process not our child")
-			watchPid = 0
-			watchCmd = nil
-			return nil
-		}
-		if pid != 0 {
-			debugWrite(fmt.Sprintf("SIGKILL reaped (pid=%d)", pid))
-			watchPid = 0
-			watchCmd = nil
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 	watchPid = 0
 	watchCmd = nil
 	return nil
+}
+
+// isProcessRunning checks if a process with the given PID is still running
+func isProcessRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	// Sending signal 0 doesn't actually send a signal but checks if process exists
+	err := syscall.Kill(pid, syscall.Signal(0))
+	return err == nil
 }
 
 // restartWatchDaemon restarts the watch subprocess
@@ -3674,12 +3669,13 @@ func flushSession() {
 // Uses exec.Command instead of syscall.ForkExec to avoid multi-threaded fork issues.
 // Waits for the new daemon to create its socket before exiting.
 func executeReboot() {
-	// Stop the watch daemon first to avoid orphaned watch processes.
-	// The watch was started with Setpgid:true, so we send SIGTERM directly.
+	// Stop the watch daemon properly to avoid orphaned watch processes.
+	// This ensures the watch is actually stopped before we restart.
 	if watchPid != 0 {
-		syscall.Kill(watchPid, syscall.SIGTERM)
-		// Don't wait - just signal and continue. The watch will die or be orphaned.
-		watchPid = 0
+		if err := stopWatchDaemon(); err != nil {
+			logWarn("lifecycle", daemonPid, fmt.Sprintf("Failed to stop watch during reboot: %v", err))
+			// Continue with reboot anyway - watch may still be running
+		}
 	}
 
 	// Spawn new daemon subprocess using exec.Command
@@ -3804,134 +3800,216 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
-// printHelp displays the mpm help text
-func printHelp() {
-	// Box: inner content width = 76 chars (between │ chars)
-	// Row format: │ + left + "   " + right + │ (4 for "│ " and " │")
-	// So: leftW + 3 + rightW + 4 = 76 => leftW + rightW = 69
-	innerW := 76
-	leftW := 22
-	rightW := innerW - 4 - leftW // = 69 - leftW
+// ============================================================================
+// Help System (Lipgloss-styled)
+// ============================================================================
 
-	hdr := "╭" + strings.Repeat("─", innerW) + "╮"
-	div := "├" + strings.Repeat("─", innerW) + "┤"
-	ftr := "╰" + strings.Repeat("─", innerW) + "╯"
-
-	// Helpers
-	padTo := func(s string, n int) string {
-		if len(s) >= n {
-			return s[:n-1] + " "
-		}
-		return s + strings.Repeat(" ", n-len(s))
-	}
-
-	row := func(left string, right string) string {
-		// "│ " + left(pad leftW) + "   " + right(pad rightW) + " │"
-		return "│ " + padTo(left, leftW) + "   " + padTo(right, rightW) + " │"
-	}
-
-	section := func(title string) string {
-		return "│ " + padTo(title, innerW-1) + "│"
-	}
-
-	var b strings.Builder
-
-	b.WriteString(hdr + "\n")
-	b.WriteString("│ mpm  —  Memory-Persona-Mode Manager" + strings.Repeat(" ", innerW-38) + "│\n")
-	b.WriteString(div + "\n")
-
-	b.WriteString(section("Core Commands") + "\n")
-	coreCmds := [][2]string{
-		{"status", "Show current status"},
-		{"dashboard", "Live terminal dashboard"},
-		{"persona", "Persona management"},
-		{"mode", "Mode management"},
-		{"memory", "Memory management"},
-		{"session", "Session management"},
-		{"topics", "Topic operations"},
-		{"compile", "Compile JSON to database"},
-		{"reference", "Reference library"},
-		{"lesson", "Lesson operations"},
-		{"recall", "Semantic memory search"},
-		{"synthesize", "Generate memory summaries"},
-	}
-	for _, c := range coreCmds {
-		b.WriteString(row(c[0], c[1]) + "\n")
-	}
-	b.WriteString(div + "\n")
-
-	b.WriteString(section("System Management") + "\n")
-	sysCmds := [][2]string{
-		{"shutdown", "Graceful daemon shutdown"},
-		{"shutdown --force", "Immediate shutdown"},
-		{"reboot", "Graceful daemon restart"},
-		{"reboot --force", "Immediate restart"},
-		{"logs", "Tail daemon logs"},
-		{"start", "Start daemon"},
-		{"stop", "Alias for shutdown"},
-		{"restart", "Alias for reboot"},
-	}
-	for _, c := range sysCmds {
-		b.WriteString(row(c[0], c[1]) + "\n")
-	}
-	b.WriteString(div + "\n")
-
-	b.WriteString(section("Gateway (Daemon) Commands") + "\n")
-	gwCmds := [][2]string{
-		{"gateway", "Gateway control (see 'mpm gateway help')"},
-		{"gateway help", "Show gateway commands"},
-		{"gateway start", "Start or connect to gateway"},
-		{"gateway stop", "Stop the gateway"},
-		{"gateway restart", "Restart the gateway"},
-		{"gateway status", "Show gateway status"},
-	}
-	for _, c := range gwCmds {
-		b.WriteString(row(c[0], c[1]) + "\n")
-	}
-	b.WriteString(div + "\n")
-
-	b.WriteString(section("Information") + "\n")
-	infoCmds := [][2]string{
-		{"doctor", "Run diagnostics"},
-		{"tui", "Launch mode/persona picker"},
-		{"prime-directives", "Show 808 prime directives"},
-		{"help", "Show this help"},
-		{"version", "Show version info"},
-	}
-	for _, c := range infoCmds {
-		b.WriteString(row(c[0], c[1]) + "\n")
-	}
-	b.WriteString(div + "\n")
-
-	b.WriteString("│ -h, --help   Show this help   -v, --version  Show version                │\n")
-	b.WriteString("│ * daemon required              > has subcommands           │\n")
-	b.WriteString(ftr + "\n")
-
-	fmt.Print(b.String())
+// helpCmd represents a command in the help menu
+type helpCmd struct {
+	name        string
+	desc        string
+	needsDaemon bool // Shows ◉ indicator
+	hasSubs     bool // Shows ▸ indicator
 }
 
-// printGatewayHelp outputs gateway-specific help
+var (
+	helpGold    = lipgloss.Color("220")
+	helpCyan    = lipgloss.Color("87")
+	helpMagenta = lipgloss.Color("213")
+	helpDim     = lipgloss.Color("245")
+	helpGreen   = lipgloss.Color("84")
+	helpBorder  = lipgloss.Color("99")
+
+	helpTitle = lipgloss.NewStyle().
+			Foreground(helpGold).
+			Bold(true).
+			Align(lipgloss.Center)
+
+	helpSection = lipgloss.NewStyle().
+			Foreground(helpMagenta).
+			Bold(true).
+			Padding(1, 0, 0, 0)
+
+	helpCommand = lipgloss.NewStyle().
+			Foreground(helpCyan)
+
+	helpDesc = lipgloss.NewStyle().
+			Foreground(helpDim)
+
+	helpBorderStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(helpBorder).
+			Padding(1, 2)
+
+	helpTip = lipgloss.NewStyle().
+		Foreground(helpDim).
+		Italic(true)
+)
+
+// printHelp displays the mpm help text with lipgloss styling
+func printHelp() {
+	// Indicators
+	daemonIndicator := lipgloss.NewStyle().Foreground(helpGreen).Render("◉")
+	subIndicator := lipgloss.NewStyle().Foreground(helpMagenta).Render("▸")
+
+	// Tips with indicators explained
+	tipsStyle := lipgloss.NewStyle().
+		Foreground(helpDim).
+		Render("  " + daemonIndicator + " daemon required    " + subIndicator + " has subcommands    -h/--help for detailed usage")
+
+	// Build sections
+	coreSection := buildHelpSection("Core Commands", []helpCmd{
+		{"status", "Show current status", true, false},
+		{"dashboard", "Live terminal dashboard", true, false},
+		{"persona", "Persona management", true, true},
+		{"mode", "Mode management", true, true},
+		{"memory", "Memory management", true, true},
+		{"session", "Session management", true, true},
+		{"topics", "Topic operations", true, true},
+		{"reference", "Reference library", true, true},
+		{"lesson", "Lesson operations", true, true},
+		{"recall <query>", "Semantic memory search", true, false},
+		{"compile", "Compile JSON to database", false, false},
+		{"synthesize [uuid]", "Generate memory summaries", true, false},
+	})
+
+	sysSection := buildHelpSection("System", []helpCmd{
+		{"start", "Start daemon", false, false},
+		{"stop", "Graceful shutdown", true, false},
+		{"restart", "Graceful reboot", true, false},
+		{"logs", "Tail daemon logs", false, true},
+		{"watch", "File watcher daemon", false, true},
+		{"doctor", "Run diagnostics", false, false},
+	})
+
+	infoSection := buildHelpSection("Info", []helpCmd{
+		{"help", "Show this help", false, false},
+		{"version", "Show version info", false, false},
+		{"tui", "Launch mode/persona picker", false, false},
+		{"prime-directives", "Show 808 directives", false, false},
+		{"gateway", "Gateway control", false, true},
+	})
+
+	// Assemble with border
+	mainStyle := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(helpBorder).
+		Padding(1, 2).
+		Margin(1)
+
+	// Title
+	titleStyle := lipgloss.NewStyle().
+		Foreground(helpGold).
+		Bold(true).
+		Align(lipgloss.Center).
+		Render("⟨ mpm ⟩  Memory-Persona-Mode Manager")
+
+	subtitleStyle := lipgloss.NewStyle().
+		Foreground(helpCyan).
+		Align(lipgloss.Center).
+		Render("Your long-term memory and persona system")
+
+	content := "\n" + titleStyle + "\n" + subtitleStyle + "\n\n" +
+		coreSection + "\n" +
+		sysSection + "\n" +
+		infoSection + "\n" +
+		helpSection.Render("Legend") + "\n" +
+		tipsStyle + "\n"
+
+	fmt.Println(mainStyle.Render(content))
+}
+
+// buildHelpSection creates a styled section with commands, left-aligned
+func buildHelpSection(title string, cmds []helpCmd) string {
+	daemonStyle := lipgloss.NewStyle().Foreground(helpGreen).Render("◉")
+	subStyle := lipgloss.NewStyle().Foreground(helpMagenta).Render("▸")
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(helpSection.Render(title))
+	b.WriteString("\n")
+
+	for _, c := range cmds {
+		// Build indicators
+		indicators := ""
+		if c.needsDaemon {
+			indicators += daemonStyle
+		}
+		if c.hasSubs {
+			indicators += subStyle
+		}
+		if indicators == "" {
+			indicators = "  "
+		} else {
+			indicators += " "
+		}
+
+		cmdStr := helpCommand.Render(c.name)
+		descStr := helpDesc.Render(c.desc)
+		// Left-aligned: indicator + command + description
+		line := fmt.Sprintf("  %s%s  %s\n", indicators, cmdStr, descStr)
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// printGatewayHelp outputs gateway-specific help with lipgloss styling
 func printGatewayHelp() {
-	fmt.Println()
-	fmt.Println("  mpm gateway - Memory Persona Manager Gateway")
-	fmt.Println()
-	fmt.Println("  The gateway is a background service that handles:")
-	fmt.Println("    - Persona management and mode stacking")
-	fmt.Println("    - Memory storage and retrieval")
-	fmt.Println("    - Session persistence and recovery")
-	fmt.Println()
-	fmt.Println("  Gateway Commands:")
-	fmt.Println("    help              Show this help")
-	fmt.Println("    start             Start gateway (or connect if already running)")
-	fmt.Println("    stop              Stop the gateway")
-	fmt.Println("    restart           Restart the gateway")
-	fmt.Println("    status            Show gateway status")
-	fmt.Println()
-	fmt.Println("  Examples:")
-	fmt.Println("    mpm gateway start     # Start/restart gateway")
-	fmt.Println("    mpm gateway stop     # Stop gateway")
-	fmt.Println("    mpm gateway status   # Check if gateway is running")
-	fmt.Println()
+	width := 60
+
+	header := lipgloss.NewStyle().
+		Foreground(helpGold).
+		Bold(true).
+		Width(width).
+		Align(lipgloss.Center).
+		Render("⟨ mpm gateway ⟩")
+
+	headerSub := lipgloss.NewStyle().
+		Foreground(helpCyan).
+		Width(width).
+		Align(lipgloss.Center).
+		Render("Background service for memory and persona management")
+
+	desc := lipgloss.NewStyle().
+		Foreground(helpDim).
+		Width(width).
+		Render("  • Persona management and mode stacking\n  • Memory storage and retrieval\n  • Session persistence and recovery")
+
+	gatewayCmds := []helpCmd{
+		{"help", "Show this help", false, false},
+		{"start", "Start or connect to gateway", false, false},
+		{"stop", "Stop the gateway", true, false},
+		{"restart", "Restart the gateway", true, false},
+		{"status", "Show gateway status", true, false},
+	}
+
+	daemonStyle := lipgloss.NewStyle().Foreground(helpGreen)
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(header)
+	b.WriteString("\n\n")
+	b.WriteString(headerSub)
+	b.WriteString("\n\n")
+	b.WriteString(helpBorderStyle.Render(desc))
+	b.WriteString("\n\n")
+	b.WriteString(helpSection.Render("Commands"))
+	b.WriteString("\n")
+
+	for _, c := range gatewayCmds {
+		indicator := ""
+		if c.needsDaemon {
+			indicator = daemonStyle.Render("◉")
+		}
+		cmdStr := helpCommand.Render(c.name)
+		descStr := helpDesc.Render(c.desc)
+		b.WriteString(fmt.Sprintf("  %s %s  %s\n", indicator, cmdStr, descStr))
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpTip.Render("  mpm gateway start  # Start/restart gateway"))
+
+	fmt.Print(b.String() + "\n\n")
 }
 
 // parseWorkspaceFlag extracts --workspace from args (doesn't mutate global state)

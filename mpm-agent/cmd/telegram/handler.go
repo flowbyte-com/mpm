@@ -756,35 +756,7 @@ func (h *Handler) editMessage(chatID int64, msgID int, text string) {
 	})
 }
 
-// HandleCallback processes inline keyboard callbacks (HITL approve/deny).
-func (h *Handler) HandleCallback(ctx *th.Context, query telego.CallbackQuery) error {
-	// Always answer callback to clear loading state on button
-	h.bot.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
-		CallbackQueryID: query.ID,
-	})
-
-	data := query.Data
-	if strings.HasPrefix(data, "auth_yes_") {
-		execID := strings.TrimPrefix(data, "auth_yes_")
-		h.handleApproval(execID, true, query.Message.GetChat().ID, query.Message.GetMessageID())
-	} else if strings.HasPrefix(data, "auth_no_") {
-		execID := strings.TrimPrefix(data, "auth_no_")
-		h.handleApproval(execID, false, query.Message.GetChat().ID, query.Message.GetMessageID())
-	}
-
-	return nil
-}
-
-// handleApproval resolves a pending approval and edits the original message.
-func (h *Handler) handleApproval(execID string, approved bool, chatID int64, msgID int) {
-	if approved {
-		core.Approve(execID, "Approved")
-		h.editMessage(chatID, msgID, "✅ Approved")
-	} else {
-		core.Deny(execID)
-		h.editMessage(chatID, msgID, "❌ Denied")
-	}
-}
+// handleApproval was removed — HITL approval system was removed in earlier refactor
 
 // isOverloadedError returns true if the error is an API overloaded error (529).
 func isOverloadedError(err error) bool {
@@ -824,7 +796,7 @@ func (h *Handler) selfImprove(dbPath string, chatID int64, userText, responseTex
 		lessonContent := fmt.Sprintf("User asked: %s | Response covered: %s",
 			truncate(userText, 100), truncate(responseText, 200))
 		lesson := core.Lesson{
-			ID:       generateID(),
+			ID:       core.GenerateID(),
 			Content:  lessonContent,
 			Type:     "exchange",
 			Tags:     "telegram,conversation",

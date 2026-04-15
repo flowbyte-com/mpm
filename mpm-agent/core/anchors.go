@@ -18,7 +18,7 @@ type Anchor struct {
 // InsertAnchor saves a high-priority anchor to mini-bot.db.
 // Idempotent: if an anchor with same content+context+session_id exists, updates weight to MAX(current, new).
 func InsertAnchor(db *sql.DB, content, context, sessionID string, weight int) error {
-	id := generateID()
+	id := GenerateID()
 	now := time.Now().Format(time.RFC3339)
 
 	_, err := db.Exec(`

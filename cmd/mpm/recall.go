@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"regexp"
@@ -18,11 +19,24 @@ import (
 // =============================================================================
 
 func handleRecall(args []string) int {
-	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm recall <query>\n")
+	fs := flag.NewFlagSet("recall", flag.ContinueOnError)
+	since := fs.String("since", "", "Search memories since date (YYYY-MM-DD)")
+	until := fs.String("until", "", "Search memories until date (YYYY-MM-DD)")
+	limit := fs.Int("limit", 15, "Maximum results to return")
+	fs.Usage = func() {
+		fmt.Println("Usage: mpm recall [options] <query>")
+		fmt.Println("\nRecall options:")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args[1:]); err != nil {
 		return 1
 	}
-	query := strings.Join(args[1:], " ")
+
+	query := fs.Arg(0)
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "Usage: mpm recall [options] <query>\n")
+		return 1
+	}
 	query = strings.TrimSpace(query)
 	if query == "" {
 		fmt.Fprintf(os.Stderr, "Empty query.\n")
@@ -37,8 +51,8 @@ func handleRecall(args []string) int {
 	}
 	defer db.Close()
 
-	// Keyword search using LIKE + FTS5 fallback
-	rows, err := keywordSearch(db, query, 15)
+	// Keyword search using LIKE + FTS5 fallback with time filters
+	rows, err := keywordSearchWithTime(db, query, *since, *until, *limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Search failed: %v\n", err)
 		return 1
@@ -121,7 +135,6 @@ func handleRecall(args []string) int {
 			ageTag = fmt.Sprintf(" %s%s%s", magenta, age, reset)
 		}
 
-
 		fmt.Printf("%s%d.%s %s%s%s\n    %s\n\n",
 			cyan, i+1, reset,
 			sessionTag, ageTag, synthTag,
@@ -159,6 +172,58 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 	return db.Query(likeQuery, likePattern, likePattern, limit)
 }
 
+func keywordSearchWithTime(db *sql.DB, query, since, until string, limit int) (*sql.Rows, error) {
+	// Try FTS5 first
+	ftsQuery := `
+		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
+		FROM memories m
+		JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL`
+
+	args := []interface{}{query}
+
+	if since != "" {
+		ftsQuery += " AND m.created_at >= ?"
+		args = append(args, since)
+	}
+	if until != "" {
+		ftsQuery += " AND m.created_at <= ?"
+		args = append(args, until+" 23:59:59")
+	}
+
+	ftsQuery += " ORDER BY fts.rank LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.Query(ftsQuery, args...)
+	if err == nil {
+		return rows, nil
+	}
+
+	// FTS5 failed — fallback to LIKE
+	likePattern := "%" + query + "%"
+	likeQuery := `
+		SELECT id, content, session_id, tags, created_at
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (content LIKE ? OR tags LIKE ?)`
+
+	args = []interface{}{likePattern, likePattern}
+
+	if since != "" {
+		likeQuery += " AND created_at >= ?"
+		args = append(args, since)
+	}
+	if until != "" {
+		likeQuery += " AND created_at <= ?"
+		args = append(args, until+" 23:59:59")
+	}
+
+	likeQuery += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	return db.Query(likeQuery, args...)
+}
+
 func stripMarkdown(s string) string {
 	s = regexp.MustCompile(`(?m)^#+\s*`).ReplaceAllString(s, "")
 	s = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(s, "$1")
@@ -184,4 +249,3 @@ func formatAge(t time.Time) string {
 		return fmt.Sprintf("%dd ago", days)
 	}
 }
-

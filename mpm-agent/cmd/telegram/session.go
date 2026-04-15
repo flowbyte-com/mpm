@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,13 +11,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
-
-// generateID returns a random hex string ID for database records.
-func generateID() string {
-	b := make([]byte, 16)
-	rand.Read(b) //nolint:errcheck
-	return fmt.Sprintf("%x", b)
-}
 
 // SessionManager maps a Telegram chat ID to its conversation message history.
 // History is persisted to the MPM SQLite database.
@@ -194,6 +186,7 @@ func initSessionDB(dbPath string) error {
 		source_path TEXT,
 		metadata TEXT
 	);
+	CREATE INDEX IF NOT EXISTS idx_sessions_session ON sessions(session_id);
 
 	CREATE TABLE IF NOT EXISTS memories (
 		id TEXT PRIMARY KEY,
@@ -205,6 +198,13 @@ func initSessionDB(dbPath string) error {
 		created_at TEXT,
 		deleted_at TEXT
 	);
+	CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+	CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+
+	CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, tags, content=memories, content_rowid=rowid);
+	CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;
+	CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;
+	CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;
 
 	CREATE TABLE IF NOT EXISTS lessons (
 		id TEXT PRIMARY KEY,
@@ -224,7 +224,7 @@ func initSessionDB(dbPath string) error {
 		created_at TEXT,
 		UNIQUE(content, context, session_id)
 	);
-	CREATE INDEX IF NOT EXISTS idx_anchors_dedup ON anchors(content, context, session_id);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_anchors_dedup ON anchors(content, context, session_id);
 
 	CREATE TABLE IF NOT EXISTS tools (
 		id TEXT PRIMARY KEY,
@@ -239,4 +239,3 @@ func initSessionDB(dbPath string) error {
 	_, err = db.Exec(schema)
 	return err
 }
-

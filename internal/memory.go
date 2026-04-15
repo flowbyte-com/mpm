@@ -15,22 +15,26 @@ import (
 	"sync"
 	"time"
 
-	"mpm/internal/config"
 	_ "modernc.org/sqlite"
+	"mpm/internal/config"
 )
 
 // Memory represents a single memory unit
 type Memory struct {
-	ID          string                 `json:"id"`
-	Content     string                 `json:"content"`
-	Metadata    map[string]interface{} `json:"metadata"`
-	Tags        []string               `json:"tags"`
-	Created     string                 `json:"created"`
-	Source      string                 `json:"source"`
-	Embedding   []float32              `json:"embedding,omitempty"`
-	Collection  string                 `json:"collection,omitempty"` // For JSONL mirror file
-	SessionID   string                 `json:"session_id,omitempty"`
-	ReferenceID string                 `json:"reference_id,omitempty"`
+	ID                 string                 `json:"id"`
+	Content            string                 `json:"content"`
+	Metadata           map[string]interface{} `json:"metadata"`
+	Tags               []string               `json:"tags"`
+	Created            string                 `json:"created"`
+	Source             string                 `json:"source"`
+	Embedding          []float32              `json:"embedding,omitempty"`
+	Collection         string                 `json:"collection,omitempty"`
+	SessionID          string                 `json:"session_id,omitempty"`
+	ReferenceID        string                 `json:"reference_id,omitempty"`
+	ReinforcementCount int                    `json:"reinforcement_count,omitempty"`
+	Weight             int                    `json:"weight,omitempty"`
+	LastAccessedAt     string                 `json:"last_accessed_at,omitempty"`
+	ExpiresAt          string                 `json:"expires_at,omitempty"`
 }
 
 // SearchResult represents a search result (used by SearchTopics)
@@ -68,8 +72,8 @@ type MemoryPaths struct {
 	// OUTPUT (write destination — ALWAYS mpm/src/db/mpm.db)
 	MemorySavePath  string `json:"memory_save_path"`  // Legacy alias for SQLiteDBPath
 	SessionSavePath string `json:"session_save_path"` // Legacy alias for SQLiteDBPath
-	MirrorFilePath  string `json:"mirror_file_path"` // Internal: mpm/src/db/mirror.jsonl
-	SQLiteDBPath    string `json:"sqlite_db_path"`   // Internal: ALWAYS mpm/src/db/mpm.db
+	MirrorFilePath  string `json:"mirror_file_path"`  // Internal: mpm/src/db/mirror.jsonl
+	SQLiteDBPath    string `json:"sqlite_db_path"`    // Internal: ALWAYS mpm/src/db/mpm.db
 
 	// INPUT (watch directories for the fsnotify daemon)
 	MemoryPath  string `json:"memory_path"`  // Watch daemon: dir for .md files
@@ -116,7 +120,7 @@ func DefaultMemoryPaths() MemoryPaths {
 		SQLiteDBPath:    sqliteDBPath, // Internal: ALWAYS mpm/src/db/mpm.db
 
 		// INPUT (watch directories for the fsnotify daemon)
-		MemoryPath:  memoryPath,  // Watch daemon: directory to scan for .md files
+		MemoryPath:  memoryPath,   // Watch daemon: directory to scan for .md files
 		SessionPath: sessionsPath, // Watch daemon: directory to scan for .jsonl files
 	}
 }
@@ -182,70 +186,22 @@ func (s *MemoryStore) InitSQLite() error {
 	}
 	s.DB = database
 
-	// Create base tables
-	tables := []string{
-		`CREATE TABLE IF NOT EXISTS memories (
-			id TEXT PRIMARY KEY, collection TEXT NOT NULL, content TEXT NOT NULL,
-			session_id TEXT NOT NULL DEFAULT '', tags TEXT, metadata TEXT,
-			embedding BLOB, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY, session_id TEXT NOT NULL, content TEXT NOT NULL,
-			content_hash TEXT, source_path TEXT, metadata TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
-		`CREATE TABLE IF NOT EXISTS topics (
-			id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, tags TEXT,
-			parent_topic_id TEXT, metadata TEXT, embedding BLOB,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, is_active INTEGER DEFAULT 1)`,
-		`CREATE TABLE IF NOT EXISTS topic_memberships (
-			memory_id TEXT,
-			session_id TEXT,
-			topic_id TEXT NOT NULL,
-			role TEXT DEFAULT 'related',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (memory_id, topic_id),
-			UNIQUE (session_id, topic_id),
-			CHECK (memory_id IS NOT NULL OR session_id IS NOT NULL)
-		)`,
-		`CREATE TABLE IF NOT EXISTS "references" (
-			id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
-			tags TEXT, content TEXT NOT NULL, content_hash TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
-	}
-
-	// Create indexes for topic_memberships
-	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_topic ON topic_memberships(topic_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_memory ON topic_memberships(memory_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topic_memberships_session ON topic_memberships(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)`,
-	}
-	for _, sql := range indexes {
-		s.DB.Exec(sql)
-	}
-	for _, sql := range tables {
+	// Use shared schema definitions from schema.go
+	for _, sql := range BaseTables {
 		if _, err := s.DB.Exec(sql); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
 
-	// Migration: add new columns to existing databases using safe addColumnIfNotExists
-	safeMigrations := []struct {
-		table    string
-		column   string
-		colType  string
-	}{
-		{"topics", "parent_topic_id", "TEXT"},
-		{"memories", "embedding", "BLOB"},
-		{"memories", "deleted_at", "TEXT"},
-		{"memories", "reference_id", "TEXT"},
-		{"memories", "content_hash", "TEXT"},
-		{"topic_memberships", "memory_id", "TEXT"},
+	// Use shared index definitions
+	for _, sql := range CommonIndexes {
+		s.DB.Exec(sql)
 	}
-	for _, m := range safeMigrations {
-		if err := s.addColumnIfNotExists(m.table, m.column, m.colType); err != nil {
-			return fmt.Errorf("migration failed for %s.%s: %w", m.table, m.column, err)
+
+	// Migration: add new columns to existing databases using safe addColumnIfNotExists
+	for _, m := range SafeMigrations {
+		if err := s.addColumnIfNotExists(m[0], m[1], m[2]); err != nil {
+			return fmt.Errorf("migration failed for %s.%s: %w", m[0], m[1], err)
 		}
 	}
 
@@ -301,7 +257,6 @@ func (s *MemoryStore) InitSQLite() error {
 	return nil
 }
 
-
 // AddMemory adds a memory to the store
 func (s *MemoryStore) AddMemory(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string) (*Memory, error) {
 	if collection == "" {
@@ -320,16 +275,16 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		s.logSensitiveAttempt(content, reason)
 		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
-	
+
 	// Check for poison phrases (prompt injection attempts)
 	if isPoisoned, reason := isPoisoned(content); isPoisoned {
 		s.logPoisonAttempt(content, reason)
 		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
-	
+
 	// Generate embedding for vector search
 	embedding := HashEmbed(content)
-	
+
 	// Create memory record
 	mem := &Memory{
 		ID:         GenerateID(),
@@ -342,7 +297,7 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		Collection: collection, // Add collection for JSONL mirror
 		SessionID:  sessionID,
 	}
-	
+
 	// Add metadata fields for filtering
 	fullMetadata := map[string]interface{}{
 		"source":    source,
@@ -353,16 +308,19 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	for k, v := range metadata {
 		fullMetadata[k] = v
 	}
-	
+
 	// Convert embedding to JSON bytes for storage
 	embeddingJSON, _ := json.Marshal(embedding)
-	
+
 	// Add to SQLite
 	metadataJSON, _ := json.Marshal(fullMetadata)
 	tagsJSON, _ := json.Marshal(tags)
 
-	// Use empty string when sessionID is empty (schema has NOT NULL DEFAULT '')
-	sessID := sessionID
+	// Use NULL when sessionID is empty to satisfy FK constraint (NULL means no FK reference)
+	var sessID interface{} = nil
+	if sessionID != "" {
+		sessID = sessionID
+	}
 
 	_, err := s.DB.Exec(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id)
@@ -371,38 +329,31 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Append to mirror file (human-readable)
 	if err := s.appendToMirror(mem); err != nil {
 		// Log but don't fail
 		fmt.Fprintf(os.Stderr, "Warning: failed to write to mirror: %v\n", err)
 	}
-	
+
 	return mem, nil
 }
 
 // poisonPhraseCache holds loaded poison phrases in memory
 var poisonPhraseCache []string
-var poisonPhraseLoaded bool
-var poisonPhraseMutex sync.Mutex
+var poisonPhraseOnce sync.Once
+var poisonPhraseErr error
 
-// loadPoisonPhrases loads poison phrases from the phrases file
+// loadPoisonPhrases loads poison phrases from the phrases file using sync.Once
+// for thread-safe one-time initialization
 func loadPoisonPhrases() ([]string, error) {
-	// Return cached phrases if already loaded
-	if poisonPhraseLoaded {
-		return poisonPhraseCache, nil
-	}
+	poisonPhraseOnce.Do(func() {
+		poisonPhraseCache, poisonPhraseErr = loadPoisonPhrasesFromFile()
+	})
+	return poisonPhraseCache, poisonPhraseErr
+}
 
-	poisonPhraseMutex.Lock()
-	defer poisonPhraseMutex.Unlock()
-
-	// Double-check after lock
-	if poisonPhraseLoaded {
-		return poisonPhraseCache, nil
-	}
-
-	// Load phrases from file - use config function for poison_phrases.txt
-	// Located at workspace root (platform-agnostic, travels with binary)
+func loadPoisonPhrasesFromFile() ([]string, error) {
 	poisonFilePath := config.GetToxicPhrasesPath()
 
 	phrases := []string{}
@@ -448,8 +399,6 @@ func loadPoisonPhrases() ([]string, error) {
 		}
 	}
 
-	poisonPhraseCache = phrases
-	poisonPhraseLoaded = true
 	return phrases, nil
 }
 
@@ -482,34 +431,42 @@ func IsSensitiveContent(content string) (bool, string) {
 	return isSensitiveContent(content)
 }
 
+// sensitivePatterns holds pre-compiled regex patterns for sensitive data detection.
+// Compiled once at package init for performance (avoids recompilation on every check).
+var sensitivePatterns = []struct {
+	name    string
+	pattern *regexp.Regexp
+}{
+	{"OpenAI API Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
+	{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
+	{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
+	{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
+	{"AWS Access Key ID", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
+	{"Slack Token", regexp.MustCompile(`xox[baprs]-[0-9]+-[0-9]+`)},
+	{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
+	{"Stripe Test Key", regexp.MustCompile(`sk_test_[0-9a-zA-Z]{24,}`)},
+	{"JWT Token", regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`)},
+	{"General API Key", regexp.MustCompile(`(?i)(api[_-]?key|apikey)[=:]\s*[^\s]+`)},
+	{"Password", regexp.MustCompile(`(?i)(password|passwd|pwd)[=:]\s*[^\s]+`)},
+	{"Secret", regexp.MustCompile(`(?i)(secret|token)[=:]\s*[^\s]+`)},
+	{"Private Key", regexp.MustCompile(`-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----`)},
+	{"SSH Key", regexp.MustCompile(`-----BEGIN\s+OPENSSH\s+KEY-----`)},
+	{"Bearer Token", regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_-]{20,}`)},
+	{"Database Connection", regexp.MustCompile(`(?i)(mysql|postgres|mongodb|redis)://[^\s]+`)},
+}
+
+func init() {
+	// Validate that all regex patterns compile successfully at init time
+	for _, p := range sensitivePatterns {
+		if p.pattern == nil {
+			panic("failed to compile sensitive pattern: " + p.name)
+		}
+	}
+}
+
 // isSensitiveContent checks if content contains sensitive data patterns
 func isSensitiveContent(content string) (bool, string) {
-	// Patterns for sensitive data (order matters - more specific first)
-	patterns := []struct {
-		name    string
-		pattern *regexp.Regexp
-	}{
-		{"OpenAI API Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
-		{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
-		{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
-		{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
-		{"AWS Access Key ID", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
-		// AWS Secret Access Keys are 40-char Base64 strings — too broad to detect reliably
-		// without context. The Access Key ID above is the actionable identifier.
-		{"Slack Token", regexp.MustCompile(`xox[baprs]-[0-9]+-[0-9]+`)},
-		{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
-		{"Stripe Test Key", regexp.MustCompile(`sk_test_[0-9a-zA-Z]{24,}`)},
-		{"JWT Token", regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`)},
-		{"General API Key", regexp.MustCompile(`(?i)(api[_-]?key|apikey)[=:]\s*[^\s]+`)},
-		{"Password", regexp.MustCompile(`(?i)(password|passwd|pwd)[=:]\s*[^\s]+`)},
-		{"Secret", regexp.MustCompile(`(?i)(secret|token)[=:]\s*[^\s]+`)},
-		{"Private Key", regexp.MustCompile(`-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----`)},
-		{"SSH Key", regexp.MustCompile(`-----BEGIN\s+OPENSSH\s+KEY-----`)},
-		{"Bearer Token", regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_-]{20,}`)},
-		{"Database Connection", regexp.MustCompile(`(?i)(mysql|postgres|mongodb|redis)://[^\s]+`)},
-	}
-
-	for _, p := range patterns {
+	for _, p := range sensitivePatterns {
 		if p.pattern.MatchString(content) {
 			return true, p.name
 		}
@@ -607,11 +564,11 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		}
 
 		mem := &Memory{
-			ID:     id,
-			Content:   content,
-			Created:   createdAt,
+			ID:         id,
+			Content:    content,
+			Created:    createdAt,
 			Collection: coll,
-			Metadata: make(map[string]interface{}),
+			Metadata:   make(map[string]interface{}),
 		}
 
 		// Parse session_id
@@ -700,12 +657,13 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 			return nil, nil
 		}
 	}
-	
+
 	var mem Memory
 	var tagsJSON, metadataJSON []byte
 	var embedding []byte
-	var createdAt, sessionID string
-	
+	var createdAt string
+	var sessionID sql.NullString
+
 	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL", id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -713,10 +671,12 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 		}
 		return nil, err
 	}
-	
-	mem.SessionID = sessionID
+
+	if sessionID.Valid {
+		mem.SessionID = sessionID.String
+	}
 	mem.Created = createdAt
-	
+
 	if len(tagsJSON) > 0 {
 		json.Unmarshal(tagsJSON, &mem.Tags)
 	}
@@ -726,7 +686,7 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	if len(embedding) > 0 {
 		json.Unmarshal(embedding, &mem.Embedding)
 	}
-	
+
 	return &mem, nil
 }
 
@@ -791,7 +751,7 @@ func (s *MemoryStore) appendToMirror(mem *Memory) error {
 		return err
 	}
 	defer f.Close()
-	
+
 	data, _ := json.Marshal(mem)
 	_, err = f.WriteString(string(data) + "\n")
 	return err
@@ -804,7 +764,7 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 		return err
 	}
 	defer f.Close()
-	
+
 	logEntry := map[string]interface{}{
 		"timestamp":       time.Now().UTC().Format(time.RFC3339),
 		"reason":          reason,
@@ -812,7 +772,7 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 		"action":          "blocked",
 		"type":            attemptType,
 	}
-	
+
 	data, _ := json.Marshal(logEntry)
 	_, err = f.WriteString(string(data) + "\n")
 	return err
@@ -824,14 +784,14 @@ func (s *MemoryStore) Stats() map[string]interface{} {
 	if s.DB != nil {
 		healthy = true
 	}
-	
+
 	stats := map[string]interface{}{
-		"mirror_file":   s.MirrorFile,
-		"sqlite_db":     s.SQLiteDBPath,
-		"collections":   s.Collections,
-		"healthy":       healthy,
+		"mirror_file": s.MirrorFile,
+		"sqlite_db":   s.SQLiteDBPath,
+		"collections": s.Collections,
+		"healthy":     healthy,
 	}
-	
+
 	// Count mirror entries
 	if data, err := os.ReadFile(s.MirrorFile); err == nil {
 		lines := splitLines(string(data))
@@ -843,7 +803,7 @@ func (s *MemoryStore) Stats() map[string]interface{} {
 		}
 		stats["mirror_entries"] = count
 	}
-	
+
 	return stats
 }
 
@@ -894,16 +854,16 @@ func (s *MemoryStore) ExportMirror(path string) (string, error) {
 	if path == "" {
 		path = fmt.Sprintf("symai_memories_%s.jsonl", time.Now().Format("20060102"))
 	}
-	
+
 	data, err := os.ReadFile(s.MirrorFile)
 	if err != nil {
 		return "", err
 	}
-	
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return "", err
 	}
-	
+
 	return path, nil
 }
 
@@ -936,11 +896,480 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 		if len(embeddingJSON) > 0 {
 			json.Unmarshal(embeddingJSON, &mem.Embedding)
 		}
-		mem.Metadata["_score"] = scoreFunc(content, query)
-		mem.Metadata["_search_type"] = "text"
 		memories = append(memories, mem)
 	}
+
 	return memories, rows.Err()
+}
+
+// =============================================================================
+// Self-Improving Memory System
+// Features: decay, auto-prune, consolidation, spaced reinforcement
+// =============================================================================
+
+// DecayWeights reduces weight of memories that haven't been reinforced recently.
+// Memories decay by decayPercent per intervalDays. LTM memories (weight >= 10) are preserved.
+func (s *MemoryStore) DecayWeights(decayPercent float64, intervalDays int) (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	if decayPercent <= 0 || decayPercent >= 100 {
+		decayPercent = 1.0 // 1% default
+	}
+	if intervalDays <= 0 {
+		intervalDays = 7 // weekly default
+	}
+
+	// Decay formula: new_weight = old_weight * (1 - decayPercent/100)
+	// Only decay if: reinforcement_count = 0 AND not LTM AND last_accessed > intervalDays ago
+	result, err := s.DB.Exec(`
+		UPDATE memories
+		SET weight = MAX(1, CAST(weight * (1 - ? / 100.0) AS INTEGER))
+		WHERE deleted_at IS NULL
+		  AND is_long_term = 0
+		  AND weight > 1
+		  AND reinforcement_count = 0
+		  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+	`, decayPercent, intervalDays)
+	if err != nil {
+		return 0, fmt.Errorf("weight decay failed: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return int(rows), nil
+}
+
+// AutoPruneConfig holds auto-pruning policy settings
+type AutoPruneConfig struct {
+	NeverAccessedMaxDays int  // Prune memories never accessed after N days (0=disabled)
+	LowWeightMaxDays     int  // Prune weight=1 memories after N days (0=disabled)
+	ExpiredEnabled       bool // Prune expired memories
+	DryRun               bool // Don't actually delete
+}
+
+// AutoPrunePolicy applies the configured pruning policy.
+// Returns number of memories pruned and any error.
+func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	totalPruned := 0
+
+	// Prune expired
+	if cfg.ExpiredEnabled {
+		result, err := s.DB.Exec(`
+			DELETE FROM memories
+			WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+		`)
+		if err == nil {
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				totalPruned += int(rows)
+			}
+		}
+	}
+
+	// Prune never accessed older than threshold
+	if cfg.NeverAccessedMaxDays > 0 {
+		result, err := s.DB.Exec(`
+			DELETE FROM memories
+			WHERE deleted_at IS NULL
+			  AND last_accessed_at IS NULL
+			  AND reinforcement_count = 0
+			  AND is_long_term = 0
+			  AND created_at < datetime('now', '-' || ? || ' days')
+		`, cfg.NeverAccessedMaxDays)
+		if err == nil {
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				totalPruned += int(rows)
+			}
+		}
+	}
+
+	// Prune low weight (weight=1) older than threshold
+	if cfg.LowWeightMaxDays > 0 {
+		result, err := s.DB.Exec(`
+			DELETE FROM memories
+			WHERE deleted_at IS NULL
+			  AND weight = 1
+			  AND reinforcement_count = 0
+			  AND is_long_term = 0
+			  AND created_at < datetime('now', '-' || ? || ' days')
+		`, cfg.LowWeightMaxDays)
+		if err == nil {
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				totalPruned += int(rows)
+			}
+		}
+	}
+
+	return totalPruned, nil
+}
+
+// ConsolidateMemories merges similar memories about the same topic.
+// Uses hash-based similarity to find near-duplicates and merges them.
+// Returns number of memories consolidated.
+func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTopic int) (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	if similarityThreshold <= 0 {
+		similarityThreshold = 0.85
+	}
+
+	// Get all LTM and reinforced memories grouped by tag
+	rows, err := s.DB.Query(`
+		SELECT id, collection, content, tags, embedding, created_at, weight, reinforcement_count
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (is_long_term = 1 OR reinforcement_count > 0 OR weight > 1)
+		ORDER BY collection, created_at DESC
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type memKey struct {
+		id         string
+		collection string
+		content    string
+		tags       string
+		embedding  []float32
+		createdAt  string
+		weight     int
+		reinforce  int
+	}
+
+	var memories []memKey
+	for rows.Next() {
+		var m memKey
+		var tags string
+		var embeddingJSON []byte
+		if rows.Scan(&m.id, &m.collection, &m.content, &tags, &embeddingJSON, &m.createdAt, &m.weight, &m.reinforce) == nil {
+			if len(embeddingJSON) > 0 {
+				json.Unmarshal(embeddingJSON, &m.embedding)
+			}
+			m.tags = tags
+			memories = append(memories, m)
+		}
+	}
+
+	// Find clusters of similar memories (simplified: same tags or similar content)
+	consolidated := 0
+	seen := make(map[string]bool)
+
+	for i, mem := range memories {
+		if seen[mem.id] {
+			continue
+		}
+
+		cluster := []string{mem.id}
+		clusterMem := []memKey{mem}
+
+		// Find similar memories
+		for j := i + 1; j < len(memories); j++ {
+			if seen[memories[j].id] {
+				continue
+			}
+			// Same collection/tags suggests similar topic
+			if memories[j].collection == mem.collection || memories[j].tags == mem.tags {
+				// Check content similarity via embedding
+				if len(mem.embedding) > 0 && len(memories[j].embedding) > 0 {
+					sim := cosineSimilarityFloat32(mem.embedding, memories[j].embedding)
+					if sim > float32(similarityThreshold) {
+						cluster = append(cluster, memories[j].id)
+						clusterMem = append(clusterMem, memories[j])
+						seen[memories[j].id] = true
+					}
+				}
+			}
+		}
+
+		// If cluster too large, merge the oldest into newest
+		if len(cluster) > maxPerTopic && maxPerTopic > 0 {
+			// Keep the newest (highest weight/reinforce), soft-delete the rest
+			bestIdx := 0
+			bestScore := clusterMem[0].weight*10 + clusterMem[0].reinforce
+			for k := 1; k < len(clusterMem); k++ {
+				score := clusterMem[k].weight*10 + clusterMem[k].reinforce
+				if score > bestScore {
+					bestScore = score
+					bestIdx = k
+				}
+			}
+
+			// Delete all except the best
+			for k := 0; k < len(cluster); k++ {
+				if k != bestIdx {
+					s.DB.Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, cluster[k])
+					consolidated++
+				}
+			}
+			seen[cluster[bestIdx]] = true
+		}
+	}
+
+	return consolidated, nil
+}
+
+// cosineSimilarityFloat32 computes cosine similarity between two vectors
+func cosineSimilarityFloat32(a, b []float32) float32 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	var dotProduct, normA, normB float32
+	for i := 0; i < len(a) && i < len(b); i++ {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
+}
+
+// SpacedReinforcementReview returns memories that should be reviewed for reinforcement.
+// These are memories that are LTM or high-weight but haven't been accessed recently.
+func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) ([]*Memory, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, err
+		}
+	}
+
+	if daysSinceAccess <= 0 {
+		daysSinceAccess = 14 // 2 weeks default
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	query := `
+		SELECT id, collection, content, session_id, tags, metadata, embedding, created_at,
+		       COALESCE(reinforcement_count, 0) as reinforcement_count,
+		       COALESCE(weight, 1) as weight,
+		       last_accessed_at
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (is_long_term = 1 OR weight >= 5)
+		  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+		ORDER BY last_accessed_at ASC NULLS FIRST,
+		        reinforcement_count ASC
+		LIMIT ?
+	`
+
+	rows, err := s.DB.Query(query, daysSinceAccess, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []*Memory
+	for rows.Next() {
+		var mem Memory
+		var tagsJSON, metadataJSON []byte
+		var embedding []byte
+		var createdAt, lastAccessed string
+		var sessionID sql.NullString
+
+		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
+			&tagsJSON, &metadataJSON, &embedding, &createdAt,
+			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
+		if err != nil {
+			continue
+		}
+
+		if sessionID.Valid {
+			mem.SessionID = sessionID.String
+		}
+		mem.Created = createdAt
+		mem.LastAccessedAt = lastAccessed
+
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &mem.Tags)
+		}
+		if len(metadataJSON) > 0 {
+			json.Unmarshal(metadataJSON, &mem.Metadata)
+		}
+		if len(embedding) > 0 {
+			json.Unmarshal(embedding, &mem.Embedding)
+		}
+		memories = append(memories, &mem)
+	}
+
+	return memories, rows.Err()
+}
+
+// GetContextualMemories returns memories relevant to a given context (tags/keywords).
+// Useful when starting a new session to surface relevant LTM memories.
+func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext string, limit int) ([]*Memory, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, err
+		}
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	// Build query that prioritizes:
+	// 1. Memories matching context tags
+	// 2. LTM or reinforced memories
+	// 3. Recently accessed
+	query := `
+		SELECT id, collection, content, session_id, tags, metadata, embedding, created_at,
+		       COALESCE(reinforcement_count, 0) as reinforcement_count,
+		       COALESCE(weight, 1) as weight,
+		       last_accessed_at
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+	`
+
+	args := []interface{}{}
+
+	// Add tag-based relevance scoring
+	if len(contextTags) > 0 {
+		tagConditions := make([]string, 0)
+		for _, tag := range contextTags {
+			tagConditions = append(tagConditions, "tags LIKE ?")
+			args = append(args, "%"+tag+"%")
+		}
+		if len(tagConditions) > 0 {
+			query += " AND (" + strings.Join(tagConditions, " OR ") + ")"
+		}
+	}
+
+	// Session context (content similarity via LIKE)
+	if sessionContext != "" {
+		query += " OR content LIKE ?"
+		args = append(args, "%"+sessionContext+"%")
+	}
+
+	query += `
+		ORDER BY (COALESCE(reinforcement_count, 0) * 2) + (COALESCE(weight, 1) * 1.5) DESC,
+		         COALESCE(last_accessed_at, created_at) DESC
+		LIMIT ?
+	`
+	args = append(args, limit)
+
+	rows, err := s.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []*Memory
+	for rows.Next() {
+		var mem Memory
+		var tagsJSON, metadataJSON []byte
+		var embedding []byte
+		var createdAt, lastAccessed string
+		var sessionID sql.NullString
+
+		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
+			&tagsJSON, &metadataJSON, &embedding, &createdAt,
+			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
+		if err != nil {
+			continue
+		}
+
+		if sessionID.Valid {
+			mem.SessionID = sessionID.String
+		}
+		mem.Created = createdAt
+		mem.LastAccessedAt = lastAccessed
+
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &mem.Tags)
+		}
+		if len(metadataJSON) > 0 {
+			json.Unmarshal(metadataJSON, &mem.Metadata)
+		}
+		if len(embedding) > 0 {
+			json.Unmarshal(embedding, &mem.Embedding)
+		}
+		memories = append(memories, &mem)
+	}
+
+	return memories, rows.Err()
+}
+
+// MaintenanceStats holds statistics for self-improvement system
+type MaintenanceStats struct {
+	DecayedWeights int `json:"decayed_weights"`
+	PrunedTotal    int `json:"pruned_total"`
+	Consolidated   int `json:"consolidated"`
+	NeverAccessed  int `json:"never_accessed"`
+	LowWeight      int `json:"low_weight"`
+	ForReview      int `json:"for_spaced_reinforcement"`
+}
+
+// RunSelfMaintenance runs all self-improvement processes.
+// Returns maintenance statistics.
+func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
+	stats := &MaintenanceStats{}
+
+	// 1. Decay unused weights (1% per week)
+	decayed, err := s.DecayWeights(1.0, 7)
+	if err == nil {
+		stats.DecayedWeights = decayed
+	}
+
+	// 2. Auto-prune policy
+	pruned, err := s.AutoPrunePolicy(AutoPruneConfig{
+		NeverAccessedMaxDays: 30, // 30 days
+		LowWeightMaxDays:     90, // 90 days
+		ExpiredEnabled:       true,
+	})
+	if err == nil {
+		stats.PrunedTotal = pruned
+	}
+
+	// 3. Consolidate similar LTM memories
+	consolidated, err := s.ConsolidateMemories(0.85, 50)
+	if err == nil {
+		stats.Consolidated = consolidated
+	}
+
+	// 4. Get counts for review queue
+	forReview, err := s.SpacedReinforcementReview(14, 100)
+	if err == nil {
+		stats.ForReview = len(forReview)
+	}
+
+	// Get never-accessed count
+	if s.DB != nil {
+		var count int
+		s.DB.QueryRow(`
+			SELECT COUNT(*) FROM memories
+			WHERE deleted_at IS NULL
+			  AND last_accessed_at IS NULL
+			  AND reinforcement_count = 0
+		`).Scan(&count)
+		stats.NeverAccessed = count
+
+		var lowWeight int
+		s.DB.QueryRow(`
+			SELECT COUNT(*) FROM memories
+			WHERE deleted_at IS NULL
+			  AND weight = 1
+			  AND reinforcement_count = 0
+		`).Scan(&lowWeight)
+		stats.LowWeight = lowWeight
+	}
+
+	return stats, nil
 }
 
 // FullTextSearch performs substring search using FTS5 or SQLite LIKE.
@@ -978,7 +1407,7 @@ func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]
 	// Strategy 2: LIKE fallback — handles malformed FTS5 queries or no FTS5
 	searchPattern := "%" + query + "%"
 	likeQuery := `
-		SELECT id, collection, content, session_id, tags, metadata, embedding, created_at
+		SELECT id, collection, content, COALESCE(session_id, '') as session_id, COALESCE(tags, '[]') as tags, COALESCE(metadata, '{}') as metadata, COALESCE(embedding, '[]') as embedding, created_at
 		FROM memories
 		WHERE collection = ? AND (content LIKE ? OR tags LIKE ?)
 		ORDER BY created_at DESC
@@ -999,11 +1428,11 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 	if s.DB == nil {
 		return []*Memory{}, nil
 	}
-	
+
 	// Build parameterized WHERE clause from filters
 	var conditions []string
 	var args []interface{}
-	
+
 	for key, value := range filters {
 		switch v := value.(type) {
 		case string:
@@ -1039,36 +1468,37 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 			args = append(args, fmt.Sprintf("%v", v))
 		}
 	}
-	
+
 	// Build query
 	query := "SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL"
 	if collection != "" && collection != "memories_public" {
-		query += fmt.Sprintf(" AND collection = '%s'", collection) // collection is safe, not user input
+		query += " AND collection = ?"
+		args = append(args, collection)
 	}
 	for _, cond := range conditions {
 		query += " AND " + cond
 	}
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, n)
-	
+
 	rows, err := s.DB.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var memories []*Memory
 	for rows.Next() {
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
 		var createdAt, sessionID string
-		
+
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 		if err != nil {
 			continue
 		}
-		
+
 		mem.SessionID = sessionID
 		mem.Created = createdAt
 		if len(tagsJSON) > 0 {
@@ -1080,14 +1510,14 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 		if len(embedding) > 0 {
 			json.Unmarshal(embedding, &mem.Embedding)
 		}
-		
+
 		if mem.Metadata == nil {
 			mem.Metadata = make(map[string]interface{})
 		}
 		mem.Metadata["_search_type"] = "metadata"
 		memories = append(memories, &mem)
 	}
-	
+
 	return memories, nil
 }
 
@@ -1096,22 +1526,22 @@ func (s *MemoryStore) HybridSearch(query string, collection string, n int) ([]*M
 	if collection == "" {
 		collection = "memories_public"
 	}
-	
+
 	// Get vector results
 	vectorResults, err := s.QueryMemory(query, collection, n*2, nil)
 	if err != nil {
 		vectorResults = []*Memory{}
 	}
-	
+
 	// Get text results
 	textResults, err := s.FullTextSearch(query, collection, n*2)
 	if err != nil {
 		textResults = []*Memory{}
 	}
-	
+
 	// Merge with weighted scores
 	merged := make(map[string]*Memory)
-	
+
 	// Weight vector results (higher weight for semantic similarity)
 	for _, mem := range vectorResults {
 		if sim, ok := mem.Metadata["_similarity"].(float64); ok {
@@ -1120,7 +1550,7 @@ func (s *MemoryStore) HybridSearch(query string, collection string, n int) ([]*M
 			merged[mem.ID] = mem
 		}
 	}
-	
+
 	// Weight text results
 	for _, mem := range textResults {
 		if score, ok := mem.Metadata["_score"].(float64); ok {
@@ -1134,17 +1564,17 @@ func (s *MemoryStore) HybridSearch(query string, collection string, n int) ([]*M
 			}
 		}
 	}
-	
+
 	// Convert to slice and sort
 	results := make([]*Memory, 0, len(merged))
 	for _, mem := range merged {
 		results = append(results, mem)
 	}
-	
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Metadata["_score"].(float64) > results[j].Metadata["_score"].(float64)
 	})
-	
+
 	if len(results) > n {
 		return results[:n], nil
 	}
@@ -1160,21 +1590,21 @@ func (s *MemoryStore) ClearMirror() error {
 
 // Reference represents a single reference document
 type Reference struct {
-	ID        string            `json:"id"`
-	Title     string            `json:"title"`
-	FilePath  string            `json:"file_path"`
-	Content   string            `json:"content"`
-	Tags      []string          `json:"tags"`
-	Metadata  map[string]string `json:"metadata"`
-	Created   string            `json:"created"`
-	Version   int               `json:"version"`
+	ID       string            `json:"id"`
+	Title    string            `json:"title"`
+	FilePath string            `json:"file_path"`
+	Content  string            `json:"content"`
+	Tags     []string          `json:"tags"`
+	Metadata map[string]string `json:"metadata"`
+	Created  string            `json:"created"`
+	Version  int               `json:"version"`
 }
 
 // ReferenceStore manages reference documents
 // Uses SQLite for storage
 type ReferenceStore struct {
-	basePath  string
-	refs      []Reference // Legacy in-memory store
+	basePath   string
+	refs       []Reference // Legacy in-memory store
 	MetadataDB *ReferenceDB
 	RefDir     string
 }
@@ -1240,14 +1670,14 @@ func (s *ReferenceStore) Save() error {
 // Add adds a new reference to the store
 func (s *ReferenceStore) Add(title, filePath string, tags []string, content string) (*Reference, error) {
 	ref := Reference{
-		ID:        GenerateID(),
-		Title:     title,
-		FilePath:  filePath,
-		Content:   content,
-		Tags:      tags,
-		Metadata:  make(map[string]string),
-		Created:   time.Now().UTC().Format(time.RFC3339),
-		Version:   1,
+		ID:       GenerateID(),
+		Title:    title,
+		FilePath: filePath,
+		Content:  content,
+		Tags:     tags,
+		Metadata: make(map[string]string),
+		Created:  time.Now().UTC().Format(time.RFC3339),
+		Version:  1,
 	}
 
 	s.refs = append(s.refs, ref)
@@ -1614,7 +2044,7 @@ func (s *MemoryStore) DeleteAllMemories() (int, error) {
 // DedupResult holds the result of a dedup operation
 type DedupResult struct {
 	ExactDuplicates int `json:"exact_duplicates"`
-	NearDuplicates   int `json:"near_duplicates"`
+	NearDuplicates  int `json:"near_duplicates"`
 	TotalDeleted    int `json:"total_deleted"`
 }
 
@@ -1707,28 +2137,69 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 	}
 	rows2.Close()
 
-	// Compare each pair (O(n^2) but n should be manageable)
+	// Hash bucketing for near-duplicate detection: O(n²) → O(n*k) where k is avg bucket size
+	// Bucket by first 8 bytes of embedding (first hash prefix) - similar embeddings cluster
+	type bucket struct {
+		memory memWithEmbed
+		prev   *bucket
+	}
+	buckets := make(map[string]*bucket)
+
+	// First pass: build buckets
+	for idx := range memories {
+		mem := &memories[idx]
+		if len(mem.Embedding) == 0 {
+			continue
+		}
+		// Use first 8 bytes of embedding as bucket key
+		bucketKey := ""
+		for i := 0; i < 8 && i < len(mem.Embedding); i++ {
+			bucketKey += fmt.Sprintf("%02x", int(mem.Embedding[i]*255))
+		}
+		if bucketKey == "" {
+			continue
+		}
+		head := &bucket{memory: *mem}
+		if existing, ok := buckets[bucketKey]; ok {
+			head.prev = existing
+		}
+		buckets[bucketKey] = head
+	}
+
+	// Second pass: compare within same bucket (and adjacent buckets for boundary cases)
 	seenNearDupes := make(map[string]bool)
-	for i := 0; i < len(memories); i++ {
-		for j := i + 1; j < len(memories); j++ {
-			if memories[i].Content == memories[j].Content {
-				continue // Already handled by exact dedup
-			}
-			if seenNearDupes[memories[j].ID] {
+	for bucketKey, head := range buckets {
+		_ = bucketKey // silence unused warning
+		// Collect all memories in this bucket chain
+		var bucketMemories []*memWithEmbed
+		for b := head; b != nil; b = b.prev {
+			bucketMemories = append(bucketMemories, &b.memory)
+		}
+		// Only compare if bucket has > 1 memory (potential dupes)
+		if len(bucketMemories) < 2 {
+			continue
+		}
+		// Compare within bucket
+		for i := 0; i < len(bucketMemories); i++ {
+			if seenNearDupes[bucketMemories[i].ID] {
 				continue
 			}
-			if seenNearDupes[memories[i].ID] {
-				continue
-			}
-			sim := hashSimilarity(memories[i].Embedding, memories[j].Embedding)
-			if sim > 0.9 {
-				// Keep the older one (i), mark j for deletion
-				if memories[i].CreatedAt < memories[j].CreatedAt {
-					seenNearDupes[memories[j].ID] = true
-				} else {
-					seenNearDupes[memories[i].ID] = true
+			for j := i + 1; j < len(bucketMemories); j++ {
+				if seenNearDupes[bucketMemories[j].ID] {
+					continue
 				}
-				result.NearDuplicates++
+				if bucketMemories[i].Content == bucketMemories[j].Content {
+					continue
+				}
+				sim := hashSimilarity(bucketMemories[i].Embedding, bucketMemories[j].Embedding)
+				if sim > 0.9 {
+					if bucketMemories[i].CreatedAt < bucketMemories[j].CreatedAt {
+						seenNearDupes[bucketMemories[j].ID] = true
+					} else {
+						seenNearDupes[bucketMemories[i].ID] = true
+					}
+					result.NearDuplicates++
+				}
 			}
 		}
 	}
@@ -1880,13 +2351,13 @@ func (s *MemoryStore) BackfillSessionIDs(sessionsJSONPath string) (int, error) {
 
 // SessionSummary holds parsed session metadata from a .jsonl transcript
 type SessionSummary struct {
-	ID          string // from filename (without .jsonl)
-	StartedAt   string // RFC3339
-	EndedAt     string // RFC3339
+	ID           string // from filename (without .jsonl)
+	StartedAt    string // RFC3339
+	EndedAt      string // RFC3339
 	MessageCount int
-	Model       string
-	Content     string // Short summary text
-	SourcePath  string // Full path to .jsonl file
+	Model        string
+	Content      string // Short summary text
+	SourcePath   string // Full path to .jsonl file
 }
 
 // LoadSessionsFromDir scans a directory for .jsonl session transcript files,
@@ -1969,10 +2440,10 @@ func (s *MemoryStore) parseSessionFile(path string) (*SessionSummary, error) {
 		Timestamp string `json:"timestamp"`
 		Type      string `json:"type"`
 		Message   struct {
-			Role  string `json:"role"`
+			Role    string                   `json:"role"`
 			Content []map[string]interface{} `json:"content"`
 		} `json:"message"`
-		Model  string `json:"modelId"`
+		Model    string `json:"modelId"`
 		Provider string `json:"provider"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &first); err == nil {
@@ -1984,8 +2455,8 @@ func (s *MemoryStore) parseSessionFile(path string) (*SessionSummary, error) {
 	// Also check for model_change events
 	for _, line := range lines {
 		var ev struct {
-			Type    string `json:"type"`
-			ModelId string `json:"modelId"`
+			Type      string `json:"type"`
+			ModelId   string `json:"modelId"`
 			Timestamp string `json:"timestamp"`
 		}
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
@@ -2053,4 +2524,216 @@ func (s *MemoryStore) BackfillContentHash() (int, error) {
 	}
 	rows, _ := result.RowsAffected()
 	return int(rows), nil
+}
+
+// BackfillLTMFlags populates is_long_term and weight columns from JSON metadata
+// for memories that don't yet have these columns populated.
+// Idempotent — only updates rows where these fields are at default values.
+func (s *MemoryStore) BackfillLTMFlags() (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	result, err := s.DB.Exec(`
+		UPDATE memories
+		SET is_long_term = 1, weight = 10
+		WHERE weight = 1
+		  AND is_long_term = 0
+		  AND json_extract(metadata, '$.is_long_term') = 'true'
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("LTM flags backfill failed: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return int(rows), nil
+}
+
+// UpdateMemory updates an existing memory's content and metadata.
+// This allows agents to revise memories when they learn new information.
+func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, metadata map[string]interface{}) error {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	tagsJSON, _ := json.Marshal(tags)
+	metadataJSON, _ := json.Marshal(metadata)
+	embedding := HashEmbed(content)
+	embeddingJSON, _ := json.Marshal(embedding)
+	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+
+	_, err := s.DB.Exec(`
+		UPDATE memories
+		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+	return err
+}
+
+// ReinforceMemory increments the reinforcement count and updates importance.
+// Called when a memory proves useful/relevant.
+func (s *MemoryStore) ReinforceMemory(id string, delta int) error {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	if delta <= 0 {
+		delta = 1
+	}
+
+	_, err := s.DB.Exec(`
+		UPDATE memories
+		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100)
+		WHERE id = ?
+	`, delta, delta/2, id)
+	return err
+}
+
+// WeakenMemory decrements the reinforcement count.
+// Called when a memory proves irrelevant or wrong.
+func (s *MemoryStore) WeakenMemory(id string, delta int) error {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	if delta <= 0 {
+		delta = 1
+	}
+
+	_, err := s.DB.Exec(`
+		UPDATE memories
+		SET reinforcement_count = MAX(reinforcement_count - ?, 0)
+		WHERE id = ?
+	`, delta, id)
+	return err
+}
+
+// AccessMemory updates last_accessed_at timestamp.
+// Called whenever a memory is retrieved to track recency.
+func (s *MemoryStore) AccessMemory(id string) error {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	_, err := s.DB.Exec(`
+		UPDATE memories SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, id)
+	return err
+}
+
+// PruneExpired removes memories that have passed their expires_at time.
+// Returns the number of memories pruned.
+func (s *MemoryStore) PruneExpired() (int, error) {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return 0, fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	result, err := s.DB.Exec(`
+		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("prune expired failed: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return int(rows), nil
+}
+
+// SetMemoryTTL sets an expiration time on a memory.
+// Pass empty time to clear (make permanent).
+func (s *MemoryStore) SetMemoryTTL(id string, expiresAt time.Time) error {
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return fmt.Errorf("failed to init db: %w", err)
+		}
+	}
+
+	if expiresAt.IsZero() {
+		_, err := s.DB.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
+		return err
+	}
+
+	_, err := s.DB.Exec(`
+		UPDATE memories SET expires_at = ? WHERE id = ?
+	`, expiresAt.Format(time.RFC3339), id)
+	return err
+}
+
+// GetMemoriesByRelevance returns memories ordered by composite relevance score.
+// Score = (reinforcement_count * 2) + (weight * 1.5) + recency_bonus
+func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*Memory, error) {
+	memories := make([]*Memory, 0)
+
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return memories, nil
+		}
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	query := `
+		SELECT id, collection, content, session_id, tags, metadata, embedding, created_at,
+		       COALESCE(reinforcement_count, 0) as reinforcement_count,
+		       COALESCE(weight, 1) as weight
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+		  AND (? = '' OR collection = ?)
+		ORDER BY (COALESCE(reinforcement_count, 0) * 2) + (COALESCE(weight, 1) * 1.5) DESC,
+		         COALESCE(last_accessed_at, created_at) DESC
+		LIMIT ?
+	`
+
+	rows, err := s.DB.Query(query, collection, collection, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var mem Memory
+		var tagsJSON, metadataJSON []byte
+		var embedding []byte
+		var createdAt string
+		var sessionID sql.NullString
+
+		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
+			&tagsJSON, &metadataJSON, &embedding, &createdAt,
+			&mem.ReinforcementCount, &mem.Weight)
+		if err != nil {
+			continue
+		}
+
+		if sessionID.Valid {
+			mem.SessionID = sessionID.String
+		}
+		mem.Created = createdAt
+
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &mem.Tags)
+		}
+		if len(metadataJSON) > 0 {
+			json.Unmarshal(metadataJSON, &mem.Metadata)
+		}
+		if len(embedding) > 0 {
+			json.Unmarshal(embedding, &mem.Embedding)
+		}
+		memories = append(memories, &mem)
+	}
+
+	return memories, rows.Err()
 }

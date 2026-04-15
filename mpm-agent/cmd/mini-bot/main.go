@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"mpm-agent/core"
 	_ "github.com/mattn/go-sqlite3"
+	"mpm-agent/core"
 )
 
 // ============================================================================
@@ -26,7 +25,7 @@ import (
 
 // Config from mpm_config.json (synth section)
 type Config struct {
-	Model        string `json:"model"`
+	Model       string `json:"model"`
 	APIKey      string `json:"api_key"`
 	BaseURL     string `json:"base_url"`
 	MaxTokens   int    `json:"max_tokens"`
@@ -139,8 +138,8 @@ func OpenDB() (*sql.DB, error) {
 
 // ToolCall represents a tool call from the LLM
 type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
 }
 
@@ -156,8 +155,8 @@ type LLMResponse struct {
 }
 
 type Choice struct {
-	Delta        Delta      `json:"delta"`
-	FinishReason string     `json:"finish_reason"`
+	Delta        Delta       `json:"delta"`
+	FinishReason string      `json:"finish_reason"`
 	Message      *LLMMessage `json:"message,omitempty"`
 }
 
@@ -194,9 +193,9 @@ func LLMCall(cfg *Config, messages []map[string]interface{}, tools []map[string]
 	}
 
 	payload := map[string]interface{}{
-		"model":    model,
+		"model":      model,
 		"max_tokens": maxTokens,
-		"messages": messages,
+		"messages":   messages,
 	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
@@ -420,7 +419,7 @@ var toolDefinitions = []map[string]interface{}{
 			"name":        "mpm_directive_list",
 			"description": "List all prime directives stored in MPM.",
 			"parameters": map[string]interface{}{
-				"type": "object",
+				"type":       "object",
 				"properties": map[string]interface{}{},
 			},
 		},
@@ -446,7 +445,7 @@ var toolDefinitions = []map[string]interface{}{
 			"name":        "mpm_mode_list",
 			"description": "List all available MPM modes.",
 			"parameters": map[string]interface{}{
-				"type": "object",
+				"type":       "object",
 				"properties": map[string]interface{}{},
 			},
 		},
@@ -457,7 +456,7 @@ var toolDefinitions = []map[string]interface{}{
 			"name":        "mpm_persona_list",
 			"description": "List all available MPM personas.",
 			"parameters": map[string]interface{}{
-				"type": "object",
+				"type":       "object",
 				"properties": map[string]interface{}{},
 			},
 		},
@@ -535,6 +534,163 @@ var toolDefinitions = []map[string]interface{}{
 			},
 		},
 	},
+	// MPM Memory Management
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_memory_add",
+			"description": "Add a new memory to MPM.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"content": map[string]interface{}{"type": "string", "description": "Memory content"},
+					"tags":    map[string]interface{}{"type": "string", "description": "Comma-separated tags"},
+				},
+				"required": []string{"content"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_memory_list",
+			"description": "List recent memories from MPM.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"limit": map[string]interface{}{"type": "integer", "description": "Max results (default 10)"},
+					"tag":   map[string]interface{}{"type": "string", "description": "Filter by tag"},
+					"ltm":   map[string]interface{}{"type": "boolean", "description": "Show only LTM memories"},
+				},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_stats",
+			"description": "Get MPM memory statistics.",
+			"parameters": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_maintain",
+			"description": "Run MPM self-maintenance (decay, consolidate, prune).",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"review": map[string]interface{}{"type": "boolean", "description": "Show LTM memories not accessed recently"},
+					"days":   map[string]interface{}{"type": "integer", "description": "Days since access for review (default 14)"},
+				},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_reinforce",
+			"description": "Reinforce a memory to increase its importance.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"memory_id": map[string]interface{}{"type": "string", "description": "Memory ID to reinforce"},
+					"delta":     map[string]interface{}{"type": "integer", "description": "Reinforcement delta (default 1)"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_weaken",
+			"description": "Weaken a memory to decrease its importance.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"memory_id": map[string]interface{}{"type": "string", "description": "Memory ID to weaken"},
+					"delta":     map[string]interface{}{"type": "integer", "description": "Weaken delta (default 1)"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_promote",
+			"description": "Promote a memory to long-term memory (LTM).",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"memory_id": map[string]interface{}{"type": "string", "description": "Memory ID to promote"},
+				},
+				"required": []string{"memory_id"},
+			},
+		},
+	},
+	// MPM Reference Management
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_reference_add",
+			"description": "Add a file as a reference document to MPM.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string", "description": "Path to the file to ingest"},
+					"tags":      map[string]interface{}{"type": "string", "description": "Comma-separated tags"},
+				},
+				"required": []string{"file_path"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_reference_list",
+			"description": "List all reference documents in MPM.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"limit": map[string]interface{}{"type": "integer", "description": "Max results (default 20)"},
+				},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_reference_show",
+			"description": "Show a reference document with its chunks.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"reference_id": map[string]interface{}{"type": "string", "description": "Reference ID to show"},
+				},
+				"required": []string{"reference_id"},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "mpm_reference_shred",
+			"description": "Delete a reference document from MPM.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"reference_id": map[string]interface{}{"type": "string", "description": "Reference ID to delete"},
+				},
+				"required": []string{"reference_id"},
+			},
+		},
+	},
 }
 
 // toolHandlers maps tool names to their handlers
@@ -548,13 +704,24 @@ var toolHandlers = map[string]ToolHandler{
 	"mpm_lesson_search":    handleMPMLessonSearch,
 	"mpm_directive_list":   handleMPMDirectiveList,
 	"mpm_reference_search": handleMPMReferenceSearch,
-	"mpm_mode_list":       handleMPMModeList,
-	"mpm_persona_list":    handleMPMPersonaList,
-	"mpm_lesson_add":      handleMPMLessonAdd,
-	"mpm_mode_set":        handleMPMModeSet,
-	"mpm_persona_set":     handleMPMPersonaSet,
-	"mpm_directive_add":   handleMPMDirectiveAdd,
-	"mpm_synthesize":      handleMPMSynthesize,
+	"mpm_mode_list":        handleMPMModeList,
+	"mpm_persona_list":     handleMPMPersonaList,
+	"mpm_lesson_add":       handleMPMLessonAdd,
+	"mpm_mode_set":         handleMPMModeSet,
+	"mpm_persona_set":      handleMPMPersonaSet,
+	"mpm_directive_add":    handleMPMDirectiveAdd,
+	"mpm_synthesize":       handleMPMSynthesize,
+	"mpm_memory_add":       handleMPMMemoryAdd,
+	"mpm_memory_list":      handleMPMMemoryList,
+	"mpm_stats":            handleMPMStats,
+	"mpm_maintain":         handleMPMMaintain,
+	"mpm_reinforce":        handleMPMReinforce,
+	"mpm_weaken":           handleMPMWeaken,
+	"mpm_promote":          handleMPMPromote,
+	"mpm_reference_add":    handleMPMReferenceAdd,
+	"mpm_reference_list":   handleMPMReferenceList,
+	"mpm_reference_show":   handleMPMReferenceShow,
+	"mpm_reference_shred":  handleMPMReferenceShred,
 }
 
 // ---- Filesystem Tools ----
@@ -596,7 +763,7 @@ func handleShell(args map[string]interface{}, db *sql.DB) (string, error) {
 	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
 	result := string(out)
 	if err != nil {
-		return truncate(result, 1000) + "\n[exit error: "+err.Error()+"]", nil
+		return truncate(result, 1000) + "\n[exit error: " + err.Error() + "]", nil
 	}
 	return truncate(result, 1000), nil
 }
@@ -739,17 +906,30 @@ func handleMPMReferenceSearch(args map[string]interface{}, db *sql.DB) (string, 
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
+	// Try FTS5 search on reference_chunks
 	rows, err := db.Query(`
 		SELECT r.title, rc.content
 		FROM reference_chunks rc
-		JOIN reference_docs r ON rc.doc_id = r.id
+		JOIN "references" r ON rc.doc_id = r.id
 		JOIN reference_chunks_fts fts ON rc.rowid = fts.rowid
 		WHERE reference_chunks_fts MATCH ?
 		ORDER BY rank
 		LIMIT ?
 	`, query, limit)
 	if err != nil {
-		return "", fmt.Errorf("reference search: %w", err)
+		// Fallback to LIKE search
+		like := "%" + query + "%"
+		rows, err = db.Query(`
+			SELECT r.title, rc.content
+			FROM reference_chunks rc
+			JOIN "references" r ON rc.doc_id = r.id
+			WHERE rc.content LIKE ?
+			ORDER BY rc.chunk_index
+			LIMIT ?
+		`, like, limit)
+		if err != nil {
+			return "", fmt.Errorf("reference search: %w", err)
+		}
 	}
 	defer rows.Close()
 	var results []string
@@ -876,10 +1056,230 @@ func handleMPMSynthesize(args map[string]interface{}, db *sql.DB) (string, error
 	return fmt.Sprintf("Synthesis triggered for session %s. Run 'mpm synthesize %s' to execute.", uuid[:8], uuid), nil
 }
 
+// ---- MPM Memory Management Tools ----
+
+// runMPMCommand runs an MPM CLI command and returns the output
+func runMPMCommand(args ...string) (string, error) {
+	mpmBin := os.Getenv("MPM_BINARY")
+	if mpmBin == "" {
+		mpmBin = resolvePath("bin/mpm", "bin/mpm")
+		if _, err := os.Stat(mpmBin); err != nil {
+			// Try system PATH
+			out, err := exec.Command("which", "mpm").CombinedOutput()
+			if err == nil {
+				mpmBin = strings.TrimSpace(string(out))
+			}
+		}
+	}
+
+	cmd := exec.Command(mpmBin, args...)
+	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+os.Getenv("MPM_WORKSPACE"))
+	out, err := cmd.CombinedOutput()
+	result := string(out)
+	if err != nil {
+		return result, fmt.Errorf("mpm command failed: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMMemoryAdd(args map[string]interface{}, db *sql.DB) (string, error) {
+	content, _ := args["content"].(string)
+	if content == "" {
+		return "", fmt.Errorf("mpm_memory_add: content is required")
+	}
+	tags, _ := args["tags"].(string)
+
+	var cmdArgs []string
+	cmdArgs = append(cmdArgs, "add", content)
+	if tags != "" {
+		cmdArgs = append(cmdArgs, "--tag", tags)
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return result, err
+	}
+	return "Memory added: " + content[:min(50, len(content))], nil
+}
+
+func handleMPMMemoryList(args map[string]interface{}, db *sql.DB) (string, error) {
+	limit := 10
+	if l, ok := args["limit"].(float64); ok {
+		limit = int(l)
+	}
+	tag, _ := args["tag"].(string)
+	_, ltm := args["ltm"].(bool)
+
+	cmdArgs := []string{"ls", "--limit", fmt.Sprintf("%d", limit)}
+	if tag != "" {
+		cmdArgs = append(cmdArgs, "--tag", tag)
+	}
+	if ltm {
+		cmdArgs = append(cmdArgs, "--ltm")
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return "", fmt.Errorf("mpm_memory_list: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMStats(args map[string]interface{}, db *sql.DB) (string, error) {
+	result, err := runMPMCommand("stats")
+	if err != nil {
+		return "", fmt.Errorf("mpm_stats: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMMaintain(args map[string]interface{}, db *sql.DB) (string, error) {
+	review, _ := args["review"].(bool)
+	days := 14
+	if d, ok := args["days"].(float64); ok {
+		days = int(d)
+	}
+
+	cmdArgs := []string{"maintain"}
+	if review {
+		cmdArgs = append(cmdArgs, "--review")
+		cmdArgs = append(cmdArgs, "--days", fmt.Sprintf("%d", days))
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return "", fmt.Errorf("mpm_maintain: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMReinforce(args map[string]interface{}, db *sql.DB) (string, error) {
+	memoryID, _ := args["memory_id"].(string)
+	if memoryID == "" {
+		return "", fmt.Errorf("mpm_reinforce: memory_id is required")
+	}
+	delta := 1
+	if d, ok := args["delta"].(float64); ok {
+		delta = int(d)
+	}
+
+	cmdArgs := []string{"reinforce", memoryID}
+	if delta != 1 {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("%d", delta))
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return "", fmt.Errorf("mpm_reinforce: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMWeaken(args map[string]interface{}, db *sql.DB) (string, error) {
+	memoryID, _ := args["memory_id"].(string)
+	if memoryID == "" {
+		return "", fmt.Errorf("mpm_weaken: memory_id is required")
+	}
+	delta := 1
+	if d, ok := args["delta"].(float64); ok {
+		delta = int(d)
+	}
+
+	cmdArgs := []string{"weaken", memoryID}
+	if delta != 1 {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("%d", delta))
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return "", fmt.Errorf("mpm_weaken: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMPromote(args map[string]interface{}, db *sql.DB) (string, error) {
+	memoryID, _ := args["memory_id"].(string)
+	if memoryID == "" {
+		return "", fmt.Errorf("mpm_promote: memory_id is required")
+	}
+
+	result, err := runMPMCommand("promote", memoryID)
+	if err != nil {
+		return "", fmt.Errorf("mpm_promote: %w", err)
+	}
+	return result, nil
+}
+
+// ---- MPM Reference Management Tools ----
+
+func handleMPMReferenceAdd(args map[string]interface{}, db *sql.DB) (string, error) {
+	filePath, _ := args["file_path"].(string)
+	if filePath == "" {
+		return "", fmt.Errorf("mpm_reference_add: file_path is required")
+	}
+	tags, _ := args["tags"].(string)
+
+	cmdArgs := []string{"reference", "add", filePath}
+	if tags != "" {
+		cmdArgs = append(cmdArgs, "--tag", tags)
+	}
+
+	result, err := runMPMCommand(cmdArgs...)
+	if err != nil {
+		return "", fmt.Errorf("mpm_reference_add: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMReferenceList(args map[string]interface{}, db *sql.DB) (string, error) {
+	_ = 20
+	if l, ok := args["limit"].(float64); ok {
+		_ = int(l)
+	}
+
+	result, err := runMPMCommand("reference", "ls")
+	if err != nil {
+		return "", fmt.Errorf("mpm_reference_list: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMReferenceShow(args map[string]interface{}, db *sql.DB) (string, error) {
+	refID, _ := args["reference_id"].(string)
+	if refID == "" {
+		return "", fmt.Errorf("mpm_reference_show: reference_id is required")
+	}
+
+	result, err := runMPMCommand("reference", "show", refID)
+	if err != nil {
+		return "", fmt.Errorf("mpm_reference_show: %w", err)
+	}
+	return result, nil
+}
+
+func handleMPMReferenceShred(args map[string]interface{}, db *sql.DB) (string, error) {
+	refID, _ := args["reference_id"].(string)
+	if refID == "" {
+		return "", fmt.Errorf("mpm_reference_shred: reference_id is required")
+	}
+
+	result, err := runMPMCommand("reference", "shred", refID)
+	if err != nil {
+		return "", fmt.Errorf("mpm_reference_shred: %w", err)
+	}
+	return result, nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func generateID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+	return core.GenerateID()
 }
 
 // truncate shortens s to maxLen, preserving start and end
@@ -902,14 +1302,22 @@ func truncate(s string, maxLen int) string {
 func buildSystemPrompt(memories, directives, references string) string {
 	var sb strings.Builder
 	sb.WriteString("You are mini-bot — MPM's companion AI agent. ")
-	sb.WriteString("You have access to tools listed below. Use them to help the user.\n\n")
+	sb.WriteString("You help users manage memories, learn from interactions, and access reference materials.\n\n")
+	sb.WriteString("## Memory Importance System\n")
+	sb.WriteString("MPM tracks memory importance through reinforcement — memories that prove useful get stronger.\n")
+	sb.WriteString("- After helping with something important, use mpm_reinforce to strengthen that memory\n")
+	sb.WriteString("- If you notice a memory was wrong or unhelpful, use mpm_weaken to weaken it\n")
+	sb.WriteString("- Memories not accessed for a while decay — use mpm_promote to make important ones permanent (LTM)\n")
+	sb.WriteString("- Run mpm_maintain --review to surface memories that need reinforcement attention\n\n")
 	sb.WriteString("## Tools\n")
 	for _, t := range toolDefinitions {
 		fn := t["function"].(map[string]interface{})
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", fn["name"], fn["description"]))
 	}
 	sb.WriteString("\n## Guidelines\n")
-	sb.WriteString("- Use tools when they help answer the user's question\n")
+	sb.WriteString("- Proactively suggest reinforcing important memories after successful help\n")
+	sb.WriteString("- Use mpm_stats to show memory health when relevant\n")
+	sb.WriteString("- When user asks about past topics, search memories first, then suggest reinforcement if useful\n")
 	sb.WriteString("- Be concise and practical\n")
 	sb.WriteString("- When using shell, explain what you're doing briefly\n")
 	sb.WriteString("- Format file paths and code in code blocks\n\n")
@@ -992,7 +1400,7 @@ func retrieveReferences(db *sql.DB, query string, limit int) string {
 	}
 	rows, err := db.Query(`
 		SELECT r.title, rc.content FROM reference_chunks rc
-		JOIN reference_docs r ON rc.doc_id = r.id
+		JOIN "references" r ON rc.doc_id = r.id
 		JOIN reference_chunks_fts fts ON rc.rowid = fts.rowid
 		WHERE reference_chunks_fts MATCH ?
 		ORDER BY rank LIMIT ?
@@ -1129,7 +1537,7 @@ func main() {
 	}
 
 	binaryDir := core.GetBinaryDir()
-	identity, _ := core.LoadIdentity(binaryDir)
+	identity, _ := core.LoadIdentity(filepath.Join(binaryDir, "IDENTITY.md"))
 	identityName, identityVersion := "unknown", "unknown"
 	if identity != nil {
 		identityName = identity.Name
@@ -1181,15 +1589,25 @@ Modes:
   No query  REPL mode — type queries interactively
   With query Single-shot mode — streaming response
 
-Tools available:
+MPM Memory tools:
+  mpm_memory_add, mpm_memory_list, mpm_memory_search
+  mpm_reinforce, mpm_weaken, mpm_promote
+  mpm_stats, mpm_maintain
+
+MPM Reference tools:
+  mpm_reference_add, mpm_reference_list, mpm_reference_show
+  mpm_reference_search, mpm_reference_shred
+
+Other tools:
   read_file, write_file, shell, web_search, web_fetch
-  mpm_memory_search, mpm_lesson_search, mpm_directive_list
-  mpm_reference_search, mpm_mode_list, mpm_persona_list
-  mpm_lesson_add, mpm_mode_set, mpm_persona_set
-  mpm_directive_add, mpm_synthesize
+  mpm_lesson_add, mpm_lesson_search
+  mpm_mode_list, mpm_mode_set
+  mpm_persona_list, mpm_persona_set
+  mpm_directive_add, mpm_directive_list, mpm_synthesize
 
 Environment:
   MINIMAX_API_KEY   API key (or set in mpm_config.json)
   MPM_WORKSPACE     MPM workspace path
+  MPM_BINARY        Path to mpm binary (default: bin/mpm in workspace)
 `)
 }

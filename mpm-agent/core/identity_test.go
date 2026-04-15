@@ -17,7 +17,7 @@ Core traits: precise, analytical`
 		t.Fatal(err)
 	}
 
-	id, err := LoadIdentity(dir)
+	id, err := LoadIdentity(filepath.Join(dir, "IDENTITY.md"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +55,7 @@ Boundaries: no personal advice`
 		t.Fatal(err)
 	}
 
-	id, err := LoadIdentity(dir)
+	id, err := LoadIdentity(filepath.Join(dir, "IDENTITY.md"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,11 +90,9 @@ Boundaries: no personal advice`
 }
 
 func TestLoadIdentityFileNotFound(t *testing.T) {
-	// Non-existent directory should return error
-	dir := "/nonexistent/path/identity"
-	_, err := LoadIdentity(dir)
+	_, err := LoadIdentity("/nonexistent/path/IDENTITY.md")
 	if err == nil {
-		t.Error("expected error for non-existent directory")
+		t.Error("expected error for non-existent file")
 	}
 }
 
