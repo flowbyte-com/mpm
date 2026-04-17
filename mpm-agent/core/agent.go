@@ -577,6 +577,15 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 		return "", nil, APIUsage{}, fmt.Errorf("read response: %w", err)
 	}
 
+	// Detect HTML error pages (OpenRouter returns HTML on rate limit / bad requests)
+	if len(respBody) > 0 && (respBody[0] == '<' || strings.HasPrefix(string(respBody), "<!DOCTYPE")) {
+		truncated := string(respBody)
+		if len(truncated) > 500 {
+			truncated = truncated[:500] + "..."
+		}
+		return "", nil, APIUsage{}, fmt.Errorf("API returned HTML (not JSON): %s", truncated)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[agent] API error response: %s", string(respBody))
 		return "", nil, APIUsage{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
