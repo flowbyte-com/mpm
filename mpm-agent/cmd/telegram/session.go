@@ -12,7 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const maxHistoryMessages = 50
+const maxHistoryMessages = 10
 
 // SessionManager maps a Telegram chat ID to its conversation message history.
 // History is persisted to the MPM SQLite database.

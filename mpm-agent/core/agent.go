@@ -21,7 +21,7 @@ import (
 // ============================================================================
 
 const (
-	maxHistoryMessages = 50
+	maxHistoryMessages = 10
 	maxIterations      = 10
 )
 
