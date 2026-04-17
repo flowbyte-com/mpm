@@ -147,7 +147,7 @@ func retrieveDirectives(db *sql.DB) []string {
 	rows, err := db.Query(`
 		SELECT content FROM memories
 		WHERE metadata LIKE '%is_prime_directive%' AND deleted_at IS NULL
-		ORDER BY created_at DESC LIMIT 20
+		ORDER BY created_at DESC LIMIT 5
 	`)
 	if err != nil {
 		return nil
