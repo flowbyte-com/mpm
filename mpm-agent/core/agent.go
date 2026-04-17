@@ -267,13 +267,13 @@ func summarize(toolName string, result string, err error) string {
 // toolkitMap maps toolkit names to tool names (from config).
 func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, frontCortex string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, error) {
 	// Get anchors as high-priority context
-	anchors, _ := GetRecentAnchors(db, 10)
-	lessons, _ := GetRecentLessons(db, 3)
+	anchors, _ := GetRecentAnchors(db, 5)
+	lessons, _ := GetRecentLessons(db, 2)
 
 	// Build context arrays
-	memories := retrieveMemories(db, query, 5)
+	memories := retrieveMemories(db, query, 3)
 	directives := retrieveDirectives(db)
-	references := retrieveReferences(db, query, 3)
+	references := retrieveReferences(db, query, 2)
 
 	// Build system prompt with identity-first approach
 	systemPrompt := BuildSystemPromptWithIdentity(identityPath, "", "", frontCortex,
