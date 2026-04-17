@@ -562,7 +562,7 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 		return "", nil, APIUsage{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", cfg.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 
 	client := &http.Client{Transport: &http.Transport{}}
 
