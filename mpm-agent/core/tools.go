@@ -1192,129 +1192,89 @@ func unescapeHTML(s string) string {
 func init() {
 	RegisterTool("read_file", ToolDefinition{
 		Name:        "read_file",
-		Description: "Read the full contents of a file within the mpm-agent directory.",
+		Description: "Read a file.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "Relative or absolute path to the file",
-				},
+				"path": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"path"},
 		},
 	})
 	RegisterTool("write_file", ToolDefinition{
 		Name:        "write_file",
-		Description: "Write content to a file within the mpm-agent directory. Creates or overwrites.",
+		Description: "Write to a file.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "Relative or absolute path to the file",
-				},
-				"content": map[string]interface{}{
-					"type":        "string",
-					"description": "The content to write",
-				},
+				"path":    map[string]interface{}{"type": "string"},
+				"content": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"path", "content"},
 		},
 	})
 	RegisterTool("ReadFileSemantic", ToolDefinition{
 		Name:        "ReadFileSemantic",
-		Description: "Read a file with semantic understanding. Modes: summary (structure overview), code (function/type lines), compare (diff two files).",
+		Description: "Read file with semantic modes: summary, code, compare.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the file",
-				},
-				"mode": map[string]interface{}{
-					"type":        "string",
-					"description": "Mode: summary, code, compare",
-				},
+				"path": map[string]interface{}{"type": "string"},
+				"mode": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"path"},
 		},
 	})
 	RegisterTool("ReadFileCompare", ToolDefinition{
 		Name:        "ReadFileCompare",
-		Description: "Compare two files and show a diff-like output with line-level changes.",
+		Description: "Compare two files.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"pathA": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the first file",
-				},
-				"pathB": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the second file",
-				},
+				"pathA": map[string]interface{}{"type": "string"},
+				"pathB": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"pathA", "pathB"},
 		},
 	})
 	RegisterTool("WebSynthesize", ToolDefinition{
 		Name:        "WebSynthesize",
-		Description: "Search the web using DuckDuckGo and produce a synthesized answer with citations.",
+		Description: "Web search with synthesis.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query": map[string]interface{}{
-					"type":        "string",
-					"description": "The search query",
-				},
+				"query": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"query"},
 		},
 	})
 	RegisterTool("jq", ToolDefinition{
 		Name:        "jq",
-		Description: "Execute a jq filter on a JSON file. Only *.json and *.jsonl files within mpm-agent are allowed.",
+		Description: "Filter JSON with jq.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"filter": map[string]interface{}{
-					"type":        "string",
-					"description": "The jq filter expression (e.g., '.name' or '.[]|.id')",
-				},
-				"file": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the JSON file (*.json or *.jsonl)",
-				},
+				"filter": map[string]interface{}{"type": "string"},
+				"file":   map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"filter", "file"},
 		},
 	})
 	RegisterTool("update_identity_knowledge", ToolDefinition{
 		Name:        "update_identity_knowledge",
-		Description: "Record a fact about the user (name, project, preferences) so the bot remembers across sessions.",
+		Description: "Record user identity facts.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"key": map[string]interface{}{
-					"type":        "string",
-					"description": "Identity key: user_name, current_project, active_work, preferences, or constraints",
-				},
-				"value": map[string]interface{}{
-					"type":        "string",
-					"description": "The fact to record",
-				},
-				"source": map[string]interface{}{
-					"type":        "string",
-					"description": "Source of the fact: explicit (user stated it) or inferred (agent deduced it)",
-				},
+				"key":   map[string]interface{}{"type": "string"},
+				"value": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"key", "value"},
 		},
 	})
 	RegisterTool("list_toolkits", ToolDefinition{
 		Name:        "list_toolkits",
-		Description: "List available toolkits and their current load status.",
+		Description: "List available toolkits.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1322,44 +1282,36 @@ func init() {
 	})
 	RegisterTool("load_toolkit", ToolDefinition{
 		Name:        "load_toolkit",
-		Description: "Load a toolkit to unlock its tools. Use list_toolkits to see available options.",
+		Description: "Load a toolkit.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name": map[string]interface{}{
-					"type":        "string",
-					"description": "Toolkit name to load",
-				},
+				"name": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"name"},
 		},
 	})
 	RegisterTool("unload_toolkit", ToolDefinition{
 		Name:        "unload_toolkit",
-		Description: "Unload a toolkit to free up context space.",
+		Description: "Unload a toolkit.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name": map[string]interface{}{
-					"type":        "string",
-					"description": "Toolkit name to unload",
-				},
+				"name": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"name"},
 		},
 	})
 
-	// MiniMax Token Plan tools
 	// Coding tools
 	RegisterTool("rg", ToolDefinition{
 		Name:        "rg",
-		Description: "Search files using ripgrep. Returns JSON results (first 50). Use for finding code patterns, function definitions, imports.",
+		Description: "Search with ripgrep.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query":       map[string]interface{}{"type": "string", "description": "Regex search pattern"},
-				"path":        map[string]interface{}{"type": "string", "description": "Directory to search (default: workspace root)"},
-				"file_filter": map[string]interface{}{"type": "string", "description": "Glob filter, e.g. *.go"},
+				"query": map[string]interface{}{"type": "string"},
+				"path":  map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"query"},
 		},
@@ -1367,13 +1319,13 @@ func init() {
 
 	RegisterTool("sg", ToolDefinition{
 		Name:        "sg",
-		Description: "Run ast-grep code analysis. Use 'rule' for named rules (e.g. return-error-no-log) or 'query' for custom patterns.",
+		Description: "Code analysis with ast-grep.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":  map[string]interface{}{"type": "string", "description": "Directory or file to analyze"},
-				"rule":  map[string]interface{}{"type": "string", "description": "ast-grep rule name (e.g. return-error-no-log)"},
-				"query": map[string]interface{}{"type": "string", "description": "Custom ast-grep query pattern"},
+				"path":  map[string]interface{}{"type": "string"},
+				"rule":  map[string]interface{}{"type": "string"},
+				"query": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"path"},
 		},
@@ -1381,34 +1333,34 @@ func init() {
 
 	RegisterTool("repomap", ToolDefinition{
 		Name:        "repomap",
-		Description: "Generate a symbol map of a project (functions, structs, types). Use depth to control traversal depth.",
+		Description: "Generate repo symbol map.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":  map[string]interface{}{"type": "string", "description": "Project root (default: workspace root)"},
-				"depth": map[string]interface{}{"type": "integer", "description": "Traversal depth (default: 2)"},
+				"path":  map[string]interface{}{"type": "string"},
+				"depth": map[string]interface{}{"type": "integer"},
 			},
 		},
 	})
 
 	RegisterTool("git_status", ToolDefinition{
 		Name:        "git_status",
-		Description: "Show git worktree status. Returns list of modified, staged, untracked files.",
+		Description: "Show git status.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"repo": map[string]interface{}{"type": "string", "description": "Repository path (default: workspace root)"},
+				"repo": map[string]interface{}{"type": "string"},
 			},
 		},
 	})
 
 	RegisterTool("git_commit", ToolDefinition{
 		Name:        "git_commit",
-		Description: "Create a git commit with the given message.",
+		Description: "Create a commit.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"message": map[string]interface{}{"type": "string", "description": "Commit message"},
+				"message": map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"message"},
 		},
@@ -1416,23 +1368,23 @@ func init() {
 
 	RegisterTool("git_diff", ToolDefinition{
 		Name:        "git_diff",
-		Description: "Show uncommitted changes. Use 'file' to diff a specific file.",
+		Description: "Show uncommitted changes.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"file": map[string]interface{}{"type": "string", "description": "Specific file to diff (default: all)"},
+				"file": map[string]interface{}{"type": "string"},
 			},
 		},
 	})
 
 	RegisterTool("execute_shell", ToolDefinition{
 		Name:        "execute_shell",
-		Description: "Execute an arbitrary shell command with the bot's permissions.",
+		Description: "Run a shell command.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"command": map[string]interface{}{"type": "string", "description": "Shell command to execute"},
-				"cwd":     map[string]interface{}{"type": "string", "description": "Working directory (default: workspace root)"},
+				"command": map[string]interface{}{"type": "string"},
+				"cwd":     map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"command"},
 		},
