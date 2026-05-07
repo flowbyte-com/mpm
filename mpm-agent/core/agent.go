@@ -58,7 +58,7 @@ func BuildSystemPromptWithIdentity(identityPath, personaContent, modeContent, fr
 	if len(anchors) > 0 {
 		sb.WriteString("\n\n## Anchored Memories\n")
 		for _, a := range anchors {
-			sb.WriteString(fmt.Sprintf("- [weight:%d] %s\n", a.Weight, a.Content))
+			sb.WriteString(fmt.Sprintf("- [weight:%d ref:%d] %s\n", a.Weight, a.ReferenceCount, FormatAnchorContext(a)))
 		}
 	}
 
@@ -199,8 +199,8 @@ type apiMessage struct {
 
 // toolUse represents a tool call from the API.
 type toolUse struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
+	Type  string                 `json:"type"`
+	Name  string                 `json:"name"`
 	Input map[string]interface{} `json:"input"`
 }
 
@@ -265,10 +265,10 @@ func summarize(toolName string, result string, err error) string {
 // toolProfile is the list of base tool names (framework tools).
 // sessionID is used to scope LoadedToolkits per conversation.
 // toolkitMap maps toolkit names to tool names (from config).
-func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, frontCortex string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, error) {
+func RunAgent(ctx context.Context, query string, history []map[string]interface{}, db *sql.DB, identityPath string, frontCortex string, cfg *SynthConfig, toolProfile []string, sessionID string, toolkitMap map[string][]string, chatID int64, reporter ToolProgressReporter, tokenReporter TokenUsageReporter) (string, []Anchor, error) {
 	// Get anchors as high-priority context
-	anchors, _ := GetRecentAnchors(db, 5)
-	lessons, _ := GetRecentLessons(db, 2)
+	anchors, _ := GetRecentAnchors(db, 3)
+	lessons, _ := GetRecentLessons(db, 1)
 
 	// Build context arrays
 	memories := retrieveMemories(db, query, 3)
@@ -296,20 +296,30 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 		// Rebuild tool list: base tools + loaded toolkit tools (dynamic)
 		availableTools := buildToolListWithLoaded(toolProfile, sessionID, toolkitMap)
 
-		responseText, toolCalls, usage, err := callSynthAPIWithTools(ctx, systemPrompt, messages, cfg, availableTools)
+		responseText, toolCalls, thinkingText, usage, err := callSynthAPIWithTools(ctx, systemPrompt, messages, cfg, availableTools)
 		if err != nil {
 			if ctx.Err() == context.DeadlineExceeded {
-				return "⚠️ Request timed out (90s). Try a simpler query.", nil
+				return "⚠️ Request timed out (90s). Try a simpler query.", nil, ctx.Err()
 			}
-			return "", err
+			return "", nil, err
 		}
 		if tokenReporter != nil {
 			tokenReporter.ReportUsage(chatID, usage.InputTokens, usage.OutputTokens, usage.Model)
 		}
 
-		// If no tool calls, return the text response
+		// If no tool calls, return the text response (unless only thinking was returned)
 		if len(toolCalls) == 0 {
-			return responseText, nil
+			// If we only got thinking text with no actual response, keep looping
+			if thinkingText != "" && responseText == "" {
+				// Add thinking to messages and continue the loop
+				messages = append(messages, apiMessage{
+					Role:    "assistant",
+					Content: "[thinking]: " + thinkingText,
+				})
+				log.Printf("[agent] iteration %d: no tool calls, continuing loop with thinking block", iteration)
+				continue
+			}
+			return responseText, anchors, nil
 		}
 
 		// Execute each tool call and append results to messages
@@ -385,12 +395,13 @@ func RunAgent(ctx context.Context, query string, history []map[string]interface{
 
 		// Check: did we make tool calls without returning text? (loop breaker)
 		if iteration == maxIterations-1 && len(toolCalls) > 0 {
-			return "⚠️ Loop terminated: Exceeded max reasoning steps.", nil
+			return "⚠️ Loop terminated: Exceeded max reasoning steps.", nil, nil
 		}
 	}
 
 	// Max iterations reached (should not reach here due to breaker above)
-	return "(tool loop limit reached)", nil
+	log.Printf("[agent] max iterations (%d) reached - returning thinking loop exit", maxIterations)
+	return "⚠️ Stopped after " + fmt.Sprintf("%d", maxIterations) + " reasoning steps without tool calls. The model kept reasoning without taking action.", nil, nil
 }
 
 var riskyCommandPatterns = []*regexp.Regexp{
@@ -447,7 +458,7 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 	// Always include execute_mpm_command
 	tools = append(tools, map[string]interface{}{
 		"name":        "execute_mpm_command",
-		"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
+		"description": "Execute an MPM CLI command. Example: 'recall hello' runs 'mpm recall hello'. Supported commands: add, ls, show, rm, shred, promote, reinforce, weaken, set-weight (memory ops); session add/search/show/shred/list (session ops); reference add/ls/show/search/shred (reference ops); lesson add/list/search/get/shred/stats (lesson ops); persona list/active/set/clear; mode list/active/add/remove/clear; recall <query>; status; stats; compile mode|persona; start; stop; restart; doctor; version; prime-directives.",
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -467,8 +478,8 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 			continue
 		}
 		tools = append(tools, map[string]interface{}{
-			"name":        def.Name,
-			"description": def.Description,
+			"name":         def.Name,
+			"description":  def.Description,
 			"input_schema": def.InputSchema,
 		})
 	}
@@ -495,8 +506,8 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 			}
 			if !exists {
 				tools = append(tools, map[string]interface{}{
-					"name":        def.Name,
-					"description": def.Description,
+					"name":         def.Name,
+					"description":  def.Description,
 					"input_schema": def.InputSchema,
 				})
 			}
@@ -506,6 +517,16 @@ func buildToolListWithLoaded(baseTools []string, sessionID string, toolkitMap ma
 	return tools
 }
 
+func toolNames(tools []map[string]interface{}) []string {
+	var names []string
+	for _, t := range tools {
+		if n, ok := t["name"].(string); ok {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // APIUsage holds token usage from a single API call.
 type APIUsage struct {
 	InputTokens  int
@@ -513,31 +534,32 @@ type APIUsage struct {
 	Model        string
 }
 
-// callSynthAPIWithTools makes an Anthropic API call and returns response text, tool calls, and usage.
-func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, APIUsage, error) {
+// callSynthAPIWithTools makes an Anthropic API call and returns response text, tool calls, thinking text, and usage.
+func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []apiMessage, cfg *SynthConfig, tools []map[string]interface{}) (string, []toolUse, string, APIUsage, error) {
 	if cfg.APIKey == "" {
-		return "", nil, APIUsage{}, fmt.Errorf("no API key configured")
+		return "", nil, "", APIUsage{}, fmt.Errorf("no API key configured")
 	}
 
 	type anthropicRequest struct {
-		Model     string                    `json:"model"`
-		MaxTokens int                       `json:"max_tokens"`
-		System    string                    `json:"system"`
-		Messages  []apiMessage              `json:"messages"`
+		Model     string                   `json:"model"`
+		MaxTokens int                      `json:"max_tokens"`
+		System    string                   `json:"system"`
+		Messages  []apiMessage             `json:"messages"`
 		Tools     []map[string]interface{} `json:"tools,omitempty"`
 	}
 
 	type anthropicResponse struct {
-		Type        string `json:"type"`
-		Content     []struct {
-			Type  string                 `json:"type"`
-			Text  string                 `json:"text"`
-			Name  string                 `json:"name"`
-			ID    string                 `json:"id"`
-			Input map[string]interface{} `json:"input"`
+		Type    string `json:"type"`
+		Content []struct {
+			Type    string                 `json:"type"`
+			Text    string                 `json:"text"`
+			Thinking string                `json:"thinking"`
+			Name    string                 `json:"name"`
+			ID    string                   `json:"id"`
+			Input   map[string]interface{} `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
-		Usage       struct {
+		Usage      struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
 		} `json:"usage"`
@@ -553,13 +575,20 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", nil, APIUsage{}, fmt.Errorf("marshal request: %w", err)
+		return "", nil, "", APIUsage{}, fmt.Errorf("marshal request: %w", err)
+	}
+
+	if len(tools) > 0 {
+		log.Printf("[agent] sending %d tools: %v", len(tools), toolNames(tools))
+	}
+	if err != nil {
+		return "", nil, "", APIUsage{}, fmt.Errorf("marshal request: %w", err)
 	}
 
 	url := strings.TrimSuffix(cfg.BaseURL, "/") + "/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, APIUsage{}, fmt.Errorf("create request: %w", err)
+		return "", nil, "", APIUsage{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+cfg.APIKey)
@@ -568,13 +597,13 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", nil, APIUsage{}, fmt.Errorf("API call failed: %w", err)
+		return "", nil, "", APIUsage{}, fmt.Errorf("API call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, APIUsage{}, fmt.Errorf("read response: %w", err)
+		return "", nil, "", APIUsage{}, fmt.Errorf("read response: %w", err)
 	}
 
 	// Detect HTML error pages (OpenRouter returns HTML on rate limit / bad requests)
@@ -583,12 +612,12 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 		if len(truncated) > 500 {
 			truncated = truncated[:500] + "..."
 		}
-		return "", nil, APIUsage{}, fmt.Errorf("API returned HTML (not JSON): %s", truncated)
+		return "", nil, "", APIUsage{}, fmt.Errorf("API returned HTML (not JSON): %s", truncated)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[agent] API error response: %s", string(respBody))
-		return "", nil, APIUsage{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, "", APIUsage{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	n := 300
@@ -599,7 +628,7 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 
 	var result anthropicResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", nil, APIUsage{}, fmt.Errorf("parse response: %w", err)
+		return "", nil, "", APIUsage{}, fmt.Errorf("parse response: %w", err)
 	}
 
 	// Check for top-level error type (e.g., MiniMax returns {"type":"error","error":...})
@@ -611,14 +640,15 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error.Message != "" {
-			return "", nil, APIUsage{}, fmt.Errorf("API error: %s", errResp.Error.Message)
+			return "", nil, "", APIUsage{}, fmt.Errorf("API error: %s", errResp.Error.Message)
 		}
-		return "", nil, APIUsage{}, fmt.Errorf("API error: %s", string(respBody))
+		return "", nil, "", APIUsage{}, fmt.Errorf("API error: %s", string(respBody))
 	}
 
 	// Collect text response and tool calls
 	var textResponse string
 	var toolCalls []toolUse
+	var thinkingText string
 	for _, block := range result.Content {
 		if block.Type == "text" && block.Text != "" {
 			textResponse = block.Text
@@ -628,13 +658,17 @@ func callSynthAPIWithTools(ctx context.Context, systemPrompt string, messages []
 				Name:  block.Name,
 				Input: block.Input,
 			})
+		} else if block.Type == "thinking" && block.Thinking != "" {
+			// MiniMax thinking/reasoning block — capture for debugging
+			thinkingText = block.Thinking
+			log.Printf("[agent] thinking block: %s", truncate(block.Thinking, 200))
 		} else if block.Type == "error" {
 			// Error block from API — surface it as an error
-			return "", nil, APIUsage{}, fmt.Errorf("API error: %s", block.Text)
+			return "", nil, "", APIUsage{}, fmt.Errorf("API error: %s", block.Text)
 		}
 	}
 
 	log.Printf("[agent] API usage: input=%d output=%d (model=%s)", result.Usage.InputTokens, result.Usage.OutputTokens, cfg.Model)
 
-	return textResponse, toolCalls, APIUsage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, Model: cfg.Model}, nil
+	return textResponse, toolCalls, thinkingText, APIUsage{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens, Model: cfg.Model}, nil
 }

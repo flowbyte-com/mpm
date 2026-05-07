@@ -150,7 +150,11 @@ func cmdWatch(args []string) bool {
 	go daemon.handleSignals(done)
 
 	// Load config for external DBs
-	cfg, _ := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  Warning: could not load config: %v\n", err)
+		cfg = &config.Config{} // empty config, defaults apply
+	}
 
 	// Start external DB polling goroutines with stop channel
 	externalDBs := cfg.GetExternalDbs()
@@ -164,12 +168,14 @@ func cmdWatch(args []string) bool {
 		select {
 		case event, ok := <-w.Events:
 			if !ok {
+				close(stopCh)
 				return true
 			}
-			daemon.handleEvent(event)
+		daemon.handleEvent(event)
 
 		case err, ok := <-w.Errors:
 			if !ok {
+				close(stopCh)
 				return true
 			}
 			if *verbose {
@@ -193,7 +199,10 @@ func resolveWatchDirs(memDir, sesDir string) []string {
 	var dirs []string
 
 	// Load config for fallback paths
-	cfg, _ := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		cfg = &config.Config{}
+	}
 
 	// Determine memory directories to watch (array from config)
 	memoryDirs := cfg.GetMemoryDirs()
@@ -310,7 +319,17 @@ func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool, stopCh <-chan
 // The dm (DatabaseManager) is passed in and reused — caller manages its lifecycle.
 // All saves are transactional — cursor only updated if all saves succeed.
 func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun, verbose bool) {
-	extDB, err := sql.Open("sqlite3", dbCfg.Path+"?mode=ro")
+	dbPath := dbCfg.Path
+
+	cleanPath := filepath.Clean(dbPath)
+	if !strings.HasSuffix(cleanPath, ".db") && !strings.HasSuffix(cleanPath, ".sqlite") && !strings.HasSuffix(cleanPath, ".sqlite3") {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: path does not look like SQLite DB: %s\n", dbCfg.Label, cleanPath)
+		}
+		return
+	}
+
+	extDB, err := sql.Open("sqlite3", cleanPath+"?mode=ro")
 	if err != nil {
 		if verbose {
 			fmt.Printf("⚠️  external DB %s: open failed: %v\n", dbCfg.Label, err)
@@ -1285,74 +1304,58 @@ func (d *watcherDaemon) extractKeywords(content string) []string {
 // checkTopicClustering implements the Topic Clustering trigger.
 // When N or more LTM memories share the same tag, create a Topic record.
 //
-// Locking strategy: holds d.mu only for the brief window needed to read the
-// cache and update it. All slow DB I/O (reading LTM memories, checking for
-// existing topics, creating new topics) happens outside the lock.
+// Locking strategy: holds d.mu for entire operation to prevent race conditions.
+// UsesRWMutex allows concurrent readers but exclusive writer access.
 func (d *watcherDaemon) checkTopicClustering() {
-	const clusterThreshold = 3 // N = 3 memories with same tag triggers clustering
+	const clusterThreshold = 3
 
-	// Phase 1 — determine work under lock: which tags need new topics?
 	type workItem struct {
-		tag   string
-		memIDs []string
-		existingTopicID string // non-empty if topic already exists in DB
+		tag       string
+		memIDs    []string
+		topicID   string
+		created   bool
 	}
-	var work []workItem
 
 	d.mu.Lock()
-	{
-		ltmMemories, err := d.getLTMMemories()
-		if err != nil {
-			if d.verbose {
-				fmt.Fprintf(os.Stderr, "⚠️  Failed to get LTM memories: %v\n", err)
-			}
-			d.mu.Unlock()
-			return
-		}
+	defer d.mu.Unlock()
 
-		// Count tag occurrences
-		tagCounts := make(map[string][]string)
-		for _, mem := range ltmMemories {
-			for _, tag := range mem.Tags {
-				tagCounts[tag] = append(tagCounts[tag], mem.ID)
-			}
+	ltmMemories, err := d.getLTMMemories()
+	if err != nil {
+		if d.verbose {
+			fmt.Fprintf(os.Stderr, "⚠️  Failed to get LTM memories: %v\n", err)
 		}
+		return
+	}
 
-		for tag, memIDs := range tagCounts {
-			if len(memIDs) < clusterThreshold {
-				continue
-			}
-			// Already cached?
-			if existing, ok := d.topicCache[tag]; ok {
-				existing.MemIDs = memIDs
-				existing.Count = len(memIDs)
-				existing.LastSeen = time.Now()
-				continue
-			}
-			// Mark for DB lookup (d.mu released before this runs)
-		 work = append(work, workItem{tag: tag, memIDs: memIDs})
+	tagCounts := make(map[string][]string)
+	for _, mem := range ltmMemories {
+		for _, tag := range mem.Tags {
+			tagCounts[tag] = append(tagCounts[tag], mem.ID)
 		}
 	}
-	d.mu.Unlock()
+
+	var work []workItem
+	for tag, memIDs := range tagCounts {
+		if len(memIDs) < clusterThreshold {
+			continue
+		}
+		if existing, ok := d.topicCache[tag]; ok {
+			existing.MemIDs = memIDs
+			existing.Count = len(memIDs)
+			existing.LastSeen = time.Now()
+			continue
+		}
+		work = append(work, workItem{tag: tag, memIDs: memIDs})
+	}
 
 	if len(work) == 0 {
 		return
 	}
 
-	// Phase 2 — slow DB I/O, no lock held
-	type createdTopic struct {
-		tag    string
-		memIDs []string
-		topicID string
-		name   string
-	}
-	var created []createdTopic
-
+	var created []workItem
 	for _, item := range work {
-		// Check if topic already exists in DB
 		existingTopic, err := d.findTopicByTag(item.tag)
 		if err == nil && existingTopic != nil {
-			d.mu.Lock()
 			d.topicCache[item.tag] = &topicCluster{
 				ID:       existingTopic.ID,
 				Name:     existingTopic.Name,
@@ -1361,11 +1364,9 @@ func (d *watcherDaemon) checkTopicClustering() {
 				Count:    len(item.memIDs),
 				LastSeen: time.Now(),
 			}
-			d.mu.Unlock()
 			continue
 		}
 
-		// Create new topic
 		topicID, err := d.createTopicFromCluster(item.tag, item.memIDs)
 		if err != nil {
 			if d.verbose {
@@ -1373,31 +1374,21 @@ func (d *watcherDaemon) checkTopicClustering() {
 			}
 			continue
 		}
-		created = append(created, createdTopic{
-			tag:    item.tag,
-			memIDs: item.memIDs,
-			topicID: topicID,
-			name:   formatTopicName(item.tag),
-		})
+		item.topicID = topicID
+		item.created = true
+		created = append(created, item)
 	}
 
-	// Phase 3 — update cache under lock (brief)
-	if len(created) > 0 {
-		d.mu.Lock()
-		for _, c := range created {
-			d.topicCache[c.tag] = &topicCluster{
-				ID:       c.topicID,
-				Name:     c.name,
-				Tag:      c.tag,
-				MemIDs:   c.memIDs,
-				Count:    len(c.memIDs),
-				LastSeen: time.Now(),
-			}
+	for _, c := range created {
+		d.topicCache[c.tag] = &topicCluster{
+			ID:       c.topicID,
+			Name:     formatTopicName(c.tag),
+			Tag:      c.tag,
+			MemIDs:   c.memIDs,
+			Count:    len(c.memIDs),
+			LastSeen: time.Now(),
 		}
-		d.mu.Unlock()
-		for _, c := range created {
-			fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", c.name, c.tag, len(c.memIDs))
-		}
+		fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", formatTopicName(c.tag), c.tag, len(c.memIDs))
 	}
 }
 
@@ -1465,7 +1456,9 @@ type Topic struct {
 // findTopicByTag searches for an existing topic by tag name
 func (d *watcherDaemon) findTopicByTag(tag string) (*Topic, error) {
 	query := `SELECT id, name, description, tags, created_at FROM topics WHERE name LIKE ? OR tags LIKE ? LIMIT 1`
-	tagPattern := "%" + tag + "%"
+	escapedTag := strings.ReplaceAll(tag, "~", "~~")
+	escapedTag = strings.ReplaceAll(escapedTag, "%", "~%")
+	tagPattern := "%" + escapedTag + "%"
 
 	row := d.db.SQLDB().QueryRow(query, tagPattern, tagPattern)
 	var t Topic

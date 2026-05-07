@@ -1,0 +1,1318 @@
+{
+  "metadata": {
+    "url": "mpm",
+    "version": "0.1.0"
+  },
+  "structure": {
+    "cmd": {
+      "mpm": {
+        "stats_stub.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "synthesize.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "recall.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "tui.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "daily_review.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "tty_select.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "router.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "watch.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "main.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "topic.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "handlers.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "dashboard.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      }
+    },
+    "check_fts.go": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "web": {
+      "index.html": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "style.css": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "app.js": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "persona": {
+      "whiterabbit.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "queen.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "default.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "README.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "oracle.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "alice.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "caterpillar.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "_template.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "cheshire.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "hatter.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "machiavelli.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "pirate.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "go.sum": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "README.md": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "internal": {
+      "lessons.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "memory.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "lessons_test.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "mode.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "db.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "reference_new.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "web_db.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "session.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "memory_test.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "search.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "reference_test.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "config": {
+        "config.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      },
+      "ingest.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "toxicphrases.txt": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "persona.go": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "Makefile": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "mpm_config.json": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "docs": {
+      "GETTING_STARTED.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "PATH_CONFIG.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "WATCH.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "CLAUDE_CODE_INTEGRATION.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "ARCHITECTURE.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "SYNTH.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "README.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "MPM_AGENT_MCP.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "action-plan": {
+        "2026-04-09-action-plan.md": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "2026-04-10-mpm-agent-design.md": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      },
+      "security": {
+        "security.md": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      },
+      "COMMANDS.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "web_ui_spec.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "MPM_AGENT.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "LICENSE": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "assets": {
+      "flowbyte_mpm_hero.png": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "mpm-agent": {
+      "cmd": {
+        "telegram": {
+          "config.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          },
+          "session.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          },
+          "telegram.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          },
+          "handler.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          }
+        },
+        "mcp": {
+          "main.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          }
+        },
+        "mini-bot": {
+          "repl.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          },
+          "main.go": {
+            "type": "blob",
+            "mode": "100644",
+            "id": ""
+          }
+        }
+      },
+      "mini-bot-config.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "mini-bot-config.json.example": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "go.sum": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "README.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "core": {
+        "config.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "anchors_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "identity_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "db.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "tools_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "identity_fork_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "tools.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "selfimprove.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "config_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "hitl.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "identity.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "selfimprove_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "identity_fork.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "agent.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "anchors.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "db_test.go": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      },
+      "Makefile": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "docs": {
+        "superpowers": {
+          "specs": {
+            "2026-04-12-mini-bot-design.md": {
+              "type": "blob",
+              "mode": "100644",
+              "id": ""
+            },
+            "2026-04-12-tool-profiles-design.md": {
+              "type": "blob",
+              "mode": "100644",
+              "id": ""
+            }
+          },
+          "plans": {
+            "2026-04-12-mini-bot-implementation.md": {
+              "type": "blob",
+              "mode": "100644",
+              "id": ""
+            },
+            "2026-04-12-tool-profiles-implementation.md": {
+              "type": "blob",
+              "mode": "100644",
+              "id": ""
+            }
+          }
+        }
+      },
+      "go.mod": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "mpm_config.json.example": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "IDENTITY.md.example": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "reference": {
+      "The_Art_of_War.txt": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "Machiavelli, Volume I.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "Alice_in_Wonderland.txt": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "Alice in Wonderland.epub": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "The_Prince.txt": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "Meditations.txt": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "check_db.go": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "toxicphrases.txt": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "go.mod": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "mpm_config.json.example": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "src": {
+      "db": {
+        "mpm.db": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        },
+        "mirror.jsonl": {
+          "type": "blob",
+          "mode": "100644",
+          "id": ""
+        }
+      }
+    },
+    "issues.md": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "mode": {
+      "programming.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "symai.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "lobster.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "debugging.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "research.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "README.md": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "oracle.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "humanizer.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "prince.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "writing.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "808.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "_template.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      },
+      "design.json": {
+        "type": "blob",
+        "mode": "100644",
+        "id": ""
+      }
+    },
+    "CLAUDE.md": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    },
+    "INSTALL.md": {
+      "type": "blob",
+      "mode": "100644",
+      "id": ""
+    }
+  },
+  "ast_data": {
+    "cmd/mpm/stats_stub.go": {
+      "path": "cmd/mpm/stats_stub.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/synthesize.go": {
+      "path": "cmd/mpm/synthesize.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/recall.go": {
+      "path": "cmd/mpm/recall.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/tui.go": {
+      "path": "cmd/mpm/tui.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/daily_review.go": {
+      "path": "cmd/mpm/daily_review.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/tty_select.go": {
+      "path": "cmd/mpm/tty_select.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/router.go": {
+      "path": "cmd/mpm/router.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/watch.go": {
+      "path": "cmd/mpm/watch.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/main.go": {
+      "path": "cmd/mpm/main.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/topic.go": {
+      "path": "cmd/mpm/topic.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/handlers.go": {
+      "path": "cmd/mpm/handlers.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "cmd/mpm/dashboard.go": {
+      "path": "cmd/mpm/dashboard.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "check_fts.go": {
+      "path": "check_fts.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "web/index.html": {
+      "path": "web/index.html",
+      "size": 0,
+      "mode": "100644"
+    },
+    "web/style.css": {
+      "path": "web/style.css",
+      "size": 0,
+      "mode": "100644"
+    },
+    "web/app.js": {
+      "path": "web/app.js",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/whiterabbit.json": {
+      "path": "persona/whiterabbit.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/queen.json": {
+      "path": "persona/queen.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/default.json": {
+      "path": "persona/default.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/README.md": {
+      "path": "persona/README.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/oracle.json": {
+      "path": "persona/oracle.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/alice.json": {
+      "path": "persona/alice.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/caterpillar.json": {
+      "path": "persona/caterpillar.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/_template.json": {
+      "path": "persona/_template.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/cheshire.json": {
+      "path": "persona/cheshire.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/hatter.json": {
+      "path": "persona/hatter.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/machiavelli.json": {
+      "path": "persona/machiavelli.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "persona/pirate.json": {
+      "path": "persona/pirate.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "go.sum": {
+      "path": "go.sum",
+      "size": 0,
+      "mode": "100644"
+    },
+    "README.md": {
+      "path": "README.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/lessons.go": {
+      "path": "internal/lessons.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/memory.go": {
+      "path": "internal/memory.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/lessons_test.go": {
+      "path": "internal/lessons_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/mode.go": {
+      "path": "internal/mode.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/db.go": {
+      "path": "internal/db.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/reference_new.go": {
+      "path": "internal/reference_new.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/web_db.go": {
+      "path": "internal/web_db.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/session.go": {
+      "path": "internal/session.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/memory_test.go": {
+      "path": "internal/memory_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/search.go": {
+      "path": "internal/search.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/reference_test.go": {
+      "path": "internal/reference_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/config/config.go": {
+      "path": "internal/config/config.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/ingest.go": {
+      "path": "internal/ingest.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/toxicphrases.txt": {
+      "path": "internal/toxicphrases.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "internal/persona.go": {
+      "path": "internal/persona.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "Makefile": {
+      "path": "Makefile",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm_config.json": {
+      "path": "mpm_config.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/GETTING_STARTED.md": {
+      "path": "docs/GETTING_STARTED.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/PATH_CONFIG.md": {
+      "path": "docs/PATH_CONFIG.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/WATCH.md": {
+      "path": "docs/WATCH.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/CLAUDE_CODE_INTEGRATION.md": {
+      "path": "docs/CLAUDE_CODE_INTEGRATION.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/ARCHITECTURE.md": {
+      "path": "docs/ARCHITECTURE.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/SYNTH.md": {
+      "path": "docs/SYNTH.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/README.md": {
+      "path": "docs/README.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/MPM_AGENT_MCP.md": {
+      "path": "docs/MPM_AGENT_MCP.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/action-plan/2026-04-09-action-plan.md": {
+      "path": "docs/action-plan/2026-04-09-action-plan.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/action-plan/2026-04-10-mpm-agent-design.md": {
+      "path": "docs/action-plan/2026-04-10-mpm-agent-design.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/security/security.md": {
+      "path": "docs/security/security.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/COMMANDS.md": {
+      "path": "docs/COMMANDS.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/web_ui_spec.md": {
+      "path": "docs/web_ui_spec.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "docs/MPM_AGENT.md": {
+      "path": "docs/MPM_AGENT.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "LICENSE": {
+      "path": "LICENSE",
+      "size": 0,
+      "mode": "100644"
+    },
+    "assets/flowbyte_mpm_hero.png": {
+      "path": "assets/flowbyte_mpm_hero.png",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/telegram/config.go": {
+      "path": "mpm-agent/cmd/telegram/config.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/telegram/session.go": {
+      "path": "mpm-agent/cmd/telegram/session.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/telegram/telegram.go": {
+      "path": "mpm-agent/cmd/telegram/telegram.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/telegram/handler.go": {
+      "path": "mpm-agent/cmd/telegram/handler.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/mcp/main.go": {
+      "path": "mpm-agent/cmd/mcp/main.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/mini-bot/repl.go": {
+      "path": "mpm-agent/cmd/mini-bot/repl.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/cmd/mini-bot/main.go": {
+      "path": "mpm-agent/cmd/mini-bot/main.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/mini-bot-config.json": {
+      "path": "mpm-agent/mini-bot-config.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/mini-bot-config.json.example": {
+      "path": "mpm-agent/mini-bot-config.json.example",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/go.sum": {
+      "path": "mpm-agent/go.sum",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/README.md": {
+      "path": "mpm-agent/README.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/config.go": {
+      "path": "mpm-agent/core/config.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/anchors_test.go": {
+      "path": "mpm-agent/core/anchors_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/identity_test.go": {
+      "path": "mpm-agent/core/identity_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/db.go": {
+      "path": "mpm-agent/core/db.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/tools_test.go": {
+      "path": "mpm-agent/core/tools_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/identity_fork_test.go": {
+      "path": "mpm-agent/core/identity_fork_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/tools.go": {
+      "path": "mpm-agent/core/tools.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/selfimprove.go": {
+      "path": "mpm-agent/core/selfimprove.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/config_test.go": {
+      "path": "mpm-agent/core/config_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/hitl.go": {
+      "path": "mpm-agent/core/hitl.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/identity.go": {
+      "path": "mpm-agent/core/identity.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/selfimprove_test.go": {
+      "path": "mpm-agent/core/selfimprove_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/identity_fork.go": {
+      "path": "mpm-agent/core/identity_fork.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/agent.go": {
+      "path": "mpm-agent/core/agent.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/anchors.go": {
+      "path": "mpm-agent/core/anchors.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/core/db_test.go": {
+      "path": "mpm-agent/core/db_test.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/Makefile": {
+      "path": "mpm-agent/Makefile",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/docs/superpowers/specs/2026-04-12-mini-bot-design.md": {
+      "path": "mpm-agent/docs/superpowers/specs/2026-04-12-mini-bot-design.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/docs/superpowers/specs/2026-04-12-tool-profiles-design.md": {
+      "path": "mpm-agent/docs/superpowers/specs/2026-04-12-tool-profiles-design.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/docs/superpowers/plans/2026-04-12-mini-bot-implementation.md": {
+      "path": "mpm-agent/docs/superpowers/plans/2026-04-12-mini-bot-implementation.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/docs/superpowers/plans/2026-04-12-tool-profiles-implementation.md": {
+      "path": "mpm-agent/docs/superpowers/plans/2026-04-12-tool-profiles-implementation.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/go.mod": {
+      "path": "mpm-agent/go.mod",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/mpm_config.json.example": {
+      "path": "mpm-agent/mpm_config.json.example",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm-agent/IDENTITY.md.example": {
+      "path": "mpm-agent/IDENTITY.md.example",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/The_Art_of_War.txt": {
+      "path": "reference/The_Art_of_War.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/Machiavelli, Volume I.md": {
+      "path": "reference/Machiavelli, Volume I.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/Alice_in_Wonderland.txt": {
+      "path": "reference/Alice_in_Wonderland.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/Alice in Wonderland.epub": {
+      "path": "reference/Alice in Wonderland.epub",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/The_Prince.txt": {
+      "path": "reference/The_Prince.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "reference/Meditations.txt": {
+      "path": "reference/Meditations.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "check_db.go": {
+      "path": "check_db.go",
+      "size": 0,
+      "mode": "100644"
+    },
+    "toxicphrases.txt": {
+      "path": "toxicphrases.txt",
+      "size": 0,
+      "mode": "100644"
+    },
+    "go.mod": {
+      "path": "go.mod",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mpm_config.json.example": {
+      "path": "mpm_config.json.example",
+      "size": 0,
+      "mode": "100644"
+    },
+    "src/db/mpm.db": {
+      "path": "src/db/mpm.db",
+      "size": 0,
+      "mode": "100644"
+    },
+    "src/db/mirror.jsonl": {
+      "path": "src/db/mirror.jsonl",
+      "size": 0,
+      "mode": "100644"
+    },
+    "issues.md": {
+      "path": "issues.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/programming.json": {
+      "path": "mode/programming.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/symai.json": {
+      "path": "mode/symai.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/lobster.json": {
+      "path": "mode/lobster.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/debugging.json": {
+      "path": "mode/debugging.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/research.json": {
+      "path": "mode/research.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/README.md": {
+      "path": "mode/README.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/oracle.json": {
+      "path": "mode/oracle.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/humanizer.json": {
+      "path": "mode/humanizer.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/prince.json": {
+      "path": "mode/prince.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/writing.json": {
+      "path": "mode/writing.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/808.json": {
+      "path": "mode/808.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/_template.json": {
+      "path": "mode/_template.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "mode/design.json": {
+      "path": "mode/design.json",
+      "size": 0,
+      "mode": "100644"
+    },
+    "CLAUDE.md": {
+      "path": "CLAUDE.md",
+      "size": 0,
+      "mode": "100644"
+    },
+    "INSTALL.md": {
+      "path": "INSTALL.md",
+      "size": 0,
+      "mode": "100644"
+    }
+  }
+}

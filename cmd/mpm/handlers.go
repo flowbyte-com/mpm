@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"mpm/internal"
 )
@@ -535,8 +534,11 @@ func handleShredDatabase(conn net.Conn, args []string) {
 
 	// Close any open connections
 	store := getMemoryStore()
-	db := store.DB
-	if err := db.Close(); err != nil {
+	if store == nil || store.DB == nil {
+		sendResponse(conn, "", "Database not initialized\n", true, 1)
+		return
+	}
+	if err := store.DB.Close(); err != nil {
 		sendResponse(conn, "", fmt.Sprintf("Failed to close database: %v", err), true, 1)
 		return
 	}
@@ -1094,7 +1096,11 @@ func handleReferenceList(conn net.Conn) {
 
 	for _, ref := range refs {
 		output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
-		output.WriteString(fmt.Sprintf("    %s\n", ref.Created[:10]))
+		created := ref.Created
+		if len(created) >= 10 {
+			created = created[:10]
+		}
+		output.WriteString(fmt.Sprintf("    %s\n", created))
 		if len(ref.Tags) > 0 {
 			output.WriteString(fmt.Sprintf("    Tags: %s\n", strings.Join(ref.Tags, ", ")))
 		}
@@ -1874,7 +1880,7 @@ func handleLessonAdd(conn net.Conn, args []string) {
 			if content == "" {
 				content = strings.Join(args[i:], " ")
 			}
-			break
+			i = len(args) // consume all remaining args and exit loop
 		}
 	}
 
@@ -2018,9 +2024,10 @@ func handleLessonStats(conn net.Conn) {
 	output.WriteString("Lesson Statistics:\n\n")
 	output.WriteString(fmt.Sprintf("Total: %d\n", stats["total_lessons"]))
 	output.WriteString("\nBy type:\n")
-	byType := stats["by_type"].(map[string]int)
-	for t, count := range byType {
-		output.WriteString(fmt.Sprintf("  %s: %d\n", t, count))
+	if byType, ok := stats["by_type"].(map[string]int); ok {
+		for t, count := range byType {
+			output.WriteString(fmt.Sprintf("  %s: %d\n", t, count))
+		}
 	}
 	sendResponse(conn, output.String(), "", true, 0)
 }
@@ -2033,7 +2040,7 @@ func handleMenu(conn net.Conn) {
 	enc := json.NewEncoder(conn)
 
 	// Get watch status
-	watching := watchPid != 0
+	watching := getWatchPID() != 0
 
 	// Build menu output
 	var output strings.Builder
@@ -2044,7 +2051,7 @@ func handleMenu(conn net.Conn) {
 	output.WriteString("║                                          ║\n")
 
 	if watching {
-		output.WriteString(fmt.Sprintf("║  🟢 Watch Daemon: Running (PID: %d)  ║\n", watchPid))
+		output.WriteString(fmt.Sprintf("║  🟢 Watch Daemon: Running (PID: %d)  ║\n", getWatchPID()))
 	} else {
 		output.WriteString("║  🔴 Watch Daemon: Stopped                ║\n")
 	}
@@ -2136,10 +2143,17 @@ func handleCompileAll(conn net.Conn) {
 	mm := internal.NewModeManager("")
 	pm := internal.NewPersonaManager("")
 
-	modeCount, _ := mm.Compile()
-	personaCount, _ := pm.Compile()
+	modeCount, modeErr := mm.Compile()
+	personaCount, personaErr := pm.Compile()
 
-	sendResponse(conn, fmt.Sprintf("Compiled %d modes, %d personas.\n", modeCount, personaCount), "", true, 0)
+	errMsg := ""
+	if modeErr != nil {
+		errMsg += fmt.Sprintf("modes: %v ", modeErr)
+	}
+	if personaErr != nil {
+		errMsg += fmt.Sprintf("personas: %v ", personaErr)
+	}
+	sendResponse(conn, fmt.Sprintf("Compiled %d modes, %d personas.\n", modeCount, personaCount), errMsg, true, 0)
 }
 
 // ============================================================================
@@ -2221,9 +2235,7 @@ func min(a, b int) int {
 
 // GenerateID creates a unique ID for memories
 func generateID() string {
-	timestamp := time.Now().UnixNano()
-	random := time.Now().UnixNano() % 1000000
-	return fmt.Sprintf("%d-%d", timestamp, random)
+	return internal.GenerateID()
 }
 
 // ============================================================================
@@ -2256,7 +2268,7 @@ func handleWatch(conn net.Conn, args []string) {
 			return
 		}
 		enc.Encode(Message{
-			Output:   fmt.Sprintf("✅ Watch daemon started (PID: %d)\n", watchPid),
+			Output:   fmt.Sprintf("✅ Watch daemon started (PID: %d)\n", getWatchPID()),
 			ExitCode: 0,
 			Done:     true,
 		})
@@ -2286,7 +2298,7 @@ func handleWatch(conn net.Conn, args []string) {
 			return
 		}
 		enc.Encode(Message{
-			Output:   fmt.Sprintf("✅ Watch daemon restarted (PID: %d)\n", watchPid),
+			Output:   fmt.Sprintf("✅ Watch daemon restarted (PID: %d)\n", getWatchPID()),
 			ExitCode: 0,
 			Done:     true,
 		})
@@ -2301,8 +2313,11 @@ func handleWatch(conn net.Conn, args []string) {
 }
 
 func formatWatchStatus(status map[string]interface{}) string {
-	running := status["running"].(bool)
-	pid := status["pid"].(int)
+	if status == nil {
+		return "🔍 Watch daemon: unknown\n"
+	}
+	running, _ := status["running"].(bool)
+	pid, _ := status["pid"].(int)
 
 	if running {
 		return fmt.Sprintf("🔍 Watch daemon: running (PID: %d)\n", pid)

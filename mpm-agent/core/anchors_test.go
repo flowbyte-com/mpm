@@ -16,13 +16,12 @@ func TestAnchorInsert(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Insert anchor
-	err = InsertAnchor(db, "test anchor content", "test context", "session123", 3)
+	facts := []string{"fact=test anchor content"}
+	err = InsertAnchor(db, facts, "test summary", []string{"test"}, "test context", "session123", 3)
 	if err != nil {
 		t.Fatalf("InsertAnchor failed: %v", err)
 	}
 
-	// Verify it exists
 	anchors, err := GetRecentAnchors(db, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -30,9 +29,8 @@ func TestAnchorInsert(t *testing.T) {
 	if len(anchors) == 0 {
 		t.Error("expected at least one anchor")
 	}
-	// Verify full anchor data
-	if anchors[0].Content != "test anchor content" {
-		t.Errorf("expected content 'test anchor content', got %q", anchors[0].Content)
+	if anchors[0].Summary != "test summary" {
+		t.Errorf("expected summary 'test summary', got %q", anchors[0].Summary)
 	}
 	if anchors[0].Context != "test context" {
 		t.Errorf("expected context 'test context', got %q", anchors[0].Context)
@@ -56,20 +54,68 @@ func TestAnchorIdempotent(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Insert same anchor twice with different weights
-	if err := InsertAnchor(db, "same content", "same context", "session456", 2); err != nil {
+	facts1 := []string{"fact=same content"}
+	if err := InsertAnchor(db, facts1, "same summary", []string{"test"}, "same context", "session456", 2); err != nil {
 		t.Fatalf("InsertAnchor failed: %v", err)
 	}
-	if err := InsertAnchor(db, "same content", "same context", "session456", 5); err != nil {
+	facts2 := []string{"fact=same content updated"}
+	if err := InsertAnchor(db, facts2, "same summary", []string{"test"}, "same context", "session456", 5); err != nil {
 		t.Fatalf("InsertAnchor failed: %v", err)
 	}
 
-	// Should have MAX(2,5) = 5, not two anchors
 	anchors, _ := GetRecentAnchors(db, 10)
 	if len(anchors) != 1 {
 		t.Errorf("expected 1 anchor (idempotent), got %d", len(anchors))
 	}
 	if anchors[0].Weight != 5 {
 		t.Errorf("expected weight MAX(2,5)=5, got %d", anchors[0].Weight)
+	}
+}
+
+func TestExtractFactsFromText(t *testing.T) {
+	tests := []struct {
+		input       string
+		minExpected int
+	}{
+		{"I work as a doctor", 1},
+		{"I have a standing desk", 1},
+		{"I like programming", 1},
+		{"I hate waiting in lines", 1},
+		{"I have an issue with my back", 2},
+		{"hello world", 1},
+	}
+
+	for _, tt := range tests {
+		facts := ExtractFactsFromText(tt.input)
+		if len(facts) < tt.minExpected {
+			t.Errorf("ExtractFactsFromText(%q) = %d facts, want at least %d", tt.input, len(facts), tt.minExpected)
+		}
+	}
+}
+
+func TestExtractTagsFromText(t *testing.T) {
+	tests := []struct {
+		input string
+		has   []string
+	}{
+		{"I work as a doctor", []string{"work", "health"}},
+		{"I love playing video games", []string{"hobby"}},
+		{"I have a problem with my code", []string{"tech"}},
+	}
+
+	for _, tt := range tests {
+		tags := ExtractTagsFromText(tt.input)
+		for _, want := range tt.has {
+			found := false
+			for _, tag := range tags {
+				if tag == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("ExtractTagsFromText(%q) missing tag %q, got %v", tt.input, want, tags)
+			}
+		}
 	}
 }

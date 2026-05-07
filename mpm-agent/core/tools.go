@@ -938,10 +938,9 @@ func generateImage(prompt, aspectRatio string) (string, error) {
 
 	url := "https://api.minimax.io/v1/image_generation"
 	payload := map[string]interface{}{
-		"model":           "image-01",
-		"prompt":          prompt,
-		"aspect_ratio":    aspectRatio,
-		"response_format": "base64",
+		"model":        "image-01",
+		"prompt":       prompt,
+		"aspect_ratio": aspectRatio,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -955,7 +954,7 @@ func generateImage(prompt, aspectRatio string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("generate_image: %w", err)
@@ -971,8 +970,10 @@ func generateImage(prompt, aspectRatio string) (string, error) {
 		return "", fmt.Errorf("generate_image: API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
+	// Try parsing image_urls first (URL format), then image_base64 (base64 format)
 	var result struct {
 		Data struct {
+			ImageURLs   []string `json:"image_urls"`
 			ImageBase64 []string `json:"image_base64"`
 		} `json:"data"`
 	}
@@ -980,23 +981,47 @@ func generateImage(prompt, aspectRatio string) (string, error) {
 		return "", fmt.Errorf("generate_image: parse: %w", err)
 	}
 
-	if len(result.Data.ImageBase64) == 0 {
-		return "", fmt.Errorf("generate_image: no images returned")
-	}
-
 	mediaDir := getMediaDir()
-	for i, b64 := range result.Data.ImageBase64 {
-		data, err := base64.StdEncoding.DecodeString(b64)
-		if err != nil {
-			continue
-		}
-		filename := filepath.Join(mediaDir, fmt.Sprintf("img_%s_%d.jpg", fmt.Sprintf("%x", time.Now().UnixNano())[:16], i))
-		if err := os.WriteFile(filename, data, 0600); err != nil {
-			continue
+
+	// Try image_urls first (URL format)
+	if len(result.Data.ImageURLs) > 0 {
+		imageURL := result.Data.ImageURLs[0]
+		filename := filepath.Join(mediaDir, fmt.Sprintf("img_%s.jpg", fmt.Sprintf("%x", time.Now().UnixNano())[:16]))
+		if err := downloadFile(imageURL, filename); err != nil {
+			return "", fmt.Errorf("generate_image: download failed: %w", err)
 		}
 		return filename, nil
 	}
-	return "", fmt.Errorf("generate_image: failed to save image")
+
+	// Fall back to base64
+	if len(result.Data.ImageBase64) > 0 {
+		for i, b64 := range result.Data.ImageBase64 {
+			data, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				continue
+			}
+			filename := filepath.Join(mediaDir, fmt.Sprintf("img_%s_%d.jpg", fmt.Sprintf("%x", time.Now().UnixNano())[:16], i))
+			if err := os.WriteFile(filename, data, 0600); err != nil {
+				continue
+			}
+			return filename, nil
+		}
+	}
+
+	return "", fmt.Errorf("generate_image: no images returned")
+}
+
+func downloadFile(url, filepath string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath, data, 0600)
 }
 
 func synthesizeSpeech(text, voice string) (string, error) {
@@ -1387,6 +1412,78 @@ func init() {
 				"cwd":     map[string]interface{}{"type": "string"},
 			},
 			"required": []string{"command"},
+		},
+	})
+
+	RegisterTool("generate_image", ToolDefinition{
+		Name:        "generate_image",
+		Description: "Generate an image from a text prompt using MiniMax image generation API.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"prompt": map[string]interface{}{
+					"type":        "string",
+					"description": "Text description of the image to generate",
+				},
+				"aspect_ratio": map[string]interface{}{
+					"type":        "string",
+					"description": "Aspect ratio of the image (e.g., '1:1', '16:9', '9:16'). Defaults to '1:1'.",
+				},
+			},
+			"required": []string{"prompt"},
+		},
+	})
+
+	RegisterTool("synthesize_speech", ToolDefinition{
+		Name:        "synthesize_speech",
+		Description: "Convert text to speech using MiniMax TTS API.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"text": map[string]interface{}{
+					"type":        "string",
+					"description": "Text to convert to speech",
+				},
+				"voice": map[string]interface{}{
+					"type":        "string",
+					"description": "Voice name to use (optional, uses default if not specified)",
+				},
+			},
+			"required": []string{"text"},
+		},
+	})
+
+	RegisterTool("web_search", ToolDefinition{
+		Name:        "web_search",
+		Description: "Search the web using MiniMax search API.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Search query",
+				},
+			},
+			"required": []string{"query"},
+		},
+	})
+
+	RegisterTool("understand_image", ToolDefinition{
+		Name:        "understand_image",
+		Description: "Analyze and describe an image using MiniMax vision API.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"image_path": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the image file to analyze",
+				},
+				"prompt": map[string]interface{}{
+					"type":        "string",
+					"description": "Question or instruction about the image",
+				},
+			},
+			"required": []string{"image_path", "prompt"},
 		},
 	})
 

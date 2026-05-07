@@ -5,10 +5,10 @@
     "hot_reload": false
   },
   "synth": {
-    "model": "openrouter/free",
-    "api_key": "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",
-    "base_url": "https://openrouter.ai/api",
-    "max_tokens": 4096,
+    "model": "MiniMax-M2.7",
+    "api_key": "sk-cp-Ag3lDVtHLtz5M5KCvw1Rd_Aan1J4tJqWyd5no8Z3mBkX5fjjQLvJYiGHbBxpFlsVm0P8H54qTXmz7_yEgHK1WsdkSW0yCZAuLqVYLpjJjKGE2ZPFRiSe5g4",
+    "base_url": "https://api.minimax.io/anthropic/v1",
+    "max_tokens": 1024,
     "timeout_seconds": 300
   },
   "telegram": {
@@ -82,7 +82,11 @@
       "ReadFileCompare",
       "WebSynthesize",
       "jq",
-      "update_identity_knowledge"
+      "update_identity_knowledge",
+      "generate_image",
+      "synthesize_speech",
+      "web_search",
+      "understand_image"
     ],
     "coding": [
       "list_toolkits",

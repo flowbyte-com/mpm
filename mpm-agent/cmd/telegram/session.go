@@ -12,7 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const maxHistoryMessages = 10
+const maxHistoryMessages = 3
 
 // SessionManager maps a Telegram chat ID to its conversation message history.
 // History is persisted to the MPM SQLite database.
@@ -173,12 +173,12 @@ func contentOf(m map[string]interface{}) string {
 
 // SessionSummary represents a one-line summary of a conversation session.
 type SessionSummary struct {
-	SessionID     string
-	Summary       string
-	LastTopic     string
-	MessageCount  int
-	CreatedAt     string
-	UpdatedAt     string
+	SessionID    string
+	Summary      string
+	LastTopic    string
+	MessageCount int
+	CreatedAt    string
+	UpdatedAt    string
 }
 
 // UpdateSessionSummary creates or updates a session summary.
@@ -257,12 +257,12 @@ func (sm *SessionManager) GetAllIdentityKnowledge() (map[string]string, error) {
 // FrontCortex holds persistent context loaded on every agent call.
 // All items respect hard caps to prevent token bloat.
 type FrontCortex struct {
-	UserName      string
+	UserName       string
 	CurrentProject string
-	ActiveWork    string
-	Preferences   string
-	RecentTopics  []string // last 3 session summaries
-	Anchors       []string // "weight:N content" strings, last 10
+	ActiveWork     string
+	Preferences    string
+	RecentTopics   []string // last 3 session summaries
+	Anchors        []string // "weight:N content" strings, last 10
 }
 
 // LoadFrontCortex builds front cortex from session summaries, identity knowledge, and anchors.
@@ -396,14 +396,22 @@ func initSessionDB(dbPath string) error {
 
 	CREATE TABLE IF NOT EXISTS anchors (
 		id TEXT PRIMARY KEY,
-		content TEXT NOT NULL,
+		facts TEXT,
+		summary TEXT NOT NULL,
+		tags TEXT,
 		context TEXT,
 		weight INTEGER DEFAULT 1,
 		session_id TEXT,
+		reference_count INTEGER DEFAULT 0,
+		expires_at TEXT,
 		created_at TEXT,
-		UNIQUE(content, context, session_id)
+		is_condensed INTEGER DEFAULT 0,
+		ancestor_ids TEXT,
+		UNIQUE(summary, context, session_id)
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_anchors_dedup ON anchors(content, context, session_id);
+	CREATE INDEX IF NOT EXISTS idx_anchors_expires ON anchors(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_anchors_weight ON anchors(weight DESC);
+	CREATE INDEX IF NOT EXISTS idx_anchors_condensed ON anchors(is_condensed) WHERE is_condensed = 0;
 
 	CREATE TABLE IF NOT EXISTS tools (
 		id TEXT PRIMARY KEY,

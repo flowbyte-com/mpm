@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -186,38 +185,34 @@ func (ss *SessionStore) getActivePersona() string {
 	if ss.BasePath == "" {
 		return "default"
 	}
-	path := filepath.Join(ss.BasePath, "persona", "active.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	pm := NewPersonaManager(ss.BasePath)
+	name, err := pm.GetActive()
+	if err != nil || !pm.Validate(name) {
 		return "default"
 	}
-
-	var active struct {
-		Persona string `json:"persona"`
-	}
-	if err := json.Unmarshal(data, &active); err != nil {
-		return "default"
-	}
-	return active.Persona
+	return name
 }
 
 func (ss *SessionStore) getActiveModes() []string {
 	if ss.BasePath == "" {
 		return []string{"standard"}
 	}
-	path := filepath.Join(ss.BasePath, "mode", "active.json")
-	data, err := os.ReadFile(path)
+	mm := NewModeManager(ss.BasePath)
+	modes, err := mm.GetActive()
 	if err != nil {
 		return []string{"standard"}
 	}
-
-	var active struct {
-		Modes []string `json:"modes"`
+	// Filter to only valid modes, fall back to ["standard"] if all were removed
+	valid := make([]string, 0, len(modes))
+	for _, m := range modes {
+		if mm.Validate(m) {
+			valid = append(valid, m)
+		}
 	}
-	if err := json.Unmarshal(data, &active); err != nil {
+	if len(valid) == 0 {
 		return []string{"standard"}
 	}
-	return active.Modes
+	return valid
 }
 
 // GetSessionCount returns the number of sessions

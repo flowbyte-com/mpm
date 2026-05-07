@@ -124,6 +124,7 @@ func (pm *PersonaManager) GetActive() (string, error) {
 }
 
 // SetActive updates the active persona
+// If the name is not a valid persona, it is set to empty string (system falls back to default).
 func (pm *PersonaManager) SetActive(personaName string) error {
 	data, err := os.ReadFile(pm.ActiveFile)
 	if err != nil {
@@ -131,15 +132,20 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 	}
 
 	var active struct {
-		Persona string `json:"persona"`
+		Persona string   `json:"persona"`
 		Modes   []string `json:"modes"`
-		Updated string `json:"updated"`
+		Updated string   `json:"updated"`
 	}
 	if err := json.Unmarshal(data, &active); err != nil {
 		return err
 	}
 
-	active.Persona = personaName
+	// Only set if valid, otherwise leave empty (triggers default fallback)
+	if personaName == "" || pm.Validate(personaName) {
+		active.Persona = personaName
+	} else {
+		active.Persona = ""
+	}
 	active.Updated = time.Now().Format(time.RFC3339)
 
 	newData, err := json.MarshalIndent(active, "", "  ")
@@ -153,6 +159,16 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 // GetActivePersona returns the active persona name (alias for GetActive)
 func (pm *PersonaManager) GetActivePersona() (string, error) {
 	return pm.GetActive()
+}
+
+// Validate returns true if a persona JSON file exists for the given name.
+func (pm *PersonaManager) Validate(name string) bool {
+	if name == "" {
+		return false
+	}
+	jsonPath := filepath.Join(pm.JSONDir, name+".json")
+	_, err := os.Stat(jsonPath)
+	return err == nil
 }
 
 // SetActivePersona updates the active persona (alias for SetActive)

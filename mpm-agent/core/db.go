@@ -80,14 +80,22 @@ func InitMiniBotDB(dbPath string) error {
 
 	CREATE TABLE IF NOT EXISTS anchors (
 		id TEXT PRIMARY KEY,
-		content TEXT NOT NULL,
+		facts TEXT,
+		summary TEXT NOT NULL,
+		tags TEXT,
 		context TEXT,
 		weight INTEGER DEFAULT 1,
 		session_id TEXT,
+		reference_count INTEGER DEFAULT 0,
+		expires_at TEXT,
 		created_at TEXT,
-		UNIQUE(content, context, session_id)
+		is_condensed INTEGER DEFAULT 0,
+		ancestor_ids TEXT,
+		UNIQUE(summary, context, session_id)
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_anchors_dedup ON anchors(content, context, session_id);
+	CREATE INDEX IF NOT EXISTS idx_anchors_expires ON anchors(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_anchors_weight ON anchors(weight DESC);
+	CREATE INDEX IF NOT EXISTS idx_anchors_condensed ON anchors(is_condensed) WHERE is_condensed = 0;
 
 	CREATE TABLE IF NOT EXISTS tools (
 		id TEXT PRIMARY KEY,

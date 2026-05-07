@@ -120,6 +120,7 @@ func (mm *ModeManager) GetActive() ([]string, error) {
 }
 
 // SetActive updates the active modes
+// Invalid mode names are silently removed from the list.
 func (mm *ModeManager) SetActive(modes []string) error {
 	data, err := os.ReadFile(mm.ActiveFile)
 	if err != nil {
@@ -127,28 +128,48 @@ func (mm *ModeManager) SetActive(modes []string) error {
 	}
 
 	var active struct {
-		Persona string `json:"persona"`
+		Persona string   `json:"persona"`
 		Modes   []string `json:"modes"`
-		Updated string `json:"updated"`
+		Updated string   `json:"updated"`
 	}
 	if err := json.Unmarshal(data, &active); err != nil {
 		return err
 	}
 
-	active.Modes = modes
+	// Filter to only valid modes
+	valid := make([]string, 0, len(modes))
+	for _, m := range modes {
+		if mm.Validate(m) {
+			valid = append(valid, m)
+		}
+	}
+	active.Modes = valid
 	active.Updated = time.Now().Format(time.RFC3339)
 
 	newData, err := json.MarshalIndent(active, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	return os.WriteFile(mm.ActiveFile, newData, 0644)
+	tmpPath := mm.ActiveFile + ".tmp"
+	if err := os.WriteFile(tmpPath, newData, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, mm.ActiveFile)
 }
 
 // GetActiveModes returns the active modes (alias for GetActive)
 func (mm *ModeManager) GetActiveModes() ([]string, error) {
 	return mm.GetActive()
+}
+
+// Validate returns true if a mode JSON file exists for the given name.
+func (mm *ModeManager) Validate(name string) bool {
+	if name == "" {
+		return false
+	}
+	jsonPath := filepath.Join(mm.JSONDir, name+".json")
+	_, err := os.Stat(jsonPath)
+	return err == nil
 }
 
 // SetActiveModes updates the active modes (alias for SetActive)

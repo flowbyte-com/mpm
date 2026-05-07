@@ -28,24 +28,24 @@ import (
 
 // chatSettings holds per-chat preferences.
 type chatSettings struct {
-	thinkLevel    int    // 0=off, 1=brief, 2=normal, 3=verbose
-	verbose       bool   // if true, don't strip thinking blocks from responses
-	toolProfile   string // active tool profile name, default "standard"
-	streamProgress bool  // if true, stream tool progress to live message
+	thinkLevel     int    // 0=off, 1=brief, 2=normal, 3=verbose
+	verbose        bool   // if true, don't strip thinking blocks from responses
+	toolProfile    string // active tool profile name, default "standard"
+	streamProgress bool   // if true, stream tool progress to live message
 }
 
 // Handler routes incoming Telegram updates to the agent.
 type Handler struct {
-	bot          *telego.Bot
-	cfg          *TelegramConfig
-	sm           *SessionManager
-	agentConfig  *core.MiniBotConfig
-	mediaDir     string              // absolute path to media cache directory
-	activeReplies sync.Map           // chatID → true (prevents double-reply)
-	chatSettings  sync.Map          // chatID → *chatSettings
-	liveMessage   sync.Map          // chatID (int64) → *liveMessageData
-	tokenTotals   sync.Map          // chatID (int64) → *sessionTokenTotals
-	summaryTimers sync.Map          // chatID (int64) → chan struct{} (cancel pending summary)
+	bot           *telego.Bot
+	cfg           *TelegramConfig
+	sm            *SessionManager
+	agentConfig   *core.MiniBotConfig
+	mediaDir      string   // absolute path to media cache directory
+	activeReplies sync.Map // chatID → true (prevents double-reply)
+	chatSettings  sync.Map // chatID → *chatSettings
+	liveMessage   sync.Map // chatID (int64) → *liveMessageData
+	tokenTotals   sync.Map // chatID (int64) → *sessionTokenTotals
+	summaryTimers sync.Map // chatID (int64) → chan struct{} (cancel pending summary)
 }
 
 // liveMessageData holds the state for a live-streaming message in one chat.
@@ -53,32 +53,133 @@ type liveMessageData struct {
 	messageID int
 	buffer    strings.Builder
 	mu        sync.Mutex
-	dirty     bool          // buffer changed since last flush
-	flusher   *flusher      // stop via flusher field to prevent goroutine leak
+	dirty     bool     // buffer changed since last flush
+	flusher   *flusher // stop via flusher field to prevent goroutine leak
+
+	// State machine for animated status
+	status        string        // "init", "thinking", "tooling", "stuck", "done"
+	step          int           // current step (for "[2/3]" display)
+	totalSteps    int           // total steps known
+	lastActivity  time.Time      // for stuck detection
+	stuckTimeout  time.Duration // default 4s
+	stuckArmed    bool          // true after first activity (arms stuck detection)
+}
+
+// statusState constants
+const (
+	statusInit     = "init"
+	statusThinking = "thinking"
+	statusTooling  = "tooling"
+	statusStuck    = "stuck"
+	statusDone     = "done"
+)
+
+func (e *liveMessageData) SetStatus(s string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if s == statusStuck {
+		return
+	}
+	e.status = s
+}
+
+func (e *liveMessageData) SetProgress(step, total int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.step = step
+	e.totalSteps = total
+}
+
+func (e *liveMessageData) Touch() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastActivity = time.Now()
+	e.stuckArmed = true
+	if e.status == statusStuck {
+		e.status = statusThinking
+	}
+}
+
+func (e *liveMessageData) IsStuck() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.stuckArmed || e.stuckTimeout == 0 {
+		return false
+	}
+	return time.Since(e.lastActivity) > e.stuckTimeout
+}
+
+func (e *liveMessageData) Render(tick int) string {
+	e.mu.Lock()
+	status := e.status
+	step := e.step
+	total := e.totalSteps
+	e.mu.Unlock()
+
+	switch status {
+	case statusInit:
+		return "🧠 Initializing..."
+	case statusThinking:
+		if tick%2 == 0 {
+			return "🤖 💭"
+		}
+		return "🤖 💡"
+	case statusTooling:
+		prefix := ""
+		if total > 0 {
+			prefix = fmt.Sprintf("[%d/%d] ", step, total)
+		}
+		switch tick % 3 {
+		case 0:
+			return fmt.Sprintf("%s🔧 Working... ⬛️⬛️⬛️", prefix)
+		case 1:
+			return fmt.Sprintf("%s🔧 Working... 🟩⬛️⬛️", prefix)
+		default:
+			return fmt.Sprintf("%s🔧 Working... 🟩🟩⬛️", prefix)
+		}
+	case statusStuck:
+		return "⏳ Taking longer than usual..."
+	case statusDone:
+		return "✍️ Formatting answer..."
+	default:
+		return "🧠 Working..."
+	}
+}
+
+func (e *liveMessageData) Init() {
+	e.mu.Lock()
+	e.lastActivity = time.Now()
+	e.stuckArmed = false
+	e.status = statusInit
+	e.stuckTimeout = 4 * time.Second
+	e.step = 0
+	e.totalSteps = 0
+	e.mu.Unlock()
 }
 
 // sessionTokenTotals holds running token usage for one chat session.
 type sessionTokenTotals struct {
-	mu          sync.Mutex
+	mu           sync.Mutex
 	inputTokens  int
 	outputTokens int
 	calls        int
 }
 
-// flusher runs in background, flushes buffer edits to Telegram at ~1.1s interval.
+// flusher runs in background, flushes buffer edits to Telegram at ~1.5s interval.
 type flusher struct {
 	handler *Handler
 	chatID  int64
 	ticker  *time.Ticker
 	stopCh  chan struct{}
 	doneCh  chan struct{} // closed when goroutine fully exits
+	tick    int
 }
 
 func newFlusher(h *Handler, chatID int64) *flusher {
 	f := &flusher{
 		handler: h,
 		chatID:  chatID,
-		ticker:  time.NewTicker(1100 * time.Millisecond),
+		ticker:  time.NewTicker(1500 * time.Millisecond),
 		stopCh:  make(chan struct{}),
 		doneCh:  make(chan struct{}),
 	}
@@ -91,7 +192,8 @@ func (f *flusher) run() {
 	for {
 		select {
 		case <-f.ticker.C:
-			f.handler.flushLiveMessage(f.chatID)
+			f.tick++
+			f.handler.flushLiveMessage(f.chatID, f.tick)
 		case <-f.stopCh:
 			return
 		}
@@ -114,6 +216,13 @@ func (r *telegramToolReporter) ToolStarted(chatID int64, toolName string, input 
 	if entry == nil {
 		return ""
 	}
+	entry.SetStatus(statusTooling)
+	if stepNum, ok := input["_stepNum"].(int); ok {
+		if stepTotal, ok := input["_stepTotal"].(int); ok {
+			entry.SetProgress(stepNum, stepTotal)
+		}
+	}
+	entry.Touch()
 	entry.mu.Lock()
 	if entry.buffer.Len() == 0 {
 		entry.buffer.WriteString("🧠 Working...\n")
@@ -129,6 +238,7 @@ func (r *telegramToolReporter) ToolCompleted(chatID int64, reportID string, tool
 	if entry == nil {
 		return
 	}
+	entry.Touch()
 	entry.mu.Lock()
 	entry.buffer.WriteString(fmt.Sprintf("  %s\n", summary))
 	entry.dirty = true
@@ -180,41 +290,53 @@ func (h *Handler) getOrCreateLiveMessage(chatID int64) *liveMessageData {
 	if ok {
 		return v.(*liveMessageData)
 	}
-	sent, err := h.bot.SendMessage(context.Background(), tu.Message(tu.ID(chatID), "🧠 Working..."))
+	sent, err := h.bot.SendMessage(context.Background(), tu.Message(tu.ID(chatID), "🤖 💭"))
 	if err != nil {
 		log.Printf("[telegram] live message init error: %v", err)
 		return nil
 	}
 	data := &liveMessageData{messageID: sent.MessageID}
+	data.Init()
+	data.status = statusThinking
 	data.flusher = newFlusher(h, chatID)
 	h.liveMessage.Store(chatID, data)
 	return data
 }
 
 // flushLiveMessage sends buffer to Telegram if dirty. Called by flusher goroutine.
-func (h *Handler) flushLiveMessage(chatID int64) {
+func (h *Handler) flushLiveMessage(chatID int64, tick int) {
 	v, ok := h.liveMessage.Load(chatID)
 	if !ok {
 		return
 	}
 	entry := v.(*liveMessageData)
+
 	entry.mu.Lock()
-	if !entry.dirty {
-		entry.mu.Unlock()
-		return
+	isStuck := entry.IsStuck()
+	if isStuck && entry.status != statusStuck {
+		entry.status = statusStuck
 	}
 	content := entry.buffer.String()
 	entry.mu.Unlock()
 
+	statusLine := entry.Render(tick)
+
+	var fullText string
+	if content != "" {
+		fullText = statusLine + "\n" + content
+	} else {
+		fullText = statusLine
+	}
+
 	const maxLen = 4000
-	if len(content) > maxLen {
-		content = truncateLiveBuffer(content, maxLen)
+	if len(fullText) > maxLen {
+		fullText = truncateLiveBuffer(fullText, maxLen)
 	}
 
 	_, err := h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
 		ChatID:    tu.ID(chatID),
 		MessageID: entry.messageID,
-		Text:      content,
+		Text:      fullText,
 	})
 	if err != nil {
 		log.Printf("[telegram] live message edit error: %v", err)
@@ -531,11 +653,16 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 		}
 		level := -1
 		switch strings.ToLower(parts[1]) {
-		case "off":  level = 0
-		case "low":  level = 1
-		case "adaptive": level = 2
-		case "med", "medium": level = 3
-		case "high": level = 4
+		case "off":
+			level = 0
+		case "low":
+			level = 1
+		case "adaptive":
+			level = 2
+		case "med", "medium":
+			level = 3
+		case "high":
+			level = 4
 		default:
 			if n, err := strconv.Atoi(parts[1]); err == nil {
 				level = n
@@ -680,52 +807,25 @@ func (h *Handler) startTyping(ctx *th.Context, chatID int64) {
 }
 
 // agentReply runs the MPM agent asynchronously (non-blocking).
-// Immediately sends "🧠 Thinking..." and spawns a goroutine.
+// Uses native sendChatAction typing indicator instead of a placeholder message.
 func (h *Handler) agentReply(chatID int64, userText string) {
-	// Send immediate thinking indicator (non-blocking)
-	sent, err := h.bot.SendMessage(context.Background(), tu.Message(tu.ID(chatID), "🧠 Thinking..."))
-	if err != nil {
-		log.Printf("[telegram] send thinking error: %v", err)
-		return
-	}
-	msgID := sent.MessageID
+	// Start typing indicator (runs in background until context cancelled)
+	h.startTyping(nil, chatID)
 
 	// Run agent in goroutine (non-blocking) — Tier 1
-	go h.runAgentWithTimeout(chatID, msgID, userText)
+	go h.runAgentWithTimeout(chatID, userText)
 }
 
 // runAgentWithTimeout runs the agent with 90s timeout and 15s heartbeat (Tier 2 + 3).
-func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) (finalMsg string) {
+func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg string) {
 	// Create 90s timeout context — Tier 2 hard kill switch
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	defer h.finalizeLiveMessage(chatID, finalMsg)
 
 	defer func() {
 		if r := recover(); r != nil {
 			finalMsg = "❌ Agent crashed or was terminated"
 			log.Printf("[telegram] agent panic recovered: %v", r)
-		}
-	}()
-
-	// Start heartbeat ticker (every 15s) — Tier 3
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	dots := 0
-
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				dots = (dots + 1) % 4
-				h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
-					ChatID:    tu.ID(chatID),
-					MessageID: msgID,
-					Text:      "🧠" + strings.Repeat(".", dots),
-				})
-			case <-ctx.Done():
-				return
-			}
 		}
 	}()
 
@@ -739,7 +839,7 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	binaryDir := core.GetBinaryDir()
 	db, err := core.OpenDBForPath(core.ResolveMiniBotDBPath())
 	if err != nil {
-		h.editMessage(chatID, msgID, fmt.Sprintf("⚠️ Error: %v", err))
+		h.sendText(nil, chatID, fmt.Sprintf("⚠️ Error: %v", err))
 		return
 	}
 	defer db.Close()
@@ -775,15 +875,12 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 	fcText := FormatFrontCortex(frontCortex)
 
 	// Call RunAgent with context (ctx is the 90s deadline)
-	responseText, err := core.RunAgent(ctx, userText, history, db, identityPath,
+	responseText, usedAnchors, err := core.RunAgent(ctx, userText, history, db, identityPath,
 		fcText, &h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter, tokenReporter)
-
-	// Stop heartbeat
-	ticker.Stop()
 
 	// Handle result
 	if err != nil {
-		h.editMessage(chatID, msgID, fmt.Sprintf("⚠️ Error: %v", err))
+		h.sendText(nil, chatID, fmt.Sprintf("⚠️ Error: %v", err))
 		return
 	}
 
@@ -796,8 +893,8 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 		responseText = cleanResponse(responseText)
 	}
 
-	// Update thinking message with final result
-	h.editMessage(chatID, msgID, responseText)
+	// Send final response
+	h.sendLongText(nil, chatID, responseText)
 
 	// Save to history
 	updatedHistory := append(history,
@@ -808,6 +905,12 @@ func (h *Handler) runAgentWithTimeout(chatID int64, msgID int, userText string) 
 
 	// Self-improve
 	dbPath := core.ResolveMiniBotDBPath()
+
+	// Increment reference count for anchors that were "on stage" (injected into prompt)
+	if len(usedAnchors) > 0 {
+		core.IncrementUsedAnchors(db, responseText, usedAnchors)
+	}
+
 	go h.selfImprove(dbPath, chatID, userText, responseText)
 
 	// Spawn idle-timer summarization (fires after 5 min idle, cancels on /new or new message)
@@ -850,13 +953,36 @@ func (h *Handler) selfImprove(dbPath string, chatID int64, userText, responseTex
 	sessionID := fmt.Sprintf("telegram:%d", chatID)
 
 	// Anchor the user's message if it's substantial (weight based on length)
-	if len(userText) > 50 {
+	if len(userText) > 100 {
 		weight := 1
 		if len(userText) > 200 {
 			weight = 2
 		}
-		if err := core.InsertAnchor(db, userText, "user_message", sessionID, weight); err != nil {
+		facts := core.ExtractFactsFromText(userText)
+		tags := core.ExtractTagsFromText(userText)
+		summary := truncate(userText, 100)
+		if err := core.InsertAnchor(db, facts, summary, tags, "user_message", sessionID, weight); err != nil {
 			log.Printf("[telegram] InsertAnchor error: %v", err)
+		} else {
+			// Check topic density and trigger async condensation if threshold met
+			go func() {
+				density, err := core.GetTopicAnchorDensity(db)
+				if err != nil || len(density) == 0 {
+					return
+				}
+				for tag, count := range density {
+					if count >= 5 {
+						log.Printf("[telegram] condensation: tag=%s count=%d, triggering forge", tag, count)
+						go func(t string) {
+							if err := core.CondenseAnchors(db, t, &h.agentConfig.Synth); err != nil {
+								log.Printf("[telegram] CondenseAnchors error: %v", err)
+							} else {
+								log.Printf("[telegram] condensation: tag=%s completed", t)
+							}
+						}(tag)
+					}
+				}
+			}()
 		}
 	}
 
@@ -865,10 +991,10 @@ func (h *Handler) selfImprove(dbPath string, chatID int64, userText, responseTex
 		lessonContent := fmt.Sprintf("User asked: %s | Response covered: %s",
 			truncate(userText, 100), truncate(responseText, 200))
 		lesson := core.Lesson{
-			ID:       core.GenerateID(),
-			Content:  lessonContent,
-			Type:     "exchange",
-			Tags:     "telegram,conversation",
+			ID:      core.GenerateID(),
+			Content: lessonContent,
+			Type:    "exchange",
+			Tags:    "telegram,conversation",
 		}
 		if err := core.ExtractLesson(db, lesson); err != nil {
 			log.Printf("[telegram] ExtractLesson error: %v", err)

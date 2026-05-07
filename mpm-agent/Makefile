@@ -17,7 +17,7 @@ $(BIN)/mini-bot: cmd/mini-bot/main.go cmd/mini-bot/repl.go core/*.go | $(BIN)
 	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o $@ ./cmd/mini-bot
 
 $(BIN)/mini-bot-telegram: cmd/telegram/*.go core/*.go | $(BIN)
-	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o $@ ./cmd/telegram
+	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -tags fts5 -o $@ ./cmd/telegram
 
 $(BIN)/mini-bot-mcp: cmd/mcp/main.go core/*.go | $(BIN)
 	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o $@ ./cmd/mcp

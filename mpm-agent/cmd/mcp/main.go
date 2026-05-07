@@ -87,7 +87,7 @@ func handleRequest(req jsonRPCRequest) jsonRPCResponse {
 			"tools": []map[string]interface{}{
 				{
 					"name":        "execute_mpm_command",
-					"description": "Execute an MPM CLI command. Pass the full command string after 'mpm'. Example: 'recall hello' runs 'mpm recall hello'.",
+					"description": "Execute an MPM CLI command. Example: 'recall hello' runs 'mpm recall hello'. Supported: add, ls, show, rm, shred, promote, reinforce, weaken, set-weight (memory ops); session add/search/show/shred/list; reference add/ls/show/search/shred; lesson add/list/search/get/shred/stats; persona list/active/set/clear; mode list/active/add/remove/clear; recall <query>; status; stats; compile mode|persona; start; stop; restart; doctor; version; prime-directives.",
 					"inputSchema": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{

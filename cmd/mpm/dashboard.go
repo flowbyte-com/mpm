@@ -3,12 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -59,6 +57,7 @@ type DashboardStatus struct {
 	ActiveModes     []string     `json:"active_modes"`
 	Workers         []WorkerInfo `json:"workers"`
 	QueueTasks      []string     `json:"queue_tasks"`
+	DaemonStartTime int64        `json:"daemon_start_time"` // Unix timestamp
 }
 
 type WorkerInfo struct {
@@ -75,26 +74,26 @@ type logEntry struct {
 
 // dashboardModel is the Bubbletea model for our dashboard
 type dashboardModel struct {
-	status        *DashboardStatus
-	logs          []logEntry
-	memoryHistory []int // Last 60 readings for sparkline
-	sockPath      string
-	width         int
-	height        int
-	connected     bool
-	err           error
-	uptimeSecs    int
-	lastRefresh   int64 // Unix timestamp of last refresh (for throttling)
+	status           *DashboardStatus
+	logs             []logEntry
+	memoryHistory    []int // Last 60 readings for sparkline
+	sockPath         string
+	width            int
+	height           int
+	connected        bool
+	err              error
+	displayUptimeSecs int    // Client-side uptime tracking
+	lastRefresh      int64   // Unix timestamp of last refresh (for throttling)
 }
 
 func newDashboardModel(sockPath string) dashboardModel {
 	return dashboardModel{
-		sockPath:      sockPath,
-		memoryHistory: make([]int, 60),
-		connected:     false,
-		uptimeSecs:    0,
-		width:         120, // Safe default; will be updated on resize
-		lastRefresh:   0,
+		sockPath:         sockPath,
+		memoryHistory:    make([]int, 60),
+		connected:        false,
+		displayUptimeSecs: 0,
+		width:            120, // Safe default; will be updated on resize
+		lastRefresh:      0,
 	}
 }
 
@@ -102,10 +101,7 @@ const dashboardRefreshInterval = 1 // Minimum seconds between refreshes
 
 // Init initializes the dashboard model
 func (m dashboardModel) Init() tea.Cmd {
-	return tea.Batch(
-		fetchStatus(m.sockPath),
-		fetchLogs(),
-	)
+	return fetchStatus(m.sockPath)
 }
 
 // Update handles messages and updates the model
@@ -115,7 +111,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = msg.status
 		m.connected = true
 		m.err = nil
-		m.uptimeSecs++
+		// Calculate uptime from daemon start time
+		if m.status != nil && m.status.DaemonStartTime > 0 {
+			m.displayUptimeSecs = int(time.Now().Unix() - m.status.DaemonStartTime)
+		} else {
+			m.displayUptimeSecs++
+		}
 		// Update memory history
 		if m.status != nil && len(m.memoryHistory) > 0 {
 			m.memoryHistory = append(m.memoryHistory[1:], m.status.MemoryUsageKB)
@@ -124,10 +125,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		now := time.Now().Unix()
 		if now > m.lastRefresh+dashboardRefreshInterval {
 			m.lastRefresh = now
-			return m, tea.Batch(
-				fetchStatus(m.sockPath),
-				fetchLogs(),
-			)
+			return m, fetchStatus(m.sockPath)
 		}
 		return m, nil
 
@@ -146,7 +144,16 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			// Trigger reboot via socket
-			return m, triggerReboot(m.sockPath)
+			return m, func() tea.Msg {
+				conn, err := net.Dial("unix", m.sockPath)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("cannot connect for reboot: %w", err)}
+				}
+				defer conn.Close()
+				msg := Message{Args: []string{"reboot"}}
+				json.NewEncoder(conn).Encode(msg)
+				return nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -197,7 +204,7 @@ func (m dashboardModel) View() string {
 
 	// Header Pane
 	sb.WriteString(statusOK.Render("  ✓ Daemon Running"))
-	sb.WriteString(fmt.Sprintf("  |  PID: %d  |  Uptime: %s", m.status.PID, m.status.Uptime))
+	sb.WriteString(fmt.Sprintf("  |  PID: %d  |  Uptime: %s", m.status.PID, formatUptime(time.Duration(m.displayUptimeSecs)*time.Second)))
 	sb.WriteString("\n")
 	sb.WriteString(borderStyle.Render("  " + strings.Repeat("─", m.width-4)))
 	sb.WriteString("\n\n")
@@ -403,177 +410,14 @@ func fetchStatus(sockPath string) tea.Cmd {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		var resp Message
 		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-			return errMsg{err: err}
+			return errMsg{err: fmt.Errorf("status response: %w", err)}
 		}
 
 		var status DashboardStatus
 		if err := json.Unmarshal([]byte(resp.Output), &status); err != nil {
-			return errMsg{err: err}
+			return errMsg{err: fmt.Errorf("parse status: %w", err)}
 		}
-
 		return statusMsg{status: &status}
-	}
-}
-
-// fetchLogs reads recent entries from daemon.json.log
-// Uses efficient backward scanning to find last N lines without loading entire file
-func fetchLogs() tea.Cmd {
-	return func() tea.Msg {
-		paths := []string{
-			"/tmp/mpm/daemon.json.log",
-			filepath.Join(os.Getenv("HOME"), ".openclaw", "workspace", "mpm", "daemon.json.log"),
-		}
-
-		const maxLogs = 10
-		var logs []logEntry
-
-		for _, path := range paths {
-			f, err := os.Open(path)
-			if err != nil {
-				continue
-			}
-
-			// Get file size
-			info, err := f.Stat()
-			if err != nil {
-				f.Close()
-				continue
-			}
-
-			// If file is small, read it all
-			if info.Size() < 64*1024 {
-				f.Close()
-				logs = readLastLinesEfficient(path, maxLogs)
-				break
-			}
-
-			// For large files, scan backward from end
-			logs = scanLastLinesBackward(f, info, maxLogs)
-			f.Close()
-			break
-		}
-
-		return logsMsg{logs: logs}
-	}
-}
-
-// readLastLinesEfficient reads last N lines from a small file
-func readLastLinesEfficient(path string, maxLines int) []logEntry {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	// Find last N newline positions
-	lines := strings.Split(string(data), "\n")
-	if len(lines) <= maxLines {
-		return parseLogLines(lines)
-	}
-
-	// Take only last maxLines
-	return parseLogLines(lines[len(lines)-maxLines:])
-}
-
-// parseLogLines parses JSON lines into logEntry structs
-func parseLogLines(lines []string) []logEntry {
-	var logs []logEntry
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var entry logEntry
-		if err := json.Unmarshal([]byte(line), &entry); err == nil {
-			logs = append(logs, entry)
-		}
-	}
-	return logs
-}
-
-// scanLastLinesBackward efficiently reads last N lines from large file by scanning backward
-func scanLastLinesBackward(f *os.File, info os.FileInfo, maxLines int) []logEntry {
-	fileSize := info.Size()
-	bufSize := 8192
-	if bufSize > int(fileSize) {
-		bufSize = int(fileSize)
-	}
-
-	lines := make([]string, 0, maxLines)
-	remainder := ""
-
-	for linesRead := 0; linesRead < maxLines && fileSize > 0; {
-		// Calculate read position
-		readStart := fileSize - int64(bufSize)
-		if readStart < 0 {
-			readStart = 0
-			bufSize = int(fileSize)
-		}
-
-		// Read chunk
-		f.Seek(readStart, io.SeekStart)
-		buf := make([]byte, bufSize)
-		n, err := f.Read(buf)
-		if err != nil && err != io.EOF {
-			break
-		}
-
-		// Prepend remainder from previous iteration
-		data := remainder + string(buf[:n])
-		chunkLines := strings.Split(data, "\n")
-
-		// If we're not at the start of file, discard the last partial line
-		if readStart > 0 && len(chunkLines) > 0 {
-			remainder = chunkLines[0]
-			chunkLines = chunkLines[1:]
-		} else {
-			remainder = ""
-		}
-
-		// Take lines from the end (most recent first)
-		for i := len(chunkLines) - 1; i >= 0 && linesRead < maxLines; i-- {
-			line := strings.TrimSpace(chunkLines[i])
-			if line == "" {
-				continue
-			}
-			var entry logEntry
-			if err := json.Unmarshal([]byte(line), &entry); err == nil {
-				lines = append(lines, line) // Store raw for now
-				linesRead++
-			}
-		}
-
-		fileSize = readStart
-	}
-
-	// Reverse to get chronological order (oldest first)
-	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
-		lines[i], lines[j] = lines[j], lines[i]
-	}
-
-	// Parse stored raw lines
-	return parseLogLines(lines)
-}
-
-// triggerReboot sends reboot command to daemon
-func triggerReboot(sockPath string) tea.Cmd {
-	return func() tea.Msg {
-		conn, err := net.Dial("unix", sockPath)
-		if err != nil {
-			return errMsg{err: err}
-		}
-		defer conn.Close()
-
-		msg := Message{Args: []string{"reboot"}}
-		if err := json.NewEncoder(conn).Encode(msg); err != nil {
-			return errMsg{err: err}
-		}
-
-		// Read response
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		var resp Message
-		json.NewDecoder(conn).Decode(&resp)
-
-		return tea.Quit
 	}
 }
 

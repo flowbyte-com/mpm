@@ -207,17 +207,18 @@ func runSelectorPTY(items []selectorItem, multi bool, activeSet map[string]bool)
 	}
 	defer ptmx.Close()
 
-	// Read result from PTY master
-	var result []string
-
+	// Read result from PTY master (communicate via channel to avoid data race)
+	resultCh := make(chan []string, 1)
 	go func() {
 		scanner := bufio.NewScanner(ptmx)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "MPM_SELECT_DONE:") {
-				result = parseSelectorResult(line)
+				resultCh <- parseSelectorResult(line)
+				return
 			}
 		}
+		resultCh <- nil
 	}()
 
 	waitErr := cmd.Wait()
@@ -225,6 +226,7 @@ func runSelectorPTY(items []selectorItem, multi bool, activeSet map[string]bool)
 	if waitErr != nil {
 		// May have been killed or exited
 	}
+	result := <-resultCh
 	if result == nil {
 		result = []string{}
 	}

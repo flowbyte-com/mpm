@@ -99,6 +99,7 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 				"execute_mpm_command",
 				"read_file", "write_file", "ReadFileSemantic", "ReadFileCompare",
 				"WebSynthesize", "jq",
+				"generate_image", "synthesize_speech", "web_search", "understand_image",
 			},
 			"coding": {
 				"list_toolkits", "load_toolkit", "unload_toolkit",

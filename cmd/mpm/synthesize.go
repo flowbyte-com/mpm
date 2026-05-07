@@ -219,9 +219,7 @@ func getSessionFromDB(uuid string) (string, error) {
 
 // findSessionJSONL searches sessions directories for a .jsonl matching the prefix
 func findSessionJSONL(uuid string) string {
-	dirs := []string{
-		"/home/v/.openclaw/agents/main/sessions",
-	}
+	dirs := []string{configpkg.ResolveEnvPath("~/.openclaw/agents/main/sessions")}
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
