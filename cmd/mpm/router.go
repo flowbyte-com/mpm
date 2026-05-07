@@ -85,6 +85,7 @@ func NewRouter() *CommandRouter {
 		"topic":            {Name: "topic", Description: "Topic management", MinArgs: 1},
 		"session":          {Name: "session", Description: "Session operations", NeedsDaemon: true},
 		"lesson":           {Name: "lesson", Description: "Lesson operations", NeedsDaemon: true},
+		"memory":           {Name: "memory", Description: "Memory operations", NeedsDaemon: true},
 		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0, NeedsDaemon: true},
 		"ingest":           {Name: "ingest", Description: "Import memories from external SQLite sources"},
 	}

@@ -199,12 +199,10 @@ var (
 	totalTasks      int64          // Thread-safe counter for total tasks processed
 	daemonPid       = os.Getpid()  // Captured at startup
 	sockPath        = socketPath() // Socket path (computed once)
-	listener        net.Listener   // The socket listener (set after Listen)
-	listenerMutex   sync.Mutex     // Protects listener access
-	cleanupSync     sync.Once      // Ensures cleanup runs exactly once
-	cleanupMutex    sync.Mutex     // Extra protection for exit path
-	isShuttingDown  atomic.Bool    // Shutdown flag
-	isDaemonProcess bool           // True when this process IS the daemon
+	listener       net.Listener // The socket listener (set after Listen)
+	cleanupSync    sync.Once    // Ensures cleanup runs exactly once
+	cleanupMutex   sync.Mutex   // Extra protection for exit path
+	isShuttingDown atomic.Bool  // Shutdown flag
 
 	// Logger state
 	logFile   *os.File
@@ -241,14 +239,37 @@ var (
 	isRebooting   atomic.Bool       // True if daemon is rebooting (not stopping)
 
 	// Watch daemon state
-	watchPid  int       // PID of the watch subprocess (0 if not running)
-	watchCmd  *exec.Cmd // Reference to watch subprocess
-	watchDone chan bool // Signals watch shutdown complete
+	watchPid       int          // PID of the watch subprocess (0 if not running)
+	watchCmd       *exec.Cmd    // Reference to watch subprocess
+	watchDaemonMu  sync.RWMutex // Protects watchPid and watchCmd
+	watchDone      chan struct{} // Signals watch shutdown complete (close to signal)
 
 	// Pre-flight health check state
 	preflightDone   atomic.Bool  // True if pre-flight checks completed
 	preflightResult atomic.Value // Stores PreFlightResult
 )
+
+// getWatchPID returns the watch daemon PID safely
+func getWatchPID() int {
+	watchDaemonMu.RLock()
+	defer watchDaemonMu.RUnlock()
+	return watchPid
+}
+
+// getWatchCmd returns the watch daemon command reference safely
+func getWatchCmd() *exec.Cmd {
+	watchDaemonMu.RLock()
+	defer watchDaemonMu.RUnlock()
+	return watchCmd
+}
+
+// setWatchState sets both watchPid and watchCmd atomically
+func setWatchState(pid int, cmd *exec.Cmd) {
+	watchDaemonMu.Lock()
+	watchPid = pid
+	watchCmd = cmd
+	watchDaemonMu.Unlock()
+}
 
 // PreFlightResult holds the result of the pre-flight health check
 type PreFlightResult struct {
@@ -335,6 +356,7 @@ type LogEntry struct {
 type DaemonStatus struct {
 	PID               int    `json:"pid"`
 	Uptime            string `json:"uptime"`
+	DaemonStartTime   int64  `json:"daemon_start_time"` // Unix timestamp for accurate uptime calculation
 	ActiveWorkers     int64  `json:"active_workers"`
 	QueuedTasks       int64  `json:"queued_tasks"`
 	MaxWorkers        int    `json:"max_workers"`
@@ -1001,15 +1023,12 @@ func queueMonitor() {
 		}
 
 		queueMapMutex.Lock()
-		defer queueMapMutex.Unlock()
 
 		now := time.Now()
 		for id, qt := range queueMap {
 			if now.Sub(qt.Task.EnqueuedAt) > queueTimeout {
-				// Task has been queued too long, cancel it
 				logWarn("queue", daemonPid, fmt.Sprintf("Task %s timed out in queue", id))
 
-				// Notify client
 				enc := json.NewEncoder(qt.Conn)
 				enc.Encode(Message{
 					Output:   fmt.Sprintf("Task timed out after %v in queue", queueTimeout),
@@ -1018,67 +1037,12 @@ func queueMonitor() {
 					Done:     true,
 				})
 
-				// Remove from queue
 				delete(queueMap, id)
 				atomic.AddInt64(&queuedTasks, -1)
 			}
 		}
+			queueMapMutex.Unlock()
 	}
-}
-
-// executeQueuedTask runs a task and notifies the client
-func executeQueuedTask(task *Task) {
-	// Increment active workers
-	atomic.AddInt64(&activeWorkers, 1)
-	atomic.AddInt64(&totalTasks, 1)
-	defer atomic.AddInt64(&activeWorkers, -1)
-
-	cmdName := "unknown"
-	if len(task.Args) > 0 {
-		cmdName = task.Args[0]
-	}
-
-	// Notify client that task is starting
-	enc := json.NewEncoder(task.Conn)
-	enc.Encode(Message{
-		Output: fmt.Sprintf("Worker acquired. Executing %s...\n", cmdName),
-		Done:   false,
-	})
-
-	binary, err := os.Executable()
-	if err != nil {
-		logError(cmdName, 0, fmt.Sprintf("Failed to get executable: %v", err))
-		enc.Encode(Message{Error: err.Error(), Done: true, ExitCode: 1})
-		return
-	}
-
-	startTime := time.Now()
-	cmd := exec.Command(binary, task.Args...)
-	cmd.Env = append(os.Environ(), "MPM_DIRECT=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	pid := cmd.Process.Pid
-	logTaskStart(cmdName, pid)
-
-	err = cmd.Start()
-	if err != nil {
-		logError(cmdName, 0, fmt.Sprintf("Failed to start: %v", err))
-		enc.Encode(Message{Error: err.Error(), Done: true, ExitCode: 1})
-		return
-	}
-
-	// Wait for completion
-	err = cmd.Wait()
-	durMs := time.Since(startTime).Milliseconds()
-
-	if err != nil {
-		logError(cmdName, pid, fmt.Sprintf("Command failed: %v", err))
-		enc.Encode(Message{Error: err.Error(), Done: true, ExitCode: 1})
-		return
-	}
-
-	logTaskEnd(cmdName, pid, durMs)
-	enc.Encode(Message{Done: true, ExitCode: 0})
 }
 
 // submitTask submits a task to the queue, returns true if queued
@@ -1135,6 +1099,11 @@ func clearQueue() {
 		})
 		delete(queueMap, id)
 	}
+}
+
+// executeQueuedTask runs a task from the queue
+func executeQueuedTask(task *Task) {
+	executeCommandWithStream(task.Args, task.Conn)
 }
 
 // isWorkCommand checks if a command should go through the worker pool
@@ -1739,7 +1708,7 @@ func handleExit() {
 	}
 
 	// Explicitly stop watch daemon for clean shutdown
-	if watchPid != 0 {
+	if getWatchPID() != 0 {
 		stopWatchDaemon()
 	}
 
@@ -1781,7 +1750,12 @@ func killProcessGroup() {
 
 // handleConnection processes incoming client requests
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+	var connQueued bool
+	defer func() {
+		if !connQueued {
+			conn.Close()
+		}
+	}()
 
 	var msg Message
 	if err := json.NewDecoder(conn).Decode(&msg); err != nil {
@@ -1813,6 +1787,7 @@ func handleConnection(conn net.Conn) {
 					force = true
 				}
 			}
+			connQueued = true
 			lifecycleChan <- &LifecycleOp{Type: "shutdown", Force: force, Conn: conn}
 			return
 		case "reboot", "restart":
@@ -1823,6 +1798,7 @@ func handleConnection(conn net.Conn) {
 					force = true
 				}
 			}
+			connQueued = true
 			lifecycleChan <- &LifecycleOp{Type: "reboot", Force: force, Conn: conn}
 			return
 		case "logs":
@@ -1885,6 +1861,7 @@ func handleConnection(conn net.Conn) {
 
 	// Check if this is a work command that needs the pool
 	if isWorkCommand(msg.Args) {
+		connQueued = true
 		handleQueuedCommand(conn, msg.Args)
 		return
 	}
@@ -1941,6 +1918,7 @@ func handleStatus(conn net.Conn) {
 	status := DaemonStatus{
 		PID:               daemonPid,
 		Uptime:            uptime,
+		DaemonStartTime:   startTime.Unix(),
 		ActiveWorkers:     atomic.LoadInt64(&activeWorkers),
 		QueuedTasks:       atomic.LoadInt64(&queuedTasks),
 		MaxWorkers:        maxWorkers,
@@ -1978,23 +1956,6 @@ func formatHeartbeatInterval() string {
 }
 
 // handleStop initiates graceful shutdown
-func handleStop(conn net.Conn) {
-	logInfo("stop", daemonPid, "Stop requested")
-
-	resp := Message{
-		Output:   "Shutting down daemon...",
-		ExitCode: 0,
-		Done:     true,
-	}
-	json.NewEncoder(conn).Encode(resp)
-
-	// Give the response time to be sent before we exit
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		handleExit()
-	}()
-}
-
 // handleLogsRequest handles logs request via socket (streaming)
 func handleLogsRequest(conn net.Conn) {
 	logFilePath := getLogPath()
@@ -2054,9 +2015,19 @@ func executeCommandWithStream(args []string, conn net.Conn) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Capture output for logging (don't stream to stdout in daemon mode)
-	var stdout, stderr []byte
-	cmd.Stdout = nil // Will be captured
-	cmd.Stderr = nil
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		logError(cmdName, 0, fmt.Sprintf("Failed to create stdout pipe: %v", err))
+		enc.Encode(Message{Error: err.Error(), Done: true, ExitCode: 1})
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		logError(cmdName, 0, fmt.Sprintf("Failed to create stderr pipe: %v", err))
+		enc.Encode(Message{Error: err.Error(), Done: true, ExitCode: 1})
+		return
+	}
 
 	if err := cmd.Start(); err != nil {
 		logError(cmdName, 0, fmt.Sprintf("Failed to start: %v", err))
@@ -2067,9 +2038,19 @@ func executeCommandWithStream(args []string, conn net.Conn) {
 	pid := cmd.Process.Pid
 	logTaskStart(cmdName, pid)
 
+	// Read stdout and stderr concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { io.Copy(&stdoutBuf, stdoutPipe); wg.Done() }()
+	go func() { io.Copy(&stderrBuf, stderrPipe); wg.Done() }()
+	wg.Wait()
+
 	// Wait for completion
 	err = cmd.Wait()
 	durMs := time.Since(startTime).Milliseconds()
+
+	stdout := stdoutBuf.Bytes()
+	stderr := stderrBuf.Bytes()
 
 	if err != nil {
 		logError(cmdName, pid, fmt.Sprintf("Command failed: %v", err))
@@ -3288,8 +3269,8 @@ func formatBytes(bytes int64) string {
 
 // startWatchDaemon starts the watch subprocess
 func startWatchDaemon() error {
-	if watchPid != 0 {
-		return fmt.Errorf("watch daemon already running (PID: %d)", watchPid)
+	if getWatchPID() != 0 {
+		return fmt.Errorf("watch daemon already running (PID: %d)", getWatchPID())
 	}
 
 	binary, err := os.Executable()
@@ -3298,7 +3279,6 @@ func startWatchDaemon() error {
 	}
 
 	cmd := exec.Command(binary, "watch")
-	// Filter daemon state from subprocess env - let watch be standalone
 	filteredEnv := os.Environ()
 	var newEnv []string
 	for _, e := range filteredEnv {
@@ -3318,24 +3298,19 @@ func startWatchDaemon() error {
 
 	watchPid = cmd.Process.Pid
 	watchCmd = cmd
-	watchDone = make(chan bool)
+	watchDone = make(chan struct{})
 
-	logInfo("watch", daemonPid, fmt.Sprintf("Watch daemon started (PID: %d)", watchPid))
+	logInfo("watch", daemonPid, fmt.Sprintf("Watch daemon started (PID: %d)", cmd.Process.Pid))
 
-	// Monitor the subprocess in background using raw wait to avoid
-	// exec.Cmd pipe state issues with Setpgid processes.
+	// Monitor the subprocess in background
+	pid := cmd.Process.Pid
 	go func() {
 		for {
 			var status syscall.WaitStatus
-			pid, err := syscall.Wait4(watchPid, &status, syscall.WNOHANG, nil)
-			if err != nil || pid != 0 {
-				// Process exited
-				watchPid = 0
-				watchCmd = nil
-				select {
-				case watchDone <- true:
-				default:
-				}
+			exitedPid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+			if err != nil || exitedPid != 0 {
+				setWatchState(0, nil)
+				close(watchDone)
 				logInfo("watch", daemonPid, "Watch daemon exited")
 				return
 			}
@@ -3348,60 +3323,46 @@ func startWatchDaemon() error {
 
 // stopWatchDaemon sends SIGTERM to the watch subprocess and waits for it to exit.
 func stopWatchDaemon() error {
-	if watchPid == 0 {
+	actualPid := getWatchPID()
+	if actualPid == 0 {
 		return fmt.Errorf("watch daemon not running")
 	}
 
-	// Try to find the actual PID of the watch process (might have been reused)
-	actualPid := watchPid
 	if !isProcessRunning(actualPid) {
-		// Process already gone
-		watchPid = 0
-		watchCmd = nil
+		setWatchState(0, nil)
 		return nil
 	}
 
-	// Send SIGTERM to the process group (negative PID = whole process group)
-	// This works because we started the watch with Setpgid:true
 	logInfo("watch", daemonPid, fmt.Sprintf("Stopping watch daemon (PID: %d)...", actualPid))
 	if err := syscall.Kill(-actualPid, syscall.SIGTERM); err != nil {
 		if err == syscall.ESRCH {
-			// Process already gone
-			watchPid = 0
-			watchCmd = nil
+			setWatchState(0, nil)
 			return nil
 		}
-		// If we can't send to process group, try direct PID
 		if err := syscall.Kill(actualPid, syscall.SIGTERM); err != nil {
 			if err == syscall.ESRCH {
-				watchPid = 0
-				watchCmd = nil
+				setWatchState(0, nil)
 				return nil
 			}
 			logWarn("watch", daemonPid, fmt.Sprintf("Failed to send SIGTERM to watch: %v", err))
 		}
 	}
 
-	// Wait for graceful shutdown with deadline
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !isProcessRunning(actualPid) {
 			logInfo("watch", daemonPid, "Watch daemon stopped gracefully")
-			watchPid = 0
-			watchCmd = nil
+			setWatchState(0, nil)
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Timeout - force kill
 	logWarn("watch", daemonPid, "Watch daemon did not stop gracefully, sending SIGKILL")
 	if err := syscall.Kill(-actualPid, syscall.SIGKILL); err != nil {
-		// Try direct PID if process group failed
 		syscall.Kill(actualPid, syscall.SIGKILL)
 	}
 
-	// Wait for SIGKILL to take effect
 	for i := 0; i < 20; i++ {
 		if !isProcessRunning(actualPid) {
 			break
@@ -3409,8 +3370,7 @@ func stopWatchDaemon() error {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	watchPid = 0
-	watchCmd = nil
+	setWatchState(0, nil)
 	return nil
 }
 
@@ -3426,11 +3386,10 @@ func isProcessRunning(pid int) bool {
 
 // restartWatchDaemon restarts the watch subprocess
 func restartWatchDaemon() error {
-	if watchPid != 0 {
+	if getWatchPID() != 0 {
 		if err := stopWatchDaemon(); err != nil {
 			logWarn("watch", daemonPid, fmt.Sprintf("Failed to stop watch during restart: %v", err))
 		}
-		// Wait for cleanup
 		time.Sleep(100 * time.Millisecond)
 	}
 	return startWatchDaemon()
@@ -3438,11 +3397,12 @@ func restartWatchDaemon() error {
 
 // getWatchStatus returns current watch daemon status
 func getWatchStatus() map[string]interface{} {
+	wpid := getWatchPID()
 	status := map[string]interface{}{
-		"running": watchPid != 0,
-		"pid":     watchPid,
+		"running": wpid != 0,
+		"pid":     wpid,
 	}
-	if watchPid != 0 {
+	if wpid != 0 {
 		status["status"] = "running"
 	} else {
 		status["status"] = "stopped"
@@ -3622,13 +3582,13 @@ func handleShutdown(force bool, conn net.Conn) {
 	closeHeartbeat()
 	clearQueue()
 
-	if watchPid != 0 {
+	if getWatchPID() != 0 {
 		stopWatchDaemon()
 	}
 
 	os.Remove(sockPath)
-	closeLogger()
 	closeWebhook()
+	closeLogger()
 	os.Exit(0)
 }
 
@@ -3670,8 +3630,7 @@ func flushSession() {
 // Waits for the new daemon to create its socket before exiting.
 func executeReboot() {
 	// Stop the watch daemon properly to avoid orphaned watch processes.
-	// This ensures the watch is actually stopped before we restart.
-	if watchPid != 0 {
+	if getWatchPID() != 0 {
 		if err := stopWatchDaemon(); err != nil {
 			logWarn("lifecycle", daemonPid, fmt.Sprintf("Failed to stop watch during reboot: %v", err))
 			// Continue with reboot anyway - watch may still be running

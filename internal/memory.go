@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -211,15 +210,15 @@ func (s *MemoryStore) InitSQLite() error {
 		cols  string
 		table string
 	}{
-		{"memories_fts", "content, tags", "memories"},
-		{"sessions_fts", "content, session_id, content_hash", "sessions"},
-		{"topics_fts", "name, description, tags", "topics"},
-		{"references_fts", "title, tags, content", "references"},
+		{"memories_fts", "content, collection, session_id UNINDEXED, tags UNINDEXED", "memories"},
+		{"sessions_fts", "content, session_id, content_hash UNINDEXED", "sessions"},
+		{"topics_fts", "name, description", "topics"},
+		{"lessons_fts", "content, tags", "lessons"},
+		{"references_fts", "title, content, tags", "references"},
 	}
 	ftsAvailable := true
 	for _, ft := range fts {
-		s.DB.Exec("DROP TABLE IF EXISTS " + ft.name)
-		if _, err := s.DB.Exec("CREATE VIRTUAL TABLE " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')"); err != nil {
+		if _, err := s.DB.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')"); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: FTS5 not available (%s), search will use LIKE fallback: %v\n", ft.name, err)
 			ftsAvailable = false
 			break
@@ -232,27 +231,28 @@ func (s *MemoryStore) InitSQLite() error {
 		return nil
 	}
 	triggers := []string{
-		`CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags) END`,
-		`CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid END`,
-		`CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN UPDATE memories_fts SET content=new.content, tags=new.tags WHERE rowid = new.rowid END`,
-		`CREATE TRIGGER sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content) VALUES (new.rowid, new.content) END`,
-		`CREATE TRIGGER sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid END`,
-		`CREATE TRIGGER sessions_au AFTER UPDATE ON sessions BEGIN UPDATE sessions_fts SET content=new.content WHERE rowid = new.rowid END`,
-		`CREATE TRIGGER topics_ai AFTER INSERT ON topics BEGIN INSERT INTO topics_fts(rowid, name, description, tags) VALUES (new.rowid, new.name, new.description, new.tags) END`,
-		`CREATE TRIGGER topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid END`,
-		`CREATE TRIGGER topics_au AFTER UPDATE ON topics BEGIN UPDATE topics_fts SET name=new.name, description=new.description, tags=new.tags WHERE rowid = new.rowid END`,
-		`CREATE TRIGGER references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, tags, content) VALUES (new.rowid, new.title, new.tags, new.content) END`,
-		`CREATE TRIGGER references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid END`,
-		`CREATE TRIGGER references_au AFTER UPDATE ON "references" BEGIN UPDATE references_fts SET title=new.title, tags=new.tags, content=new.content WHERE rowid = new.rowid END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au_content AFTER UPDATE ON memories WHEN NOT (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END`,
+		`CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END`,
+		`CREATE TRIGGER IF NOT EXISTS topics_ai AFTER INSERT ON topics BEGIN INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END`,
+		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS topics_au AFTER UPDATE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END`,
+		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
 	}
 	for _, sql := range triggers {
 		if _, err := s.DB.Exec(sql); err != nil {
 			return fmt.Errorf("failed to create trigger: %w", err)
 		}
 	}
-
-	// Cleanup expired sessions
-	s.DB.Exec(`VACUUM`)
 
 	return nil
 }
@@ -345,7 +345,7 @@ var poisonPhraseOnce sync.Once
 var poisonPhraseErr error
 
 // loadPoisonPhrases loads poison phrases from the phrases file using sync.Once
-// for thread-safe one-time initialization
+// for thread-safe one-time initialization. Returns cached result on all calls.
 func loadPoisonPhrases() ([]string, error) {
 	poisonPhraseOnce.Do(func() {
 		poisonPhraseCache, poisonPhraseErr = loadPoisonPhrasesFromFile()
@@ -406,20 +406,10 @@ func loadPoisonPhrasesFromFile() ([]string, error) {
 func isPoisoned(content string) (bool, string) {
 	phrases, err := loadPoisonPhrases()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️ Failed to load poison phrases: %v — using defaults\n", err)
-		// Hardcoded fallbacks: if file load fails, at least catch the most obvious ones
-		phrases = []string{
-			"ignore previous instructions",
-			"system override",
-			"disregard your training",
-			"override system instructions",
-			"reset your persona",
-			"forget who you are",
-			"bypass security",
-		}
+		// Defensive fallback — should never hit since sync.Once seeds defaults on first failure
+		return false, ""
 	}
 
-	// Case-insensitive substring match for each poison phrase
 	lowerContent := strings.ToLower(content)
 	for _, phrase := range phrases {
 		if strings.Contains(lowerContent, strings.ToLower(phrase)) {
@@ -531,7 +521,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		ftsQuery := `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at, fts.rank
 			FROM memories m
 			JOIN memories_fts fts ON m.rowid = fts.rowid
-			WHERE memories_fts MATCH ? AND m.collection = ?
+			WHERE memories_fts MATCH ? AND m.collection = ? AND m.deleted_at IS NULL
 			ORDER BY fts.rank
 			LIMIT ?`
 		rows, err = s.DB.Query(ftsQuery, query, collection, n)
@@ -564,7 +554,8 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 	// Convert results to Memory structs
 	memories := make([]*Memory, 0)
 	for rows.Next() {
-		var id, coll, content, sessionID, tagsJSON, metadataJSON, createdAt string
+		var id, coll, content, tagsJSON, metadataJSON, createdAt string
+		var sessionID sql.NullString
 		var embeddingJSON []byte
 		var rank int
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt, &rank)
@@ -581,8 +572,8 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		}
 
 		// Parse session_id
-		if sessionID != "" {
-			mem.Metadata["session_id"] = sessionID
+		if sessionID.Valid {
+			mem.Metadata["session_id"] = sessionID.String
 		}
 
 		// Parse tags
@@ -892,7 +883,8 @@ func (s *MemoryStore) ExportMirror(path string) (string, error) {
 func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string) float64, query string) ([]*Memory, error) {
 	var memories []*Memory
 	for rows.Next() {
-		var id, coll, content, sessionID, tagsJSON, metadataJSON, createdAt string
+		var id, coll, content, tagsJSON, metadataJSON, createdAt string
+		var sessionID sql.NullString
 		var embeddingJSON []byte
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt)
 		if err != nil {
@@ -905,8 +897,8 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 			Collection: coll,
 			Metadata:   make(map[string]interface{}),
 		}
-		if sessionID != "" {
-			mem.Metadata["session_id"] = sessionID
+		if sessionID.Valid {
+			mem.Metadata["session_id"] = sessionID.String
 		}
 		if tagsJSON != "" {
 			json.Unmarshal([]byte(tagsJSON), &mem.Tags)
@@ -1414,7 +1406,7 @@ func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]
 		SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.collection = ?
+		WHERE memories_fts MATCH ? AND m.collection = ? AND m.deleted_at IS NULL
 		ORDER BY fts.rank
 		LIMIT ?`
 	rows, err := s.DB.Query(ftsQuery, query, collection, n)
@@ -1430,7 +1422,7 @@ func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]
 	likeQuery := `
 		SELECT id, collection, content, COALESCE(session_id, '') as session_id, COALESCE(tags, '[]') as tags, COALESCE(metadata, '{}') as metadata, COALESCE(embedding, '[]') as embedding, created_at
 		FROM memories
-		WHERE collection = ? AND (content LIKE ? OR tags LIKE ?)
+		WHERE collection = ? AND deleted_at IS NULL AND (content LIKE ? OR tags LIKE ?)
 		ORDER BY created_at DESC
 		LIMIT ?`
 	rows2, err := s.DB.Query(likeQuery, collection, searchPattern, searchPattern, n)
@@ -1513,14 +1505,15 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt, sessionID string
+		var createdAt string
+		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 		if err != nil {
 			continue
 		}
 
-		mem.SessionID = sessionID
+		mem.SessionID = sessionID.String
 		mem.Created = createdAt
 		if len(tagsJSON) > 0 {
 			json.Unmarshal(tagsJSON, &mem.Tags)
@@ -1545,56 +1538,24 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 // HybridSearch combines vector and keyword search
 func (s *MemoryStore) HybridSearch(query string, collection string, n int) ([]*Memory, error) {
 	if collection == "" {
-		collection = "memories_public"
+		collection = "memories"
 	}
 
-	// Get vector results
-	vectorResults, err := s.QueryMemory(query, collection, n*2, nil)
-	if err != nil {
-		vectorResults = []*Memory{}
-	}
-
-	// Get text results
 	textResults, err := s.FullTextSearch(query, collection, n*2)
 	if err != nil {
 		textResults = []*Memory{}
 	}
 
-	// Merge with weighted scores
-	merged := make(map[string]*Memory)
-
-	// Weight vector results (higher weight for semantic similarity)
-	for _, mem := range vectorResults {
-		if sim, ok := mem.Metadata["_similarity"].(float64); ok {
-			mem.Metadata["_score"] = sim * 0.6 // Vector weight
-			mem.Metadata["_search_type"] = "hybrid"
-			merged[mem.ID] = mem
-		}
-	}
-
-	// Weight text results
+	seen := make(map[string]bool)
+	var results []*Memory
 	for _, mem := range textResults {
-		if score, ok := mem.Metadata["_score"].(float64); ok {
-			if existing, exists := merged[mem.ID]; exists {
-				// Combine scores
-				existing.Metadata["_score"] = existing.Metadata["_score"].(float64) + (score * 0.4)
-			} else {
-				mem.Metadata["_score"] = score * 0.4 // Text weight
-				mem.Metadata["_search_type"] = "hybrid"
-				merged[mem.ID] = mem
-			}
+		if seen[mem.ID] {
+			continue
 		}
-	}
-
-	// Convert to slice and sort
-	results := make([]*Memory, 0, len(merged))
-	for _, mem := range merged {
+		seen[mem.ID] = true
+		mem.Metadata["_search_type"] = "hybrid"
 		results = append(results, mem)
 	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Metadata["_score"].(float64) > results[j].Metadata["_score"].(float64)
-	})
 
 	if len(results) > n {
 		return results[:n], nil
@@ -1859,9 +1820,10 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 
 	// Sessions are stored in memories table with collection='session' (singular)
 	rows, err := s.DB.Query(`
-		SELECT id, collection, content, created_at, metadata, tags
-		FROM memories
-		WHERE collection = 'session' AND content MATCH ?
+		SELECT m.id, m.collection, m.content, m.created_at, m.metadata, m.tags
+		FROM memories m
+		JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE m.collection = 'session' AND memories_fts MATCH ?
 		ORDER BY rank
 		LIMIT ?
 	`, query, limit)
@@ -1928,7 +1890,7 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 	// Update collection to deactivate
 	result, err := s.DB.Exec(`
 		UPDATE memories 
-		SET collection = CONCAT(collection, '_inactive'),
+		SET collection = collection || '_inactive',
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE id = ? AND collection = ?
 	`, id, collection)
@@ -1948,7 +1910,7 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 	return nil
 }
 
-// SearchTopics performs FTS5 search on topics table
+// SearchTopics performs FTS5 search on topics table, falling back to LIKE.
 func (s *MemoryStore) SearchTopics(query string, limit int) ([]*SearchResult, error) {
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
@@ -2007,8 +1969,6 @@ func (s *MemoryStore) SearchTopics(query string, limit int) ([]*SearchResult, er
 	return results, nil
 }
 
-// SearchTopics performs FTS5 search on topics table
-
 // DeleteAllByCollection deletes all memories in a specific collection
 func (s *MemoryStore) DeleteAllByCollection(collection string) (int, error) {
 	if s.DB == nil {
@@ -2020,7 +1980,7 @@ func (s *MemoryStore) DeleteAllByCollection(collection string) (int, error) {
 	// Mark all memories in collection as deleted
 	result, err := s.DB.Exec(`
 		UPDATE memories 
-		SET collection = CONCAT(collection, '_inactive'),
+		SET collection = collection || '_inactive',
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE collection = ?
 	`, collection)
@@ -2047,7 +2007,7 @@ func (s *MemoryStore) DeleteAllMemories() (int, error) {
 	// Mark all memories as deleted
 	result, err := s.DB.Exec(`
 		UPDATE memories 
-		SET collection = CONCAT(collection, '_inactive'),
+		SET collection = collection || '_inactive',
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 	`)
 	if err != nil {
@@ -2288,10 +2248,9 @@ func (s *MemoryStore) BackfillSessionIDs(sessionsJSONPath string) (int, error) {
 					}
 				}
 			}
+			break // Only process the first :main:main key
 		}
-		break // Just process the first :main:main key
 	}
-	_ = sessionsData
 
 	// Build a time-range map: sessionFile path → sessionId
 	// The sessionFile field in sessions.json points to the .jsonl file

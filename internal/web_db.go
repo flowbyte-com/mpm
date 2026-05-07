@@ -97,10 +97,10 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 	var args []interface{}
 
 	if found {
-		query = `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.created_at, m.source_db, m.source_id, m.promoted_at FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH ?`
+		query = `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.created_at, m.source_db, m.source_id, m.promoted_at FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH ? AND m.deleted_at IS NULL`
 		args = []interface{}{ftsQuery}
 	} else {
-		query = `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE content LIKE ?`
+		query = `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE deleted_at IS NULL AND content LIKE ?`
 		args = []interface{}{"%" + q + "%"}
 	}
 
@@ -176,7 +176,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 
 	err := dm.db.QueryRow(`
 		SELECT collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at
-		FROM memories WHERE id = ?
+		FROM memories WHERE id = ? AND deleted_at IS NULL
 	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
 		return nil, err
@@ -260,12 +260,16 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
 	}
+	weightGain := (delta + 1) / 2
+	if weightGain == 0 {
+		weightGain = 1
+	}
 	_, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
 		    last_accessed_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, delta, delta/2, id)
+	`, delta, weightGain, id)
 	return err
 }
 
@@ -830,8 +834,8 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 
 // RunSelfMaintenance runs all self-improvement processes on DatabaseManager.
 func (dm *DatabaseManager) RunSelfMaintenance() (map[string]interface{}, error) {
-	store := NewMemoryStore("")
-	if err := store.InitSQLite(); err != nil {
+	store, err := dm.getSharedStore()
+	if err != nil {
 		return nil, err
 	}
 
@@ -852,8 +856,8 @@ func (dm *DatabaseManager) RunSelfMaintenance() (map[string]interface{}, error) 
 
 // GetSpacedReinforcementReview returns memories for spaced reinforcement review.
 func (dm *DatabaseManager) GetSpacedReinforcementReview(daysSinceAccess, limit int) ([]map[string]interface{}, error) {
-	store := NewMemoryStore("")
-	if err := store.InitSQLite(); err != nil {
+	store, err := dm.getSharedStore()
+	if err != nil {
 		return nil, err
 	}
 
@@ -879,8 +883,8 @@ func (dm *DatabaseManager) GetSpacedReinforcementReview(daysSinceAccess, limit i
 
 // GetContextualMemories returns memories relevant to a given context.
 func (dm *DatabaseManager) GetContextualMemories(contextTags []string, sessionContext string, limit int) ([]map[string]interface{}, error) {
-	store := NewMemoryStore("")
-	if err := store.InitSQLite(); err != nil {
+	store, err := dm.getSharedStore()
+	if err != nil {
 		return nil, err
 	}
 

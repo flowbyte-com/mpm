@@ -432,6 +432,16 @@ func stripMarkdownDisplay(s string) string {
 	s = strings.TrimPrefix(s, "#")
 	s = strings.TrimPrefix(s, " ")
 	// Remove common markdown
+	// Strip all leading # characters and whitespace
+	for strings.HasPrefix(s, "#") {
+		s = strings.TrimPrefix(s, "#")
+	}
+	s = strings.TrimSpace(s)
+	// Strip all leading # characters and whitespace
+	for strings.HasPrefix(s, "#") {
+		s = strings.TrimPrefix(s, "#")
+	}
+	s = strings.TrimSpace(s)
 	replacer := strings.NewReplacer(
 		"**", "", "*", "", "`", "",
 		"\n", " ", "  ", " ",

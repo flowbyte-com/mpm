@@ -17,6 +17,8 @@ import (
 	"mpm/internal/config"
 )
 
+var skillNameRegexp = regexp.MustCompile(`<name>([\w-]+)</name>`)
+
 // DailyReviewReport holds all three sections of the daily review
 // Note: ansiBold, ansiReset, colorCyan, colorGreen, colorYellow, colorRed
 // are declared in main.go and shared within the main package.
@@ -262,8 +264,7 @@ func fetchRuntimeConfig() RuntimeConfig {
 	var skillNames []string
 	if ss, ok := latest["skillsSnapshot"].(map[string]interface{}); ok {
 		if prompt, ok := ss["prompt"].(string); ok {
-			re := regexp.MustCompile(`<name>([\w-]+)</name>`)
-			matches := re.FindAllStringSubmatch(prompt, -1)
+			matches := skillNameRegexp.FindAllStringSubmatch(prompt, -1)
 			for _, m := range matches {
 				if len(m) > 1 {
 					skillNames = append(skillNames, m[1])
@@ -377,8 +378,8 @@ func storeDailyReviewToMPM(r *DailyReviewReport) {
 
 	// Check for duplicate
 	var lastContent string
-	db.QueryRow(`SELECT content FROM memories WHERE collection='system' AND tags='["daily-review"]' ORDER BY created_at DESC LIMIT 1`).Scan(&lastContent)
-	if lastContent == string(payload) {
+	err = db.QueryRow(`SELECT content FROM memories WHERE collection='system' AND tags='["daily-review"]' ORDER BY created_at DESC LIMIT 1`).Scan(&lastContent)
+	if err == nil && lastContent == string(payload) {
 		fmt.Printf("\n  [%s] Daily review unchanged — not written\n", colorYellow("NOTE"))
 		return
 	}

@@ -14,15 +14,17 @@ PREFIX      ?= /usr/local
 
 VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
+CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
 .PHONY: all build install clean test help
 
 all: build
 
 # Build canonical binary to bin/mpm
+# Requires CGO for mattn/go-sqlite3 with FTS5 support
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/mpm
+	CGO_CFLAGS=$(CGO_CFLAGS) go build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/mpm
 	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME) (mpm-std)"
 
 # Install to PREFIX/bin
@@ -33,7 +35,7 @@ install: build
 
 # Run tests
 test:
-	go test -v ./...
+	CGO_CFLAGS=$(CGO_CFLAGS) go test -tags fts5 -v ./...
 
 # Clean build artifacts
 clean:

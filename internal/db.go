@@ -132,7 +132,9 @@ func UnmarshalJSON(data string, v interface{}) error {
 
 // DatabaseManager manages the single unified database
 type DatabaseManager struct {
-	db *sql.DB
+	db          *sql.DB
+	dbPath      string // stored for shareable store init
+	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
 }
 
 // SQLDB returns the underlying *sql.DB for direct queries.
@@ -143,6 +145,19 @@ func (dm *DatabaseManager) SQLDB() *sql.DB {
 // IsOpen returns true if the database connection is non-nil.
 func (dm *DatabaseManager) IsOpen() bool {
 	return dm.db != nil
+}
+
+// getSharedStore returns a MemoryStore backed by dm.db, creating it once.
+// This avoids redundant InitSQLite() calls in self-maintenance methods.
+func (dm *DatabaseManager) getSharedStore() (*MemoryStore, error) {
+	if dm.sharedStore != nil {
+		return dm.sharedStore, nil
+	}
+	store := NewMemoryStore("")
+	store.SQLiteDBPath = dm.dbPath
+	store.DB = &SQLiteConnection{DB: dm.db}
+	dm.sharedStore = store
+	return store, nil
 }
 
 // NewDatabaseManager creates a new database manager with single unified database.
@@ -166,7 +181,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	db.Exec("PRAGMA synchronous = NORMAL")
 	db.Exec("PRAGMA cache_size = -64000")
 
-	manager := &DatabaseManager{db: db}
+	manager := &DatabaseManager{db: db, dbPath: dbPath}
 
 	if err := manager.initUnifiedSchema(); err != nil {
 		db.Close()
@@ -217,42 +232,52 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 
 	// Use shared index definitions
+	var indexErrs []error
 	for _, sql := range CommonIndexes {
-		dm.db.Exec(sql)
+		if _, err := dm.db.Exec(sql); err != nil {
+			indexErrs = append(indexErrs, err)
+		}
+	}
+	if len(indexErrs) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %d index creation errors (may be benign on re-run): %v\n", len(indexErrs), indexErrs)
 	}
 
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
-	dm.initFTSTables()
+	if err := dm.initFTSTables(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: FTS5 initialization failed: %v (search will use LIKE fallback)\n", err)
+	} else {
+		// FTS5 tables ready — backfill any existing data that predates the triggers
+		dm.backfillFTSTables()
+	}
 
 	return nil
 }
 
-// initFTSTables attempts to create FTS5 virtual tables
-// If FTS5 is not available (pure Go sqlite build), this silently skips
-func (dm *DatabaseManager) initFTSTables() {
-	// Test if FTS5 is available
+func (dm *DatabaseManager) initFTSTables() error {
+	// Robust FTS5 availability check
 	var available int
 	dm.db.QueryRow("SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'").Scan(&available)
 	if available == 0 {
-		// Try a simple FTS5 table to confirm availability
+		// Fallback test: try creating a real FTS5 table in-memory
 		testDB, err := sql.Open("sqlite3", ":memory:")
-		if err == nil {
-			_, err = testDB.Exec("CREATE VIRTUAL TABLE test_fts USING fts5(content);")
-			testDB.Close()
-			if err != nil {
-				// FTS5 not available
-				return
-			}
-		} else {
-			return
+		if err != nil {
+			return nil // fail silently, search will use LIKE fallback
+		}
+		_, err = testDB.Exec("CREATE VIRTUAL TABLE test_fts USING fts5(content, tokenize='porter unicode61');")
+		testDB.Close()
+		if err != nil {
+			return nil // fail silently, search will use LIKE fallback
 		}
 	}
 
+	// FTS5 is available. Use unicode61+porter for broad compatibility.
 	ftsStatements := []string{
-		`CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(content, session_id, content_hash UNINDEXED, tokenize='porter');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags UNINDEXED, tokenize='porter');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(content, session_id, content_hash UNINDEXED, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags UNINDEXED, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
 
 		`CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
 		`CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; END;`,
@@ -260,24 +285,90 @@ func (dm *DatabaseManager) initFTSTables() {
 
 		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
-		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au_content AFTER UPDATE ON memories WHEN NOT (old.deleted_at IS NULL AND new.deleted_at IS NOT NULL) BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
 
 		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
+
+		`CREATE TRIGGER IF NOT EXISTS topics_ai AFTER INSERT ON topics BEGIN INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END;`,
+		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS topics_au AFTER UPDATE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END;`,
+
 		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ai AFTER INSERT ON reference_chunks BEGIN INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ad AFTER DELETE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_au AFTER UPDATE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 	}
 
 	for _, sqlQuery := range ftsStatements {
-		dm.db.Exec(sqlQuery) // Ignore errors - FTS5 is optional
+		if _, err := dm.db.Exec(sqlQuery); err != nil {
+			// FTS5 creation failed — log and return error so we know search will use LIKE fallback
+			fmt.Fprintf(os.Stderr, "FTS5 init error (search will use LIKE): %v\nSQL: %s\n", err, sqlQuery)
+			return fmt.Errorf("FTS5 table/trigger creation failed: %v (search will use LIKE fallback)", err)
+		}
 	}
+	return nil
+}
+
+// backfillFTSTables inserts existing rows into FTS5 tables.
+// Called once after initFTSTables succeeds to index pre-existing data
+// that predates the FTS5 triggers.
+func (dm *DatabaseManager) backfillFTSTables() error {
+	backfills := []struct {
+		destTable string
+		srcTable  string
+		cols      string
+		insertSQL string
+	}{
+		{
+			destTable: "memories_fts",
+			srcTable:  "memories",
+			cols:      "id, content, collection, session_id, tags",
+			insertSQL: `INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+					SELECT rowid, content, collection, COALESCE(session_id,''), COALESCE(tags,'[]')
+					FROM memories WHERE deleted_at IS NULL`,
+		},
+		{
+			destTable: "sessions_fts",
+			srcTable:  "sessions",
+			cols:      "id, content, session_id, content_hash",
+			insertSQL: `INSERT INTO sessions_fts(rowid, content, session_id, content_hash)
+					SELECT rowid, content, COALESCE(session_id,''), COALESCE(content_hash,'') FROM sessions`,
+		},
+		{
+			destTable: "topics_fts",
+			srcTable:  "topics",
+			cols:      "id, name, description",
+			insertSQL: `INSERT INTO topics_fts(rowid, name, description)
+					SELECT rowid, COALESCE(name,''), COALESCE(description,'') FROM topics`,
+		},
+		{
+			destTable: "lessons_fts",
+			srcTable:  "lessons",
+			cols:      "id, content, tags",
+			insertSQL: `INSERT INTO lessons_fts(rowid, content, tags)
+					SELECT rowid, content, COALESCE(tags,'[]') FROM lessons`,
+		},
+	}
+
+	for _, b := range backfills {
+		// Check if FTS table already has data (avoid duplicate backfills)
+		var count int
+		dm.db.QueryRow("SELECT COUNT(*) FROM " + b.destTable).Scan(&count)
+		if count > 0 {
+			continue // already populated
+		}
+		_, err := dm.db.Exec(b.insertSQL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: backfill FTS table %s failed: %v\n", b.destTable, err)
+		}
+	}
+	return nil
 }
 
 func (dm *DatabaseManager) Close() error {
@@ -527,108 +618,50 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 
 // ==================== SHRED PROTOCOL ====================
 
-// WipeRecord performs a hard delete with VACUUM (on DatabaseManager)
+// WipeRecord performs a hard delete (on DatabaseManager)
 func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 	if tier != "sessions" && tier != "memories" && tier != "topics" {
 		return fmt.Errorf("cannot wipe from tier: %s", tier)
 	}
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return err
+	// Clean up topic_memberships when deleting a topic
+	if tier == "topics" {
+		if _, err := dm.db.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
+			return err
+		}
 	}
-	defer tx.Rollback()
-
-	if _, err = tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", tier), id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	_, err = dm.db.Exec("VACUUM")
+	_, err := dm.db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", tier), id)
 	return err
 }
 
-// ShredMemory performs a hard delete on memories table with VACUUM
+// ShredMemory performs a hard delete on memories table
 func ShredMemory(db *sql.DB, id string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err = tx.Exec("DELETE FROM memories WHERE id = ?", id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	_, err = db.Exec("VACUUM")
+	_, err := db.Exec("DELETE FROM memories WHERE id = ?", id)
 	return err
 }
 
-// ShredSession performs a hard delete on sessions table with VACUUM
+// ShredSession performs a hard delete on sessions table
 func ShredSession(db *sql.DB, id string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err = tx.Exec("DELETE FROM sessions WHERE id = ?", id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	_, err = db.Exec("VACUUM")
+	_, err := db.Exec("DELETE FROM sessions WHERE id = ?", id)
 	return err
 }
 
-// DeleteByID performs a hard delete with VACUUM (for general use)
+// DeleteByID performs a hard delete (for general use)
 func DeleteByID(db *sql.DB, table, id string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
+	if table != "sessions" && table != "memories" && table != "topics" {
+		return fmt.Errorf("cannot delete from table: %s", table)
 	}
-	defer tx.Rollback()
-
-	if _, err = tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	_, err = db.Exec("VACUUM")
+	_, err := db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	return err
 }
 
-// ShredTopic performs a hard delete on topics table with VACUUM
+// ShredTopic performs a hard delete on topics table
 // Also deletes associated topic_memberships entries first
 func ShredTopic(db *sql.DB, id string) error {
-	tx, err := db.Begin()
+	_, err := db.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-
-	// Delete memberships first (explicit, for clarity)
-	if _, err = tx.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
-		return err
-	}
-
-	// Delete the topic
-	if _, err = tx.Exec("DELETE FROM topics WHERE id = ?", id); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	_, err = db.Exec("VACUUM")
+	_, err = db.Exec("DELETE FROM topics WHERE id = ?", id)
 	return err
 }
 

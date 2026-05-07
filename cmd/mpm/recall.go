@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
+
 	_ "github.com/mattn/go-sqlite3"
-	"mpm/internal"
+	mpminternal "mpm/internal"
 )
 
 // Pre-compiled regexes for stripMarkdown (avoid repeated recompilation)
@@ -51,13 +52,14 @@ func handleRecall(args []string) int {
 		return 1
 	}
 
-	dbPath := internal.DefaultMemoryPaths().SQLiteDBPath
-	db, err := sql.Open("sqlite3", dbPath)
+	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
 		return 1
 	}
-	defer db.Close()
+	defer dm.Close()
+
+	db := dm.SQLDB()
 
 	// Keyword search using LIKE + FTS5 fallback with time filters
 	rows, err := keywordSearchWithTime(db, query, *since, *until, *limit)
@@ -76,22 +78,27 @@ func handleRecall(args []string) int {
 	}
 	var entries []recallEntry
 	for rows.Next() {
-		var id, content, sessionID, tags, createdAt string
-		if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
+		var id, content, createdAt string
+		var nullableSessionID, nullableTags sql.NullString
+		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt); err != nil {
 			continue
 		}
 		if content == "" {
 			continue
 		}
+		sessionID := ""
+		if nullableSessionID.Valid {
+			sessionID = nullableSessionID.String
+		}
 		entry := recallEntry{
 			content:   content,
 			sessionID: sessionID,
-			tags:      tags,
+			tags:      nullableTags.String,
 		}
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			entry.createdAt = t
 		}
-		if strings.Contains(tags, "synthesized") {
+		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
 		}
 		entries = append(entries, entry)
