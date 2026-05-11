@@ -1202,36 +1202,92 @@ func (h *Handler) sendText(_ *th.Context, chatID int64, text string) {
 	}
 }
 
+// SmartFenceChunk splits text into Telegram-safe chunks while preserving
+// balanced markdown code fences. Code blocks of any size are split with
+// properly balanced opening/closing fences across chunk boundaries.
+func SmartFenceChunk(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+
+	const safetyMargin = 196 // keeps us well under 4096 even with fence overhead
+	effectiveMax := maxLen - safetyMargin
+
+	var chunks []string
+	var buf strings.Builder
+	var currentLang string
+	inCodeBlock := false
+
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		isFence := strings.HasPrefix(line, "```")
+
+		if isFence {
+			if !inCodeBlock {
+				// Opening fence — extract language
+				inCodeBlock = true
+				lang := strings.TrimPrefix(strings.TrimSpace(line), "```")
+				if lang != "" {
+					currentLang = lang
+				}
+			} else {
+				// Closing fence
+				inCodeBlock = false
+				currentLang = ""
+			}
+		}
+
+		// Check if adding this line would exceed the limit
+		candidate := line
+		if buf.Len() > 0 && buf.Len()+1+len(candidate) > effectiveMax {
+			// Need to emit current chunk
+			if inCodeBlock {
+				// Close the code block before emitting
+				buf.WriteString("\n```")
+			}
+			chunks = append(chunks, buf.String())
+			buf.Reset()
+
+			if inCodeBlock {
+				// Reopen the code block in the next chunk
+				langPrefix := ""
+				if currentLang != "" {
+					langPrefix = currentLang + "\n"
+				}
+				buf.WriteString("```" + langPrefix + line + "\n")
+				continue
+			}
+		}
+
+		if buf.Len() > 0 {
+			buf.WriteString("\n")
+		}
+		buf.WriteString(line)
+	}
+
+	// Emit final chunk
+	if buf.Len() > 0 {
+		if inCodeBlock {
+			buf.WriteString("\n```")
+		}
+		chunks = append(chunks, buf.String())
+	}
+
+	if len(chunks) == 0 {
+		return []string{text}
+	}
+	return chunks
+}
+
 // sendLongText sends a long text as one or more messages, respecting Telegram's 4096 char limit.
 func (h *Handler) sendLongText(ctx *th.Context, chatID int64, text string) {
 	const maxLen = 4096
-	if len(text) <= maxLen {
-		h.sendText(ctx, chatID, text)
-		return
-	}
-
-	// Split on paragraph boundaries
-	paragraphs := strings.Split(text, "\n\n")
-	var buf strings.Builder
-	for _, para := range paragraphs {
-		para = strings.TrimSpace(para)
-		if para == "" {
-			continue
+	chunks := SmartFenceChunk(text, maxLen)
+	for i, chunk := range chunks {
+		h.sendText(ctx, chatID, chunk)
+		if i < len(chunks)-1 {
+			time.Sleep(150 * time.Millisecond)
 		}
-		if buf.Len()+len(para)+2 > maxLen {
-			if buf.Len() > 0 {
-				h.sendText(ctx, chatID, buf.String())
-				time.Sleep(150 * time.Millisecond)
-				buf.Reset()
-			}
-		}
-		if buf.Len() > 0 {
-			buf.WriteString("\n\n")
-		}
-		buf.WriteString(para)
-	}
-	if buf.Len() > 0 {
-		h.sendText(ctx, chatID, buf.String())
 	}
 }
 
