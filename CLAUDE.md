@@ -15,29 +15,31 @@ go test -v ./internal/... -run TestFunctionName  # Single test
 
 ## Architecture
 
-Two independent daemon processes on a Unix socket:
+Unified single process — all commands execute in-process. No daemon subprocess or Unix socket IPC.
 
 ```
-CLI ─── socket ───> Main Daemon ──> SQLite (mpm.db)
+CLI ──> Router ──> Handler (in-process) ──> SQLite (mpm.db)
                          │
-                         └──> Watch Daemon (fsnotify)
-                                  ├── .md → LTM memory
-                                  ├── .lock removed → session facts
-                                  └── external DB polling
+                         └──> WorkerPool (goroutine pool)
+                               ├── fsnotify watcher ──> .md → LTM memory
+                               ├── .lock removed → session facts
+                               └── external DB polling
 ```
 
-Many commands work standalone (no daemon): `add`, `ls`, `show`, `rm`, `recall`, `promote`, `reinforce`, `weaken`, `set-weight`, `shred`, `stats`, `prune`, `export`, `topic`, `reference`, `ingest`.
+All commands work standalone (no separate daemon): `add`, `ls`, `show`, `rm`, `recall`, `promote`, `reinforce`, `weaken`, `set-weight`, `shred`, `stats`, `prune`, `export`, `topic`, `reference`, `ingest`, `mode`, `persona`, `session`, `lesson`, `memory`, `compile`, `llm`.
 
 ## Key Source Files
 
 | File | Purpose |
 |------|---------|
-| `cmd/mpm/main.go` | CLI entry, daemon lifecycle, logging, webhooks, heartbeat, worker pool |
-| `cmd/mpm/router.go` | Command registry, socket dispatch, flag parsing (46 commands) |
+| `cmd/mpm/main.go` | CLI entry, doctor diagnostics, help system |
+| `cmd/mpm/router.go` | Command registry, flag parsing, dispatch |
+| `cmd/mpm/handlers.go` | All handlers (memory, session, topic, lesson, mode, persona, reference, watch lifecycle) |
+| `cmd/mpm/worker.go` | WorkerPool, WatchEvent types, event processors (runs fsnotify + external DB in-goroutine) |
 | `cmd/mpm/simple_cmds.go` | Standalone memory ops (add, ls, show, rm, promote, etc.) |
 | `cmd/mpm/maint_cmds.go` | Stats, prune, export, maintain |
 | `cmd/mpm/recall.go` | FTS5 search with time-range filters |
-| `cmd/mpm/watch.go` | fsnotify daemon, external DB polling, topic clustering |
+| `cmd/mpm/watch.go` | fsnotify goroutine, external DB polling goroutine, topic clustering |
 | `cmd/mpm/daily_review.go` | Daily review report |
 | `cmd/mpm/dashboard.go` | Bubbletea TUI dashboard |
 | `cmd/mpm/web.go` | Web UI server (embedded static assets) |
@@ -46,7 +48,6 @@ Many commands work standalone (no daemon): `add`, `ls`, `show`, `rm`, `recall`, 
 | `cmd/mpm/synthesize.go` | LLM session synthesis |
 | `cmd/mpm/topic.go` | Topic management (create, add, remove, list, show, delete) |
 | `cmd/mpm/tui.go` | Bubbletea TUI for mode/persona selection |
-| `cmd/mpm/handlers.go` | Legacy daemon handlers (memory, session, topic, lesson, mode, persona, reference) |
 | `internal/db.go` | DatabaseManager, unified schema, CRUD, FTS5, migrations |
 | `internal/memory.go` | MemoryStore, sensitive content blocking, poison phrases, self-maintenance |
 | `internal/web_db.go` | Web/database query methods |
@@ -71,6 +72,10 @@ FTS5 virtual tables with auto-sync triggers. Query: FTS5 MATCH → LIKE fallback
 - `weight` (1-100), `reinforcement_count`, `is_long_term` (weight >= 10), `expires_at`, `last_accessed_at`
 - Collections: `memories` (general), `session` (session facts), `lessons` (learned wisdom)
 - Relevance: `(reinforcement_count * 2) + (weight * 1.5) + recency_bonus`
+
+## File Watcher
+
+File watcher runs as a background goroutine within the same process, submitting events to the `WorkerPool` via a buffered channel. Controlled via `mpm watch [start|stop|restart|status]`. No separate subprocess.
 
 ## Security
 

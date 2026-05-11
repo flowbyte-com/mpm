@@ -80,7 +80,7 @@ func handlePrune(args []string) int {
 		fmt.Println("\nPrune options:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return 1
 	}
 
@@ -169,7 +169,7 @@ func handleExport(args []string) int {
 		fmt.Println("\nExport options:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return 1
 	}
 

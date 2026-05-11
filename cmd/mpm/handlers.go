@@ -1,9 +1,8 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,42 +10,60 @@ import (
 	"mpm/internal"
 )
 
-// ============================================================================
-// Handler: memory
-// ============================================================================
+// watchPool is the shared WorkerPool used by file watcher and external DB pollers.
+// It is initialized by main() in the unified process architecture.
+var watchPool *WorkerPool
 
-func handleMemory(conn net.Conn, args []string) {
+// watcherLifecycle tracks the fsnotify watcher goroutine lifecycle.
+var (
+	watcherCtx    context.Context
+	watcherCancel context.CancelFunc
+	watcherDone   chan struct{}
+)
+
+// respond prints output/error and returns an exit code.
+// This replaces the old sendResponse() that wrote JSON over a socket.
+func respond(output, errMsg string, exitCode int) int {
+	if output != "" {
+		fmt.Print(output)
+	}
+	if errMsg != "" {
+		fmt.Fprint(os.Stderr, errMsg)
+	}
+	return exitCode
+}
+
+func handleMemory(args []string) int {
 	// Parse subcommand - args[0] is the subcommand (add, list, search, etc.)
 	if len(args) < 1 {
 		// No subcommand - show help
-		handleMemoryHelp(conn)
-		return
+		return handleMemoryHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleMemoryHelp(conn)
+		return handleMemoryHelp()
 	case "add":
-		handleMemoryAdd(conn, args[1:])
+		return handleMemoryAdd(args[1:])
 	case "search":
-		handleMemorySearch(conn, args[1:])
+		return handleMemorySearch(args[1:])
 	case "show":
-		handleMemoryShow(conn, args[1:])
+		return handleMemoryShow(args[1:])
 	case "shred":
-		handleMemoryShred(conn, args[1:])
+		return handleMemoryShred(args[1:])
 	case "list":
-		handleMemoryList(conn, args[1:])
+		return handleMemoryList(args[1:])
 	case "search-term":
-		handleMemorySearchTerm(conn, args[1:])
+		return handleMemorySearchTerm(args[1:])
 	case "wipe":
-		handleMemoryWipe(conn, args[1:])
+		return handleMemoryWipe(args[1:])
 	default:
-		handleMemoryHelp(conn)
+		return handleMemoryHelp()
 	}
 }
 
-func handleMemoryHelp(conn net.Conn) {
+func handleMemoryHelp() int {
 	output := `mpm memory - Memory operations
 
 Usage:
@@ -65,23 +82,21 @@ Examples:
   mpm memory show abc123
   mpm memory shred abc123
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
 // ============================================================================
 // Handler: prime-directives
 // ============================================================================
 
-func handlePrimeDirectives(conn net.Conn) {
+func handlePrimeDirectives() int {
 	store := getMemoryStore()
 	if store == nil {
-		sendResponse(conn, "", "Error: memory store not available\n", true, 1)
-		return
+		return respond("", "Error: memory store not available\n", 1)
 	}
 	if store.DB == nil {
 		if err := store.InitSQLite(); err != nil {
-			sendResponse(conn, "", fmt.Sprintf("Error initializing memory store: %v\n", err), true, 1)
-			return
+			return respond("", fmt.Sprintf("Error initializing memory store: %v\n", err), 1)
 		}
 	}
 
@@ -92,8 +107,7 @@ func handlePrimeDirectives(conn net.Conn) {
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Error querying prime directives: %v\n", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Error querying prime directives: %v\n", err), 1)
 	}
 	defer rows.Close()
 
@@ -126,13 +140,12 @@ func handlePrimeDirectives(conn net.Conn) {
 	}
 
 	output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleMemoryAdd(conn net.Conn, args []string) {
+func handleMemoryAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm memory add <content>", true, 1)
-		return
+		return respond("", "Usage: mpm memory add <content>", 1)
 	}
 
 	content := strings.Join(args, " ")
@@ -140,17 +153,15 @@ func handleMemoryAdd(conn net.Conn, args []string) {
 	
 	mem, err := store.AddMemory(content, "memories", nil, nil, "", "cli")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add memory: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Memory added with ID: %s\n", mem.ID), "", true, 0)
+	return respond(fmt.Sprintf("Memory added with ID: %s\n", mem.ID), "", 0)
 }
 
-func handleMemorySearch(conn net.Conn, args []string) {
+func handleMemorySearch(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm memory search <query>", true, 1)
-		return
+		return respond("", "Usage: mpm memory search <query>", 1)
 	}
 
 	query := strings.Join(args, " ")
@@ -158,13 +169,11 @@ func handleMemorySearch(conn net.Conn, args []string) {
 
 	memories, err := store.FullTextSearch(query, "memories", 20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
 
 	if len(memories) == 0 {
-		sendResponse(conn, "No memories found.\n", "", true, 0)
-		return
+		return respond("No memories found.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -186,13 +195,12 @@ func handleMemorySearch(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleMemoryShow(conn net.Conn, args []string) {
+func handleMemoryShow(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm memory show <id>", true, 1)
-		return
+		return respond("", "Usage: mpm memory show <id>", 1)
 	}
 
 	id := args[0]
@@ -200,8 +208,7 @@ func handleMemoryShow(conn net.Conn, args []string) {
 
 	mem, err := store.GetByID(id, "memories")
 	if err != nil || mem == nil {
-		sendResponse(conn, "", fmt.Sprintf("Memory not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
 	}
 
 	var output strings.Builder
@@ -217,13 +224,12 @@ func handleMemoryShow(conn net.Conn, args []string) {
 	output.WriteString(mem.Content)
 	output.WriteString("\n")
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleMemoryShred(conn net.Conn, args []string) {
+func handleMemoryShred(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm memory shred <id>", true, 1)
-		return
+		return respond("", "Usage: mpm memory shred <id>", 1)
 	}
 
 	id := args[0]
@@ -231,25 +237,22 @@ func handleMemoryShred(conn net.Conn, args []string) {
 
 	err := store.DeleteMemory(id, "memories")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred memory: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred memory: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Memory shredded: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Memory shredded: %s\n", id), "", 0)
 }
 
-func handleMemoryList(conn net.Conn, args []string) {
+func handleMemoryList(args []string) int {
 	store := getMemoryStore()
 
 	memories, err := store.GetRecent(20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list memories: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list memories: %v", err), 1)
 	}
 
 	if len(memories) == 0 {
-		sendResponse(conn, "No memories stored.\n", "", true, 0)
-		return
+		return respond("No memories stored.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -271,13 +274,12 @@ func handleMemoryList(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleMemorySearchTerm(conn net.Conn, args []string) {
+func handleMemorySearchTerm(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm memory search-term <term>", true, 1)
-		return
+		return respond("", "Usage: mpm memory search-term <term>", 1)
 	}
 
 	term := strings.Join(args, " ")
@@ -286,13 +288,11 @@ func handleMemorySearchTerm(conn net.Conn, args []string) {
 	// Use the existing search functionality
 	memories, err := store.FullTextSearch(term, "memories", 50)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
 
 	if len(memories) == 0 {
-		sendResponse(conn, fmt.Sprintf("No memories matching '%s' found.\n", term), "", true, 0)
-		return
+		return respond(fmt.Sprintf("No memories matching '%s' found.\n", term), "", 0)
 	}
 
 	var output strings.Builder
@@ -314,10 +314,10 @@ func handleMemorySearchTerm(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleMemoryWipe(conn net.Conn, args []string) {
+func handleMemoryWipe(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -327,8 +327,7 @@ func handleMemoryWipe(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Wipe requires --force flag\n", true, 1)
-		return
+		return respond("", "Wipe requires --force flag\n", 1)
 	}
 
 	store := getMemoryStore()
@@ -336,57 +335,54 @@ func handleMemoryWipe(conn net.Conn, args []string) {
 	// Clear the mirror file
 	err := store.ClearMirror()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to wipe memories: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to wipe memories: %v", err), 1)
 	}
 
-	sendResponse(conn, "All memories wiped.\n", "", true, 0)
+	return respond("All memories wiped.\n", "", 0)
 }
 
 // ============================================================================
 // Handler: shred (topic, session, memory - same options)
 // ============================================================================
 
-func handleShred(conn net.Conn, args []string) {
+func handleShred(args []string) int {
 	if len(args) < 1 {
-		handleShredHelp(conn)
-		return
+		handleShredHelp()
 	}
 
 	targetType := args[0]
 	
 	switch targetType {
 	case "sessions":
-		handleShredSessions(conn, args[1:])
+		return handleShredSessions(args[1:])
 	case "memories":
-		handleShredMemories(conn, args[1:])
+		return handleShredMemories(args[1:])
 	case "topics":
-		handleShredTopics(conn, args[1:])
+		return handleShredTopics(args[1:])
 	case "database":
-		handleShredDatabase(conn, args[1:])
+		return handleShredDatabase(args[1:])
 	case "modes":
-		handleShredModes(conn, args[1:])
+		return handleShredModes(args[1:])
 	case "personas":
-		handleShredPersonas(conn, args[1:])
+		return handleShredPersonas(args[1:])
 	default:
 		// Legacy: single item by ID (topic/session)
 		if len(args) < 2 {
-			handleShredHelp(conn)
-			return
+			return handleShredHelp()
 		}
 		id := args[1]
 		switch targetType {
 		case "topic":
-			handleShredTopic(conn, id)
+			return handleShredTopic(id)
 		case "session":
-			handleShredSession(conn, id)
+			return handleShredSession(id)
 		default:
-			handleShredHelp(conn)
+			return handleShredHelp()
 		}
 	}
 }
 
-func handleShredHelp(conn net.Conn) {
+func handleShredHelp() int {
 	output := `mpm shred - Secure delete operations
 
 Usage:
@@ -409,10 +405,10 @@ Examples:
   mpm shred topic abc123 -f
   mpm shred session xyz789 -f
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleShredSessions(conn net.Conn, args []string) {
+func handleShredSessions(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -422,22 +418,20 @@ func handleShredSessions(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete ALL sessions. Use 'mpm shred sessions -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete ALL sessions. Use 'mpm shred sessions -f' to confirm.\n", 1)
 	}
 
 	store := getMemoryStore()
 	count, err := store.DeleteAllByCollection("sessions")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete sessions: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete sessions: %v", err), 1)
 	}
 
 	// Space reclamation happens during maintenance cycle (deferred VACUUM)
-	sendResponse(conn, fmt.Sprintf("All sessions deleted (%d records).\n", count), "", true, 0)
+	return respond(fmt.Sprintf("All sessions deleted (%d records).\n", count), "", 0)
 }
 
-func handleShredMemories(conn net.Conn, args []string) {
+func handleShredMemories(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -447,22 +441,20 @@ func handleShredMemories(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete ALL memories. Use 'mpm shred memories -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete ALL memories. Use 'mpm shred memories -f' to confirm.\n", 1)
 	}
 
 	store := getMemoryStore()
 	count, err := store.DeleteAllMemories()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete memories: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete memories: %v", err), 1)
 	}
 
 	// Space reclamation happens during maintenance cycle (deferred VACUUM)
-	sendResponse(conn, fmt.Sprintf("All memories deleted (%d records).\n", count), "", true, 0)
+	return respond(fmt.Sprintf("All memories deleted (%d records).\n", count), "", 0)
 }
 
-func handleShredTopics(conn net.Conn, args []string) {
+func handleShredTopics(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -472,8 +464,7 @@ func handleShredTopics(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete ALL topics. Use 'mpm shred topics -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete ALL topics. Use 'mpm shred topics -f' to confirm.\n", 1)
 	}
 
 	store := getMemoryStore()
@@ -481,24 +472,22 @@ func handleShredTopics(conn net.Conn, args []string) {
 
 	// Delete topic memberships first
 	if _, err := db.Exec("DELETE FROM topic_memberships"); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete topic memberships: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete topic memberships: %v", err), 1)
 	}
 
 	// Delete topics
 	result, err := db.Exec("DELETE FROM topics")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete topics: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete topics: %v", err), 1)
 	}
 
 	count, _ := result.RowsAffected()
 
 	// Space reclamation happens during maintenance cycle (deferred VACUUM)
-	sendResponse(conn, fmt.Sprintf("All topics deleted (%d records).\n", count), "", true, 0)
+	return respond(fmt.Sprintf("All topics deleted (%d records).\n", count), "", 0)
 }
 
-func handleShredDatabase(conn net.Conn, args []string) {
+func handleShredDatabase(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -508,8 +497,7 @@ func handleShredDatabase(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete the entire database and create a new one. Use 'mpm shred database -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete the entire database and create a new one. Use 'mpm shred database -f' to confirm.\n", 1)
 	}
 
 	paths := internal.DefaultMemoryPaths()
@@ -518,37 +506,32 @@ func handleShredDatabase(conn net.Conn, args []string) {
 	// Close any open connections
 	store := getMemoryStore()
 	if store == nil || store.DB == nil {
-		sendResponse(conn, "", "Database not initialized\n", true, 1)
-		return
+		return respond("", "Database not initialized\n", 1)
 	}
 	if err := store.DB.Close(); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to close database: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to close database: %v", err), 1)
 	}
 
 	// Remove the database file
 	if err := os.Remove(dbPath); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to remove database file: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to remove database file: %v", err), 1)
 	}
 
 	// Recreate the database
 	newStore := internal.NewMemoryStore(filepath.Dir(dbPath))
 	if newStore.DB == nil {
-		sendResponse(conn, "", "Failed to recreate database", true, 1)
-		return
+		return respond("", "Failed to recreate database", 1)
 	}
 
 	// Close the new store
 	if err := newStore.DB.Close(); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to close new database: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to close new database: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Database recreated at: %s\n", dbPath), "", true, 0)
+	return respond(fmt.Sprintf("Database recreated at: %s\n", dbPath), "", 0)
 }
 
-func handleShredModes(conn net.Conn, args []string) {
+func handleShredModes(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -558,21 +541,19 @@ func handleShredModes(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete ALL modes. Use 'mpm shred modes -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete ALL modes. Use 'mpm shred modes -f' to confirm.\n", 1)
 	}
 
 	mm := internal.NewModeManager("")
 	count, err := mm.RemoveAll()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete modes: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("All modes deleted (%d records).\n", count), "", true, 0)
+	return respond(fmt.Sprintf("All modes deleted (%d records).\n", count), "", 0)
 }
 
-func handleShredPersonas(conn net.Conn, args []string) {
+func handleShredPersonas(args []string) int {
 	// Check for --force flag
 	force := false
 	for _, arg := range args {
@@ -582,108 +563,98 @@ func handleShredPersonas(conn net.Conn, args []string) {
 	}
 
 	if !force {
-		sendResponse(conn, "", "Warning: This will delete ALL personas. Use 'mpm shred personas -f' to confirm.\n", true, 1)
-		return
+		return respond("", "Warning: This will delete ALL personas. Use 'mpm shred personas -f' to confirm.\n", 1)
 	}
 
 	pm := internal.NewPersonaManager("")
 	count, err := pm.RemoveAll()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to delete personas: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to delete personas: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("All personas deleted (%d records).\n", count), "", true, 0)
+	return respond(fmt.Sprintf("All personas deleted (%d records).\n", count), "", 0)
 }
 
-func handleShredTopic(conn net.Conn, id string) {
+func handleShredTopic(id string) int {
 	store := getMemoryStore()
 
 	// Get the topic first to verify it exists
 	topic, err := store.SearchTopics(id, 1)
 	if err != nil || len(topic) == 0 {
-		sendResponse(conn, "", fmt.Sprintf("Topic not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Topic not found: %s\n", id), 1)
 	}
 
 	// Use the internal ShredTopic function via DeleteByID
 	db := store.DB
 	tx, err := db.Begin()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred topic: %v", err), 1)
 	}
 	defer tx.Rollback()
 
 	// Delete memberships first
 	if _, err = tx.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred topic: %v", err), 1)
 	}
 
 	// Delete the topic
 	if _, err = tx.Exec("DELETE FROM topics WHERE id = ?", id); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred topic: %v", err), 1)
 	}
 
 	if err := tx.Commit(); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred topic: %v", err), 1)
 	}
 
 	// Space reclamation happens during maintenance cycle (deferred VACUUM)
-	sendResponse(conn, fmt.Sprintf("Topic shredded: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Topic shredded: %s\n", id), "", 0)
 }
 
-func handleShredSession(conn net.Conn, id string) {
+func handleShredSession(id string) int {
 	store := getMemoryStore()
 
 	err := store.DeleteMemory(id, "sessions")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred session: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred session: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Session shredded: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Session shredded: %s\n", id), "", 0)
 }
 
 // ============================================================================
 // Handler: topic
 // ============================================================================
 
-func handleTopic(conn net.Conn, args []string) {
+func handleTopic(args []string) int {
 	if len(args) < 1 {
-		handleTopicHelp(conn)
-		return
+		return handleTopicHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleTopicHelp(conn)
+		return handleTopicHelp()
 	case "add":
-		handleTopicAdd(conn, args[1:])
+		return handleTopicAdd(args[1:])
 	case "search":
-		handleTopicSearch(conn, args[1:])
+		return handleTopicSearch(args[1:])
 	case "show":
-		handleTopicShow(conn, args[1:])
+		return handleTopicShow(args[1:])
 	case "promote":
-		handleTopicPromote(conn, args[1:])
+		return handleTopicPromote(args[1:])
 	case "shred":
 		if len(args) < 2 {
-			handleTopicHelp(conn)
-			return
+			return handleTopicHelp()
 		}
-		handleShredTopic(conn, args[1])
+		return handleShredTopic(args[1])
 	case "list":
-		handleTopicList(conn, args[1:])
+		return handleTopicList(args[1:])
 	default:
-		handleTopicHelp(conn)
+		return handleTopicHelp()
 	}
 }
 
-func handleTopicHelp(conn net.Conn) {
+func handleTopicHelp() int {
 	output := `mpm topic - Topic operations
 
 Usage:
@@ -700,13 +671,12 @@ Examples:
   mpm topic show abc123
   mpm topic promote abc123
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleTopicAdd(conn net.Conn, args []string) {
+func handleTopicAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm topic add <name> [description]", true, 1)
-		return
+		return respond("", "Usage: mpm topic add <name> [description]", 1)
 	}
 
 	name := args[0]
@@ -726,17 +696,15 @@ func handleTopicAdd(conn net.Conn, args []string) {
 	`, id, name, description)
 
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add topic: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Topic added: %s\n", name), "", true, 0)
+	return respond(fmt.Sprintf("Topic added: %s\n", name), "", 0)
 }
 
-func handleTopicSearch(conn net.Conn, args []string) {
+func handleTopicSearch(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm topic search <query>", true, 1)
-		return
+		return respond("", "Usage: mpm topic search <query>", 1)
 	}
 
 	query := strings.Join(args, " ")
@@ -744,13 +712,11 @@ func handleTopicSearch(conn net.Conn, args []string) {
 
 	results, err := store.SearchTopics(query, 20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
 
 	if len(results) == 0 {
-		sendResponse(conn, "No topics found.\n", "", true, 0)
-		return
+		return respond("No topics found.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -765,13 +731,12 @@ func handleTopicSearch(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleTopicShow(conn net.Conn, args []string) {
+func handleTopicShow(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm topic show <id>", true, 1)
-		return
+		return respond("", "Usage: mpm topic show <id>", 1)
 	}
 
 	id := args[0]
@@ -784,8 +749,7 @@ func handleTopicShow(conn net.Conn, args []string) {
 	`, id).Scan(&name, &description, &created)
 
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Topic not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Topic not found: %s\n", id), 1)
 	}
 
 	var output strings.Builder
@@ -796,13 +760,12 @@ func handleTopicShow(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("\nDescription:\n%s\n", description))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleTopicPromote(conn net.Conn, args []string) {
+func handleTopicPromote(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm topic promote <id>", true, 1)
-		return
+		return respond("", "Usage: mpm topic promote <id>", 1)
 	}
 
 	id := args[0]
@@ -810,14 +773,13 @@ func handleTopicPromote(conn net.Conn, args []string) {
 
 	err := store.PromoteTopicToMemory(id, "memories", nil)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to promote topic: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to promote topic: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Topic promoted to memory: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Topic promoted to memory: %s\n", id), "", 0)
 }
 
-func handleTopicList(conn net.Conn, args []string) {
+func handleTopicList(args []string) int {
 	store := getMemoryStore()
 	db := store.DB
 
@@ -826,8 +788,7 @@ func handleTopicList(conn net.Conn, args []string) {
 		ORDER BY created_at DESC LIMIT 20
 	`)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list topics: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list topics: %v", err), 1)
 	}
 	defer rows.Close()
 
@@ -848,43 +809,41 @@ func handleTopicList(conn net.Conn, args []string) {
 		}
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: session
 // ============================================================================
 
-func handleSession(conn net.Conn, args []string) {
+func handleSession(args []string) int {
 	if len(args) < 1 {
-		handleSessionHelp(conn)
-		return
+		return handleSessionHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleSessionHelp(conn)
+		return handleSessionHelp()
 	case "add":
-		handleSessionAdd(conn, args[1:])
+		return handleSessionAdd(args[1:])
 	case "search":
-		handleSessionSearch(conn, args[1:])
+		return handleSessionSearch(args[1:])
 	case "show":
-		handleSessionShow(conn, args[1:])
+		return handleSessionShow(args[1:])
 	case "shred":
 		if len(args) < 2 {
-			handleSessionHelp(conn)
-			return
+			return handleSessionHelp()
 		}
-		handleShredSession(conn, args[1])
+		return handleShredSession(args[1])
 	case "list":
-		handleSessionList(conn, args[1:])
+		return handleSessionList(args[1:])
 	default:
-		handleSessionHelp(conn)
+		return handleSessionHelp()
 	}
 }
 
-func handleSessionHelp(conn net.Conn) {
+func handleSessionHelp() int {
 	output := `mpm session - Session operations
 
 Usage:
@@ -900,13 +859,12 @@ Examples:
   mpm session show abc123
   mpm session shred abc123
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleSessionAdd(conn net.Conn, args []string) {
+func handleSessionAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm session add <content>", true, 1)
-		return
+		return respond("", "Usage: mpm session add <content>", 1)
 	}
 
 	content := strings.Join(args, " ")
@@ -915,17 +873,15 @@ func handleSessionAdd(conn net.Conn, args []string) {
 	// Add to session collection
 	mem, err := store.AddMemory(content, "session", nil, nil, "", "cli")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add session: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add session: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Session added with ID: %s\n", mem.ID), "", true, 0)
+	return respond(fmt.Sprintf("Session added with ID: %s\n", mem.ID), "", 0)
 }
 
-func handleSessionSearch(conn net.Conn, args []string) {
+func handleSessionSearch(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm session search <query>", true, 1)
-		return
+		return respond("", "Usage: mpm session search <query>", 1)
 	}
 
 	query := strings.Join(args, " ")
@@ -933,13 +889,11 @@ func handleSessionSearch(conn net.Conn, args []string) {
 
 	memories, err := store.SearchSessions(query, 20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
 
 	if len(memories) == 0 {
-		sendResponse(conn, "No sessions found.\n", "", true, 0)
-		return
+		return respond("No sessions found.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -956,13 +910,12 @@ func handleSessionSearch(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleSessionShow(conn net.Conn, args []string) {
+func handleSessionShow(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm session show <id>", true, 1)
-		return
+		return respond("", "Usage: mpm session show <id>", 1)
 	}
 
 	id := args[0]
@@ -970,8 +923,7 @@ func handleSessionShow(conn net.Conn, args []string) {
 
 	mem, err := store.GetByID(id, "session")
 	if err != nil || mem == nil {
-		sendResponse(conn, "", fmt.Sprintf("Session not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Session not found: %s\n", id), 1)
 	}
 
 	var output strings.Builder
@@ -980,21 +932,19 @@ func handleSessionShow(conn net.Conn, args []string) {
 	output.WriteString(mem.Content)
 	output.WriteString("\n")
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleSessionList(conn net.Conn, args []string) {
+func handleSessionList(args []string) int {
 	store := getSessionStore()
 
 	sessions, err := store.GetRecentSessions(20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list sessions: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list sessions: %v", err), 1)
 	}
 
 	if len(sessions) == 0 {
-		sendResponse(conn, "No sessions stored.\n", "", true, 0)
-		return
+		return respond("No sessions stored.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -1011,41 +961,40 @@ func handleSessionList(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: reference
 // ============================================================================
 
-func handleReference(conn net.Conn, args []string) {
+func handleReference(args []string) int {
 	if len(args) < 1 {
-		handleReferenceHelp(conn)
-		return
+		handleReferenceHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleReferenceHelp(conn)
+		return handleReferenceHelp()
 	case "list":
-		handleReferenceList(conn)
+		return handleReferenceList()
 	case "add":
-		handleReferenceAdd(conn, args[1:])
+		return handleReferenceAdd(args[1:])
 	case "search":
-		handleReferenceSearch(conn, args[1:])
+		return handleReferenceSearch(args[1:])
 	case "get":
-		handleReferenceGet(conn, args[1:])
+		return handleReferenceGet(args[1:])
 	case "shred":
-		handleReferenceShred(conn, args[1:])
+		return handleReferenceShred(args[1:])
 	case "scan":
-		handleReferenceScan(conn)
+		return handleReferenceScan()
 	default:
-		handleReferenceHelp(conn)
+		return handleReferenceHelp()
 	}
 }
 
-func handleReferenceHelp(conn net.Conn) {
+func handleReferenceHelp() int {
 	output := `mpm reference - Reference library
 
 Usage:
@@ -1062,16 +1011,15 @@ Examples:
   mpm reference search "machiavelli"
   mpm reference shred abc123
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleReferenceList(conn net.Conn) {
+func handleReferenceList() int {
 	store := getReferenceStore()
 	refs := store.List()
 
 	if len(refs) == 0 {
-		sendResponse(conn, "No references stored. Add some with: mpm reference add <file>\n", "", true, 0)
-		return
+		return respond("No references stored. Add some with: mpm reference add <file>\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -1090,19 +1038,17 @@ func handleReferenceList(conn net.Conn) {
 		output.WriteString("\n")
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleReferenceAdd(conn net.Conn, args []string) {
+func handleReferenceAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm reference add <file>\n", true, 1)
-		return
+		return respond("", "Usage: mpm reference add <file>\n", 1)
 	}
 
 	filePath := args[0]
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		sendResponse(conn, "", fmt.Sprintf("File not found: %s\n", filePath), true, 1)
-		return
+		return respond("", fmt.Sprintf("File not found: %s\n", filePath), 1)
 	}
 
 	// Parse file based on extension
@@ -1118,23 +1064,20 @@ func handleReferenceAdd(conn net.Conn, args []string) {
 	case ".txt", ".md":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			sendResponse(conn, "", fmt.Sprintf("Failed to read file: %v\n", err), true, 1)
-			return
+			return respond("", fmt.Sprintf("Failed to read file: %v\n", err), 1)
 		}
 		content = string(data)
 	default:
 		// Try as plain text
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			sendResponse(conn, "", fmt.Sprintf("Unsupported file type: %s\n", ext), true, 1)
-			return
+			return respond("", fmt.Sprintf("Unsupported file type: %s\n", ext), 1)
 		}
 		content = string(data)
 	}
 
 	if parseErr != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to parse file: %v\n", parseErr), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to parse file: %v\n", parseErr), 1)
 	}
 
 	title := filepath.Base(filePath)
@@ -1143,17 +1086,15 @@ func handleReferenceAdd(conn net.Conn, args []string) {
 	// Use the ReferenceStore.Add which writes to JSON
 	_, err := store.Add(title, filePath, nil, content)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add reference: %v\n", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add reference: %v\n", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Reference added: %s\n", title), "", true, 0)
+	return respond(fmt.Sprintf("Reference added: %s\n", title), "", 0)
 }
 
-func handleReferenceSearch(conn net.Conn, args []string) {
+func handleReferenceSearch(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm reference search <query>\n", true, 1)
-		return
+		return respond("", "Usage: mpm reference search <query>\n", 1)
 	}
 
 	query := strings.Join(args, " ")
@@ -1161,8 +1102,7 @@ func handleReferenceSearch(conn net.Conn, args []string) {
 	results := store.Search(query)
 
 	if len(results) == 0 {
-		sendResponse(conn, fmt.Sprintf("No references found matching: %s\n", query), "", true, 0)
-		return
+		return respond(fmt.Sprintf("No references found matching: %s\n", query), "", 0)
 	}
 
 	var output strings.Builder
@@ -1177,13 +1117,12 @@ func handleReferenceSearch(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", strings.ReplaceAll(snippet, "\n", " ")))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleReferenceGet(conn net.Conn, args []string) {
+func handleReferenceGet(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm reference get <id>\n", true, 1)
-		return
+		return respond("", "Usage: mpm reference get <id>\n", 1)
 	}
 
 	id := args[0]
@@ -1191,8 +1130,7 @@ func handleReferenceGet(conn net.Conn, args []string) {
 
 	ref, err := store.GetByID(id)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Reference not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Reference not found: %s\n", id), 1)
 	}
 
 	var output strings.Builder
@@ -1203,40 +1141,36 @@ func handleReferenceGet(conn net.Conn, args []string) {
 	}
 	output.WriteString(fmt.Sprintf("\n%s\n", ref.Content))
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleReferenceShred(conn net.Conn, args []string) {
+func handleReferenceShred(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm reference shred <id>\n", true, 1)
-		return
+		return respond("", "Usage: mpm reference shred <id>\n", 1)
 	}
 
 	id := args[0]
 	store := getReferenceStore()
 
 	if err := store.Remove(id); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to remove reference: %v\n", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to remove reference: %v\n", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Reference removed: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Reference removed: %s\n", id), "", 0)
 }
 
-func handleReferenceScan(conn net.Conn) {
+func handleReferenceScan() int {
 	store := getReferenceStore()
 	paths := internal.DefaultMemoryPaths()
 	refDir := filepath.Join(paths.SessionSavePath, "reference")
 
 	if _, err := os.Stat(refDir); os.IsNotExist(err) {
-		sendResponse(conn, "No reference directory found. Create it and add files, then run scan.\n", "", true, 0)
-		return
+		return respond("No reference directory found. Create it and add files, then run scan.\n", "", 0)
 	}
 
 	entries, err := os.ReadDir(refDir)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to read reference directory: %v\n", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to read reference directory: %v\n", err), 1)
 	}
 
 	var output strings.Builder
@@ -1288,43 +1222,42 @@ func handleReferenceScan(conn net.Conn) {
 	}
 
 	output.WriteString(fmt.Sprintf("\nScanned %d references from %s\n", count, refDir))
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: mode
 // ============================================================================
 
-func handleMode(conn net.Conn, args []string) {
+func handleMode(args []string) int {
 	if len(args) < 1 {
 		// Interactive selection by default (replaces ~m hotkey behavior)
-		handleModeSelect(conn)
-		return
+		handleModeSelect()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleModeHelp(conn)
+		return handleModeHelp()
 	case "list":
-		handleModeList(conn)
+		return handleModeList()
 	case "active":
-		handleModeActive(conn)
+		return handleModeActive()
 	case "add":
-		handleModeAdd(conn, args[1:])
+		return handleModeAdd(args[1:])
 	case "remove":
-		handleModeRemove(conn, args[1:])
+		return handleModeRemove(args[1:])
 	case "clear":
-		handleModeClear(conn)
+		return handleModeClear()
 	case "select":
 		// Interactive mode selection via fzf
-		handleModeSelect(conn)
+		return handleModeSelect()
 	default:
-		handleModeHelp(conn)
+		return handleModeHelp()
 	}
 }
 
-func handleModeHelp(conn net.Conn) {
+func handleModeHelp() int {
 	output := `mpm mode - Mode operations
 
 Usage:
@@ -1340,15 +1273,14 @@ Examples:
   mpm mode add developer
   mpm mode remove developer
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleModeList(conn net.Conn) {
+func handleModeList() int {
 	mm := internal.NewModeManager("")
 	modes, err := mm.List()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list modes: %v", err), 1)
 	}
 
 	var output strings.Builder
@@ -1365,20 +1297,18 @@ func handleModeList(conn net.Conn) {
 		}
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleModeActive(conn net.Conn) {
+func handleModeActive() int {
 	mm := internal.NewModeManager("")
 	modes, err := mm.GetActive()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to get active modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to get active modes: %v", err), 1)
 	}
 
 	if len(modes) == 0 {
-		sendResponse(conn, "No active modes.\n", "", true, 0)
-		return
+		return respond("No active modes.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -1387,13 +1317,12 @@ func handleModeActive(conn net.Conn) {
 		output.WriteString(fmt.Sprintf("  %s\n", m))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleModeAdd(conn net.Conn, args []string) {
+func handleModeAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm mode add <name>", true, 1)
-		return
+		return respond("", "Usage: mpm mode add <name>", 1)
 	}
 
 	name := args[0]
@@ -1401,24 +1330,21 @@ func handleModeAdd(conn net.Conn, args []string) {
 
 	err := mm.AddMode(name)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add mode: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add mode: %v", err), 1)
 	}
 
 	// Compile the mode
 	_, compileErr := mm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Mode added: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
-		return
+		return respond(fmt.Sprintf("Mode added: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Mode added: %s (compiled)\n", name), "", true, 0)
+	return respond(fmt.Sprintf("Mode added: %s (compiled)\n", name), "", 0)
 }
 
-func handleModeRemove(conn net.Conn, args []string) {
+func handleModeRemove(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm mode remove <name>", true, 1)
-		return
+		return respond("", "Usage: mpm mode remove <name>", 1)
 	}
 
 	name := args[0]
@@ -1426,36 +1352,32 @@ func handleModeRemove(conn net.Conn, args []string) {
 
 	err := mm.RemoveMode(name)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to remove mode: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to remove mode: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Mode removed: %s\n", name), "", true, 0)
+	return respond(fmt.Sprintf("Mode removed: %s\n", name), "", 0)
 }
 
-func handleModeClear(conn net.Conn) {
+func handleModeClear() int {
 	mm := internal.NewModeManager("")
 
 	err := mm.ClearModes()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to clear modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to clear modes: %v", err), 1)
 	}
 
-	sendResponse(conn, "All modes cleared.\n", "", true, 0)
+	return respond("All modes cleared.\n", "", 0)
 }
 
-func handleModeSelect(conn net.Conn) {
+func handleModeSelect() int {
 	mm := internal.NewModeManager("")
 	modes, err := mm.List()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list modes: %v", err), 1)
 	}
 
 	if len(modes) == 0 {
-		sendResponse(conn, "No modes available.\n", "", true, 0)
-		return
+		return respond("No modes available.\n", "", 0)
 	}
 
 	// Get currently active modes
@@ -1478,64 +1400,58 @@ func handleModeSelect(conn net.Conn) {
 	// Run PTY selector (multi-select)
 	selected, err := runSelectorPTY(items, true, activeSet)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Selector error: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Selector error: %v", err), 1)
 	}
 
 	if len(selected) == 0 {
-		sendResponse(conn, "No modes selected.\n", "", true, 0)
-		return
+		return respond("No modes selected.\n", "", 0)
 	}
 
 	// Set new active modes
 	err = mm.SetActive(selected)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to set modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to set modes: %v", err), 1)
 	}
 
 	// Auto-compile modes
 	compiledCount, compileErr := mm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Active modes updated: %s\n\n", strings.Join(selected, ", ")), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
-		return
+		return respond(fmt.Sprintf("Active modes updated: %s\n\n", strings.Join(selected, ", ")), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Active modes updated: %s\nCompiled %d mode(s).\n", strings.Join(selected, ", "), compiledCount), "", true, 0)
+	return respond(fmt.Sprintf("Active modes updated: %s\nCompiled %d mode(s).\n", strings.Join(selected, ", "), compiledCount), "", 0)
 }
 
 // ============================================================================
 // Handler: persona
 // ============================================================================
 
-func handlePersona(conn net.Conn, args []string) {
+func handlePersona(args []string) int {
 	if len(args) < 1 {
-		// Interactive selection by default (replaces ~p hotkey behavior)
-		handlePersonaSelect(conn)
-		return
+		return handlePersonaSelect()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handlePersonaHelp(conn)
+		return handlePersonaHelp()
 	case "list":
-		handlePersonaList(conn)
+		return handlePersonaList()
 	case "active":
-		handlePersonaActive(conn)
+		return handlePersonaActive()
 	case "set":
-		handlePersonaSet(conn, args[1:])
+		return handlePersonaSet(args[1:])
 	case "clear":
-		handlePersonaClear(conn)
+		return handlePersonaClear()
 	case "select":
 		// Interactive persona selection via fzf
-		handlePersonaSelect(conn)
+		return handlePersonaSelect()
 	default:
-		handlePersonaHelp(conn)
+		return handlePersonaHelp()
 	}
 }
 
-func handlePersonaHelp(conn net.Conn) {
+func handlePersonaHelp() int {
 	output := `mpm persona - Persona operations
 
 Usage:
@@ -1549,15 +1465,14 @@ Examples:
   mpm persona                   # Pick one persona, auto-compiles
   mpm persona set 808
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handlePersonaList(conn net.Conn) {
+func handlePersonaList() int {
 	pm := internal.NewPersonaManager("")
 	personas, err := pm.List()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list personas: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list personas: %v", err), 1)
 	}
 
 	var output strings.Builder
@@ -1570,29 +1485,26 @@ func handlePersonaList(conn net.Conn) {
 		}
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handlePersonaActive(conn net.Conn) {
+func handlePersonaActive() int {
 	pm := internal.NewPersonaManager("")
 	persona, err := pm.GetActive()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to get active persona: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to get active persona: %v", err), 1)
 	}
 
 	if persona == "" {
-		sendResponse(conn, "No active persona.\n", "", true, 0)
-		return
+		return respond("No active persona.\n", "", 0)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Active persona: %s\n", persona), "", true, 0)
+	return respond(fmt.Sprintf("Active persona: %s\n", persona), "", 0)
 }
 
-func handlePersonaSet(conn net.Conn, args []string) {
+func handlePersonaSet(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm persona set <name>", true, 1)
-		return
+		return respond("", "Usage: mpm persona set <name>", 1)
 	}
 
 	name := args[0]
@@ -1601,49 +1513,43 @@ func handlePersonaSet(conn net.Conn, args []string) {
 	// Verify persona exists
 	_, err := pm.Get(name)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Persona not found: %s\n", name), true, 1)
-		return
+		return respond("", fmt.Sprintf("Persona not found: %s\n", name), 1)
 	}
 
 	err = pm.SetActive(name)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to set persona: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to set persona: %v", err), 1)
 	}
 
 	// Auto-compile persona
 	compiledCount, compileErr := pm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Persona set: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
-		return
+		return respond(fmt.Sprintf("Persona set: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", name, compiledCount), "", true, 0)
+	return respond(fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", name, compiledCount), "", 0)
 }
 
-func handlePersonaClear(conn net.Conn) {
+func handlePersonaClear() int {
 	pm := internal.NewPersonaManager("")
 
 	err := pm.SetActive("")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to clear persona: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to clear persona: %v", err), 1)
 	}
 
-	sendResponse(conn, "Persona cleared.\n", "", true, 0)
+	return respond("Persona cleared.\n", "", 0)
 }
 
-func handlePersonaSelect(conn net.Conn) {
+func handlePersonaSelect() int {
 	pm := internal.NewPersonaManager("")
 	personas, err := pm.List()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list personas: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list personas: %v", err), 1)
 	}
 
 	if len(personas) == 0 {
-		sendResponse(conn, "No personas available.\n", "", true, 0)
-		return
+		return respond("No personas available.\n", "", 0)
 	}
 
 	// Get currently active persona
@@ -1663,56 +1569,51 @@ func handlePersonaSelect(conn net.Conn) {
 	// Run PTY selector (single-select for persona)
 	selected, err := runSelectorPTY(items, false, activeSet)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Selector error: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Selector error: %v", err), 1)
 	}
 
 	if len(selected) == 0 {
-		sendResponse(conn, "No persona selected.\n", "", true, 0)
-		return
+		return respond("No persona selected.\n", "", 0)
 	}
 
 	// Set new active persona
 	err = pm.SetActive(selected[0])
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to set persona: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to set persona: %v", err), 1)
 	}
 
 	// Auto-compile persona
 	compiledCount, compileErr := pm.Compile()
 	if compileErr != nil {
-		sendResponse(conn, fmt.Sprintf("Persona set: %s\n\n", selected[0]), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), true, 0)
-		return
+		return respond(fmt.Sprintf("Persona set: %s\n\n", selected[0]), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", selected[0], compiledCount), "", true, 0)
+	return respond(fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", selected[0], compiledCount), "", 0)
 }
 
 // ============================================================================
 // Handler: llm
 // ============================================================================
 
-func handleLlm(conn net.Conn, args []string) {
+func handleLlm(args []string) int {
 	if len(args) < 1 {
-		handleLlmHelp(conn)
-		return
+		return handleLlmHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleLlmHelp(conn)
+		return handleLlmHelp()
 	case "list":
-		handleLlmList(conn)
+		return handleLlmList()
 	case "status":
-		handleLlmStatus(conn)
+		return handleLlmStatus()
 	default:
-		handleLlmHelp(conn)
+		return handleLlmHelp()
 	}
 }
 
-func handleLlmHelp(conn net.Conn) {
+func handleLlmHelp() int {
 	output := `mpm llm - LLM operations
 
 Usage:
@@ -1723,10 +1624,10 @@ Examples:
   mpm llm list
   mpm llm status
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleLlmList(conn net.Conn) {
+func handleLlmList() int {
 	// List available LLM configurations
 	output := `Available LLM providers:
 
@@ -1741,10 +1642,10 @@ Configure via environment variables:
   ANTHROPIC_KEY   Anthropic API key
   GROQ_API_KEY    Groq API key
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleLlmStatus(conn net.Conn) {
+func handleLlmStatus() int {
 	var output strings.Builder
 	output.WriteString("LLM Configuration:\n\n")
 
@@ -1769,41 +1670,40 @@ func handleLlmStatus(conn net.Conn) {
 		output.WriteString("  ANTHROPIC_KEY:  [not set]\n")
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: lesson
 // ============================================================================
 
-func handleLesson(conn net.Conn, args []string) {
+func handleLesson(args []string) int {
 	if len(args) < 1 {
-		handleLessonHelp(conn)
-		return
+		return handleLessonHelp()
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "help":
-		handleLessonHelp(conn)
+		return handleLessonHelp()
 	case "add":
-		handleLessonAdd(conn, args[1:])
+		return handleLessonAdd(args[1:])
 	case "list":
-		handleLessonList(conn, args[1:])
+		return handleLessonList(args[1:])
 	case "search":
-		handleLessonSearch(conn, args[1:])
+		return handleLessonSearch(args[1:])
 	case "get":
-		handleLessonGet(conn, args[1:])
+		return handleLessonGet(args[1:])
 	case "shred":
-		handleLessonShred(conn, args[1:])
+		return handleLessonShred(args[1:])
 	case "stats":
-		handleLessonStats(conn)
+		return handleLessonStats()
 	default:
-		handleLessonHelp(conn)
+		return handleLessonHelp()
 	}
 }
 
-func handleLessonHelp(conn net.Conn) {
+func handleLessonHelp() int {
 	output := `mpm lesson - Lesson operations
 
 Usage:
@@ -1829,13 +1729,12 @@ Lesson types:
   practice - "do Y" (positive lessons, best practices)
   insight  - "X leads to Y" (causal knowledge, default)
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleLessonAdd(conn net.Conn, args []string) {
+func handleLessonAdd(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags]", true, 1)
-		return
+		return respond("", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags]", 1)
 	}
 
 	content := ""
@@ -1868,21 +1767,19 @@ func handleLessonAdd(conn net.Conn, args []string) {
 	}
 
 	if content == "" {
-		sendResponse(conn, "", "Usage: mpm lesson add <content>", true, 1)
-		return
+		return respond("", "Usage: mpm lesson add <content>", 1)
 	}
 
 	lessonStore := internal.NewLessonStore("")
 	lesson, err := lessonStore.AddLesson(content, internal.LessonType(lessonType), tags, "")
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to add lesson: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to add lesson: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", true, 0)
+	return respond(fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", 0)
 }
 
-func handleLessonList(conn net.Conn, args []string) {
+func handleLessonList(args []string) int {
 	lessonType := ""
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--type=") {
@@ -1893,13 +1790,11 @@ func handleLessonList(conn net.Conn, args []string) {
 	lessonStore := internal.NewLessonStore("")
 	lessons, err := lessonStore.ListLessons(internal.LessonType(lessonType))
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to list lessons: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to list lessons: %v", err), 1)
 	}
 
 	if len(lessons) == 0 {
-		sendResponse(conn, "No lessons stored.\n", "", true, 0)
-		return
+		return respond("No lessons stored.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -1914,26 +1809,23 @@ func handleLessonList(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleLessonSearch(conn net.Conn, args []string) {
+func handleLessonSearch(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm lesson search <query>", true, 1)
-		return
+		return respond("", "Usage: mpm lesson search <query>", 1)
 	}
 
 	query := strings.Join(args, " ")
 	lessonStore := internal.NewLessonStore("")
 	results, err := lessonStore.SearchLessons(query, 20)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Search failed: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
 
 	if len(results) == 0 {
-		sendResponse(conn, "No lessons found.\n", "", true, 0)
-		return
+		return respond("No lessons found.\n", "", 0)
 	}
 
 	var output strings.Builder
@@ -1946,21 +1838,19 @@ func handleLessonSearch(conn net.Conn, args []string) {
 		output.WriteString(fmt.Sprintf("[%s] [%s]\n    %s\n\n", l.ID, l.Type, snippet))
 	}
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleLessonGet(conn net.Conn, args []string) {
+func handleLessonGet(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm lesson get <id>", true, 1)
-		return
+		return respond("", "Usage: mpm lesson get <id>", 1)
 	}
 
 	id := args[0]
 	lessonStore := internal.NewLessonStore("")
 	lesson, err := lessonStore.GetLesson(id)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Lesson not found: %s\n", id), true, 1)
-		return
+		return respond("", fmt.Sprintf("Lesson not found: %s\n", id), 1)
 	}
 
 	var output strings.Builder
@@ -1975,32 +1865,29 @@ func handleLessonGet(conn net.Conn, args []string) {
 	output.WriteString(lesson.Content)
 	output.WriteString("\n")
 
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
-func handleLessonShred(conn net.Conn, args []string) {
+func handleLessonShred(args []string) int {
 	if len(args) == 0 {
-		sendResponse(conn, "", "Usage: mpm lesson shred <id>", true, 1)
-		return
+		return respond("", "Usage: mpm lesson shred <id>", 1)
 	}
 
 	id := args[0]
 	lessonStore := internal.NewLessonStore("")
 	err := lessonStore.DeleteLesson(id)
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to shred lesson: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to shred lesson: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Lesson shredded: %s\n", id), "", true, 0)
+	return respond(fmt.Sprintf("Lesson shredded: %s\n", id), "", 0)
 }
 
-func handleLessonStats(conn net.Conn) {
+func handleLessonStats() int {
 	lessonStore := internal.NewLessonStore("")
 	stats, err := lessonStore.GetLessonStats()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to get stats: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to get stats: %v", err), 1)
 	}
 
 	var output strings.Builder
@@ -2012,18 +1899,19 @@ func handleLessonStats(conn net.Conn) {
 			output.WriteString(fmt.Sprintf("  %s: %d\n", t, count))
 		}
 	}
-	sendResponse(conn, output.String(), "", true, 0)
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: menu
 // ============================================================================
 
-func handleMenu(conn net.Conn) {
-	enc := json.NewEncoder(conn)
-
+func handleMenu() int {
 	// Get watch status
-	watching := getWatchPID() != 0
+	watching := false
+	if watchPool != nil {
+		watching = watchPool.ActiveWorkers() > 0
+	}
 
 	// Build menu output
 	var output strings.Builder
@@ -2034,55 +1922,45 @@ func handleMenu(conn net.Conn) {
 	output.WriteString("║                                          ║\n")
 
 	if watching {
-		output.WriteString(fmt.Sprintf("║  🟢 Watch Daemon: Running (PID: %d)  ║\n", getWatchPID()))
+		output.WriteString("║  🟢 Watcher Active                        ║\n")
 	} else {
-		output.WriteString("║  🔴 Watch Daemon: Stopped                ║\n")
+		output.WriteString("║  🔴 Watcher: Inactive                     ║\n")
 	}
 
 	output.WriteString("║                                          ║\n")
 	output.WriteString("║  Commands:                               ║\n")
-	output.WriteString("║    mpm watch status   - Check status     ║\n")
-	output.WriteString("║    mpm watch start   - Start watcher     ║\n")
-	output.WriteString("║    mpm watch stop    - Stop watcher      ║\n")
-	output.WriteString("║    mpm watch restart - Restart watcher   ║\n")
-	output.WriteString("║                                          ║\n")
 	output.WriteString("║    mpm session list   - Saved sessions    ║\n")
 	output.WriteString("║    mpm dashboard     - Open TUI          ║\n")
 	output.WriteString("║                                          ║\n")
 	output.WriteString("╚══════════════════════════════════════════╝\n")
 	output.WriteString("\n")
 
-	enc.Encode(Message{
-		Output:   output.String(),
-		ExitCode: 0,
-		Done:     true,
-	})
+	return respond(output.String(), "", 0)
 }
 
 // ============================================================================
 // Handler: compile
 // ============================================================================
 
-func handleCompile(conn net.Conn, args []string) {
+func handleCompile(args []string) int {
 	if len(args) < 1 {
-		handleCompileHelp(conn)
-		return
+		return handleCompileHelp()
 	}
 
 	target := args[0]
 	switch target {
 	case "mode":
-		handleCompileMode(conn)
+		return handleCompileMode()
 	case "persona":
-		handleCompilePersona(conn)
+		return handleCompilePersona()
 	case "all":
-		handleCompileAll(conn)
+		return handleCompileAll()
 	default:
-		handleCompileHelp(conn)
+		return handleCompileHelp()
 	}
 }
 
-func handleCompileHelp(conn net.Conn) {
+func handleCompileHelp() int {
 	output := `mpm compile - Compilation operations
 
 Usage:
@@ -2097,32 +1975,30 @@ Examples:
   mpm compile mode
   mpm compile all
 `
-	sendResponse(conn, output, "", true, 0)
+	return respond(output, "", 0)
 }
 
-func handleCompileMode(conn net.Conn) {
+func handleCompileMode() int {
 	mm := internal.NewModeManager("")
 	count, err := mm.Compile()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to compile modes: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to compile modes: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Compiled %d modes.\n", count), "", true, 0)
+	return respond(fmt.Sprintf("Compiled %d modes.\n", count), "", 0)
 }
 
-func handleCompilePersona(conn net.Conn) {
+func handleCompilePersona() int {
 	pm := internal.NewPersonaManager("")
 	count, err := pm.Compile()
 	if err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Failed to compile personas: %v", err), true, 1)
-		return
+		return respond("", fmt.Sprintf("Failed to compile personas: %v", err), 1)
 	}
 
-	sendResponse(conn, fmt.Sprintf("Compiled %d personas.\n", count), "", true, 0)
+	return respond(fmt.Sprintf("Compiled %d personas.\n", count), "", 0)
 }
 
-func handleCompileAll(conn net.Conn) {
+func handleCompileAll() int {
 	mm := internal.NewModeManager("")
 	pm := internal.NewPersonaManager("")
 
@@ -2136,30 +2012,13 @@ func handleCompileAll(conn net.Conn) {
 	if personaErr != nil {
 		errMsg += fmt.Sprintf("personas: %v ", personaErr)
 	}
-	sendResponse(conn, fmt.Sprintf("Compiled %d modes, %d personas.\n", modeCount, personaCount), errMsg, true, 0)
+	return respond(fmt.Sprintf("Compiled %d modes, %d personas.\n", modeCount, personaCount), errMsg, 0)
 }
 
 // ============================================================================
 // Utility Functions
 // ============================================================================
 
-func sendResponse(conn net.Conn, output, errMsg string, done bool, exitCode int) {
-	resp := Message{
-		Output:   output,
-		Error:    errMsg,
-		Done:     done,
-		ExitCode: exitCode,
-	}
-	enc := json.NewEncoder(conn)
-	if err := enc.Encode(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] sendResponse failed: %v\n", err)
-		return
-	}
-	// Explicitly flush the encoder
-	if flusher, ok := conn.(interface{ Flush() error }); ok {
-		flusher.Flush()
-	}
-}
 
 func getMemoryStore() *internal.MemoryStore {
 	paths := internal.DefaultMemoryPaths()
@@ -2225,85 +2084,96 @@ func generateID() string {
 // Handler: watch
 // ============================================================================
 
-func handleWatch(conn net.Conn, args []string) {
-	enc := json.NewEncoder(conn)
-
-	// No subcommand = show status
+// handleWatch manages the internal fsnotify watcher goroutine lifecycle.
+// In the unified process architecture, the watcher runs within the same process.
+// handleWatch manages the internal fsnotify watcher goroutine lifecycle.
+// In the unified process architecture, the watcher runs within the same process.
+func handleWatch(args []string) int {
 	if len(args) < 1 || args[0] == "status" {
-		status := getWatchStatus()
-		enc.Encode(Message{
-			Output:   formatWatchStatus(status),
-			ExitCode: 0,
-			Done:     true,
-		})
-		return
+		return respond(formatWatchStatus(), "", 0)
 	}
 
 	subCmd := args[0]
 	switch subCmd {
 	case "start":
-		if err := startWatchDaemon(); err != nil {
-			enc.Encode(Message{
-				Error:    err.Error(),
-				ExitCode: 1,
-				Done:     true,
-			})
-			return
+		if err := startWatchGoroutine(); err != nil {
+			return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 		}
-		enc.Encode(Message{
-			Output:   fmt.Sprintf("✅ Watch daemon started (PID: %d)\n", getWatchPID()),
-			ExitCode: 0,
-			Done:     true,
-		})
+		return respond("File watcher started\n", "", 0)
 
 	case "stop":
-		if err := stopWatchDaemon(); err != nil {
-			enc.Encode(Message{
-				Error:    err.Error(),
-				ExitCode: 1,
-				Done:     true,
-			})
-			return
-		}
-		enc.Encode(Message{
-			Output:   "✅ Watch daemon stopped\n",
-			ExitCode: 0,
-			Done:     true,
-		})
+		stopWatchGoroutine()
+		return respond("File watcher stopped\n", "", 0)
 
 	case "restart":
-		if err := restartWatchDaemon(); err != nil {
-			enc.Encode(Message{
-				Error:    err.Error(),
-				ExitCode: 1,
-				Done:     true,
-			})
-			return
+		stopWatchGoroutine()
+		if err := startWatchGoroutine(); err != nil {
+			return respond("", fmt.Sprintf("Error restarting: %v\n", err), 1)
 		}
-		enc.Encode(Message{
-			Output:   fmt.Sprintf("✅ Watch daemon restarted (PID: %d)\n", getWatchPID()),
-			ExitCode: 0,
-			Done:     true,
-		})
+		return respond("File watcher restarted\n", "", 0)
+
+	case "add-path":
+		return handleWatchAddPath(args[1:])
+	case "remove-path":
+		return handleWatchRemovePath(args[1:])
+	case "list-paths", "paths":
+		return handleWatchListPaths(args[1:])
 
 	default:
-		enc.Encode(Message{
-			Error:    fmt.Sprintf("Unknown watch subcommand: %s", subCmd),
-			ExitCode: 1,
-			Done:     true,
-		})
+		return respond("", fmt.Sprintf("Unknown watch subcommand: %s\n", subCmd), 1)
 	}
 }
 
-func formatWatchStatus(status map[string]interface{}) string {
-	if status == nil {
-		return "🔍 Watch daemon: unknown\n"
+// startWatchGoroutine launches the fsnotify watcher and external DB pollers
+// as background goroutines within the current process.
+func startWatchGoroutine() error {
+	if watcherCancel != nil {
+		return fmt.Errorf("watcher is already running")
 	}
-	running, _ := status["running"].(bool)
-	pid, _ := status["pid"].(int)
+	watcherCtx, watcherCancel = context.WithCancel(context.Background())
+	watcherDone = make(chan struct{})
 
-	if running {
-		return fmt.Sprintf("🔍 Watch daemon: running (PID: %d)\n", pid)
+	go func() {
+		defer close(watcherDone)
+
+		// Start the fsnotify watcher goroutine
+		if len(resolveWatchDirs("", "")) > 0 {
+			startWatcherGoroutine(watcherCtx, watchPool, false, false)
+		}
+
+		// Start external DB polling goroutines
+		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
+
+		// Submit a startup sweep event
+		watchPool.Submit(WatchEvent{Type: EventStartupSweep})
+
+		// Block until cancelled
+		<-watcherCtx.Done()
+	}()
+	return nil
+}
+
+// stopWatchGoroutine cancels the watcher goroutine and waits for it to finish.
+func stopWatchGoroutine() {
+	if watcherCancel == nil {
+		return
 	}
-	return "🔍 Watch daemon: stopped\n"
+	watcherCancel()
+	<-watcherDone
+	watcherCancel = nil
+	watcherCtx = nil
+	watcherDone = nil
+}
+
+// formatWatchStatus returns a human-readable status string for the file watcher.
+func formatWatchStatus() string {
+	if watchPool == nil {
+		return "Watch system: not initialized\n"
+	}
+	active := watchPool.ActiveWorkers()
+	processed := watchPool.ProcessedCount()
+	if watcherCancel != nil && watcherDone != nil {
+		return fmt.Sprintf("Watch system: running (%d active workers, %d events processed)\n", active, processed)
+	}
+	return fmt.Sprintf("Watch system: stopped (%d events processed)\n", processed)
 }

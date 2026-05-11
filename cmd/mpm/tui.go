@@ -359,14 +359,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.activePanel == 0 {
 		m.modeList, cmd = m.modeList.Update(msg)
 	} else {
-		m.personaList, cmd = m.personaList.Update(msg)
+m.personaList, cmd = m.personaList.Update(msg)
 	}
 	return m, cmd
 }
 
 // ---------------------------------------------------------------------------
-// Commands
+// View
 // ---------------------------------------------------------------------------
+func (m *Model) View() string {
+	if m.quitting {
+		return "\n  Goodbye, lobster friend! 🦞\n\n"
+	}
+
+	modePane := m.renderModeList()
+	personaPane := m.renderPersonaList()
+	previewPane := m.renderPreview()
+
+	lists := lipgloss.JoinVertical(lipgloss.Top, modePane, personaPane)
+
+	return fmt.Sprintf(
+		"%s\n\n  %s\n\n%s\n%s\n\n%s\n",
+		TitleStyle.Render("⟨ mpm-tui ⟩  ·  MPM Dashboard"),
+		m.renderTabBar(),
+		lists,
+		previewPane,
+		m.renderFooter(),
+	)
+}
+
 func (m *Model) applyModes() tea.Msg {
 	toApply := m.selectedModes
 	if len(toApply) == 0 {
@@ -392,28 +413,30 @@ func (m *Model) applyPersona() tea.Msg {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// View
-// ---------------------------------------------------------------------------
-func (m *Model) View() string {
-	if m.quitting {
-		return "\n  Goodbye, lobster friend! 🦞\n\n"
+func (m *Model) renderFooter() string {
+	parts := []string{"mpm running"}
+	modeActive := "not set"
+	if data, err := os.ReadFile(filepath.Join(m.mpmDir, "active.json")); err == nil {
+		var raw map[string]interface{}
+		if json.Unmarshal(data, &raw) == nil {
+			if v, ok := raw["mode"].(string); ok && v != "" {
+				modeActive = v
+			}
+		}
 	}
-
-	modePane := m.renderModeList()
-	personaPane := m.renderPersonaList()
-	previewPane := m.renderPreview()
-
-	lists := lipgloss.JoinVertical(lipgloss.Top, modePane, personaPane)
-
-	return fmt.Sprintf(
-		"%s\n\n  %s\n\n%s\n%s\n\n%s\n",
-		TitleStyle.Render("⟨ mpm-tui ⟩  ·  MPM Dashboard"),
-		m.renderTabBar(),
-		lists,
-		previewPane,
-		m.renderFooter(),
-	)
+	parts = append(parts, fmt.Sprintf("mode: %s", SubTitleStyle.Render(modeActive)))
+	persActive := "not set"
+	if data, err := os.ReadFile(filepath.Join(m.mpmDir, "active.json")); err == nil {
+		var raw map[string]interface{}
+		if json.Unmarshal(data, &raw) == nil {
+			if v, ok := raw["persona"].(string); ok && v != "" {
+				persActive = v
+			}
+		}
+	}
+	parts = append(parts, fmt.Sprintf("persona: %s", SubTitleStyle.Render(persActive)))
+	parts = append(parts, fmt.Sprintf("%d modes · %d personas", len(modeNames), len(personaNames)))
+	return HelpStyle.Render(strings.Join(parts, "   ·   "))
 }
 
 func (m *Model) renderTabBar() string {
@@ -623,58 +646,6 @@ func formatPersonaPreview(raw map[string]interface{}) string {
 		lines = append(lines[:20], DimStyle.Render("... more in file"))
 	}
 	return strings.Join(lines, "\n")
-}
-
-// ---------------------------------------------------------------------------
-// Footer: system status
-// ---------------------------------------------------------------------------
-func (m *Model) renderFooter() string {
-	var parts []string
-
-	// MPM daemon status
-	sockPath := socketPath()
-	if _, err := os.Stat(sockPath); err == nil {
-		parts = append(parts, fmt.Sprintf("daemon %s running", StatusOK))
-	} else {
-		xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
-		if xdgRuntime != "" {
-			if _, err := os.Stat(filepath.Join(xdgRuntime, "mpm.sock")); err == nil {
-				parts = append(parts, fmt.Sprintf("daemon %s running", StatusOK))
-			} else {
-				parts = append(parts, fmt.Sprintf("daemon %s offline", StatusDim))
-			}
-		} else {
-			parts = append(parts, fmt.Sprintf("daemon %s offline", StatusDim))
-		}
-	}
-
-	// Active mode
-	modeActive := "not set"
-	if data, err := os.ReadFile(filepath.Join(m.mpmDir, "active.json")); err == nil {
-		var raw map[string]interface{}
-		if json.Unmarshal(data, &raw) == nil {
-			if v, ok := raw["mode"].(string); ok && v != "" {
-				modeActive = v
-			}
-		}
-	}
-	parts = append(parts, fmt.Sprintf("mode: %s", SubTitleStyle.Render(modeActive)))
-
-	// Active persona
-	persActive := "not set"
-	if data, err := os.ReadFile(filepath.Join(m.mpmDir, "active.json")); err == nil {
-		var raw map[string]interface{}
-		if json.Unmarshal(data, &raw) == nil {
-			if v, ok := raw["persona"].(string); ok && v != "" {
-				persActive = v
-			}
-		}
-	}
-	parts = append(parts, fmt.Sprintf("persona: %s", SubTitleStyle.Render(persActive)))
-
-	parts = append(parts, fmt.Sprintf("%d modes · %d personas", len(modeNames), len(personaNames)))
-
-	return HelpStyle.Render(strings.Join(parts, "   ·   "))
 }
 
 // ---------------------------------------------------------------------------
