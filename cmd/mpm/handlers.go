@@ -433,13 +433,7 @@ func handleShredSessions(conn net.Conn, args []string) {
 		return
 	}
 
-	// Run VACUUM to reclaim space
-	db := store.DB
-	if _, err := db.Exec("VACUUM"); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Sessions deleted but vacuum failed: %v", err), true, 1)
-		return
-	}
-
+	// Space reclamation happens during maintenance cycle (deferred VACUUM)
 	sendResponse(conn, fmt.Sprintf("All sessions deleted (%d records).\n", count), "", true, 0)
 }
 
@@ -464,13 +458,7 @@ func handleShredMemories(conn net.Conn, args []string) {
 		return
 	}
 
-	// Run VACUUM to reclaim space
-	db := store.DB
-	if _, err := db.Exec("VACUUM"); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Memories deleted but vacuum failed: %v", err), true, 1)
-		return
-	}
-
+	// Space reclamation happens during maintenance cycle (deferred VACUUM)
 	sendResponse(conn, fmt.Sprintf("All memories deleted (%d records).\n", count), "", true, 0)
 }
 
@@ -506,12 +494,7 @@ func handleShredTopics(conn net.Conn, args []string) {
 
 	count, _ := result.RowsAffected()
 
-	// Run VACUUM to reclaim space
-	if _, err := db.Exec("VACUUM"); err != nil {
-		sendResponse(conn, "", fmt.Sprintf("Topics deleted but vacuum failed: %v", err), true, 1)
-		return
-	}
-
+	// Space reclamation happens during maintenance cycle (deferred VACUUM)
 	sendResponse(conn, fmt.Sprintf("All topics deleted (%d records).\n", count), "", true, 0)
 }
 
@@ -649,7 +632,7 @@ func handleShredTopic(conn net.Conn, id string) {
 		return
 	}
 
-	_, err = db.Exec("VACUUM")
+	// Space reclamation happens during maintenance cycle (deferred VACUUM)
 	sendResponse(conn, fmt.Sprintf("Topic shredded: %s\n", id), "", true, 0)
 }
 
