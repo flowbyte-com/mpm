@@ -7,17 +7,5 @@ __pycache__/
 mpm
 bin/
 
-# Runtime state
-MEMORY.md
-active.json
-
-# Runtime data
-memory/
-projects/
-.claude/
-
-# SQLite
-src/db/*.db
-src/db/*.db-shm
-src/db/*.db-wal
+# Worktrees
 /.worktrees
