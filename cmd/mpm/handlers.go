@@ -14,6 +14,9 @@ import (
 // It is initialized by main() in the unified process architecture.
 var watchPool *WorkerPool
 
+// Default worker pool size for the watcher background goroutines.
+const defaultWorkerPoolSize = 3
+
 // watcherLifecycle tracks the fsnotify watcher goroutine lifecycle.
 var (
 	watcherCtx    context.Context
@@ -2130,22 +2133,31 @@ func startWatchGoroutine() error {
 	if watcherCancel != nil {
 		return fmt.Errorf("watcher is already running")
 	}
+
+	// Lazy-init the worker pool with its own DatabaseManager.
+	// The DM is opened once and shared across all pool workers.
+	if watchPool == nil {
+		dm, err := internal.NewDatabaseManager("")
+		if err != nil {
+			return fmt.Errorf("failed to open database for watcher: %w", err)
+		}
+		watchPool = NewWorkerPool(dm, defaultWorkerPoolSize)
+	}
 	watcherCtx, watcherCancel = context.WithCancel(context.Background())
 	watcherDone = make(chan struct{})
 
 	go func() {
 		defer close(watcherDone)
 
-		// Start the fsnotify watcher goroutine
-		if len(resolveWatchDirs("", "")) > 0 {
-			startWatcherGoroutine(watcherCtx, watchPool, false, false)
-		}
+		// Launch the fsnotify watcher event loop in its own goroutine
+		// (it blocks internally on fsnotify events).
+		go startWatcherGoroutine(watcherCtx, watchPool, false, false)
 
-		// Start external DB polling goroutines
+		// Start external DB polling goroutines (each spawns its own goroutine).
 		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
 
-		// Submit a startup sweep event
-		watchPool.Submit(WatchEvent{Type: EventStartupSweep})
+		// Submit a startup sweep event to the pool.
+		watchPool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: false, Verbose: false})
 
 		// Block until cancelled
 		<-watcherCtx.Done()
