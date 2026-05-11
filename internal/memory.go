@@ -436,7 +436,11 @@ var sensitivePatterns = []struct {
 	name    string
 	pattern *regexp.Regexp
 }{
-	{"OpenAI API Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
+	// Layered: specific prefixes first, general fallback last
+	{"OpenAI Project Key", regexp.MustCompile(`sk-proj-[a-zA-Z0-9_-]{20,}`)},
+	{"OpenAI Service Key", regexp.MustCompile(`sk-svc-[a-zA-Z0-9_-]{20,}`)},
+	{"Anthropic API Key", regexp.MustCompile(`sk-ant-[a-zA-Z0-9_-]{20,}`)},
+	{"Generic Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
 	{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
 	{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
 	{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
