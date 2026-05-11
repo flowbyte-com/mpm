@@ -34,7 +34,7 @@ If `memory_dirs`/`sessions_dirs` are unset, defaults to `$MPM_WORKSPACE/memory/`
 
 ## Topic Clustering
 
-After each memory ingestion: scans LTM memories for shared tags. If 3+ memories share a tag → auto-create Topic + link via `topic_memberships`. Idempotent (cached in-memory).
+After each memory ingestion: scans LTM memories for shared tags. If 3+ memories share a tag → auto-create Topic + link via `topic_memberships`. Database is sole source of truth — no in-memory cache.
 
 ## Startup Sweep
 
