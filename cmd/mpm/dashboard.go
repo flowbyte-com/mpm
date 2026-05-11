@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
@@ -422,23 +419,14 @@ func fetchStatus(sockPath string) tea.Cmd {
 }
 
 // StartDashboard launches the Bubbletea dashboard
+// In the unified architecture, the TUI-based dashboard is not available.
+// All commands run in-process with no socket daemon to connect to.
 func StartDashboard(sockPath string) {
-	p := tea.NewProgram(
-		newDashboardModel(sockPath),
-		tea.WithAltScreen(),       // Use alternate screen buffer
-		tea.WithMouseCellMotion(), // Enable mouse tracking
-	)
-
-	// Handle signals for graceful exit
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		p.Quit()
-	}()
-
-	if err := p.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Dashboard error: %v\n", err)
-	}
+	fmt.Println("Dashboard (TUI) is not available in unified mode.")
+	fmt.Println("All commands run in-process — use the following instead:")
+	fmt.Println("  mpm stats        Memory statistics")
+	fmt.Println("  mpm watch status  File watcher status")
+	fmt.Println("  mpm menu         Interactive mode/persona picker")
+	fmt.Println("  mpm doctor       System diagnostics")
+	fmt.Println("  mpm help         Full command listing")
 }

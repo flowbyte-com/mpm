@@ -1,13 +1,8 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net"
 	"os"
-	"strings"
-	"time"
 )
 
 // Command describes a single command
@@ -17,46 +12,26 @@ type Command struct {
 	Aliases     []string
 	MinArgs     int
 	MaxArgs     int
-	NeedsDaemon bool
 }
 
 // CommandRouter routes commands to handlers
 type CommandRouter struct {
-	Commands   map[string]*Command
-	socketPath string
+	Commands map[string]*Command
 }
 
 // NewRouter creates a new command router
 func NewRouter() *CommandRouter {
-	r := &CommandRouter{
-		socketPath: socketPath(),
-	}
+	r := &CommandRouter{}
 
 	// Register all commands
 	r.Commands = map[string]*Command{
-		// Lifecycle commands (need daemon)
-		"start":    {Name: "start", Description: "Start daemon"},
-		"status":   {Name: "status", Description: "Show daemon status", NeedsDaemon: true},
-		"shutdown": {Name: "shutdown", Description: "Gracefully stop daemon", NeedsDaemon: true},
-		"stop":     {Name: "stop", Description: "Alias for shutdown", Aliases: []string{"shutdown"}, NeedsDaemon: true},
-		"reboot":   {Name: "reboot", Description: "Restart daemon", NeedsDaemon: true},
-		"restart":  {Name: "restart", Description: "Alias for reboot", Aliases: []string{"reboot"}, NeedsDaemon: true},
-		"logs":     {Name: "logs", Description: "Tail daemon logs", NeedsDaemon: true},
+		// Info commands
+		"version": {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
+		"help":    {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
+		"doctor":  {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
 
-		// Standalone commands
-		"version":  {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
-		"help":     {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
-		"doctor":   {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
-		"recall":   {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
-		"watch":    {Name: "watch", Description: "Watch daemon for memory ingestion"},
-		"web":      {Name: "web", Description: "Start web UI server", MinArgs: 0},
-		"menu":     {Name: "menu", Description: "Interactive control menu", NeedsDaemon: true},
-		"stats":    {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
-		"prune":    {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
-		"export":   {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
-		"maintain": {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
-
-		// Simplified memory commands
+		// Memory commands
+		"recall":     {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
 		"add":        {Name: "add", Description: "Add a new memory", MinArgs: 1},
 		"ls":         {Name: "ls", Description: "List memories", MinArgs: 0},
 		"show":       {Name: "show", Description: "Show memory details", MinArgs: 1},
@@ -66,40 +41,36 @@ func NewRouter() *CommandRouter {
 		"weaken":     {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
 		"set-weight": {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
 		"shred":      {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
+		"stats":      {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
+		"prune":      {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
+		"export":     {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"maintain":   {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
 
-		// Reference commands (simplified, no daemon)
-		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
-
-		// OpenCLAW commands
-		"dashboard": {
-			Name:        "dashboard",
-			Description: "Real-time TUI dashboard",
-			NeedsDaemon: true,
-		},
-
-		// Daemon subcommands (legacy - kept for compatibility)
-		"llm":              {Name: "llm", Description: "LLM operations", NeedsDaemon: true},
-		"compile":          {Name: "compile", Description: "Compile project", NeedsDaemon: true},
-		"mode":             {Name: "mode", Description: "Mode operations", NeedsDaemon: true},
-		"persona":          {Name: "persona", Description: "Persona operations", NeedsDaemon: true},
-		"topic":            {Name: "topic", Description: "Topic management", MinArgs: 1},
-		"session":          {Name: "session", Description: "Session operations", NeedsDaemon: true},
-		"lesson":           {Name: "lesson", Description: "Lesson operations", NeedsDaemon: true},
-		"memory":           {Name: "memory", Description: "Memory operations", NeedsDaemon: true},
-		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0, NeedsDaemon: true},
-		"ingest":           {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		// Feature commands
+		"watch":           {Name: "watch", Description: "File watcher for memory ingestion"},
+		"web":             {Name: "web", Description: "Start web UI server", MinArgs: 0},
+		"menu":            {Name: "menu", Description: "Interactive control menu", MinArgs: 0},
+		"reference":       {Name: "reference", Description: "Reference library", MinArgs: 1},
+		"topic":           {Name: "topic", Description: "Topic management", MinArgs: 1},
+		"session":         {Name: "session", Description: "Session operations"},
+		"lesson":          {Name: "lesson", Description: "Lesson operations"},
+		"memory":          {Name: "memory", Description: "Memory operations"},
+		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0},
+		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"dashboard":       {Name: "dashboard", Description: "Real-time TUI dashboard", MinArgs: 0},
+		"llm":             {Name: "llm", Description: "LLM operations"},
+		"compile":         {Name: "compile", Description: "Compile project"},
+		"mode":            {Name: "mode", Description: "Mode operations"},
+		"persona":         {Name: "persona", Description: "Persona operations"},
 	}
 
 	return r
 }
 
-// Execute routes and runs the command
+// Execute routes and runs the command, returning an exit code.
 func (r *CommandRouter) Execute(args []string) int {
-	// Handle empty command - launch TUI menu
 	if len(args) == 0 {
-		// Start daemon first (TUI needs it), then launch menu
-		handleStartCommand()
-		StartTUI()
+		PrintHelp()
 		return 0
 	}
 
@@ -112,15 +83,12 @@ func (r *CommandRouter) Execute(args []string) int {
 	}
 
 	cmdName := args[0]
-
-	// Handle empty command after flag parsing
 	if cmdName == "" {
-		becomeDaemonAndExecute()
+		PrintHelp()
 		return 0
 	}
 
 	cmd := r.resolveCommand(cmdName)
-
 	if cmd == nil {
 		r.unknownCommand(cmdName)
 		return 1
@@ -143,9 +111,9 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleVersion()
 	case "help":
 		return r.handleHelp()
-	case "doctor", "logs", "start":
-		// Standalone commands - don't need daemon
-		return r.handleStandalone(cmd.Name, args)
+	case "doctor":
+		runDoctorCommand()
+		return 0
 	case "recall":
 		return handleRecall(args)
 	case "ingest":
@@ -161,29 +129,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "web":
 		return handleWeb(args)
 	case "watch":
-		// Handle path management subcommands directly (no daemon)
-		if len(args) >= 2 {
-			switch args[1] {
-			case "add-path", "remove-path", "list-paths", "paths":
-				if cmdWatch(args[1:]) {
-					return 0
-				}
-				return 1
-			}
-		}
-		// watch - if no args, start watch daemon standalone
-		// if args provided, route to daemon for status/start/stop/restart
-		if len(args) < 2 {
-			// No subcommand - start watch daemon as standalone process
-			if cmdWatch(args[1:]) {
-				return 0
-			}
-			return 1
-		}
-		// Has subcommand - route to daemon (status/start/stop/restart)
-		return r.handleDaemonCommand(cmd.Name, args)
-	case "status", "shutdown", "stop", "reboot", "restart":
-		return r.handleDaemonCommand(cmd.Name, args)
+		return handleWatch(args[1:])
 	case "dashboard":
 		return r.handleDashboard()
 	case "menu":
@@ -208,31 +154,24 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleShredMem(args)
 	case "reference":
 		return handleRef(args)
-	default:
-		// Daemon commands (llm, compile, shred, ss, etc.)
-		if cmd.NeedsDaemon {
-			return r.handleDaemonCommand(cmd.Name, args)
-		}
-		r.unknownCommand(cmdName)
-		return 1
-	}
-}
-
-// handleStandalone runs commands that don't need the daemon
-func (r *CommandRouter) handleStandalone(cmdName string, args []string) int {
-	switch cmdName {
-	case "help":
-		PrintHelp()
-		return 0
-	case "doctor":
-		runDoctorCommand()
-		return 0
-	case "logs":
-		handleLogsCommand()
-		return 0
-	case "start":
-		handleStartCommand()
-		return 0
+	case "prime-directives":
+		return handlePrimeDirectives()
+	case "memory":
+		return handleMemory(args[1:])
+	case "mode":
+		return handleMode(args[1:])
+	case "persona":
+		return handlePersona(args[1:])
+	case "topic":
+		return handleTopic(args[1:])
+	case "session":
+		return handleSession(args[1:])
+	case "lesson":
+		return handleLesson(args[1:])
+	case "llm":
+		return handleLlm(args[1:])
+	case "compile":
+		return handleCompile(args[1:])
 	default:
 		r.unknownCommand(cmdName)
 		return 1
@@ -255,48 +194,21 @@ func (r *CommandRouter) resolveCommand(name string) *Command {
 	return nil
 }
 
-// commandNeedsDaemon checks if a command requires the daemon
-func (r *CommandRouter) commandNeedsDaemon(name string) bool {
-	cmd := r.resolveCommand(name)
-	if cmd == nil {
-		return false
-	}
-	return cmd.NeedsDaemon
-}
-
 // parseFlags parses global flags, returns remaining args
 func (r *CommandRouter) parseFlags(args []string) []string {
 	result := make([]string, 0, len(args))
-	i := 0
-	for i < len(args) {
-		arg := args[i]
+	for _, arg := range args {
 		switch arg {
 		case "-h", "--help":
-			// Only intercept help if it's standalone or followed by nothing
-			if i == 0 || (i == 1 && (args[0] == "watch" || args[0] == "status")) {
-				result = append(result, "help")
-				return result
-			}
-			result = append(result, arg)
-			i++
+			result = append(result, "help")
 		case "-v", "--version":
-			// Only intercept version flag if it's the ONLY command-like argument
-			// This allows "mpm watch -v" to pass -v to the watch command
-			if i == 0 || (i == 1 && args[0] == "watch") {
-				result = append(result, "version")
-				return result
-			}
-			result = append(result, arg)
-			i++
+			result = append(result, "version")
 		case "-f", "--force":
 			os.Setenv("MPM_FORCE", "1")
-			i++
 		case "-i", "--interactive":
 			os.Setenv("MPM_INTERACTIVE", "1")
-			i++
 		default:
 			result = append(result, arg)
-			i++
 		}
 	}
 	return result
@@ -317,113 +229,13 @@ func (r *CommandRouter) handleHelp() int {
 }
 
 func (r *CommandRouter) handleDashboard() int {
-	// Dashboard as CLI command: start the bubbletea TUI dashboard
-	// Requires daemon to be running for status data
-	conn, err := r.dialDaemonWithRetry(2, 500*time.Millisecond)
-	if err != nil {
-		fmt.Println("Daemon not running. Start with: mpm start")
-		return 1
-	}
-	defer conn.Close()
-
-	// Launch the bubbletea TUI dashboard
-	// It will connect to the daemon via socket for status
-	StartDashboard(sockPath)
+	StartDashboard("")
 	return 0
 }
 
 func (r *CommandRouter) handleMenu() int {
-	// Ensure daemon is running before launching TUI (TUI calls mpm mode/persona set)
-	handleStartCommand()
 	StartTUI()
 	return 0
-}
-
-func (r *CommandRouter) handleDaemonCommand(cmd string, args []string) int {
-	// Try with retry - daemon might be starting
-	conn, err := r.dialDaemonWithRetry(3, 500*time.Millisecond)
-	if err != nil {
-		r.daemonNotRunning(cmd)
-		return 1
-	}
-	defer conn.Close()
-
-	// Send command
-	msg := Message{Args: append([]string{cmd}, args[1:]...)}
-	if err := json.NewEncoder(conn).Encode(msg); err != nil {
-		r.errorf("[!] Error: failed to send command: %v\n", err)
-		return 1
-	}
-
-	// Stream response
-	r.streamResponse(conn)
-	return 0
-}
-
-// ============================================================================
-// Daemon Connection
-// ============================================================================
-
-// dialDaemon connects to the daemon with timeout and stale socket cleanup
-func (r *CommandRouter) dialDaemon() (net.Conn, error) {
-	return r.dialDaemonWithRetry(1, 0)
-}
-
-// dialDaemonWithRetry attempts to connect with retries
-func (r *CommandRouter) dialDaemonWithRetry(attempts int, delay time.Duration) (net.Conn, error) {
-	for i := 0; i < attempts; i++ {
-		if i > 0 && delay > 0 {
-			time.Sleep(delay)
-		}
-
-		// Check if socket exists
-		if _, err := os.Stat(r.socketPath); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, err
-		}
-
-		// Dial with timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		conn, err := (&net.Dialer{}).DialContext(ctx, "unix", r.socketPath)
-		if err != nil {
-			// Socket exists but daemon is dead - cleanup stale socket
-			if strings.Contains(err.Error(), "connection refused") {
-				os.Remove(r.socketPath)
-				continue
-			}
-			continue
-		}
-
-		return conn, nil
-	}
-	return nil, fmt.Errorf("daemon not available after %d attempts", attempts)
-}
-
-// streamResponse reads and displays daemon response
-func (r *CommandRouter) streamResponse(conn net.Conn) {
-	dec := json.NewDecoder(conn)
-	for {
-		var resp Message
-		if err := dec.Decode(&resp); err != nil {
-			break
-		}
-		if resp.Output != "" {
-			fmt.Print(resp.Output)
-		}
-		if resp.Error != "" {
-			r.errorf("[!] Error: %s\n", resp.Error)
-		}
-		if resp.Done {
-			if resp.ExitCode != 0 {
-				os.Exit(resp.ExitCode)
-			}
-			return
-		}
-	}
 }
 
 // ============================================================================
@@ -435,27 +247,9 @@ func PrintHelp() {
 	printHelp()
 }
 
-func (r *CommandRouter) printCmd(name string, needsDaemon bool) {
-	cmd := r.Commands[name]
-	if cmd == nil {
-		return
-	}
-	daemonNote := ""
-	if needsDaemon {
-		daemonNote = "*"
-	}
-	fmt.Printf("    %-12s %s%s\n", name, cmd.Description, daemonNote)
-}
-
 func (r *CommandRouter) unknownCommand(name string) {
 	r.errorf("[!] Error: unknown command '%s'\n", name)
 	fmt.Printf("    Run 'mpm help' for available commands.\n")
-}
-
-func (r *CommandRouter) daemonNotRunning(cmd string) {
-	r.errorf("[!] Error: daemon is not running\n")
-	fmt.Printf("    The '%s' command requires the daemon.\n", cmd)
-	fmt.Printf("    Run 'mpm' without arguments to start the daemon.\n")
 }
 
 func (r *CommandRouter) errorf(format string, args ...interface{}) {

@@ -6,14 +6,14 @@ SQLite-native agent state management for AI agents. Single binary, zero external
 
 ```bash
 make build                          # Build bin/mpm
-./bin/mpm add "Remember this fact"  # Add memory (no daemon needed)
+./bin/mpm add "Remember this fact"  # Add memory
 ./bin/mpm ls                        # List memories
 ./bin/mpm recall sqlite             # Search via FTS5
 ```
 
-## Simplified CLI
+## CLI
 
-All core commands work without a daemon:
+All commands execute in-process — no daemon needed:
 
 | Command | Description |
 |---------|-------------|
@@ -36,11 +36,6 @@ All core commands work without a daemon:
 | `mpm ingest <path>` | Import from external SQLite |
 | `mpm doctor` | Diagnostics |
 | `mpm web` | Start web UI server |
-
-Commands needing daemon (`mpm start`):
-
-| Command | Description |
-|---------|-------------|
 | `mpm mode [list\|active\|add\|remove\|clear]` | Multi-select behavioral modes |
 | `mpm persona [list\|active\|set\|clear]` | Single-select identity |
 | `mpm prime-directives` | Show 808 directives |
@@ -50,23 +45,20 @@ Commands needing daemon (`mpm start`):
 | `mpm synthesize <uuid>` | LLM session synthesis |
 | `mpm dashboard` | Real-time TUI dashboard |
 | `mpm menu` | Interactive mode/persona picker |
-| `mpm logs` | Tail daemon logs |
-| `mpm start/stop/restart/status` | Daemon lifecycle |
+| `mpm watch [start\|stop\|restart\|status]` | File watcher lifecycle |
 
 ## Architecture
 
 ```
-CLI ─── Unix socket ───> Main Daemon ──> SQLite (mpm.db)
-                              │
-                              └──> Watch Daemon (fsnotify)
-                                       ├── .md files → LTM memory
-                                       ├── .lock removed → session facts
-                                       └── external DB polling → new memories
+CLI ──> Router ──> Handler (in-process) ──> SQLite (mpm.db)
+                         │
+                         └──> WorkerPool (goroutine pool)
+                               ├── fsnotify watcher ──> .md → LTM memory
+                               ├── .lock removed → session facts
+                               └── external DB polling
 ```
 
-**Main daemon**: CLI commands, SQLite CRUD, mode/persona compilation, session synthesis.
-**Watch daemon**: Filesystem monitoring via `fsnotify`, auto-ingests content independently.
-**No daemon needed**: `add`, `ls`, `show`, `rm`, `recall`, `promote`, `reinforce`, `weaken`, `set-weight`, `shred`, `stats`, `prune`, `export`, `topic`, `reference`, `ingest`.
+Unified single process — all commands execute in-process with no daemon subprocess or Unix socket IPC. The file watcher runs as a background goroutine, submitting events to a `WorkerPool` via a buffered channel.
 
 ## Memory Model
 
@@ -110,7 +102,6 @@ No hardcoded paths. Cascade: `MPM_WORKSPACE` env var → executable-relative →
 | Mirror log | `$MPM_WORKSPACE/src/db/mirror.jsonl` |
 | Modes | `$MPM_WORKSPACE/mode/` |
 | Personas | `$MPM_WORKSPACE/persona/` |
-| Socket | `/run/user/$UID/mpm.sock` |
 
 ## Build
 
@@ -133,22 +124,13 @@ Requires Go 1.18+ and CGO. Dependencies: `mattn/go-sqlite3`, `fsnotify`, `bubble
 }
 ```
 
-## mpm-agent (Companion AI Agent)
+## Web UI
 
-`mpm-agent/` is a sub-project: a tool-augmented LLM that interacts with MPM directly. Three binaries:
+`mpm web` serves SPA at port 18792 with token auth (`web_token` in config).
 
-| Binary | Purpose |
-|--------|---------|
-| `bin/mpm-agent` | Standalone CLI/REPL agent |
-| `bin/mpm-agent-mcp` | MCP server for Claude Code |
-| `bin/mpm-agent-telegram` | Telegram bot bridge |
+## File Watcher
 
-Built from `mpm-agent/` with `make build`. See [docs/MPM_AGENT.md](docs/MPM_AGENT.md).
-
-## Server Configuration
-
-**Web UI**: `mpm web` serves SPA at port 18792 with token auth (`web_token` in config).
-**Watch daemon**: Auto-started with `mpm start`. Monitors `.md` files, session locks, and external DBs.
+Auto-started via `mpm watch start`. Monitors `.md` files (ingested as LTM memories), session `.lock` removal (triggers fact extraction), and external SQLite databases (polls for new rows on configurable intervals). Runs as a background goroutine — no separate subprocess.
 
 ## License
 

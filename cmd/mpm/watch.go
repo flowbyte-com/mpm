@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -57,138 +58,6 @@ var (
 	camelPattern = regexp.MustCompile(`([A-Z][a-z]+[A-Z][a-zA-Z]*)`)
 )
 
-// =============================================================================
-// Watch Command - fsnotify-based file watcher and ingestion daemon
-// =============================================================================
-
-func cmdWatch(args []string) bool {
-	// Handle path management subcommands (no daemon needed)
-	if len(args) >= 1 {
-		switch args[0] {
-		case "add-path":
-			return handleWatchAddPath(args[1:]) == 0
-		case "remove-path":
-			return handleWatchRemovePath(args[1:]) == 0
-		case "list-paths", "paths":
-			return handleWatchListPaths(args[1:]) == 0
-		}
-	}
-
-	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	// Watch specific directories (defaults from config)
-	watchDir := fs.String("dir", "", "Watch directory (default: memory dir from config)")
-	sessionDir := fs.String("sessions", "", "Session directory (default: sessions dir from config)")
-	dryRun := fs.Bool("dry-run", false, "Process files but don't delete them")
-	once := fs.Bool("once", false, "Run startup sweep only, then exit")
-	verbose := fs.Bool("v", false, "Verbose output")
-	fs.Usage = func() {
-		fmt.Println("Usage: mpm watch [options]")
-		fmt.Println("\nWatch options:")
-		fs.PrintDefaults()
-		fmt.Println("\nPath management (no daemon):")
-		fmt.Println("  mpm watch add-path <path> [--type memory|sessions]")
-		fmt.Println("  mpm watch remove-path <path>")
-		fmt.Println("  mpm watch list-paths")
-	}
-	if err := fs.Parse(args); err != nil {
-		return false
-	}
-
-	// Determine watch directories
-	watcherDirs := resolveWatchDirs(*watchDir, *sessionDir)
-	if len(watcherDirs) == 0 {
-		fmt.Fprintf(os.Stderr, "❌ No directories to watch. Configure memory_dir and sessions_dir in mpm_config.json\n")
-		return false
-	}
-
-	// Initialize the watcher
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to create watcher: %v\n", err)
-		return false
-	}
-	defer w.Close()
-
-	// Create the daemon with database connection
-	daemon := newWatcherDaemon(w, watcherDirs, *dryRun, *verbose)
-	if daemon == nil {
-		return false // Error already printed
-	}
-	if !daemon.IsReady() {
-		fmt.Fprintf(os.Stderr, "❌ Watch daemon not ready (database initialization failed)\n")
-		return false
-	}
-
-	// Start the daemon
-	fmt.Printf("🔍 MPM Watch Daemon starting...\n")
-	fmt.Printf("   Watching: %v\n", watcherDirs)
-	fmt.Printf("   Dry run: %v\n", *dryRun)
-
-	if *once {
-		fmt.Printf("\n⚡ Running one-shot startup sweep...\n")
-		daemon.startupSweep()
-		fmt.Printf("✅ Startup sweep complete.\n")
-		return true
-	}
-
-	// Add directories to watcher
-	for _, dir := range watcherDirs {
-		if err := w.Add(dir); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to watch %s: %v\n", dir, err)
-			return false
-		}
-	}
-
-	// Run startup sweep first
-	fmt.Printf("\n⚡ Running initial startup sweep...\n")
-	daemon.startupSweep()
-	fmt.Printf("✅ Startup sweep complete. Watching for changes...\n\n")
-
-	// Setup signal handling for graceful shutdown
-	done := make(chan bool)
-	stopCh := make(chan struct{})
-	go daemon.handleSignals(done)
-
-	// Load config for external DBs
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Warning: could not load config: %v\n", err)
-		cfg = &config.Config{} // empty config, defaults apply
-	}
-
-	// Start external DB polling goroutines with stop channel
-	externalDBs := cfg.GetExternalDbs()
-	if len(externalDBs) > 0 {
-		fmt.Printf("🔄 Starting %d external DB poller(s)...\n", len(externalDBs))
-		startExternalDBPolling(externalDBs, *dryRun, *verbose, stopCh)
-	}
-
-	// Main event loop
-	for {
-		select {
-		case event, ok := <-w.Events:
-			if !ok {
-				close(stopCh)
-				return true
-			}
-		daemon.handleEvent(event)
-
-		case err, ok := <-w.Errors:
-			if !ok {
-				close(stopCh)
-				return true
-			}
-			if *verbose {
-				fmt.Fprintf(os.Stderr, "⚠️  Watch error: %v\n", err)
-			}
-
-		case <-done:
-			fmt.Printf("\n👋 Watch daemon shutting down...\n")
-			close(stopCh) // Signal external DB pollers to stop
-			return true
-		}
-	}
-}
 
 // resolveWatchDirs determines which directories to watch for the daemon
 // Priority: 1) CLI flags, 2) Config file (memory_dirs/sessions_dirs), 3) OpenClaw workspace defaults
@@ -1464,6 +1333,152 @@ func formatTopicName(tag string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// =============================================================================
+// Goroutine-based Watch (used by unified daemon — pushes events to Worker Pool)
+// =============================================================================
+
+// startWatcherGoroutine creates the fsnotify watcher and runs its event loop
+// in the current goroutine. It pushes WatchEvents to the pool for processing.
+// Blocks until ctx is cancelled or the watcher encounters a fatal error.
+func startWatcherGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbose bool) {
+	dirs := resolveWatchDirs("", "")
+	if len(dirs) == 0 {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "⚠️  No watch directories configured\n")
+		}
+		return
+	}
+
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to create watcher: %v\n", err)
+		return
+	}
+	defer w.Close()
+
+	for _, dir := range dirs {
+		if err := w.Add(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Failed to watch %s: %v\n", dir, err)
+		}
+	}
+
+	if verbose {
+		fmt.Printf("🔍 File watcher started. Watching: %v\n", dirs)
+	}
+
+	// Confirm pool is ready for events
+	pool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: dryRun, Verbose: verbose})
+
+	for {
+		select {
+		case <-ctx.Done():
+			if verbose {
+				fmt.Println("🛑 File watcher stopping...")
+			}
+			return
+		case event, ok := <-w.Events:
+			if !ok {
+				return
+			}
+			ev := eventFromFsnotify(event, dryRun, verbose)
+			if ev != nil {
+				pool.Submit(*ev)
+			}
+		case err, ok := <-w.Errors:
+			if !ok {
+				return
+			}
+			if verbose {
+				fmt.Fprintf(os.Stderr, "⚠️  Watch error: %v\n", err)
+			}
+		}
+	}
+}
+
+// eventFromFsnotify converts an fsnotify event to a WatchEvent, or nil if
+// the event should be ignored (system files, conflicted files, etc.).
+func eventFromFsnotify(event fsnotify.Event, dryRun, verbose bool) *WatchEvent {
+	name := filepath.Base(event.Name)
+	ext := strings.ToLower(filepath.Ext(name))
+
+	// Skip conflicted files
+	if strings.Contains(strings.ToLower(name), "conflicted") {
+		return nil
+	}
+
+	// Skip OpenClaw live session registry and config files
+	if isSystemFile(name) {
+		return nil
+	}
+
+	switch {
+	case ext == ".md" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
+		return &WatchEvent{Type: EventMarkdownFile, Path: event.Name, DryRun: dryRun, Verbose: verbose}
+	case ext == ".lock" && event.Has(fsnotify.Remove):
+		jsonlPath := strings.TrimSuffix(event.Name, ".lock")
+		if strings.ToLower(filepath.Ext(jsonlPath)) != ".jsonl" {
+			return nil
+		}
+		return &WatchEvent{Type: EventSessionComplete, Path: jsonlPath, DryRun: dryRun, Verbose: verbose}
+	case ext == ".json" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
+		nameLower := strings.ToLower(name)
+		if nameLower == "workspace.json" || nameLower == "config.json" {
+			return &WatchEvent{Type: EventSystemConfig, Path: event.Name, DryRun: dryRun, Verbose: verbose}
+		}
+	}
+
+	return nil
+}
+
+// startExternalDBPollGoroutines starts one goroutine per external DB that
+// periodically pushes poll events to the worker pool.
+func startExternalDBPollGoroutines(ctx context.Context, pool *WorkerPool, dryRun, verbose bool) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "⚠️  Cannot load config for external DB polling: %v\n", err)
+		}
+		return
+	}
+
+	dbs := cfg.GetExternalDbs()
+	if len(dbs) == 0 {
+		return
+	}
+
+	for _, dbc := range dbs {
+		dbLabel := dbc.Label
+		interval := dbc.IntervalSeconds
+		if interval <= 0 {
+			interval = 30
+		}
+
+		if verbose {
+			fmt.Printf("🔄 External DB poller: %s (label=%s, interval=%ds)\n", dbc.Path, dbLabel, interval)
+		}
+
+		go func(label string, intervalSec int) {
+			ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+			defer ticker.Stop()
+
+			// Push first poll immediately
+			pool.Submit(WatchEvent{Type: EventExternalDBPoll, Label: label, DryRun: dryRun, Verbose: verbose})
+
+			for {
+				select {
+				case <-ctx.Done():
+					if verbose {
+						fmt.Printf("🛑 External DB poller %s stopping...\n", label)
+					}
+					return
+				case <-ticker.C:
+					pool.Submit(WatchEvent{Type: EventExternalDBPoll, Label: label, DryRun: dryRun, Verbose: verbose})
+				}
+			}
+		}(dbLabel, interval)
+	}
 }
 
 // =============================================================================
