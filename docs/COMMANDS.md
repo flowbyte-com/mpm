@@ -10,7 +10,7 @@ mpm ls [--collection <name>] [--tag <t>] [--since YYYY-MM-DD] [--until YYYY-MM-D
 mpm show <id>
 mpm rm <id>
 mpm recall <query> [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit <n>]
-mpm shred <id>            # DELETE + VACUUM (hard delete, FTS5 triggers sync)
+mpm shred <id>            # DELETE (hard delete, FTS5 triggers sync); VACUUM deferred to `mpm maintain`
 ```
 
 ## Memory Importance (standalone)
