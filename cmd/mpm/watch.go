@@ -485,16 +485,6 @@ type watcherDaemon struct {
 	verbose    bool
 	mu         sync.Mutex
 	stopCh     chan struct{}
-	topicCache map[string]*topicCluster // topic name -> cluster info
-}
-
-type topicCluster struct {
-	ID       string
-	Name     string
-	Tag      string
-	MemIDs   []string
-	Count    int
-	LastSeen time.Time
 }
 
 func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) *watcherDaemon {
@@ -523,7 +513,6 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 		dryRun:     dryRun,
 		verbose:    verbose,
 		stopCh:     make(chan struct{}),
-		topicCache: make(map[string]*topicCluster),
 	}
 }
 
@@ -1305,16 +1294,9 @@ func (d *watcherDaemon) extractKeywords(content string) []string {
 // When N or more LTM memories share the same tag, create a Topic record.
 //
 // Locking strategy: holds d.mu for entire operation to prevent race conditions.
-// UsesRWMutex allows concurrent readers but exclusive writer access.
+// No in-memory cache — queries DB directly for consistency across daemons.
 func (d *watcherDaemon) checkTopicClustering() {
 	const clusterThreshold = 3
-
-	type workItem struct {
-		tag       string
-		memIDs    []string
-		topicID   string
-		created   bool
-	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1334,61 +1316,25 @@ func (d *watcherDaemon) checkTopicClustering() {
 		}
 	}
 
-	var work []workItem
 	for tag, memIDs := range tagCounts {
 		if len(memIDs) < clusterThreshold {
 			continue
 		}
-		if existing, ok := d.topicCache[tag]; ok {
-			existing.MemIDs = memIDs
-			existing.Count = len(memIDs)
-			existing.LastSeen = time.Now()
-			continue
-		}
-		work = append(work, workItem{tag: tag, memIDs: memIDs})
-	}
-
-	if len(work) == 0 {
-		return
-	}
-
-	var created []workItem
-	for _, item := range work {
-		existingTopic, err := d.findTopicByTag(item.tag)
+		// Check if topic already exists in DB (no in-memory cache)
+		existingTopic, err := d.findTopicByTag(tag)
 		if err == nil && existingTopic != nil {
-			d.topicCache[item.tag] = &topicCluster{
-				ID:       existingTopic.ID,
-				Name:     existingTopic.Name,
-				Tag:      item.tag,
-				MemIDs:   item.memIDs,
-				Count:    len(item.memIDs),
-				LastSeen: time.Now(),
-			}
 			continue
 		}
 
-		topicID, err := d.createTopicFromCluster(item.tag, item.memIDs)
+		// Create new topic from cluster
+		_, err = d.createTopicFromCluster(tag, memIDs)
 		if err != nil {
 			if d.verbose {
-				fmt.Fprintf(os.Stderr, "⚠️  Failed to create topic for tag '%s': %v\n", item.tag, err)
+				fmt.Fprintf(os.Stderr, "⚠️  Failed to create topic for tag '%s': %v\n", tag, err)
 			}
 			continue
 		}
-		item.topicID = topicID
-		item.created = true
-		created = append(created, item)
-	}
-
-	for _, c := range created {
-		d.topicCache[c.tag] = &topicCluster{
-			ID:       c.topicID,
-			Name:     formatTopicName(c.tag),
-			Tag:      c.tag,
-			MemIDs:   c.memIDs,
-			Count:    len(c.memIDs),
-			LastSeen: time.Now(),
-		}
-		fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", formatTopicName(c.tag), c.tag, len(c.memIDs))
+		fmt.Printf("   🏷️  Topic auto-created: '%s' (tag: %s, %d memories)\n", formatTopicName(tag), tag, len(memIDs))
 	}
 }
 
