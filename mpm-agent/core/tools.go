@@ -580,6 +580,9 @@ func executeTool(tool string, args map[string]interface{}, sessionID string) (st
 		}
 		return runShell(command, cwd)
 
+	case "apply_diff":
+		return applyDiff(args)
+
 	case "generate_image":
 		prompt, _ := args["prompt"].(string)
 		aspectRatio, _ := args["aspect_ratio"].(string)
@@ -1484,6 +1487,19 @@ func init() {
 				},
 			},
 			"required": []string{"image_path", "prompt"},
+		},
+	})
+
+	RegisterTool("apply_diff", ToolDefinition{
+		Name:        "apply_diff",
+		Description: "Apply a unified diff to patch specific lines in a file without overwriting",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file": map[string]interface{}{"type": "string", "description": "Absolute path to file"},
+				"diff": map[string]interface{}{"type": "string", "description": "Unified diff string"},
+			},
+			"required": []string{"file", "diff"},
 		},
 	})
 
