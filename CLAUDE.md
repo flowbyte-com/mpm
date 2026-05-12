@@ -1,92 +1,108 @@
 # CLAUDE.md
 
-MPM (Memory-Persona-Mode) — SQLite-native agent state management for OpenClaw agents.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Build & Test
+## Project Overview
 
+This is the **MPM** monorepo — Memory-Persona-Mode Manager. Two related projects:
+
+| Directory | Language | Description |
+|-----------|----------|-------------|
+| `mpm/` | Go | SQLite-native agent state management (memory layer) |
+| `mpm/mpm-agent/` | Go | Self-improving AI agent (CLI REPL, Telegram bot, MCP server) |
+
+## Building & Testing
+
+**MPM (primary):**
 ```bash
-make build    # Build bin/mpm (CGO + fts5)
-make test     # go test -tags fts5 ./...
-make install  # sudo install to /usr/local/bin/mpm
-make clean    # Remove bin/
-
-go test -v ./internal/... -run TestFunctionName  # Single test
+cd /home/v/workspace/projects/mpm
+make build    # Build to bin/mpm
+make test     # Run tests
+make install  # Install to /usr/local/bin/mpm
 ```
 
-## Architecture
+**Single test:** `go test -v ./internal/... -run TestFunctionName`
 
-Unified single process — all commands execute in-process. No daemon subprocess or Unix socket IPC.
-
-```
-CLI ──> Router ──> Handler (in-process) ──> SQLite (mpm.db)
-                         │
-                         └──> WorkerPool (goroutine pool)
-                               ├── fsnotify watcher ──> .md → LTM memory
-                               ├── .lock removed → session facts
-                               └── external DB polling
+**mpm-agent:**
+```bash
+cd /home/v/workspace/projects/mpm/mpm-agent
+make build BIN=bin/mini-bot        # Build specific binary
+make build                         # Build all 3 binaries
+CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go test ./core/...
 ```
 
-All commands work standalone (no separate daemon): `add`, `ls`, `show`, `rm`, `recall`, `promote`, `reinforce`, `weaken`, `set-weight`, `shred`, `stats`, `prune`, `export`, `topic`, `reference`, `ingest`, `mode`, `persona`, `session`, `lesson`, `memory`, `compile`, `llm`.
+FTS5 must be enabled via `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5"`.
 
-## Key Source Files
+## MPM Architecture
 
-| File | Purpose |
-|------|---------|
-| `cmd/mpm/main.go` | CLI entry, doctor diagnostics, help system |
-| `cmd/mpm/router.go` | Command registry, flag parsing, dispatch |
-| `cmd/mpm/handlers.go` | All handlers (memory, session, topic, lesson, mode, persona, reference, watch lifecycle) |
-| `cmd/mpm/worker.go` | WorkerPool, WatchEvent types, event processors (runs fsnotify + external DB in-goroutine) |
-| `cmd/mpm/simple_cmds.go` | Standalone memory ops (add, ls, show, rm, promote, etc.) |
-| `cmd/mpm/maint_cmds.go` | Stats, prune, export, maintain |
-| `cmd/mpm/recall.go` | FTS5 search with time-range filters |
-| `cmd/mpm/watch.go` | fsnotify goroutine, external DB polling goroutine, topic clustering |
-| `cmd/mpm/daily_review.go` | Daily review report |
-| `cmd/mpm/dashboard.go` | Bubbletea TUI dashboard |
-| `cmd/mpm/web.go` | Web UI server (embedded static assets) |
-| `cmd/mpm/web_handlers.go` | REST API handlers |
-| `cmd/mpm/ingest.go` | External SQLite ingest pipeline |
-| `cmd/mpm/synthesize.go` | LLM session synthesis |
-| `cmd/mpm/topic.go` | Topic management (create, add, remove, list, show, delete) |
-| `cmd/mpm/tui.go` | Bubbletea TUI for mode/persona selection |
-| `internal/db.go` | DatabaseManager, unified schema, CRUD, FTS5, migrations |
-| `internal/memory.go` | MemoryStore, sensitive content blocking, poison phrases, self-maintenance |
-| `internal/web_db.go` | Web/database query methods |
-| `internal/schema.go` | Schema definitions (11 tables, 19 indexes, 15 migrations) |
-| `internal/mode.go` | ModeManager (JSON file-based) |
-| `internal/persona.go` | PersonaManager (JSON file-based) |
-| `internal/lessons.go` | LessonStore (wrapper over DatabaseManager) |
-| `internal/session.go` | SessionStore (snapshot, query, recent) |
-| `internal/search.go` | SearchWithSnippet, Shred via DatabaseManager |
-| `internal/ingest.go` | OpenClaw ingest pipeline, schema detection, staging |
-| `internal/reference_new.go` | ReferenceDB, PDF/EPUB parsing, chunking |
-| `internal/config/config.go` | Path resolution, config loading |
+**Single-process, shared-database model.** No socket IPC, no separate watcher process. Commands execute directly in the same process. The file watcher runs as a background goroutine within the same binary (or as a detached child with `--bg` for systemd).
+
+```
+┌─────────────────────────────────────────────┐
+│                   mpm binary                  │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐ │
+│  │   CLI    │──▶│  Router  │──▶│ Handlers │ │
+│  └──────────┘   └──────────┘   └────┬─────┘ │
+│                                      │       │
+│  Background: WorkerPool (3 goros) + fsnotify │
+│                  watcher             │       │
+│                         ┌────────────▼────┐ │
+│                         │  DBManager      │ │
+│                         │  (SQLite + WAL) │ │
+│                         └────────────┬────┘ │
+│              ┌───────────────────────┘      │
+│              ▼                               │
+│         src/db/mpm.db                        │
+└─────────────────────────────────────────────┘
+```
+
+**Key architectural points:**
+- All access via one `DatabaseManager` instance sharing a single SQLite connection with WAL mode
+- Fixed-size goroutine pool (default 3 workers) processes file watcher events concurrently
+- PID file (`watch.pid`) for inter-process communication with detached mode
+
+**Memory model:** Everything is a **memory**. Collections distinguish types:
+- `memories` — general facts/knowledge
+- `session` — session-derived facts
+- LTM (long-term memory) = weight ≥ 10, promoted via `mpm promote` or auto-ingested `.md` files
+
+**Relevance scoring:** `score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
+
+**Path resolution:** `MPM_WORKSPACE` env var → `~/.mpm/` → current working directory
+
+## mpm-agent Architecture
+
+Three entry points: `mini-bot` (CLI REPL), `mini-bot-telegram` (Telegram daemon), `mini-bot-mcp` (MCP server).
+
+**Identity-first system prompt** (`BuildSystemPromptWithIdentity` in `core/agent.go`):
+Priority: IDENTITY.md → anchored memories → memories → directives → references
+
+**Toolkit lazy-loading:**
+- Tool profiles (`standard`, `coding`) define base tools
+- Toolkits (`files`, `web`, `mpm`, `shell`, etc.) load dynamically via `load_toolkit()`
+- Four base tools always registered: `list_toolkits`, `load_toolkit`, `unload_toolkit`, `execute_mpm_command`
+
+**Self-improvement system** (`core/selfimprove.go`):
+1. Memory anchoring — user messages >50 chars anchor as high-priority context
+2. Lesson extraction — exchanges create lessons with reinforcement tracking
+3. Identity patching — bot proposes changes to `IDENTITY_PATCH.md`, human approves
+
+**Identity branching** (`core/identity_fork.go`): Full fork/promote system for identity versions.
 
 ## Database
 
-`src/db/mpm.db` — SQLite with FTS5. Tables: `memories`, `sessions`, `topics`, `topic_memberships`, `modes`, `personas`, `reference_docs`, `reference_chunks`, `lessons`, `system_config`, `raw_memories`, `external_db_cursors`.
+**MPM:** Single `src/db/mpm.db` (WAL mode). Tables: `memories`, `sessions`, `topics`, `modes`, `personas`, `lessons`, `reference_docs`, `reference_chunks`.
 
-FTS5 virtual tables with auto-sync triggers. Query: FTS5 MATCH → LIKE fallback → recent rows.
-
-## Memory Model
-
-- `weight` (1-100), `reinforcement_count`, `is_long_term` (weight >= 10), `expires_at`, `last_accessed_at`
-- Collections: `memories` (general), `session` (session facts), `lessons` (learned wisdom)
-- Relevance: `(reinforcement_count * 2) + (weight * 1.5) + recency_bonus`
-
-## File Watcher
-
-File watcher runs as a **detached background process** — `mpm watch start` spawns a child process that persists independently of the terminal. The child writes its PID to `{MPM_DIR}/watch.pid` and blocks until signaled. Controlled via `mpm watch [start|stop|status]`:
-
-- `watch start` — parent checks if watcher already running (PID file + signal 0 probe), spawns child with `--bg` flag, exits immediately. Child: writes PID, registers `SIGTERM`/`Interrupt` handler, blocks on `select{}`
-- `watch stop` — reads PID, sends `os.Interrupt`, cleans up PID file
-- `watch status` — reads PID, checks alive via signal 0, reports worker pool stats
-
-Graceful shutdown: signal → drain worker pool → delete `watch.pid` → exit.
+**mpm-agent:** `mini-bot.db` shared by session manager and agent. Schema defined in both `core/db.go:InitMiniBotDB` and `cmd/telegram/session.go:initSessionDB` (must remain in sync).
 
 ## Security
 
-17 regex patterns block API keys/tokens/secrets before DB write. Blocked content → `mirror.jsonl`. Toxic phrase detection via `toxicphrases.txt`. Shred: DELETE + VACUUM (hard delete).
+All content scanned against 20 regex patterns (API keys, JWTs, SSH keys, `password=`, etc.) before database writes. Blocked content logged to `mirror.jsonl`, never the database.
 
-## Path Resolution
+## Gotchas
 
-`MPM_WORKSPACE` env var → executable-relative → CWD. No hardcoded paths.
+- `mpm watch start --bg` spawns a detached child — parent exits immediately; child blocks on `select{}` until signaled
+- `cleanResponse()` in Telegram handler strips thinking blocks (`<thinking>`, `《》`, `（）》`) — other entry points see raw blocks
+- `selfImprove()` in Telegram handler opens its own db connection (goroutine, runs after response)
+- `mini-bot.db` is opened independently by session manager and agent — SQLite handles concurrent reads; writes retry with exponential backoff
+- Both `core/db.go` and `cmd/telegram/session.go` define the full schema — must stay in sync
