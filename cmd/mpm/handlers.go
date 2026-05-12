@@ -2244,7 +2244,8 @@ func startWatchGoroutine() error {
 	watcherDone = make(chan struct{})
 	watchPool.Start(watcherCtx)
 
-	// Write PID file before starting goroutines (best effort — if this fails, continue anyway)
+	// Write PID file after worker pool is confirmed alive
+	// (not before — avoids writing a PID for a pool that might fail to start)
 	_ = writeWatchPID()
 
 	// Set up graceful shutdown handler
