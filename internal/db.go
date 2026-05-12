@@ -206,29 +206,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 
 	// Migration: add new columns to existing databases (no-op if already present)
-	migrations := []string{
-		`ALTER TABLE topics ADD COLUMN parent_topic_id TEXT`,
-		`ALTER TABLE topics ADD COLUMN tags JSON`,
-		`ALTER TABLE topics ADD COLUMN is_active INTEGER DEFAULT 1`,
-		`ALTER TABLE topics ADD COLUMN updated_at DATETIME`,
-		`ALTER TABLE topic_memberships ADD COLUMN memory_id TEXT`,
-		`ALTER TABLE topic_memberships ADD COLUMN role TEXT DEFAULT 'related'`,
-		`ALTER TABLE memories ADD COLUMN session_id TEXT`,
-		// v5: add summary column to sessions for LLM-generated session summaries
-		`ALTER TABLE sessions ADD COLUMN summary TEXT`,
-		// v6 ingest: source tracking on memories
-		`ALTER TABLE memories ADD COLUMN source_db TEXT`,
-		`ALTER TABLE memories ADD COLUMN source_id TEXT`,
-		`ALTER TABLE memories ADD COLUMN promoted_at REAL`,
-		`ALTER TABLE memories ADD COLUMN deleted_at DATETIME`,
-	}
-	for _, sql := range migrations {
-		if _, err := dm.db.Exec(sql); err != nil {
-			// Log unexpected errors (SQLITE_ERROR for duplicate column is expected on re-runs)
-			if !isDuplicateColumnError(err) {
-				fmt.Fprintf(os.Stderr, "Warning: migration error (may be benign): %v\nSQL: %s\n", err, sql)
-			}
-		}
+	// Use SafeMigrations from schema.go to ensure ALL column additions are covered
+	for _, m := range SafeMigrations {
+		_, _ = dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]))
 	}
 
 	// Use shared index definitions
