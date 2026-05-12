@@ -49,6 +49,7 @@ func NewRouter() *CommandRouter {
 		// Feature commands
 		"watch":           {Name: "watch", Description: "File watcher for memory ingestion"},
 		"web":             {Name: "web", Description: "Start web UI server", MinArgs: 0},
+		"switch":          {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
 		"reference":       {Name: "reference", Description: "Reference library", MinArgs: 1},
 		"topic":           {Name: "topic", Description: "Topic management", MinArgs: 1},
 		"session":         {Name: "session", Description: "Session operations"},
@@ -128,6 +129,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWeb(args)
 	case "watch":
 		return handleWatch(args[1:])
+	case "switch":
+		return r.handleSwitch()
 	case "add":
 		return handleAdd(args)
 	case "ls":
@@ -219,6 +222,11 @@ func (r *CommandRouter) handleVersion() int {
 
 func (r *CommandRouter) handleHelp() int {
 	PrintHelp()
+	return 0
+}
+
+func (r *CommandRouter) handleSwitch() int {
+	StartSwitch()
 	return 0
 }
 

@@ -147,8 +147,8 @@ func main() {
 	// Parse flags
 	args = router.parseFlags(args)
 	if len(args) == 0 || args[0] == "" {
-		// No command - show help
-		PrintHelp()
+		// No command - show categorized quicklinks
+		PrintQuicklinks()
 		return
 	}
 
@@ -1197,6 +1197,34 @@ var (
 		Italic(true)
 )
 
+// PrintQuicklinks displays the categorized quicklinks when mpm is run with no args.
+func PrintQuicklinks() {
+	fmt.Println()
+	fmt.Println("MPM — Memory-Persona-Mode Manager")
+	fmt.Println()
+	fmt.Println("Usage: mpm <command> [arguments]")
+	fmt.Println()
+	fmt.Println("Core Memory:")
+	fmt.Println("  add             Add a new memory or fact")
+	fmt.Println("  recall          Search through your memories")
+	fmt.Println("  watch           File watcher lifecycle (start/stop/status)")
+	fmt.Println()
+	fmt.Println("Knowledge base:")
+	fmt.Println("  topic           Manage memory clusters and topics")
+	fmt.Println("  reference       Search and manage ingested documents")
+	fmt.Println("  lesson          Review learned insights and warnings")
+	fmt.Println()
+	fmt.Println("Identity & Behavior:")
+	fmt.Println("  switch          Interactive UI to change active persona/mode")
+	fmt.Println("  persona         Manage identity profiles")
+	fmt.Println("  mode            Manage behavioral modes")
+	fmt.Println("  prime-directives View current behavioral rules")
+	fmt.Println()
+	fmt.Println("Run 'mpm help' for a complete list of all commands.")
+	fmt.Println("Run 'mpm help <command>' for detailed usage.")
+	fmt.Println()
+}
+
 // printHelp displays the mpm help text with lipgloss styling
 func printHelp() {
 	// Build sections
@@ -1221,6 +1249,7 @@ func printHelp() {
 	infoSection := buildHelpSection("Info", []helpCmd{
 		{"help", "Show this help", false},
 		{"version", "Show version info", false},
+		{"switch", "Interactive UI for persona/mode", false},
 		{"prime-directives", "Show 808 directives", false},
 		{"gateway", "Gateway control", true},
 	})
@@ -1237,7 +1266,7 @@ func printHelp() {
 		Foreground(helpGold).
 		Bold(true).
 		Align(lipgloss.Center).
-		Render("⟨ mpm ⟩  Memory-Persona-Mode Manager")
+		Render(" mpm  ·  Memory-Persona-Mode Manager")
 
 	subtitleStyle := lipgloss.NewStyle().
 		Foreground(helpCyan).
