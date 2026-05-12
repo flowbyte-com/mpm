@@ -17,6 +17,8 @@
 #      journalctl -u mpm -f
 #
 # Notes:
+#   - The mpm binary resolves its workspace via MPM_WORKSPACE or ~/.mpm automatically.
+#     No environment or path configuration needed in systemd.
 #   - Do NOT use --bg flag. systemd tracks the process lifecycle directly.
 #     The mpm binary runs in foreground mode and systemd manages it as a service.
 #   - Logs go to journalctl (not a log file). Use `journalctl -u mpm` to view.
@@ -29,6 +31,7 @@ After=network.target
 
 [Service]
 Type=simple
+WorkingDirectory=/home/v/workspace/projects/mpm
 ExecStart=/usr/local/bin/mpm watch start
 Restart=on-failure
 RestartSec=5
@@ -38,11 +41,6 @@ User=v
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# Allow write access to MPM runtime directory
-ReadWritePaths=/home/v/workspace/projects/mpm
-
-# Environment (optional — uncomment and set if using non-default workspace)
-# Environment=MPM_WORKSPACE=/home/v/workspace/projects/mpm
 
 [Install]
 WantedBy=multi-user.target
