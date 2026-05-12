@@ -2185,9 +2185,12 @@ func handleWatch(args []string) int {
 
 		// CHILD: --bg flag present — proceed with normal startup
 		if err := startWatchGoroutine(); err != nil {
-			return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-		return respond("File watcher started\n", "", 0)
+		// Block indefinitely — this process IS the watcher, don't return to main()
+		select {}
+		// Unreachable — select{} blocks forever until signal fires
 
 	case "stop":
 		return handleWatchStop()
