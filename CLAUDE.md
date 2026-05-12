@@ -75,7 +75,13 @@ FTS5 virtual tables with auto-sync triggers. Query: FTS5 MATCH → LIKE fallback
 
 ## File Watcher
 
-File watcher runs as a background goroutine within the same process, submitting events to the `WorkerPool` via a buffered channel. Controlled via `mpm watch [start|stop|restart|status]`. No separate subprocess.
+File watcher runs as a **detached background process** — `mpm watch start` spawns a child process that persists independently of the terminal. The child writes its PID to `{MPM_DIR}/watch.pid` and blocks until signaled. Controlled via `mpm watch [start|stop|status]`:
+
+- `watch start` — parent checks if watcher already running (PID file + signal 0 probe), spawns child with `--bg` flag, exits immediately. Child: writes PID, registers `SIGTERM`/`Interrupt` handler, blocks on `select{}`
+- `watch stop` — reads PID, sends `os.Interrupt`, cleans up PID file
+- `watch status` — reads PID, checks alive via signal 0, reports worker pool stats
+
+Graceful shutdown: signal → drain worker pool → delete `watch.pid` → exit.
 
 ## Security
 

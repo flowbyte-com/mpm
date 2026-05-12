@@ -1,15 +1,28 @@
 # Watch Daemon
 
-Auto-ingests content from filesystem and external databases. Started with `mpm start` or standalone via `mpm watch`.
+File watcher for automatic memory ingestion. Runs as a detached background process — `mpm watch start` spawns a child process that persists independently of the terminal that started it.
+
+## Architecture
+
+The watcher operates in two modes:
+
+- **Detached mode** (default): `mpm watch start` spawns a background child process that blocks on `select{}` until signaled. The parent CLI exits immediately after spawning.
+- **In-process mode**: `startWatchGoroutine()` / `stopWatchGoroutine()` manage the watcher goroutines directly within the current process (used by `watch restart` when no detached watcher is running).
+
+The child process writes its PID to `watch.pid` (in the MPM data directory) for inter-process communication with `stop` and `status` commands.
 
 ## Starting
 
 ```bash
-mpm watch              # Foreground daemon
-mpm watch --v          # Verbose
-mpm watch --dry-run    # Process but don't delete
-mpm watch --once       # One-shot sweep, then exit
+mpm watch start      # Spawn detached background watcher (returns immediately)
+mpm watch stop       # Signal the detached watcher to shut down gracefully
+mpm watch status     # Check if watcher is running
+mpm watch restart    # Blocked while detached watcher is running (use stop + start instead)
 ```
+
+**Detached persistence:** The child process survives terminal close. To persist across reboots, use a process supervisor (systemd, supervisord) or run with `nohup`.
+
+**PID file:** Written to `{MPM_DIR}/watch.pid` with `0600` permissions (owner-only read/write).
 
 ## Config Sources (`mpm_config.json`)
 
@@ -39,6 +52,14 @@ After each memory ingestion: scans LTM memories for shared tags. If 3+ memories 
 ## Startup Sweep
 
 On daemon start: processes all `.md` files immediately. Skips `.jsonl` (processed only on `.lock` removal). Skips `sessions.json` (live registry).
+
+## Graceful Shutdown
+
+The detached child handles `SIGTERM` / `os.Interrupt` (Ctrl+C) by:
+1. Cancelling the watcher context
+2. Draining the worker pool
+3. Deleting `watch.pid`
+4. Exiting cleanly
 
 ## Path Management
 

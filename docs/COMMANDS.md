@@ -87,22 +87,25 @@ mpm ingest status|review|cleanup|history|undo <batch-id>
 
 Imports from external SQLite (OpenClaw chunks table). Stages to `raw_memories` with dedup, security filtering, and LLM review pipeline.
 
-## Daemon Lifecycle
+## Watch Lifecycle (detached)
 
 ```
-mpm start       # Start main daemon + watch daemon
-mpm stop        # Graceful shutdown
-mpm restart     # Reboot
-mpm status      # Show daemon health
-mpm logs        # Tail daemon logs
+mpm watch start      # Spawn detached background watcher (returns immediately)
+mpm watch stop       # Signal the detached watcher to shut down gracefully
+mpm watch status     # Check if watcher is running (PID file based)
+mpm watch restart    # Not supported while detached watcher is running (stop + start instead)
+mpm watch add-path <path> --type memory|sessions
+mpm watch remove-path <path> --type memory|sessions
+mpm watch list-paths
+```
+
+The detached watcher writes its PID to `{MPM_DIR}/watch.pid` and blocks until signaled. It handles `SIGTERM` / `os.Interrupt` gracefully (drains pool, cleans PID file, exits).
+
+## System
+
+```
 mpm doctor      # Run diagnostics (6 categories)
-mpm dashboard   # Real-time bubbletea TUI
 mpm menu        # Mode/persona interactive picker
-```
-
-## Web UI
-
-```
 mpm web         # Serves at :18792
 ```
 
