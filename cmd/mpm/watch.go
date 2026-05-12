@@ -905,12 +905,6 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 	tags := d.extractKeywords(content)
 	tags = append(tags, "ltm", "explicit-memory")
 
-	// Convert string tags to map format for SaveMemory
-	tagsMap := make(map[string]interface{})
-	for _, t := range tags {
-		tagsMap[t] = true
-	}
-
 	// Prepare metadata with LTM flag
 	metadata := map[string]interface{}{
 		"is_long_term": true,
@@ -923,7 +917,7 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 	embedding := mpminternal.HashEmbed(content)
 
 	// Save to database (LTM: isLongTerm=true, weight=10)
-	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding, true, 10)
+	id, err := d.db.SaveMemory("memories", content, "", tags, metadata, embedding, true, 10)
 	if err != nil {
 		return "", err
 	}
@@ -940,12 +934,6 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 	tags := d.extractKeywords(content)
 	tags = append(tags, "session-fact")
 
-	// Convert string tags to map format for SaveMemory
-	tagsMap := make(map[string]interface{})
-	for _, t := range tags {
-		tagsMap[t] = true
-	}
-
 	// Prepare metadata
 	metadata := map[string]interface{}{
 		"is_long_term": false,
@@ -958,7 +946,7 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 	embedding := mpminternal.HashEmbed(content)
 
 	// Save to database (session memory: isLongTerm=false, weight=1)
-	id, err := d.db.SaveMemory("memories", content, "", tagsMap, metadata, embedding, false, 1)
+	id, err := d.db.SaveMemory("memories", content, "", tags, metadata, embedding, false, 1)
 	if err != nil {
 		return "", err
 	}

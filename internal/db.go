@@ -409,7 +409,7 @@ func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error)
 	}, nil
 }
 
-func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int) (string, error) {
+func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int) (string, error) {
 	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
