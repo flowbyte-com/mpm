@@ -2310,7 +2310,8 @@ func handleWatchStop() int {
 
 	// Verify it's gone
 	if isWatchProcessAlive(pid) {
-		return respond("", fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), 0)
+		deleteWatchPID()
+		return respond("", fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), 1)
 	}
 
 	deleteWatchPID()
