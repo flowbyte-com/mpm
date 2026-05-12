@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2149,6 +2150,38 @@ func handleWatch(args []string) int {
 	subCmd := args[0]
 	switch subCmd {
 	case "start":
+		// Check if --bg flag is present (indicates this is the child process)
+		bgFlag := false
+		for _, arg := range args[1:] {
+			if arg == "--bg" {
+				bgFlag = true
+				break
+			}
+		}
+
+		if !bgFlag {
+			// PARENT: Check if watcher is already running via PID file
+			existingPID := readWatchPID()
+			if existingPID > 0 && isWatchProcessAlive(existingPID) {
+				return respond("", fmt.Sprintf("Watcher is already running (PID %d)\n", existingPID), 1)
+			}
+
+			// SPAWN CHILD: Re-invoke self with --bg flag
+			exe, err := os.Executable()
+			if err != nil {
+				return respond("", fmt.Sprintf("Error: cannot find executable: %v\n", err), 1)
+			}
+			cmd := exec.Command(exe, append([]string{"watch", "start", "--bg"}, args[1:]...)...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Start(); err != nil {
+				return respond("", fmt.Sprintf("Error: failed to start watcher: %v\n", err), 1)
+			}
+			fmt.Printf("🚀 Watcher started in background (PID %d)\n", cmd.Process.Pid)
+			os.Exit(0)
+		}
+
+		// CHILD: --bg flag present — proceed with normal startup
 		if err := startWatchGoroutine(); err != nil {
 			return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 		}
