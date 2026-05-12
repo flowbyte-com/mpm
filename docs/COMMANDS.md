@@ -1,6 +1,6 @@
 # MPM Command Reference
 
-Conventions: `mpm <cmd>` = standalone (no daemon). `*` = requires `mpm start`.
+Conventions: `mpm <cmd>` = standalone. All commands execute in-process (no separate daemon).
 
 ## Core Memory (standalone)
 
