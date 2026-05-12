@@ -20,7 +20,7 @@ mpm watch status     # Check if watcher is running
 mpm watch restart    # Blocked while detached watcher is running (use stop + start instead)
 ```
 
-**Detached persistence:** The child process survives terminal close. To persist across reboots, use a process supervisor (systemd, supervisord) or run with `nohup`.
+**Detached persistence:** The child process survives terminal close. To persist across reboots, use a systemd service (see `contrib/systemd/mpm.service`) or another process supervisor.
 
 **PID file:** Written to `{MPM_DIR}/watch.pid` with `0600` permissions (owner-only read/write).
 
