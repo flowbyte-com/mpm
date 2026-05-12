@@ -111,21 +111,18 @@ func handleSynthesize(args []string) int {
 		if fact == "" {
 			continue
 		}
-		tags := map[string]interface{}{
-			"synthesized": true,
-			"session-id":  uuid,
-			"source":      "llm-synthesis",
-		}
+		tags := []string{}
 		for _, t := range topics {
-			tags[strings.ToLower(strings.TrimSpace(t))] = true
+			tags = append(tags, strings.ToLower(strings.TrimSpace(t)))
 		}
 		metadata := map[string]interface{}{
-			"is_long_term": true,
-			"weight":       8,
-			"source_path":  jsonlPath,
-			"session_id":   uuid,
-			"synthesized":  true,
-			"summary":      result.SessionSummary,
+			"synthesized":   true,
+			"session_id":     uuid,
+			"source":        "llm-synthesis",
+			"is_long_term":  true,
+			"weight":        8,
+			"source_path":   jsonlPath,
+			"summary":       result.SessionSummary,
 		}
 		embedding := mpminternal.HashEmbed(fact)
 		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, tags, metadata, embedding, false, 1)

@@ -240,51 +240,43 @@ func GetOpenClawDBPath() string {
 	return filepath.Join(homeDir, ".openclaw", "memory", "main.sqlite")
 }
 
-// GetMPMDir returns the absolute path to the MPM directory
-// All MPM runtime data (mode, persona, toxicphrases, src/db) lives here
+// GetMPMDir returns the absolute path to the MPM data directory.
+// Resolution order:
+// 1. MPM_WORKSPACE environment variable (explicit override)
+// 2. ~/.mpm (user's home directory — standard cross-platform fallback)
+// 3. Current working directory (absolute last resort)
+//
+// Note: If ~/.mpm does not exist but ~/.openclaw/workspace/projects/mpm/src/db/mpm.db
+// does (legacy path), a symlink is created from ~/.mpm → legacy path automatically.
 func GetMPMDir() string {
-	// Use executable-relative resolution to find mpm directory
-	execPath, err := os.Executable()
-	if err == nil {
-		execDir := filepath.Dir(execPath)
-
-		// Case: binary is at mpm/bin/mpm
-		if filepath.Base(execDir) == "bin" {
-			parent := filepath.Dir(execDir) // mpm/
-			if filepath.Base(parent) == "mpm" {
-				return parent
-			}
-		}
-
-		// Case: binary is at mpm/ (running from source, e.g. ./mpm)
-		if filepath.Base(execDir) == "mpm" {
-			return execDir
-		}
-
-		// Case: binary is in PATH or elsewhere — walk up to find mpm/
-		for dir := execDir; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-			if filepath.Base(dir) == "mpm" {
-				return dir
-			}
-		}
-
-		// Case: binary is in PATH or elsewhere — walk up to find mpm/
-		workspace := GetWorkspace()
-		// If workspace is already the mpm directory, use it directly
-		if filepath.Base(workspace) == "mpm" {
-			return workspace
-		}
-		// Otherwise, mpm is a subdirectory of workspace
-		mpmDir := filepath.Join(workspace, "mpm")
-		if _, err := os.Stat(mpmDir); err == nil {
-			return mpmDir
-		}
-		// Fallback: workspace itself is the mpm directory
-		return workspace
+	// 1. Explicit override
+	if envPath := os.Getenv("MPM_WORKSPACE"); envPath != "" {
+		os.MkdirAll(envPath, 0755)
+		return envPath
 	}
 
-	// Fallback: use workspace as the mpm directory
-	return GetWorkspace()
+	// 2. Standard user home directory (~/.mpm)
+	if home, err := os.UserHomeDir(); err == nil {
+		mpmDir := filepath.Join(home, ".mpm")
+
+		// Auto-migrate: if ~/.mpm doesn't exist but legacy path has data, symlink
+		if _, err := os.Stat(mpmDir); os.IsNotExist(err) {
+			legacyDB := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm", "src", "db", "mpm.db")
+			if _, err := os.Stat(legacyDB); err == nil {
+				// Legacy data exists — create symlink from ~/.mpm → legacy parent dir
+				legacyMpmDir := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm")
+				os.Symlink(legacyMpmDir, mpmDir)
+			} else {
+				os.MkdirAll(mpmDir, 0755)
+			}
+		}
+
+		return mpmDir
+	}
+
+	// 3. Absolute last resort
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // GetPersonaPath constructs the full path to the persona configurations directory
