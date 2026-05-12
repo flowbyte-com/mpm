@@ -186,7 +186,8 @@ func (m dashboardModel) View() string {
 			sb.WriteString(fmt.Sprintf(": %v", m.err))
 		}
 		sb.WriteString("\n\n")
-		sb.WriteString("  Start daemon with: mpm daemon\n")
+		sb.WriteString("  Dashboard (TUI) unavailable in unified mode.\n")
+		sb.WriteString("  Use: mpm stats, mpm watch status, mpm doctor\n")
 		sb.WriteString("  Press 'q' to quit\n")
 		return sb.String()
 	}
