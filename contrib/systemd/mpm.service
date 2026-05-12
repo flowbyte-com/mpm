@@ -39,10 +39,10 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 # Allow write access to MPM runtime directory
-ReadWritePaths=/home/v/.openclaw/workspace/flowbyte/mpm
+ReadWritePaths=/home/v/workspace/projects/mpm
 
 # Environment (optional — uncomment and set if using non-default workspace)
-# Environment=MPM_WORKSPACE=/home/v/.openclaw/workspace/flowbyte/mpm
+# Environment=MPM_WORKSPACE=/home/v/workspace/projects/mpm
 
 [Install]
 WantedBy=multi-user.target

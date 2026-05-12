@@ -2342,9 +2342,12 @@ func handleWatchStatus() int {
 		return respond("Watcher is not running.\n", "", 0)
 	}
 
-	// Process is alive — report status from the global pool
+	// Process is alive — report status
+	// Note: In detached mode, the parent process cannot query the child's pool state.
+	// Pool statistics (active workers, events processed) are only visible to the
+	// child process itself. We report running state based on the PID file alone.
 	if watchPool == nil {
-		return respond(fmt.Sprintf("Watcher is running (PID %d) — pool not yet initialized.\n", pid), "", 0)
+		return respond(fmt.Sprintf("Watcher is running (PID %d)\n", pid), "", 0)
 	}
 	active := watchPool.ActiveWorkers()
 	processed := watchPool.ProcessedCount()
