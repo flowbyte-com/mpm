@@ -9,15 +9,16 @@ import (
 
 // MiniBotConfig is the top-level config for mini-bot.
 type MiniBotConfig struct {
-	Identity     IdentityConfig       `json:"identity"`
-	Synth       SynthConfig          `json:"synth"`
-	Telegram    TelegramConfig       `json:"telegram"`
-	MCP         MCPConfig            `json:"mcp"`
-	SelfImprove SelfImproveConfig    `json:"self_improve"`
-	Paths       PathsConfig          `json:"paths"`
-	Profiles    map[string][]string  `json:"profiles"`
-	Toolkits    map[string][]string  `json:"toolkits"` // toolkit name → tool names
-	Retry       RetryConfig          `json:"retry"`
+	Identity      IdentityConfig       `json:"identity"`
+	Synth        SynthConfig          `json:"synth"` // Legacy single synth (fallback)
+	SynthProfiles map[string]SynthConfig `json:"synth_profiles"` // Profile name → config
+	Telegram     TelegramConfig       `json:"telegram"`
+	MCP          MCPConfig            `json:"mcp"`
+	SelfImprove  SelfImproveConfig    `json:"self_improve"`
+	Paths        PathsConfig          `json:"paths"`
+	Profiles     map[string][]string  `json:"profiles"`
+	Toolkits     map[string][]string  `json:"toolkits"` // toolkit name → tool names
+	Retry        RetryConfig          `json:"retry"`
 }
 
 // RetryConfig controls retry behavior for API calls.
@@ -68,6 +69,20 @@ type PathsConfig struct {
 
 // DefaultMiniBotConfig returns the default config.
 func DefaultMiniBotConfig() *MiniBotConfig {
+	profiles := map[string]SynthConfig{
+		"chat": {
+			Model:       "MiniMax-Text-01",
+			BaseURL:     "https://api.minimax.io/anthropic/v1",
+			MaxTokens:   4096,
+			TimeoutSecs: 60,
+		},
+		"coding": {
+			Model:       "anthropic/claude-3.5-sonnet",
+			BaseURL:     "https://openrouter.ai/api/v1",
+			MaxTokens:   8192,
+			TimeoutSecs: 120,
+		},
+	}
 	return &MiniBotConfig{
 		Identity: IdentityConfig{Name: "mini-bot", Version: "1.0"},
 		Synth: SynthConfig{
@@ -76,6 +91,7 @@ func DefaultMiniBotConfig() *MiniBotConfig {
 			MaxTokens: 4096,
 			TimeoutSecs: 300,
 		},
+		SynthProfiles: profiles,
 		SelfImprove: SelfImproveConfig{
 			Enabled: true,
 			AnchorThreshold: 3,

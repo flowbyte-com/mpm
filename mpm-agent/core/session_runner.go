@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -519,60 +518,29 @@ func loadFrontCortexGeneric(db *sql.DB) string {
 }
 
 // RouteProfile returns the LLM configuration for a given profile.
-// Config file is checked first; env vars serve as fallback.
+// Pure config lookup — no hardcoded URLs, models, or API keys.
 func RouteProfile(profile string) SynthConfig {
 	cfg, _ := LoadMiniBotConfig(GetConfigPath())
 	if cfg == nil {
 		cfg = DefaultMiniBotConfig()
 	}
 
-	switch profile {
-	case "coding":
-		return SynthConfig{
-			APIKey:     getEnvOr("OPENROUTER_API_KEY", ""),
-			BaseURL:    "https://openrouter.ai/api/v1",
-			Model:      getEnvOr("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet"),
-			MaxTokens:  8192,
-			TimeoutSecs: 120,
-		}
-	case "chat":
-		fallthrough
-	default:
-		// Use config file values; env var fallback for API key
-		apiKey := cfg.Synth.APIKey
-		if apiKey == "" {
-			apiKey = getEnvOr("MINIMAX_API_KEY", "")
-		}
-		baseURL := cfg.Synth.BaseURL
-		if baseURL == "" {
-			baseURL = "https://api.minimax.io/anthropic/v1"
-		}
-		model := cfg.Synth.Model
-		if model == "" {
-			model = "MiniMax-Text-01"
-		}
-		maxTokens := cfg.Synth.MaxTokens
-		if maxTokens == 0 {
-			maxTokens = 4096
-		}
-		timeoutSecs := cfg.Synth.TimeoutSecs
-		if timeoutSecs == 0 {
-			timeoutSecs = 60
-		}
-		return SynthConfig{
-			APIKey:     apiKey,
-			BaseURL:    baseURL,
-			Model:      model,
-			MaxTokens:  maxTokens,
-			TimeoutSecs: timeoutSecs,
+	// Try the requested profile first
+	if cfg.SynthProfiles != nil {
+		if synth, ok := cfg.SynthProfiles[profile]; ok {
+			return synth
 		}
 	}
-}
 
-// getEnvOr returns the env var or a default value.
-func getEnvOr(key, deflt string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
+	// Fallback to "chat" profile
+	if profile != "chat" {
+		if cfg.SynthProfiles != nil {
+			if synth, ok := cfg.SynthProfiles["chat"]; ok {
+				return synth
+			}
+		}
 	}
-	return deflt
+
+	// Final fallback: legacy single Synth config
+	return cfg.Synth
 }
