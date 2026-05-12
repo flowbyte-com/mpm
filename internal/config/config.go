@@ -245,9 +245,6 @@ func GetOpenClawDBPath() string {
 // 1. MPM_WORKSPACE environment variable (explicit override)
 // 2. ~/.mpm (user's home directory — standard cross-platform fallback)
 // 3. Current working directory (absolute last resort)
-//
-// Note: If ~/.mpm does not exist but ~/.openclaw/workspace/projects/mpm/src/db/mpm.db
-// does (legacy path), a symlink is created from ~/.mpm → legacy path automatically.
 func GetMPMDir() string {
 	// 1. Explicit override
 	if envPath := os.Getenv("MPM_WORKSPACE"); envPath != "" {
@@ -258,19 +255,7 @@ func GetMPMDir() string {
 	// 2. Standard user home directory (~/.mpm)
 	if home, err := os.UserHomeDir(); err == nil {
 		mpmDir := filepath.Join(home, ".mpm")
-
-		// Auto-migrate: if ~/.mpm doesn't exist but legacy path has data, symlink
-		if _, err := os.Stat(mpmDir); os.IsNotExist(err) {
-			legacyDB := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm", "src", "db", "mpm.db")
-			if _, err := os.Stat(legacyDB); err == nil {
-				// Legacy data exists — create symlink from ~/.mpm → legacy parent dir
-				legacyMpmDir := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm")
-				os.Symlink(legacyMpmDir, mpmDir)
-			} else {
-				os.MkdirAll(mpmDir, 0755)
-			}
-		}
-
+		os.MkdirAll(mpmDir, 0755)
 		return mpmDir
 	}
 
