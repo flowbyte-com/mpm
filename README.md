@@ -1,136 +1,493 @@
 # MPM — Memory-Persona-Mode Manager
 
-SQLite-native agent state management for AI agents. Single binary, zero external deps.
+SQLite-native agent state management for AI agents. Single binary, zero external dependencies.
 
-## Quick Start
+MPM provides long-term memory, behavioral modes, and persona management for AI agents. Everything is stored in a single SQLite database with full-text search — no server process, no socket IPC, no complexity.
 
-```bash
-make build                          # Build bin/mpm
-./bin/mpm add "Remember this fact"  # Add memory
-./bin/mpm ls                        # List memories
-./bin/mpm recall sqlite             # Search via FTS5
-```
+---
 
-## CLI
+## Overview
 
-All commands execute in-process — no daemon needed:
+MPM is your agent's **persistent memory layer**. It stores facts, lessons, topics, and references in a unified SQLite database (`mpm.db`), with automatic file watching for seamless memory ingestion from your workflow.
 
-| Command | Description |
-|---------|-------------|
-| `mpm add <content>` | Add memory (`--collection`, `--tag`, `--weight`, `--ttl`) |
-| `mpm ls` | List memories (`--collection`, `--tag`, `--since`, `--until`, `--limit`) |
-| `mpm show <id>` | Show memory details |
-| `mpm rm <id>` | Soft delete |
-| `mpm recall <query>` | Search with FTS5 + LIKE fallback (`--since`, `--until`) |
-| `mpm shred <id>` | Secure delete (DELETE + VACUUM) |
-| `mpm promote <id>` | Promote to LTM (weight=10) |
-| `mpm reinforce <id> [n]` | Increment reinforcement |
-| `mpm weaken <id> [n]` | Decrement reinforcement |
-| `mpm set-weight <id> <0-100>` | Set weight directly |
-| `mpm stats` | Memory statistics dashboard |
-| `mpm prune` | Prune (`--older-than 90d`, `--never-accessed`) |
-| `mpm export` | Export to JSON/CSV (`--format`, `--collection`, `--since`) |
-| `mpm maintain` | Self-maintenance (decay, consolidate, prune) |
-| `mpm reference add/list/search/get/shred` | Reference library |
-| `mpm topic create/add/remove/list/show/rm` | Topic management |
-| `mpm ingest <path>` | Import from external SQLite |
-| `mpm doctor` | Diagnostics |
-| `mpm web` | Start web UI server |
-| `mpm mode [list\|active\|add\|remove\|clear]` | Multi-select behavioral modes |
-| `mpm persona [list\|active\|set\|clear]` | Single-select identity |
-| `mpm prime-directives` | Show 808 directives |
-| `mpm session [add\|search\|show\|list]` | Session operations |
-| `mpm lesson [add\|list\|search\|get\|shred\|stats]` | Lesson operations |
-| `mpm memory [add\|search\|show\|shred\|list]` | Legacy memory ops |
-| `mpm synthesize <uuid>` | LLM session synthesis |
-| `mpm dashboard` | Real-time TUI dashboard |
-| `mpm menu` | Interactive mode/persona picker |
-| `mpm watch [start\|stop\|restart\|status]` | File watcher lifecycle |
+### Key Features
+
+- **Unified SQLite database** with WAL mode for concurrent reads/writes
+- **Full-text search** via SQLite FTS5 — no external search service needed
+- **Automatic file watching** — `.md` files become LTM memories, session completions become facts
+- **Topic clustering** — when 3+ long-term memories share a tag, a topic is auto-created
+- **Reference library** — ingest PDFs, EPUBs, and documents with automatic Smart Fence chunking
+- **Security scanning** — all content checked against 20 sensitive-data regex patterns before storage
+- **Modes & Personas** — multi-select behavioral modes and single-select identity profiles
+- **Spaced reinforcement** — memories that are accessed/used grow stronger over time
+
+### What MPM Is NOT
+
+MPM is **not** a daemon you run separately. There is no `mpm-server` process. Every command — `mpm add`, `mpm recall`, `mpm watch start` — is a single invocation of the `mpm` binary. The file watcher runs as a background goroutine within the same process (or as a detached child for systemd-style lifecycle management).
+
+---
 
 ## Architecture
 
+### Single-Process, Shared-Database Model
+
+In MPM v2.0, the architecture was radically simplified:
+
 ```
-CLI ──> Router ──> Handler (in-process) ──> SQLite (mpm.db)
-                         │
-                         └──> WorkerPool (goroutine pool)
-                               ├── fsnotify watcher ──> .md → LTM memory
-                               ├── .lock removed → session facts
-                               └── external DB polling
+┌─────────────────────────────────────────────────────────────┐
+│                         mpm binary                          │
+│                                                             │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────────┐  │
+│  │  CLI input  │──▶│   Router    │──▶│    Handler      │  │
+│  └─────────────┘   └─────────────┘   └────────┬────────┘  │
+│                                                 │           │
+│  ┌─────────────────────────────────────────────┼────────┐ │
+│  │            Background subsystem              │        │ │
+│  │  ┌──────────────┐  ┌───────────────────┐    │        │ │
+│  │  │  WorkerPool  │  │  fsnotify watcher │    │        │ │
+│  │  │  (3 goros)   │  │  (goroutine)      │    │        │ │
+│  │  └──────┬───────┘  └─────────┬─────────┘    │        │ │
+│  │         │                    │              │        │ │
+│  │         └──────────┬─────────┘              │        │ │
+│  │                    ▼                        │        │ │
+│  │         ┌─────────────────────┐             │        │ │
+│  │         │  Shared DBManager    │             │        │ │
+│  │         │  (SQLite + WAL)      │             │        │ │
+│  │         └──────────┬────────────┘             │        │ │
+│  └────────────────────┼────────────────────────┘        │ │
+│                        ▼                                  │ │
+│              ┌─────────────────┐                         │ │
+│              │   src/db/mpm.db  │  (unified database)    │ │
+│              └─────────────────┘                         │ │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Unified single process — all commands execute in-process with no daemon subprocess or Unix socket IPC. The file watcher runs as a background goroutine, submitting events to a `WorkerPool` via a buffered channel.
+**Key architectural points:**
 
-## Memory Model
+1. **No socket IPC** — Commands execute directly in the same process. The old Unix socket daemon was removed.
+2. **No separate watcher process** — By default, `mpm watch start` launches the file watcher as a background goroutine within the same binary. The `--bg` flag spawns a detached child process for systemd integration.
+3. **Unified WAL pool** — All access goes through one `DatabaseManager` instance sharing a single SQLite connection with WAL mode enabled.
+4. **Worker pool** — A fixed-size goroutine pool (default 3 workers) processes file watcher events concurrently, sharing the database connection.
+5. **PID file** — When running detached (`--bg`), the watcher writes its PID to `watch.pid` for inter-process communication with `stop` and `status` commands.
 
-Everything is a **memory**. Collections distinguish types via the `collection` field:
+### Memory Model
 
-| Collection | Purpose |
-|------------|---------|
-| `memories` | General facts with reinforcement tracking |
-| `session` | Session-derived facts |
-| `lessons` | Learned wisdom (warning/practice/insight) |
+Everything is a **memory**. Collections distinguish types:
 
-**Metadata fields**: `weight` (1-100), `reinforcement_count`, `is_long_term` (weight >= 10), `expires_at` (TTL), `last_accessed_at` (recency).
+| Collection | Purpose | Default Weight |
+|------------|---------|----------------|
+| `memories` | General facts and knowledge | 1 |
+| `session` | Session-derived facts (from `.jsonl` processing) | 1 |
 
-**Relevance scoring**: `(reinforcement_count * 2) + (weight * 1.5) + recency_bonus`
+**Long-term memory (LTM)** is any memory with `weight >= 10`. LTM is promoted by:
+- `mpm promote <id>` — explicit promotion (weight=10)
+- File watcher processing `.md` files — auto-ingested as LTM (weight=10)
 
-## Modes & Personas
+**Relevance scoring:**
+```
+score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
+```
 
-Modes define *how* to work (multi-select). Personas define *who* the agent is (single-select). Both are JSON files in `mode/` and `persona/` directories, tracked via `active.json`.
+### Database Schema
 
-## Database
+The unified `mpm.db` contains:
 
-**Location**: `src/db/mpm.db` (SQLite with FTS5)
-**Key tables**: `memories`, `sessions`, `topics`, `topic_memberships`, `modes`, `personas`, `reference_docs`, `reference_chunks`, `lessons`, `system_config`, `raw_memories`, `external_db_cursors`
-**FTS5 indexes**: `memories_fts`, `sessions_fts`, `topics_fts`, `references_fts`, `lessons_fts` — auto-synced via INSERT/UPDATE/DELETE triggers.
+| Table | Purpose |
+|-------|---------|
+| `memories` | Core storage (content, tags, metadata, FTS5-triggered embedding) |
+| `sessions` | Session metadata and transcripts |
+| `topics` | Topic definitions |
+| `topic_memberships` | Memory-to-topic links |
+| `modes` | Behavioral mode configurations |
+| `personas` | Persona profiles |
+| `lessons` | Learned lessons (insight/warning/practice) |
+| `reference_docs` | Reference document metadata |
+| `reference_chunks` | Smart Fence chunks from ingested documents |
+| `system_config` | Configuration snapshots (hash-verified) |
+| `external_db_cursors` | Sync cursors for external DB polling |
+| `raw_memories` | Staging area for ingest workflow |
 
-**Query strategy**: FTS5 MATCH → LIKE fallback → recent rows.
+### Security
 
-## Security
+All content is scanned against **20 regex patterns** before any database write:
 
-All content is scanned against **17 regex patterns** before any write. Blocked patterns include API keys (OpenAI, GitHub, AWS, Stripe, Slack), JWTs, private keys, SSH keys, database URLs, `password=`/`secret=` patterns, bearer tokens. Blocked content is logged to `mirror.jsonl` but never stored.
+- API keys (OpenAI, Anthropic, GitHub, AWS, Stripe, Slack)
+- JWTs, bearer tokens, SSH keys, private keys
+- Database connection strings (`mysql://`, `postgres://`, etc.)
+- Password/secret patterns (`password=`, `secret=`, `api_key=`)
 
-Toxic phrase detection (prompt injection) via `toxicphrases.txt` — case-insensitive substring match, cached after first load.
+Blocked content is logged to `mirror.jsonl` but never reaches the database.
 
-## Path Resolution
+Toxic phrase detection (`toxicphrases.txt`) blocks prompt injection patterns via case-insensitive substring match.
 
-No hardcoded paths. Cascade: `MPM_WORKSPACE` env var → executable-relative → CWD.
+---
 
-| Path | Default |
-|------|---------|
-| Database | `$MPM_WORKSPACE/src/db/mpm.db` |
-| Mirror log | `$MPM_WORKSPACE/src/db/mirror.jsonl` |
-| Modes | `$MPM_WORKSPACE/mode/` |
-| Personas | `$MPM_WORKSPACE/persona/` |
+## Installation
 
-## Build
+### Build from Source
+
+**Requirements:**
+- Go 1.18+
+- C compiler (for `mattn/go-sqlite3`)
+- SQLite compiled with FTS5 support
 
 ```bash
-make build    # bin/mpm (requires CGO for SQLite FTS5)
-make test     # go test -tags fts5 ./...
-make install  # sudo install to /usr/local/bin/mpm
+cd /home/v/workspace/projects/mpm
+make build
 ```
 
-Requires Go 1.18+ and CGO. Dependencies: `mattn/go-sqlite3`, `fsnotify`, `bubbletea`, `lipgloss`, `pdf`, `golang.org/x/net`.
+This produces `bin/mpm`. The binary is self-contained.
 
-## Configuration (`mpm_config.json`)
+**Install system-wide:**
+```bash
+sudo make install   # installs to /usr/local/bin/mpm
+```
 
+### Systemd Service (Reboot Persistence)
+
+For automatic restart on reboot, install the systemd unit:
+
+```bash
+# 1. Copy the unit file
+sudo cp /home/v/workspace/projects/mpm/contrib/systemd/mpm.service /etc/systemd/system/
+
+# 2. Reload systemd
+sudo systemctl daemon-reload
+
+# 3. Enable and start
+sudo systemctl enable mpm
+sudo systemctl start mpm
+
+# 4. Check status
+systemctl status mpm
+journalctl -u mpm -f
+```
+
+The service runs `mpm watch start` (goroutine-based watcher, not detached). Systemd manages the process lifecycle — no `--bg` flag needed.
+
+**Note:** The binary resolves its workspace automatically via `MPM_WORKSPACE` or `~/.mpm`. No environment configuration is needed in systemd.
+
+### Path Resolution
+
+MPM resolves paths in this priority order:
+
+| Path | Resolution |
+|------|------------|
+| `MPM_WORKSPACE` env var | Explicit override |
+| `~/.mpm/` | Standard home directory fallback |
+| Current working directory | Last resort |
+
+| Data | Default Location |
+|------|-----------------|
+| Database | `~/.mpm/src/db/mpm.db` |
+| Mirror log | `~/.mpm/src/db/mirror.jsonl` |
+| Modes | `~/.mpm/mode/` |
+| Personas | `~/.mpm/persona/` |
+
+### Configuration
+
+MPM reads `mpm_config.json` from the workspace root. Create it manually or let MPM auto-scaffold it on first run.
+
+**Example `mpm_config.json`:**
 ```json
 {
-  "memory_dirs": ["/path/to/watch"],
-  "sessions_dirs": ["/path/to/sessions"],
-  "external_dbs": [{"path": "...", "label": "openclaw", "interval_seconds": 30}],
-  "synth": {"model": "MiniMax-M2.7", "api_key": "", "base_url": ""}
+  "memory_dirs": ["/home/user/.openclaw/workspace/memory"],
+  "sessions_dirs": ["/home/user/.openclaw/agents/main/sessions"],
+  "external_dbs": [
+    {
+      "path": "/home/user/.openclaw/memory/main.sqlite",
+      "label": "openclaw",
+      "interval_seconds": 30
+    }
+  ],
+  "web_token": "your-secret-token",
+  "synth": {
+    "model": "MiniMax-M2.7",
+    "api_key": "",
+    "base_url": "https://api.minimax.chat/v1",
+    "max_tokens": 1024,
+    "timeout_seconds": 300
+  }
 }
 ```
 
-## Web UI
+---
 
-`mpm web` serves SPA at port 18792 with token auth (`web_token` in config).
+## Usage & Commands
 
-## File Watcher
+### Core Memory
 
-Auto-started via `mpm watch start`. Monitors `.md` files (ingested as LTM memories), session `.lock` removal (triggers fact extraction), and external SQLite databases (polls for new rows on configurable intervals). Runs as a background goroutine — no separate subprocess.
+```bash
+# Add a memory
+mpm add "Remember to use gRPC for internal service communication"
+mpm add "The payment service requires JWT validation" --tag security --weight 5
+mpm add "Weekly review every Friday 3pm" --ttl 7d
+
+# List memories
+mpm ls                          # Recent 20 memories
+mpm ls --collection memories    # Filter by collection
+mpm ls --tag important          # Filter by tag
+mpm ls --since 2026-01-01      # Since date
+mpm ls --limit 50               # Custom limit
+
+# Show and delete
+mpm show abc123                 # Show memory details
+mpm rm abc123                   # Soft delete (sets deleted_at)
+mpm shred abc123                # Secure delete (DELETE + deferred VACUUM)
+```
+
+### Search & Recall
+
+```bash
+# Full-text search (FTS5 + LIKE fallback)
+mpm recall sqlite
+mpm recall "JWT authentication"
+mpm recall "payment" --limit 10
+```
+
+### Memory Importance
+
+```bash
+# Promote to LTM (weight=10, clears TTL)
+mpm promote abc123
+
+# Reinforce or weaken
+mpm reinforce abc123           # +1 reinforcement (default)
+mpm reinforce abc123 3         # +3
+mpm weaken abc123              # -1
+mpm set-weight abc123 7        # Set directly (0-100)
+```
+
+### Stats & Maintenance
+
+```bash
+# Statistics
+mpm stats                      # Memory counts, tag distribution, reinforcement
+
+# Prune old/expired memories
+mpm prune                      # Default: older than 90 days
+mpm prune --older-than 30d     # Custom TTL
+
+# Export
+mpm export                     # Export all memories to JSON
+mpm export --format csv        # CSV format
+mpm export --collection memories --since 2026-01-01
+
+# Self-maintenance (decay, consolidate, prune)
+mpm maintain                   # Run maintenance cycle
+mpm maintain --review          # Preview without applying
+mpm maintain --days 30         # Prune memories not accessed in 30 days
+```
+
+### Modes & Personas
+
+```bash
+# Interactive TUI selection (multi-select for modes, single-select for persona)
+mpm mode                       # Pick modes, auto-compiles
+mpm persona                    # Pick persona, auto-compiles
+
+# Direct management
+mpm mode list                  # Show available modes
+mpm mode active                # Show currently active modes
+mpm mode add developer         # Add a mode
+mpm mode remove developer      # Remove a mode
+mpm mode clear                 # Clear all active modes
+
+mpm persona list               # Show available personas
+mpm persona active             # Show active persona
+mpm persona set 808            # Set active persona
+mpm persona clear              # Clear active persona
+
+# Prime directives (808 rules)
+mpm prime-directives           # Display all prime directives
+```
+
+### Topics
+
+```bash
+mpm topic create "golang patterns" --desc "Go idioms and patterns"
+mpm topic add abc123 "golang patterns"   # Add memory to topic
+mpm topic remove abc123 "golang patterns" # Remove from topic
+mpm topic list                            # List all topics
+mpm topic show def456                     # Show topic details
+mpm topic promote def456                  # Promote topic to memory
+```
+
+### Reference Library
+
+Ingest documents and search within them. Supports PDF, EPUB, HTML, Markdown, and plain text.
+
+```bash
+# Add a reference document
+mpm reference add book.pdf
+mpm reference add manual.md --tag golang
+mpm reference add research.epub
+
+# List, search, show
+mpm reference list              # All references
+mpm reference search "performance"  # Search content
+mpm reference show abc123      # Full document with chunks
+
+# Delete
+mpm reference shred abc123
+```
+
+### Sessions
+
+```bash
+mpm session list                # Recent sessions
+mpm session search "project"   # Search sessions
+mpm session show abc123        # Session details
+mpm session add "Notes from the architecture review"
+```
+
+### Lessons
+
+Lessons store learned wisdom — insights, warnings, and best practices.
+
+```bash
+mpm lesson add "Always validate JWT expiration" --type warning --tags security
+mpm lesson add "Use connection pooling for external APIs" --type practice --tags golang
+mpm lesson add "gRPC streaming is better for high-throughput data pipelines" --type insight
+
+mpm lesson list                 # All lessons
+mpm lesson list --type warning  # Filter by type
+mpm lesson search "security"
+mpm lesson get abc123
+mpm lesson shred abc123
+mpm lesson stats               # Statistics by type
+```
+
+### File Watcher
+
+The watcher monitors directories for automatic memory ingestion:
+
+- **`.md` files** → ingested as LTM memories, then deleted
+- **Session `.lock` removal** → `.jsonl` processed for facts, async LLM synthesis triggered
+- **`workspace.json`/`config.json`** → snapshot stored in `system_config` table
+
+```bash
+# Lifecycle (goroutine-based, within the CLI process)
+mpm watch start                # Start the watcher (background goroutine)
+mpm watch stop                 # Stop gracefully (SIGINT to watcher)
+mpm watch status               # Check if running
+
+# Path management
+mpm watch add-path /path/to/memory --type memory
+mpm watch add-path /path/to/sessions --type sessions
+mpm watch remove-path /path/to/memory --type memory
+mpm watch list-paths           # Show all configured paths
+```
+
+**Detached mode (for systemd integration):**
+
+```bash
+# With --bg flag, spawns a detached child process
+# Parent exits immediately after spawning
+mpm watch start --bg
+```
+
+The detached child writes its PID to `watch.pid` and blocks on `select{}` until signaled. It handles `SIGTERM` gracefully (drains pool, cleans PID file, exits).
+
+### Web UI
+
+```bash
+mpm web         # Start web UI at http://localhost:18792
+```
+
+Requires `web_token` in `mpm_config.json` for authentication.
+
+### System Diagnostics
+
+```bash
+mpm doctor              # Run diagnostics (6 categories)
+mpm doctor --fix         # Apply automatic repairs
+```
+
+Checks: system info, environment variables, workspace structure, database integrity, network connectivity, external dependencies.
+
+### Synthesis
+
+Generate memory summaries from session data using an LLM.
+
+```bash
+mpm synthesize <session-uuid>
+```
+
+Configure the LLM provider in `mpm_config.json` `[synth]` section.
+
+### Interactive Menu
+
+```bash
+mpm menu         # Launch the transient interactive mode/persona picker
+```
+
+### Other Commands
+
+```bash
+mpm version               # Show version
+mpm help                  # Show help
+mpm ingest <path>         # Import from external SQLite (e.g., OpenClaw)
+mpm ingest list-schemas   # Show available tables
+mpm compile mode          # Force recompile modes
+mpm compile persona       # Force recompile personas
+mpm shred sessions -f     # Delete all sessions (requires --force)
+mpm shred memories -f     # Delete all memories
+mpm shred topics -f      # Delete all topics
+mpm shred database -f    # Wipe and recreate database
+```
+
+---
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `MPM_WORKSPACE` | Override workspace directory |
+| `MPM_FORCE` | Skip confirmation prompts |
+| `MPM_INTERACTIVE` | Force interactive mode |
+| `MPM_SELECT` | Internal: PTY selector subprocess |
+| `MINIMAX_API_KEY` | LLM API key (synth fallback) |
+| `MINIMAX_BASE_URL` | LLM base URL (synth fallback) |
+| `MPM_WEBHOOK_URL` | Heartbeat webhook target |
+
+---
+
+## Build Requirements
+
+```bash
+# Ubuntu/Debian
+sudo apt install build-essential golang sqlite3 libsqlite3-dev
+
+# macOS
+brew install go sqlite
+
+# Build
+make build    # Requires CGO for mattn/go-sqlite3 with FTS5
+make test     # Run tests
+make install  # Install to /usr/local/bin/mpm
+```
+
+The build requires `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5=1"` for full-text search support.
+
+---
+
+## File Locations Summary
+
+```
+~/.mpm/                         # Default workspace (MPM_DIR)
+├── src/db/
+│   ├── mpm.db                  # Unified SQLite database (WAL mode)
+│   ├── mpm.db-wal              # WAL journal
+│   ├── mpm.db-shm              # Shared memory
+│   └── mirror.jsonl             # Security audit log
+├── mode/                        # Mode JSON files
+├── persona/                     # Persona JSON files
+├── watch.pid                    # Watcher PID (when detached)
+└── mpm_config.json              # Configuration
+```
+
+---
 
 ## License
 

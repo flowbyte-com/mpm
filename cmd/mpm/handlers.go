@@ -1026,7 +1026,7 @@ func handleSessionList(args []string) int {
 
 func handleReference(args []string) int {
 	if len(args) < 1 {
-		handleReferenceHelp()
+		return handleReferenceHelp()
 	}
 
 	subCmd := args[0]
@@ -1287,8 +1287,7 @@ func handleReferenceScan() int {
 
 func handleMode(args []string) int {
 	if len(args) < 1 {
-		// Interactive selection by default (replaces ~m hotkey behavior)
-		handleModeSelect()
+		return handleModeSelect()
 	}
 
 	subCmd := args[0]
@@ -2078,7 +2077,11 @@ func handleCompileAll() int {
 
 func getMemoryStore() *internal.MemoryStore {
 	paths := internal.DefaultMemoryPaths()
-	return internal.NewMemoryStore(filepath.Dir(paths.SQLiteDBPath))
+	store := internal.NewMemoryStore(filepath.Dir(paths.SQLiteDBPath))
+	if store.DB == nil {
+		store.InitSQLite()
+	}
+	return store
 }
 
 func getSessionDir() string {
