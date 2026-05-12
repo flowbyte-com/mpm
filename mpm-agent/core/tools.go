@@ -580,6 +580,9 @@ func executeTool(tool string, args map[string]interface{}, sessionID string) (st
 		}
 		return runShell(command, cwd)
 
+	case "execute_cmd_with_timeout":
+		return executeCmdWithTimeout(args)
+
 	case "apply_diff":
 		return applyDiff(args)
 
@@ -1500,6 +1503,25 @@ func init() {
 				"diff": map[string]interface{}{"type": "string", "description": "Unified diff string"},
 			},
 			"required": []string{"file", "diff"},
+		},
+	})
+
+	RegisterTool("execute_cmd_with_timeout", ToolDefinition{
+		Name:        "execute_cmd_with_timeout",
+		Description: "Run a shell command with a strict timeout (max 300s)",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"cmd": map[string]interface{}{
+					"type":        "string",
+					"description": "Shell command to execute",
+				},
+				"timeout_seconds": map[string]interface{}{
+					"type":        "number",
+					"description": "Timeout in seconds (max 300)",
+				},
+			},
+			"required": []string{"cmd"},
 		},
 	})
 
