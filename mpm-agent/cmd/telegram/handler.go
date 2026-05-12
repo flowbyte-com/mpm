@@ -26,6 +26,37 @@ import (
 	"mpm-agent/core"
 )
 
+// telegramPersistence wraps SessionManager to implement core.Persistence.
+type telegramPersistence struct {
+	sm     *SessionManager
+	chatID int64
+}
+
+func (p *telegramPersistence) Get() ([]map[string]interface{}, error) {
+	return p.sm.Get(p.chatID)
+}
+
+func (p *telegramPersistence) Save(messages []map[string]interface{}) error {
+	return p.sm.Save(p.chatID, messages)
+}
+
+func (p *telegramPersistence) SessionID() string {
+	return fmt.Sprintf("telegram:%d", p.chatID)
+}
+
+// handlerIdentityResolver implements core.IdentityResolver using the Handler's config.
+type handlerIdentityResolver struct {
+	h *Handler
+}
+
+func (r *handlerIdentityResolver) ResolveIdentityPath(binaryDir, configured string) string {
+	return core.ResolveIdentityPath(binaryDir, r.h.agentConfig.Paths.Identity)
+}
+
+func (r *handlerIdentityResolver) LoadIdentity(path string) (*core.Identity, error) {
+	return core.LoadIdentity(path)
+}
+
 // chatSettings holds per-chat preferences.
 type chatSettings struct {
 	thinkLevel     int    // 0=off, 1=brief, 2=normal, 3=verbose
@@ -816,9 +847,9 @@ func (h *Handler) agentReply(chatID int64, userText string) {
 	go h.runAgentWithTimeout(chatID, userText)
 }
 
-// runAgentWithTimeout runs the agent with 90s timeout and 15s heartbeat (Tier 2 + 3).
+// runAgentWithTimeout runs the agent via SessionRunner with 90s timeout.
 func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg string) {
-	// Create 90s timeout context — Tier 2 hard kill switch
+	// Create 90s timeout context — hard kill switch
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -829,14 +860,7 @@ func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg s
 		}
 	}()
 
-	// Load existing history
-	history, err := h.sm.Get(chatID)
-	if err != nil || history == nil {
-		history = []map[string]interface{}{}
-	}
-
 	// Open database
-	binaryDir := core.GetBinaryDir()
 	db, err := core.OpenDBForPath(core.ResolveMiniBotDBPath())
 	if err != nil {
 		h.sendText(nil, chatID, fmt.Sprintf("⚠️ Error: %v", err))
@@ -844,77 +868,35 @@ func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg s
 	}
 	defer db.Close()
 
-	// Resolve identity path
-	identityPath := core.ResolveIdentityPath(binaryDir, h.agentConfig.Paths.Identity)
-
 	// Get active tool profile
 	profile := h.getSettings(chatID).toolProfile
 	if profile == "" {
 		profile = "standard"
 	}
-	profileTools := h.agentConfig.Profiles[profile]
-	if profileTools == nil {
-		profileTools = []string{}
-	}
 
-	// Session ID for toolkit state
-	sessionID := fmt.Sprintf("telegram:%d", chatID)
+	// Create transport + persistence + identity
+	transport := newLiveTransport(h.bot, chatID, h)
+	session := &telegramPersistence{sm: h.sm, chatID: chatID}
+	identityResolver := &handlerIdentityResolver{h: h}
 
-	// Wire tool progress reporter if streaming is enabled
-	settings := h.getSettings(chatID)
-	var reporter core.ToolProgressReporter
-	if settings.streamProgress {
-		reporter = &telegramToolReporter{h: h, chatID: chatID}
-	}
-
-	// Wire token usage reporter
-	tokenReporter := &tokenUsageReporter{h: h, chatID: chatID}
-
-	// Load front cortex: identity knowledge + session summaries
-	frontCortex := h.sm.LoadFrontCortex(chatID)
-	fcText := FormatFrontCortex(frontCortex)
-
-	// Call RunAgent with context (ctx is the 90s deadline)
-	responseText, usedAnchors, err := core.RunAgent(ctx, userText, history, db, identityPath,
-		fcText, &h.agentConfig.Synth, profileTools, sessionID, h.agentConfig.Toolkits, chatID, reporter, tokenReporter)
-
-	// Handle result
-	if err != nil {
-		h.sendText(nil, chatID, fmt.Sprintf("⚠️ Error: %v", err))
-		return
-	}
-
-	if responseText == "" {
-		responseText = "(no response)"
-	}
-
-	// Strip thinking blocks if verbose off
-	if !settings.verbose {
-		responseText = cleanResponse(responseText)
-	}
-
-	// Send final response
-	h.sendLongText(nil, chatID, responseText)
-
-	// Save to history
-	updatedHistory := append(history,
-		map[string]interface{}{"role": "user", "content": userText},
-		map[string]interface{}{"role": "assistant", "content": responseText},
+	// Create session runner
+	runner := core.NewSessionRunner(
+		transport,
+		fmt.Sprintf("telegram:%d", chatID),
+		profile,
+		db,
+		session,
+		identityResolver,
 	)
-	h.sm.Save(chatID, updatedHistory)
 
-	// Self-improve
-	dbPath := core.ResolveMiniBotDBPath()
+	// Run the agent (streams output via transport)
+	runner.HandleInput(ctx, userText)
 
-	// Increment reference count for anchors that were "on stage" (injected into prompt)
-	if len(usedAnchors) > 0 {
-		core.IncrementUsedAnchors(db, responseText, usedAnchors)
-	}
+	// Finalize the live message
+	h.finalizeLiveMessage(chatID, "")
 
-	go h.selfImprove(dbPath, chatID, userText, responseText)
-
-	// Spawn idle-timer summarization (fires after 5 min idle, cancels on /new or new message)
-	go h.scheduleSessionSummary(chatID, updatedHistory)
+	// Schedule session summary
+	go h.scheduleSessionSummary(chatID, nil)
 
 	return finalMsg
 }
