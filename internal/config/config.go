@@ -179,6 +179,18 @@ func GetWorkspace() string {
 
 		// Fallback: return current working directory
 		cwd, _ := os.Getwd()
+
+		// For system-installed binaries (e.g. /usr/local/bin/mpm), the walk-up
+		// from /usr/local/bin finds nothing useful. Check if the OpenClaw
+		// workspace pattern exists: ~/.openclaw/workspace/projects/mpm
+		if home := os.Getenv("HOME"); home != "" {
+			openclawWS := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm")
+			dbPath := filepath.Join(openclawWS, "src", "db", "mpm.db")
+			if _, err := os.Stat(dbPath); err == nil {
+				return openclawWS
+			}
+		}
+
 		return cwd
 	}
 
