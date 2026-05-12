@@ -147,8 +147,8 @@ func main() {
 	// Parse flags
 	args = router.parseFlags(args)
 	if len(args) == 0 || args[0] == "" {
-		// No command - launch dashboard directly
-		StartDashboard("")
+		// No command - show help
+		PrintHelp()
 		return
 	}
 
@@ -1201,7 +1201,6 @@ var (
 func printHelp() {
 	// Build sections
 	coreSection := buildHelpSection("Core Commands", []helpCmd{
-		{"dashboard", "Live terminal dashboard", false},
 		{"persona", "Persona management", true},
 		{"mode", "Mode management", true},
 		{"memory", "Memory management", true},
@@ -1222,7 +1221,6 @@ func printHelp() {
 	infoSection := buildHelpSection("Info", []helpCmd{
 		{"help", "Show this help", false},
 		{"version", "Show version info", false},
-		{"tui", "Launch mode/persona picker", false},
 		{"prime-directives", "Show 808 directives", false},
 		{"gateway", "Gateway control", true},
 	})
