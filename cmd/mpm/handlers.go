@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"mpm/internal"
 	"mpm/internal/config"
@@ -2145,7 +2146,7 @@ func generateID() string {
 // In the unified process architecture, the watcher runs within the same process.
 func handleWatch(args []string) int {
 	if len(args) < 1 || args[0] == "status" {
-		return respond(formatWatchStatus(), "", 0)
+		return handleWatchStatus()
 	}
 
 	subCmd := args[0]
@@ -2189,8 +2190,7 @@ func handleWatch(args []string) int {
 		return respond("File watcher started\n", "", 0)
 
 	case "stop":
-		stopWatchGoroutine()
-		return respond("File watcher stopped\n", "", 0)
+		return handleWatchStop()
 
 	case "restart":
 		stopWatchGoroutine()
@@ -2279,6 +2279,64 @@ func stopWatchGoroutine() {
 	watcherCancel = nil
 	watcherCtx = nil
 	watcherDone = nil
+}
+
+// handleWatchStop reads the PID from watch.pid and signals the watcher to stop.
+func handleWatchStop() int {
+	pid := readWatchPID()
+	if pid == 0 {
+		return respond("", "Watcher is not running.\n", 1)
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		deleteWatchPID()
+		return respond("", "Watcher is not running.\n", 1)
+	}
+
+	// Send Interrupt (cross-platform equivalent of SIGTERM)
+	if err := proc.Signal(os.Interrupt); err != nil {
+		// Process may have already exited — clean up PID file
+		deleteWatchPID()
+		// Check if it's actually gone
+		if isWatchProcessAlive(pid) {
+			return respond("", fmt.Sprintf("Error: failed to stop watcher: %v\n", err), 1)
+		}
+		// Process is gone, consider it stopped
+	}
+
+	// Give it a moment to shut down gracefully
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify it's gone
+	if isWatchProcessAlive(pid) {
+		return respond("", fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), 0)
+	}
+
+	deleteWatchPID()
+	return respond("Watcher stopped.\n", "", 0)
+}
+
+// handleWatchStatus checks if the watcher is running via the PID file.
+func handleWatchStatus() int {
+	pid := readWatchPID()
+	if pid == 0 {
+		return respond("Watcher is not running.\n", "", 0)
+	}
+
+	if !isWatchProcessAlive(pid) {
+		// Stale PID file — clean it up
+		deleteWatchPID()
+		return respond("Watcher is not running.\n", "", 0)
+	}
+
+	// Process is alive — report status from the global pool
+	if watchPool == nil {
+		return respond(fmt.Sprintf("Watcher is running (PID %d) — pool not yet initialized.\n", pid), "", 0)
+	}
+	active := watchPool.ActiveWorkers()
+	processed := watchPool.ProcessedCount()
+	return respond(fmt.Sprintf("Watcher is running (PID %d, %d active workers, %d events processed)\n", pid, active, processed), "", 0)
 }
 
 // formatWatchStatus returns a human-readable status string for the file watcher.
