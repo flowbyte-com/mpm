@@ -1,12 +1,12 @@
 # mpm-agent
 
-A self-improving AI agent with Telegram interface, MCP server, and Toolkit lazy-loading for MPM access.
+A self-improving AI agent with a universal SessionRunner orchestrator, supporting both a CLI REPL and Telegram interface, MCP server, and Toolkit lazy-loading for MPM access.
 
 ## Binaries
 
 | Binary | Purpose |
 |--------|---------|
-| `mini-bot` | CLI REPL — single-shot or interactive agent |
+| `mini-bot` | CLI REPL — interactive terminal agent with readline, multiline input, and HITL tool approvals |
 | `mini-bot-telegram` | Telegram bot daemon — long-polling bridge |
 | `mini-bot-mcp` | MCP server — stdio JSON-RPC, serves `execute_mpm_command` |
 
@@ -15,17 +15,8 @@ A self-improving AI agent with Telegram interface, MCP server, and Toolkit lazy-
 ### Build
 
 ```bash
-make mini-bot           # → bin/mini-bot
-make mini-bot-telegram  # → bin/mini-bot-telegram
-make mini-bot-mcp       # → bin/mini-bot-mcp
-```
-
-Or individually:
-
-```bash
-go build -o bin/mini-bot         ./cmd/mini-bot
-go build -o bin/mini-bot-telegram ./cmd/telegram
-go build -o bin/mini-bot-mcp     ./cmd/mcp
+make build                    # all binaries → bin/
+make build BIN=bin/mini-bot  # specific binary
 ```
 
 ### Configure
@@ -39,10 +30,21 @@ Edit `mini-bot-config.json`:
 ```json
 {
   "identity": { "name": "mini-bot", "version": "1.0" },
-  "synth": {
-    "model": "MiniMax-M2.7",
-    "api_key": "your-key-here",
-    "base_url": "https://api.minimax.io/anthropic"
+  "synth_profiles": {
+    "chat": {
+      "api_key": "your-key-here",
+      "model": "MiniMax-Text-01",
+      "base_url": "https://api.minimax.io/anthropic/v1",
+      "max_tokens": 4096,
+      "timeout_seconds": 60
+    },
+    "coding": {
+      "api_key": "openrouter-key",
+      "model": "anthropic/claude-3.5-sonnet",
+      "base_url": "https://openrouter.ai/api/v1",
+      "max_tokens": 8192,
+      "timeout_seconds": 120
+    }
   },
   "telegram": {
     "bot_token": "your-telegram-token",
@@ -62,6 +64,21 @@ Edit `mini-bot-config.json`:
   }
 }
 ```
+
+### Run the CLI REPL
+
+```bash
+./bin/mini-bot
+```
+
+**Features:**
+- Readline input with history (`~/.mpm-agent-history`)
+- Multiline mode: type ` ``` ` then Enter to start pasting, ` ``` ` alone to deliver
+- `mpm> ` prompt (single line), `... ` prompt (multiline)
+- Profile switching: `/tools chat` or `/tools coding`
+- HITL approvals for risky tools (`execute_shell`, `write_file`, `apply_diff`, `execute_cmd_with_timeout`)
+- ANSI dim output for thinking blocks on stderr, final output on stdout
+- Commands: `/new`, `/clear`, `/tools <profile>`, `/status`, `/recall <topic>`
 
 ### Run the Telegram bot
 
@@ -86,7 +103,8 @@ All settings in `mini-bot-config.json`:
 | Section | Key | Description |
 |---------|-----|-------------|
 | `identity` | `name`, `version`, `hot_reload` | Bot identity |
-| `synth` | `model`, `api_key`, `base_url`, `max_tokens`, `timeout_seconds` | LLM API settings |
+| `synth_profiles` | `chat`, `coding` (or custom) | Named LLM configs — each has `api_key`, `model`, `base_url`, `max_tokens`, `timeout_seconds` |
+| `synth` | legacy fallback | Single `synth` object if `synth_profiles` not set |
 | `telegram` | `bot_token`, `polling`, `allowed_users` | Telegram bot settings |
 | `self_improve` | `enabled`, `anchor_threshold`, `lesson_complexity_threshold`, `identity_patch_approval_required` | Self-improvement settings |
 | `paths` | `db`, `identity`, `mcp_socket`, `workspace_root` | File paths relative to binary |
@@ -94,8 +112,8 @@ All settings in `mini-bot-config.json`:
 | `toolkits` | `mpm_core`, `files`, `web`, `jq`, `coding_tools`, `shell`, `minimax` | Dynamically-loadable tool collections |
 
 **Environment variables** override config values:
-- `MINIMAX_API_KEY` → `synth.api_key`
-- `MPM_API_TOKEN` → `mcp.token`
+- `MINIMAX_API_KEY` → `synth_profiles.chat.api_key` (legacy `synth.api_key` fallback)
+- `OPENROUTER_API_KEY` → `synth_profiles.coding.api_key`
 
 ## IDENTITY.md
 
@@ -145,9 +163,13 @@ The bot starts with only base tools to keep token costs low, and dynamically loa
 | `files` | `read_file`, `write_file`, `ReadFileSemantic`, `ReadFileCompare` |
 | `web` | `WebSynthesize` (DuckDuckGo search + synthesis) |
 | `jq` | `jq` — query JSON files with jq filters |
-| `coding_tools` | `rg`, `sg`, `repomap`, `git_status`, `git_commit`, `git_diff` |
+| `coding_tools` | `rg`, `sg`, `repomap`, `git_status`, `git_commit`, `git_diff`, `apply_diff`, `execute_cmd_with_timeout` |
 | `minimax` | `generate_image`, `synthesize_speech`, `web_search`, `understand_image` |
 | `shell` | `execute_shell` |
+
+**Coding tools:**
+- `apply_diff` — apply a unified diff to patch specific lines without overwriting a file
+- `execute_cmd_with_timeout` — run a shell command with a strict timeout (max 300s)
 
 **Tool profiles** group tools for different use cases:
 
@@ -190,7 +212,10 @@ mini-bot improves itself automatically:
 ```
                     Telegram long-polling
                          |
-mini-bot-telegram ────── agent loop ────── mini-bot (REPL)
+mini-bot-telegram ────── SessionRunner ────── mini-bot (REPL)
+         |                   |                     |
+         |            core/session_runner.go       |
+         |            core/transport.go            |
          |                   |                     |
          |                   +--- mini-bot.db ----+
          |                   |   (front cortex,    |
@@ -207,6 +232,10 @@ mini-bot-telegram ────── agent loop ────── mini-bot (REP
               (recall, mode, persona,
                memory, topic, etc.)
 ```
+
+**SessionRunner (`core/session_runner.go`)** — Universal orchestrator shared by all entry points. Handles command interception, session history, agent loop, and async self-improve. Each entry point (CLI, Telegram, MCP) implements the `Transport` interface to bridge OS/UI specifics.
+
+**Transport interface (`core/transport.go`)** — Abstracts all IO: `ReadMessage`, `WriteChunk`, `RequestToolApproval`, `SendTypingIndicator`, `StopTypingIndicator`. CLI and Telegram each implement it their own way.
 
 ## Database
 
