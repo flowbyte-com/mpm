@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2212,6 +2213,10 @@ func handleWatch(args []string) int {
 
 // startWatchGoroutine launches the fsnotify watcher and external DB pollers
 // as background goroutines within the current process.
+// When run as a detached child (--bg flag), it also:
+//   - Writes its PID to watch.pid
+//   - Registers a SIGTERM/Interrupt handler for graceful shutdown
+//   - Blocks forever (select{}) until signalled
 func startWatchGoroutine() error {
 	if watcherCancel != nil {
 		return fmt.Errorf("watcher is already running")
@@ -2229,8 +2234,16 @@ func startWatchGoroutine() error {
 	watcherCtx, watcherCancel = context.WithCancel(context.Background())
 	watcherDone = make(chan struct{})
 
+	// Write PID file before starting goroutines (best effort — if this fails, continue anyway)
+	_ = writeWatchPID()
+
+	// Set up graceful shutdown handler
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
 	go func() {
 		defer close(watcherDone)
+		defer deleteWatchPID() // clean up PID file on exit
 
 		// Launch the fsnotify watcher event loop in its own goroutine
 		// (it blocks internally on fsnotify events).
@@ -2239,15 +2252,20 @@ func startWatchGoroutine() error {
 		// Start external DB polling goroutines (each spawns its own goroutine).
 		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
 
-		// Start worker pool — must be running before we submit events.
-		watchPool.Start(watcherCtx)
-
 		// Submit a startup sweep event to the pool.
 		watchPool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: false, Verbose: false})
 
-		// Block until cancelled
-		<-watcherCtx.Done()
+		// Block until cancelled or signal received
+		select {
+		case <-watcherCtx.Done():
+			// Cancelled by stopWatchGoroutine
+		case sig := <-sigCh:
+			// SIGTERM or Interrupt received — graceful shutdown
+			fmt.Fprintf(os.Stderr, "\n⚠️  Received %v — shutting down watcher...\n", sig)
+			stopWatchGoroutine()
+		}
 	}()
+
 	return nil
 }
 
