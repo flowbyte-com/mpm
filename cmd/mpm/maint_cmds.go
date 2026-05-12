@@ -53,21 +53,25 @@ func printStats(s map[string]interface{}) {
 
 	fmt.Printf("\n  By Tag (top 10):\n")
 	tags, _ := s["by_tag"].([]map[string]interface{})
-	for i, t := range tags {
-		if i >= 10 {
-			fmt.Printf("    ... and %d more tags\n", len(tags)-10)
-			break
+	if len(tags) == 0 {
+		fmt.Printf("    • None\n")
+	} else {
+		for i, t := range tags {
+			if i >= 10 {
+				fmt.Printf("    ... and %d more tags\n", len(tags)-10)
+				break
+			}
+			fmt.Printf("    • %-20s %v uses\n", t["tag"], t["count"])
 		}
-		fmt.Printf("    • %-20s %v uses\n", t["tag"], t["count"])
 	}
 
 	fmt.Printf("\n  Reinforcement Distribution:\n")
 	reinforceDist, _ := s["reinforce_dist"].([]map[string]interface{})
 	for _, r := range reinforceDist {
-		fmt.Printf("    • %s memories with rc=%v\n", r["count"], r["reinforcement_count"])
+		fmt.Printf("    • %d memories with rc=%v\n", r["count"], r["reinforcement_count"])
 	}
 
-	fmt.Print("\n══════════════════════════════════════════")
+	fmt.Print("\n══════════════════════════════════════════\n")
 }
 
 // handlePrune removes old/expired memories
