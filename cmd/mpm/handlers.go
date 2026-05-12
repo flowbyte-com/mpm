@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"mpm/internal"
+	"mpm/internal/config"
 )
 
 // watchPool is the shared WorkerPool used by file watcher and external DB pollers.
@@ -16,6 +19,53 @@ var watchPool *WorkerPool
 
 // Default worker pool size for the watcher background goroutines.
 const defaultWorkerPoolSize = 3
+
+// watchPIDFile is the path to the watcher's PID file.
+// Written by the detached child process, used by parent stop/status to locate the watcher.
+const watchPIDFile = "watch.pid"
+
+// watchPIDPath returns the absolute path to the watch.pid file.
+// Uses GetMPMDir() so the PID file lives alongside mpm.db and other runtime data.
+func watchPIDPath() string {
+	return filepath.Join(config.GetMPMDir(), watchPIDFile)
+}
+
+// readWatchPID reads the PID from watch.pid and returns it.
+// Returns 0 if the file does not exist or cannot be read.
+func readWatchPID() int {
+	data, err := os.ReadFile(watchPIDPath())
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	return pid
+}
+
+// writeWatchPID writes the current process PID to watch.pid.
+func writeWatchPID() error {
+	return os.WriteFile(watchPIDPath(), []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
+}
+
+// deleteWatchPID removes the watch.pid file.
+// Safe to call even if the file does not exist.
+func deleteWatchPID() {
+	os.Remove(watchPIDPath())
+}
+
+// isWatchProcessAlive checks if the process identified by pid is running.
+// Uses signal 0 (no actual signal sent) to test process existence.
+func isWatchProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 checks if process exists without sending a real signal
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
+}
 
 // watcherLifecycle tracks the fsnotify watcher goroutine lifecycle.
 var (
@@ -2155,6 +2205,9 @@ func startWatchGoroutine() error {
 
 		// Start external DB polling goroutines (each spawns its own goroutine).
 		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
+
+		// Start worker pool — must be running before we submit events.
+		watchPool.Start(watcherCtx)
 
 		// Submit a startup sweep event to the pool.
 		watchPool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: false, Verbose: false})
