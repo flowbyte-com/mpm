@@ -2233,6 +2233,7 @@ func startWatchGoroutine() error {
 	}
 	watcherCtx, watcherCancel = context.WithCancel(context.Background())
 	watcherDone = make(chan struct{})
+	watchPool.Start(watcherCtx)
 
 	// Write PID file before starting goroutines (best effort — if this fails, continue anyway)
 	_ = writeWatchPID()
