@@ -2142,8 +2142,8 @@ func generateID() string {
 
 // handleWatch manages the internal fsnotify watcher goroutine lifecycle.
 // In the unified process architecture, the watcher runs within the same process.
-// handleWatch manages the internal fsnotify watcher goroutine lifecycle.
-// In the unified process architecture, the watcher runs within the same process.
+// It supports both in-process goroutine management (direct start/stop) and detached
+// mode where the watcher runs as a separate child process.
 func handleWatch(args []string) int {
 	if len(args) < 1 || args[0] == "status" {
 		return handleWatchStatus()
@@ -2196,6 +2196,12 @@ func handleWatch(args []string) int {
 		return handleWatchStop()
 
 	case "restart":
+		// Check if detached watcher is running via PID file
+		pid := readWatchPID()
+		if pid > 0 && isWatchProcessAlive(pid) {
+			return respond("", "Restart is not supported while the detached watcher is running. Use 'mpm watch stop' then 'mpm watch start' to restart.\n", 1)
+		}
+		// For in-process restart (non-detached), stop and restart the goroutine
 		stopWatchGoroutine()
 		if err := startWatchGoroutine(); err != nil {
 			return respond("", fmt.Sprintf("Error restarting: %v\n", err), 1)
