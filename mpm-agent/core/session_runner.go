@@ -519,7 +519,13 @@ func loadFrontCortexGeneric(db *sql.DB) string {
 }
 
 // RouteProfile returns the LLM configuration for a given profile.
+// Config file is checked first; env vars serve as fallback.
 func RouteProfile(profile string) SynthConfig {
+	cfg, _ := LoadMiniBotConfig(GetConfigPath())
+	if cfg == nil {
+		cfg = DefaultMiniBotConfig()
+	}
+
 	switch profile {
 	case "coding":
 		return SynthConfig{
@@ -532,12 +538,33 @@ func RouteProfile(profile string) SynthConfig {
 	case "chat":
 		fallthrough
 	default:
+		// Use config file values; env var fallback for API key
+		apiKey := cfg.Synth.APIKey
+		if apiKey == "" {
+			apiKey = getEnvOr("MINIMAX_API_KEY", "")
+		}
+		baseURL := cfg.Synth.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.minimax.io/anthropic/v1"
+		}
+		model := cfg.Synth.Model
+		if model == "" {
+			model = "MiniMax-Text-01"
+		}
+		maxTokens := cfg.Synth.MaxTokens
+		if maxTokens == 0 {
+			maxTokens = 4096
+		}
+		timeoutSecs := cfg.Synth.TimeoutSecs
+		if timeoutSecs == 0 {
+			timeoutSecs = 60
+		}
 		return SynthConfig{
-			APIKey:     getEnvOr("MINIMAX_API_KEY", ""),
-			BaseURL:    "https://api.minimax.io/anthropic/v1",
-			Model:      getEnvOr("MINIMAX_MODEL", "MiniMax-Text-01"),
-			MaxTokens:  4096,
-			TimeoutSecs: 60,
+			APIKey:     apiKey,
+			BaseURL:    baseURL,
+			Model:      model,
+			MaxTokens:  maxTokens,
+			TimeoutSecs: timeoutSecs,
 		}
 	}
 }
