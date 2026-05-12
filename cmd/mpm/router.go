@@ -49,7 +49,6 @@ func NewRouter() *CommandRouter {
 		// Feature commands
 		"watch":           {Name: "watch", Description: "File watcher for memory ingestion"},
 		"web":             {Name: "web", Description: "Start web UI server", MinArgs: 0},
-		"menu":            {Name: "menu", Description: "Interactive control menu", MinArgs: 0},
 		"reference":       {Name: "reference", Description: "Reference library", MinArgs: 1},
 		"topic":           {Name: "topic", Description: "Topic management", MinArgs: 1},
 		"session":         {Name: "session", Description: "Session operations"},
@@ -57,7 +56,6 @@ func NewRouter() *CommandRouter {
 		"memory":          {Name: "memory", Description: "Memory operations"},
 		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0},
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
-		"dashboard":       {Name: "dashboard", Description: "Real-time TUI dashboard", MinArgs: 0},
 		"llm":             {Name: "llm", Description: "LLM operations"},
 		"compile":         {Name: "compile", Description: "Compile project"},
 		"mode":            {Name: "mode", Description: "Mode operations"},
@@ -130,10 +128,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWeb(args)
 	case "watch":
 		return handleWatch(args[1:])
-	case "dashboard":
-		return r.handleDashboard()
-	case "menu":
-		return r.handleMenu()
 	case "add":
 		return handleAdd(args)
 	case "ls":
@@ -225,16 +219,6 @@ func (r *CommandRouter) handleVersion() int {
 
 func (r *CommandRouter) handleHelp() int {
 	PrintHelp()
-	return 0
-}
-
-func (r *CommandRouter) handleDashboard() int {
-	StartDashboard("")
-	return 0
-}
-
-func (r *CommandRouter) handleMenu() int {
-	StartTUI()
 	return 0
 }
 
