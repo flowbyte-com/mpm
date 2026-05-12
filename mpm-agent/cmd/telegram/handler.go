@@ -812,7 +812,7 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 // startTyping sends typing indicator and keeps it going while we process.
 // Uses background context for API calls so they aren't killed by the
 // long-polling context deadline.
-func (h *Handler) startTyping(ctx *th.Context, chatID int64) {
+func (h *Handler) startTyping(ctx context.Context, chatID int64) {
 	// Send initial typing action with background context
 	_ = h.bot.SendChatAction(context.Background(), &telego.SendChatActionParams{
 		ChatID: tu.ID(chatID),
@@ -839,16 +839,27 @@ func (h *Handler) startTyping(ctx *th.Context, chatID int64) {
 
 // agentReply runs the MPM agent asynchronously (non-blocking).
 // Uses native sendChatAction typing indicator instead of a placeholder message.
+// Detaches context from Telego's lifecycle to avoid panics from pooled contexts.
 func (h *Handler) agentReply(chatID int64, userText string) {
-	// Start typing indicator (runs in background until context cancelled)
-	h.startTyping(nil, chatID)
+	// Create a detached root context — Telego pools Context objects and
+	// recycles them as soon as the handler returns. Passing a pooled context
+	// (or nil) to background goroutines causes nil panics when Telego clears it.
+	safeCtx, safeCancel := context.WithCancel(context.Background())
 
-	// Run agent in goroutine (non-blocking) — Tier 1
-	go h.runAgentWithTimeout(chatID, userText)
+	// Start typing indicator (runs in background until safeCancel called)
+	h.startTyping(safeCtx, chatID)
+
+	// Run agent in goroutine — pass safeCancel so typing stops when done
+	go func() {
+		h.runAgentWithTimeout(chatID, userText, safeCancel)
+	}()
 }
 
 // runAgentWithTimeout runs the agent via SessionRunner with 90s timeout.
-func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg string) {
+// safeCancel is called when the agent finishes to stop the typing indicator.
+func (h *Handler) runAgentWithTimeout(chatID int64, userText string, safeCancel context.CancelFunc) (finalMsg string) {
+	// Ensure typing indicator stops when agent completes
+	defer safeCancel()
 	// Create 90s timeout context — hard kill switch
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
