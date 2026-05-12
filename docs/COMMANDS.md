@@ -31,7 +31,7 @@ mpm export [--format json|csv] [--collection <name>] [--since YYYY-MM-DD] [--unt
 mpm maintain [--review] [--days <n>]  # weight decay, consolidation, spaced reinforcement
 ```
 
-## Mode / Persona (require daemon)
+## Mode / Persona
 
 ```
 mpm mode                   # Interactive TUI (multi-select)
@@ -41,7 +41,7 @@ mpm persona list|active|set <name>|clear
 mpm prime-directives
 ```
 
-## Session / Lesson (require daemon)
+## Session / Lesson
 
 ```
 mpm session list|show <id>|search <query>|add <content>|shred <id>
@@ -65,7 +65,7 @@ mpm reference add <file>   # PDF, EPUB, .md, .txt
 mpm reference list|search <query>|get <id>|shred <id>|scan
 ```
 
-## Synthesis (require daemon)
+## Synthesis
 
 ```
 mpm synthesize <session-uuid>
