@@ -2296,33 +2296,28 @@ func stopWatchGoroutine() {
 func handleWatchStop() int {
 	pid := readWatchPID()
 	if pid == 0 {
-		return respond("", "Watcher is not running.\n", 1)
+		// Already stopped — desired state achieved, return 0
+		return respond("Watcher is not running (already stopped).\n", "", 0)
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
+	proc, _ := os.FindProcess(pid)
+	if !isWatchProcessAlive(pid) {
+		// Process gone — clean up stale PID file, return 0
 		deleteWatchPID()
-		return respond("", "Watcher is not running.\n", 1)
+		return respond("Watcher is not running (already stopped).\n", "", 0)
 	}
 
-	// Send Interrupt (cross-platform equivalent of SIGTERM)
-	if err := proc.Signal(os.Interrupt); err != nil {
-		// Process may have already exited — clean up PID file
-		deleteWatchPID()
-		// Check if it's actually gone
-		if isWatchProcessAlive(pid) {
-			return respond("", fmt.Sprintf("Error: failed to stop watcher: %v\n", err), 1)
-		}
-		// Process is gone, consider it stopped
-	}
+	// Process is alive — send Interrupt signal and wait for graceful shutdown
+	proc.Signal(os.Interrupt)
 
 	// Give it a moment to shut down gracefully
+	// PIDs are reused slowly on Linux, so this avoids stale PID confusion
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify it's gone
 	if isWatchProcessAlive(pid) {
 		deleteWatchPID()
-		return respond("", fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), 1)
+		return respond(fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), "", 0)
 	}
 
 	deleteWatchPID()
