@@ -55,7 +55,7 @@ func NewRouter() *CommandRouter {
 		"session":         {Name: "session", Description: "Session operations"},
 		"lesson":          {Name: "lesson", Description: "Lesson operations"},
 		"memory":          {Name: "memory", Description: "Memory operations"},
-		"prime-directives": {Name: "prime-directives", Description: "Show 808 prime directives", MinArgs: 0, MaxArgs: 0},
+		"synthesize":  {Name: "synthesize", Description: "LLM synthesize session into memories", MinArgs: 1},
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
 		"llm":             {Name: "llm", Description: "LLM operations"},
 		"compile":         {Name: "compile", Description: "Compile project"},
@@ -167,8 +167,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleLesson(args[1:])
 	case "llm":
 		return handleLlm(args[1:])
-	case "compile":
+case "compile":
 		return handleCompile(args[1:])
+	case "synthesize":
+		return handleSynthesize(args)
 	default:
 		r.unknownCommand(cmdName)
 		return 1

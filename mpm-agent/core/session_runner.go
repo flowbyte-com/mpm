@@ -297,7 +297,6 @@ func (r *SessionRunner) runAgentWithContext(ctx context.Context, query string) e
 	synthCfg := RouteProfile(r.profile)
 
 	// Start typing indicator
-	r.transport.SendTypingIndicator()
 
 	// Tool loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
@@ -307,8 +306,7 @@ func (r *SessionRunner) runAgentWithContext(ctx context.Context, query string) e
 			ctx, systemPrompt, messages, &synthCfg, availableTools,
 		)
 		if err != nil {
-			r.transport.StopTypingIndicator()
-			if ctx.Err() == context.DeadlineExceeded {
+					if ctx.Err() == context.DeadlineExceeded {
 				r.transport.WriteChunk("⚠️ Request timed out (90s).\n", false)
 			} else {
 				r.transport.WriteChunk(fmt.Sprintf("⚠️ Error: %v\n", err), false)
@@ -323,8 +321,7 @@ func (r *SessionRunner) runAgentWithContext(ctx context.Context, query string) e
 
 		// If no tool calls, stream final response and return
 		if len(toolCalls) == 0 {
-			r.transport.StopTypingIndicator()
-			if responseText != "" {
+					if responseText != "" {
 				r.transport.WriteChunk(responseText, false)
 			}
 			// Save to history
@@ -362,10 +359,8 @@ func (r *SessionRunner) runAgentWithContext(ctx context.Context, query string) e
 
 			// HITL approval for risky tools
 			if isRiskyTool(tc.Name) {
-				r.transport.StopTypingIndicator()
-				approved := r.transport.RequestToolApproval(tc.Name, formatArgs(tc.Input))
-				r.transport.SendTypingIndicator()
-				if !approved {
+							approved := r.transport.RequestToolApproval(tc.Name, formatArgs(tc.Input))
+							if !approved {
 					r.appendToolResult(tc.Name, fmt.Sprintf("Tool %s rejected by user.", tc.Name))
 					messages = append(messages, apiMessage{Role: "user", Content: fmt.Sprintf("[%s result]: Tool rejected.\n", tc.Name)})
 					continue
@@ -382,13 +377,11 @@ func (r *SessionRunner) runAgentWithContext(ctx context.Context, query string) e
 
 		// Check loop breaker
 		if iteration == maxIterations-1 && len(toolCalls) > 0 {
-			r.transport.StopTypingIndicator()
-			r.transport.WriteChunk("⚠️ Loop terminated: Exceeded max reasoning steps.\n", false)
+					r.transport.WriteChunk("⚠️ Loop terminated: Exceeded max reasoning steps.\n", false)
 			return nil
 		}
 	}
 
-	r.transport.StopTypingIndicator()
 	return nil
 }
 

@@ -1,9 +1,8 @@
 package main
 
 import (
-	"database/sql"
+"database/sql"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -63,18 +62,6 @@ func printSuccess(format string, args ...interface{}) {
 // printWarning prints a warning message mpm-style
 func printWarning(format string, args ...interface{}) {
 	fmt.Printf("⚠ "+format+"\n", args...)
-}
-
-// Global state kept for compatibility
-var sockPath = socketPath()
-
-// Message is the socket protocol struct (kept for other file references)
-type Message struct {
-	Args     []string `json:"args"`
-	Output   string   `json:"output"`
-	Error    string   `json:"error"`
-	ExitCode int      `json:"exit_code"`
-	Done     bool     `json:"done"`
 }
 
 // formatUptime returns a human-readable uptime string
@@ -321,23 +308,6 @@ func runDoctorEnvironmentChecks(report *DoctorReport) {
 		fmt.Printf("          %s\n\n", workspace)
 	}
 
-	// XDG_RUNTIME_DIR
-	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	socketDir := sockPath
-	if xdgRuntime != "" {
-		socketDir = filepath.Join(xdgRuntime, "mpm.sock")
-	}
-	report.Checks = append(report.Checks, DoctorCheck{
-		Name:     "Socket Path",
-		Status:   "PASS",
-		Message:  socketDir,
-		Duration: "0ms",
-	})
-	report.Passed++
-	report.TotalChecks++
-	fmt.Printf("    [%s] %s\n", colorGreen("PASS"), "Socket Path")
-	fmt.Printf("          %s\n\n", socketDir)
-
 	// Webhook URL
 	webhookURL := os.Getenv("MPM_WEBHOOK_URL")
 	if webhookURL == "" {
@@ -433,34 +403,6 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 			fmt.Printf("    [%s] %s\n", colorGreen("PASS"), name+" Directory")
 			fmt.Printf("          %s\n\n", path)
 		}
-	}
-
-	// Check socket directory permissions
-	socketDir := filepath.Dir(sockPath)
-	if err := testWritable(socketDir); err != nil {
-		report.Checks = append(report.Checks, DoctorCheck{
-			Name:     "Socket Directory Writable",
-			Status:   "FAIL",
-			Message:  "Cannot write to: " + socketDir,
-			Details:  []string{err.Error()},
-			Duration: "0ms",
-		})
-		report.Failed++
-		report.TotalChecks++
-		fmt.Printf("    [%s] %s\n", colorRed("FAIL"), "Socket Directory Writable")
-		fmt.Printf("          Cannot write to: %s\n", socketDir)
-		fmt.Printf("          Error: %s\n\n", err.Error())
-	} else {
-		report.Checks = append(report.Checks, DoctorCheck{
-			Name:     "Socket Directory Writable",
-			Status:   "PASS",
-			Message:  socketDir,
-			Duration: "0ms",
-		})
-		report.Passed++
-		report.TotalChecks++
-		fmt.Printf("    [%s] %s\n", colorGreen("PASS"), "Socket Directory Writable")
-		fmt.Printf("          %s\n\n", socketDir)
 	}
 }
 
@@ -671,29 +613,13 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 func runDoctorApplyFixes(report *DoctorReport) {
 	fmt.Printf("  %s%sApplying Fixes%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
 
-	// Clean up stale socket file
-	if _, err := os.Stat(sockPath); err == nil {
-		// Socket exists - check if daemon is actually listening
-		conn, dialErr := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
-		if dialErr != nil {
-			// No daemon listening - stale socket
-			os.Remove(sockPath)
-			fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Stale Socket Removed")
-			fmt.Printf("          Removed: %s\n\n", sockPath)
-		} else {
-			conn.Close()
-			fmt.Printf("    [%s] %s\n", colorGreen("SKIP"), "Socket In Use")
-			fmt.Printf("          Daemon is active\n\n")
-		}
-	}
-
-	// Fix socket directory permissions
-	socketDir := filepath.Dir(sockPath)
+	// Fix database directory permissions
+	socketDir := filepath.Join(config.GetMPMDir(), "src", "db")
 	if err := os.Chmod(socketDir, 0755); err == nil {
-		fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Socket Directory Permissions")
+		fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Database Directory Permissions")
 		fmt.Printf("          chmod 755 %s\n\n", socketDir)
 	} else {
-		fmt.Printf("    [%s] %s\n", colorRed("FAIL"), "Socket Directory Permissions")
+		fmt.Printf("    [%s] %s\n", colorRed("FAIL"), "Database Directory Permissions")
 		fmt.Printf("          Cannot fix: %s\n\n", err.Error())
 	}
 
@@ -800,20 +726,6 @@ func runLockfileCheck(result *PreFlightResult) {
 		}
 	}
 
-	// Also check socket directory for orphaned sockets without daemon
-	socketInfo, err := os.Stat(sockPath)
-	if err == nil && socketInfo.Mode()&os.ModeSocket != 0 {
-		// Socket exists but no one is listening - try to connect
-		conn, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond)
-		if err != nil {
-			// No one listening - orphaned socket
-			os.Remove(sockPath)
-			details = append(details, fmt.Sprintf("Removed orphaned socket: %s", sockPath))
-		} else {
-			conn.Close()
-		}
-	}
-
 	status := "OK"
 	message := "No stale lockfiles found"
 	if len(details) > 0 {
@@ -837,8 +749,7 @@ func runDirectoryCheck(result *PreFlightResult) {
 
 	// Determine workspace and data directories
 	workspace := config.GetWorkspace()
-	dirs := []string{
-		filepath.Dir(sockPath),                // Socket directory (XDG_RUNTIME_DIR or ~/.mpm)
+dirs := []string{
 		filepath.Join(workspace, "mode"),      // Mode configurations
 		config.GetPersonaPath(),               // Persona configurations (correct path: projects/mpm/persona)
 		filepath.Join(workspace, "src", "db"), // Database directory
@@ -1052,8 +963,7 @@ func runPermissionsCheck(result *PreFlightResult) {
 	details := []string{}
 
 	// Critical paths that must be writable
-	writablePaths := []string{
-		filepath.Dir(sockPath),                            // Socket directory
+writablePaths := []string{
 		filepath.Join(config.GetWorkspace(), "src", "db"), // DB directory
 	}
 
@@ -1132,24 +1042,6 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
-
-// socketPath returns the daemon socket path, preferring user-specific locations
-func socketPath() string {
-	// Try XDG_RUNTIME_DIR first (Linux/BSD standard)
-	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
-		sockPath := filepath.Join(xdg, "mpm.sock")
-		os.MkdirAll(xdg, 0700)
-		return sockPath
-	}
-	// Fallback to ~/.mpm/mpm.sock for portability
-	if home, err := os.UserHomeDir(); err == nil {
-		mpmDir := filepath.Join(home, ".mpm")
-		os.MkdirAll(mpmDir, 0700)
-		return filepath.Join(mpmDir, "mpm.sock")
-	}
-	// Last resort - /tmp (note: shared in multi-user systems!)
-	return "/tmp/mpm.sock"
 }
 
 // ============================================================================

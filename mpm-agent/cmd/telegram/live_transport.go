@@ -24,11 +24,6 @@ func (t *liveTransport) ReadMessage() (string, error) {
 }
 
 func (t *liveTransport) WriteChunk(text string, isThinking bool) error {
-	// Strip thinking blocks if verbose mode is off
-	settings := t.handler.getSettings(t.chatID)
-	if !settings.verbose {
-		text = cleanResponse(text)
-	}
 	if text == "" {
 		return nil
 	}
@@ -46,20 +41,4 @@ func (t *liveTransport) WriteChunk(text string, isThinking bool) error {
 
 func (t *liveTransport) RequestToolApproval(toolName string, args string) bool {
 	return true // Auto-approve for Telegram
-}
-
-func (t *liveTransport) SendTypingIndicator() error {
-	entry := t.handler.getOrCreateLiveMessage(t.chatID)
-	if entry != nil {
-		entry.SetStatus(statusThinking)
-	}
-	return nil
-}
-
-func (t *liveTransport) StopTypingIndicator() error {
-	entry := t.handler.getLiveMessage(t.chatID)
-	if entry != nil {
-		entry.SetStatus(statusDone)
-	}
-	return nil
 }

@@ -118,12 +118,9 @@ func resolveWatchDirs(memDir, sesDir string) []string {
 			}
 		}
 	} else {
-		// Default: OpenClaw agents sessions directory
-		homeDir, _ := os.UserHomeDir()
-		defaultSes := filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
-		if dirExists(defaultSes) {
-			dirs = append(dirs, defaultSes)
-		}
+		// No sessions_dirs configured — this is a configuration error, not a fallback opportunity.
+		// The user must explicitly configure where to watch for sessions.
+		fmt.Fprintf(os.Stderr, "⚠️  No sessions_dirs configured in mpm_config.json and no default available.\n")
 	}
 
 	return dirs
@@ -469,115 +466,10 @@ func (d *watcherDaemon) sweepDirectory(dir string) {
 			}
 
 		case ".jsonl":
-			// Skip in sweep — only process via handleLockRemoved when .lock is explicitly
-			// removed (signals session complete). Without a .lock, the session is still being
-			// written and must not be touched.
+			// Skip .jsonl in startup sweep — they are processed by the orphan
+			// sweep triggered when a new session lock (.jsonl.lock) is created.
 		}
 	}
-}
-
-// =============================================================================
-// PART 2: Watcher Event Handlers
-// =============================================================================
-
-func (d *watcherDaemon) handleEvent(event fsnotify.Event) {
-	path := event.Name
-	name := filepath.Base(path)
-	ext := strings.ToLower(filepath.Ext(name))
-
-	// Skip conflicted files
-	if strings.Contains(strings.ToLower(name), "conflicted") {
-		return
-	}
-
-	// Skip OpenClaw live session registry and config files — never process
-	if isSystemFile(name) {
-		return
-	}
-
-	switch {
-	// Route A: .md files - Create or Write events
-	case ext == ".md" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
-		d.processMarkdownFile(path, false)
-
-	// Route B: .lock files - Remove events (lock deleted = session complete)
-	case ext == ".lock" && event.Has(fsnotify.Remove):
-		d.handleLockRemoved(path)
-	}
-}
-
-// handleLockRemoved is triggered when a .lock file is deleted
-func (d *watcherDaemon) handleLockRemoved(lockPath string) {
-	// Derive .jsonl path from .lock path
-	jsonlPath := strings.TrimSuffix(lockPath, ".lock")
-
-	// SAFETY: Verify it is actually a .jsonl file before processing.
-	// This prevents accidental processing of files like sessions.json
-	// if OpenClaw ever creates sessions.json.lock.
-	if strings.ToLower(filepath.Ext(jsonlPath)) != ".jsonl" {
-		if d.verbose {
-			fmt.Printf("   ⏭️  Lock removed for non-.jsonl file: %s — skipping\n", filepath.Base(jsonlPath))
-		}
-		return
-	}
-
-	// Verify .jsonl exists
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		if d.verbose {
-			fmt.Printf("   ⏭️  Lock removed but no .jsonl found: %s\n", filepath.Base(lockPath))
-		}
-		return
-	}
-
-	// Guard: check if the .jsonl is still being written (modified recently).
-	// A session's .jsonl should be cold (≥60s old) once the .lock is removed.
-	// If it's fresh, the session is still alive and we must NOT eat it.
-	if d.isRecentlyModified(jsonlPath, 60) {
-		fmt.Printf("   ⏭️  Skip %s — still being written (session active)\n", filepath.Base(jsonlPath))
-		return
-	}
-
-	// Extra safety: grace period delay before processing.
-	// After .lock removal, OpenClaw may still be flushing final writes.
-	time.Sleep(3 * time.Second)
-
-	// Re-check after delay: if file was modified during sleep, skip it.
-	if d.isRecentlyModified(jsonlPath, 5) {
-		fmt.Printf("   ⏭️  Skip %s — modified during grace period\n", filepath.Base(jsonlPath))
-		return
-	}
-
-	d.processSessionFile(jsonlPath, false)
-}
-
-// triggerSynthesisAsync fires LLM synthesis for a completed session.
-// Runs as a detached subprocess so it outlives the daemon restart.
-func (d *watcherDaemon) triggerSynthesisAsync(sessionUUID, jsonlPath string) {
-	binary, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[synth] failed to find binary: %v\n", err)
-		return
-	}
-	go func() {
-		cmd := exec.Command(binary, "synthesize", sessionUUID)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[synth] %s: %v\n", sessionUUID[:8], err)
-			return
-		}
-		fmt.Printf("   🔮 %s", string(out))
-	}()
-}
-
-// isRecentlyModified returns true if the file was modified within the last `seconds`.
-// This is used to detect sessions that are still alive (being written to).
-func (d *watcherDaemon) isRecentlyModified(path string, seconds int) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	age := time.Since(info.ModTime())
-	return age < time.Duration(seconds)*time.Second
 }
 
 // =============================================================================
@@ -628,8 +520,83 @@ func (d *watcherDaemon) processMarkdownFile(path string, isStartup bool) {
 	// Check for topic clustering
 	d.checkTopicClustering()
 
-	fmt.Printf("   %s LTM memory saved: %s (id: %s)\n", prefix, name, memID[:8])
+fmt.Printf("   %s LTM memory saved: %s (id: %s)\n", prefix, name, memID[:8])
 	d.deleteFile(path, "processed successfully")
+}
+
+// triggerSynthesisAsync fires LLM synthesis for a completed session.
+// Runs as a detached subprocess so it outlives the daemon restart.
+// After the subprocess completes, the .jsonl is archived to prevent data loss.
+func (d *watcherDaemon) triggerSynthesisAsync(sessionUUID, jsonlPath string) {
+	binary, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[synth] failed to find binary: %v\n", err)
+		d.archiveFile(jsonlPath, "synthesis-skipped")
+		return
+	}
+	go func() {
+		cmd := exec.Command(binary, "synthesize", sessionUUID)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[synth] %s: %v\n", sessionUUID[:8], err)
+		} else {
+			fmt.Printf("   🔮 %s", string(out))
+		}
+		d.archiveFile(jsonlPath, "synthesized")
+	}()
+}
+
+// sweepOrphanSessions scans a session directory for orphan .jsonl files that
+// have no matching .jsonl.lock, indicating the session has ended. Each orphan
+// is processed: facts extracted and saved to DB, then LLM synthesis triggered.
+// On completion the .jsonl is archived to archive/ to prevent data loss.
+func (d *watcherDaemon) sweepOrphanSessions(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "   ⚠️  Cannot read session dir %s: %v\n", dir, err)
+		return
+	}
+
+	// Build set of locked UUIDs (files with an active .jsonl.lock)
+	locks := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".jsonl.lock") {
+			uuid := strings.TrimSuffix(name, ".jsonl.lock")
+			locks[uuid] = true
+		}
+	}
+
+	// Process orphans: .jsonl files that have NO matching .lock
+	var orphans []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		uuid := strings.TrimSuffix(name, ".jsonl")
+		if locks[uuid] {
+			continue // still active
+		}
+		orphans = append(orphans, filepath.Join(dir, name))
+	}
+
+	if len(orphans) == 0 {
+		return
+	}
+
+	for _, path := range orphans {
+		if d.verbose {
+			fmt.Printf("   🔄 Orphan session: %s\n", filepath.Base(path))
+		}
+		d.processSessionFile(path, false)
+	}
 }
 
 // processSessionFile handles Route B: Session files (.jsonl)
@@ -663,7 +630,7 @@ func (d *watcherDaemon) processSessionFile(path string, isStartup bool) {
 		return
 	}
 
-	// Insert facts as regular memories (weight = 1)
+	// Insert facts into session collection (weight = 1, 24h TTL)
 	var savedIDs []string
 	for _, fact := range facts {
 		// Sanitization checks
@@ -698,11 +665,9 @@ func (d *watcherDaemon) processSessionFile(path string, isStartup bool) {
 	// Check for topic clustering
 	d.checkTopicClustering()
 
-	// Fire LLM synthesis (non-blocking) — keeps .jsonl for synthesis, runs in background
+// Fire LLM synthesis (non-blocking) — keeps .jsonl for synthesis, runs in background
 	sessionUUID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-	go d.triggerSynthesisAsync(sessionUUID, path)
-
-	d.deleteFile(path, "processed successfully")
+	d.triggerSynthesisAsync(sessionUUID, path)
 }
 
 // processSessionsConfig handles Route C: OpenClaw system config files (sessions.json, workspace.json, etc.)
@@ -929,10 +894,40 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 }
 
 // ingestAsSessionMemory inserts extracted session facts (weight = 1)
+// Facts are stored in the "session" collection (not "memories") to isolate them
+// from long-term factual knowledge. A short TTL (24h) ensures automatic cleanup
+// via `mpm maintain`. State-change dedup prevents duplicate entries when the
+// underlying value hasn't actually changed.
 func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (string, error) {
+	// Extract fact key prefix for per-type dedup.
+	// e.g., "session cwd: /home/user" → prefix "session cwd", value "/home/user"
+	// e.g., "model: gpt-4 (provider: openai)" → prefix "model", value "gpt-4 (provider: openai)"
+	keyPrefix := content
+	if idx := strings.Index(content, ":"); idx > 0 {
+		keyPrefix = content[:idx]
+	}
+
+	// Deduplicate per fact type: only insert if the value differs from the most
+	// recent session entry of the same type. This prevents heartbeats like cwd or
+	// model from being re-stored when unchanged, while still capturing actual
+	// state changes (e.g., cwd changed from /foo to /bar).
+	db := d.db.SQLDB()
+	var latestContent string
+	err := db.QueryRow(
+		`SELECT content FROM memories
+		 WHERE collection = 'session' AND deleted_at IS NULL AND content LIKE ?
+		 ORDER BY created_at DESC LIMIT 1`, keyPrefix+": %",
+	).Scan(&latestContent)
+	if err == nil && latestContent == content {
+		return "", nil // no state change — skip
+	}
+
 	// Extract keywords/tags
 	tags := d.extractKeywords(content)
 	tags = append(tags, "session-fact")
+
+	// 24h TTL for session facts — ensures automatic cleanup via mpm maintain
+	ttl := time.Now().Add(24 * time.Hour).UTC()
 
 	// Prepare metadata
 	metadata := map[string]interface{}{
@@ -945,14 +940,15 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 	// Generate embedding
 	embedding := mpminternal.HashEmbed(content)
 
-	// Save to database (session memory: isLongTerm=false, weight=1)
-	id, err := d.db.SaveMemory("memories", content, "", tags, metadata, embedding, false, 1)
+	// Save to database — explicitly use "session" collection to isolate from LTM.
+	// Pass expires_at explicitly so SaveMemory can write it to the correct column.
+	id, err := d.db.SaveMemory("session", content, "", tags, metadata, embedding, false, 1, ttl)
 	if err != nil {
 		return "", err
 	}
 
 	// Also append to mirror
-	d.appendToMirror(id, content, "memories", tags, metadata)
+	d.appendToMirror(id, content, "session", tags, metadata)
 
 	return id, nil
 }
@@ -1356,9 +1352,6 @@ func startWatcherGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbos
 		fmt.Printf("🔍 File watcher started. Watching: %v\n", dirs)
 	}
 
-	// Confirm pool is ready for events
-	pool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: dryRun, Verbose: verbose})
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -1401,15 +1394,18 @@ func eventFromFsnotify(event fsnotify.Event, dryRun, verbose bool) *WatchEvent {
 		return nil
 	}
 
-	switch {
+switch {
 	case ext == ".md" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
 		return &WatchEvent{Type: EventMarkdownFile, Path: event.Name, DryRun: dryRun, Verbose: verbose}
-	case ext == ".lock" && event.Has(fsnotify.Remove):
+	case ext == ".lock" && event.Has(fsnotify.Create):
+		// New session lock created → a new session just started.
+		// Trigger an orphan sweep: process any .jsonl without a matching .lock
+		// (the previous session's file that was never cleaned up).
 		jsonlPath := strings.TrimSuffix(event.Name, ".lock")
 		if strings.ToLower(filepath.Ext(jsonlPath)) != ".jsonl" {
 			return nil
 		}
-		return &WatchEvent{Type: EventSessionComplete, Path: jsonlPath, DryRun: dryRun, Verbose: verbose}
+		return &WatchEvent{Type: EventOrphanSweep, Path: filepath.Dir(event.Name), DryRun: dryRun, Verbose: verbose}
 	case ext == ".json" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
 		nameLower := strings.ToLower(name)
 		if nameLower == "workspace.json" || nameLower == "config.json" {
@@ -1476,7 +1472,7 @@ func startExternalDBPollGoroutines(ctx context.Context, pool *WorkerPool, dryRun
 // deleteFile deletes a file (or logs if dry-run mode)
 func (d *watcherDaemon) deleteFile(path, reason string) {
 	if d.dryRun {
-		fmt.Printf("   � dry-run: would delete %s (%s)\n", filepath.Base(path), reason)
+		fmt.Printf("    dry-run: would delete %s (%s)\n", filepath.Base(path), reason)
 		return
 	}
 	if err := os.Remove(path); err != nil {
@@ -1484,6 +1480,28 @@ func (d *watcherDaemon) deleteFile(path, reason string) {
 	} else {
 		if d.verbose {
 			fmt.Printf("   🗑️  Deleted: %s (%s)\n", filepath.Base(path), reason)
+		}
+	}
+}
+
+// archiveFile moves a processed session file to the archive/ subdirectory
+// within the same session directory, preventing data loss.
+func (d *watcherDaemon) archiveFile(path, reason string) {
+	if d.dryRun {
+		fmt.Printf("    dry-run: would archive %s (%s)\n", filepath.Base(path), reason)
+		return
+	}
+	archiveDir := filepath.Join(filepath.Dir(path), "archive")
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "   ⚠️  Failed to create archive dir %s: %v\n", archiveDir, err)
+		return
+	}
+	dest := filepath.Join(archiveDir, filepath.Base(path))
+	if err := os.Rename(path, dest); err != nil {
+		fmt.Fprintf(os.Stderr, "   ⚠️  Failed to archive %s: %v\n", filepath.Base(path), err)
+	} else {
+		if d.verbose {
+			fmt.Printf("   📦 Archived: %s -> archive/ (%s)\n", filepath.Base(path), reason)
 		}
 	}
 }

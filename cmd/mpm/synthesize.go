@@ -105,15 +105,19 @@ func handleSynthesize(args []string) int {
 		sessionDBID = fullUUID
 	}
 
-	stored := 0
-	for _, fact := range memories {
-		fact = strings.TrimSpace(fact)
+stored := 0
+	for _, mf := range memories {
+		fact := strings.TrimSpace(mf.Fact)
 		if fact == "" {
 			continue
 		}
-		tags := []string{}
-		for _, t := range topics {
-			tags = append(tags, strings.ToLower(strings.TrimSpace(t)))
+		factTags := mf.Tags
+		if factTags == nil {
+			factTags = []string{}
+		}
+		// Normalize tags to lowercase
+		for i := range factTags {
+factTags[i] = strings.ToLower(strings.TrimSpace(factTags[i]))
 		}
 		metadata := map[string]interface{}{
 			"synthesized":   true,
@@ -125,7 +129,7 @@ func handleSynthesize(args []string) int {
 			"summary":       result.SessionSummary,
 		}
 		embedding := mpminternal.HashEmbed(fact)
-		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, tags, metadata, embedding, false, 1)
+		_, err := dbMgr.SaveMemory("memories", fact, sessionDBID, factTags, metadata, embedding, false, 1)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to store fact: %v\n", err)
 			continue
@@ -147,6 +151,12 @@ func handleSynthesize(args []string) int {
 		fmt.Printf("   Summary: %s\n", truncateStr(result.SessionSummary, 120))
 	}
 	return 0
+}
+
+// MemoryFact holds a single synthesized memory with its tags.
+type MemoryFact struct {
+	Fact string   `json:"fact"`
+	Tags []string `json:"tags"`
 }
 
 // SynthesisResult holds the raw LLM JSON output before null handling.
@@ -338,7 +348,7 @@ func extractSessionMetadataRaw(lines []string, filename string) sessionMetaRaw {
 }
 
 const synthesisSystemPrompt = `You are the Memory Synthesis Engine for the Flowbyte Memory Persona Mode (MPM) pipeline.
-Your objective is to analyze a sanitized transcript of a user's session and extract structured metadata: the Session Summary, overarching Topics, and discrete Memories.
+Your objective is to analyze a sanitized transcript of a user's session and extract structured metadata: the Session Summary, overarching Topics, and discrete Memories with tags.
 
 DEFINITIONS & EXTRACTION RULES:
 
@@ -354,9 +364,13 @@ Extract 1 to 3 high-level categories or domains discussed in the session.
 
 Keep topics broad and reusable (e.g., "Data Pipeline", "Security", "State Management").
 
-MEMORIES (Array of Strings)
+MEMORIES (Array of Objects)
 
 Extract 0 to 3 high-signal, permanent facts.
+
+Each memory object MUST have these two fields:
+  - "fact": A standalone, consolidated memory written in third person (e.g., "User decided to...", "Architecture shifted to..."). Each fact must make perfect sense out of context.
+  - "tags": 1 to 3 highly relevant, lower-case tags that describe the fact (e.g., ["golang", "architecture"]).
 
 A "high-signal fact" is a permanent architectural decision, a new workflow established, a milestone completed, or a foundational constraint learned.
 
@@ -366,7 +380,7 @@ If the session was purely transient chatter or failed debugging, return an empty
 
 Write facts in the third person (e.g., "User decided to...", "Architecture shifted to...").
 
-Each memory must be standalone and make perfect sense out of context.
+Each fact must be standalone and make perfect sense out of context.
 
 OUTPUT FORMAT:
 You must respond strictly with a valid JSON object matching the requested schema. Do not wrap the JSON in markdown formatting blocks or include any text.`
@@ -384,7 +398,7 @@ Transcript:
 
 // callSynthesisLLM calls the configured LLM for synthesis.
 // Credentials are read from mpm_config.json (synth section) with env var fallback.
-func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, []string, []string, error) {
+func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, []string, []MemoryFact, error) {
 	// Load synth config from mpm_config.json
 	cfg, err := configpkg.LoadConfig()
 	if err != nil {
@@ -514,8 +528,9 @@ func callSynthesisLLM(ctx context.Context, prompt string) (*SynthesisResult, []s
 		return nil, nil, nil, fmt.Errorf("failed to parse synthesis JSON: %w\nRaw: %s", err, truncateStr(responseText, 300))
 	}
 
-	// Handle null/missing array fields safely
-	var topics, memories []string
+// Handle null/missing array fields safely
+	var topics []string
+	var memories []MemoryFact
 
 	if len(sr.Topics) > 0 && string(sr.Topics) != "null" {
 		if err := json.Unmarshal(sr.Topics, &topics); err != nil {

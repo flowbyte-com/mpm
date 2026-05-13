@@ -795,6 +795,43 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 }
 
 // Stats returns store statistics
+// GetLatestByCollection returns the most recent memory for a given collection, used for
+// deduplication of session facts (e.g., session cwd, model changes) that should
+// only be recorded when the value actually changes.
+func (s *MemoryStore) GetLatestByCollection(collection string) (*Memory, error) {
+	var mem Memory
+	var tagsJSON, metadataJSON []byte
+	var embedding []byte
+	var createdAt string
+	var sessionID sql.NullString
+
+	err := s.DB.QueryRow(
+		`SELECT id, collection, content, session_id, tags, metadata, embedding, created_at
+		 FROM memories WHERE collection = ? AND deleted_at IS NULL
+		 ORDER BY created_at DESC LIMIT 1`, collection,
+	).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if sessionID.Valid {
+		mem.SessionID = sessionID.String
+	}
+	mem.Created = createdAt
+	if len(tagsJSON) > 0 {
+		json.Unmarshal(tagsJSON, &mem.Tags)
+	}
+	if len(metadataJSON) > 0 {
+		json.Unmarshal(metadataJSON, &mem.Metadata)
+	}
+	if len(embedding) > 0 {
+		json.Unmarshal(embedding, &mem.Embedding)
+	}
+	return &mem, nil
+}
+
 func (s *MemoryStore) Stats() map[string]interface{} {
 	healthy := false
 	if s.DB != nil {

@@ -47,13 +47,3 @@ func (t *TerminalTransport) RequestToolApproval(toolName string, args string) bo
 	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 	return line != "n"
 }
-
-func (t *TerminalTransport) SendTypingIndicator() error {
-	fmt.Fprint(os.Stderr, "\033[s\033[2m🤖 working...\033[0m")
-	return nil
-}
-
-func (t *TerminalTransport) StopTypingIndicator() error {
-	fmt.Fprint(os.Stderr, "\r\033[2K\r")
-	return nil
-}

@@ -18,12 +18,6 @@ type Transport interface {
 	// RequestToolApproval blocks until user approves/rejects.
 	// Returns true if approved, false if rejected.
 	RequestToolApproval(toolName string, args string) bool
-
-	// SendTypingIndicator signals "agent is thinking/working".
-	SendTypingIndicator() error
-
-	// StopTypingIndicator clears the typing signal.
-	StopTypingIndicator() error
 }
 
 // Message represents a turn in the agent conversation.

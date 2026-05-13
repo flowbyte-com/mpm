@@ -393,10 +393,11 @@ func truncateLiveBuffer(content string, maxLen int) string {
 }
 
 // finalizeLiveMessage stops the flusher, waits for it to fully exit, then does one final edit.
-func (h *Handler) finalizeLiveMessage(chatID int64, finalText string) {
+// Returns the text that was sent.
+func (h *Handler) finalizeLiveMessage(chatID int64, finalText string) string {
 	v, ok := h.liveMessage.Load(chatID)
 	if !ok {
-		return
+		return ""
 	}
 	entry := v.(*liveMessageData)
 
@@ -415,16 +416,18 @@ func (h *Handler) finalizeLiveMessage(chatID int64, finalText string) {
 	if finalText != "" {
 		entry.buffer.WriteString("\n" + finalText)
 	}
+	text := entry.buffer.String()
 	entry.mu.Unlock()
 
 	_, err := h.bot.EditMessageText(context.Background(), &telego.EditMessageTextParams{
 		ChatID:    tu.ID(chatID),
 		MessageID: entry.messageID,
-		Text:      entry.buffer.String(),
+		Text:      text,
 	})
 	if err != nil {
-		h.sendText(nil, chatID, entry.buffer.String())
+		h.sendText(nil, chatID, text)
 	}
+	return text
 }
 
 // NewHandler creates a new Telegram handler.
@@ -486,22 +489,6 @@ func (h *Handler) Handle(ctx *th.Context, message telego.Message) error {
 	// Non-blocking agent reply (Tier 1): send "🧠 Thinking..." immediately
 	h.agentReply(chatID, text)
 	return nil
-}
-
-// cleanResponse removes thinking blocks and extra whitespace for clean Telegram display.
-func cleanResponse(text string) string {
-	patterns := []string{
-		`(?si)<thinking>.*?</thinking>`,
-		"(?s)" + "《" + "[^》]*》",
-		"(?s)" + "（" + "[^）]*）",
-		"(?s)" + "。" + "[^。]*。",
-	}
-	for _, p := range patterns {
-		re := regexp.MustCompile(p)
-		text = re.ReplaceAllString(text, "")
-	}
-	text = regexp.MustCompile(`\n{3,}`).ReplaceAllString(text, "\n")
-	return strings.TrimSpace(text)
 }
 
 // isAllowed checks if a Telegram user is authorized.
@@ -809,57 +796,21 @@ func (h *Handler) handleCommand(chatID int64, cmd string) (bool, string) {
 	}
 }
 
-// startTyping sends typing indicator and keeps it going while we process.
-// Uses background context for API calls so they aren't killed by the
-// long-polling context deadline.
-func (h *Handler) startTyping(ctx context.Context, chatID int64) {
-	// Send initial typing action with background context
+// agentReply runs the MPM agent asynchronously (non-blocking).
+// Sends a single fire-and-forget typing indicator, then runs the agent.
+func (h *Handler) agentReply(chatID int64, userText string) {
+	// Fire-and-forget typing action
 	_ = h.bot.SendChatAction(context.Background(), &telego.SendChatActionParams{
 		ChatID: tu.ID(chatID),
 		Action: telego.ChatActionTyping,
 	})
 
-	// Keep sending typing every 4 seconds
-	go func() {
-		ticker := time.NewTicker(4 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				_ = h.bot.SendChatAction(context.Background(), &telego.SendChatActionParams{
-					ChatID: tu.ID(chatID),
-					Action: telego.ChatActionTyping,
-				})
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// agentReply runs the MPM agent asynchronously (non-blocking).
-// Uses native sendChatAction typing indicator instead of a placeholder message.
-// Detaches context from Telego's lifecycle to avoid panics from pooled contexts.
-func (h *Handler) agentReply(chatID int64, userText string) {
-	// Create a detached root context — Telego pools Context objects and
-	// recycles them as soon as the handler returns. Passing a pooled context
-	// (or nil) to background goroutines causes nil panics when Telego clears it.
-	safeCtx, safeCancel := context.WithCancel(context.Background())
-
-	// Start typing indicator (runs in background until safeCancel called)
-	h.startTyping(safeCtx, chatID)
-
-	// Run agent in goroutine — pass safeCancel so typing stops when done
-	go func() {
-		h.runAgentWithTimeout(chatID, userText, safeCancel)
-	}()
+	// Run agent in goroutine
+	go h.runAgentWithTimeout(chatID, userText)
 }
 
 // runAgentWithTimeout runs the agent via SessionRunner with 90s timeout.
-// safeCancel is called when the agent finishes to stop the typing indicator.
-func (h *Handler) runAgentWithTimeout(chatID int64, userText string, safeCancel context.CancelFunc) (finalMsg string) {
-	// Ensure typing indicator stops when agent completes
-	defer safeCancel()
+func (h *Handler) runAgentWithTimeout(chatID int64, userText string) (finalMsg string) {
 	// Create 90s timeout context — hard kill switch
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -903,8 +854,14 @@ func (h *Handler) runAgentWithTimeout(chatID int64, userText string, safeCancel 
 	// Run the agent (streams output via transport)
 	runner.HandleInput(ctx, userText)
 
-	// Finalize the live message
-	h.finalizeLiveMessage(chatID, "")
+	// Finalize the live message — returns the response text
+	responseText := h.finalizeLiveMessage(chatID, "")
+
+	// Silent bot fallback: if no live message was created (streaming failed),
+	// send the response text directly via bot.SendMessage()
+	if responseText == "" && finalMsg != "" {
+		h.sendText(nil, chatID, finalMsg)
+	}
 
 	// Schedule session summary
 	go h.scheduleSessionSummary(chatID, nil)

@@ -13,7 +13,7 @@ build: $(BINS)
 $(BIN):
 	mkdir -p $(BIN)
 
-$(BIN)/mini-bot: cmd/mini-bot/main.go cmd/mini-bot/repl.go core/*.go | $(BIN)
+$(BIN)/mini-bot: cmd/mini-bot/main.go cmd/mini-bot/terminal_transport.go core/*.go | $(BIN)
 	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o $@ ./cmd/mini-bot
 
 $(BIN)/mini-bot-telegram: cmd/telegram/*.go core/*.go | $(BIN)
