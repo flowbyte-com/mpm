@@ -192,7 +192,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 }
 
 // NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.
-// Use this for one-off CLI commands that don't need daemon persistence.
+// Use this for one-off CLI commands that don't need managed persistence.
 func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
 	return &DatabaseManager{db: db}
 }
@@ -409,7 +409,7 @@ func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error)
 	}, nil
 }
 
-func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int) (string, error) {
+func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error) {
 	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
@@ -432,8 +432,14 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 		isLTM = 1
 	}
 
-	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight)
+	// Handle optional expires_at parameter
+	var expiresAtStr interface{} = nil
+	if len(expiresAt) > 0 && !expiresAt[0].IsZero() {
+		expiresAtStr = expiresAt[0].UTC().Format(time.RFC3339)
+	}
+
+	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr)
 	return id, err
 }
 

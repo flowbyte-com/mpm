@@ -6,6 +6,19 @@ __pycache__/
 # Compiled binaries
 mpm
 bin/
+mini-bot
+mpm-agent/mini-bot
+mpm-agent/bin/
+
+# SQLite WAL and shared memory files (runtime artifacts)
+*.db-wal
+*.db-shm
 
 # Worktrees
 /.worktrees
+
+# OS artifacts
+.DS_Store
+
+# Local config (contains secrets — always private)
+mpm_config.json

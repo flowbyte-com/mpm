@@ -1,14 +1,15 @@
 {
+  "memory_dirs": [
+    "/home/user/.openclaw/memory"
+  ],
+  "sessions_dirs": [
+    "/home/user/.openclaw/agents/main/sessions"
+  ],
   "synth": {
     "model": "MiniMax-M2.7",
-    "api_key": "",
+    "api_key": "your-api-key-here",
     "base_url": "https://api.minimax.io/anthropic",
-    "max_tokens": 4096,
+    "max_tokens": 1024,
     "timeout_seconds": 300
-  },
-  "telegram": {
-    "bot_token": "",
-    "polling": true,
-    "allowed_users": []
   }
 }
