@@ -67,16 +67,35 @@ func handleReview(args []string) int {
 
 	if showPromoted {
 		// Default: recently elevated memories for spaced reinforcement review
-		memories, err = dm.GetSpacedReinforcementReview(0, resultLimit)
+		// Spec: WHERE deleted_at IS NULL AND last_accessed_at IS NOT NULL
+		//       AND (reinforcement_count > 0 OR weight > 1) ORDER BY last_accessed_at DESC
+		rows, err := dm.SQLDB().Query(`
+			SELECT id, collection, content,
+			       COALESCE(reinforcement_count, 0) as reinforcement_count,
+			       COALESCE(weight, 1) as weight,
+			       last_accessed_at,
+			       created_at
+			FROM memories
+			WHERE deleted_at IS NULL
+			  AND last_accessed_at IS NOT NULL
+			  AND (reinforcement_count > 0 OR weight > 1)
+			ORDER BY last_accessed_at DESC
+			LIMIT ?
+		`, resultLimit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Review query failed: %v\n", err)
 			return 1
 		}
-		// Sort by last_accessed_at DESC (already sorted by the method, but ensure)
-		sortByLastAccessed(memories)
+		defer rows.Close()
+
+		memories, err = scanMemoriesFromRows(rows)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Review scan failed: %v\n", err)
+			return 1
+		}
 	} else {
 		// Stale: LTM/high-weight memories not accessed in N+ days
-		memories, err = getStaleMemories(dm.SQLDB(), daysFilter, resultLimit)
+		memories, err = dm.GetSpacedReinforcementReview(daysFilter, 20)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Stale query failed: %v\n", err)
 			return 1
@@ -197,6 +216,30 @@ func sortByLastAccessed(memories []map[string]interface{}) {
 			}
 		}
 	}
+}
+
+// scanMemoriesFromRows scans SQL rows into a memory list
+func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, collection, content string
+		var reinforcementCount, weight int64
+		var lastAccess, createdAt time.Time
+
+		if err := rows.Scan(&id, &collection, &content, &reinforcementCount, &weight, &lastAccess, &createdAt); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"id":                  id,
+			"collection":         collection,
+			"content":             content,
+			"reinforcement_count": reinforcementCount,
+			"weight":              weight,
+			"last_accessed_at":    lastAccess,
+			"created_at":          createdAt,
+		})
+	}
+	return result, rows.Err()
 }
 
 // getStaleMemories returns LTM/high-weight memories not accessed in N+ days
