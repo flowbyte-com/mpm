@@ -38,11 +38,17 @@ When saving a memory, if content semantically matches an existing topic:
 - New `mpm topic link <topic-id> <memory-id>` command for linking
 - TypeScript `link_topic` tool added to plugin
 
-### 4. Memory age + stale flag
+### 4. Memory age + stale flag ✅ DONE (2026-05-14)
 No concept of "you stored this 3 weeks ago and haven't touched it."
 - Add `last_recalled` timestamp
 - Surface stale memories for review
 - "Unused memory" alerts
+**Implemented:**
+- `mpm recall --stale-days N` flags memories not accessed within N days (default 14, disabled with 0)
+- `is_stale` bool in JSON output per result
+- ⚠️ STALE chip in human-readable output (yellow, appended when memory exceeds threshold)
+- `isMemoryStale` helper: lastAccessed primary, createdAt fallback, exclusive comparison
+- Unit tests cover 7 boundary cases
 
 ### 5. Session context continuity
 Mode/persona files are correctly file-based (human-readable, easy to edit, diff-friendly — no need to move to SQLite).
