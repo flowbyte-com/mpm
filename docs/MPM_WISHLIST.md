@@ -11,11 +11,16 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 - Add `score` (0-1) and `rationale` (one-line) to each result
 - Makes the agent contextualize rather than just dump
 
-### 2. Frequency-weighted reinforcement
-Weight is static — set at save time and never updated.
-- Memories recalled every session should auto-elevate
-- Memories never recalled should surface for "did you forget this?" review
-- Spaced repetition logic, basically
+### 2. Frequency-weighted reinforcement ✅ DONE (2026-05-14)
+~~Weight is static — set at save time and never updated.~~
+- ~~Memories recalled every session should auto-elevate~~
+- ~~Memories never recalled should surface for "did you forget this?" review~~
+- ~~Spaced repetition logic, basically~~
+**Implemented:**
+- `handleRecall` now calls `ReinforceMemory(id, 1)` on first access per invocation (per-call deduplication)
+- `mpm review --promoted` shows recently elevated memories with `last_recalled` timestamp
+- `mpm review --stale --days N` shows LTM/high-weight memories not accessed in N+ days
+- Per-session deduplication: same memory recalled twice in one call = reinforced once
 
 ### 3. Topic auto-suggestion on save
 When saving a memory, if content semantically matches an existing topic:
@@ -85,9 +90,13 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 
 ## Things to Remove / Deprecate
 
-- File-based mode/persona storage → migrate to SQLite (see #5)
-- `synthesize` command → replaced by better recall, rarely used
-- The `--json` flag pre-scanning hack → standardize arg parsing across all handlers
+- File-based mode/persona storage → migrate to SQLite (see #5) — **pending**
+- `synthesize` command → replaced by better recall, rarely used — **pending**
+- The `--json` flag pre-scanning hack → standardize arg parsing across all handlers — **pending**
+
+---
+
+*Last updated: 2026-05-14*
 
 ---
 
