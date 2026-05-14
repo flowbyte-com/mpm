@@ -427,7 +427,7 @@ Add after `topicRemove`:
 
 func topicLink(args []string) int {
     if len(args) < 2 {
-        fmt.Fprintf(os.Stderr, "Usage: mpm topic link <topic-name> <memory-id> [--json]\n")
+        fmt.Fprintf(os.Stderr, "Usage: mpm topic link <topic-id> <memory-id> [--json]\n")
         return 1
     }
 
@@ -442,7 +442,7 @@ func topicLink(args []string) int {
     }
     args = filteredArgs
 
-    topicName := args[0]
+    topicID := args[0]
     memoryID := args[1]
 
     dbMgr, err := mpminternal.NewDatabaseManager("")
@@ -452,13 +452,13 @@ func topicLink(args []string) int {
     }
     defer dbMgr.Close()
 
-    // Get topic ID by name
-    topicID, err := dbMgr.GetTopicByName(topicName)
-    if err != nil {
+    // Verify topic exists by ID (not by name)
+    topic, err := dbMgr.GetTopic(topicID)
+    if err != nil || topic == nil {
         if jsonOutput {
-            fmt.Printf(`{"success":false,"error":"topic_not_found","topic_name":"%s"}\n`, topicName)
+            fmt.Printf(`{"success":false,"error":"topic_not_found","topic_id":"%s"}\n`, topicID)
         } else {
-            fmt.Fprintf(os.Stderr, "❌ Topic not found: %s\n", topicName)
+            fmt.Fprintf(os.Stderr, "❌ Topic not found: %s\n", topicID)
         }
         return 1
     }
@@ -481,14 +481,21 @@ func topicLink(args []string) int {
         return 1
     }
 
+    topicName := strField(topic, "name")
     if jsonOutput {
-        fmt.Printf(`{"success":true,"memory_id":"%s","topic_name":"%s","topic_id":"%s"}\n`,
-            memoryID, topicName, topicID)
+        fmt.Printf(`{"success":true,"memory_id":"%s","topic_id":"%s","topic_name":"%s"}\n`,
+            memoryID, topicID, topicName)
     } else {
-        fmt.Printf("✅ Linked %s → '%s'\n", memoryID[:min(8, len(memoryID))], topicName)
+        fmt.Printf("✅ Linked %s → '%s' (%s)\n", memoryID[:min(8, len(memoryID))], topicName, topicID[:min(8, len(topicID))])
     }
     return 0
 }
+```
+
+Also update the help text in `topicCmdHelp()`:
+```go
+  link <topic-id> <memory-id>
+    Link an existing memory to an existing topic.
 ```
 
 - [ ] **Step 3: Add `link` case to `topicCmd` switch**
@@ -545,12 +552,12 @@ const LINK_TOPIC_SCHEMA = {
       type: "string",
       description: "ID of the memory to link to a topic.",
     },
-    topic_name: {
+    topic_id: {
       type: "string",
-      description: "Name of the topic to link the memory to.",
+      description: "ID of the topic to link the memory to.",
     },
   },
-  required: ["memory_id", "topic_name"],
+  required: ["memory_id", "topic_id"],
   additionalProperties: false,
 } as const;
 ```
@@ -574,13 +581,13 @@ function makeLinkTopicTool(
     execute: async (toolCallId, params) => {
       const {
         memory_id = "",
-        topic_name = "",
+        topic_id = "",
       } = params as {
         memory_id: string;
-        topic_name: string;
+        topic_id: string;
       };
 
-      if (!memory_id.trim() || !topic_name.trim()) {
+      if (!memory_id.trim() || !topic_id.trim()) {
         return {
           toolCallId,
           result: {
@@ -590,7 +597,7 @@ function makeLinkTopicTool(
                 content: [
                   {
                     type: "text" as const,
-                    text: '{"success":false,"error":"missing_params","message":"memory_id and topic_name are required"}',
+                    text: '{"success":false,"error":"missing_params","message":"memory_id and topic_id are required"}',
                   },
                 ],
               },
@@ -601,7 +608,7 @@ function makeLinkTopicTool(
 
       const result = await runMpm([
         "topic", "link",
-        topic_name,
+        topic_id,
         memory_id,
         "--json",
       ]);
