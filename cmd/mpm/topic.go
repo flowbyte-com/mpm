@@ -68,7 +68,7 @@ Subcommands:
   delete <topic-name>
     Alias for rm.
 
-  link <topic-id> <memory-id>
+  link <topic-id> <memory-id> [--json]
     Link an existing memory to an existing topic.
 
 Examples:
@@ -439,7 +439,7 @@ func topicLink(args []string) int {
 	topic, err := dbMgr.GetTopic(topicID)
 	if err != nil {
 		if jsonOutput {
-			fmt.Printf(`{"success":false,"error":"topic not found","id":"%s"}%s`, topicID, "\n")
+			fmt.Printf(`{"success":false,"error":"topic_not_found","topic_id":"%s"}`+"\n", topicID)
 		} else {
 			fmt.Fprintf(os.Stderr, "❌ Topic not found: %s\n", topicID)
 		}
@@ -451,7 +451,7 @@ func topicLink(args []string) int {
 	memory, err := dbMgr.GetMemory(memoryID)
 	if err != nil {
 		if jsonOutput {
-			fmt.Printf(`{"success":false,"error":"memory not found","id":"%s"}%s`, memoryID, "\n")
+			fmt.Printf(`{"success":false,"error":"memory_not_found","memory_id":"%s"}`+"\n", memoryID)
 		} else {
 			fmt.Fprintf(os.Stderr, "❌ Memory not found: %s\n", memoryID)
 		}
