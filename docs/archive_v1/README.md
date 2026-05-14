@@ -1,4 +1,4 @@
-# MPM — Memory-Persona-Mode Manager
+# MPM — Memory Persistence Module
 
 SQLite-native agent state management for AI agents. Single binary, zero external deps.
 

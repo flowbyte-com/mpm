@@ -614,16 +614,6 @@ func runDoctorApplyFixes(report *DoctorReport) {
 	fmt.Printf("  %s%sApplying Fixes%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
 
 	// Fix database directory permissions
-	socketDir := filepath.Join(config.GetMPMDir(), "src", "db")
-	if err := os.Chmod(socketDir, 0755); err == nil {
-		fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Database Directory Permissions")
-		fmt.Printf("          chmod 755 %s\n\n", socketDir)
-	} else {
-		fmt.Printf("    [%s] %s\n", colorRed("FAIL"), "Database Directory Permissions")
-		fmt.Printf("          Cannot fix: %s\n\n", err.Error())
-	}
-
-	// Fix database directory permissions (always mpm/src/db/)
 	dbDir := filepath.Join(config.GetMPMDir(), "src", "db")
 	if err := os.Chmod(dbDir, 0755); err == nil {
 		fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Database Directory Permissions")
@@ -1092,7 +1082,7 @@ var (
 // PrintQuicklinks displays the categorized quicklinks when mpm is run with no args.
 func PrintQuicklinks() {
 	fmt.Println()
-	fmt.Println("MPM — Memory-Persona-Mode Manager")
+	fmt.Println("MPM — Memory Persistence Module")
 	fmt.Println()
 	fmt.Println("Usage: mpm <command> [arguments]")
 	fmt.Println()
@@ -1129,7 +1119,6 @@ func printHelp() {
 		{"reference", "Reference library", true},
 		{"lesson", "Lesson operations", true},
 		{"recall <query>", "Semantic memory search", false},
-		{"compile", "Compile JSON to database", false},
 		{"synthesize [uuid]", "Generate memory summaries", false},
 	})
 
@@ -1158,7 +1147,7 @@ func printHelp() {
 		Foreground(helpGold).
 		Bold(true).
 		Align(lipgloss.Center).
-		Render(" mpm  ·  Memory-Persona-Mode Manager")
+		Render(" mpm  ·  Memory Persistence Module")
 
 	subtitleStyle := lipgloss.NewStyle().
 		Foreground(helpCyan).
@@ -1204,7 +1193,7 @@ func buildHelpSection(title string, cmds []helpCmd) string {
 }
 
 // printGatewayHelp outputs gateway-specific help with lipgloss styling
-func printGatewayHelp() {
+func printGatewayHelp() int {
 	gatewayCmds := []helpCmd{
 		{"help", "Show this help", false},
 		{"start", "Start or connect to gateway", false},
@@ -1215,7 +1204,7 @@ func printGatewayHelp() {
 
 	var b strings.Builder
 	b.WriteString("\n")
-for _, c := range gatewayCmds {
+	for _, c := range gatewayCmds {
 		cmdStr := helpCommand.Render(c.name)
 		descStr := helpDesc.Render(c.desc)
 		b.WriteString(fmt.Sprintf("  %s  %s\n", cmdStr, descStr))
@@ -1225,6 +1214,7 @@ for _, c := range gatewayCmds {
 	b.WriteString(helpTip.Render("  mpm gateway start  # Start/restart gateway"))
 
 	fmt.Print(b.String() + "\n\n")
+	return 0
 }
 
 // parseWorkspaceFlag extracts --workspace from args (doesn't mutate global state)
