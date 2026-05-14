@@ -1,0 +1,94 @@
+# MPM Improvement Wishlist
+
+A running list of things I want to add or change in MPM. Updated as I think of things — not promises, just direction.
+
+---
+
+## High-Value Improvements
+
+### 1. Recall should explain itself
+`query_long_term_memory` returns matches but no ranking rationale. The agent sees results without knowing why they matched.
+- Add `score` (0-1) and `rationale` (one-line) to each result
+- Makes the agent contextualize rather than just dump
+
+### 2. Frequency-weighted reinforcement
+Weight is static — set at save time and never updated.
+- Memories recalled every session should auto-elevate
+- Memories never recalled should surface for "did you forget this?" review
+- Spaced repetition logic, basically
+
+### 3. Topic auto-suggestion on save
+When saving a memory, if content semantically matches an existing topic:
+- Prompt: "this relates to topic X — link it?"
+- Same for lessons: "this looks like a warning, save as lesson?"
+- System nudges structure instead of making agent do it manually
+
+### 4. Memory age + stale flag
+No concept of "you stored this 3 weeks ago and haven't touched it."
+- Add `last_recalled` timestamp
+- Surface stale memories for review
+- "Unused memory" alerts
+
+### 5. Unified blob storage (legacy debt)
+Mode files, persona files, memory chunks — all scattered across JSON.
+- Should all live in SQLite
+- File-based stuff is legacy tech debt creating sync issues
+
+### 6. Reference chunking control
+Fixed chunk size with no user control.
+- Sometimes want smaller chunks for precision, larger for context
+- Make chunk size configurable per-ingest
+
+---
+
+## Medium-Value Improvements
+
+### 7. Cross-reference linking
+Memories, lessons, topics, references — currently siloed.
+- When a memory is retrieved, show linked topics/references
+- When a topic is shown, surface related memories
+
+### 8. Memory decay scheduling
+TTL is manual. Should be automatic:
+- High-weight memories → slow decay
+- Low-weight + unaccessed → accelerate decay
+- Eventually suggest deletion instead of infinite storage
+
+### 9. Better directives UI
+`read_directives` returns raw JSON.
+- Format it with collection/category grouping
+- Show directive age ("defined 2 weeks ago")
+- Allow directive versioning
+
+### 10. Session memory context
+On session start, show: "last session you worked on X, had Y open, learned Z."
+- Summary of previous session without full recall
+- Jump-back context
+
+---
+
+## Low-Value (Nice to Have)
+
+### 11. Bulk import/export
+Dump memories to JSON for backup, import from other agents.
+
+### 12. Memory pruning with confirmation
+"12 memories haven't been accessed in 90 days — review or delete?"
+
+### 13. Tag autocomplete
+When saving with tags, suggest existing tags from similar memories.
+
+### 14. Reference source tracking
+Track where ingested documents came from (URL, file path, date) and surface on search results.
+
+---
+
+## Things to Remove / Deprecate
+
+- File-based mode/persona storage → migrate to SQLite (see #5)
+- `synthesize` command → replaced by better recall, rarely used
+- The `--json` flag pre-scanning hack → standardize arg parsing across all handlers
+
+---
+
+*Last updated: 2026-05-14*
