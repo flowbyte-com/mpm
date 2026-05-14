@@ -1100,7 +1100,7 @@ func PrintQuicklinks() {
 	fmt.Println("  switch          Interactive UI to change active persona/mode")
 	fmt.Println("  persona         Manage identity profiles")
 	fmt.Println("  mode            Manage behavioral modes")
-	fmt.Println("  prime-directives View current behavioral rules")
+	fmt.Println("  directives       View current behavioral rules")
 	fmt.Println()
 	fmt.Println("Run 'mpm help' for a complete list of all commands.")
 	fmt.Println("Run 'mpm help <command>' for detailed usage.")
@@ -1131,7 +1131,7 @@ func printHelp() {
 		{"help", "Show this help", false},
 		{"version", "Show version info", false},
 		{"switch", "Interactive UI for persona/mode", false},
-		{"prime-directives", "Show 808 directives", false},
+		{"directives", "Show current directives", false},
 		{"gateway", "Gateway control", true},
 	})
 

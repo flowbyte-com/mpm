@@ -110,6 +110,7 @@ func ReadOpenClawChunks(dbPath string, batchSize int) (<-chan []OpenClawChunk, <
 
 	go func() {
 		defer close(chunkChan)
+		defer close(errChan)
 		defer db.Close()
 
 		rows, err := db.Query(`
@@ -142,7 +143,6 @@ func ReadOpenClawChunks(dbPath string, batchSize int) (<-chan []OpenClawChunk, <
 		if len(batch) > 0 {
 			chunkChan <- batch
 		}
-		close(errChan)
 	}()
 
 	return chunkChan, errChan, nil
@@ -156,20 +156,17 @@ type IngestStats struct {
 	RowsRejected int // security filter
 }
 
-// IngestOpenClaw reads from an OpenClaw source DB and writes to raw_memories.
-// It applies security filtering and deduplication inline.
-func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error) {
-	schema, err := DetectSchema(sourcePath)
+// IngestFromAdapter ingests memories from any registered schema adapter.
+// The adapter handles detection and fetching; this function applies dedup and staging.
+func (dm *DatabaseManager) IngestFromAdapter(dbPath string, adapter SchemaAdapter, batchSize int, importBatch string, dryRun bool) (*IngestStats, error) {
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open DB: %w", err)
 	}
-	if schema.DBType != "openclaw" {
-		return nil, fmt.Errorf("unsupported source type: %s", schema.DBType)
-	}
+	defer db.Close()
 
-	chunks, errCh, err := ReadOpenClawChunks(sourcePath, batchSize)
-	if err != nil {
-		return nil, err
+	if !adapter.Detect(db) {
+		return nil, fmt.Errorf("adapter %s does not match schema at %s", adapter.Name(), dbPath)
 	}
 
 	stats := &IngestStats{}
@@ -178,41 +175,36 @@ func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, impo
 		importBatch = fmt.Sprintf("ingest_%d", time.Now().Unix())
 	}
 
-	for batch := range chunks {
-		for _, chunk := range batch {
+	// Stream in batches using the adapter
+	var cursor string
+	for {
+		memories, newCursor, err := adapter.FetchNew(db, cursor)
+		if err != nil {
+			return stats, fmt.Errorf("fetch failed: %w", err)
+		}
+
+		for _, mem := range memories {
 			stats.RowsRead++
 
-			// Skip empty text
-			if strings.TrimSpace(chunk.Text) == "" {
+			// Skip empty content
+			if strings.TrimSpace(mem.Content) == "" {
 				stats.RowsSkipped++
 				continue
 			}
 
 			// Security filter
-			if sensitive, reason := isSensitiveContent(chunk.Text); sensitive {
+			if sensitive, reason := isSensitiveContent(mem.Content); sensitive {
 				if !dryRun {
-					dm.insertRawMemoryRejected(chunk, now, importBatch, reason)
+					h := sha256.Sum256([]byte(mem.Content))
+					dm.insertRawMemoryRejectedFromAdapter(mem, now, importBatch, reason, hex.EncodeToString(h[:]))
 				}
 				stats.RowsRejected++
 				continue
 			}
 
-			// Dedup layer 1: content_hash already in memory table
-			exists, _ := dm.contentHashExistsInMemory(chunk.Hash)
-			if exists {
-				stats.RowsSkipped++
-				continue
-			}
-
-			// Dedup layer 2: source_id already staged in raw_memories
-			exists, _ = dm.sourceIDExistsInRawMemories(schema.DBType, chunk.ID)
-			if exists {
-				stats.RowsSkipped++
-				continue
-			}
-
-			// Dedup layer 3: same content_hash pending in raw_memories
-			exists, _ = dm.contentHashExistsInRawMemories(chunk.Hash, "pending")
+			// Dedup: content hash in memories table
+			contentHash := sha256.Sum256([]byte(mem.Content))
+			exists, _ := dm.contentHashExistsInMemory(hex.EncodeToString(contentHash[:]))
 			if exists {
 				stats.RowsSkipped++
 				continue
@@ -220,26 +212,25 @@ func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, impo
 
 			// Stage it
 			if !dryRun {
-				metadata, _ := json.Marshal(map[string]interface{}{
-					"path":       chunk.Path,
-					"source":     chunk.Source,
-					"start_line": chunk.StartLine,
-					"end_line":   chunk.EndLine,
-					"model":      chunk.Model,
-					"updated_at": chunk.UpdatedAt,
-				})
+				meta := mem.Metadata
+				if meta == nil {
+					meta = make(map[string]interface{})
+				}
+				meta["source"] = adapter.Name()
+				metadataJSON, _ := json.Marshal(meta)
+
 				raw := &RawMemory{
 					ID:           GenerateID(),
-					SourceID:     chunk.ID,
-					SourceDB:     schema.DBType,
-					ContentHash:  chunk.Hash,
-					Text:         chunk.Text,
-					Metadata:     string(metadata),
+					SourceID:     mem.ID,
+					SourceDB:     adapter.Name(),
+					ContentHash:  hex.EncodeToString(contentHash[:]),
+					Text:         mem.Content,
+					Metadata:     string(metadataJSON),
 					IngestedAt:   now,
 					Status:       "pending",
 					ImportBatch:  importBatch,
 					UpdatedAt:    now,
-					ExpiresAt:    now + (30 * 24 * 60 * 60), // 30 days
+					ExpiresAt:    now + (30 * 24 * 60 * 60),
 				}
 				if err := dm.insertRawMemory(raw); err != nil {
 					return stats, fmt.Errorf("insert failed: %w", err)
@@ -247,14 +238,41 @@ func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, impo
 			}
 			stats.RowsStaged++
 		}
-	}
 
-	if err := <-errCh; err != nil {
-		return stats, err
+		// If no new cursor or no memories, we're done
+		if newCursor == "" || len(memories) == 0 {
+			break
+		}
+		cursor = newCursor
 	}
 
 	return stats, nil
 }
+
+// insertRawMemoryRejectedFromAdapter inserts a rejected entry for adapter-based ingest
+func (dm *DatabaseManager) insertRawMemoryRejectedFromAdapter(mem Memory, now float64, importBatch string, reason string, contentHash string) error {
+	meta := mem.Metadata
+	if meta == nil {
+		meta = make(map[string]interface{})
+	}
+	metaJSON, _ := json.Marshal(meta)
+	_, err := dm.db.Exec(`
+		INSERT INTO raw_memories (id, source_id, source_db, content_hash, text, metadata, ingested_at, status, llm_verdict, llm_notes, import_batch, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'rejected', 'toxic', ?, ?, ?)
+	`, GenerateID(), mem.ID, mem.Source, contentHash, mem.Content, string(metaJSON), now, "security filter: "+reason, importBatch, now)
+	return err
+}
+
+// IngestOpenClaw reads from an OpenClaw source DB and writes to raw_memories.
+// It applies security filtering and deduplication inline.
+func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error) {
+	adapter, err := DetectSchemaAdapter(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	return dm.IngestFromAdapter(sourcePath, adapter, batchSize, importBatch, dryRun)
+}
+
 
 // insertRawMemory inserts a new raw_memory entry (status=pending).
 func (dm *DatabaseManager) insertRawMemory(raw *RawMemory) error {

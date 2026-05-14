@@ -214,7 +214,7 @@ func (s *MemoryStore) InitSQLite() error {
 		{"sessions_fts", "content, session_id, content_hash UNINDEXED", "sessions"},
 		{"topics_fts", "name, description", "topics"},
 		{"lessons_fts", "content, tags", "lessons"},
-		{"references_fts", "title, content, tags", "references"},
+		{"references_fts", "title, content, tags", "reference_docs"},
 	}
 	ftsAvailable := true
 	for _, ft := range fts {
@@ -244,9 +244,9 @@ func (s *MemoryStore) InitSQLite() error {
 		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
-		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
-		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END`,
-		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON reference_docs BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
+		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END`,
+		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
 	}
 	for _, sql := range triggers {
 		if _, err := s.DB.Exec(sql); err != nil {
@@ -440,7 +440,6 @@ var sensitivePatterns = []struct {
 	{"OpenAI Project Key", regexp.MustCompile(`sk-proj-[a-zA-Z0-9_-]{20,}`)},
 	{"OpenAI Service Key", regexp.MustCompile(`sk-svc-[a-zA-Z0-9_-]{20,}`)},
 	{"Anthropic API Key", regexp.MustCompile(`sk-ant-[a-zA-Z0-9_-]{20,}`)},
-	{"Generic Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
 	{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
 	{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
 	{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
@@ -456,6 +455,8 @@ var sensitivePatterns = []struct {
 	{"SSH Key", regexp.MustCompile(`-----BEGIN\s+OPENSSH\s+KEY-----`)},
 	{"Bearer Token", regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_-]{20,}`)},
 	{"Database Connection", regexp.MustCompile(`(?i)(mysql|postgres|mongodb|redis)://[^\s]+`)},
+	// Generic Secret Key MUST be last — it matches any sk- prefix not caught above
+	{"Generic Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
 }
 
 func init() {
@@ -1928,10 +1929,10 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 		}
 	}
 
-	// Update collection to deactivate
+	// Set deleted_at so active-memory queries (WHERE deleted_at IS NULL) exclude this record.
 	result, err := s.DB.Exec(`
-		UPDATE memories 
-		SET collection = collection || '_inactive',
+		UPDATE memories
+		SET deleted_at = CURRENT_TIMESTAMP,
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE id = ? AND collection = ?
 	`, id, collection)

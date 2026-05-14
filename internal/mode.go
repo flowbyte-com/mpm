@@ -2,104 +2,116 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"mpm/internal/config"
+
+	"gopkg.in/yaml.v3"
 )
 
-// Mode represents a mode configuration
+// Mode represents a mode configuration from .md file
 type Mode struct {
-	SymID        string      `json:"sym_id"`
-	Title        string      `json:"title"`
-	Name         string      `json:"name"`
-	Version      string      `json:"version"`
-	Description  string      `json:"description"`
-	Purpose      string      `json:"purpose"`
-	Patterns     string      `json:"patterns"`
-	Checklist    string      `json:"checklist"`
-	AntiPatterns interface{} `json:"anti_patterns"` // Accept string or array
-	Tools        interface{} `json:"tools"`        // Accept string or array
-	JSONData     string      `json:"-"`
+	Name         string `yaml:"name"`
+	Title        string `yaml:"title"`
+	Version      string `yaml:"version"`
+	Status       string `yaml:"status"`
+	Purpose      string `yaml:"purpose,omitempty"`
+	Description  string `yaml:"description,omitempty"`
+	Patterns     string `yaml:"patterns,omitempty"`
+	Checklist    string `yaml:"checklist,omitempty"`
+	AntiPatterns string `yaml:"anti_patterns,omitempty"`
+	Tools        string `yaml:"tools,omitempty"`
+	Content      string `yaml:"-"` // Markdown body after frontmatter
 }
 
-// ModeManager handles mode operations (JSON-only mode for lean binaries)
+// ModeManager handles mode operations from .md files
 type ModeManager struct {
-	JSONDir     string
-	ActiveFile  string
+	Dir        string
+	ActiveFile string
 }
 
-// NewModeManager creates a new mode manager (JSON-only mode)
-// Updated for new path structure: workspace/mode/ (pristine root)
+// NewModeManager creates a new mode manager
 func NewModeManager(basePath string) *ModeManager {
 	if basePath == "" {
-		// Use config.GetMPMDir() so modes are found at mpm/mode/
 		basePath = config.GetMPMDir()
 	}
-
 	return &ModeManager{
-		JSONDir:    filepath.Join(basePath, "mode"),
+		Dir:        filepath.Join(basePath, "mode"),
 		ActiveFile: filepath.Join(basePath, "active.json"),
 	}
 }
 
-// InitDB initializes the mode database (no-op for JSON-only mode)
-func (mm *ModeManager) InitDB() error {
-	os.MkdirAll(mm.JSONDir, 0755)
-	return nil
-}
-
-// Compile loads all modes from JSON files
-func (mm *ModeManager) Compile() (int, error) {
-	files, err := os.ReadDir(mm.JSONDir)
-	if err != nil {
-		return 0, err
-	}
-
-	count := 0
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-
-		jsonPath := filepath.Join(mm.JSONDir, file.Name())
-		data, err := os.ReadFile(jsonPath)
-		if err != nil {
-			continue
-		}
-
-		var m Mode
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-
-		// Validate required fields
-		if m.SymID == "" {
-			continue
-		}
-
-		count++
-	}
-
-	return count, nil
-}
-
-// Get retrieves a mode by name from JSON file
-func (mm *ModeManager) Get(name string) (*Mode, error) {
-	jsonPath := filepath.Join(mm.JSONDir, name+".json")
-	data, err := os.ReadFile(jsonPath)
+// parseModeFile reads a .md file and parses YAML frontmatter + markdown body
+func parseModeFile(path string) (*Mode, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+
+	content := string(data)
+	var frontmatter string
+	var body string
+
+	if strings.HasPrefix(content, "---") {
+		parts := strings.SplitN(content[3:], "---", 2)
+		if len(parts) == 2 {
+			frontmatter = strings.TrimSpace(parts[0])
+			body = strings.TrimSpace(parts[1])
+		}
 	}
 
 	var m Mode
-	if err := json.Unmarshal(data, &m); err != nil {
+	if frontmatter != "" {
+		if err := yaml.Unmarshal([]byte(frontmatter), &m); err != nil {
+			return nil, fmt.Errorf("invalid frontmatter in %s: %w", path, err)
+		}
+	}
+	m.Content = body
+
+	return &m, nil
+}
+
+// Get retrieves a mode by name from .md file
+func (mm *ModeManager) Get(name string) (*Mode, error) {
+	mdPath := filepath.Join(mm.Dir, name+".md")
+	return parseModeFile(mdPath)
+}
+
+// List returns all modes from .md files
+func (mm *ModeManager) List() ([]*Mode, error) {
+	entries, err := os.ReadDir(mm.Dir)
+	if err != nil {
 		return nil, err
 	}
 
-	return &m, nil
+	var modes []*Mode
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		m, err := parseModeFile(filepath.Join(mm.Dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if m.Name == "" && m.Title == "" {
+			continue
+		}
+		modes = append(modes, m)
+	}
+	return modes, nil
+}
+
+// Validate returns true if a mode .md file exists for the given name
+func (mm *ModeManager) Validate(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(mm.Dir, name+".md"))
+	return err == nil
 }
 
 // GetActive returns the active modes from the active file
@@ -109,13 +121,15 @@ func (mm *ModeManager) GetActive() ([]string, error) {
 		return nil, err
 	}
 
-	var active struct {
-		Modes []string `json:"modes"`
+	type activeState struct {
+		Persona string   `json:"persona"`
+		Modes   []string `json:"modes"`
+		Updated string   `json:"updated"`
 	}
+	var active activeState
 	if err := json.Unmarshal(data, &active); err != nil {
-		return nil, err
+		active = activeState{}
 	}
-
 	return active.Modes, nil
 }
 
@@ -127,13 +141,14 @@ func (mm *ModeManager) SetActive(modes []string) error {
 		return err
 	}
 
-	var active struct {
+	type activeState struct {
 		Persona string   `json:"persona"`
 		Modes   []string `json:"modes"`
 		Updated string   `json:"updated"`
 	}
+	var active activeState
 	if err := json.Unmarshal(data, &active); err != nil {
-		return err
+		active = activeState{}
 	}
 
 	// Filter to only valid modes
@@ -150,11 +165,7 @@ func (mm *ModeManager) SetActive(modes []string) error {
 	if err != nil {
 		return err
 	}
-	tmpPath := mm.ActiveFile + ".tmp"
-	if err := os.WriteFile(tmpPath, newData, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, mm.ActiveFile)
+	return os.WriteFile(mm.ActiveFile, newData, 0644)
 }
 
 // GetActiveModes returns the active modes (alias for GetActive)
@@ -162,110 +173,41 @@ func (mm *ModeManager) GetActiveModes() ([]string, error) {
 	return mm.GetActive()
 }
 
-// Validate returns true if a mode JSON file exists for the given name.
-func (mm *ModeManager) Validate(name string) bool {
-	if name == "" {
-		return false
-	}
-	jsonPath := filepath.Join(mm.JSONDir, name+".json")
-	_, err := os.Stat(jsonPath)
-	return err == nil
-}
-
 // SetActiveModes updates the active modes (alias for SetActive)
 func (mm *ModeManager) SetActiveModes(modes []string) error {
 	return mm.SetActive(modes)
 }
 
-// List returns all modes (read from JSON files directly)
-func (mm *ModeManager) List() ([]*Mode, error) {
-	files, err := os.ReadDir(mm.JSONDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var modes []*Mode
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-
-		jsonPath := filepath.Join(mm.JSONDir, file.Name())
-		data, err := os.ReadFile(jsonPath)
-		if err != nil {
-			continue
-		}
-
-		var m Mode
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-
-		if m.SymID != "" {
-			modes = append(modes, &m)
-		}
-	}
-
-	return modes, nil
-}
-
-// AddMode adds a mode to the active list
+// AddMode writes a new mode .md file (stub — mode files are managed externally)
 func (mm *ModeManager) AddMode(name string) error {
-	modes, _ := mm.GetActive()
-	for _, m := range modes {
-		if m == name {
-			return nil // already exists
-		}
-	}
-	modes = append(modes, name)
-	return mm.SetActive(modes)
+	return fmt.Errorf("mpm does not create mode files; manage them directly in %s", mm.Dir)
 }
 
-// RemoveMode removes a mode from the active list
+// RemoveMode removes a mode .md file
 func (mm *ModeManager) RemoveMode(name string) error {
-	modes, _ := mm.GetActive()
-	var newModes []string
-	for _, m := range modes {
-		if m != name {
-			newModes = append(newModes, m)
-		}
-	}
-	return mm.SetActive(newModes)
+	mdPath := filepath.Join(mm.Dir, name+".md")
+	return os.Remove(mdPath)
 }
 
-// ClearModes clears all modes
+// ClearModes sets active modes to empty
 func (mm *ModeManager) ClearModes() error {
-	return mm.SetActive([]string{})
+	return mm.SetActive(nil)
 }
 
-// RemoveAll removes all mode JSON files (secure delete)
+// RemoveAll removes all mode files (use with caution)
 func (mm *ModeManager) RemoveAll() (int, error) {
-	files, err := os.ReadDir(mm.JSONDir)
+	entries, err := os.ReadDir(mm.Dir)
 	if err != nil {
 		return 0, err
 	}
-
 	count := 0
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-
-		jsonPath := filepath.Join(mm.JSONDir, file.Name())
-		if err := os.Remove(jsonPath); err != nil {
-			continue
+		if err := os.Remove(filepath.Join(mm.Dir, entry.Name())); err == nil {
+			count++
 		}
-
-		count++
 	}
-
-	// Clear the active file
-	mm.ClearModes()
-
 	return count, nil
-}
-
-// CompileAll compiles all modes (no-op for JSON-only mode)
-func (mm *ModeManager) CompileAll() error {
-	return nil
 }

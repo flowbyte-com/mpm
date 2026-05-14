@@ -9,101 +9,108 @@ import (
 	"time"
 
 	"mpm/internal/config"
+
+	"gopkg.in/yaml.v3"
 )
 
-// Persona represents a persona configuration
+// Persona represents a persona configuration from .md file
 type Persona struct {
-	SymID       string                 `json:"sym_id"`
-	Title       string                 `json:"title"`
-	Name        string                 `json:"name"`
-	Version     string                 `json:"version"`
-	Description string                 `json:"description"`
-	Style       interface{}            `json:"style,omitempty"` // Accept string or object
-	Voice       interface{}            `json:"voice,omitempty"` // Accept string or object
-	Knowledge   map[string]interface{} `json:"knowledge,omitempty"`
-	JSONData    string                 `json:"-"`
+	Name        string `yaml:"name"`
+	Title       string `yaml:"title"`
+	Version     string `yaml:"version"`
+	Status      string `yaml:"status"`
+	Description string `yaml:"description,omitempty"`
+	Creature    string `yaml:"creature,omitempty"`
+	Vibe        string `yaml:"vibe,omitempty"`
+	Voice       string `yaml:"voice,omitempty"`
+	Emoji       string `yaml:"emoji,omitempty"`
+	Content     string `yaml:"-"` // Markdown body after frontmatter
 }
 
-// PersonaManager handles persona operations (JSON-only mode for lean binaries)
+// PersonaManager handles persona operations from .md files
 type PersonaManager struct {
-	JSONDir     string
-	ActiveFile  string
+	Dir        string
+	ActiveFile string
 }
 
-// NewPersonaManager creates a new persona manager (JSON-only mode)
-// Updated for new path structure: workspace/persona/ (pristine root)
+// NewPersonaManager creates a new persona manager
 func NewPersonaManager(basePath string) *PersonaManager {
 	if basePath == "" {
-		// Use config.GetMPMDir() so personas are found at mpm/persona/
 		basePath = config.GetMPMDir()
 	}
-
 	return &PersonaManager{
-		JSONDir:    filepath.Join(basePath, "persona"),
+		Dir:        filepath.Join(basePath, "persona"),
 		ActiveFile: filepath.Join(basePath, "active.json"),
 	}
 }
 
-// InitDB initializes the persona database (no-op for JSON-only mode)
-func (pm *PersonaManager) InitDB() error {
-	os.MkdirAll(pm.JSONDir, 0755)
-	return nil
-}
-
-// Compile loads all personas from JSON files
-func (pm *PersonaManager) Compile() (int, error) {
-	files, err := os.ReadDir(pm.JSONDir)
-	if err != nil {
-		return 0, err
-	}
-
-	count := 0
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-
-		jsonPath := filepath.Join(pm.JSONDir, file.Name())
-		data, err := os.ReadFile(jsonPath)
-		if err != nil {
-			continue
-		}
-
-		var p Persona
-		if err := json.Unmarshal(data, &p); err != nil {
-			continue
-		}
-
-		// Validate required fields
-		if p.SymID == "" {
-			continue
-		}
-
-		count++
-	}
-
-	return count, nil
-}
-
-// Get retrieves a persona by name from JSON file
-func (pm *PersonaManager) Get(symID string) (*Persona, error) {
-	jsonPath := filepath.Join(pm.JSONDir, symID+".json")
-	data, err := os.ReadFile(jsonPath)
+// parsePersonaFile reads a .md file and parses YAML frontmatter + markdown body
+func parsePersonaFile(path string) (*Persona, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+
+	content := string(data)
+	var frontmatter string
+	var body string
+
+	if strings.HasPrefix(content, "---") {
+		parts := strings.SplitN(content[3:], "---", 2)
+		if len(parts) == 2 {
+			frontmatter = strings.TrimSpace(parts[0])
+			body = strings.TrimSpace(parts[1])
+		}
 	}
 
 	var p Persona
-	if err := json.Unmarshal(data, &p); err != nil {
+	if frontmatter != "" {
+		if err := yaml.Unmarshal([]byte(frontmatter), &p); err != nil {
+			return nil, fmt.Errorf("invalid frontmatter in %s: %w", path, err)
+		}
+	}
+	p.Content = body
+
+	return &p, nil
+}
+
+// Get retrieves a persona by name from .md file
+func (pm *PersonaManager) Get(name string) (*Persona, error) {
+	mdPath := filepath.Join(pm.Dir, name+".md")
+	return parsePersonaFile(mdPath)
+}
+
+// List returns all personas from .md files
+func (pm *PersonaManager) List() ([]*Persona, error) {
+	entries, err := os.ReadDir(pm.Dir)
+	if err != nil {
 		return nil, err
 	}
 
-	// Validate required fields
-	if p.SymID != symID && p.Name != symID {
-		return nil, fmt.Errorf("persona ID mismatch")
+	var personas []*Persona
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		p, err := parsePersonaFile(filepath.Join(pm.Dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if p.Name == "" && p.Title == "" {
+			continue
+		}
+		personas = append(personas, p)
 	}
+	return personas, nil
+}
 
-	return &p, nil
+// Validate returns true if a persona .md file exists for the given name
+func (pm *PersonaManager) Validate(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(pm.Dir, name+".md"))
+	return err == nil
 }
 
 // GetActive returns the active persona name from the active file
@@ -113,11 +120,14 @@ func (pm *PersonaManager) GetActive() (string, error) {
 		return "", err
 	}
 
-	var active struct {
-		Persona string `json:"persona"`
+	type activeState struct {
+		Persona string   `json:"persona"`
+		Modes   []string `json:"modes"`
+		Updated string   `json:"updated"`
 	}
+	var active activeState
 	if err := json.Unmarshal(data, &active); err != nil {
-		return "", err
+		active = activeState{}
 	}
 
 	return active.Persona, nil
@@ -131,13 +141,14 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 		return err
 	}
 
-	var active struct {
+	type activeState struct {
 		Persona string   `json:"persona"`
 		Modes   []string `json:"modes"`
 		Updated string   `json:"updated"`
 	}
+	var active activeState
 	if err := json.Unmarshal(data, &active); err != nil {
-		return err
+		active = activeState{}
 	}
 
 	// Only set if valid, otherwise leave empty (triggers default fallback)
@@ -152,7 +163,6 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(pm.ActiveFile, newData, 0644)
 }
 
@@ -161,81 +171,57 @@ func (pm *PersonaManager) GetActivePersona() (string, error) {
 	return pm.GetActive()
 }
 
-// Validate returns true if a persona JSON file exists for the given name.
-func (pm *PersonaManager) Validate(name string) bool {
-	if name == "" {
-		return false
-	}
-	jsonPath := filepath.Join(pm.JSONDir, name+".json")
-	_, err := os.Stat(jsonPath)
-	return err == nil
-}
-
 // SetActivePersona updates the active persona (alias for SetActive)
 func (pm *PersonaManager) SetActivePersona(personaName string) error {
 	return pm.SetActive(personaName)
 }
 
-// List returns all personas (read from JSON files directly)
-func (pm *PersonaManager) List() ([]*Persona, error) {
-	files, err := os.ReadDir(pm.JSONDir)
+// SetActiveModes updates mode list in active file
+func (pm *PersonaManager) SetActiveModes(modes []string) error {
+	data, err := os.ReadFile(pm.ActiveFile)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var personas []*Persona
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-			continue
-		}
-
-		jsonPath := filepath.Join(pm.JSONDir, file.Name())
-		data, err := os.ReadFile(jsonPath)
-		if err != nil {
-			continue
-		}
-
-		var p Persona
-		if err := json.Unmarshal(data, &p); err != nil {
-			continue
-		}
-
-		if p.SymID != "" {
-			personas = append(personas, &p)
-		}
+	type activeState struct {
+		Persona string   `json:"persona"`
+		Modes   []string `json:"modes"`
+		Updated string   `json:"updated"`
+	}
+	var active activeState
+	if err := json.Unmarshal(data, &active); err != nil {
+		active = activeState{}
 	}
 
-	return personas, nil
+	active.Modes = modes
+	active.Updated = time.Now().Format(time.RFC3339)
+
+	newData, err := json.MarshalIndent(active, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pm.ActiveFile, newData, 0644)
 }
 
-// CompileAll compiles all personas (no-op for JSON-only mode)
-func (pm *PersonaManager) CompileAll() error {
-	return nil
+// ClearPersona sets active persona to empty
+func (pm *PersonaManager) ClearPersona() error {
+	return pm.SetActive("")
 }
 
-// RemoveAll removes all persona JSON files (secure delete)
+// RemoveAll removes all persona .md files (use with caution)
 func (pm *PersonaManager) RemoveAll() (int, error) {
-	files, err := os.ReadDir(pm.JSONDir)
+	entries, err := os.ReadDir(pm.Dir)
 	if err != nil {
 		return 0, err
 	}
-
 	count := 0
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-
-		jsonPath := filepath.Join(pm.JSONDir, file.Name())
-		if err := os.Remove(jsonPath); err != nil {
-			continue
+		if err := os.Remove(filepath.Join(pm.Dir, entry.Name())); err == nil {
+			count++
 		}
-
-		count++
 	}
-
-	// Clear the active file
-	pm.SetActive("")
-
 	return count, nil
 }

@@ -4,7 +4,19 @@
   "description": "Long-term memory tool for 808 — query and save memories via the agent's own SQLite-backed persistence layer.",
   "version": "1.0.0",
   "contracts": {
-    "tools": ["query_long_term_memory", "save_to_memory"]
+    "tools": [
+      "query_long_term_memory",
+      "save_to_memory",
+      "save_lesson",
+      "search_lessons",
+      "list_lessons",
+      "create_topic",
+      "search_topics",
+      "add_reference",
+      "search_references",
+      "list_references",
+      "read_directives"
+    ]
   },
   "activation": {
     "onStartup": true

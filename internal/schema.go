@@ -40,19 +40,7 @@ var BaseTables = []string{
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
 	);`,
 
-	// Modes table - stores mode configurations
-	`CREATE TABLE IF NOT EXISTS modes (
-		id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, content TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`,
-
-	// Personas table - stores persona configurations
-	`CREATE TABLE IF NOT EXISTS personas (
-		id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, content TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`,
-
-	// System config table - stores system configuration snapshots
+// System config table - stores system configuration snapshots
 	`CREATE TABLE IF NOT EXISTS system_config (
 		key TEXT PRIMARY KEY,
 		raw_json TEXT NOT NULL,
@@ -98,8 +86,8 @@ var BaseTables = []string{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
 
-	// References table - stores reference documents
-	`CREATE TABLE IF NOT EXISTS "references" (
+	// Reference documents table - aligned with ReferenceDB in reference_new.go
+	`CREATE TABLE IF NOT EXISTS reference_docs (
 		id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
 		source_type TEXT, tags TEXT, content TEXT NOT NULL, content_hash TEXT,
 		total_chunks INTEGER DEFAULT 0, last_indexed TEXT,
@@ -110,7 +98,7 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS reference_chunks (
 		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
 		section TEXT, content TEXT NOT NULL, source_path TEXT,
-		FOREIGN KEY (doc_id) REFERENCES "references"(id) ON DELETE CASCADE
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 }
 
