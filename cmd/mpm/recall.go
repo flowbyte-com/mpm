@@ -122,13 +122,10 @@ func handleRecall(args []string) int {
 		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
 		}
-		// Per-call access deduplication: reinforce and mark accessed only on first access in this call
+		// Per-call access deduplication: reinforce only on first access in this call
 		if sessionAccessCounts[id] == 0 {
 			if err := dm.ReinforceMemory(id, 1); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to reinforce memory %s: %v\n", id, err)
-			}
-			if _, err := dm.SQLDB().Exec(`UPDATE memories SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to update access time for %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to reinforce memory %s: %v\n", id, err)
 			}
 		}
 		sessionAccessCounts[id]++
