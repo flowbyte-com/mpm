@@ -80,6 +80,7 @@ func handleRecall(args []string) int {
 	defer dm.Close()
 
 	db := dm.SQLDB()
+	sessionAccessCounts := make(map[string]int)
 
 	// Keyword search using LIKE + FTS5 fallback with time filters
 	rows, err := keywordSearchWithTime(db, query, *collection, *since, *until, *limit)
@@ -121,6 +122,16 @@ func handleRecall(args []string) int {
 		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
 		}
+		// Per-call access deduplication: reinforce and mark accessed only on first access in this call
+		if sessionAccessCounts[id] == 0 {
+			if err := dm.ReinforceMemory(id, 1); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to reinforce memory %s: %v\n", id, err)
+			}
+			if err := dm.AccessMemory(id); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to access memory %s: %v\n", id, err)
+			}
+		}
+		sessionAccessCounts[id]++
 		entries = append(entries, entry)
 	}
 
