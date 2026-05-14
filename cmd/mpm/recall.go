@@ -33,7 +33,6 @@ func handleRecall(args []string) int {
 	until := fs.String("until", "", "Search memories until date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 15, "Maximum results to return")
 	staleDays := fs.Int("stale-days", 14, "Days threshold for stale flag (0=disabled)")
-	_ = staleDays // TODO: wire into output (Task 15)
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	collection := fs.String("collection", "memories", "Collection to search")
 	fs.Usage = func() {
@@ -181,6 +180,7 @@ func handleRecall(args []string) int {
 			LastAccessedAt     string `json:"last_accessed_at,omitempty"`
 			Score              float64 `json:"score"`
 			Rationale          string  `json:"rationale"`
+			IsStale            bool    `json:"is_stale"`
 		}
 		result := make([]memoryEntry, 0, len(entries))
 		for _, e := range entries {
@@ -190,6 +190,8 @@ func handleRecall(args []string) int {
 			}
 			score := computeScore(e.reinforcementCount, e.weight)
 			rationale := formatRationale(e.reinforcementCount, e.weight, e.lastAccessedAt)
+
+			isStale := isMemoryStale(e.createdAt, e.lastAccessedAt, *staleDays)
 
 			result = append(result, memoryEntry{
 				ID:                 shortID(e.id),
@@ -201,7 +203,8 @@ func handleRecall(args []string) int {
 				Weight:             e.weight,
 				LastAccessedAt:     lastAccessStr,
 				Score:              score,
-				Rationale:          rationale,
+				Rationale:         rationale,
+				IsStale:            isStale,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{
@@ -214,6 +217,7 @@ func handleRecall(args []string) int {
 
 	cyan := "\033[36m"
 	magenta := "\033[35m"
+	yellow := "\033[33m"
 	reset := "\033[0m"
 	bold := "\033[1m"
 
@@ -238,6 +242,12 @@ func handleRecall(args []string) int {
 		// Weight (skip if ≤ 1 since that's default)
 		if e.weight > 1 {
 			chips = append(chips, fmt.Sprintf("weight %d", e.weight))
+		}
+
+		// Stale indicator
+		isStale := isMemoryStale(e.createdAt, e.lastAccessedAt, *staleDays)
+		if isStale {
+			chips = append(chips, fmt.Sprintf("%s⚠️ STALE%s", yellow, reset))
 		}
 
 		// LTM flag
