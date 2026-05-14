@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -218,6 +220,47 @@ func TestRecallReinforceSQLPattern(t *testing.T) {
 	}
 	if !lastAccessed.Valid {
 		t.Error("mem-real: last_accessed_at should be set")
+	}
+}
+
+func TestComputeScore(t *testing.T) {
+	tests := []struct {
+		rc, weight int
+		wantMin, wantMax float64
+	}{
+		{0, 1, 0.0, 0.1},      // default: very low score
+		{5, 10, 0.4, 0.5},     // moderate: mid score
+		{10, 10, 0.6, 0.7},    // high: upper mid
+		{50, 20, 1.0, 1.0},    // capped at 1.0
+	}
+	for _, tt := range tests {
+		got := computeScore(tt.rc, tt.weight)
+		if got < tt.wantMin || got > tt.wantMax {
+			t.Errorf("computeScore(%d, %d) = %v, want between %v and %v",
+				tt.rc, tt.weight, got, tt.wantMin, tt.wantMax)
+		}
+	}
+}
+
+func TestFormatRationale(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		rc, weight   int
+		lastAccessed time.Time
+		wantSubstr   string
+	}{
+		{5, 12, now.Add(-48 * time.Hour), "5x ref"},
+		{5, 12, now.Add(-48 * time.Hour), "weight 12"},
+		{5, 12, now.Add(-48 * time.Hour), "LTM"},
+		{5, 12, now.Add(-48 * time.Hour), "accessed"},
+		{0, 1, time.Time{}, ""}, // no chips expected for default memory
+	}
+	for _, tt := range tests {
+		got := formatRationale(tt.rc, tt.weight, tt.lastAccessed)
+		if tt.wantSubstr != "" && !strings.Contains(got, tt.wantSubstr) {
+			t.Errorf("formatRationale(%d, %d, _) = %q, want substring %q",
+				tt.rc, tt.weight, got, tt.wantSubstr)
+		}
 	}
 }
 
