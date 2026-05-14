@@ -34,6 +34,7 @@ type Memory struct {
 	Weight             int                    `json:"weight,omitempty"`
 	LastAccessedAt     string                 `json:"last_accessed_at,omitempty"`
 	ExpiresAt          string                 `json:"expires_at,omitempty"`
+	SuggestedTopics    interface{}            `json:"suggested_topics,omitempty"`
 }
 
 // SearchResult represents a search result (used by SearchTopics)
