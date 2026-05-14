@@ -76,7 +76,27 @@ Memory added: abc123
 
 ---
 
-### Phase 2: TypeScript Plugin — `link_topic` Tool
+### Phase 2: Go Backend — `handleTopicLink`
+
+**File:** `cmd/mpm/topic.go`
+
+**New handler function:**
+```go
+func handleTopicLink(args []string) int {
+    // Usage: mpm topic link <topic_name> <memory_id> [--json]
+    // Links an existing memory to an existing topic.
+}
+```
+
+**Route:** `mpm topic link <topic_name> <memory_id>`
+
+`topic_link` is a new subcommand under `topic`. It:
+1. Looks up `topicID` by `topicName` (via `GetTopicByName`)
+2. Looks up `memoryID` existence in `memories` table
+3. Calls `AddMemoryToTopic(memoryID, topicID, "manual")`
+4. Outputs JSON on `--json`: `{"success": true, "memory_id": "...", "topic_name": "...", "topic_id": "..."}`
+
+### Phase 3: TypeScript Plugin — `link_topic` Tool
 
 **File:** `openclaw/mpm-plugin/src/index.ts`
 
@@ -100,7 +120,7 @@ const LINK_TOPIC_SCHEMA = {
 ```
 
 **`makeLinkTopicTool`:**
-- Command: `["topic", "add", memory_id, topic_name, "--json"]`
+- Command: `["topic", "link", topic_name, memory_id, "--json"]`
 - Returns JSON result of the link operation
 
 **Registered as:** `link_topic` tool
@@ -199,7 +219,8 @@ func computeTopicConfidence(memoryKeywords []string, topicName string) float64 {
 | File | Change |
 |------|--------|
 | `cmd/mpm/handlers.go` | Modify `handleMemoryAdd` to call topic suggestion after save |
-| `cmd/mpm/topic.go` | Add `sanitizeContentForFTS` and `suggestTopicsForMemory` functions |
+| `cmd/mpm/topic.go` | Add `sanitizeContentForFTS`, `suggestTopicsForMemory`, and `handleTopicLink` functions |
+| `cmd/mpm/router.go` | Add `"link"` subcommand under `"topic"` route |
 | `openclaw/mpm-plugin/src/index.ts` | Add `LINK_TOPIC_SCHEMA`, `makeLinkTopicTool`, register it |
 
 ---
