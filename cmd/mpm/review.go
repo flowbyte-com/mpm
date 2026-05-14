@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	mpminternal "mpm/internal"
@@ -136,8 +135,12 @@ func handleReview(args []string) int {
 				Collection:         m["collection"].(string),
 			})
 		}
+		modeStr := "promoted"
+		if !showPromoted {
+			modeStr = "stale"
+		}
 		data, _ := json.Marshal(map[string]interface{}{
-			"mode":     map[bool]bool{true: "promoted", false: "stale"}[showPromoted],
+			"mode":     modeStr,
 			"days":     daysFilter,
 			"count":    len(result),
 			"memories": result,
@@ -181,13 +184,12 @@ func handleReview(args []string) int {
 		// Recall frequency
 		recallFreq := fmt.Sprintf("%dx", rc)
 
-		fmt.Printf("%s%d.%s %s[%s]%s %s%dd%s weight\n",
+		fmt.Printf("%s%d.%s %s[%s]%s %s%s%s weight\n",
 			cyan, i+1, reset,
 			dim, id, reset,
 			magenta, recallFreq, reset)
-		fmt.Printf("   %s%dd%s ago  %s%+d%s\n",
-			magenta, age, reset,
-			dim, weightDelta, reset)
+		fmt.Printf("   %s%s  weight %s%+d%s\n",
+			magenta, age, dim, weightDelta, reset)
 		fmt.Printf("   %s\n\n", snippet)
 	}
 
@@ -205,8 +207,6 @@ func shortID(id string) string {
 
 // sortByLastAccessed sorts memories by last_accessed_at DESC
 func sortByLastAccessed(memories []map[string]interface{}) {
-	// GetSpacedReinforcementReview already returns sorted by last_accessed_at DESC
-	// But we sort again to be safe in case the order changes
 	for i := 0; i < len(memories)-1; i++ {
 		for j := i + 1; j < len(memories); j++ {
 			ti := memories[i]["last_accessed_at"].(time.Time)
@@ -231,7 +231,7 @@ func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 		}
 		result = append(result, map[string]interface{}{
 			"id":                  id,
-			"collection":         collection,
+			"collection":          collection,
 			"content":             content,
 			"reinforcement_count": reinforcementCount,
 			"weight":              weight,
@@ -240,44 +240,4 @@ func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 		})
 	}
 	return result, rows.Err()
-}
-
-// getStaleMemories returns LTM/high-weight memories not accessed in N+ days
-func getStaleMemories(db *sql.DB, days int, limit int) ([]map[string]interface{}, error) {
-	cutoff := time.Now().AddDate(0, 0, -days)
-	query := `
-		SELECT id, content, weight, reinforcement_count, last_accessed_at, collection, tags
-		FROM memories
-		WHERE deleted_at IS NULL
-		  AND (weight >= 10 OR collection = 'ltm')
-		  AND last_accessed_at < ?
-		ORDER BY last_accessed_at ASC
-		LIMIT ?`
-
-	rows, err := db.Query(query, cutoff.Format(time.RFC3339), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var id, content, collection, tags string
-		var weight, reinforcementCount int64
-		var lastAccess time.Time
-
-		if err := rows.Scan(&id, &content, &weight, &reinforcementCount, &lastAccess, &collection, &tags); err != nil {
-			continue
-		}
-		result = append(result, map[string]interface{}{
-			"id":                  id,
-			"content":             content,
-			"weight":              weight,
-			"reinforcement_count": reinforcementCount,
-			"last_accessed_at":    lastAccess,
-			"collection":          collection,
-			"tags":                tags,
-		})
-	}
-	return result, nil
 }
