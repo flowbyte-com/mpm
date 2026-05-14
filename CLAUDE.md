@@ -35,7 +35,7 @@ FTS5 must be enabled via `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5"`.
 
 ## MPM Architecture
 
-**Single-process, shared-database model.** No socket IPC, no separate watcher process. Commands execute directly in the same process. The file watcher runs as a background goroutine within the same binary (or as a detached child with `--bg` for systemd).
+**Single-process, shared-database model.** No socket IPC, no separate daemon. Commands execute directly in the same process. File watching runs as a background goroutine within the binary (detached with `mpm watch start --bg`).
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -44,7 +44,7 @@ FTS5 must be enabled via `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5"`.
 │  │   CLI    │──▶│  Router  │──▶│ Handlers │ │
 │  └──────────┘   └──────────┘   └────┬─────┘ │
 │                                      │       │
-│  Background: WorkerPool (3 goros) + fsnotify │
+│  Background: goroutine pool + fsnotify │
 │                  watcher             │       │
 │                         ┌────────────▼────┐ │
 │                         │  DBManager      │ │
@@ -58,7 +58,7 @@ FTS5 must be enabled via `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5"`.
 
 **Key architectural points:**
 - All access via one `DatabaseManager` instance sharing a single SQLite connection with WAL mode
-- Fixed-size goroutine pool (default 3 workers) processes file watcher events concurrently
+- Background goroutines process file watcher events (fsnotify) concurrently
 - PID file (`watch.pid`) for inter-process communication with detached mode
 
 **Memory model:** Everything is a **memory**. Collections distinguish types:
