@@ -159,19 +159,37 @@ func handleRecall(args []string) int {
 	// JSON output for tool integration
 	if *jsonOutput {
 		type memoryEntry struct {
-			ID        string `json:"id"`
-			Content   string `json:"content"`
-			Tags      string `json:"tags"`
-			SessionID string `json:"session_id,omitempty"`
-			CreatedAt string `json:"created_at"`
+			ID                 string `json:"id"`
+			Content            string `json:"content"`
+			Tags               string `json:"tags"`
+			SessionID          string `json:"session_id,omitempty"`
+			CreatedAt          string `json:"created_at"`
+			ReinforcementCount int    `json:"reinforcement_count"`
+			Weight             int    `json:"weight"`
+			LastAccessedAt     string `json:"last_accessed_at,omitempty"`
+			Score              float64 `json:"score"`
+			Rationale          string  `json:"rationale"`
 		}
 		result := make([]memoryEntry, 0, len(entries))
 		for _, e := range entries {
+			lastAccessStr := ""
+			if !e.lastAccessedAt.IsZero() {
+				lastAccessStr = e.lastAccessedAt.Format(time.RFC3339)
+			}
+			score := computeScore(e.reinforcementCount, e.weight)
+			rationale := formatRationale(e.reinforcementCount, e.weight, e.lastAccessedAt)
+
 			result = append(result, memoryEntry{
-				Content:   e.content,
-				Tags:      e.tags,
-				SessionID: e.sessionID,
-				CreatedAt: e.createdAt.Format(time.RFC3339),
+				ID:                 shortID(e.id),
+				Content:            e.content,
+				Tags:               e.tags,
+				SessionID:          e.sessionID,
+				CreatedAt:          e.createdAt.Format(time.RFC3339),
+				ReinforcementCount: e.reinforcementCount,
+				Weight:             e.weight,
+				LastAccessedAt:     lastAccessStr,
+				Score:              score,
+				Rationale:          rationale,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{

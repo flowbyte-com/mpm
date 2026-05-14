@@ -14,6 +14,8 @@ import (
 
 	"mpm/internal"
 	"mpm/internal/config"
+
+	mpminternal "mpm/internal"
 	"encoding/json"
 )
 
@@ -249,15 +251,73 @@ func handleMemoryAdd(args []string) int {
 		return respond("", "Usage: mpm memory add <content>", 1)
 	}
 
-	content := strings.Join(args, " ")
+	// Pre-scan for --json flag (may appear anywhere in args)
+	jsonOutput := false
+	contentArgs := make([]string, 0)
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		} else {
+			contentArgs = append(contentArgs, arg)
+		}
+	}
+	if len(contentArgs) == 0 {
+		return respond("", "Usage: mpm memory add <content>", 1)
+	}
+	content := strings.Join(contentArgs, " ")
+
 	store := getMemoryStore()
-	
 	mem, err := store.AddMemory(content, "memories", nil, nil, "", "cli")
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
 
-	return respond(fmt.Sprintf("Memory added with ID: %s\n", mem.ID), "", 0)
+	// Get topic suggestions (non-blocking — failures are silently ignored)
+	var suggestions []map[string]interface{}
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err == nil {
+		defer dm.Close()
+		suggestions, _ = suggestTopicsForMemory(dm, mem.ID, content, 3, 0.3)
+	}
+	mem.SuggestedTopics = suggestions
+
+	if jsonOutput {
+		// JSON output mode
+		type jsonResult struct {
+			Success         bool                     `json:"success"`
+			ID              string                   `json:"id"`
+			Content         string                   `json:"content"`
+			SuggestedTopics []map[string]interface{} `json:"suggested_topics,omitempty"`
+		}
+		result := jsonResult{
+			Success: true,
+			ID:      mem.ID,
+			Content: mem.Content,
+		}
+		if len(suggestions) > 0 {
+			result.SuggestedTopics = suggestions
+		}
+		out, _ := json.Marshal(result)
+		fmt.Println(string(out))
+		return 0
+	}
+
+	// Human output mode
+	output := fmt.Sprintf("✅ Memory added: %s\n", mem.ID)
+	if len(suggestions) > 0 {
+		var parts []string
+		for _, s := range suggestions {
+			if name, ok := s["name"].(string); ok {
+				if conf, ok := s["confidence"].(float64); ok {
+					parts = append(parts, fmt.Sprintf("%s (%.2f)", name, conf))
+				}
+			}
+		}
+		if len(parts) > 0 {
+			output += fmt.Sprintf("💡 Consider linking to: %s\n", strings.Join(parts, ", "))
+		}
+	}
+	return respond(output, "", 0)
 }
 
 func handleMemorySearch(args []string) int {
