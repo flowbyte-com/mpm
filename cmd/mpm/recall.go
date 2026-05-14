@@ -106,7 +106,7 @@ func handleRecall(args []string) int {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
 		var reinforcementCount, weight int64
-		var nullableLastAccessed sql.NullTime
+		var nullableLastAccessed sql.NullString
 
 		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt,
 			&reinforcementCount, &weight, &nullableLastAccessed); err != nil {
@@ -130,8 +130,10 @@ func handleRecall(args []string) int {
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			entry.createdAt = t
 		}
-		if nullableLastAccessed.Valid {
-			entry.lastAccessedAt = nullableLastAccessed.Time
+		if nullableLastAccessed.Valid && nullableLastAccessed.String != "" {
+			if t, err := time.Parse(time.RFC3339, nullableLastAccessed.String); err == nil {
+				entry.lastAccessedAt = t
+			}
 		}
 		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
