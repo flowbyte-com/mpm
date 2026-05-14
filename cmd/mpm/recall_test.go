@@ -223,6 +223,79 @@ func TestRecallReinforceSQLPattern(t *testing.T) {
 	}
 }
 
+func TestIsMemoryStale(t *testing.T) {
+	now := time.Now()
+	day := 24 * time.Hour
+
+	tests := []struct {
+		name       string
+		createdAt  time.Time
+		lastAccess time.Time
+		staleDays  int
+		want       bool
+	}{
+		{
+			name:       "disabled when staleDays=0",
+			createdAt:  now.Add(-30 * day),
+			lastAccess: time.Time{},
+			staleDays:  0,
+			want:       false,
+		},
+		{
+			name:       "recent last access — not stale",
+			createdAt:  now.Add(-30 * day),
+			lastAccess: now.Add(-5 * day),
+			staleDays:  14,
+			want:       false,
+		},
+		{
+			name:       "last access > threshold — stale",
+			createdAt:  now.Add(-30 * day),
+			lastAccess: now.Add(-20 * day),
+			staleDays:  14,
+			want:       true,
+		},
+		{
+			name:       "never accessed, created > threshold — stale",
+			createdAt:  now.Add(-20 * day),
+			lastAccess: time.Time{},
+			staleDays:  14,
+			want:       true,
+		},
+		{
+			name:       "never accessed, created < threshold — not stale",
+			createdAt:  now.Add(-5 * day),
+			lastAccess: time.Time{},
+			staleDays:  14,
+			want:       false,
+		},
+		{
+			name:       "last access exactly at threshold — not stale (exclusive)",
+			createdAt:  now.Add(-30 * day),
+			lastAccess: now.Add(-14*day + 1*time.Second),
+			staleDays:  14,
+			want:       false,
+		},
+		{
+			name:       "last access just past threshold — stale",
+			createdAt:  now.Add(-30 * day),
+			lastAccess: now.Add(-14*day - 1*time.Second),
+			staleDays:  14,
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isMemoryStale(tt.createdAt, tt.lastAccess, tt.staleDays)
+			if got != tt.want {
+				t.Errorf("isMemoryStale(%v, %v, %d) = %v, want %v",
+					tt.createdAt, tt.lastAccess, tt.staleDays, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestComputeScore(t *testing.T) {
 	tests := []struct {
 		rc, weight int
