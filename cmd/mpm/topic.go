@@ -32,6 +32,8 @@ func topicCmd(args []string) int {
 		return topicShow(args[2:])
 	case "rm", "delete":
 		return topicRm(args[2:])
+	case "link":
+		return topicLink(args[2:])
 	case "help":
 		return topicCmdHelp()
 	default:
@@ -65,6 +67,9 @@ Subcommands:
     Delete a topic by name (memories are NOT deleted).
   delete <topic-name>
     Alias for rm.
+
+  link <topic-id> <memory-id>
+    Link an existing memory to an existing topic.
 
 Examples:
   mpm topic create --today
@@ -394,6 +399,90 @@ func topicRm(args []string) int {
 		return 1
 	}
 	fmt.Printf("✅ Deleted topic '%s' (memories preserved)\n", topicName)
+	return 0
+}
+
+// =============================================================================
+// topicLink — Link an existing memory to an existing topic
+// =============================================================================
+
+func topicLink(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: mpm topic link <topic-id> <memory-id> [--json]\n")
+		return 1
+	}
+
+	// Pre-scan for --json
+	jsonOutput := false
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	if len(filtered) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: mpm topic link <topic-id> <memory-id> [--json]\n")
+		return 1
+	}
+	topicID, memoryID := filtered[0], filtered[1]
+
+	dbMgr, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ DB: %v\n", err)
+		return 1
+	}
+	defer dbMgr.Close()
+
+	// Verify topic exists
+	topic, err := dbMgr.GetTopic(topicID)
+	if err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"success":false,"error":"topic not found","id":"%s"}%s`, topicID, "\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "❌ Topic not found: %s\n", topicID)
+		}
+		return 1
+	}
+	topicName := strField(topic, "name")
+
+	// Verify memory exists
+	memory, err := dbMgr.GetMemory(memoryID)
+	if err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"success":false,"error":"memory not found","id":"%s"}%s`, memoryID, "\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "❌ Memory not found: %s\n", memoryID)
+		}
+		return 1
+	}
+	_ = memory // existence check only; AddMemoryToTopic handles the rest
+
+	// Link them
+	err = dbMgr.AddMemoryToTopic(memoryID, topicID, "manual")
+	if err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"success":false,"error":"%v"}`+"\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "❌ Failed to link: %v\n", err)
+		}
+		return 1
+	}
+
+	if jsonOutput {
+		fmt.Printf(`{"success":true,"memory_id":"%s","topic_id":"%s","topic_name":"%s"}`+"\n", memoryID, topicID, topicName)
+	} else {
+		memShort := memoryID
+		topicShort := topicID
+		if len(memShort) > 8 {
+			memShort = memShort[:8]
+		}
+		if len(topicShort) > 8 {
+			topicShort = topicShort[:8]
+		}
+		fmt.Printf("✅ Linked %s → '%s' (%s)\n", memShort, topicName, topicShort)
+	}
 	return 0
 }
 
