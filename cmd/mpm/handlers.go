@@ -284,18 +284,18 @@ func handleMemoryAdd(args []string) int {
 	if jsonOutput {
 		// JSON output mode
 		type jsonResult struct {
-			Success         bool                     `json:"success"`
-			ID              string                   `json:"id"`
-			Content         string                   `json:"content"`
-			SuggestedTopics []map[string]interface{} `json:"suggested_topics,omitempty"`
+			success         bool                     `json:"success"`
+			id              string                   `json:"id"`
+			content         string                   `json:"content"`
+			suggestedTopics []map[string]interface{} `json:"suggested_topics,omitempty"`
 		}
 		result := jsonResult{
-			Success: true,
-			ID:      mem.ID,
-			Content: mem.Content,
+			success: true,
+			id:      mem.ID,
+			content: mem.Content,
 		}
 		if len(suggestions) > 0 {
-			result.SuggestedTopics = suggestions
+			result.suggestedTopics = suggestions
 		}
 		out, _ := json.Marshal(result)
 		fmt.Println(string(out))
