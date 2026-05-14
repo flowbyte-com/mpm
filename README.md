@@ -12,12 +12,15 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 
 - **Unified SQLite database** with WAL mode for concurrent reads/writes
 - **Full-text search** via SQLite FTS5 — no external search service
+- **Inline importance chips** on recall results — reinforcement count, weight, LTM flag, last-accessed age, score (0–1)
+- **Auto-elevation on access** — frequently recalled memories grow stronger over time via per-session deduplication
+- **Spaced reinforcement review** — `mpm review --promoted` shows recently elevated; `mpm review --stale` surfaces forgotten LTM memories
+- **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
+- **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
 - **Automatic file watching** — `.md` files ingested as LTM; sessions swept, synthesized, archived
-- **Topic clustering** — 3+ LTM memories sharing a tag auto-generate a topic
 - **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
 - **Security scanning** — 20 regex patterns for API keys, tokens, secrets
 - **Modes & Personas** — file-based (`.md`), multi-select modes, single-select persona
-- **Spaced reinforcement** — accessed memories grow stronger over time
 
 ### What MPM Is NOT
 
