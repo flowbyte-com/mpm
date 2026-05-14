@@ -6,6 +6,46 @@ This is distinct from the mpm-agent MCP approach (see `docs/archive_v1/MPM_AGENT
 
 ---
 
+## Agent Configuration (`AGENTS.md`)
+
+The plugin provides the tools. The agent configuration controls when and how they are used. Set these directives in the agent's `AGENTS.md` (or workspace bootstrap file) to enforce the memory discipline:
+
+```markdown
+## MPM — Memory Persistence Module (Mandatory)
+
+MPM is your native SQLite-backed persistence layer. You are directly wired into it via your tool schema. It is **not** optional context — it is your primary brain.
+
+**CRITICAL: Mandatory Recall**
+Before answering *any* question about prior work, decisions, dates, people, preferences, or todos, you MUST execute the `query_long_term_memory` tool. NEVER claim you don't know something or guess an answer without querying your memory first.
+*Note: Use `memory_get` only when a result points to a specific file.*
+
+**CRITICAL: Mandatory Save**
+After any non-trivial action, lesson learned, or architectural decision, you MUST execute the `save_to_memory` tool.
+- **Tags:** Help later retrieval — use them heavily.
+- **Weight:** 0.5 default, higher for important absolute truths.
+- **TTL '24h':** Ephemeral session-scoped facts (e.g., current task context).
+- **TTL '0':** Permanent memories (user preferences, project state, architectural decisions).
+
+## Memory
+
+- **Running context:** MPM SQLite — sessions, lessons, modes, personas
+- **Immediate:** Use your `save_to_memory` tool to capture learnings in real-time.
+
+When you learn something worth keeping: add it to MPM immediately via your native tools. Text survives restarts. MPM is the source of truth for agent state.
+
+## Session Startup
+
+On every session start, before responding to the user:
+```bash
+bash /home/v/workspace/scripts/mpm-startup-recall.sh
+```
+Then read `memory/startup-context.md` — recent memories, lessons, and LTM fragments. Files stay authoritative for identity. MPM holds everything else.
+```
+
+These directives ensure the LLM routes via the tool schema (matching `query_long_term_memory` / `save_to_memory` directly) rather than falling back to shell exec.
+
+---
+
 ## What Gets Installed
 
 | File | Location |
