@@ -386,7 +386,7 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 	if limit <= 0 {
 		limit = 50
 	}
-	query := `SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM "references" ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := dm.db.Query(query, limit, offset)
 	if err != nil {
 		return nil, err
@@ -420,7 +420,7 @@ func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, e
 	var totalChunks int
 	err := dm.db.QueryRow(`
 		SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at
-		FROM "references" WHERE id = ?
+		FROM reference_docs WHERE id = ?
 	`, refID).Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt)
 	if err != nil {
 		return nil, err
@@ -483,9 +483,9 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 	if found {
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM "references" WHERE id IN (SELECT rowid FROM references_fts WHERE references_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
+		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE id IN (SELECT rowid FROM references_fts WHERE references_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
 	} else {
-		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM "references" WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?`, "%"+q+"%", "%"+q+"%", limit)
+		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?`, "%"+q+"%", "%"+q+"%", limit)
 	}
 
 	if err != nil {
@@ -535,9 +535,9 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 	if found {
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN "references" r ON rc.doc_id = r.id WHERE rc.id IN (SELECT rowid FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
+		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN reference_docs r ON rc.doc_id = r.id WHERE rc.id IN (SELECT rowid FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
 	} else {
-		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN "references" r ON rc.doc_id = r.id WHERE rc.content LIKE ? ORDER BY rc.chunk_index LIMIT ?`, "%"+q+"%", limit)
+		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN reference_docs r ON rc.doc_id = r.id WHERE rc.content LIKE ? ORDER BY rc.chunk_index LIMIT ?`, "%"+q+"%", limit)
 	}
 
 	if err != nil {
@@ -564,7 +564,11 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 
 // DeleteReference removes a reference doc and its chunks (cascade from FK)
 func (dm *DatabaseManager) DeleteReference(id string) error {
-	_, err := dm.db.Exec(`DELETE FROM "references" WHERE id = ?`, id)
+	_, err := dm.db.Exec(`DELETE FROM reference_chunks WHERE doc_id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = dm.db.Exec(`DELETE FROM reference_docs WHERE id = ?`, id)
 	return err
 }
 
@@ -578,7 +582,7 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 
 	tagsJSON, _ := MarshalJSON(doc.Tags)
 	_, err = tx.Exec(`
-		INSERT INTO "references" (id, title, file_path, source_type, tags, content, content_hash, total_chunks, last_indexed, created_at)
+		INSERT INTO reference_docs (id, title, file_path, source_type, tags, content, content_hash, total_chunks, last_indexed, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.Content, doc.ContentHash, doc.TotalChunks, doc.LastIndexed, doc.Created)
 	if err != nil {
