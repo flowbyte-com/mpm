@@ -44,10 +44,13 @@ No concept of "you stored this 3 weeks ago and haven't touched it."
 - Surface stale memories for review
 - "Unused memory" alerts
 
-### 5. Unified blob storage (legacy debt)
-Mode files, persona files, memory chunks — all scattered across JSON.
-- Should all live in SQLite
-- File-based stuff is legacy tech debt creating sync issues
+### 5. Session context continuity
+Mode/persona files are correctly file-based (human-readable, easy to edit, diff-friendly — no need to move to SQLite).
+
+The real question is **cross-session continuity**: knowing which mode/persona was active when a memory was saved, and surfacing "you were in programming mode last session, working on X."
+- Store `active_mode` and `active_persona` in memory metadata on save
+- On session start, show: "last session: programming mode, personified as hatter, discussed Y"
+- This makes the file-based approach a strength (easy to read mode state) rather than a limitation
 
 ### 6. Reference chunking control
 Fixed chunk size with no user control.
@@ -100,14 +103,7 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 
 ## Things to Remove / Deprecate
 
-- File-based mode/persona storage → migrate to SQLite (see #5) — **pending**
 - `synthesize` command → replaced by better recall, rarely used — **pending**
 - The `--json` flag pre-scanning hack → standardize arg parsing across all handlers — **pending**
-
----
-
-*Last updated: 2026-05-14*
-
----
 
 *Last updated: 2026-05-14*
