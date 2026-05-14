@@ -142,11 +142,7 @@ Add to `plugins.entries`, `plugins.load.paths`, and `tools.allow`:
     }
   },
   "tools": {
-    "profile": "coding",
-    "allow": [
-      "query_long_term_memory",
-      "save_to_memory"
-    ]
+    "profile": "coding"
   }
 }
 ```
@@ -213,9 +209,11 @@ ttl: "24h"  (optional, '0' for permanent)
 
 ## Troubleshooting
 
-**Plugin loads but tools don't appear in agent schema**
+**Tools don't appear in agent schema / "No callable tools remain" error**
 
-The `tools.allow` list must explicitly include `query_long_term_memory` and `save_to_memory`. Without this, the `coding` profile's implicit allowlist doesn't include plugin tools.
+Check your `openclaw.json` config. If you are using an explicit `tools.allow` array, it will block dynamic plugin hydration and crash the subagents.
+
+The Fix: Remove the `"allow"` array entirely from your `"tools"` block to let the Gateway dynamically inject the loaded plugin tools into your active profile. If you must use an allowlist for security, ensure you prefix the tools with the plugin namespace (e.g., `"mpm.query_long_term_memory"`, `"mpm.save_to_memory"`).
 
 **"No such module: fts5" on memory operations**
 
