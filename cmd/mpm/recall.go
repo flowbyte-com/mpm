@@ -91,17 +91,24 @@ func handleRecall(args []string) int {
 	defer rows.Close()
 
 	type recallEntry struct {
-		content     string
-		sessionID   string
-		createdAt   time.Time
-		tags        string
-		synthesized bool
+		content             string
+		sessionID           string
+		createdAt           time.Time
+		tags                string
+		synthesized         bool
+		reinforcementCount  int
+		weight              int
+		lastAccessedAt      time.Time
 	}
 	var entries []recallEntry
 	for rows.Next() {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
-		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt); err != nil {
+		var reinforcementCount, weight int64
+		var nullableLastAccessed sql.NullTime
+
+		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt,
+			&reinforcementCount, &weight, &nullableLastAccessed); err != nil {
 			continue
 		}
 		if content == "" {
@@ -112,12 +119,17 @@ func handleRecall(args []string) int {
 			sessionID = nullableSessionID.String
 		}
 		entry := recallEntry{
-			content:   content,
-			sessionID: sessionID,
-			tags:      nullableTags.String,
+			content:             content,
+			sessionID:           sessionID,
+			tags:                nullableTags.String,
+			reinforcementCount:  int(reinforcementCount),
+			weight:              int(weight),
 		}
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			entry.createdAt = t
+		}
+		if nullableLastAccessed.Valid {
+			entry.lastAccessedAt = nullableLastAccessed.Time
 		}
 		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
@@ -249,7 +261,10 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 
 	// Try FTS5 first
 	ftsQuery := `
-		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
+		SELECT m.id, m.content, m.session_id, m.tags, m.created_at,
+		       COALESCE(m.reinforcement_count, 0) as reinforcement_count,
+		       COALESCE(m.weight, 1) as weight,
+		       m.last_accessed_at
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
 		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.collection = ?`
@@ -276,7 +291,10 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 	// FTS5 failed — fallback to LIKE
 	likePattern := "%" + query + "%"
 	likeQuery := `
-		SELECT id, content, session_id, tags, created_at
+		SELECT id, content, session_id, tags, created_at,
+		       COALESCE(reinforcement_count, 0) as reinforcement_count,
+		       COALESCE(weight, 1) as weight,
+		       last_accessed_at
 		FROM memories
 		WHERE deleted_at IS NULL AND collection = ?
 		  AND (content LIKE ? OR tags LIKE ?)`

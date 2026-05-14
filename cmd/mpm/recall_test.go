@@ -87,7 +87,8 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 	sessionAccessCounts := make(map[string]int)
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id, new(string), new(string), new(string), new(string)); err != nil {
+		// Scan all 8 columns: id, content, session_id, tags, created_at, reinforcement_count, weight, last_accessed_at
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(string), new(int64), new(int64), new(sql.NullTime)); err != nil {
 			continue
 		}
 		if sessionAccessCounts[id] == 0 {
@@ -148,7 +149,8 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 	sessionAccessCounts := make(map[string]int)
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id, new(string), new(string), new(string), new(string)); err != nil {
+		// Scan all 8 columns: id, content, session_id, tags, created_at, reinforcement_count, weight, last_accessed_at
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(string), new(int64), new(int64), new(sql.NullTime)); err != nil {
 			continue
 		}
 		if sessionAccessCounts[id] == 0 {
