@@ -117,10 +117,10 @@ Add after `formatAge` (around line 325):
 
 ```go
 // computeScore returns a fractional score 0-1 based on reinforcement count and weight.
-// Formula: clamp((rc * 2 + weight * 1.5) / 50, 0, 1)
+// Formula: clamp((rc * 2 + weight * 1.5) / 55, 0, 1)
 func computeScore(rc, weight int) float64 {
     raw := float64(rc*2) + float64(weight*3)/2
-    result := raw / 50.0
+    result := raw / 55.0
     if result > 1.0 {
         result = 1.0
     }
@@ -378,9 +378,7 @@ Expected: PASS
    - `formatRationale(rc, weight int, lastAccessed time.Time) string` — uses existing `formatAge`
    - `shortID(id string) string` — already exists in `review.go`, must be accessible in `recall.go` (both in `cmd/mpm` package)
 
-4. **Score formula:** `(rc * 2 + weight * 1.5) / 50` → max value 1.0 when rc=10, weight=10 → (20+15)/50 = 0.7... wait. Recalculate: if we want rc=10, w=10 → 0.85 → denominator should be ~41. Or target rc=20, w=10 → max. Let me verify: (20*2 + 10*1.5) = 55. For score=1.0, denominator should be 55. Use denominator 55 to allow typical high-value memories to approach 1.0.
-
-   Actually: use denominator 60 to give headroom. rc=10, w=10 → (20+15)/60 = 0.58. rc=20, w=10 → (40+15)/60 = 0.92. rc=20, w=20 → (40+30)/60 = 1.17 → capped to 1.0. Good.
+4. **Score formula:** `(rc * 2 + weight * 1.5) / 55` — denominator 55: rc=10,w=10 → (20+15)/55 = 0.64; rc=20,w=10 → (40+15)/55 = 1.0 (maxed). Values above 1.0 clamped to 1.0.
 
 5. **Variable name:** The scan variable for memory ID in `handleRecall` is `id` (from `rows.Scan(&id, &content, ...)`). Use `shortID(id)` in both human and JSON output.
 
