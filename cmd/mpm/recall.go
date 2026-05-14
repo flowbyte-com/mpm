@@ -127,8 +127,8 @@ func handleRecall(args []string) int {
 			if err := dm.ReinforceMemory(id, 1); err != nil {
 				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to reinforce memory %s: %v\n", id, err)
 			}
-			if err := dm.AccessMemory(id); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to access memory %s: %v\n", id, err)
+			if _, err := dm.SQLDB().Exec(`UPDATE memories SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️ Warning: failed to update access time for %s: %v\n", id, err)
 			}
 		}
 		sessionAccessCounts[id]++
