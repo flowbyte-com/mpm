@@ -183,6 +183,22 @@ const SEARCH_TOPICS_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const LINK_TOPIC_SCHEMA = {
+  type: "object",
+  properties: {
+    memory_id: {
+      type: "string",
+      description: "ID of the memory to link to a topic.",
+    },
+    topic_id: {
+      type: "string",
+      description: "ID of the topic to link the memory to.",
+    },
+  },
+  required: ["memory_id", "topic_id"],
+  additionalProperties: false,
+} as const;
+
 // ── References ───────────────────────────────────────────────────────────────
 
 const ADD_REFERENCE_SCHEMA = {
@@ -752,6 +768,68 @@ function makeSearchTopicsTool(
   };
 }
 
+function makeLinkTopicTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "link_topic",
+    description:
+      "Link an existing memory to an existing topic. " +
+      "Use this after saving a memory and seeing topic suggestions. " +
+      "The memory and topic must both already exist.",
+    parameters: LINK_TOPIC_SCHEMA,
+    emoji_name: "link",
+    execute: async (toolCallId, params) => {
+      const {
+        memory_id = "",
+        topic_id = "",
+      } = params as {
+        memory_id: string;
+        topic_id: string;
+      };
+
+      if (!memory_id.trim() || !topic_id.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: '{"success":false,"error":"missing_params","message":"memory_id and topic_id are required"}',
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      const result = await runMpm([
+        "topic", "link",
+        topic_id,
+        memory_id,
+        "--json",
+      ]);
+      const data = parseMpmResult(result);
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [
+            {
+              content: [{ type: "text" as const, text: JSON.stringify(data) }],
+            },
+          ],
+        },
+      };
+    },
+  };
+}
+
 // ── References ───────────────────────────────────────────────────────────────
 
 function makeAddReferenceTool(
@@ -1005,6 +1083,11 @@ export default definePluginEntry({
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeSearchTopicsTool(ctx),
       { names: ["search_topics"], optional: false }
+    );
+
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeLinkTopicTool(ctx),
+      { names: ["link_topic"], optional: true }
     );
 
     // ── Reference Tools ──────────────────────────────────────────────────
