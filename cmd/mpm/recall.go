@@ -341,3 +341,40 @@ func formatAge(t time.Time) string {
 		return fmt.Sprintf("%dd ago", days)
 	}
 }
+
+// computeScore returns a fractional score 0-1 based on reinforcement count and weight.
+// Formula: clamp((rc * 2 + weight * 1.5) / 55, 0, 1)
+func computeScore(rc, weight int) float64 {
+	raw := float64(rc*2) + float64(weight*3)/2
+	result := raw / 55.0
+	if result > 1.0 {
+		result = 1.0
+	}
+	if result < 0.0 {
+		result = 0.0
+	}
+	return result
+}
+
+// formatRationale returns a one-line string describing why this memory matters.
+func formatRationale(rc, weight int, lastAccessed time.Time) string {
+	parts := []string{}
+
+	if rc > 0 {
+		parts = append(parts, fmt.Sprintf("%dx ref", rc))
+	}
+
+	if weight > 1 {
+		parts = append(parts, fmt.Sprintf("weight %d", weight))
+	}
+
+	if weight >= 10 {
+		parts = append(parts, "LTM")
+	}
+
+	if !lastAccessed.IsZero() {
+		parts = append(parts, "accessed "+formatAge(lastAccessed))
+	}
+
+	return strings.Join(parts, " · ")
+}
