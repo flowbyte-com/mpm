@@ -91,14 +91,15 @@ func handleRecall(args []string) int {
 	defer rows.Close()
 
 	type recallEntry struct {
-		content             string
-		sessionID           string
-		createdAt           time.Time
-		tags                string
-		synthesized         bool
-		reinforcementCount  int
-		weight              int
-		lastAccessedAt      time.Time
+		id                   string
+		content              string
+		sessionID            string
+		createdAt            time.Time
+		tags                 string
+		synthesized          bool
+		reinforcementCount   int
+		weight               int
+		lastAccessedAt       time.Time
 	}
 	var entries []recallEntry
 	for rows.Next() {
@@ -119,6 +120,7 @@ func handleRecall(args []string) int {
 			sessionID = nullableSessionID.String
 		}
 		entry := recallEntry{
+			id:                  id,
 			content:             content,
 			sessionID:           sessionID,
 			tags:                nullableTags.String,
@@ -187,38 +189,66 @@ func handleRecall(args []string) int {
 
 	fmt.Printf("%s%sRecall — %s%s\n\n", bold, cyan, query, reset)
 
+	dim := "\033[2m"
 	for i, e := range entries {
-		age := ""
-		if !e.createdAt.IsZero() {
-			age = formatAge(e.createdAt)
-		}
-
 		content := e.content
 		if len(content) > 250 {
 			content = content[:250] + "..."
 		}
 		content = stripMarkdown(content)
 
-		sessionTag := ""
-		if e.sessionID != "" {
-			sessionTagLen := 8
-			if len(e.sessionID) < sessionTagLen {
-				sessionTagLen = len(e.sessionID)
-			}
-			sessionTag = fmt.Sprintf(" %s[%s]%s", magenta, e.sessionID[:sessionTagLen], reset)
+		// Build chip list
+		chips := []string{}
+
+		// Reinforcement count
+		if e.reinforcementCount > 0 {
+			chips = append(chips, fmt.Sprintf("%dx ref", e.reinforcementCount))
 		}
+
+		// Weight (skip if ≤ 1 since that's default)
+		if e.weight > 1 {
+			chips = append(chips, fmt.Sprintf("weight %d", e.weight))
+		}
+
+		// LTM flag
+		ltmTag := ""
+		if e.weight >= 10 {
+			ltmTag = fmt.Sprintf(" %sLTM%s", magenta, reset)
+		}
+
+		// Access age (use lastAccessedAt, not createdAt)
+		accessAge := ""
+		if !e.lastAccessedAt.IsZero() {
+			accessAge = formatAge(e.lastAccessedAt)
+		}
+
+		// ID chip
+		shortID := shortID(e.id)
+		idChip := fmt.Sprintf("%s[%s]%s", dim, shortID, reset)
+
+		// Assemble chip line
+		chipParts := []string{idChip}
+		for _, c := range chips {
+			chipParts = append(chipParts, fmt.Sprintf("%s%s%s", magenta, c, reset))
+		}
+		if accessAge != "" {
+			chipParts = append(chipParts, fmt.Sprintf("%s%s%s", magenta, accessAge, reset))
+		}
+
+		chipsLine := strings.Join(chipParts, " · ")
+		if ltmTag != "" {
+			chipsLine += ltmTag
+		}
+
 		synthTag := ""
 		if e.synthesized {
 			synthTag = fmt.Sprintf(" %s[synth]%s", magenta, reset)
 		}
-		ageTag := ""
-		if age != "" {
-			ageTag = fmt.Sprintf(" %s%s%s", magenta, age, reset)
-		}
 
 		fmt.Printf("%s%d.%s %s%s%s\n    %s\n\n",
 			cyan, i+1, reset,
-			sessionTag, ageTag, synthTag,
+			chipsLine, synthTag,
+			reset,
 			content)
 	}
 
