@@ -32,6 +32,8 @@ func handleRecall(args []string) int {
 	since := fs.String("since", "", "Search memories since date (YYYY-MM-DD)")
 	until := fs.String("until", "", "Search memories until date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 15, "Maximum results to return")
+	staleDays := fs.Int("stale-days", 14, "Days threshold for stale flag (0=disabled)")
+	_ = staleDays // TODO: wire into output (Task 15)
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	collection := fs.String("collection", "memories", "Collection to search")
 	fs.Usage = func() {
@@ -44,10 +46,18 @@ func handleRecall(args []string) int {
 	// Pre-scan for --json since callers may place it after the query.
 	preprocessed := make([]string, 0, len(args))
 	jsonFlagSeen := false
-	for _, arg := range args[1:] {
+	for i, arg := range args[1:] {
 		if arg == "--json" || arg == "-j" {
 			jsonFlagSeen = true
-			continue // drop from processed args, we'll set it directly
+			continue
+		}
+		if arg == "--stale-days" && i+2 < len(args) {
+			// skip --stale-days and its value
+			continue
+		}
+		if strings.HasPrefix(arg, "--stale-days=") {
+			// skip --stale-days=value
+			continue
 		}
 		preprocessed = append(preprocessed, arg)
 	}
@@ -427,4 +437,20 @@ func formatRationale(rc, weight int, lastAccessed time.Time) string {
 	}
 
 	return strings.Join(parts, " · ")
+}
+
+// isMemoryStale returns true if the memory has not been accessed within staleDays.
+func isMemoryStale(createdAt, lastAccessed time.Time, staleDays int) bool {
+	if staleDays <= 0 {
+		return false // feature disabled
+	}
+	threshold := time.Duration(staleDays) * 24 * time.Hour
+
+	if !lastAccessed.IsZero() {
+		return time.Since(lastAccessed) > threshold
+	}
+	if !createdAt.IsZero() {
+		return time.Since(createdAt) > threshold
+	}
+	return false
 }
