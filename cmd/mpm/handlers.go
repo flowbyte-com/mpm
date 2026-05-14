@@ -14,7 +14,14 @@ import (
 
 	"mpm/internal"
 	"mpm/internal/config"
+	"encoding/json"
 )
+
+
+// Package-level singleton DatabaseManager — initialized once per process,
+// shared across all handler calls to avoid connection proliferation.
+var dbManager *internal.DatabaseManager
+var dbManagerInitErr error
 
 // watchPool is the shared WorkerPool used by file watcher and external DB pollers.
 // It is initialized by main() in the unified process architecture.
@@ -146,6 +153,15 @@ Examples:
 // ============================================================================
 
 func handlePrimeDirectives() int {
+	// Pre-scan for --json since callers may place it after the command
+	jsonOutput := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+			break
+		}
+	}
+
 	store := getMemoryStore()
 	if store == nil {
 		return respond("", "Error: memory store not available\n", 1)
@@ -167,9 +183,38 @@ func handlePrimeDirectives() int {
 	}
 	defer rows.Close()
 
+	if jsonOutput {
+		type directiveEntry struct {
+			ID        string `json:"id"`
+			Collection string `json:"collection"`
+			Content   string `json:"content"`
+			CreatedAt string `json:"created_at"`
+		}
+		directives := make([]directiveEntry, 0)
+		for rows.Next() {
+			var id, collection, content, metadata, created string
+			if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
+				continue
+			}
+			directives = append(directives, directiveEntry{
+				ID:         id,
+				Collection: collection,
+				Content:    content,
+				CreatedAt:   created,
+			})
+		}
+		if len(directives) == 0 {
+			fmt.Println(`{"directives": [], "message": "No prime directives found"}`)
+		} else {
+			data, _ := json.Marshal(map[string]interface{}{"directives": directives})
+			fmt.Println(string(data))
+		}
+		return 0
+	}
+
 	var output strings.Builder
-	output.WriteString("\n🛸 808 PRIME DIRECTIVES 🛸\n")
-	output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	output.WriteString("\n\xf0\x9f\x9b\xb8 808 PRIME DIRECTIVES \xf0\x9f\x9b\xb8\n")
+	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n\n")
 
 	count := 0
 	for rows.Next() {
@@ -178,7 +223,6 @@ func handlePrimeDirectives() int {
 			continue
 		}
 		output.WriteString(fmt.Sprintf("[%s] %s\n\n", id, collection))
-		// Print content, word-wrapped at 70 chars
 		content = strings.TrimSpace(content)
 		for i := 0; i < len(content); i += 70 {
 			end := i + 70
@@ -195,9 +239,10 @@ func handlePrimeDirectives() int {
 		output.WriteString("No prime directives found. Run the session that defines them.\n")
 	}
 
-	output.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n")
 	return respond(output.String(), "", 0)
 }
+
 
 func handleMemoryAdd(args []string) int {
 	if len(args) == 0 {
@@ -403,7 +448,7 @@ func handleMemoryWipe(args []string) int {
 
 func handleShred(args []string) int {
 	if len(args) < 1 {
-		handleShredHelp()
+		return handleShredHelp()
 	}
 
 	targetType := args[0]
@@ -732,13 +777,20 @@ Examples:
 
 func handleTopicAdd(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm topic add <name> [description]", 1)
+		return respond("", "Usage: mpm topic add <name> [description] [--json]", 1)
 	}
 
 	name := args[0]
 	description := ""
-	if len(args) > 1 {
-		description = strings.Join(args[1:], " ")
+	jsonOutput := false
+
+	// Pre-scan for --json
+	for _, arg := range args[1:] {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		} else if !strings.HasPrefix(arg, "-") {
+			description = arg
+		}
 	}
 
 	store := getMemoryStore()
@@ -752,27 +804,84 @@ func handleTopicAdd(args []string) int {
 	`, id, name, description)
 
 	if err != nil {
-		return respond("", fmt.Sprintf("Failed to add topic: %v", err), 1)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add topic: %v", err)})
+			fmt.Println(string(data))
+		} else {
+			respond("", fmt.Sprintf("Failed to add topic: %v", err), 1)
+		}
+		return 1
 	}
 
-	return respond(fmt.Sprintf("Topic added: %s\n", name), "", 0)
+	if jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":     true,
+			"id":         id,
+			"name":       name,
+			"description": description,
+		})
+		fmt.Println(string(data))
+	} else {
+		respond(fmt.Sprintf("Topic added: %s\n", name), "", 0)
+	}
+	return 0
 }
 
 func handleTopicSearch(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm topic search <query>", 1)
+		return respond("", "Usage: mpm topic search <query> [--json]", 1)
 	}
 
 	query := strings.Join(args, " ")
+	jsonOutput := false
+	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
+		jsonOutput = true
+		args = args[:len(args)-1]
+		query = strings.Join(args, " ")
+	}
+
 	store := getMemoryStore()
 
 	results, err := store.SearchTopics(query, 20)
 	if err != nil {
-		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "error": fmt.Sprintf("Search failed: %v", err)})
+			fmt.Println(string(data))
+		} else {
+			respond("", fmt.Sprintf("Search failed: %v", err), 1)
+		}
+		return 1
 	}
 
 	if len(results) == 0 {
-		return respond("No topics found.\n", "", 0)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "message": "No topics found"})
+			fmt.Println(string(data))
+		} else {
+			respond("No topics found.\n", "", 0)
+		}
+		return 0
+	}
+
+	if jsonOutput {
+		type topicResult struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			CreatedAt   string `json:"created_at"`
+		}
+		result := make([]topicResult, 0, len(results))
+		for _, r := range results {
+			result = append(result, topicResult{
+				ID:          r.ID,
+				Name:        r.Snippet,
+				Description: r.Snippet,
+				CreatedAt:   r.Created,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"query": query, "results": result})
+		fmt.Println(string(data))
+		return 0
 	}
 
 	var output strings.Builder
@@ -792,10 +901,15 @@ func handleTopicSearch(args []string) int {
 
 func handleTopicShow(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm topic show <id>", 1)
+		return respond("", "Usage: mpm topic show <id> [--json]", 1)
 	}
 
 	id := args[0]
+	jsonOutput := false
+	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
+		jsonOutput = true
+	}
+
 	store := getMemoryStore()
 	db := store.DB
 
@@ -805,7 +919,36 @@ func handleTopicShow(args []string) int {
 	`, id).Scan(&name, &description, &created)
 
 	if err != nil {
-		return respond("", fmt.Sprintf("Topic not found: %s\n", id), 1)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Topic not found: " + id})
+			fmt.Println(string(data))
+		} else {
+			respond("", fmt.Sprintf("Topic not found: %s\n", id), 1)
+		}
+		return 1
+	}
+
+	if jsonOutput {
+		// Get memory IDs for this topic
+		rows, _ := db.Query("SELECT memory_id FROM topic_memberships WHERE topic_id = ?", id)
+		memoryIDs := []string{}
+		for rows.Next() {
+			var mid string
+			rows.Scan(&mid)
+			memoryIDs = append(memoryIDs, mid)
+		}
+		rows.Close()
+		chunkCount := len(memoryIDs)
+		data, _ := json.Marshal(map[string]interface{}{
+			"id":           id,
+			"name":         name,
+			"description":  description,
+			"created_at":   created,
+			"memory_ids":   memoryIDs,
+			"chunk_count":  chunkCount,
+		})
+		fmt.Println(string(data))
+		return 0
 	}
 
 	var output strings.Builder
@@ -836,17 +979,49 @@ func handleTopicPromote(args []string) int {
 }
 
 func handleTopicList(args []string) int {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		}
+	}
+
 	store := getMemoryStore()
 	db := store.DB
 
 	rows, err := db.Query(`
-		SELECT id, name, description, created_at FROM topics 
+		SELECT id, name, description, created_at FROM topics
 		ORDER BY created_at DESC LIMIT 20
 	`)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to list topics: %v", err), 1)
 	}
 	defer rows.Close()
+
+	if jsonOutput {
+		type topicEntry struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			CreatedAt   string `json:"created_at"`
+		}
+		result := make([]topicEntry, 0)
+		for rows.Next() {
+			var id, name, description, created string
+			if err := rows.Scan(&id, &name, &description, &created); err != nil {
+				continue
+			}
+			result = append(result, topicEntry{
+				ID:          id,
+				Name:        name,
+				Description: description,
+				CreatedAt:   created,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"topics": result})
+		fmt.Println(string(data))
+		return 0
+	}
 
 	var output strings.Builder
 	output.WriteString("Topics:\n\n")
@@ -867,10 +1042,6 @@ func handleTopicList(args []string) int {
 
 	return respond(output.String(), "", 0)
 }
-
-// ============================================================================
-// Handler: session
-// ============================================================================
 
 func handleSession(args []string) int {
 	if len(args) < 1 {
@@ -1387,14 +1558,7 @@ func handleModeAdd(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add mode: %v", err), 1)
 	}
-
-	// Compile the mode
-	_, compileErr := mm.Compile()
-	if compileErr != nil {
-		return respond(fmt.Sprintf("Mode added: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
-	}
-
-	return respond(fmt.Sprintf("Mode added: %s (compiled)\n", name), "", 0)
+	return respond(fmt.Sprintf("Mode added: %s\n", name), "", 0)
 }
 
 func handleModeRemove(args []string) int {
@@ -1467,14 +1631,8 @@ func handleModeSelect() int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to set modes: %v", err), 1)
 	}
+	return respond(fmt.Sprintf("Active modes updated: %s\n", strings.Join(selected, ", ")), "", 0)
 
-	// Auto-compile modes
-	compiledCount, compileErr := mm.Compile()
-	if compileErr != nil {
-		return respond(fmt.Sprintf("Active modes updated: %s\n\n", strings.Join(selected, ", ")), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
-	}
-
-	return respond(fmt.Sprintf("Active modes updated: %s\nCompiled %d mode(s).\n", strings.Join(selected, ", "), compiledCount), "", 0)
 }
 
 // ============================================================================
@@ -1575,14 +1733,7 @@ func handlePersonaSet(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to set persona: %v", err), 1)
 	}
-
-	// Auto-compile persona
-	compiledCount, compileErr := pm.Compile()
-	if compileErr != nil {
-		return respond(fmt.Sprintf("Persona set: %s\n\n", name), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
-	}
-
-	return respond(fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", name, compiledCount), "", 0)
+	return respond(fmt.Sprintf("Persona set: %s\n", name), "", 0)
 }
 
 func handlePersonaClear() int {
@@ -1636,97 +1787,13 @@ func handlePersonaSelect() int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to set persona: %v", err), 1)
 	}
+	return respond(fmt.Sprintf("Persona set: %s\n", selected[0]), "", 0)
 
-	// Auto-compile persona
-	compiledCount, compileErr := pm.Compile()
-	if compileErr != nil {
-		return respond(fmt.Sprintf("Persona set: %s\n\n", selected[0]), fmt.Sprintf("Warning: Auto-compile failed: %v\n", compileErr), 0)
-	}
-
-	return respond(fmt.Sprintf("Persona set: %s\nCompiled %d persona(s).\n", selected[0], compiledCount), "", 0)
 }
 
 // ============================================================================
 // Handler: llm
 // ============================================================================
-
-func handleLlm(args []string) int {
-	if len(args) < 1 {
-		return handleLlmHelp()
-	}
-
-	subCmd := args[0]
-	switch subCmd {
-	case "help":
-		return handleLlmHelp()
-	case "list":
-		return handleLlmList()
-	case "status":
-		return handleLlmStatus()
-	default:
-		return handleLlmHelp()
-	}
-}
-
-func handleLlmHelp() int {
-	output := `mpm llm - LLM operations
-
-Usage:
-  mpm llm list                  List available LLM providers
-  mpm llm status                Show LLM configuration status
-
-Examples:
-  mpm llm list
-  mpm llm status
-`
-	return respond(output, "", 0)
-}
-
-func handleLlmList() int {
-	// List available LLM configurations
-	output := `Available LLM providers:
-
-  ollama          Local Ollama instance
-  openai          OpenAI API
-  anthropic       Anthropic Claude
-  groq            Groq API
-
-Configure via environment variables:
-  OLLAMA_HOST     Ollama server address
-  OPENAI_API_KEY  OpenAI API key
-  ANTHROPIC_KEY   Anthropic API key
-  GROQ_API_KEY    Groq API key
-`
-	return respond(output, "", 0)
-}
-
-func handleLlmStatus() int {
-	var output strings.Builder
-	output.WriteString("LLM Configuration:\n\n")
-
-	// Check environment variables
-	ollama := os.Getenv("OLLAMA_HOST")
-	if ollama == "" {
-		ollama = "localhost:11434 (default)"
-	}
-	output.WriteString(fmt.Sprintf("  OLLAMA_HOST:  %s\n", ollama))
-
-	openai := os.Getenv("OPENAI_API_KEY")
-	if openai != "" {
-		output.WriteString("  OPENAI_API_KEY: [set] (redacted)\n")
-	} else {
-		output.WriteString("  OPENAI_API_KEY: [not set]\n")
-	}
-
-	anthropic := os.Getenv("ANTHROPIC_KEY")
-	if anthropic != "" {
-		output.WriteString("  ANTHROPIC_KEY:  [set] (redacted)\n")
-	} else {
-		output.WriteString("  ANTHROPIC_KEY:  [not set]\n")
-	}
-
-	return respond(output.String(), "", 0)
-}
 
 // ============================================================================
 // Handler: lesson
@@ -1789,12 +1856,24 @@ Lesson types:
 
 func handleLessonAdd(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags]", 1)
+		return respond("", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags] [--json]", 1)
 	}
 
 	content := ""
 	lessonType := "insight"
 	var tags []string
+	jsonOutput := false
+
+	// Pre-scan for --json since callers may place it after the content
+	filteredArgs := []string{}
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	args = filteredArgs
 
 	i := 0
 	for i < len(args) {
@@ -1814,10 +1893,19 @@ func handleLessonAdd(args []string) int {
 				i++
 			}
 		default:
-			if content == "" {
-				content = strings.Join(args[i:], " ")
+			// First non-flag arg is the content; consume it and stop
+			content = args[i]
+			// Check if there are more args that aren't flags
+			i++
+			for i < len(args) && !strings.HasPrefix(args[i], "--") {
+				content += " " + args[i]
+				i++
 			}
-			i = len(args) // consume all remaining args and exit loop
+			// Skip any remaining flags
+			for i < len(args) {
+				i++
+			}
+			break
 		}
 	}
 
@@ -1825,31 +1913,92 @@ func handleLessonAdd(args []string) int {
 		return respond("", "Usage: mpm lesson add <content>", 1)
 	}
 
-	lessonStore := internal.NewLessonStore("")
+	lessonStore, err := internal.NewLessonStore("")
+	if err != nil {
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to initialize lesson store: %v", err)})
+			fmt.Println(string(data))
+		} else {
+			respond("", fmt.Sprintf("Failed to initialize lesson store: %v", err), 1)
+		}
+		return 1
+	}
 	lesson, err := lessonStore.AddLesson(content, internal.LessonType(lessonType), tags, "")
 	if err != nil {
-		return respond("", fmt.Sprintf("Failed to add lesson: %v", err), 1)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add lesson: %v", err)})
+			fmt.Println(string(data))
+		} else {
+			respond("", fmt.Sprintf("Failed to add lesson: %v", err), 1)
+		}
+		return 1
 	}
 
-	return respond(fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", 0)
+	if jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":       true,
+			"id":           lesson.ID,
+			"type":         string(lesson.Type),
+			"reinforcement": lesson.ReinforcementCount,
+		})
+		fmt.Println(string(data))
+	} else {
+		respond(fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", 0)
+	}
+	return 0
 }
 
 func handleLessonList(args []string) int {
 	lessonType := ""
+	jsonOutput := false
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--type=") {
 			lessonType = strings.TrimPrefix(arg, "--type=")
 		}
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		}
 	}
 
-	lessonStore := internal.NewLessonStore("")
-	lessons, err := lessonStore.ListLessons(internal.LessonType(lessonType))
-	if err != nil {
-		return respond("", fmt.Sprintf("Failed to list lessons: %v", err), 1)
+	lessonStore, storeErr := internal.NewLessonStore("")
+	if storeErr != nil {
+		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	}
+	lessons, listErr := lessonStore.ListLessons(internal.LessonType(lessonType))
+	if listErr != nil {
+		return respond("", fmt.Sprintf("Failed to list lessons: %v", listErr), 1)
 	}
 
 	if len(lessons) == 0 {
-		return respond("No lessons stored.\n", "", 0)
+		if jsonOutput {
+			fmt.Println(`{"lessons": [], "message": "No lessons stored"}`)
+		} else {
+			respond("No lessons stored.\n", "", 0)
+		}
+		return 0
+	}
+
+	if jsonOutput {
+		type lessonEntry struct {
+			ID        string   `json:"id"`
+			Type      string   `json:"type"`
+			Content   string   `json:"content"`
+			Tags      []string `json:"tags"`
+			CreatedAt string   `json:"created_at"`
+		}
+		result := make([]lessonEntry, 0, len(lessons))
+		for _, l := range lessons {
+			result = append(result, lessonEntry{
+				ID:        l.ID,
+				Type:      string(l.Type),
+				Content:   l.Content,
+				Tags:      l.Tags,
+				CreatedAt: l.Created,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"lessons": result})
+		fmt.Println(string(data))
+		return 0
 	}
 
 	var output strings.Builder
@@ -1869,18 +2018,58 @@ func handleLessonList(args []string) int {
 
 func handleLessonSearch(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm lesson search <query>", 1)
+		return respond("", "Usage: mpm lesson search <query> [--json]", 1)
 	}
 
 	query := strings.Join(args, " ")
-	lessonStore := internal.NewLessonStore("")
-	results, err := lessonStore.SearchLessons(query, 20)
-	if err != nil {
-		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
+	jsonOutput := false
+	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
+		jsonOutput = true
+		// Remove --json from query
+		args = args[:len(args)-1]
+		query = strings.Join(args, " ")
+	}
+
+	lessonStore, storeErr := internal.NewLessonStore("")
+	if storeErr != nil {
+		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	}
+	results, searchErr := lessonStore.SearchLessons(query, 20)
+	if searchErr != nil {
+		return respond("", fmt.Sprintf("Search failed: %v", searchErr), 1)
 	}
 
 	if len(results) == 0 {
-		return respond("No lessons found.\n", "", 0)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "message": "No lessons found"})
+			fmt.Println(string(data))
+		} else {
+			respond("No lessons found.\n", "", 0)
+		}
+		return 0
+	}
+
+	if jsonOutput {
+		type lessonResult struct {
+			ID        string   `json:"id"`
+			Type      string   `json:"type"`
+			Content   string   `json:"content"`
+			Tags      []string `json:"tags"`
+			CreatedAt string   `json:"created_at"`
+		}
+		result := make([]lessonResult, 0, len(results))
+		for _, l := range results {
+			result = append(result, lessonResult{
+				ID:        l.ID,
+				Type:      string(l.Type),
+				Content:   l.Content,
+				Tags:      l.Tags,
+				CreatedAt: l.Created,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"query": query, "results": result})
+		fmt.Println(string(data))
+		return 0
 	}
 
 	var output strings.Builder
@@ -1902,9 +2091,12 @@ func handleLessonGet(args []string) int {
 	}
 
 	id := args[0]
-	lessonStore := internal.NewLessonStore("")
-	lesson, err := lessonStore.GetLesson(id)
-	if err != nil {
+	lessonStore, storeErr := internal.NewLessonStore("")
+	if storeErr != nil {
+		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	}
+	lesson, getErr := lessonStore.GetLesson(id)
+	if getErr != nil {
 		return respond("", fmt.Sprintf("Lesson not found: %s\n", id), 1)
 	}
 
@@ -1929,7 +2121,10 @@ func handleLessonShred(args []string) int {
 	}
 
 	id := args[0]
-	lessonStore := internal.NewLessonStore("")
+	lessonStore, storeErr := internal.NewLessonStore("")
+	if storeErr != nil {
+		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	}
 	err := lessonStore.DeleteLesson(id)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to shred lesson: %v", err), 1)
@@ -1939,10 +2134,13 @@ func handleLessonShred(args []string) int {
 }
 
 func handleLessonStats() int {
-	lessonStore := internal.NewLessonStore("")
-	stats, err := lessonStore.GetLessonStats()
-	if err != nil {
-		return respond("", fmt.Sprintf("Failed to get stats: %v", err), 1)
+	lessonStore, storeErr := internal.NewLessonStore("")
+	if storeErr != nil {
+		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	}
+	stats, statsErr := lessonStore.GetLessonStats()
+	if statsErr != nil {
+		return respond("", fmt.Sprintf("Failed to get stats: %v", statsErr), 1)
 	}
 
 	var output strings.Builder
@@ -1994,94 +2192,44 @@ func handleMenu() int {
 }
 
 // ============================================================================
-// Handler: compile
-// ============================================================================
-
-func handleCompile(args []string) int {
-	if len(args) < 1 {
-		return handleCompileHelp()
-	}
-
-	target := args[0]
-	switch target {
-	case "mode":
-		return handleCompileMode()
-	case "persona":
-		return handleCompilePersona()
-	case "all":
-		return handleCompileAll()
-	default:
-		return handleCompileHelp()
-	}
-}
-
-func handleCompileHelp() int {
-	output := `mpm compile - Compilation operations
-
-Usage:
-  mpm compile mode              Compile all modes
-  mpm compile persona           Compile all personas
-  mpm compile all               Compile everything
-
-Modes and personas are auto-compiled when changed.
-This command forces a recompilation.
-
-Examples:
-  mpm compile mode
-  mpm compile all
-`
-	return respond(output, "", 0)
-}
-
-func handleCompileMode() int {
-	mm := internal.NewModeManager("")
-	count, err := mm.Compile()
-	if err != nil {
-		return respond("", fmt.Sprintf("Failed to compile modes: %v", err), 1)
-	}
-
-	return respond(fmt.Sprintf("Compiled %d modes.\n", count), "", 0)
-}
-
-func handleCompilePersona() int {
-	pm := internal.NewPersonaManager("")
-	count, err := pm.Compile()
-	if err != nil {
-		return respond("", fmt.Sprintf("Failed to compile personas: %v", err), 1)
-	}
-
-	return respond(fmt.Sprintf("Compiled %d personas.\n", count), "", 0)
-}
-
-func handleCompileAll() int {
-	mm := internal.NewModeManager("")
-	pm := internal.NewPersonaManager("")
-
-	modeCount, modeErr := mm.Compile()
-	personaCount, personaErr := pm.Compile()
-
-	errMsg := ""
-	if modeErr != nil {
-		errMsg += fmt.Sprintf("modes: %v ", modeErr)
-	}
-	if personaErr != nil {
-		errMsg += fmt.Sprintf("personas: %v ", personaErr)
-	}
-	return respond(fmt.Sprintf("Compiled %d modes, %d personas.\n", modeCount, personaCount), errMsg, 0)
-}
-
-// ============================================================================
 // Utility Functions
 // ============================================================================
 
 
 func getMemoryStore() *internal.MemoryStore {
-	paths := internal.DefaultMemoryPaths()
-	store := internal.NewMemoryStore(filepath.Dir(paths.SQLiteDBPath))
-	if store.DB == nil {
-		store.InitSQLite()
+	if dbManager == nil {
+		dm, err := internal.NewDatabaseManager("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			return nil
+		}
+		dbManager = dm
 	}
-	return store
+	// Wrap the shared *sql.DB in a SQLiteConnection to satisfy MemoryStore.DB.
+	return &internal.MemoryStore{
+		DB: &internal.SQLiteConnection{DB: dbManager.SQLDB()},
+	}
+}
+
+// initDB is called once during main() startup to prime the singleton.
+func initDB() error {
+	if dbManager != nil {
+		return nil
+	}
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	dbManager = dm
+	return nil
+}
+
+// closeDB closes the singleton connection. Call from main() on exit.
+func closeDB() {
+	if dbManager != nil {
+		dbManager.Close()
+		dbManager = nil
+	}
 }
 
 func getSessionDir() string {
@@ -2217,9 +2365,11 @@ func handleWatch(args []string) int {
 		return handleWatchRemovePath(args[1:])
 	case "list-paths", "paths":
 		return handleWatchListPaths(args[1:])
+	case "help":
+		return handleWatchHelp()
 
 	default:
-		return respond("", fmt.Sprintf("Unknown watch subcommand: %s\n", subCmd), 1)
+		return handleWatchHelp()
 	}
 }
 
@@ -2363,4 +2513,25 @@ func formatWatchStatus() string {
 		return fmt.Sprintf("Watch system: running (%d active workers, %d events processed)\n", active, processed)
 	}
 	return fmt.Sprintf("Watch system: stopped (%d events processed)\n", processed)
+}
+
+func handleWatchHelp() int {
+	output := `mpm watch - File watcher for automatic memory ingestion
+
+Usage:
+  mpm watch start              Start the file watcher
+  mpm watch stop               Stop the file watcher
+  mpm watch status             Check watcher status
+  mpm watch add-path <path>    Add a directory to watch
+  mpm watch remove-path <path> Remove a directory from watch list
+  mpm watch list-paths         List watched directories
+
+Examples:
+  mpm watch start
+  mpm watch stop
+  mpm watch status
+  mpm watch add-path /home/user/notes --type memory
+  mpm watch list-paths
+`
+	return respond(output, "", 0)
 }

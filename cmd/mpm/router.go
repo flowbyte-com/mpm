@@ -57,9 +57,9 @@ func NewRouter() *CommandRouter {
 		"memory":          {Name: "memory", Description: "Memory operations"},
 		"synthesize":  {Name: "synthesize", Description: "LLM synthesize session into memories", MinArgs: 1},
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
-		"llm":             {Name: "llm", Description: "LLM operations"},
-		"compile":         {Name: "compile", Description: "Compile project"},
+
 		"mode":            {Name: "mode", Description: "Mode operations"},
+		"directives":       {Name: "directives", Description: "Show behavioral directives"},
 		"persona":         {Name: "persona", Description: "Persona operations"},
 	}
 
@@ -109,7 +109,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "version":
 		return r.handleVersion()
 	case "help":
-		return r.handleHelp()
+		return r.handleHelp(args[1:])
 	case "doctor":
 		runDoctorCommand()
 		return 0
@@ -151,7 +151,7 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleShredMem(args)
 	case "reference":
 		return handleRef(args)
-	case "prime-directives":
+	case "directives":
 		return handlePrimeDirectives()
 	case "memory":
 		return handleMemory(args[1:])
@@ -165,10 +165,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSession(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
-	case "llm":
-		return handleLlm(args[1:])
-case "compile":
-		return handleCompile(args[1:])
 	case "synthesize":
 		return handleSynthesize(args)
 	default:
@@ -218,12 +214,50 @@ func (r *CommandRouter) parseFlags(args []string) []string {
 // ============================================================================
 
 func (r *CommandRouter) handleVersion() int {
-	fmt.Printf("SymAI mpm %s\n", buildVersion)
+	fmt.Printf("MPM mpm %s\n", buildVersion)
 	return 0
 }
 
-func (r *CommandRouter) handleHelp() int {
-	PrintHelp()
+// handleHelp routes help requests to specific help functions or prints general help
+func (r *CommandRouter) handleHelp(args []string) int {
+	if len(args) == 0 {
+		PrintHelp()
+		return 0
+	}
+
+	// Route to specific help based on command
+	helpCmd := args[0]
+	var helpFunc func() int
+
+	switch helpCmd {
+	case "watch":
+		helpFunc = handleWatchHelp
+	case "mode":
+		helpFunc = handleModeHelp
+	case "persona":
+		helpFunc = handlePersonaHelp
+	case "topic":
+		helpFunc = handleTopicHelp
+	case "session":
+		helpFunc = handleSessionHelp
+	case "lesson":
+		helpFunc = handleLessonHelp
+	case "reference":
+		helpFunc = handleReferenceHelp
+	case "memory":
+		helpFunc = handleMemoryHelp
+	case "gateway":
+		helpFunc = printGatewayHelp
+	default:
+		// Fall back to general help
+		r.errorf("[!] Error: no help available for '%s'\n", helpCmd)
+		PrintHelp()
+		return 1
+	}
+
+	if helpFunc != nil {
+		helpFunc()
+	}
 	return 0
 }
 

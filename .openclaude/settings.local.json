@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go test:*)",
+      "Bash(CGO_CFLAGS=\"-DSQLITE_ENABLE_FTS5=1\" go test -tags fts5 ./...)"
+    ]
+  }
+}

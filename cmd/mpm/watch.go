@@ -132,55 +132,6 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// startExternalDBPolling starts goroutines to poll each configured external DB.
-// Each goroutine gets its own DatabaseManager connection (created once, reused per poll).
-// The stopCh is used to signal graceful shutdown.
-func startExternalDBPolling(dbs []config.ExternalDB, dryRun, verbose bool, stopCh <-chan struct{}) {
-	for _, db := range dbs {
-		go pollExternalDB(db, dryRun, verbose, stopCh)
-	}
-}
-
-// pollExternalDB polls an external SQLite DB at the configured interval,
-// ingesting new memories since the last cursor. Stop when stopCh is closed.
-func pollExternalDB(dbCfg config.ExternalDB, dryRun, verbose bool, stopCh <-chan struct{}) {
-	interval := dbCfg.IntervalSeconds
-	if interval <= 0 {
-		interval = 30
-	}
-
-	if verbose {
-		fmt.Printf("🔄 Starting external DB poller: %s (label=%s, interval=%ds)\n",
-			dbCfg.Path, dbCfg.Label, interval)
-	}
-
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		if verbose {
-			fmt.Printf("⚠️  external DB %s: can't open MPM DB: %v\n", dbCfg.Label, err)
-		}
-		return
-	}
-	defer dm.Close()
-
-	pollOnce(&dbCfg, dm, dryRun, verbose)
-
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			pollOnce(&dbCfg, dm, dryRun, verbose)
-		case <-stopCh:
-			if verbose {
-				fmt.Printf("🛑 External DB poller %s stopping...\n", dbCfg.Label)
-			}
-			return
-		}
-	}
-}
-
 // pollOnce performs one poll cycle for an external DB.
 // The dm (DatabaseManager) is passed in and reused — caller manages its lifecycle.
 // All saves are transactional — cursor only updated if all saves succeed.
@@ -204,6 +155,16 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 	}
 	defer extDB.Close()
 
+	// Detect schema adapter dynamically
+	registry := mpminternal.NewAdapterRegistry()
+	adapter := registry.Detect(extDB)
+	if adapter == nil {
+		if verbose {
+			fmt.Printf("⚠️  external DB %s: no matching schema adapter found\n", dbCfg.Label)
+		}
+		return
+	}
+
 	cursor, err := dm.GetExternalDBCursor(dbCfg.Label)
 	if err != nil {
 		if verbose {
@@ -212,37 +173,19 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 		cursor = ""
 	}
 
-	query := `
-		SELECT id, content, session_id, tags, created_at
-		FROM memories
-		WHERE deleted_at IS NULL
-	`
-	var rows *sql.Rows
-	if cursor != "" {
-		rows, err = extDB.Query(query+" AND created_at > ? ORDER BY created_at ASC", cursor)
-	} else {
-		rows, err = extDB.Query(query + " ORDER BY created_at ASC")
-	}
+	memories, newCursor, err := adapter.FetchNew(extDB, cursor)
 	if err != nil {
 		if verbose {
-			fmt.Printf("⚠️  external DB %s: query failed: %v\n", dbCfg.Label, err)
+			fmt.Printf("⚠️  external DB %s: fetch failed: %v\n", dbCfg.Label, err)
 		}
 		return
 	}
-	defer rows.Close()
 
-	var latestCursor string
 	count := 0
-
 	if dryRun {
-		for rows.Next() {
-			var id, content, sessionID, tags, createdAt string
-			if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
-				continue
-			}
-			latestCursor = createdAt
+		for _, mem := range memories {
 			if verbose {
-				fmt.Printf("   [dry-run] would ingest: id=%s, session=%s\n", id, sessionID)
+				fmt.Printf("   [dry-run] would ingest: id=%s, content_len=%d\n", mem.ID, len(mem.Content))
 			}
 		}
 	} else {
@@ -254,14 +197,8 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 			return
 		}
 
-		for rows.Next() {
-			var id, content, sessionID, tags, createdAt string
-			if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
-				continue
-			}
-			latestCursor = createdAt
-
-			existing, _ := dm.GetMemoryByExternalID(dbCfg.Label, id)
+		for _, mem := range memories {
+			existing, _ := dm.GetMemoryByExternalID(dbCfg.Label, mem.ID)
 			if existing != nil {
 				continue
 			}
@@ -269,21 +206,21 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 			tagsJSON := fmt.Sprintf(`["source:%s","external_db"]`, dbCfg.Label)
 			metadataMap := map[string]interface{}{
 				"source_label": dbCfg.Label,
-				"source_id":    id,
+				"source_id":    mem.ID,
 			}
 			metadataJSON, _ := json.Marshal(metadataMap)
-			embedding := mpminternal.HashEmbed(content)
+			embedding := mpminternal.HashEmbed(mem.Content)
 			embeddingJSON, _ := json.Marshal(embedding)
-			contentHash := sha256.Sum256([]byte(content))
+			contentHash := sha256.Sum256([]byte(mem.Content))
 			now := time.Now()
 
 			_, err := tx.Exec(`
 				INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, source_db, source_id, content_hash)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`, mpminternal.GenerateID(), "memories", content, sessionID, tagsJSON, string(metadataJSON), string(embeddingJSON), now.Format(time.RFC3339), dbCfg.Label, id, hex.EncodeToString(contentHash[:]))
+			`, mpminternal.GenerateID(), "memories", mem.Content, mem.SessionID, tagsJSON, string(metadataJSON), string(embeddingJSON), now.Format(time.RFC3339), dbCfg.Label, mem.ID, hex.EncodeToString(contentHash[:]))
 			if err != nil {
 				if verbose {
-					fmt.Printf("⚠️  external DB %s: save failed for id=%s: %v\n", dbCfg.Label, id, err)
+					fmt.Printf("⚠️  external DB %s: save failed for id=%s: %v\n", dbCfg.Label, mem.ID, err)
 				}
 				tx.Rollback()
 				return
@@ -291,11 +228,11 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 			count++
 		}
 
-		if latestCursor != "" {
+		if newCursor != "" {
 			_, err = tx.Exec(`
 				INSERT OR REPLACE INTO external_db_cursors (db_label, last_cursor, updated_at)
 				VALUES (?, ?, CURRENT_TIMESTAMP)`,
-				dbCfg.Label, latestCursor)
+				dbCfg.Label, newCursor)
 			if err != nil {
 				if verbose {
 					fmt.Printf("⚠️  external DB %s: set cursor failed: %v\n", dbCfg.Label, err)
@@ -315,7 +252,7 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 
 	if verbose && count > 0 {
 		fmt.Printf("✅ external DB %s: ingested %d new memories (cursor=%s)\n",
-			dbCfg.Label, count, latestCursor)
+			dbCfg.Label, count, newCursor)
 	}
 }
 

@@ -10,9 +10,12 @@ type LessonStore struct {
 }
 
 // NewLessonStore returns a LessonStore backed by the DatabaseManager at dbPath.
-func NewLessonStore(dbPath string) *LessonStore {
-	dm, _ := NewDatabaseManager(dbPath) // errors handled per-call below
-	return &LessonStore{dm: dm}
+func NewLessonStore(dbPath string) (*LessonStore, error) {
+	dm, err := NewDatabaseManager(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize lesson store: %w", err)
+	}
+	return &LessonStore{dm: dm}, nil
 }
 
 // Init is a no-op; the lessons table is created by DatabaseManager at startup.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
 
 	_ "github.com/mattn/go-sqlite3"
 	mpminternal "mpm/internal"
@@ -32,13 +32,33 @@ func handleRecall(args []string) int {
 	since := fs.String("since", "", "Search memories since date (YYYY-MM-DD)")
 	until := fs.String("until", "", "Search memories until date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 15, "Maximum results to return")
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	collection := fs.String("collection", "memories", "Collection to search")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
 		fmt.Println("\nRecall options:")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args[1:]); err != nil {
+
+	// Go's flag.Parse stops at the first non-flag positional arg.
+	// Pre-scan for --json since callers may place it after the query.
+	preprocessed := make([]string, 0, len(args))
+	jsonFlagSeen := false
+	for _, arg := range args[1:] {
+		if arg == "--json" || arg == "-j" {
+			jsonFlagSeen = true
+			continue // drop from processed args, we'll set it directly
+		}
+		preprocessed = append(preprocessed, arg)
+	}
+
+	if err := fs.Parse(preprocessed); err != nil {
 		return 1
+	}
+
+	// Apply pre-scanned json flag
+	if jsonFlagSeen {
+		*jsonOutput = true
 	}
 
 	query := fs.Arg(0)
@@ -62,7 +82,7 @@ func handleRecall(args []string) int {
 	db := dm.SQLDB()
 
 	// Keyword search using LIKE + FTS5 fallback with time filters
-	rows, err := keywordSearchWithTime(db, query, *since, *until, *limit)
+	rows, err := keywordSearchWithTime(db, query, *collection, *since, *until, *limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Search failed: %v\n", err)
 		return 1
@@ -113,6 +133,32 @@ func handleRecall(args []string) int {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].createdAt.After(entries[j].createdAt)
 	})
+
+	// JSON output for tool integration
+	if *jsonOutput {
+		type memoryEntry struct {
+			ID        string `json:"id"`
+			Content   string `json:"content"`
+			Tags      string `json:"tags"`
+			SessionID string `json:"session_id,omitempty"`
+			CreatedAt string `json:"created_at"`
+		}
+		result := make([]memoryEntry, 0, len(entries))
+		for _, e := range entries {
+			result = append(result, memoryEntry{
+				Content:   e.content,
+				Tags:      e.tags,
+				SessionID: e.sessionID,
+				CreatedAt: e.createdAt.Format(time.RFC3339),
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"query":    query,
+			"memories": result,
+		})
+		fmt.Println(string(data))
+		return 0
+	}
 
 	cyan := "\033[36m"
 	magenta := "\033[35m"
@@ -188,15 +234,19 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 	return db.Query(likeQuery, likePattern, likePattern, limit)
 }
 
-func keywordSearchWithTime(db *sql.DB, query, since, until string, limit int) (*sql.Rows, error) {
+func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, limit int) (*sql.Rows, error) {
+	if collection == "" {
+		collection = "memories"
+	}
+
 	// Try FTS5 first
 	ftsQuery := `
 		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL`
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.collection = ?`
 
-	args := []interface{}{query}
+	args := []interface{}{query, collection}
 
 	if since != "" {
 		ftsQuery += " AND m.created_at >= ?"
@@ -220,10 +270,10 @@ func keywordSearchWithTime(db *sql.DB, query, since, until string, limit int) (*
 	likeQuery := `
 		SELECT id, content, session_id, tags, created_at
 		FROM memories
-		WHERE deleted_at IS NULL
+		WHERE deleted_at IS NULL AND collection = ?
 		  AND (content LIKE ? OR tags LIKE ?)`
 
-	args = []interface{}{likePattern, likePattern}
+	args = []interface{}{collection, likePattern, likePattern}
 
 	if since != "" {
 		likeQuery += " AND created_at >= ?"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ func handleAdd(args []string) int {
 	session := fs.String("session", "", "Session ID to associate")
 	weight := fs.Int("weight", 1, "Initial weight (1-100)")
 	ttl := fs.String("ttl", "", "Time to live (e.g., 7d, 24h)")
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm add [flags] <content>")
 		fmt.Println("Flags:")
@@ -35,34 +37,19 @@ func handleAdd(args []string) int {
 		fmt.Println("Example: mpm add --tag personal,important 'Remember to call mom'")
 	}
 
-	// flag.NewFlagSet.Parse stops at the first non-flag arg, so we must
-	// partition args ourselves: collect all --flag value pairs first, then content.
-	// Skip args[0] which is the subcommand name ("add").
-	flagArgs := []string{}
-	positional := []string{}
-	for i := 1; i < len(args); i++ {  // start at 1 to skip subcommand
-		if strings.HasPrefix(args[i], "-") {
-			flagArgs = append(flagArgs, args[i])
-			// Check if next arg is a flag value (doesn't start with -)
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				flagArgs = append(flagArgs, args[i+1])
-				i++
-			}
-		} else {
-			positional = append(positional, args[i])
-		}
-	}
-
-	if err := fs.Parse(flagArgs); err != nil {
+	// Parse with standard flag parser, which handles arbitrary argument ordering.
+	// After parsing, fs.Args() contains the positional arguments (the content).
+	if err := fs.Parse(args[1:]); err != nil {
+		// On error (e.g., unknown flag), fs.HasError() is true; error already printed
 		return 1
 	}
 
-	// remaining non-flag args are the content
-	content := strings.Join(positional, " ")
-	if content == "" {
+	// Extract content: use first positional arg, or join all for multi-word content
+	if fs.NArg() == 0 {
 		fmt.Fprintf(os.Stderr, "Error: content required\n")
 		return 1
 	}
+	content := strings.Join(fs.Args(), " ")
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
@@ -103,7 +90,15 @@ func handleAdd(args []string) int {
 		}
 	}
 
-	fmt.Printf("Added memory %s to %s (weight=%d)\n", id, *collection, *weight)
+	if *jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"id":      id,
+			"success": true,
+		})
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("Added memory %s to %s (weight=%d)\n", id, *collection, *weight)
+	}
 	return 0
 }
 
@@ -424,7 +419,7 @@ func handleShredMem(args []string) int {
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--json]\n")
 		return 1
 	}
 
@@ -436,8 +431,16 @@ func handleRefAdd(args []string) int {
 
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
 	tag := fs.String("tag", "", "Tags for the reference")
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	if err := fs.Parse(args[2:]); err != nil {
 		return 1
+	}
+
+	// Pre-scan for --json since callers may place it after the query
+	for _, arg := range args[2:] {
+		if arg == "--json" || arg == "-j" {
+			*jsonOutput = true
+		}
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
@@ -534,12 +537,36 @@ func handleRefAdd(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("Added reference: %s (%d chunks)\n", title, len(chunks))
+	if *jsonOutput {
+		tagsStr := strings.Join(tags, ",")
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":       true,
+			"id":            doc.ID,
+			"title":         doc.Title,
+			"total_chunks":  doc.TotalChunks,
+			"tags":          tagsStr,
+		})
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("Added reference: %s (%d chunks)\n", title, len(chunks))
+	}
 	return 0
 }
 
 // handleRefList lists all reference documents
 func handleRefList(args []string) int {
+	fs := flag.NewFlagSet("reference ls", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	// Pre-scan for --json since callers may place it after positional args
+	for _, arg := range args[1:] {
+		if arg == "--json" || arg == "-j" {
+			*jsonOutput = true
+		}
+	}
+
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -554,7 +581,53 @@ func handleRefList(args []string) int {
 	}
 
 	if len(refs) == 0 {
-		fmt.Println("No references stored")
+		if *jsonOutput {
+			fmt.Println(`{"references": [], "message": "No references stored"}`)
+		} else {
+			fmt.Println("No references stored")
+		}
+		return 0
+	}
+
+	if *jsonOutput {
+		type refEntry struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			TotalChunks int    `json:"total_chunks"`
+			Tags        string `json:"tags"`
+			CreatedAt   string `json:"created_at"`
+		}
+		result := make([]refEntry, 0, len(refs))
+		for _, r := range refs {
+			chunks := 0
+			switch c := r["total_chunks"].(type) {
+			case int64:
+				chunks = int(c)
+			case int:
+				chunks = c
+			case int32:
+				chunks = int(c)
+			}
+			created := ""
+			if c, ok := r["created_at"].(string); ok {
+				created = c
+			}
+			tags := ""
+			if t, ok := r["tags"].(string); ok {
+				tags = t
+			}
+			refID, _ := r["id"].(string)
+			refTitle, _ := r["title"].(string)
+			result = append(result, refEntry{
+				ID:          refID,
+				Title:       refTitle,
+				TotalChunks: chunks,
+				Tags:        tags,
+				CreatedAt:   created,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"references": result})
+		fmt.Println(string(data))
 		return 0
 	}
 
@@ -577,11 +650,11 @@ func handleRefList(args []string) int {
 		if c, ok := r["created_at"].(string); ok {
 			created = c
 		}
-	refID, _ := r["id"].(string)
-	refTitle, _ := r["title"].(string)
-	fmt.Printf("  %s | %s | %d chunks |%s\n",
-		refID[:min(len(refID), 16)],
-		refTitle,
+		refID, _ := r["id"].(string)
+		refTitle, _ := r["title"].(string)
+		fmt.Printf("  %s | %s | %d chunks |%s\n",
+			refID[:min(len(refID), 16)],
+			refTitle,
 			chunks,
 			tags)
 		if created != "" {
@@ -594,7 +667,7 @@ func handleRefList(args []string) int {
 // handleRefShow shows a reference document with its chunks
 func handleRefShow(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference show <id>\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm reference show <id> [--json]\n")
 		return 1
 	}
 
@@ -606,14 +679,73 @@ func handleRefShow(args []string) int {
 	}
 	defer dm.Close()
 
+	// Pre-scan for --json
+	jsonOutput := false
+	for _, arg := range args[2:] {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+			break
+		}
+	}
+
 	ref, err := dm.GetReference(id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Reference not found: %s\n", id)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Reference not found: " + id})
+			fmt.Println(string(data))
+		} else {
+			fmt.Fprintf(os.Stderr, "Reference not found: %s\n", id)
+		}
 		return 1
 	}
 
 	refShowID, _ := ref["id"].(string)
 	refShowTitle, _ := ref["title"].(string)
+	tags := ""
+	if t, ok := ref["tags"].(string); ok {
+		tags = t
+	}
+	created := ""
+	if c, ok := ref["created_at"].(string); ok {
+		created = c
+	}
+
+	chunks, ok := ref["chunks"].([]map[string]interface{})
+	if jsonOutput {
+		type chunkEntry struct {
+			Index   int    `json:"index"`
+			Content string `json:"content"`
+		}
+		chunkResult := make([]chunkEntry, 0)
+		if ok {
+			for _, c := range chunks {
+				idxVal := c["chunk_index"]
+				idx := 0
+				switch v := idxVal.(type) {
+				case int64:
+					idx = int(v)
+				case int:
+					idx = v
+				case int32:
+					idx = int(v)
+				case float64:
+					idx = int(v)
+				}
+				content, _ := c["content"].(string)
+				chunkResult = append(chunkResult, chunkEntry{Index: idx, Content: content})
+			}
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"id":         refShowID,
+			"title":      refShowTitle,
+			"tags":       tags,
+			"created_at": created,
+			"chunks":     chunkResult,
+		})
+		fmt.Println(string(data))
+		return 0
+	}
+
 	fmt.Printf("\n[%s] %s\n", refShowID, refShowTitle)
 	if st, ok := ref["source_type"].(string); ok && st != "" {
 		fmt.Printf("Type: %s\n", st)
@@ -627,7 +759,6 @@ func handleRefShow(args []string) int {
 		fmt.Printf("Chunks: %d\n", tc)
 	}
 
-	chunks, ok := ref["chunks"].([]map[string]interface{})
 	if ok && len(chunks) > 0 {
 		fmt.Printf("\n--- Content (%d chunks) ---\n", len(chunks))
 		for _, c := range chunks {
@@ -653,7 +784,7 @@ func handleRefShow(args []string) int {
 // handleRefSearch searches reference chunks
 func handleRefSearch(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference search <query>\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm reference search <query> [--json]\n")
 		return 1
 	}
 
@@ -665,6 +796,15 @@ func handleRefSearch(args []string) int {
 	}
 	defer dm.Close()
 
+	// Pre-scan for --json
+	jsonOutput := false
+	for _, arg := range args[2:] {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+			break
+		}
+	}
+
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -672,7 +812,60 @@ func handleRefSearch(args []string) int {
 	}
 
 	if len(chunks) == 0 {
-		fmt.Printf("No results found for: %s\n", query)
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "message": "No results found"})
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("No results found for: %s\n", query)
+		}
+		return 0
+	}
+
+	if jsonOutput {
+		type chunkResult struct {
+			DocID       string  `json:"doc_id"`
+			DocTitle    string  `json:"doc_title"`
+			ChunkIndex  int     `json:"chunk_index"`
+			Content     string  `json:"content"`
+			Score       float64 `json:"score"`
+		}
+		results := make([]chunkResult, 0, len(chunks))
+		for _, c := range chunks {
+			docTitle := ""
+			if dt, ok := c["doc_title"].(string); ok {
+				docTitle = dt
+			}
+			docID := ""
+			if did, ok := c["id"].(string); ok {
+				docID = did
+			}
+			idxVal := c["chunk_index"]
+			idx := 0
+			switch v := idxVal.(type) {
+			case int64:
+				idx = int(v)
+			case int:
+				idx = v
+			case int32:
+				idx = int(v)
+			case float64:
+				idx = int(v)
+			}
+			content, _ := c["content"].(string)
+			score := 0.0
+			if s, ok := c["score"].(float64); ok {
+				score = s
+			}
+			results = append(results, chunkResult{
+				DocID:      docID,
+				DocTitle:   docTitle,
+				ChunkIndex: idx,
+				Content:    content,
+				Score:      score,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"query": query, "results": results})
+		fmt.Println(string(data))
 		return 0
 	}
 

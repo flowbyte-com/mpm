@@ -28,6 +28,7 @@ func TestLessonStoreAddAndGet(t *testing.T) {
 
 	// Wipe existing lessons to ensure clean state
 	dm.db.Exec("DELETE FROM lessons")
+	dm.db.Exec("DELETE FROM lessons_fts")
 
 	// Add a lesson
 	lesson, err := dm.AddLesson("Check file extensions before executing", LessonTypeWarning, []string{"safety", "files"}, "")
@@ -62,6 +63,7 @@ func TestLessonStoreDeduplication(t *testing.T) {
 
 	// Wipe existing lessons to ensure clean state
 	dm.db.Exec("DELETE FROM lessons")
+	dm.db.Exec("DELETE FROM lessons_fts")
 
 	content := "Test deduplication content"
 
@@ -100,6 +102,7 @@ func TestLessonStoreListLessons(t *testing.T) {
 
 	// Wipe any existing lessons from previous test runs using this dm
 	dm.db.Exec("DELETE FROM lessons")
+	dm.db.Exec("DELETE FROM lessons_fts")
 
 	// Add lessons of different types
 	dm.AddLesson("Warning 1", LessonTypeWarning, nil, "")
@@ -163,6 +166,7 @@ func TestLessonStoreStats(t *testing.T) {
 
 	// Wipe existing lessons to ensure clean state
 	dm.db.Exec("DELETE FROM lessons")
+	dm.db.Exec("DELETE FROM lessons_fts")
 
 	// Get initial stats
 	stats, err := dm.GetLessonStats()
@@ -203,6 +207,7 @@ func TestLessonStoreSearch(t *testing.T) {
 	defer dm.Close()
 
 	dm.db.Exec("DELETE FROM lessons")
+	dm.db.Exec("DELETE FROM lessons_fts")
 	dm.AddLesson("Always validate paths before rm -rf", LessonTypeWarning, []string{"safety"}, "")
 	dm.AddLesson("Use gofmt for Go code formatting", LessonTypePractice, []string{"go", "style"}, "")
 

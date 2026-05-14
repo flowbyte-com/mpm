@@ -256,7 +256,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags UNINDEXED, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_docs_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
 
 		`CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
@@ -276,9 +276,9 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS topics_au AFTER UPDATE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END;`,
 
-		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON "references" BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
-		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END;`,
-		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON "references" BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_docs_ai AFTER INSERT ON reference_docs BEGIN INSERT INTO reference_docs_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_docs_ad AFTER DELETE ON reference_docs BEGIN DELETE FROM reference_docs_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS reference_docs_au AFTER UPDATE ON reference_docs BEGIN DELETE FROM reference_docs_fts WHERE rowid = old.rowid; INSERT INTO reference_docs_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
 
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ai AFTER INSERT ON reference_chunks BEGIN INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ad AFTER DELETE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; END;`,
@@ -443,18 +443,6 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 	return id, err
 }
 
-func (dm *DatabaseManager) SaveMode(name, content string) (string, error) {
-	id := GenerateID()
-	_, err := dm.db.Exec(`INSERT OR REPLACE INTO modes (id, name, content) VALUES (?, ?, ?)`, id, name, content)
-	return id, err
-}
-
-func (dm *DatabaseManager) SavePersona(name, content string) (string, error) {
-	id := GenerateID()
-	_, err := dm.db.Exec(`INSERT OR REPLACE INTO personas (id, name, content) VALUES (?, ?, ?)`, id, name, content)
-	return id, err
-}
-
 // SaveSystemConfig stores or updates a system config entry (keyed by source file name)
 // Only updates if the content hash has changed (skip duplicate writes)
 // Returns (updated bool, error)
@@ -558,9 +546,9 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 
 	// Safe: whitelist enforced above; map lookup avoids fmt.Sprintf with user data
 	baseQuery := map[string]string{
-		"sessions": "SELECT id, content, embedding, created_at FROM sessions WHERE embedding IS NOT NULL AND embedding != 'null'",
-		"memories": "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL AND embedding != 'null'",
-		"topics":   "SELECT id, content, embedding, created_at FROM topics WHERE embedding IS NOT NULL AND embedding != 'null'",
+		"sessions": "SELECT id, content, embedding, created_at FROM sessions WHERE embedding IS NOT NULL",
+		"memories": "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL",
+		"topics":   "SELECT id, content, embedding, created_at FROM topics WHERE embedding IS NOT NULL",
 	}[tier]
 	rows, err := dm.db.Query(baseQuery)
 	if err != nil {
@@ -1000,10 +988,9 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 
 	rows, err := dm.db.Query(`
 		SELECT l.id, l.type, l.content, l.tags, l.reinforcement_count, l.source_session_id, l.created
-		FROM lessons_fts
-		JOIN lessons l ON lessons_fts.rowid = l.rowid
-		WHERE lessons_fts MATCH ?
-		ORDER BY bm25(lessons_fts)
+		FROM lessons l
+		WHERE l.id IN (SELECT id FROM lessons WHERE lessons_fts MATCH ?)
+		ORDER BY l.reinforcement_count DESC, l.created DESC
 		LIMIT ?
 	`, ftsQuery, limit)
 	if err != nil {
