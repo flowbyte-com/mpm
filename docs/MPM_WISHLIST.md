@@ -6,10 +6,14 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 
 ## High-Value Improvements
 
-### 1. Recall should explain itself
+### 1. Recall should explain itself ✅ DONE (2026-05-14)
 `query_long_term_memory` returns matches but no ranking rationale. The agent sees results without knowing why they matched.
 - Add `score` (0-1) and `rationale` (one-line) to each result
 - Makes the agent contextualize rather than just dump
+**Implemented:**
+- `mpm recall` output now shows chip-based rationale: `[id] · Nx ref · weight N · LTM · accessed Nd ago`
+- JSON output includes `score` (0-1 fractional, `(rc*2 + weight*1.5) / 55`) and `rationale` string
+- `computeScore` and `formatRationale` helper functions added to `cmd/mpm/recall.go`
 
 ### 2. Frequency-weighted reinforcement ✅ DONE (2026-05-14)
 ~~Weight is static — set at save time and never updated.~~
