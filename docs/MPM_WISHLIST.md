@@ -26,11 +26,17 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 - `mpm review --stale --days N` shows LTM/high-weight memories not accessed in N+ days
 - Per-session deduplication: same memory recalled twice in one call = reinforced once
 
-### 3. Topic auto-suggestion on save
+### 3. Topic auto-suggestion on save ✅ DONE (2026-05-14)
 When saving a memory, if content semantically matches an existing topic:
 - Prompt: "this relates to topic X — link it?"
 - Same for lessons: "this looks like a warning, save as lesson?"
 - System nudges structure instead of making agent do it manually
+**Implemented:**
+- `mpm add` now runs FTS5 topic search after save, appends `suggested_topics` to JSON output
+- `sanitizeContentForFTS` strips punctuation/markdown, filters stop-words (< 4 chars), OR-joins for safe FTS5 MATCH
+- `computeTopicConfidence` scores matches by keyword overlap
+- New `mpm topic link <topic-id> <memory-id>` command for linking
+- TypeScript `link_topic` tool added to plugin
 
 ### 4. Memory age + stale flag
 No concept of "you stored this 3 weeks ago and haven't touched it."
