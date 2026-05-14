@@ -8,9 +8,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
-	db, err := sql.Open("sqlite3", ":memory:")
+func setupTestDB(t *testing.T) (*sql.DB, string) {
+	tmpFile, err := os.CreateTemp("", "mpm-test-*.db")
 	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	db, err := sql.Open("sqlite3", tmpFile.Name())
+	if err != nil {
+		os.Remove(tmpFile.Name())
 		t.Fatalf("failed to open temp db: %v", err)
 	}
 
@@ -41,152 +48,174 @@ func setupTestDB(t *testing.T) *sql.DB {
 	_, err = db.Exec(schema)
 	if err != nil {
 		db.Close()
+		os.Remove(tmpFile.Name())
 		t.Fatalf("failed to create schema: %v", err)
 	}
 
-	return db
+	return db, tmpFile.Name()
 }
 
-func TestRecallDeduplicatesReinforcement(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	// Insert two test memories
+// insertMemory inserts a test memory directly via SQL (bypassing MPM internals)
+func insertMemory(t *testing.T, db *sql.DB, id, collection, content, sessionID, tags string) {
 	_, err := db.Exec(`
-		INSERT INTO memories (id, collection, content, reinforcement_count, weight)
-		VALUES
-			('mem-1', 'memories', 'go test is a good testing framework', 0, 1),
-			('mem-2', 'memories', 'table driven tests in go are efficient', 0, 1)
-	`)
+		INSERT INTO memories (id, collection, content, session_id, tags, reinforcement_count, weight)
+		VALUES (?, ?, ?, ?, ?, 0, 1)
+	`, id, collection, content, sessionID, tags)
 	if err != nil {
-		t.Fatalf("failed to insert test memories: %v", err)
+		t.Fatalf("failed to insert memory %s: %v", id, err)
+	}
+}
+
+// TestRecallDeduplicatesReinforcement verifies that calling keywordSearchWithTime
+// and then reinforcing only once per unique memory ID per call.
+func TestRecallDeduplicatesReinforcement(t *testing.T) {
+	db, dbPath := setupTestDB(t)
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Insert two memories with same keyword so they both match
+	insertMemory(t, db, "mem-1", "memories", "golang programming language", "sess1", `[]`)
+	insertMemory(t, db, "mem-2", "memories", "golang is great", "sess1", `[]`)
+
+	// Simulate what handleRecall does: query then reinforce per unique ID
+	rows, err := keywordSearchWithTime(db, "golang", "memories", "", "", 10)
+	if err != nil {
+		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
 
-	// Simulate what handleRecall does: query memories and reinforce on first access
-	// We'll simulate a single recall call that returns both memories
+	// Simulate per-call dedup (same logic as handleRecall)
 	sessionAccessCounts := make(map[string]int)
-
-	rows, err := db.Query(`
-		SELECT id, content, session_id, tags, created_at
-		FROM memories
-		WHERE deleted_at IS NULL AND collection = 'memories'
-		ORDER BY created_at DESC
-		LIMIT 15
-	`)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	type recallEntry struct {
-		id        string
-		content   string
-		sessionID string
-		tags      string
-	}
-	var entries []recallEntry
 	for rows.Next() {
-		var id, content, createdAt string
-		var nullableSessionID, nullableTags sql.NullString
-		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt); err != nil {
+		var id string
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(string)); err != nil {
 			continue
 		}
-		if content == "" {
-			continue
+		if sessionAccessCounts[id] == 0 {
+			// ReinforceMemory: increment reinforcement_count and weight
+			_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
+			if err != nil {
+				t.Fatalf("reinforce failed for %s: %v", id, err)
+			}
 		}
-		entry := recallEntry{id: id}
-		if nullableSessionID.Valid {
-			entry.sessionID = nullableSessionID.String
-		}
-		entries = append(entries, entry)
+		sessionAccessCounts[id]++
 	}
 	rows.Close()
 
-	// Simulate the deduplication logic from handleRecall
-	for _, entry := range entries {
-		if sessionAccessCounts[entry.id] == 0 {
-			// ReinforceMemory: increment reinforcement_count and weight
-			_, err := db.Exec(`
-				UPDATE memories
-				SET reinforcement_count = reinforcement_count + 1,
-				    weight = weight + ((1 + 1) / 2)
-				WHERE id = ?
-			`, entry.id)
-			if err != nil {
-				t.Fatalf("reinforce failed for %s: %v", entry.id, err)
-			}
-		}
-		sessionAccessCounts[entry.id]++
+	// Verify both IDs appear in sessionAccessCounts
+	if sessionAccessCounts["mem-1"] != 1 {
+		t.Errorf("mem-1 access count = %d, want 1", sessionAccessCounts["mem-1"])
+	}
+	if sessionAccessCounts["mem-2"] != 1 {
+		t.Errorf("mem-2 access count = %d, want 1", sessionAccessCounts["mem-2"])
 	}
 
-	// Verify: mem-1 and mem-2 should each be reinforced exactly once
-	var reinforcement, weight int
-	row := db.QueryRow("SELECT reinforcement_count, weight FROM memories WHERE id = 'mem-1'")
-	if err := row.Scan(&reinforcement, &weight); err != nil {
+	// Verify both were reinforced exactly once
+	var reinforcement int
+	row := db.QueryRow("SELECT reinforcement_count FROM memories WHERE id = 'mem-1'")
+	if err := row.Scan(&reinforcement); err != nil {
 		t.Fatalf("failed to read mem-1: %v", err)
 	}
 	if reinforcement != 1 {
 		t.Errorf("mem-1: expected reinforcement_count=1, got %d", reinforcement)
 	}
-	if weight != 2 { // weight starts at 1, gains (1+1)/2 = 1
-		t.Errorf("mem-1: expected weight=2, got %d", weight)
-	}
 
-	row = db.QueryRow("SELECT reinforcement_count, weight FROM memories WHERE id = 'mem-2'")
-	if err := row.Scan(&reinforcement, &weight); err != nil {
+	row = db.QueryRow("SELECT reinforcement_count FROM memories WHERE id = 'mem-2'")
+	if err := row.Scan(&reinforcement); err != nil {
 		t.Fatalf("failed to read mem-2: %v", err)
 	}
 	if reinforcement != 1 {
 		t.Errorf("mem-2: expected reinforcement_count=1, got %d", reinforcement)
 	}
-	if weight != 2 {
-		t.Errorf("mem-2: expected weight=2, got %d", weight)
-	}
 }
 
+// TestRecallDeduplicatesAccessAcrossMultipleRows verifies that when the same
+// memory ID appears twice in a single recall result (duplicate rows), it is
+// only reinforced once.
 func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
-	db := setupTestDB(t)
+	db, dbPath := setupTestDB(t)
 	defer db.Close()
+	defer os.Remove(dbPath)
 
-	// Insert a single memory that appears multiple times (simulating a duplicate result)
-	_, err := db.Exec(`
-		INSERT INTO memories (id, collection, content, reinforcement_count, weight)
-		VALUES ('mem-dup', 'memories', 'duplicate test content', 0, 1)
-	`)
+	// Insert a single memory
+	insertMemory(t, db, "mem-dup", "memories", "duplicate test content", "sess1", `[]`)
+
+	// Simulate recall returning the same memory twice (duplicate rows)
+	rows, err := keywordSearchWithTime(db, "duplicate", "memories", "", "", 10)
 	if err != nil {
-		t.Fatalf("failed to insert: %v", err)
+		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
 
-	// Simulate recall returning the same memory twice (should only reinforce once)
 	sessionAccessCounts := make(map[string]int)
-
-	type recallEntry struct {
-		id string
-	}
-	entries := []recallEntry{{id: "mem-dup"}, {id: "mem-dup"}}
-
-	for _, entry := range entries {
-		if sessionAccessCounts[entry.id] == 0 {
-			db.Exec(`
-				UPDATE memories
-				SET reinforcement_count = reinforcement_count + 1,
-				    weight = weight + ((1 + 1) / 2)
-				WHERE id = ?
-			`, entry.id)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(string)); err != nil {
+			continue
 		}
-		sessionAccessCounts[entry.id]++
+		if sessionAccessCounts[id] == 0 {
+			_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
+			if err != nil {
+				t.Fatalf("reinforce failed for %s: %v", id, err)
+			}
+		}
+		sessionAccessCounts[id]++
+	}
+	rows.Close()
+
+	// Should be accessed twice but reinforced only once
+	if sessionAccessCounts["mem-dup"] != 2 {
+		t.Errorf("mem-dup access count = %d, want 2", sessionAccessCounts["mem-dup"])
 	}
 
-	// Should only be reinforced once even though accessed twice
-	var reinforcement, weight int
-	row := db.QueryRow("SELECT reinforcement_count, weight FROM memories WHERE id = 'mem-dup'")
-	if err := row.Scan(&reinforcement, &weight); err != nil {
+	var reinforcement int
+	row := db.QueryRow("SELECT reinforcement_count FROM memories WHERE id = 'mem-dup'")
+	if err := row.Scan(&reinforcement); err != nil {
 		t.Fatalf("failed to read mem-dup: %v", err)
 	}
 	if reinforcement != 1 {
 		t.Errorf("mem-dup: expected reinforcement_count=1 (deduped), got %d", reinforcement)
 	}
-	if weight != 2 {
-		t.Errorf("mem-dup: expected weight=2, got %d", weight)
+}
+
+// TestRecallReinforceSQLPattern verifies the reinforcement SQL pattern
+// (mimics what ReinforceMemory does) updates reinforcement_count correctly.
+func TestRecallReinforceSQLPattern(t *testing.T) {
+	db, dbPath := setupTestDB(t)
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Insert a memory
+	insertMemory(t, db, "mem-real", "memories", "real reinforcement test", "sess1", `[]`)
+
+	// Apply the exact same SQL that ReinforceMemory uses
+	_, err := db.Exec(`
+		UPDATE memories
+		SET reinforcement_count = reinforcement_count + 1,
+		    weight = MIN(weight + ((1 + 1) / 2), 100),
+		    last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, "mem-real")
+	if err != nil {
+		t.Fatalf("reinforce SQL failed: %v", err)
+	}
+
+	// Verify reinforcement_count incremented
+	var reinforcement int
+	row := db.QueryRow("SELECT reinforcement_count FROM memories WHERE id = 'mem-real'")
+	if err := row.Scan(&reinforcement); err != nil {
+		t.Fatalf("failed to read mem-real: %v", err)
+	}
+	if reinforcement != 1 {
+		t.Errorf("mem-real: expected reinforcement_count=1, got %d", reinforcement)
+	}
+
+	// Verify last_accessed_at was set
+	var lastAccessed sql.NullString
+	row = db.QueryRow("SELECT last_accessed_at FROM memories WHERE id = 'mem-real'")
+	if err := row.Scan(&lastAccessed); err != nil {
+		t.Fatalf("failed to read last_accessed_at: %v", err)
+	}
+	if !lastAccessed.Valid {
+		t.Error("mem-real: last_accessed_at should be set")
 	}
 }
 

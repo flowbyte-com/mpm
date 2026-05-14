@@ -46,6 +46,9 @@ func NewRouter() *CommandRouter {
 		"export":     {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
 		"maintain":   {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
 
+		// Review commands
+		"review":         {Name: "review", Description: "Spaced reinforcement review", MinArgs: 0},
+
 		// Feature commands
 		"watch":           {Name: "watch", Description: "File watcher for memory ingestion"},
 		"web":             {Name: "web", Description: "Start web UI server", MinArgs: 0},
@@ -125,6 +128,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleExport(args)
 	case "maintain":
 		return handleMaintain(args)
+	case "review":
+		return handleReview(args)
 	case "web":
 		return handleWeb(args)
 	case "watch":
