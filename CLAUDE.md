@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **MPM** monorepo — Memory-Persona-Mode Manager. Two related projects:
+This is the **MPM** monorepo — Memory Persistence Module — Agent-owned SQLite brain. No server, no daemon, just persistence.:
 
 | Directory | Language | Description |
 |-----------|----------|-------------|

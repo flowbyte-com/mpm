@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-MPM (Memory-Persona-Mode) — SQLite-native agent state management for OpenClaw agents.
+MPM (Memory Persistence Module) — SQLite-native agent state management for OpenClaw agents.
 
 ## Build & Test
 
