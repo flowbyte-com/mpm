@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Command describes a single command
@@ -63,7 +64,10 @@ func NewRouter() *CommandRouter {
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
 		"mode":            {Name: "mode", Description: "Mode operations"},
-		"directives":       {Name: "directives", Description: "Show behavioral directives"},
+			"wake":            {Name: "wake", Description: "Show last session context (mode, persona, recent memories)", MinArgs: 0},
+		"gc":              {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+			"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
+			"directives":       {Name: "directives", Description: "Show behavioral directives"},
 		"persona":         {Name: "persona", Description: "Persona operations"},
 	}
 
@@ -112,6 +116,12 @@ func (r *CommandRouter) Execute(args []string) int {
 	switch cmd.Name {
 	case "version":
 		return r.handleVersion()
+	case "wake":
+		return handleWake(args)
+	case "gc":
+		return handleGC(args)
+	case "restore":
+		return handleRestore(args)
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":
@@ -288,4 +298,43 @@ func (r *CommandRouter) unknownCommand(name string) {
 
 func (r *CommandRouter) errorf(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+// ExtractJSONFlag scans args for --json or -j, removes it, returns (jsonOutput, cleanedArgs).
+// Callers may place the flag anywhere in the arg list.
+func ExtractJSONFlag(args []string) (bool, []string) {
+	jsonOutput := false
+	cleaned := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			jsonOutput = true
+		} else {
+			cleaned = append(cleaned, arg)
+		}
+	}
+	return jsonOutput, cleaned
+}
+
+// ExtractFlags scans args for any flags in removeFlags map (key = flag name, value = consumes next arg),
+// removes them, returns (found flags as map, cleaned args).
+func ExtractFlags(args []string, removeFlags map[string]bool) (map[string]bool, []string) {
+	found := make(map[string]bool)
+	cleaned := make([]string, 0, len(args))
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if removeFlags[arg] {
+			found[arg] = true
+			if removeFlags[arg] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				// consume next arg if it's not a flag
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		cleaned = append(cleaned, arg)
+		i++
+	}
+	return found, cleaned
 }
