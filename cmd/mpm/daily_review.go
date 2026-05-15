@@ -123,7 +123,7 @@ func fetchRecentMemories(hours, limit int) []MemoryEntry {
 	since := time.Now().Add(-time.Duration(hours) * time.Hour).Format("2006-01-02 15:04:05")
 	rows, err := db.Query(
 		`SELECT id, created_at, content, collection, tags FROM memories
-		 WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?`,
+		 WHERE created_at >= ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?`,
 		since, limit,
 	)
 	if err != nil {

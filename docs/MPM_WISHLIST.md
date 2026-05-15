@@ -6,7 +6,7 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 
 ## In Progress
 
-_(empty)_
+_(empty — all queues clear)_
 
 ---
 
@@ -18,17 +18,7 @@ _(all medium-priority items complete — see Completed below)_
 
 ## Low-Priority (Nice to Have)
 
-### Bulk import/export
-Dump memories to JSON for backup, import from other agents.
-
-### Memory pruning with confirmation
-"12 memories haven't been accessed in 90 days — review or delete?"
-
-### Tag autocomplete
-When saving with tags, suggest existing tags from similar memories.
-
-### Reference source tracking
-Track where ingested documents came from (URL, file path, date) and surface on search results.
+_(all low-priority items complete — see Completed below)_
 
 ---
 
@@ -48,6 +38,8 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 | 10 | Reference chunking control — `--chunk-size` flag, tiktoken batch encode/decode | ✅ Done (2026-05-15) |
 | 11 | Session memory context — `mpm wake` + active_mode/persona injection | ✅ Done (2026-05-15) |
 | 12 | Memory decay scheduling — `mpm gc` (--dry-run/--review/--purge), computeDecay (float64), implicit reinforcement on recall (+0.5, capped +1/hr), weight > 0 filter in all recall queries | ✅ Done (2026-05-15) |
+| 13 | Tag autocomplete — `mpm _suggest_tags <prefix>` (hidden command) + `scripts/mpm-completion.sh` bash/zsh TAB wiring | ✅ Done (2026-05-15) |
+| 14 | Reference source tracking — `--source` flag override, `FilePath` field surfaced as `[Source: …]` in list/search/get output | ✅ Done (2026-05-15) |
 
 ---
 
@@ -65,5 +57,19 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 - ~~The `--json` flag pre-scanning hack~~ — ✅ Done (2026-05-15): `ExtractJSONFlag()` centralized in `router.go`, all 16 handlers migrated
 
 ---
+
+*Last updated: 2026-05-15*
+---
+
+## Future Wishlist (2026-05-15)
+
+| # | Priority | Item | Notes |
+|---|----------|------|-------|
+| 1 | Medium | Per-collection decay policies | Different halflife/floor per collection (sessions vs decisions vs theories) |
+| 2 | Medium | Explicit memory TTL | Hard `expires_at` alongside probabilistic weight decay |
+| 3 | Low | Memory deduplication | `content_hash` exists; `mpm dedup` to find/merge near-identical memories |
+| 4 | Low | Structured recall filters | `--weight-below`, `--before`, `--collection` combinations for memory archaeology |
+| 5 | Low | Interactive memory add | `mpm add -i` stdin editor, multi-line preview before persist |
+| 6 | Low | Memory snooze | `mpm snooze <id> [--days N]` bump weight + touch `last_accessed_at` without marking LTM |
 
 *Last updated: 2026-05-15*

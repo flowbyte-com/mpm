@@ -166,6 +166,11 @@ var LIST_REFERENCES_SCHEMA = {
   properties: {},
   additionalProperties: false
 };
+var READ_WAKE_CONTEXT_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false
+};
 var READ_DIRECTIVES_SCHEMA = {
   type: "object",
   properties: {},
@@ -818,8 +823,72 @@ function makeListReferencesTool(_ctx) {
     }
   };
 }
+function makeReadWakeContextTool(_ctx) {
+  return {
+    name: "read_wake_context",
+    description: "Read the agent's wake context \u2014 session state from the previous session including active mode, active persona, recent topics, and recent memories. This is the first thing to check on session start to understand where you left off. Call this immediately on session start before doing anything else.",
+    parameters: READ_WAKE_CONTEXT_SCHEMA,
+    emoji_name: "sunrise",
+    execute: async (toolCallId, _params) => {
+      const result = await runMpm(["wake", "--json"]);
+      const data = parseMpmResult(result);
+      if (!data) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: "(no wake context available \u2014 no previous session found)"
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      const ctx = data;
+      const lines = [
+        "\xF0\x9F\x8C\x9E **WAKE CONTEXT** \xF0\x9F\x8C\x9E\n"
+      ];
+      if (ctx.mode || ctx.active_mode) {
+        lines.push(`
+  **Mode:** ${ctx.mode || ctx.active_mode}`);
+      }
+      if (ctx.persona || ctx.active_persona) {
+        lines.push(`
+  **Persona:** ${ctx.persona || ctx.active_persona}`);
+      }
+      if (ctx.recent_topics && ctx.recent_topics.length > 0) {
+        lines.push(`
+  **Recent Topics:** ${ctx.recent_topics.join(", ")}`);
+      }
+      if (ctx.recent_memories && Array.isArray(ctx.recent_memories) && ctx.recent_memories.length > 0) {
+        lines.push(`
+  **Recent Memories:**`);
+        for (const mem of ctx.recent_memories) {
+          const content = (mem.content || "").substring(0, 80);
+          const age = mem.created_at ? ` (${formatAge(mem.created_at)})` : "";
+          lines.push(`
+    \u2022 ${content}${age}`);
+        }
+      }
+      const displayText = lines.join("");
+      return {
+        toolCallId,
+        result: {
+          type: "ok",
+          results: [{ content: [{ type: "text", text: displayText }] }]
+        }
+      };
+    }
+  };
+}
 function makeReadDirectivesTool(_ctx) {
-  function formatAge(createdAt) {
+  function formatAge2(createdAt) {
     if (!createdAt) return "unknown age";
     let created;
     try {
@@ -891,7 +960,7 @@ function makeReadDirectivesTool(_ctx) {
 **${group.toUpperCase()}**
 `);
         for (const d of directives) {
-          const age = formatAge(d.created_at);
+          const age = formatAge2(d.created_at);
           lines.push(`
   \u2022 ${d.content}`);
           lines.push(`    \u2192 added ${age}`);
@@ -1167,6 +1236,10 @@ var index_default = definePluginEntry({
     api.registerTool(
       (ctx) => makeListReferencesTool(ctx),
       { names: ["list_references"], optional: false }
+    );
+    api.registerTool(
+      (ctx) => makeReadWakeContextTool(ctx),
+      { names: ["read_wake_context"], optional: false }
     );
     api.registerTool(
       (ctx) => makeReadDirectivesTool(ctx),

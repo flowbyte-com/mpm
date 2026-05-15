@@ -66,7 +66,10 @@ func NewRouter() *CommandRouter {
 		"mode":            {Name: "mode", Description: "Mode operations"},
 			"wake":            {Name: "wake", Description: "Show last session context (mode, persona, recent memories)", MinArgs: 0},
 		"gc":              {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
-			"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
+		"backup":          {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
+		"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
+		"restore-db":      {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
+		"_suggest_tags":   {Name: "_suggest_tags", Description: "Tag autocomplete for shell completion", MinArgs: 0},
 			"directives":       {Name: "directives", Description: "Show behavioral directives"},
 		"persona":         {Name: "persona", Description: "Persona operations"},
 	}
@@ -120,8 +123,14 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
+	case "backup":
+		return handleBackup(args)
 	case "restore":
 		return handleRestore(args)
+	case "restore-db":
+		return handleRestoreDB(args)
+	case "_suggest_tags":
+		return handleSuggestTags(args)
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":

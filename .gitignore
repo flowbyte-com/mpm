@@ -10,6 +10,15 @@ mini-bot
 mpm-agent/mini-bot
 mpm-agent/bin/
 
+# Runtime state (never commit these)
+src/db/mpm.db
+src/db/mpm.db.old
+src/db/mirror.jsonl
+config/
+
+# Backup files
+mpm-backup-*.sql
+
 # SQLite WAL and shared memory files (runtime artifacts)
 *.db-wal
 *.db-shm

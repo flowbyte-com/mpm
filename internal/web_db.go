@@ -384,17 +384,19 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	return err
 }
 
-// WeakenMemory decrements the reinforcement count.
+// WeakenMemory decrements reinforcement count and reduces weight.
 func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
 	}
+	weightLoss := (delta + 1) / 2
 	_, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
+		    weight = MAX(weight - ?, 0),
 		    last_accessed_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, delta, id)
+	`, delta, weightLoss, id)
 	return err
 }
 

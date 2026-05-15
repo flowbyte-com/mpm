@@ -1241,9 +1241,8 @@ func formatTopicName(tag string) string {
 func startWatcherGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbose bool) {
 	dirs := resolveWatchDirs("", "")
 	if len(dirs) == 0 {
-		if verbose {
-			fmt.Fprintf(os.Stderr, "⚠️  No watch directories configured\n")
-		}
+		fmt.Fprintf(os.Stderr, "⚠️  No watch directories configured — watcher started but will not process any files\n")
+		fmt.Fprintf(os.Stderr, "   Configure memory_dirs and sessions_dirs in mpm_config.json\n")
 		return
 	}
 

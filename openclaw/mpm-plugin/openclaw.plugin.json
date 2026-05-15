@@ -1,24 +1,26 @@
 {
   "id": "mpm",
   "name": "MPM (Memory Persistence Module)",
-  "description": "Long-term memory tool for 808 — query and save memories via the agent's own SQLite-backed persistence layer.",
+  "description": "Long-term memory tool for 808 \u2014 query and save memories via the agent's own SQLite-backed persistence layer.",
   "version": "1.0.0",
   "contracts": {
     "tools": [
-      "query_long_term_memory",
-      "save_to_memory",
-      "save_lesson",
-      "search_lessons",
-      "list_lessons",
-      "create_topic",
-      "search_topics",
       "add_reference",
-      "search_references",
+      "create_topic",
+      "link_topic",
+      "list_lessons",
       "list_references",
-      "read_directives",
-      "record_decision",
       "propose_theory",
-      "resolve_theory"
+      "query_long_term_memory",
+      "read_directives",
+      "read_wake_context",
+      "record_decision",
+      "resolve_theory",
+      "save_lesson",
+      "save_to_memory",
+      "search_lessons",
+      "search_references",
+      "search_topics"
     ]
   },
   "activation": {

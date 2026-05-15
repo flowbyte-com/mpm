@@ -473,12 +473,12 @@ func handleRefAdd(args []string) int {
 
 	// Pre-scan for --json and --chunk-size since callers may place them after the path
 	var parsedChunkSize int
-	for i, arg := range args[2:] {
-		if arg == "--json" || arg == "-j" {
-			*jsonOutput = true
-		}
-		if arg == "--chunk-size" && i+1 < len(args) {
-			fmt.Sscanf(args[i+2], "%d", &parsedChunkSize)
+	jsonOutputFromArgs, argsWithoutJSON := ExtractJSONFlag(args[2:])
+	*jsonOutput = jsonOutputFromArgs
+
+	for i, arg := range argsWithoutJSON {
+		if arg == "--chunk-size" && i+1 < len(argsWithoutJSON) {
+			fmt.Sscanf(argsWithoutJSON[i+1], "%d", &parsedChunkSize)
 		}
 	}
 
@@ -612,12 +612,7 @@ func handleRefList(args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 1
 	}
-	// Pre-scan for --json since callers may place it after positional args
-	for _, arg := range args[1:] {
-		if arg == "--json" || arg == "-j" {
-			*jsonOutput = true
-		}
-	}
+	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
@@ -732,13 +727,7 @@ func handleRefShow(args []string) int {
 	defer dm.Close()
 
 	// Pre-scan for --json
-	jsonOutput := false
-	for _, arg := range args[2:] {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-			break
-		}
-	}
+	jsonOutput, _ := ExtractJSONFlag(args[2:])
 
 	ref, err := dm.GetReference(id)
 	if err != nil {
@@ -849,13 +838,7 @@ func handleRefSearch(args []string) int {
 	defer dm.Close()
 
 	// Pre-scan for --json
-	jsonOutput := false
-	for _, arg := range args[2:] {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-			break
-		}
-	}
+	jsonOutput, _ := ExtractJSONFlag(args[2:])
 
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {

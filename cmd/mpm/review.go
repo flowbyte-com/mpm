@@ -29,15 +29,7 @@ func handleReview(args []string) int {
 	}
 
 	// Handle --json anywhere in args (may follow command name)
-	preprocessed := make([]string, 0, len(args))
-	jsonFlagSeen := false
-	for _, arg := range args[1:] {
-		if arg == "--json" || arg == "-j" {
-			jsonFlagSeen = true
-			continue
-		}
-		preprocessed = append(preprocessed, arg)
-	}
+	jsonFlagSeen, preprocessed := ExtractJSONFlag(args[1:])
 
 	if err := fs.Parse(preprocessed); err != nil {
 		return 1

@@ -49,6 +49,10 @@ const MPM_BINARY =
 const MPM_WORKSPACE =
   process.env.MPM_WORKSPACE ?? "/home/v/workspace/projects/mpm";
 
+// Max buffer size to prevent unbounded stdout/stderr accumulation.
+// 10 MB is sufficient for any reasonable mpm output while preventing OOM.
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Tool Schemas — plain JSON Schema (works with all OpenClaw runtimes)
 // ---------------------------------------------------------------------------
@@ -242,6 +246,12 @@ const LIST_REFERENCES_SCHEMA = {
 
 // ── Directives ───────────────────────────────────────────────────────────────
 
+const READ_WAKE_CONTEXT_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+} as const;
+
 const READ_DIRECTIVES_SCHEMA = {
   type: "object",
   properties: {},
@@ -394,11 +404,26 @@ async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> 
     }, timeoutMs);
 
     proc.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length + chunk.length > MAX_BUFFER_SIZE) {
+        settled = true;
+        proc.kill("SIGKILL");
+        resolve({
+          stdout,
+          stderr: `${stderr}\n[output exceeded ${MAX_BUFFER_SIZE} bytes]`.trim(),
+          exitCode: 125,
+        });
+        return;
+      }
       stdout += chunk.toString();
     });
 
     proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+      if (stderr.length + chunk.length > MAX_BUFFER_SIZE) {
+        // Only truncate stderr, don't kill — mpm writes warnings there too
+        stderr = (stderr + chunk.toString()).slice(-MAX_BUFFER_SIZE);
+      } else {
+        stderr += chunk.toString();
+      }
     });
 
     proc.on("error", (err: Error & { code?: string }) => {
@@ -432,6 +457,19 @@ function parseMpmResult(result: MpmRunResult): MpmJsonResult {
   const { stdout, stderr, exitCode } = result;
 
   if (exitCode !== 0) {
+    // Buffer overflow — distinguish from genuinely missing wake context.
+    // SIGKILL on overflow produces exitCode 125 with stderr containing
+    // "[output exceeded N bytes]" rather than a normal error message.
+    if (exitCode === 125 && stderr.includes("[output exceeded")) {
+      return {
+        id: "",
+        success: false,
+        error: "wake_context_truncated",
+        message:
+          "Wake context exceeds buffer limit — session is too large for the wake context tool. " +
+          "Proceed with minimal context (no previous session state).",
+      };
+    }
     if (
       stderr.includes("database is locked") ||
       stderr.includes("SQLITE_BUSY") ||
@@ -1114,6 +1152,82 @@ function makeListReferencesTool(
   };
 }
 
+// ── Session Wake Context ─────────────────────────────────────────────────────
+
+function makeReadWakeContextTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "read_wake_context",
+    description:
+      "Read the agent's wake context — session state from the previous session including " +
+      "active mode, active persona, recent topics, and recent memories. " +
+      "This is the first thing to check on session start to understand where you left off. " +
+      "Call this immediately on session start before doing anything else.",
+    parameters: READ_WAKE_CONTEXT_SCHEMA,
+    emoji_name: "sunrise",
+    execute: async (toolCallId, _params) => {
+      const result = await runMpm(["wake", "--json"]);
+      const data = parseMpmResult(result);
+
+      if (!data) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "(no wake context available — no previous session found)",
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      const ctx = data;
+      const lines: string[] = [
+        "\xf0\x9f\x8c\x9e **WAKE CONTEXT** \xf0\x9f\x8c\x9e\n",
+      ];
+
+      if (ctx.mode || ctx.active_mode) {
+        lines.push(`\n  **Mode:** ${ctx.mode || ctx.active_mode}`);
+      }
+      if (ctx.persona || ctx.active_persona) {
+        lines.push(`\n  **Persona:** ${ctx.persona || ctx.active_persona}`);
+      }
+      if (ctx.recent_topics && ctx.recent_topics.length > 0) {
+        lines.push(`\n  **Recent Topics:** ${(ctx.recent_topics as string[]).join(", ")}`);
+      }
+
+      if (ctx.recent_memories && Array.isArray(ctx.recent_memories) && ctx.recent_memories.length > 0) {
+        lines.push(`\n  **Recent Memories:**`);
+        for (const mem of ctx.recent_memories as Array<{ content?: string; created_at?: string }>) {
+          const content = (mem.content || "").substring(0, 80);
+          const age = mem.created_at
+            ? ` (${formatAge(mem.created_at)})`
+            : "";
+          lines.push(`\n    \u2022 ${content}${age}`);
+        }
+      }
+
+      const displayText = lines.join("");
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: displayText }] }],
+        },
+      };
+    },
+  };
+}
+
 // ── Directives ───────────────────────────────────────────────────────────────
 
 function makeReadDirectivesTool(
@@ -1568,6 +1682,12 @@ export default definePluginEntry({
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeListReferencesTool(ctx),
       { names: ["list_references"], optional: false }
+    );
+
+    // ── Session Wake Context ──────────────────────────────────────────────
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeReadWakeContextTool(ctx),
+      { names: ["read_wake_context"], optional: false }
     );
 
     // ── Directive Tools ──────────────────────────────────────────────────
