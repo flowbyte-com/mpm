@@ -6,15 +6,14 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 
 ## In Progress
 
-### 🔄 Better directives UI
-`read_directives` returns structured JSON — the Go handler works. The fix is in the TypeScript plugin: format the JSON output as readable grouped text with collection/category labels, directive age, and proper line breaks. Small lift, meaningful output improvement.
+_(nothing currently in progress — see High-Priority below)_
 
 ---
 
 ## High-Priority (Do Next)
 
-### Cross-reference linking
-Memories, lessons, topics, references — currently siloed. When a memory is retrieved, show linked topics/references. When a topic is shown, surface related memories. This is the connectivity win — makes the system feel like a brain, not a filing cabinet.
+### Cross-reference linking — DONE (2026-05-15)
+Memories, lessons, topics, references — now linked via bounded bidirectional cross-refs. Memory recall shows linked Topics + parent Reference doc. Topic recall shows top-3 memories + count chip. Phase 1 complete.
 
 ### Reference chunking control
 Fixed chunk size with no user control. Sometimes you want smaller chunks for precision search, larger for context. Make chunk size configurable per-ingest via `--chunk-size` flag (tokens).
@@ -58,6 +57,10 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 | 2 | Frequency-weighted reinforcement — auto-elevation + `mpm review` digest | ✅ Done (2026-05-14) |
 | 3 | Topic auto-suggestion — link to related topics on save | ✅ Done (2026-05-14) |
 | 4 | Stale memory flag — inline flagging in recall output | ✅ Done (2026-05-14) |
+| 5 | Better directives UI — grouped + age display via TS layer | ✅ Done (2026-05-15) |
+| 6 | Epistemology Engine — Decision Ledger + Theory Tracker | ✅ Done (2026-05-15) |
+| 7 | `UpdateMemoryMetadata()` + `mpm patch-memory` command | ✅ Done (2026-05-15) |
+| 8 | `resolve_theory` in-place metadata patch (no FTS re-index) | ✅ Done (2026-05-15) |
 
 ---
 
@@ -71,9 +74,9 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 
 ## Cleanup (Technical Debt)
 
-- `synthesize` command — replaced by better recall, rarely used
-- The `--json` flag pre-scanning hack — standardize arg parsing across all handlers
+- ~~`synthesize` command~~ — ✅ Removed 2026-05-15 (deleted synthesize.go, unregistered route, removed from help, stripped from watch daemon)
+- ~~The `--json` flag pre-scanning hack~~ — ⚠️  Deferred. Build is clean. Standardization is a larger refactor (see router.go helper approach). Would need `ParseArgsWithJSONFlag()` in router + migrate handlers one-by-one.
 
 ---
 
-*Last updated: 2026-05-14*
+*Last updated: 2026-05-15*
