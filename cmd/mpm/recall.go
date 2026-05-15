@@ -109,16 +109,17 @@ func handleRecall(args []string) int {
 		reinforcementCount   int
 		weight               int
 		lastAccessedAt       time.Time
+		referenceID          string
 	}
 	var entries []recallEntry
 	for rows.Next() {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
 		var reinforcementCount, weight int64
-		var nullableLastAccessed sql.NullString
+		var nullableLastAccessed, nullableRefID sql.NullString
 
 		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt,
-			&reinforcementCount, &weight, &nullableLastAccessed); err != nil {
+			&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
 			continue
 		}
 		if content == "" {
@@ -128,6 +129,10 @@ func handleRecall(args []string) int {
 		if nullableSessionID.Valid {
 			sessionID = nullableSessionID.String
 		}
+		refID := ""
+		if nullableRefID.Valid {
+			refID = nullableRefID.String
+		}
 		entry := recallEntry{
 			id:                  id,
 			content:             content,
@@ -135,6 +140,7 @@ func handleRecall(args []string) int {
 			tags:                nullableTags.String,
 			reinforcementCount:  int(reinforcementCount),
 			weight:              int(weight),
+			referenceID:         refID,
 		}
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			entry.createdAt = t
@@ -181,6 +187,10 @@ func handleRecall(args []string) int {
 			Score              float64 `json:"score"`
 			Rationale          string  `json:"rationale"`
 			IsStale            bool    `json:"is_stale"`
+			CrossReferences    struct {
+				Topics       []mpminternal.TopicRef         `json:"topics"`
+				ReferenceDoc *mpminternal.ReferenceDocRef   `json:"reference_doc"`
+			} `json:"cross_references"`
 		}
 		result := make([]memoryEntry, 0, len(entries))
 		for _, e := range entries {
@@ -192,6 +202,21 @@ func handleRecall(args []string) int {
 			rationale := formatRationale(e.reinforcementCount, e.weight, e.lastAccessedAt)
 
 			isStale := isMemoryStale(e.createdAt, e.lastAccessedAt, *staleDays)
+
+			// Fetch cross-references
+			topics, _ := dm.GetMemoryTopics(e.id)
+			var refDoc *mpminternal.ReferenceDocRef
+			if e.referenceID != "" {
+				refDoc, _ = dm.GetReferenceDoc(e.referenceID)
+			}
+
+			crossRefs := struct {
+				Topics       []mpminternal.TopicRef       `json:"topics"`
+				ReferenceDoc *mpminternal.ReferenceDocRef `json:"reference_doc"`
+			}{
+				Topics:       topics,
+				ReferenceDoc: refDoc,
+			}
 
 			result = append(result, memoryEntry{
 				ID:                 shortID(e.id),
@@ -205,6 +230,7 @@ func handleRecall(args []string) int {
 				Score:              score,
 				Rationale:         rationale,
 				IsStale:            isStale,
+				CrossReferences:   crossRefs,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{
@@ -290,6 +316,31 @@ func handleRecall(args []string) int {
 			chipsLine, synthTag,
 			reset,
 			content)
+
+		// Fetch and display cross-references
+		topics, _ := dm.GetMemoryTopics(e.id)
+		var refTitle string
+		if e.referenceID != "" {
+			if refDoc, err := dm.GetReferenceDoc(e.referenceID); err == nil && refDoc != nil {
+				refTitle = refDoc.Title
+			}
+		}
+
+		if len(topics) > 0 || refTitle != "" {
+			topicChips := []string{}
+			for _, t := range topics {
+				topicChips = append(topicChips, fmt.Sprintf("%s[%s]%s", magenta, t.Name, reset))
+			}
+
+			fmt.Printf("\n%s─ Related ────────────────────────────────%s\n", bold, reset)
+			if len(topics) > 0 {
+				fmt.Printf("  Topics: %s\n", strings.Join(topicChips, " "))
+			}
+			if refTitle != "" {
+				fmt.Printf("  Ref:    %s\n", refTitle)
+			}
+			fmt.Printf("%s─────────────────────────────────────────%s\n", bold, reset)
+		}
 	}
 
 	fmt.Printf("%s%d results%s\n", cyan, len(entries), reset)
@@ -334,7 +385,8 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		SELECT m.id, m.content, m.session_id, m.tags, m.created_at,
 		       COALESCE(m.reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(m.weight, 1) as weight,
-		       m.last_accessed_at
+		       m.last_accessed_at,
+		       m.reference_id
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
 		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.collection = ?`
@@ -364,7 +416,8 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		SELECT id, content, session_id, tags, created_at,
 		       COALESCE(reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(weight, 1) as weight,
-		       last_accessed_at
+		       last_accessed_at,
+		       reference_id
 		FROM memories
 		WHERE deleted_at IS NULL AND collection = ?
 		  AND (content LIKE ? OR tags LIKE ?)`
