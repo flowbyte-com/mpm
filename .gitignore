@@ -30,4 +30,4 @@ mpm-backup-*.sql
 .DS_Store
 
 # Local config (contains secrets — always private)
-mpm_config.json
+mpm_config.jsonsrc/db/mirror.jsonl
