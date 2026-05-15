@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ledongthuc/pdf"
+	"github.com/pkoukk/tiktoken-go"
 	"golang.org/x/net/html"
 
 	"mpm/internal/config"
@@ -471,6 +472,75 @@ func ChunkReference(content string, chunkSize int) []Chunk {
 	}
 
 	return chunks
+}
+
+// CountTokens returns the number of cl100k_base tokens in a string.
+// Uses tiktoken for accurate LLM context window sizing.
+func CountTokens(text string) (int, error) {
+	encoder, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+		return 0, fmt.Errorf("failed to load tiktoken encoder: %w", err)
+	}
+	tokens := encoder.Encode(text, nil, nil)
+	return len(tokens), nil
+}
+
+// ChunkByTokens chunks reference content by token count (not character count).
+// Uses tiktoken cl100k_base encoding for accurate LLM context window sizing.
+// chunkSize is the target token count per chunk (64-8192; 64-2048 recommended).
+// Returns chunks with Content field containing the text, Index for ordering.
+func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
+	if chunkSize <= 0 {
+		chunkSize = 512
+	}
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+	if chunkSize > 8192 {
+		chunkSize = 8192
+	}
+
+	encoder, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tiktoken encoder: %w", err)
+	}
+
+	// Fast path: if total tokens <= chunkSize, return single chunk
+	fullTokens := encoder.Encode(content, nil, nil)
+	if len(fullTokens) <= chunkSize {
+		return []Chunk{{Index: 0, Content: strings.TrimSpace(content)}}, nil
+	}
+
+	// Multi-chunk: batch encode once, iterate in chunkSize increments
+	// Decode each chunk's token slice, then trim to nearest space to prevent mid-word slicing
+	var chunks []Chunk
+	for i := 0; i < len(fullTokens); i += chunkSize {
+		end := i + chunkSize
+		if end > len(fullTokens) {
+			end = len(fullTokens)
+		}
+
+		// Decode token slice to text
+		chunkText := encoder.Decode(fullTokens[i:end])
+
+		// If not the last chunk, trim to nearest space to avoid mid-word breaks
+		if end < len(fullTokens) {
+			lastSpace := strings.LastIndex(chunkText, " ")
+			if lastSpace > 0 {
+				chunkText = chunkText[:lastSpace]
+			}
+		}
+
+		chunkText = strings.TrimSpace(chunkText)
+		if chunkText != "" {
+			chunks = append(chunks, Chunk{
+				Index:   len(chunks),
+				Content: chunkText,
+			})
+		}
+	}
+
+	return chunks, nil
 }
 
 // GetReferenceCount returns the number of reference documents

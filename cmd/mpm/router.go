@@ -37,6 +37,7 @@ func NewRouter() *CommandRouter {
 		"show":       {Name: "show", Description: "Show memory details", MinArgs: 1},
 		"rm":         {Name: "rm", Description: "Delete a memory", MinArgs: 1},
 		"promote":    {Name: "promote", Description: "Make memory LTM", MinArgs: 1},
+		"patch-memory": {Name: "patch-memory", Description: "Patch metadata JSON in-place", MinArgs: 2},
 		"reinforce":  {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
 		"weaken":     {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
 		"set-weight": {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
@@ -58,7 +59,7 @@ func NewRouter() *CommandRouter {
 		"session":         {Name: "session", Description: "Session operations"},
 		"lesson":          {Name: "lesson", Description: "Lesson operations"},
 		"memory":          {Name: "memory", Description: "Memory operations"},
-		"synthesize":  {Name: "synthesize", Description: "LLM synthesize session into memories", MinArgs: 1},
+
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
 		"mode":            {Name: "mode", Description: "Mode operations"},
@@ -146,6 +147,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRm(args)
 	case "promote":
 		return handlePromote(args)
+	case "patch-memory":
+		return handlePatchMemory(args)
 	case "reinforce":
 		return handleReinforce(args)
 	case "weaken":
@@ -170,8 +173,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSession(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
-	case "synthesize":
-		return handleSynthesize(args)
 	default:
 		r.unknownCommand(cmdName)
 		return 1

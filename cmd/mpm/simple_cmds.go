@@ -260,6 +260,39 @@ func handleRm(args []string) int {
 	return 0
 }
 
+// mpm patch-memory <id> <json-patch> — Patch metadata JSON in-place (no content change, no FTS re-index)
+func handlePatchMemory(args []string) int {
+	if len(args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: mpm patch-memory <id> <json-patch>\n")
+		return 1
+	}
+
+	id := args[1]
+	patchJSON := args[2]
+
+	// Basic JSON validity check
+	if !strings.HasPrefix(strings.TrimSpace(patchJSON), "{") {
+		fmt.Fprintf(os.Stderr, "Error: patch must be a JSON object string\n")
+		return 1
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	err = dm.UpdateMemoryMetadata(id, patchJSON)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Patched metadata for memory %s\n", id)
+	return 0
+}
+
 // mpm promote <id> — Make memory LTM
 func handlePromote(args []string) int {
 	if len(args) < 2 {
@@ -419,7 +452,8 @@ func handleShredMem(args []string) int {
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--json]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--chunk-size <tokens>] [--json]\n")
+		fmt.Fprintf(os.Stderr, "  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)\n")
 		return 1
 	}
 
@@ -432,15 +466,29 @@ func handleRefAdd(args []string) int {
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
 	tag := fs.String("tag", "", "Tags for the reference")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
 	if err := fs.Parse(args[2:]); err != nil {
 		return 1
 	}
 
-	// Pre-scan for --json since callers may place it after the query
-	for _, arg := range args[2:] {
+	// Pre-scan for --json and --chunk-size since callers may place them after the path
+	var parsedChunkSize int
+	for i, arg := range args[2:] {
 		if arg == "--json" || arg == "-j" {
 			*jsonOutput = true
 		}
+		if arg == "--chunk-size" && i+1 < len(args) {
+			fmt.Sscanf(args[i+2], "%d", &parsedChunkSize)
+		}
+	}
+
+	// Validate and apply chunk size
+	if parsedChunkSize != 0 {
+		*chunkSize = parsedChunkSize
+	}
+	if *chunkSize < 64 || *chunkSize > 2048 {
+		fmt.Fprintf(os.Stderr, "Error: --chunk-size must be between 64 and 2048 (got %d)\n", *chunkSize)
+		return 1
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
@@ -501,7 +549,11 @@ func handleRefAdd(args []string) int {
 		}
 	}
 
-	chunks := mpminternal.ChunkReference(content, 1000)
+	chunks, err := mpminternal.ChunkByTokens(content, *chunkSize)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to chunk content: %v\n", err)
+		return 1
+	}
 	refChunks := make([]mpminternal.ReferenceChunk, len(chunks))
 	for i, c := range chunks {
 		refChunks[i] = mpminternal.ReferenceChunk{

@@ -12,11 +12,8 @@ _(nothing currently in progress — see High-Priority below)_
 
 ## High-Priority (Do Next)
 
-### Cross-reference linking — DONE (2026-05-15)
-Memories, lessons, topics, references — now linked via bounded bidirectional cross-refs. Memory recall shows linked Topics + parent Reference doc. Topic recall shows top-3 memories + count chip. Phase 1 complete.
-
 ### Reference chunking control
-Fixed chunk size with no user control. Sometimes you want smaller chunks for precision search, larger for context. Make chunk size configurable per-ingest via `--chunk-size` flag (tokens).
+Configurable via `--chunk-size` flag (64-2048 tokens, default 512). Uses batch encode/decode with tiktoken cl100k_base. Token-based chunking replaces character-based `ChunkReference`.
 
 ---
 
@@ -61,6 +58,8 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 | 6 | Epistemology Engine — Decision Ledger + Theory Tracker | ✅ Done (2026-05-15) |
 | 7 | `UpdateMemoryMetadata()` + `mpm patch-memory` command | ✅ Done (2026-05-15) |
 | 8 | `resolve_theory` in-place metadata patch (no FTS re-index) | ✅ Done (2026-05-15) |
+| 9 | Cross-reference linking — bounded bidirectional Memory↔Topic↔Reference | ✅ Done (2026-05-15) |
+| 10 | Reference chunking control — `--chunk-size` flag, tiktoken batch encode/decode | ✅ Done (2026-05-15) |
 
 ---
 

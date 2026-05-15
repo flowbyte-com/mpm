@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -461,28 +460,6 @@ fmt.Printf("   %s LTM memory saved: %s (id: %s)\n", prefix, name, memID[:8])
 	d.deleteFile(path, "processed successfully")
 }
 
-// triggerSynthesisAsync fires LLM synthesis for a completed session.
-// Runs as a detached subprocess so it outlives the daemon restart.
-// After the subprocess completes, the .jsonl is archived to prevent data loss.
-func (d *watcherDaemon) triggerSynthesisAsync(sessionUUID, jsonlPath string) {
-	binary, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[synth] failed to find binary: %v\n", err)
-		d.archiveFile(jsonlPath, "synthesis-skipped")
-		return
-	}
-	go func() {
-		cmd := exec.Command(binary, "synthesize", sessionUUID)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[synth] %s: %v\n", sessionUUID[:8], err)
-		} else {
-			fmt.Printf("   🔮 %s", string(out))
-		}
-		d.archiveFile(jsonlPath, "synthesized")
-	}()
-}
-
 // sweepOrphanSessions scans a session directory for orphan .jsonl files that
 // have no matching .jsonl.lock, indicating the session has ended. Each orphan
 // is processed: facts extracted and saved to DB, then LLM synthesis triggered.
@@ -602,9 +579,7 @@ func (d *watcherDaemon) processSessionFile(path string, isStartup bool) {
 	// Check for topic clustering
 	d.checkTopicClustering()
 
-// Fire LLM synthesis (non-blocking) — keeps .jsonl for synthesis, runs in background
-	sessionUUID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-	d.triggerSynthesisAsync(sessionUUID, path)
+	// Session file processing complete — .jsonl will be archived by caller
 }
 
 // processSessionsConfig handles Route C: OpenClaw system config files (sessions.json, workspace.json, etc.)

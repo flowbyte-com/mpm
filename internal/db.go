@@ -443,6 +443,33 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 	return id, err
 }
 
+// UpdateMemoryMetadata patches the metadata JSON column for a specific memory ID.
+// Uses SQLite's json_patch() to merge the patch into existing metadata in-place.
+// Does NOT touch content — FTS index is not affected.
+// Returns error if the memory ID does not exist.
+func (dm *DatabaseManager) UpdateMemoryMetadata(id string, patchJSON string) error {
+	// json_patch(NULL, '{}') returns NULL in SQLite, so COALESCE to {} is required.
+	// This ensures a NULL metadata field doesn't cause the patch to fail.
+	result, err := dm.db.Exec(`
+		UPDATE memories
+		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
+			last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND deleted_at IS NULL
+	`, patchJSON, id)
+	if err != nil {
+		return fmt.Errorf("UpdateMemoryMetadata: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("UpdateMemoryMetadata: rows check: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("memory not found or deleted: %s", id)
+	}
+	return nil
+}
+
 // SaveSystemConfig stores or updates a system config entry (keyed by source file name)
 // Only updates if the content hash has changed (skip duplicate writes)
 // Returns (updated bool, error)

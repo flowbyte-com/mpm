@@ -1119,7 +1119,6 @@ func printHelp() {
 		{"reference", "Reference library", true},
 		{"lesson", "Lesson operations", true},
 		{"recall <query>", "Semantic memory search", false},
-		{"synthesize [uuid]", "Generate memory summaries", false},
 	})
 
 	sysSection := buildHelpSection("System", []helpCmd{
