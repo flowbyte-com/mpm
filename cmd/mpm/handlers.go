@@ -1019,6 +1019,31 @@ func handleTopicShow(args []string) int {
 		output.WriteString(fmt.Sprintf("\nDescription:\n%s\n", description))
 	}
 
+	// Fetch top 3 memories for this topic
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err == nil {
+		memories, total, _ := dm.GetTopicTopMemories(id, 3)
+		if len(memories) > 0 {
+			bold := "\033[1m"
+			reset := "\033[0m"
+			dim := "\033[2m"
+
+			output.WriteString(fmt.Sprintf("\n%s─ Top Memories ──────────────────────────%s\n", bold, reset))
+			for i, mem := range memories {
+				content := mem.Content
+				if len(content) > 120 {
+					content = content[:120] + "…"
+				}
+				output.WriteString(fmt.Sprintf("\n%d. %s\n", i+1, content))
+			}
+			if total > 3 {
+				remaining := total - 3
+				output.WriteString(fmt.Sprintf("\n%s[+ %d other linked memories]%s\n", dim, remaining, reset))
+			}
+			output.WriteString(fmt.Sprintf("%s─────────────────────────────────────────%s\n", bold, reset))
+		}
+	}
+
 	return respond(output.String(), "", 0)
 }
 
