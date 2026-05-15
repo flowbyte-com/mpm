@@ -28,6 +28,52 @@ MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch star
 
 ---
 
+## Epistemology Engine
+
+MPM tracks not just *what* it knows, but *why* it knows it and *how* it decided to act. Three new collections extend the memory model into agency:
+
+### Decision Ledger (`collection: decisions`)
+
+An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, 808 can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
+
+```bash
+# Via CLI (structured format)
+mpm add --collection decisions --json -- "CONTEXT: We needed a CSS injection mechanism that survives wp_kses filtering
+CHOICE: Route all widget CSS through agentshell_register_widget → wp_options → widgets.php <head> injection
+RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() even for admins. The widget init JS also needs a footer injection point. Both requirements pointed to wp_options as the store and a dedicated loader as the mechanism." --tag agent-shell --weight 8
+
+# Or use the OpenClaw tool directly (record_decision)
+```
+
+### Theory Tracker (`collection: theories`)
+
+A hypothesis ledger for debugging and design. When 808 forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
+
+```bash
+# Propose (via CLI)
+mpm add --collection theories --json -- "HYPOTHESIS: passing --json before the positional arg causes the parse bug
+VALIDATION_CRITERIA: write a unit test — invoke mpm with --json flag first vs positional-first, compare parse error rate
+STATUS: pending" --tag debugging
+
+# Resolve via patch-memory (no FTS re-index)
+mpm patch-memory <theory-id> '{"status":"proven","conclusion":"Flag order matters — --json consumed by the flag parser before positional processing"}'
+```
+
+### Content Format Conventions
+
+| Collection | Content Format |
+| --- | --- |
+| `decisions` | `CONTEXT:\nCHOICE:\nRATIONALE:\n[OUTCOME:]` |
+| `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
+
+FTS5 indexes the content field directly — no new tables or indices needed.
+
+### Metadata Patching
+
+`mpm patch-memory <id> '<json-patch>'` uses SQLite's `json_patch()` to update the `metadata` column in-place. Content is untouched, so the FTS index is not affected. Used by `resolve_theory` to close the loop on a pending theory without triggering a re-index.
+
+---
+
 ## Architecture
 
 ### Single-Process, Shared-Database Model
@@ -72,6 +118,8 @@ MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch star
 | --- | --- | --- | --- |
 | `memories` | General facts, LLM-synthesized insights | 1 | Tagged for auto-topic clustering |
 | `session` | Operational facts (CWD, model changes) | 1 | State-change dedup, 24h TTL |
+| `decisions` | Architectural choices with rationale | 1 | Append-only audit trail |
+| `theories` | Hypothesis + validation criteria | 1 | Has lifecycle: pending → proven/disproven |
 
 **Long-term memory (LTM):** any memory with `weight >= 10`. Promoted by `mpm promote <id>` or auto-ingested `.md` files from the watcher.
 
@@ -172,7 +220,25 @@ Systematic, precise, architectural. Thinks in code structures and abstraction bo
 
 ## OpenClaw Plugin Integration
 
-MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer via two tools: `query_long_term_memory` and `save_to_memory`.
+MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 15 tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `query_long_term_memory` | Semantic recall across all collections |
+| `save_to_memory` | Persist facts, lessons, decisions |
+| `save_lesson` | Record learned patterns (warning/practice/insight) |
+| `search_lessons` | Search lesson store |
+| `list_lessons` | List all lessons |
+| `create_topic` | Create topic definitions |
+| `search_topics` | Search topics |
+| `link_topic` | Associate memory with topic |
+| `add_reference` | Ingest documents to reference library |
+| `search_references` | Search reference chunks |
+| `list_references` | List reference documents |
+| `read_directives` | Read prime directives |
+| `record_decision` | Log architectural choices with rationale |
+| `propose_theory` | Log hypothesis before writing fix |
+| `resolve_theory` | Close loop on pending theory (patches metadata in-place) |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
 
@@ -296,6 +362,7 @@ mpm reinforce abc123            # +1 reinforcement
 mpm reinforce abc123 3          # +3
 mpm weaken abc123               # -1
 mpm set-weight abc123 7        # Set directly (0-100)
+mpm patch-memory abc123 '{"status":"proven"}'  # Patch metadata in-place (FTS untouched)
 ```
 
 ### Stats & Maintenance
@@ -417,6 +484,7 @@ mpm version               # Show version
 mpm help                  # Show help
 mpm ingest <path>         # Import from external SQLite
 mpm ingest list-schemas   # Show available tables
+mpm patch-memory <id> '<json-patch>'  # Patch metadata in-place (used by resolve_theory)
 mpm shred sessions -f     # Delete all sessions (requires --force)
 mpm shred memories -f     # Delete all memories
 mpm shred topics -f       # Delete all topics

@@ -15,7 +15,10 @@
       "add_reference",
       "search_references",
       "list_references",
-      "read_directives"
+      "read_directives",
+      "record_decision",
+      "propose_theory",
+      "resolve_theory"
     ]
   },
   "activation": {
