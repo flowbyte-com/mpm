@@ -1,5 +1,5 @@
 // src/index.ts
-import { definePluginEntry } from "/home/v/.nvm/versions/node/v24.14.1/lib/node_modules/openclaw/dist/plugin-sdk/plugin-entry.js";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry.js";
 var MPM_BINARY = process.env.MPM_BINARY ?? "/home/v/workspace/projects/mpm/bin/mpm";
 var MPM_WORKSPACE = process.env.MPM_WORKSPACE ?? "/home/v/workspace/projects/mpm";
 var QUERY_LONG_TERM_MEMORY_SCHEMA = {
@@ -115,6 +115,21 @@ var SEARCH_TOPICS_SCHEMA = {
   required: ["query"],
   additionalProperties: false
 };
+var LINK_TOPIC_SCHEMA = {
+  type: "object",
+  properties: {
+    memory_id: {
+      type: "string",
+      description: "ID of the memory to link to a topic."
+    },
+    topic_id: {
+      type: "string",
+      description: "ID of the topic to link the memory to."
+    }
+  },
+  required: ["memory_id", "topic_id"],
+  additionalProperties: false
+};
 var ADD_REFERENCE_SCHEMA = {
   type: "object",
   properties: {
@@ -154,6 +169,81 @@ var LIST_REFERENCES_SCHEMA = {
 var READ_DIRECTIVES_SCHEMA = {
   type: "object",
   properties: {},
+  additionalProperties: false
+};
+var RECORD_DECISION_SCHEMA = {
+  type: "object",
+  properties: {
+    context: {
+      type: "string",
+      description: "The situation or problem that forced a choice between competing options."
+    },
+    choice: {
+      type: "string",
+      description: "What was decided \u2014 the specific path, approach, or action taken."
+    },
+    rationale: {
+      type: "string",
+      description: "Why this choice won over the alternatives. What evidence or reasoning made it the right call."
+    },
+    outcome: {
+      type: "string",
+      description: "Optional: what actually happened when this decision was executed."
+    },
+    tags: {
+      type: "array",
+      items: { type: "string" },
+      description: "Optional tags for retrieval.",
+      default: []
+    },
+    weight: {
+      type: "number",
+      description: "Importance weight 0\u20131 (default 0.5). Use 0.8+ for architectural decisions.",
+      default: 0.5
+    }
+  },
+  required: ["context", "choice", "rationale"],
+  additionalProperties: false
+};
+var PROPOSE_THEORY_SCHEMA = {
+  type: "object",
+  properties: {
+    hypothesis: {
+      type: "string",
+      description: "What you think is true \u2014 a causal assumption, a noticed pattern, or a gut feeling about why something is broken."
+    },
+    validationCriteria: {
+      type: "string",
+      description: "A specific, executable test or observation that would prove or disprove the hypothesis. Be concrete: 'run the benchmark with --json flag before positional arg and compare parse time' \u2014 not 'test it somehow'."
+    },
+    tags: {
+      type: "array",
+      items: { type: "string" },
+      description: "Optional tags.",
+      default: []
+    }
+  },
+  required: ["hypothesis", "validationCriteria"],
+  additionalProperties: false
+};
+var RESOLVE_THEORY_SCHEMA = {
+  type: "object",
+  properties: {
+    theoryId: {
+      type: "string",
+      description: "The MPM memory ID of the theory to resolve."
+    },
+    conclusion: {
+      type: "string",
+      description: "What the test or observation actually found. Be specific about the result."
+    },
+    newStatus: {
+      type: "string",
+      enum: ["proven", "disproven"],
+      description: "proven if the hypothesis was confirmed; disproven if it was not."
+    }
+  },
+  required: ["theoryId", "conclusion", "newStatus"],
   additionalProperties: false
 };
 async function runMpm(args, timeoutMs = 15e3) {
@@ -251,7 +341,18 @@ function makeQueryLongTermMemoryTool(_ctx) {
       const data = parseMpmResult(result);
       let displayText;
       if (data.memories && Array.isArray(data.memories) && data.memories.length > 0) {
-        displayText = data.memories.map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m)).join("\n\n---\n\n");
+        displayText = data.memories.map((m) => {
+          const mem = m;
+          const xref = mem.cross_references || {};
+          const topics = xref.topics || [];
+          const refDoc = xref.reference_doc;
+          const topicLine = topics.length ? `
+Topics: [${topics.map((t) => t.name).join("] [")}]` : "";
+          const refLine = refDoc ? `
+Ref: ${refDoc.title}` : "";
+          const content = typeof mem.content === "string" ? mem.content : JSON.stringify(mem);
+          return `${content}${topicLine}${refLine}`;
+        }).join("\n\n---\n\n");
       } else if (data.text) {
         displayText = String(data.text);
       } else {
@@ -514,7 +615,19 @@ function makeSearchTopicsTool(_ctx) {
           const name = t.name || t.description || "(unnamed)";
           const id = t.id ? ` [${t.id}]` : "";
           const desc = t.description ? `: ${t.description}` : "";
-          return `${name}${id}${desc}`;
+          const topMems = t.top_memories || [];
+          let memPreview = "";
+          if (topMems.length > 0) {
+            memPreview = "\n  Top: " + topMems.slice(0, 3).map((m) => {
+              const content = typeof m.content === "string" ? m.content : "";
+              return content.length > 60 ? content.slice(0, 60) + "\u2026" : content;
+            }).join(" | ");
+            const total = t.memory_count || 0;
+            if (total > 3) {
+              memPreview += ` [+${total - 3} more]`;
+            }
+          }
+          return `${name}${id}${desc}${memPreview}`;
         }).join("\n");
       } else if (data.message) {
         displayText = String(data.message);
@@ -526,6 +639,57 @@ function makeSearchTopicsTool(_ctx) {
         result: {
           type: "ok",
           results: [{ content: [{ type: "text", text: displayText }] }]
+        }
+      };
+    }
+  };
+}
+function makeLinkTopicTool(_ctx) {
+  return {
+    name: "link_topic",
+    description: "Link an existing memory to an existing topic. Use this after saving a memory and seeing topic suggestions. The memory and topic must both already exist.",
+    parameters: LINK_TOPIC_SCHEMA,
+    emoji_name: "link",
+    execute: async (toolCallId, params) => {
+      const {
+        memory_id = "",
+        topic_id = ""
+      } = params;
+      if (!memory_id.trim() || !topic_id.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: '{"success":false,"error":"missing_params","message":"memory_id and topic_id are required"}'
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      const result = await runMpm([
+        "topic",
+        "link",
+        topic_id,
+        memory_id,
+        "--json"
+      ]);
+      const data = parseMpmResult(result);
+      return {
+        toolCallId,
+        result: {
+          type: "ok",
+          results: [
+            {
+              content: [{ type: "text", text: JSON.stringify(data) }]
+            }
+          ]
         }
       };
     }
@@ -655,6 +819,43 @@ function makeListReferencesTool(_ctx) {
   };
 }
 function makeReadDirectivesTool(_ctx) {
+  function formatAge(createdAt) {
+    if (!createdAt) return "unknown age";
+    let created;
+    try {
+      created = new Date(createdAt.replace(" ", "T"));
+      if (isNaN(created.getTime())) created = new Date(createdAt);
+    } catch {
+      return "unknown age";
+    }
+    if (isNaN(created.getTime())) return "unknown age";
+    const diffMs = Date.now() - created.getTime();
+    const diffSec = Math.floor(diffMs / 1e3);
+    if (diffSec < 60) return `${diffSec}s ago`;
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDays = Math.floor(diffHr / 24);
+    if (diffDays < 30) return `${diffDays}d ago`;
+    const diffWeeks = Math.floor(diffDays / 7);
+    if (diffWeeks < 12) return `${diffWeeks}w ago`;
+    const diffMonths = Math.floor(diffDays / 30);
+    return `${diffMonths}mo ago`;
+  }
+  function groupByCollection(directives) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const d of directives) {
+      const key = (d.collection || "directive").trim();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({
+        content: typeof d.content === "string" ? d.content : JSON.stringify(d.content),
+        created_at: d.created_at || "",
+        id: d.id || ""
+      });
+    }
+    return groups;
+  }
   return {
     name: "read_directives",
     description: "Read the agent's prime directives \u2014 behavioral rules and operating principles. These define what the agent must and must not do.",
@@ -663,24 +864,256 @@ function makeReadDirectivesTool(_ctx) {
     execute: async (toolCallId, _params) => {
       const result = await runMpm(["directives", "--json"]);
       const data = parseMpmResult(result);
-      let displayText;
-      if (data.directives && Array.isArray(data.directives) && data.directives.length > 0) {
-        displayText = data.directives.map((d) => {
-          const collection = d.collection || "directive";
-          const content = typeof d.content === "string" ? d.content : JSON.stringify(d.content);
-          return `[${collection}]
-${content}`;
-        }).join("\n\n---\n\n");
-      } else if (data.message) {
-        displayText = String(data.message);
-      } else {
-        displayText = "(no directives defined \u2014 run the session that defines them)";
+      if (!data.directives || !Array.isArray(data.directives) || data.directives.length === 0) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: data.message ? String(data.message) : "(no directives defined \u2014 run the session that defines them)"
+                  }
+                ]
+              }
+            ]
+          }
+        };
       }
+      const groups = groupByCollection(data.directives);
+      const lines = [
+        "\xF0\x9F\x9B\xB8 **808 PRIME DIRECTIVES** \xF0\x9F\x9B\xB8\n"
+      ];
+      for (const [group, directives] of groups) {
+        lines.push(`
+**${group.toUpperCase()}**
+`);
+        for (const d of directives) {
+          const age = formatAge(d.created_at);
+          lines.push(`
+  \u2022 ${d.content}`);
+          lines.push(`    \u2192 added ${age}`);
+        }
+      }
+      const displayText = lines.join("\n");
       return {
         toolCallId,
         result: {
           type: "ok",
           results: [{ content: [{ type: "text", text: displayText }] }]
+        }
+      };
+    }
+  };
+}
+function makeRecordDecisionTool(_ctx) {
+  return {
+    name: "record_decision",
+    description: "Record an architectural decision, library choice, or any moment where you chose path A over path B. Call this BEFORE or AFTER the decision \u2014 not just after. The rationale is the most important field: it is what makes past decisions reusable when you encounter a similar problem weeks later. Trigger: whenever you weigh tradeoffs and choose one, or whenever you notice you just picked an approach without recording why.",
+    parameters: RECORD_DECISION_SCHEMA,
+    emoji_name: "scales",
+    execute: async (toolCallId, params) => {
+      const {
+        context = "",
+        choice = "",
+        rationale = "",
+        outcome = "",
+        tags = [],
+        weight = 0.5
+      } = params;
+      if (!context.trim() || !choice.trim() || !rationale.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "context, choice, and rationale are all required."
+                    })
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      const content = [
+        `CONTEXT: ${context}`,
+        `CHOICE: ${choice}`,
+        `RATIONALE: ${rationale}`,
+        outcome ? `OUTCOME: ${outcome}` : ``
+      ].filter((line) => line.length > `CONTEXT: `.length).join("\n");
+      const args = ["add", "--json", "--collection", "decisions", "--", content];
+      for (const tag of tags) {
+        args.push("--tag", tag);
+      }
+      if (weight !== 0.5) {
+        args.push("--weight", String(weight));
+      }
+      const result = await runMpm(args);
+      const data = parseMpmResult(result);
+      return {
+        toolCallId,
+        result: {
+          type: "ok",
+          results: [{ content: [{ type: "text", text: JSON.stringify(data) }] }]
+        }
+      };
+    }
+  };
+}
+function makeProposeTheoryTool(_ctx) {
+  return {
+    name: "propose_theory",
+    description: "Log a hypothesis about causality before writing a fix. When you think 'X is probably causing Y' \u2014 propose it, define the test, then run the test. Writing the validation criteria forces you to confront whether the assumption is actually testable, and often collapses a false hypothesis before it wastes an hour of debugging time. Trigger: whenever you form a 'I think X is causing Y' assumption during debugging or design work.",
+    parameters: PROPOSE_THEORY_SCHEMA,
+    emoji_name: "bulb",
+    execute: async (toolCallId, params) => {
+      const {
+        hypothesis = "",
+        validationCriteria = "",
+        tags = []
+      } = params;
+      if (!hypothesis.trim() || !validationCriteria.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "hypothesis and validationCriteria are both required."
+                    })
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      const content = [
+        `HYPOTHESIS: ${hypothesis}`,
+        `VALIDATION_CRITERIA: ${validationCriteria}`,
+        `STATUS: pending`
+      ].join("\n");
+      const args = ["add", "--json", "--collection", "theories", "--", content];
+      for (const tag of tags) {
+        args.push("--tag", tag);
+      }
+      args.push("--tag", "theory");
+      const result = await runMpm(args);
+      const data = parseMpmResult(result);
+      return {
+        toolCallId,
+        result: {
+          type: "ok",
+          results: [{ content: [{ type: "text", text: JSON.stringify(data) }] }]
+        }
+      };
+    }
+  };
+}
+function makeResolveTheoryTool(_ctx) {
+  return {
+    name: "resolve_theory",
+    description: "Close the loop on a pending theory after running its validation criteria. If the hypothesis was confirmed, save the confirmed result as a permanent memory (weight=1.0, include the theory_id as a tag for traceability). If it was disproven, record what actually caused the problem instead. Trigger: immediately after executing the test described in a pending theory's validationCriteria.",
+    parameters: RESOLVE_THEORY_SCHEMA,
+    emoji_name: "white_check_mark",
+    execute: async (toolCallId, params) => {
+      const {
+        theoryId = "",
+        conclusion = "",
+        newStatus = ""
+      } = params;
+      if (!theoryId.trim() || !conclusion.trim() || !newStatus.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "theoryId, conclusion, and newStatus are all required."
+                    })
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      if (newStatus !== "proven" && newStatus !== "disproven") {
+        return {
+          toolCallId,
+          result: {
+            type: "ok",
+            results: [
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      success: false,
+                      error: "invalid_status",
+                      message: "newStatus must be 'proven' or 'disproven'."
+                    })
+                  }
+                ]
+              }
+            ]
+          }
+        };
+      }
+      const patchResult = await runMpm([
+        "patch-memory",
+        theoryId,
+        JSON.stringify({ status: newStatus, conclusion })
+      ]);
+      const patchData = parseMpmResult(patchResult);
+      const resolvedContent = [
+        `RESOLVED_THEORY_ID: ${theoryId}`,
+        `STATUS: ${newStatus}`,
+        `CONCLUSION: ${conclusion}`
+      ].join("\n");
+      const addArgs = [
+        "add",
+        "--json",
+        "--collection",
+        "theories",
+        "--tag",
+        "resolved",
+        "--tag",
+        `theories:${theoryId}`,
+        "--weight",
+        "1",
+        "--",
+        resolvedContent
+      ];
+      const addResult = await runMpm(addArgs);
+      const addData = parseMpmResult(addResult);
+      return {
+        toolCallId,
+        result: {
+          type: "ok",
+          results: [{ content: [{ type: "text", text: JSON.stringify({ patch: patchData, resolved: addData }) }] }]
         }
       };
     }
@@ -720,6 +1153,10 @@ var index_default = definePluginEntry({
       { names: ["search_topics"], optional: false }
     );
     api.registerTool(
+      (ctx) => makeLinkTopicTool(ctx),
+      { names: ["link_topic"], optional: true }
+    );
+    api.registerTool(
       (ctx) => makeAddReferenceTool(ctx),
       { names: ["add_reference"], optional: false }
     );
@@ -734,6 +1171,18 @@ var index_default = definePluginEntry({
     api.registerTool(
       (ctx) => makeReadDirectivesTool(ctx),
       { names: ["read_directives"], optional: false }
+    );
+    api.registerTool(
+      (ctx) => makeRecordDecisionTool(ctx),
+      { names: ["record_decision"], optional: false }
+    );
+    api.registerTool(
+      (ctx) => makeProposeTheoryTool(ctx),
+      { names: ["propose_theory"], optional: false }
+    );
+    api.registerTool(
+      (ctx) => makeResolveTheoryTool(ctx),
+      { names: ["resolve_theory"], optional: false }
     );
   }
 });
