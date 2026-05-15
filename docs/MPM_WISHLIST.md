@@ -6,27 +6,13 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 
 ## In Progress
 
-_(nothing currently in progress — see High-Priority below)_
-
----
-
-## High-Priority (Do Next)
-
-### Reference chunking control
-Configurable via `--chunk-size` flag (64-2048 tokens, default 512). Uses batch encode/decode with tiktoken cl100k_base. Token-based chunking replaces character-based `ChunkReference`.
+_(empty)_
 
 ---
 
 ## Medium-Priority
 
-### Session memory context
-On session start, show: "last session you worked on X, had Y open, learned Z." Store `active_mode` and `active_persona` in memory metadata on save. Jump-back context without full recall.
-
-### Memory decay scheduling
-TTL is manual. Should be automatic: high-weight memories → slow decay; low-weight + unaccessed → accelerate decay. Eventually suggest deletion instead of infinite storage.
-
-### Session context continuity
-File-based mode/persona is correct (human-readable, diff-friendly). The real need: store which mode/persona was active when a memory was saved, and surface "you were in programming mode last session" on session wake-up.
+_(all medium-priority items complete — see Completed below)_
 
 ---
 
@@ -60,6 +46,8 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 | 8 | `resolve_theory` in-place metadata patch (no FTS re-index) | ✅ Done (2026-05-15) |
 | 9 | Cross-reference linking — bounded bidirectional Memory↔Topic↔Reference | ✅ Done (2026-05-15) |
 | 10 | Reference chunking control — `--chunk-size` flag, tiktoken batch encode/decode | ✅ Done (2026-05-15) |
+| 11 | Session memory context — `mpm wake` + active_mode/persona injection | ✅ Done (2026-05-15) |
+| 12 | Memory decay scheduling — `mpm gc` (--dry-run/--review/--purge), computeDecay (float64), implicit reinforcement on recall (+0.5, capped +1/hr), weight > 0 filter in all recall queries | ✅ Done (2026-05-15) |
 
 ---
 
@@ -74,7 +62,7 @@ Track where ingested documents came from (URL, file path, date) and surface on s
 ## Cleanup (Technical Debt)
 
 - ~~`synthesize` command~~ — ✅ Removed 2026-05-15 (deleted synthesize.go, unregistered route, removed from help, stripped from watch daemon)
-- ~~The `--json` flag pre-scanning hack~~ — ⚠️  Deferred. Build is clean. Standardization is a larger refactor (see router.go helper approach). Would need `ParseArgsWithJSONFlag()` in router + migrate handlers one-by-one.
+- ~~The `--json` flag pre-scanning hack~~ — ✅ Done (2026-05-15): `ExtractJSONFlag()` centralized in `router.go`, all 16 handlers migrated
 
 ---
 

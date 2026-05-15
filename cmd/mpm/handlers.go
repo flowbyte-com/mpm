@@ -64,6 +64,38 @@ func deleteWatchPID() {
 	os.Remove(watchPIDPath())
 }
 
+// activeContext holds the mode/persona for the current CLI invocation.
+// Set at the start of each handler via detectActiveContext(), cleared after use.
+var activeMode string
+var activePersona string
+
+// detectActiveContext reads the current mode and persona from config files.
+// These values are injected into memory metadata on every AddMemory call.
+func detectActiveContext() (mode, persona string) {
+	modePath := filepath.Join(config.GetMPMDir(), "config", "current_mode")
+	if data, err := os.ReadFile(modePath); err == nil {
+		mode = strings.TrimSpace(string(data))
+	}
+	personaPath := filepath.Join(config.GetMPMDir(), "config", "current_persona")
+	if data, err := os.ReadFile(personaPath); err == nil {
+		persona = strings.TrimSpace(string(data))
+	}
+	return
+}
+
+// injectActiveContext sets activeMode and activePersona from config files.
+// Call at the start of any handler that calls AddMemory.
+func injectActiveContext() {
+	activeMode, activePersona = detectActiveContext()
+}
+
+// clearActiveContext clears the active context after a handler completes.
+// Call after AddMemory to prevent stale state leaking between invocations.
+func clearActiveContext() {
+	activeMode = ""
+	activePersona = ""
+}
+
 // isWatchProcessAlive checks if the process identified by pid is running.
 // Uses signal 0 (no actual signal sent) to test process existence.
 func isWatchProcessAlive(pid int) bool {
@@ -155,14 +187,7 @@ Examples:
 // ============================================================================
 
 func handlePrimeDirectives() int {
-	// Pre-scan for --json since callers may place it after the command
-	jsonOutput := false
-	for _, arg := range os.Args[1:] {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-			break
-		}
-	}
+	jsonOutput, _ := ExtractJSONFlag(os.Args[1:])
 
 	store := getMemoryStore()
 	if store == nil {
@@ -252,22 +277,27 @@ func handleMemoryAdd(args []string) int {
 	}
 
 	// Pre-scan for --json flag (may appear anywhere in args)
-	jsonOutput := false
-	contentArgs := make([]string, 0)
-	for _, arg := range args {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-		} else {
-			contentArgs = append(contentArgs, arg)
-		}
-	}
+	jsonOutput, contentArgs := ExtractJSONFlag(args)
 	if len(contentArgs) == 0 {
 		return respond("", "Usage: mpm memory add <content>", 1)
 	}
 	content := strings.Join(contentArgs, " ")
 
+	// Inject active mode/persona from config files
+injectActiveContext()
+defer clearActiveContext()
+
+	// Build metadata with active context
+	memMetadata := map[string]interface{}{}
+	if activeMode != "" {
+		memMetadata["active_mode"] = activeMode
+	}
+	if activePersona != "" {
+		memMetadata["active_persona"] = activePersona
+	}
+
 	store := getMemoryStore()
-	mem, err := store.AddMemory(content, "memories", nil, nil, "", "cli")
+	mem, err := store.AddMemory(content, "memories", nil, memMetadata, "", "cli")
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
@@ -783,6 +813,239 @@ func handleShredSession(id string) int {
 }
 
 // ============================================================================
+// Handler: gc (garbage collection / memory decay)
+// ============================================================================
+
+func handleGC(args []string) int {
+	jsonOutput, _ := ExtractJSONFlag(args)
+	dryRun := false
+	aggressive := false
+	review := false
+	purge := false
+	maxAgeHours := 24
+
+	for _, arg := range args {
+		if arg == "--dry-run" {
+			dryRun = true
+		}
+		if arg == "--aggressive" {
+			aggressive = true
+		}
+		if arg == "--review" {
+			review = true
+		}
+		if arg == "--purge" {
+			purge = true
+		}
+		if strings.HasPrefix(arg, "--max-age=") {
+			fmt.Sscanf(arg, "--max-age=%d", &maxAgeHours)
+		}
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	// Check frequency cap — skip if last gc ran within max-age window
+	lastGC, err := dm.GetSystemConfig("last_gc_at")
+	if err == nil {
+		if updatedAt, ok := lastGC["updated_at"].(string); ok {
+			if last, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
+				if time.Since(last).Hours() < float64(maxAgeHours) {
+					fmt.Printf("Skipped: last gc was %s\n", last.Format("2006-01-02 15:04"))
+					return 0
+				}
+			}
+		}
+	}
+
+	// Purge mode: hard delete old reviewed memories and exit
+	if purge {
+		result, err := dm.SQLDB().Exec(`
+			DELETE FROM memories
+			WHERE deleted_at IS NOT NULL
+			AND deleted_at < datetime('now', '-30 days')
+		`)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		purged, _ := result.RowsAffected()
+		fmt.Printf("Purged %d old deleted memories\n", purged)
+		return 0
+	}
+
+	// Get all non-deleted memories
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, weight, last_accessed_at, created_at, is_long_term, content
+		FROM memories WHERE deleted_at IS NULL
+	`)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer rows.Close()
+
+	now := time.Now()
+	var deadMemories []map[string]interface{}
+	var updated, scanned int
+
+	for rows.Next() {
+		scanned++
+		var id string
+		var weight int
+		var lastAccessed, createdAt *time.Time
+		var isLongTerm bool
+		var content string
+
+		rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm, &content)
+
+		// Compute days since access
+		lastAccessTime := lastAccessed
+		if lastAccessTime == nil {
+			lastAccessTime = createdAt
+		}
+		daysSinceAccess := now.Sub(*lastAccessTime).Hours() / 24.0
+
+		// Compute decay amount (float64 throughout)
+		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAt, aggressive)
+		newWeight := float64(weight) - decay
+
+		// Floor
+		if newWeight < -10.0 {
+			newWeight = -10.0
+		}
+		// LTM protection
+		if isLongTerm && newWeight < 1.0 {
+			newWeight = 1.0
+		}
+
+		// Dead if <= 0
+		if newWeight <= 0.0 && float64(weight) > 0.0 {
+			deadMemories = append(deadMemories, map[string]interface{}{
+				"id":      id,
+				"content": content,
+				"weight":  weight,
+				"decay":   decay,
+			})
+		}
+
+		if !dryRun && newWeight != float64(weight) {
+			dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ?`, int(newWeight), id)
+			updated++
+		}
+	}
+
+	// --review mode: soft-delete all dead memories
+	if review && len(deadMemories) > 0 && !dryRun {
+		for _, m := range deadMemories {
+			dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, m["id"])
+		}
+		fmt.Printf("Soft-deleted %d dead memories\n", len(deadMemories))
+	}
+
+	// Update last_gc_at timestamp
+	if !dryRun {
+		dm.SaveSystemConfig("last_gc_at", `{"timestamp":"`+time.Now().Format(time.RFC3339)+`"}`, "", "")
+	}
+
+	// Output
+	if jsonOutput {
+		type gcResult struct {
+			Scanned     int      `json:"scanned"`
+			Updated     int      `json:"updated"`
+			DeadCount   int      `json:"dead_count"`
+			DeadMemories []map[string]interface{} `json:"dead_memories,omitempty"`
+			DryRun      bool     `json:"dry_run"`
+		}
+		result := gcResult{
+			Scanned:     scanned,
+			Updated:     updated,
+			DeadCount:   len(deadMemories),
+			DeadMemories: deadMemories,
+			DryRun:      dryRun,
+		}
+		data, _ := json.Marshal(result)
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("Scanned: %d | Updated: %d | Dead: %d\n", scanned, updated, len(deadMemories))
+		if len(deadMemories) > 0 {
+			fmt.Println("\nDead memories (weight <= 0):")
+			for _, m := range deadMemories {
+				content := m["content"].(string)
+				if len(content) > 60 {
+					content = content[:60] + "…"
+				}
+				fmt.Printf("  [%s] %s\n", m["id"].(string)[:8], content)
+			}
+		}
+	}
+	return 0
+}
+
+// computeDecay returns the weight decay amount for a memory.
+// All math is float64; only the final value is truncated on DB write.
+func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool) float64 {
+	multiplier := 1.0
+	if aggressive {
+		multiplier = 2.0
+	}
+
+	if isLongTerm {
+		return daysSinceAccess * 0.01 * multiplier
+	}
+	if weight >= 10 {
+		return daysSinceAccess * 0.02 * multiplier
+	}
+	if weight >= 5 {
+		return daysSinceAccess * 0.05 * multiplier
+	}
+
+	// Low-weight: decay scales with age (newer = faster decay)
+	ageFactor := 1.0
+	if createdAt != nil {
+		daysSinceCreated := time.Now().Sub(*createdAt).Hours() / 24.0
+		if daysSinceCreated > 30.0 {
+			ageFactor = 1.0
+		} else {
+			ageFactor = daysSinceCreated / 30.0
+		}
+	}
+	baseDecay := 0.1 + 0.2*ageFactor
+	return daysSinceAccess * baseDecay * multiplier
+}
+
+// handleRestore recovers a soft-deleted memory by clearing deleted_at and resetting weight.
+func handleRestore(args []string) int {
+	if len(args) < 2 {
+		return respond("", "Usage: mpm restore <memory-id>\n", 1)
+	}
+	id := args[1]
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	result, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = NULL, weight = 1 WHERE id = ?`, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
+	}
+	fmt.Printf("Restored: %s\n", id)
+	return 0
+}
+
+// ============================================================================
 // Handler: topic
 // ============================================================================
 
@@ -842,13 +1105,11 @@ func handleTopicAdd(args []string) int {
 
 	name := args[0]
 	description := ""
-	jsonOutput := false
+	jsonOutput, cleanedArgs := ExtractJSONFlag(args)
 
-	// Pre-scan for --json
-	for _, arg := range args[1:] {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-		} else if !strings.HasPrefix(arg, "-") {
+	// Extract description from non-flag args
+	for _, arg := range cleanedArgs[1:] {
+		if !strings.HasPrefix(arg, "-") {
 			description = arg
 		}
 	}
@@ -892,12 +1153,10 @@ func handleTopicSearch(args []string) int {
 		return respond("", "Usage: mpm topic search <query> [--json]", 1)
 	}
 
-	query := strings.Join(args, " ")
-	jsonOutput := false
-	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
-		jsonOutput = true
-		args = args[:len(args)-1]
-		query = strings.Join(args, " ")
+	query := args[0]
+	jsonOutput, queryArgs := ExtractJSONFlag(args)
+	if len(queryArgs) > 0 {
+		query = queryArgs[0]
 	}
 
 	store := getMemoryStore()
@@ -965,10 +1224,7 @@ func handleTopicShow(args []string) int {
 	}
 
 	id := args[0]
-	jsonOutput := false
-	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
-		jsonOutput = true
-	}
+	jsonOutput, _ := ExtractJSONFlag(args)
 
 	store := getMemoryStore()
 	db := store.DB
@@ -1064,12 +1320,7 @@ func handleTopicPromote(args []string) int {
 }
 
 func handleTopicList(args []string) int {
-	jsonOutput := false
-	for _, arg := range args {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-		}
-	}
+	jsonOutput, _ := ExtractJSONFlag(args)
 
 	store := getMemoryStore()
 	db := store.DB
@@ -1181,14 +1432,192 @@ func handleSessionAdd(args []string) int {
 
 	content := strings.Join(args, " ")
 	store := getMemoryStore()
-	
+
+	// Inject active mode/persona from config files
+	injectActiveContext()
+	defer clearActiveContext()
+
+	memMetadata := map[string]interface{}{}
+	if activeMode != "" {
+		memMetadata["active_mode"] = activeMode
+	}
+	if activePersona != "" {
+		memMetadata["active_persona"] = activePersona
+	}
+
 	// Add to session collection
-	mem, err := store.AddMemory(content, "session", nil, nil, "", "cli")
+	mem, err := store.AddMemory(content, "session", nil, memMetadata, "", "cli")
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add session: %v", err), 1)
 	}
 
 	return respond(fmt.Sprintf("Session added with ID: %s\n", mem.ID), "", 0)
+}
+
+// handleWake returns context from the last active session.
+// Displays mode, persona, recent topics, and recent memories.
+func handleWake(args []string) int {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	var sessionID string
+
+	// Try to get the most recent explicit session record
+	session, err := dm.GetLastSession()
+	if err == nil && session != nil {
+		sessionID, _ = session["session_id"].(string)
+	}
+
+	// Get recent session-collection memories (fallback: no explicit session record needed)
+	// Use last 5 memories from "session" collection ordered by created_at
+	var memories []map[string]interface{}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, collection, content, tags, metadata, created_at
+		FROM memories
+		WHERE collection = 'session'
+		ORDER BY created_at DESC
+		LIMIT 5
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var memID, collection, content, tagsJSON, metadataJSON, createdAt string
+			if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
+				break
+			}
+			var tags []string
+			var metadata map[string]interface{}
+			json.Unmarshal([]byte(tagsJSON), &tags)
+			if metadataJSON != "" {
+				json.Unmarshal([]byte(metadataJSON), &metadata)
+			}
+			memories = append(memories, map[string]interface{}{
+				"id":         memID,
+				"collection": collection,
+				"content":    content,
+				"tags":       tags,
+				"metadata":   metadata,
+				"created_at": createdAt,
+			})
+		}
+	}
+
+	if len(memories) == 0 {
+		fmt.Println("No previous session found.")
+		return 0
+	}
+
+	// Extract active_mode/persona from most recent memory's metadata
+	var activeMode, activePersona string
+	if mem := memories[0]; mem["metadata"] != nil {
+		if m, ok := mem["metadata"].(map[string]interface{}); ok {
+			if v, ok := m["active_mode"]; ok {
+				activeMode = fmt.Sprintf("%v", v)
+			}
+			if v, ok := m["active_persona"]; ok {
+				activePersona = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+
+	// Pre-scan for --json
+	jsonOutput, _ := ExtractJSONFlag(args)
+
+	if jsonOutput {
+		type memoryRef struct {
+			ID        string `json:"id"`
+			Content   string `json:"content"`
+			CreatedAt string `json:"created_at"`
+		}
+		type wakeResult struct {
+			SessionID      string   `json:"session_id"`
+			ActiveMode     string   `json:"active_mode"`
+			ActivePersona  string   `json:"active_persona"`
+			RecentTopics   []string `json:"recent_topics"`
+			RecentMemories []memoryRef `json:"recent_memories"`
+		}
+
+		// Collect topic names
+		topicSet := map[string]bool{}
+		var memRefs []memoryRef
+		for _, mem := range memories {
+			content := mem["content"].(string)
+			createdAt := mem["created_at"].(string)
+			if len(content) > 120 {
+				content = content[:120] + "…"
+			}
+			memRefs = append(memRefs, memoryRef{
+				ID:        mem["id"].(string),
+				Content:   content,
+				CreatedAt: createdAt,
+			})
+			// Get topics for this memory
+			topics, _ := dm.GetMemoryTopics(mem["id"].(string))
+			for _, t := range topics {
+				topicSet[t.Name] = true
+			}
+		}
+		var topics []string
+		for t := range topicSet {
+			topics = append(topics, t)
+		}
+
+		result := wakeResult{
+			SessionID:      sessionID,
+			ActiveMode:     activeMode,
+			ActivePersona:  activePersona,
+			RecentTopics:   topics,
+			RecentMemories: memRefs,
+		}
+		data, _ := json.Marshal(result)
+		fmt.Println(string(data))
+		return 0
+	}
+
+	// Human-readable output
+	fmt.Println("╭─ Last Session ──────────────────────────────────────────────╮")
+	if activeMode != "" {
+		fmt.Printf("│ Mode:     %-42s │\n", activeMode)
+	}
+	if activePersona != "" {
+		fmt.Printf("│ Persona:  %-42s │\n", activePersona)
+	}
+
+	// Collect and deduplicate topics
+	topicSet := map[string]bool{}
+	for _, mem := range memories {
+		topics, _ := dm.GetMemoryTopics(mem["id"].(string))
+		for _, t := range topics {
+			topicSet[t.Name] = true
+		}
+	}
+	var topics []string
+	for t := range topicSet {
+		topics = append(topics, t)
+	}
+	if len(topics) > 0 {
+		topicStr := strings.Join(topics[:3], ", ")
+		if len(topics) > 3 {
+			topicStr += fmt.Sprintf(" (+%d more)", len(topics)-3)
+		}
+		fmt.Printf("│ Topics:   %-42s │\n", topicStr)
+	}
+
+	fmt.Println("│                                                             │")
+	fmt.Println("│ Recent memories:                                            │")
+	for _, mem := range memories {
+		content := mem["content"].(string)
+		if len(content) > 54 {
+			content = content[:54] + "…"
+		}
+		fmt.Printf("│   • %-53s │\n", content)
+	}
+	fmt.Println("╰─────────────────────────────────────────────────────────────╯")
+	return 0
 }
 
 func handleSessionSearch(args []string) int {
@@ -1947,17 +2376,7 @@ func handleLessonAdd(args []string) int {
 	content := ""
 	lessonType := "insight"
 	var tags []string
-	jsonOutput := false
-
-	// Pre-scan for --json since callers may place it after the content
-	filteredArgs := []string{}
-	for _, arg := range args {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-		} else {
-			filteredArgs = append(filteredArgs, arg)
-		}
-	}
+	jsonOutput, filteredArgs := ExtractJSONFlag(args)
 	args = filteredArgs
 
 	i := 0
@@ -2035,13 +2454,10 @@ func handleLessonAdd(args []string) int {
 
 func handleLessonList(args []string) int {
 	lessonType := ""
-	jsonOutput := false
+	jsonOutput, args := ExtractJSONFlag(args)
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--type=") {
 			lessonType = strings.TrimPrefix(arg, "--type=")
-		}
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
 		}
 	}
 
@@ -2106,13 +2522,10 @@ func handleLessonSearch(args []string) int {
 		return respond("", "Usage: mpm lesson search <query> [--json]", 1)
 	}
 
-	query := strings.Join(args, " ")
-	jsonOutput := false
-	if args[len(args)-1] == "--json" || args[len(args)-1] == "-j" {
-		jsonOutput = true
-		// Remove --json from query
-		args = args[:len(args)-1]
-		query = strings.Join(args, " ")
+	query := args[0]
+	jsonOutput, queryArgs := ExtractJSONFlag(args)
+	if len(queryArgs) > 0 {
+		query = strings.Join(queryArgs, " ")
 	}
 
 	lessonStore, storeErr := internal.NewLessonStore("")

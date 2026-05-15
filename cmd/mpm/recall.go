@@ -42,30 +42,44 @@ func handleRecall(args []string) int {
 	}
 
 	// Go's flag.Parse stops at the first non-flag positional arg.
-	// Pre-scan for --json since callers may place it after the query.
+	// Pre-scan for --json and --stale-days since callers may place them after the query.
 	preprocessed := make([]string, 0, len(args))
 	jsonFlagSeen := false
+
+	// Collect indices to remove
+	removeIdxs := make(map[int]bool)
+
 	for i, arg := range args[1:] {
+		realIdx := i + 1 // account for args[0] being the command name
 		if arg == "--json" || arg == "-j" {
 			jsonFlagSeen = true
+			removeIdxs[realIdx] = true
 			continue
 		}
-		if arg == "--stale-days" && i+2 < len(args) {
-			// skip --stale-days and its value
+		if arg == "--stale-days" {
+			removeIdxs[realIdx] = true
+			if realIdx+1 < len(args) {
+				removeIdxs[realIdx+1] = true // consume its value
+			}
 			continue
 		}
 		if strings.HasPrefix(arg, "--stale-days=") {
-			// skip --stale-days=value
+			removeIdxs[realIdx] = true
 			continue
 		}
-		preprocessed = append(preprocessed, arg)
+	}
+
+	for i, arg := range args {
+		if !removeIdxs[i] {
+			preprocessed = append(preprocessed, arg)
+		}
 	}
 
 	if err := fs.Parse(preprocessed); err != nil {
 		return 1
 	}
 
-	// Apply pre-scanned json flag
+	// Apply pre-scanned flags
 	if jsonFlagSeen {
 		*jsonOutput = true
 	}
@@ -344,6 +358,19 @@ func handleRecall(args []string) int {
 	}
 
 	fmt.Printf("%s%d results%s\n", cyan, len(entries), reset)
+
+	// Implicit reinforcement: bump weight +0.5 for returned memories (capped +1/hour)
+	// Skip for empty results, single result (casual mention), or stale sessions
+	if len(entries) > 1 {
+		dm.SQLDB().Exec(`
+			UPDATE memories
+			SET weight = MIN(weight + 0.5, weight + 1.0, 100.0),
+			    last_accessed_at = CURRENT_TIMESTAMP
+			WHERE id IN (SELECT id FROM memories WHERE last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-1 hour'))
+			AND id IN (SELECT id FROM memories WHERE deleted_at IS NULL AND weight > 0)
+		`)
+	}
+
 	return 0
 }
 
@@ -353,7 +380,7 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.weight > 0
 		ORDER BY fts.rank
 		LIMIT ?`
 
@@ -368,7 +395,7 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 	likeQuery := `
 		SELECT id, content, session_id, tags, created_at
 		FROM memories
-		WHERE deleted_at IS NULL
+		WHERE deleted_at IS NULL AND weight > 0
 		  AND (content LIKE ? OR tags LIKE ?)
 		ORDER BY created_at DESC
 		LIMIT ?`
@@ -389,7 +416,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		       m.reference_id
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.collection = ?`
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.weight > 0 AND m.collection = ?`
 
 	args := []interface{}{query, collection}
 
@@ -419,7 +446,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		       last_accessed_at,
 		       reference_id
 		FROM memories
-		WHERE deleted_at IS NULL AND collection = ?
+		WHERE deleted_at IS NULL AND weight > 0 AND collection = ?
 		  AND (content LIKE ? OR tags LIKE ?)`
 
 	args = []interface{}{collection, likePattern, likePattern}
