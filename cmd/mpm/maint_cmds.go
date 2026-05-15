@@ -296,8 +296,8 @@ func handleMaintain(args []string) int {
 			if len(content) > 80 {
 				content = content[:80] + "..."
 			}
-			w := int(m["weight"].(int64))
-			rc := int(m["reinforcement_count"].(int64))
+			w := safeInt(m["weight"])
+			rc := safeInt(m["reinforcement_count"])
 			la := ""
 			if lat, ok := m["last_accessed_at"].(string); ok && lat != "" {
 				la = lat
@@ -343,4 +343,19 @@ func handleMaintain(args []string) int {
 	}
 
 	return 0
+}
+
+// safeInt safely extracts an int from interface{} that may be int, int64, or float64.
+// Returns 0 on type mismatch.
+func safeInt(v interface{}) int {
+	switch val := v.(type) {
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case float64:
+		return int(val)
+	default:
+		return 0
+	}
 }

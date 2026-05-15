@@ -103,7 +103,7 @@ func handleRecall(args []string) int {
 	defer dm.Close()
 
 	db := dm.SQLDB()
-	sessionAccessCounts := make(map[string]int)
+	returnedIDs := make(map[string]bool)
 
 	// Keyword search using LIKE + FTS5 fallback with time filters
 	rows, err := keywordSearchWithTime(db, query, *collection, *since, *until, *limit)
@@ -167,13 +167,7 @@ func handleRecall(args []string) int {
 		if strings.Contains(nullableTags.String, "synthesized") {
 			entry.synthesized = true
 		}
-		// Per-call access deduplication: reinforce only on first access in this call
-		if sessionAccessCounts[id] == 0 {
-			if err := dm.ReinforceMemory(id, 1); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to reinforce memory %s: %v\n", id, err)
-			}
-		}
-		sessionAccessCounts[id]++
+		returnedIDs[id] = true
 		entries = append(entries, entry)
 	}
 
@@ -359,16 +353,24 @@ func handleRecall(args []string) int {
 
 	fmt.Printf("%s%d results%s\n", cyan, len(entries), reset)
 
-	// Implicit reinforcement: bump weight +0.5 for returned memories (capped +1/hour)
-	// Skip for empty results, single result (casual mention), or stale sessions
-	if len(entries) > 1 {
-		dm.SQLDB().Exec(`
+	// Implicit reinforcement: bump weight +0.5 for returned memories (capped +1/hr)
+	// Only reinforce memories with meaningful weight (>=1) to avoid artificially boosting
+	// casual mentions or memories that have decayed to near-zero weight
+	if len(returnedIDs) > 0 {
+		ids := make([]string, 0, len(returnedIDs))
+		vals := make([]interface{}, 0, len(returnedIDs))
+		for id := range returnedIDs {
+			ids = append(ids, "?")
+			vals = append(vals, id)
+		}
+		dm.SQLDB().Exec(fmt.Sprintf(`
 			UPDATE memories
-			SET weight = MIN(weight + 0.5, weight + 1.0, 100.0),
+			SET weight = MIN(weight + 0.5, 100.0),
 			    last_accessed_at = CURRENT_TIMESTAMP
-			WHERE id IN (SELECT id FROM memories WHERE last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-1 hour'))
-			AND id IN (SELECT id FROM memories WHERE deleted_at IS NULL AND weight > 0)
-		`)
+			WHERE id IN (%s)
+			  AND weight >= 1
+			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-1 hour'))
+		`, strings.Join(ids, ",")), vals...)
 	}
 
 	return 0
@@ -380,7 +382,7 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.weight > 0
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
 		ORDER BY fts.rank
 		LIMIT ?`
 
@@ -395,7 +397,7 @@ func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
 	likeQuery := `
 		SELECT id, content, session_id, tags, created_at
 		FROM memories
-		WHERE deleted_at IS NULL AND weight > 0
+		WHERE deleted_at IS NULL
 		  AND (content LIKE ? OR tags LIKE ?)
 		ORDER BY created_at DESC
 		LIMIT ?`
@@ -416,7 +418,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		       m.reference_id
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.weight > 0 AND m.collection = ?`
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL AND m.collection = ?`
 
 	args := []interface{}{query, collection}
 
@@ -446,7 +448,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, l
 		       last_accessed_at,
 		       reference_id
 		FROM memories
-		WHERE deleted_at IS NULL AND weight > 0 AND collection = ?
+		WHERE deleted_at IS NULL AND collection = ?
 		  AND (content LIKE ? OR tags LIKE ?)`
 
 	args = []interface{}{collection, likePattern, likePattern}

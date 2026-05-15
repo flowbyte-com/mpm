@@ -89,13 +89,13 @@ func TestChunkByTokens_TokenAccuracy(t *testing.T) {
 }
 
 func TestChunkByTokens_EdgeCases(t *testing.T) {
-	// Empty content returns single empty chunk (not 0 — fast path treats empty as content)
+	// Empty content returns nil (no chunks — avoids storing empty references)
 	chunks, err := ChunkByTokens("", 512)
 	if err != nil {
 		t.Fatalf("ChunkByTokens('') failed: %v", err)
 	}
-	if len(chunks) != 1 {
-		t.Errorf("expected 1 chunk for empty content, got %d", len(chunks))
+	if chunks != nil {
+		t.Errorf("expected nil for empty content, got %d chunks", len(chunks))
 	}
 
 	// chunkSize below minimum — should clamp to 1

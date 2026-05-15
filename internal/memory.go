@@ -1308,7 +1308,7 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 
 	// Session context (content similarity via LIKE)
 	if sessionContext != "" {
-		query += " OR content LIKE ?"
+		query += " AND content LIKE ?"
 		args = append(args, "%"+sessionContext+"%")
 	}
 
@@ -2610,15 +2610,16 @@ func (s *MemoryStore) ReinforceMemory(id string, delta int) error {
 		delta = 1
 	}
 
+	weightGain := (delta + 1) / 2
 	_, err := s.DB.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100)
 		WHERE id = ?
-	`, delta, delta/2, id)
+	`, delta, weightGain, id)
 	return err
 }
 
-// WeakenMemory decrements the reinforcement count.
+// WeakenMemory decrements reinforcement count and reduces weight.
 // Called when a memory proves irrelevant or wrong.
 func (s *MemoryStore) WeakenMemory(id string, delta int) error {
 	if s.DB == nil {
@@ -2631,11 +2632,13 @@ func (s *MemoryStore) WeakenMemory(id string, delta int) error {
 		delta = 1
 	}
 
+	weightLoss := (delta + 1) / 2
 	_, err := s.DB.Exec(`
 		UPDATE memories
-		SET reinforcement_count = MAX(reinforcement_count - ?, 0)
+		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
+		    weight = MAX(weight - ?, 0)
 		WHERE id = ?
-	`, delta, id)
+	`, delta, weightLoss, id)
 	return err
 }
 

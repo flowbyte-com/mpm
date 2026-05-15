@@ -51,6 +51,9 @@ func NewSQLiteConnection(dbPath string) (*SQLiteConnection, error) {
 	}
 	db.Exec("PRAGMA foreign_keys = ON")
 	db.Exec("PRAGMA journal_mode = WAL")
+	// Wait up to 5 seconds for locks to clear before returning SQLITE_BUSY.
+	// This handles concurrent GC + Add without immediate failure.
+	db.Exec("PRAGMA busy_timeout = 5000")
 	return &SQLiteConnection{DB: db}, nil
 }
 
@@ -407,6 +410,78 @@ func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error)
 		"metadata":     metadata,
 		"created_at":   createdAt,
 	}, nil
+}
+
+// GetLastSession returns the most recent session by created_at DESC.
+func (dm *DatabaseManager) GetLastSession() (map[string]interface{}, error) {
+	var id, sessionID, content, contentHash, sourcePath, metadataJSON string
+	var createdAt time.Time
+
+	err := dm.db.QueryRow(`SELECT id, session_id, content, content_hash, source_path, metadata, created_at FROM sessions ORDER BY created_at DESC LIMIT 1`).
+		Scan(&id, &sessionID, &content, &contentHash, &sourcePath, &metadataJSON, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+
+	var metadata map[string]interface{}
+	if metadataJSON != "" {
+		json.Unmarshal([]byte(metadataJSON), &metadata)
+	}
+
+	return map[string]interface{}{
+		"id":           id,
+		"session_id":   sessionID,
+		"content":      content,
+		"content_hash": contentHash,
+		"source_path":  sourcePath,
+		"metadata":     metadata,
+		"created_at":   createdAt,
+	}, nil
+}
+
+// GetSessionMemories returns the most recent memories for a given session ID.
+func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]map[string]interface{}, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT id, collection, content, tags, metadata, created_at
+		FROM memories
+		WHERE session_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var memID, collection, content, tagsJSON, metadataJSON, createdAt string
+		if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
+			return nil, err
+		}
+		var tags []string
+		var metadata map[string]interface{}
+		json.Unmarshal([]byte(tagsJSON), &tags)
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &metadata)
+		}
+		results = append(results, map[string]interface{}{
+			"id":         memID,
+			"collection": collection,
+			"content":    content,
+			"tags":       tags,
+			"metadata":   metadata,
+			"created_at": createdAt,
+		})
+	}
+	return results, rows.Err()
 }
 
 func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error) {

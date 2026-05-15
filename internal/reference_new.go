@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ledongthuc/pdf"
@@ -474,10 +477,39 @@ func ChunkReference(content string, chunkSize int) []Chunk {
 	return chunks
 }
 
+// tiktokenEnc caches the cl100k_base encoder after first successful load.
+var (
+	tiktokenEnc   *tiktoken.Tiktoken
+	tiktokenErr   error
+	tiktokenEncMu sync.Mutex
+	tiktokenReady atomic.Bool // true once initialization succeeded
+)
+
+// getTiktokenEncoder returns a shared cl100k_base encoder.
+// Initialization is retried on each call until it succeeds — useful for
+// transient failures (e.g., library load races in goroutines).
+// Subsequent calls after success return the cached encoder with no lock.
+func getTiktokenEncoder() (*tiktoken.Tiktoken, error) {
+	if tiktokenReady.Load() {
+		return tiktokenEnc, tiktokenErr
+	}
+	tiktokenEncMu.Lock()
+	defer tiktokenEncMu.Unlock()
+	if tiktokenReady.Load() { // double-check after lock
+		return tiktokenEnc, tiktokenErr
+	}
+	tiktokenEnc, tiktokenErr = tiktoken.GetEncoding("cl100k_base")
+	if tiktokenErr == nil {
+		tiktokenReady.Store(true)
+	}
+	return tiktokenEnc, tiktokenErr
+}
+
 // CountTokens returns the number of cl100k_base tokens in a string.
 // Uses tiktoken for accurate LLM context window sizing.
+// The encoder is cached after first use for performance.
 func CountTokens(text string) (int, error) {
-	encoder, err := tiktoken.GetEncoding("cl100k_base")
+	encoder, err := getTiktokenEncoder()
 	if err != nil {
 		return 0, fmt.Errorf("failed to load tiktoken encoder: %w", err)
 	}
@@ -488,6 +520,7 @@ func CountTokens(text string) (int, error) {
 // ChunkByTokens chunks reference content by token count (not character count).
 // Uses tiktoken cl100k_base encoding for accurate LLM context window sizing.
 // chunkSize is the target token count per chunk (64-8192; 64-2048 recommended).
+// The encoder is cached after first use for performance.
 // Returns chunks with Content field containing the text, Index for ordering.
 func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
 	if chunkSize <= 0 {
@@ -500,12 +533,15 @@ func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
 		chunkSize = 8192
 	}
 
-	encoder, err := tiktoken.GetEncoding("cl100k_base")
+	encoder, err := getTiktokenEncoder()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load tiktoken encoder: %w", err)
 	}
 
 	// Fast path: if total tokens <= chunkSize, return single chunk
+	if strings.TrimSpace(content) == "" {
+		return []Chunk{}, nil
+	}
 	fullTokens := encoder.Encode(content, nil, nil)
 	if len(fullTokens) <= chunkSize {
 		return []Chunk{{Index: 0, Content: strings.TrimSpace(content)}}, nil
@@ -523,11 +559,19 @@ func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
 		// Decode token slice to text
 		chunkText := encoder.Decode(fullTokens[i:end])
 
-		// If not the last chunk, trim to nearest space to avoid mid-word breaks
+		// If not the last chunk, trim to nearest space to avoid mid-word breaks.
+		// Use rune-level LastIndex to handle multi-byte UTF-8 characters safely.
 		if end < len(fullTokens) {
-			lastSpace := strings.LastIndex(chunkText, " ")
+			chunkRunes := []rune(chunkText)
+			lastSpace := -1
+			for j := len(chunkRunes) - 1; j >= 0; j-- {
+				if unicode.IsSpace(chunkRunes[j]) {
+					lastSpace = j
+					break
+				}
+			}
 			if lastSpace > 0 {
-				chunkText = chunkText[:lastSpace]
+				chunkText = string(chunkRunes[:lastSpace])
 			}
 		}
 

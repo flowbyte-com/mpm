@@ -19,6 +19,9 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
 - **Automatic file watching** — `.md` files ingested as LTM; sessions swept, synthesized, archived
 - **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
+- **Reference chunking control** — `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding
+- **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
+- **Session memory context** — `mpm wake` surfaces last session's mode, persona, topics, and recent memories
 - **Security scanning** — 20 regex patterns for API keys, tokens, secrets
 - **Modes & Personas** — file-based (`.md`), multi-select modes, single-select persona
 
@@ -220,7 +223,7 @@ Systematic, precise, architectural. Thinks in code structures and abstraction bo
 
 ## OpenClaw Plugin Integration
 
-MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 15 tools:
+MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 16 tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -236,9 +239,10 @@ MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calli
 | `search_references` | Search reference chunks |
 | `list_references` | List reference documents |
 | `read_directives` | Read prime directives |
+| `read_wake_context` | Read last session's context (mode, persona, topics, memories) |
 | `record_decision` | Log architectural choices with rationale |
 | `propose_theory` | Log hypothesis before writing fix |
-| `resolve_theory` | Close loop on pending theory (patches metadata in-place) |
+| `resolve_theory` | Mark theory proven/disproven, patch metadata in-place |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
 
@@ -419,6 +423,12 @@ mpm reference show abc123        # Full document with chunks
 mpm reference shred abc123
 ```
 
+**Chunking control:** Use `--chunk-size` to control tokens per chunk (64–2048, default 512). Uses tiktoken (cl100k_base) for accurate token-based splitting.
+
+```bash
+mpm reference add big-doc.pdf --chunk-size 1024
+```
+
 ### Sessions
 
 ```bash
@@ -426,6 +436,17 @@ mpm session list                 # Recent sessions
 mpm session search "project"    # Search sessions
 mpm session show abc123         # Session details
 ```
+
+### Session Memory Context
+
+```bash
+mpm wake                        # Human-readable last session summary
+mpm wake --json                 # Structured JSON for tool use
+```
+
+`mpm wake` returns mode, persona, recent topics, and recent memories from the most recent session. The OpenClaw plugin's `read_wake_context` tool wraps this — 808 calls it automatically on session start (forced by AGENTS.md directive).
+
+Active mode and persona are injected into memory metadata on every `mpm add` via `detectActiveContext()`, so the session context is preserved across restarts.
 
 ### Lessons
 
@@ -462,6 +483,15 @@ mpm watch list-paths            # Show all configured paths
 mpm web         # Start at http://localhost:18792 (requires web_token in config)
 ```
 
+### Cross-reference Linking
+
+Recall and topic show include bounded cross-reference data:
+
+- **`mpm recall <query>`** shows a `── Related ───` block per result: topic chips + reference doc name
+- **`mpm topic show <name>`** shows top-3 linked memories and a count chip
+
+Links are derived on-demand via JOINs on existing `topic_memberships` and `reference_id` columns — no new tables or FTS indices needed.
+
 ### System Diagnostics
 
 ```bash
@@ -469,13 +499,13 @@ mpm doctor              # Run diagnostics (6 categories)
 mpm doctor --fix        # Apply automatic repairs
 ```
 
-### Synthesis (LLM Tagging)
+### Synthesis (LLM Tagging) — Not yet implemented
 
 ```bash
 mpm synthesize <session-uuid>   # Generate memories from session via LLM
 ```
 
-Configure LLM in `mpm_config.json` `[synth]` section.
+Configure LLM in `mpm_config.json` `[synth]` section. Requires external LLM API (e.g. Minimax).
 
 ### Other Commands
 

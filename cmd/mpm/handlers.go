@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,7 +18,6 @@ import (
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
-	"encoding/json"
 )
 
 
@@ -434,6 +435,84 @@ func handleMemoryShred(args []string) int {
 	return respond(fmt.Sprintf("Memory shredded: %s\n", id), "", 0)
 }
 
+// handleSuggestTags returns unique tags matching a prefix, one per line.
+// Used by shell completion scripts. Hidden command: mpm _suggest_tags <prefix>
+func handleSuggestTags(args []string) int {
+	prefix := ""
+	if len(args) >= 2 && args[0] == "_suggest_tags" {
+		prefix = strings.ToLower(args[1])
+	} else if len(args) >= 1 {
+		prefix = strings.ToLower(args[len(args)-1])
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return 1
+	}
+	defer dm.Close()
+
+	rows, err := dm.SQLDB().Query(`
+		SELECT DISTINCT value
+		FROM memories,
+		json_each(memories.tags)
+		WHERE json_valid(memories.tags)
+		AND memories.tags IS NOT NULL
+		AND memories.tags != 'null'
+		AND memories.tags != '[]'
+		AND value IS NOT NULL
+		AND value != ''
+		AND lower(value) LIKE lower(?) || '%'
+		ORDER BY lower(value)
+	`, prefix)
+	if err != nil {
+		// Fallback: scan all tags in-memory if json_each fails
+		if rows != nil {
+			rows.Close()
+		}
+		allRows, err2 := dm.SQLDB().Query(`SELECT tags FROM memories WHERE tags IS NOT NULL`)
+		if err2 != nil {
+			return 1
+		}
+		defer allRows.Close()
+		seen := map[string]bool{}
+		var allTags []string
+		for allRows.Next() {
+			var tagsJSON string
+			if allRows.Scan(&tagsJSON) != nil {
+				continue
+			}
+			if tagsJSON == "" || tagsJSON == "null" || tagsJSON == "[]" {
+				continue
+			}
+			var tags []string
+			if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
+				for _, t := range tags {
+					if t != "" && !seen[t] && strings.HasPrefix(strings.ToLower(t), prefix) {
+						seen[t] = true
+						allTags = append(allTags, t)
+					}
+				}
+			}
+		}
+		for _, t := range allTags {
+			fmt.Println(t)
+		}
+		return 0
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var value string
+		if rows.Scan(&value) == nil && value != "" {
+			fmt.Println(value)
+			found = true
+		}
+	}
+	_ = found // suppress unused variable warning
+	return 0
+}
+
 func handleMemoryList(args []string) int {
 	store := getMemoryStore()
 
@@ -849,18 +928,39 @@ func handleGC(args []string) int {
 	}
 	defer dm.Close()
 
-	// Check frequency cap — skip if last gc ran within max-age window
-	lastGC, err := dm.GetSystemConfig("last_gc_at")
-	if err == nil {
+	now := time.Now()
+	gcTimestampJSON, _ := json.Marshal(map[string]string{"timestamp": now.Format(time.RFC3339)})
+
+	// Atomic frequency cap: UPDATE last_gc_at only if no recent GC has run.
+	// This avoids the TOCTOU race between reading the config and writing it later.
+	// If another GC process updated last_gc_at since our read, rowsAffected will be 0
+	// and we'll skip this GC run.
+	result, err := dm.SQLDB().Exec(`
+		UPDATE system_config
+		SET raw_json = ?
+		WHERE key = 'last_gc_at'
+		AND (
+			raw_json IS NULL
+			OR
+			datetime(json_extract(raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+		)
+	`, string(gcTimestampJSON), strconv.Itoa(maxAgeHours))
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		// last_gc_at was updated by another process while we were working — skip this run.
+		// Re-read and report the actual last GC time.
+		lastGC, _ := dm.GetSystemConfig("last_gc_at")
 		if updatedAt, ok := lastGC["updated_at"].(string); ok {
 			if last, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
-				if time.Since(last).Hours() < float64(maxAgeHours) {
-					fmt.Printf("Skipped: last gc was %s\n", last.Format("2006-01-02 15:04"))
-					return 0
-				}
+				fmt.Printf("Skipped: last gc was %s\n", last.Format("2006-01-02 15:04"))
+				return 0
 			}
 		}
+		fmt.Println("Skipped: recent GC detected")
+		return 0
 	}
+	// Atomic update succeeded — we have the lock. Proceed with GC.
+	// Note: all subsequent work happens AFTER this atomic check-and-set.
 
 	// Purge mode: hard delete old reviewed memories and exit
 	if purge {
@@ -880,7 +980,7 @@ func handleGC(args []string) int {
 
 	// Get all non-deleted memories
 	rows, err := dm.SQLDB().Query(`
-		SELECT id, weight, last_accessed_at, created_at, is_long_term, content
+		SELECT id, weight, last_accessed_at, created_at, is_long_term
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
@@ -889,9 +989,22 @@ func handleGC(args []string) int {
 	}
 	defer rows.Close()
 
-	now := time.Now()
+	// Capture monotonic clock offset once at start of GC run to prevent clock-rollback exploits.
+	// Using a captured "now" ensures all time calculations within this GC pass use the same
+	// reference point, even if the system clock goes backward mid-run.
+	monotonicNow := time.Now()
 	var deadMemories []map[string]interface{}
 	var updated, scanned int
+
+	// Collect all computed weight changes for batch application (avoids N+1 SQL pattern).
+	// Structure: []struct{ id string, oldWeight int, newWeight float64, isLTM bool }
+	type weightDelta struct {
+		id       string
+		oldWeight int
+		newWeight float64
+		isLTM    bool
+	}
+	var deltas []weightDelta
 
 	for rows.Next() {
 		scanned++
@@ -899,57 +1012,107 @@ func handleGC(args []string) int {
 		var weight int
 		var lastAccessed, createdAt *time.Time
 		var isLongTerm bool
-		var content string
 
-		rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm, &content)
+		rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm)
 
-		// Compute days since access
+		// Compute days since access using captured monotonic time
 		lastAccessTime := lastAccessed
 		if lastAccessTime == nil {
 			lastAccessTime = createdAt
 		}
-		daysSinceAccess := now.Sub(*lastAccessTime).Hours() / 24.0
+		if lastAccessTime == nil {
+			// Both timestamps are NULL — skip this row
+			continue
+		}
+		daysSinceAccess := monotonicNow.Sub(*lastAccessTime).Hours() / 24.0
 
 		// Compute decay amount (float64 throughout)
-		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAt, aggressive)
+		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAt, aggressive, monotonicNow)
 		newWeight := float64(weight) - decay
 
 		// Floor
 		if newWeight < -10.0 {
 			newWeight = -10.0
 		}
-		// LTM protection
-		if isLongTerm && newWeight < 1.0 {
+		// LTM protection: preserve memories that are explicitly marked LTM OR have weight >= 10.
+		// Applying the floor BEFORE dead detection ensures LTM memories are never flagged for deletion.
+		if (isLongTerm || float64(weight) >= 10) && newWeight < 1.0 {
 			newWeight = 1.0
 		}
 
-		// Dead if <= 0
-		if newWeight <= 0.0 && float64(weight) > 0.0 {
+		// Record delta for batch update
+		deltas = append(deltas, weightDelta{id: id, oldWeight: weight, newWeight: newWeight, isLTM: isLongTerm || float64(weight) >= 10})
+
+		// Dead if <= 0 (post-clamp) and not LTM — LTM memories are never eligible for deletion.
+		// Also catches already-dead memories (weight already <= 0 from a previous GC)
+		// that were never soft-deleted — without the oldWeight > 0 guard they'd be missed.
+		isLTM := deltas[len(deltas)-1].isLTM
+		if newWeight <= 0.0 && !isLTM {
+			var deadContent string
+			dm.SQLDB().QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&deadContent)
 			deadMemories = append(deadMemories, map[string]interface{}{
 				"id":      id,
-				"content": content,
+				"content": deadContent,
 				"weight":  weight,
 				"decay":   decay,
 			})
 		}
+	}
 
-		if !dryRun && newWeight != float64(weight) {
-			dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ?`, int(newWeight), id)
-			updated++
+	// Batch-apply all weight updates to avoid N+1 SQL pattern.
+	// Uses math.Floor for consistent rounding (not int() truncation which rounds toward zero).
+	if !dryRun && len(deltas) > 0 {
+		tx, txErr := dm.SQLDB().Begin()
+		if txErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to begin transaction: %v\n", txErr)
+		} else {
+			var batchErr error
+			for _, d := range deltas {
+				if d.newWeight == float64(d.oldWeight) {
+					continue
+				}
+				rounded := int(math.Round(d.newWeight))
+				if d.isLTM {
+					if rounded < 1 {
+						rounded = 1
+					}
+				} else {
+					if rounded < -10 {
+						rounded = -10
+					}
+				}
+				if _, err := tx.Exec(`UPDATE memories SET weight = ? WHERE id = ?`, rounded, d.id); err != nil {
+					batchErr = err
+					break
+				}
+				updated++
+			}
+			if batchErr != nil {
+				tx.Rollback()
+				fmt.Fprintf(os.Stderr, "Error: batch update failed, rolled back: %v\n", batchErr)
+			} else if err := tx.Commit(); err != nil {
+				tx.Rollback()
+				fmt.Fprintf(os.Stderr, "Error: batch commit failed, rolled back: %v\n", err)
+			}
 		}
 	}
 
-	// --review mode: soft-delete all dead memories
-	if review && len(deadMemories) > 0 && !dryRun {
+	// --review mode: soft-delete all dead and zombie memories (LTM already excluded above).
+	// Also catches existing zombies (weight <= 0 from previous GC runs that were never cleaned).
+	if review && !dryRun {
 		for _, m := range deadMemories {
 			dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, m["id"])
 		}
-		fmt.Printf("Soft-deleted %d dead memories\n", len(deadMemories))
+		// Clean any lingering zombies not caught by this pass
+		dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`)
+		if len(deadMemories) > 0 {
+			fmt.Printf("Soft-deleted %d dead memories\n", len(deadMemories))
+		}
 	}
 
 	// Update last_gc_at timestamp
 	if !dryRun {
-		dm.SaveSystemConfig("last_gc_at", `{"timestamp":"`+time.Now().Format(time.RFC3339)+`"}`, "", "")
+		dm.SaveSystemConfig("last_gc_at", string(gcTimestampJSON), "", "")
 	}
 
 	// Output
@@ -988,7 +1151,8 @@ func handleGC(args []string) int {
 
 // computeDecay returns the weight decay amount for a memory.
 // All math is float64; only the final value is truncated on DB write.
-func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool) float64 {
+// Uses a pre-captured "now" timestamp to prevent clock-rollback exploits.
+func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
 	multiplier := 1.0
 	if aggressive {
 		multiplier = 2.0
@@ -1007,7 +1171,9 @@ func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, crea
 	// Low-weight: decay scales with age (newer = faster decay)
 	ageFactor := 1.0
 	if createdAt != nil {
-		daysSinceCreated := time.Now().Sub(*createdAt).Hours() / 24.0
+		// Use the captured monotonic reference: daysSinceCreated based on the pre-captured
+		// timestamp, not wall-clock time. This prevents clock-rollback from slowing decay.
+		daysSinceCreated := now.Sub(*createdAt).Hours() / 24.0
 		if daysSinceCreated > 30.0 {
 			ageFactor = 1.0
 		} else {
@@ -1018,7 +1184,8 @@ func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, crea
 	return daysSinceAccess * baseDecay * multiplier
 }
 
-// handleRestore recovers a soft-deleted memory by clearing deleted_at and resetting weight.
+// handleRestore recovers a soft-deleted memory by clearing deleted_at and preserving
+// its original LTM status and weight (minimum floor of 1).
 func handleRestore(args []string) int {
 	if len(args) < 2 {
 		return respond("", "Usage: mpm restore <memory-id>\n", 1)
@@ -1032,7 +1199,24 @@ func handleRestore(args []string) int {
 	}
 	defer dm.Close()
 
-	result, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = NULL, weight = 1 WHERE id = ?`, id)
+	// Fetch current state to preserve is_long_term and avoid overwriting weight
+	var currentIsLTM int
+	var currentWeight int
+	err = dm.SQLDB().QueryRow(
+		`SELECT COALESCE(is_long_term, 0), COALESCE(weight, 1) FROM memories WHERE id = ?`,
+		id,
+	).Scan(&currentIsLTM, &currentWeight)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	// Restore deleted_at, reset weight to max(original weight, 1) to prevent 0-weight limbo.
+	// LTM status is preserved.
+	result, err := dm.SQLDB().Exec(
+		`UPDATE memories SET deleted_at = NULL, weight = MAX(?, 1) WHERE id = ?`,
+		currentWeight, id,
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -1041,7 +1225,11 @@ func handleRestore(args []string) int {
 	if affected == 0 {
 		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
 	}
-	fmt.Printf("Restored: %s\n", id)
+	status := "restored"
+	if currentIsLTM == 1 {
+		status = "restored (LTM preserved)"
+	}
+	fmt.Printf("%s: %s\n", status, id)
 	return 0
 }
 
@@ -1246,14 +1434,15 @@ func handleTopicShow(args []string) int {
 
 	if jsonOutput {
 		// Get memory IDs for this topic
-		rows, _ := db.Query("SELECT memory_id FROM topic_memberships WHERE topic_id = ?", id)
 		memoryIDs := []string{}
-		for rows.Next() {
-			var mid string
-			rows.Scan(&mid)
-			memoryIDs = append(memoryIDs, mid)
+		if rows, err := db.Query("SELECT memory_id FROM topic_memberships WHERE topic_id = ?", id); err == nil {
+			for rows.Next() {
+				var mid string
+				rows.Scan(&mid)
+				memoryIDs = append(memoryIDs, mid)
+			}
+			rows.Close()
 		}
-		rows.Close()
 		chunkCount := len(memoryIDs)
 		data, _ := json.Marshal(map[string]interface{}{
 			"id":           id,
@@ -1479,6 +1668,7 @@ func handleWake(args []string) int {
 		SELECT id, collection, content, tags, metadata, created_at
 		FROM memories
 		WHERE collection = 'session'
+		  AND deleted_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT 5
 	`)
@@ -1773,6 +1963,9 @@ func handleReferenceList() int {
 			created = created[:10]
 		}
 		output.WriteString(fmt.Sprintf("    %s\n", created))
+		if len(ref.FilePath) > 0 {
+			output.WriteString(fmt.Sprintf("    Source: %s\n", ref.FilePath))
+		}
 		if len(ref.Tags) > 0 {
 			output.WriteString(fmt.Sprintf("    Tags: %s\n", strings.Join(ref.Tags, ", ")))
 		}
@@ -1784,10 +1977,42 @@ func handleReferenceList() int {
 
 func handleReferenceAdd(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm reference add <file>\n", 1)
+		return respond("", "Usage: mpm reference add <file> [--source <url>]\n", 1)
 	}
 
-	filePath := args[0]
+	// Parse --source flag (supports both --source=<url> and --source <url>)
+	filePath := ""
+	sourceOverride := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--source" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				sourceOverride = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--source=") {
+			sourceOverride = strings.TrimPrefix(arg, "--source=")
+			continue
+		}
+		if filePath == "" && !strings.HasPrefix(arg, "-") {
+			filePath = arg
+		}
+	}
+
+	if filePath == "" {
+		return respond("", "Usage: mpm reference add <file> [--source <url>]\n", 1)
+	}
+
+	// Capture absolute path for local files
+	absPath := filePath
+	if !strings.HasPrefix(filePath, "/") {
+		if abs, err := filepath.Abs(filePath); err == nil {
+			absPath = abs
+		}
+	}
+
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return respond("", fmt.Sprintf("File not found: %s\n", filePath), 1)
 	}
@@ -1824,8 +2049,14 @@ func handleReferenceAdd(args []string) int {
 	title := filepath.Base(filePath)
 	store := getReferenceStore()
 
-	// Use the ReferenceStore.Add which writes to JSON
-	_, err := store.Add(title, filePath, nil, content)
+	// Use the source override if provided (web URL), otherwise use absolute local path
+	sourcePath := absPath
+	if sourceOverride != "" {
+		sourcePath = sourceOverride
+	}
+
+	// Use the ReferenceStore.Add which writes to JSON; FilePath stores the source
+	_, err := store.Add(title, sourcePath, nil, content)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add reference: %v\n", err), 1)
 	}
@@ -1851,6 +2082,9 @@ func handleReferenceSearch(args []string) int {
 
 	for _, ref := range results {
 		output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
+		if len(ref.FilePath) > 0 {
+			output.WriteString(fmt.Sprintf("    Source: %s\n", ref.FilePath))
+		}
 		snippet := ref.Content
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "..."
@@ -1877,6 +2111,9 @@ func handleReferenceGet(args []string) int {
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("[%s] %s\n", ref.ID, ref.Title))
 	output.WriteString(fmt.Sprintf("Created: %s\n", ref.Created))
+	if len(ref.FilePath) > 0 {
+		output.WriteString(fmt.Sprintf("Source: %s\n", ref.FilePath))
+	}
 	if len(ref.Tags) > 0 {
 		output.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(ref.Tags, ", ")))
 	}
@@ -2895,8 +3132,9 @@ func startWatchGoroutine() error {
 	watcherDone = make(chan struct{})
 	watchPool.Start(watcherCtx)
 
-	// Write PID file after worker pool is confirmed alive
-	// (not before — avoids writing a PID for a pool that might fail to start)
+	// Write PID file only in detached mode (--bg flag).
+	// In in-process goroutine mode the PID would point to the main mpm process,
+	// causing stale PID file confusion on abnormal exit.
 	_ = writeWatchPID()
 
 	// Set up graceful shutdown handler

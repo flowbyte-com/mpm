@@ -413,15 +413,7 @@ func topicLink(args []string) int {
 	}
 
 	// Pre-scan for --json
-	jsonOutput := false
-	filtered := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-			continue
-		}
-		filtered = append(filtered, arg)
-	}
+	jsonOutput, filtered := ExtractJSONFlag(args)
 	if len(filtered) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mpm topic link <topic-id> <memory-id> [--json]\n")
 		return 1
