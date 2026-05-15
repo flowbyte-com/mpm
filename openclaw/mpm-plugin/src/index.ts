@@ -249,6 +249,98 @@ const READ_DIRECTIVES_SCHEMA = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Epistemology Engine — Decision & Theory Tools
+// ---------------------------------------------------------------------------
+
+
+const RECORD_DECISION_SCHEMA = {
+  type: "object",
+  properties: {
+    context: {
+      type: "string",
+      description:
+        "The situation or problem that forced a choice between competing options.",
+    },
+    choice: {
+      type: "string",
+      description:
+        "What was decided — the specific path, approach, or action taken.",
+    },
+    rationale: {
+      type: "string",
+      description:
+        "Why this choice won over the alternatives. What evidence or reasoning made it the right call.",
+    },
+    outcome: {
+      type: "string",
+      description:
+        "Optional: what actually happened when this decision was executed.",
+    },
+    tags: {
+      type: "array",
+      items: { type: "string" },
+      description: "Optional tags for retrieval.",
+      default: [],
+    },
+    weight: {
+      type: "number",
+      description: "Importance weight 0–1 (default 0.5). Use 0.8+ for architectural decisions.",
+      default: 0.5,
+    },
+  },
+  required: ["context", "choice", "rationale"],
+  additionalProperties: false,
+} as const;
+
+const PROPOSE_THEORY_SCHEMA = {
+  type: "object",
+  properties: {
+    hypothesis: {
+      type: "string",
+      description:
+        "What you think is true — a causal assumption, a noticed pattern, or a gut feeling about why something is broken.",
+    },
+    validationCriteria: {
+      type: "string",
+      description:
+        "A specific, executable test or observation that would prove or disprove the hypothesis. " +
+        "Be concrete: 'run the benchmark with --json flag before positional arg and compare parse time' " +
+        "— not 'test it somehow'.",
+    },
+    tags: {
+      type: "array",
+      items: { type: "string" },
+      description: "Optional tags.",
+      default: [],
+    },
+  },
+  required: ["hypothesis", "validationCriteria"],
+  additionalProperties: false,
+} as const;
+
+
+const RESOLVE_THEORY_SCHEMA = {
+  type: "object",
+  properties: {
+    theoryId: {
+      type: "string",
+      description: "The MPM memory ID of the theory to resolve.",
+    },
+    conclusion: {
+      type: "string",
+      description: "What the test or observation actually found. Be specific about the result.",
+    },
+    newStatus: {
+      type: "string",
+      enum: ["proven", "disproven"],
+      description: "proven if the hypothesis was confirmed; disproven if it was not.",
+    },
+  },
+  required: ["theoryId", "conclusion", "newStatus"],
+  additionalProperties: false,
+} as const;
+
+// ---------------------------------------------------------------------------
 // runMpm — robust child_process spawn to Go binary
 // ---------------------------------------------------------------------------
 
@@ -262,6 +354,7 @@ interface MpmJsonResult {
   id?: string;
   success?: boolean;
   memories?: Array<{ id?: string; content?: string }>;
+  created_at?: string;  // directive timestamp for age calculation
   [key: string]: unknown;
 }
 
@@ -407,9 +500,22 @@ function makeQueryLongTermMemoryTool(
       // Format memories for the agent's tool result display
       let displayText: string;
       if (data.memories && Array.isArray(data.memories) && data.memories.length > 0) {
-        displayText = data.memories
-          .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m)))
-          .join("\n\n---\n\n");
+        displayText = data.memories.map((m) => {
+          const mem = m as any;
+          const xref = mem.cross_references || {};
+          const topics = xref.topics || [];
+          const refDoc = xref.reference_doc;
+
+          const topicLine = topics.length
+            ? `\nTopics: [${topics.map((t: any) => t.name).join("] [")}]`
+            : "";
+          const refLine = refDoc
+            ? `\nRef: ${refDoc.title}`
+            : "";
+
+          const content = typeof mem.content === "string" ? mem.content : JSON.stringify(mem);
+          return `${content}${topicLine}${refLine}`;
+        }).join("\n\n---\n\n");
       } else if (data.text) {
         displayText = String(data.text);
       } else {
@@ -748,7 +854,25 @@ function makeSearchTopicsTool(
             const name = t.name || t.description || "(unnamed)";
             const id = t.id ? ` [${t.id}]` : "";
             const desc = t.description ? `: ${t.description}` : "";
-            return `${name}${id}${desc}`;
+
+            // If topic has top_memories, append inline preview
+            const topMems = (t as any).top_memories || [];
+            let memPreview = "";
+            if (topMems.length > 0) {
+              memPreview = "\n  Top: " + topMems
+                .slice(0, 3)
+                .map((m: any) => {
+                  const content = typeof m.content === "string" ? m.content : "";
+                  return content.length > 60 ? content.slice(0, 60) + "…" : content;
+                })
+                .join(" | ");
+              const total = (t as any).memory_count || 0;
+              if (total > 3) {
+                memPreview += ` [+${total - 3} more]`;
+              }
+            }
+
+            return `${name}${id}${desc}${memPreview}`;
           })
           .join("\n");
       } else if (data.message) {
@@ -995,6 +1119,54 @@ function makeListReferencesTool(
 function makeReadDirectivesTool(
   _ctx: OpenClawPluginToolContext
 ): AnyAgentTool {
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  /** Format a directive's created_at timestamp as a human-readable age. */
+  function formatAge(createdAt: string): string {
+    if (!createdAt) return "unknown age";
+    let created: Date;
+    try {
+      // Try parsing ISO-8601 with fallback for space-separated datetime
+      created = new Date(createdAt.replace(" ", "T"));
+      if (isNaN(created.getTime())) created = new Date(createdAt);
+    } catch {
+      return "unknown age";
+    }
+    if (isNaN(created.getTime())) return "unknown age";
+
+    const diffMs = Date.now() - created.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return `${diffSec}s ago`;
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDays = Math.floor(diffHr / 24);
+    if (diffDays < 30) return `${diffDays}d ago`;
+    const diffWeeks = Math.floor(diffDays / 7);
+    if (diffWeeks < 12) return `${diffWeeks}w ago`;
+    const diffMonths = Math.floor(diffDays / 30);
+    return `${diffMonths}mo ago`;
+  }
+
+  /** Group an array of directive objects by their collection label. */
+  function groupByCollection(
+    directives: Array<{ collection?: string; content?: string; created_at?: string; id?: string }>
+  ): Map<string, Array<{ content: string; created_at: string; id: string }>> {
+    const groups = new Map<string, Array<{ content: string; created_at: string; id: string }>>();
+    for (const d of directives) {
+      const key = (d.collection || "directive").trim();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push({
+        content: typeof d.content === "string" ? d.content : JSON.stringify(d.content),
+        created_at: d.created_at || "",
+        id: d.id || "",
+      });
+    }
+    return groups;
+  }
+
   return {
     name: "read_directives",
     description:
@@ -1006,27 +1178,319 @@ function makeReadDirectivesTool(
       const result = await runMpm(["directives", "--json"]);
       const data = parseMpmResult(result);
 
-      // Format directives for display
-      let displayText: string;
-      if (data.directives && Array.isArray(data.directives) && data.directives.length > 0) {
-        displayText = data.directives
-          .map((d: MpmJsonResult) => {
-            const collection = d.collection || "directive";
-            const content = typeof d.content === "string" ? d.content : JSON.stringify(d.content);
-            return `[${collection}]\n${content}`;
-          })
-          .join("\n\n---\n\n");
-      } else if (data.message) {
-        displayText = String(data.message);
-      } else {
-        displayText = "(no directives defined — run the session that defines them)";
+      if (!data.directives || !Array.isArray(data.directives) || data.directives.length === 0) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: data.message
+                      ? String(data.message)
+                      : "(no directives defined — run the session that defines them)",
+                  },
+                ],
+              },
+            ],
+          },
+        };
       }
+
+      const groups = groupByCollection(data.directives as Array<{
+        collection?: string;
+        content?: string;
+        created_at?: string;
+        id?: string;
+      }>);
+
+      const lines: string[] = [
+        "\xf0\x9f\x9b\xb8 **808 PRIME DIRECTIVES** \xf0\x9f\x9b\xb8\n",
+      ];
+
+      for (const [group, directives] of groups) {
+        lines.push(`\n**${group.toUpperCase()}**\n`);
+        for (const d of directives) {
+          const age = formatAge(d.created_at);
+          lines.push(`\n  \u2022 ${d.content}`);
+          lines.push(`    \u2192 added ${age}`);
+        }
+      }
+
+      const displayText = lines.join("\n");
 
       return {
         toolCallId,
         result: {
           type: "ok" as const,
           results: [{ content: [{ type: "text" as const, text: displayText }] }],
+        },
+      };
+    },
+  };
+}
+
+// ── Epistemology Engine ─────────────────────────────────────────────────────────
+
+
+function makeRecordDecisionTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "record_decision",
+    description:
+      "Record an architectural decision, library choice, or any moment where you chose " +
+      "path A over path B. Call this BEFORE or AFTER the decision — not just after. " +
+      "The rationale is the most important field: it is what makes past decisions " +
+      "reusable when you encounter a similar problem weeks later. " +
+      "Trigger: whenever you weigh tradeoffs and choose one, or whenever you notice " +
+      "you just picked an approach without recording why.",
+    parameters: RECORD_DECISION_SCHEMA,
+    emoji_name: "scales",
+    execute: async (toolCallId, params) => {
+      const {
+        context = "",
+        choice = "",
+        rationale = "",
+        outcome = "",
+        tags = [],
+        weight = 0.5,
+      } = params as {
+        context: string;
+        choice: string;
+        rationale: string;
+        outcome?: string;
+        tags?: string[];
+        weight?: number;
+      };
+
+
+      if (!context.trim() || !choice.trim() || !rationale.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "context, choice, and rationale are all required.",
+                    }),
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      const content = [
+        `CONTEXT: ${context}`,
+        `CHOICE: ${choice}`,
+        `RATIONALE: ${rationale}`,
+        outcome ? `OUTCOME: ${outcome}` : ``,
+      ]
+        .filter(line => line.length > `CONTEXT: `.length)
+        .join("\n");
+
+
+      const args = ["add", "--json", "--collection", "decisions", "--", content];
+      for (const tag of tags) { args.push("--tag", tag); }
+      if (weight !== 0.5) { args.push("--weight", String(weight)); }
+
+      const result = await runMpm(args);
+      const data = parseMpmResult(result);
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify(data) }] }],
+        },
+      };
+    },
+  };
+}
+
+function makeProposeTheoryTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "propose_theory",
+    description:
+      "Log a hypothesis about causality before writing a fix. " +
+      "When you think 'X is probably causing Y' — propose it, define the test, then run the test. " +
+      "Writing the validation criteria forces you to confront whether the assumption is actually testable, " +
+      "and often collapses a false hypothesis before it wastes an hour of debugging time. " +
+      "Trigger: whenever you form a 'I think X is causing Y' assumption during debugging or design work.",
+    parameters: PROPOSE_THEORY_SCHEMA,
+    emoji_name: "bulb",
+    execute: async (toolCallId, params) => {
+      const {
+        hypothesis = "",
+        validationCriteria = "",
+        tags = [],
+      } = params as {
+        hypothesis: string;
+        validationCriteria: string;
+        tags?: string[];
+      };
+
+      if (!hypothesis.trim() || !validationCriteria.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "hypothesis and validationCriteria are both required.",
+                    }),
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      const content = [
+        `HYPOTHESIS: ${hypothesis}`,
+        `VALIDATION_CRITERIA: ${validationCriteria}`,
+        `STATUS: pending`,
+      ].join("\n");
+
+      const args = ["add", "--json", "--collection", "theories", "--", content];
+      for (const tag of tags) { args.push("--tag", tag); }
+      args.push("--tag", "theory");
+
+      const result = await runMpm(args);
+      const data = parseMpmResult(result);
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify(data) }] }],
+        },
+      };
+    },
+  };
+}
+
+function makeResolveTheoryTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "resolve_theory",
+    description:
+      "Close the loop on a pending theory after running its validation criteria. " +
+      "If the hypothesis was confirmed, save the confirmed result as a permanent memory " +
+      "(weight=1.0, include the theory_id as a tag for traceability). " +
+      "If it was disproven, record what actually caused the problem instead. " +
+      "Trigger: immediately after executing the test described in a pending theory's validationCriteria.",
+    parameters: RESOLVE_THEORY_SCHEMA,
+    emoji_name: "white_check_mark",
+    execute: async (toolCallId, params) => {
+      const {
+        theoryId = "",
+        conclusion = "",
+        newStatus = "",
+      } = params as {
+        theoryId: string;
+        conclusion: string;
+        newStatus: "proven" | "disproven";
+      };
+
+      if (!theoryId.trim() || !conclusion.trim() || !newStatus.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "theoryId, conclusion, and newStatus are all required.",
+                    }),
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      if (newStatus !== "proven" && newStatus !== "disproven") {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: "invalid_status",
+                      message: "newStatus must be 'proven' or 'disproven'.",
+                    }),
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      // Use UpdateMemoryMetadata via mpm patch-memory to update the theory's
+      // metadata in-place (no content change → no FTS re-index).
+      // Then insert a new resolved record for the conclusion.
+      const patchResult = await runMpm([
+        "patch-memory", theoryId,
+        JSON.stringify({ status: newStatus, conclusion }),
+      ]);
+      const patchData = parseMpmResult(patchResult);
+
+      // Add resolved record with traceability tag back to original theory.
+      const resolvedContent = [
+        `RESOLVED_THEORY_ID: ${theoryId}`,
+        `STATUS: ${newStatus}`,
+        `CONCLUSION: ${conclusion}`,
+      ].join("\n");
+
+      const addArgs = [
+        "add", "--json", "--collection", "theories",
+        "--tag", "resolved",
+        "--tag", `theories:${theoryId}`,
+        "--weight", "1",
+        "--", resolvedContent,
+      ];
+
+      const addResult = await runMpm(addArgs);
+      const addData = parseMpmResult(addResult);
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify({ patch: patchData, resolved: addData }) }] }],
         },
       };
     },
@@ -1110,6 +1574,22 @@ export default definePluginEntry({
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeReadDirectivesTool(ctx),
       { names: ["read_directives"], optional: false }
+    );
+
+    // ── Epistemology Engine ──────────────────────────────────────────────
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeRecordDecisionTool(ctx),
+      { names: ["record_decision"], optional: false }
+    );
+
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeProposeTheoryTool(ctx),
+      { names: ["propose_theory"], optional: false }
+    );
+
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeResolveTheoryTool(ctx),
+      { names: ["resolve_theory"], optional: false }
     );
 
     // ── Memory Capability (prompt builder for recall guidance) ────────────
