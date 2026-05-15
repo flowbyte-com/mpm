@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -327,5 +328,164 @@ func TestFullTextSearchLIKEFallback(t *testing.T) {
 	}
 	if !found {
 		t.Error("FullTextSearch did not find memory via LIKE fallback")
+	}
+}
+
+// TestGetMemoryTopics tests GetMemoryTopics cross-ref query
+func TestGetMemoryTopics(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store := NewMemoryStore("")
+	store.SQLiteDBPath = dbPath
+	if err := store.InitSQLite(); err != nil {
+		t.Fatalf("InitSQLite failed: %v", err)
+	}
+	defer store.DB.Close()
+
+	// Create a memory
+	mem, err := store.AddMemory("test content", "memories", nil, nil, "", "test")
+	if err != nil {
+		t.Fatalf("AddMemory failed: %v", err)
+	}
+	if mem == nil {
+		t.Fatal("AddMemory returned nil")
+	}
+
+	// Create topics
+	topicID1 := GenerateID()
+	topicID2 := GenerateID()
+	_, err = store.DB.Exec(`INSERT INTO topics (id, name, is_active) VALUES (?, ?, 1)`, topicID1, "topic-a")
+	if err != nil {
+		t.Fatalf("Insert topic-a failed: %v", err)
+	}
+	_, err = store.DB.Exec(`INSERT INTO topics (id, name, is_active) VALUES (?, ?, 1)`, topicID2, "topic-b")
+	if err != nil {
+		t.Fatalf("Insert topic-b failed: %v", err)
+	}
+
+	// Link memory to both topics
+	_, err = store.DB.Exec(`INSERT INTO topic_memberships (memory_id, topic_id, role) VALUES (?, ?, ?)`, mem.ID, topicID1, "manual")
+	if err != nil {
+		t.Fatalf("Insert membership manual failed: %v", err)
+	}
+	_, err = store.DB.Exec(`INSERT INTO topic_memberships (memory_id, topic_id, role) VALUES (?, ?, ?)`, mem.ID, topicID2, "auto")
+	if err != nil {
+		t.Fatalf("Insert membership auto failed: %v", err)
+	}
+
+	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	topics, err := dm.GetMemoryTopics(mem.ID)
+
+	if err != nil {
+		t.Fatalf("GetMemoryTopics failed: %v", err)
+	}
+	if len(topics) != 2 {
+		t.Fatalf("expected 2 topics, got %d", len(topics))
+	}
+	// Ordered by role then name: manual topic-a first, then auto topic-b
+	if topics[0].Role != "manual" {
+		t.Errorf("expected role 'manual', got %q", topics[0].Role)
+	}
+	if topics[0].Name != "topic-a" {
+		t.Errorf("expected name 'topic-a', got %q", topics[0].Name)
+	}
+	if topics[1].Role != "auto" {
+		t.Errorf("expected role 'auto', got %q", topics[1].Role)
+	}
+}
+
+// TestGetTopicTopMemories tests GetTopicTopMemories cross-ref query
+func TestGetTopicTopMemories(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store := NewMemoryStore("")
+	store.SQLiteDBPath = dbPath
+	if err := store.InitSQLite(); err != nil {
+		t.Fatalf("InitSQLite failed: %v", err)
+	}
+	defer store.DB.Close()
+
+	topicID := GenerateID()
+	_, err := store.DB.Exec(`INSERT INTO topics (id, name, is_active) VALUES (?, ?, 1)`, topicID, "test-topic")
+	if err != nil {
+		t.Fatalf("Insert topic failed: %v", err)
+	}
+
+	// Create 5 memories with different weights
+	ids := []string{}
+	for i := 0; i < 5; i++ {
+		mem, err := store.AddMemory(fmt.Sprintf("content-%d", i), "memories", nil, nil, "", "test")
+		if err != nil {
+			t.Fatalf("AddMemory failed: %v", err)
+		}
+		ids = append(ids, mem.ID)
+		// Set weight: 1, 5, 3, 10, 2
+		w := []int{1, 5, 3, 10, 2}[i]
+		_, err = store.DB.Exec(`UPDATE memories SET weight = ? WHERE id = ?`, w, mem.ID)
+		if err != nil {
+			t.Fatalf("Update weight failed: %v", err)
+		}
+		_, err = store.DB.Exec(`INSERT INTO topic_memberships (memory_id, topic_id, role) VALUES (?, ?, ?)`, mem.ID, topicID, "manual")
+		if err != nil {
+			t.Fatalf("Insert membership failed: %v", err)
+		}
+	}
+
+	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	memories, total, err := dm.GetTopicTopMemories(topicID, 3)
+
+	if err != nil {
+		t.Fatalf("GetTopicTopMemories failed: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected total=5, got %d", total)
+	}
+	if len(memories) != 3 {
+		t.Fatalf("expected 3 memories, got %d", len(memories))
+	}
+	// Top 3 by weight: weight=10 (id[3]), weight=5 (id[1]), weight=3 (id[2])
+	if memories[0].ID != ids[3] {
+		t.Errorf("expected memories[0].id=%s (weight 10), got %s", ids[3], memories[0].ID)
+	}
+	if memories[1].ID != ids[1] {
+		t.Errorf("expected memories[1].id=%s (weight 5), got %s", ids[1], memories[1].ID)
+	}
+	if memories[2].ID != ids[2] {
+		t.Errorf("expected memories[2].id=%s (weight 3), got %s", ids[2], memories[2].ID)
+	}
+}
+
+// TestGetReferenceDoc tests GetReferenceDoc cross-ref query
+func TestGetReferenceDoc(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store := NewMemoryStore("")
+	store.SQLiteDBPath = dbPath
+	if err := store.InitSQLite(); err != nil {
+		t.Fatalf("InitSQLite failed: %v", err)
+	}
+	defer store.DB.Close()
+
+	docID := GenerateID()
+	_, err := store.DB.Exec(`INSERT INTO reference_docs (id, title, file_path, content) VALUES (?, ?, ?, ?)`,
+		docID, "Test Doc", "/path/to/doc.pdf", "test content")
+	if err != nil {
+		t.Fatalf("Insert reference_doc failed: %v", err)
+	}
+
+	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	doc, err := dm.GetReferenceDoc(docID)
+
+	if err != nil {
+		t.Fatalf("GetReferenceDoc failed: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("expected doc, got nil")
+	}
+	if doc.Title != "Test Doc" {
+		t.Errorf("expected title 'Test Doc', got %q", doc.Title)
+	}
+	if doc.FilePath != "/path/to/doc.pdf" {
+		t.Errorf("expected file_path '/path/to/doc.pdf', got %q", doc.FilePath)
 	}
 }

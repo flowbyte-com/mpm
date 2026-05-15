@@ -9,6 +9,30 @@ import (
 	"time"
 )
 
+// ==================== Lightweight reference types for cross-ref display ====================
+
+// TopicRef is a lightweight topic reference for cross-reference display
+type TopicRef struct {
+	ID   string
+	Name string
+	Role string // "manual", "auto", "related"
+}
+
+// ReferenceDocRef is a lightweight reference doc reference
+type ReferenceDocRef struct {
+	ID       string
+	Title    string
+	FilePath string
+}
+
+// MemoryRef is a lightweight memory reference (truncated content for lists)
+type MemoryRef struct {
+	ID         string
+	Content    string
+	Collection string
+	Weight     int
+}
+
 // ==================== Memory queries (for web UI) ====================
 
 // QueryMemories returns memories matching the criteria
@@ -236,6 +260,93 @@ func (dm *DatabaseManager) GetMemoryByExternalID(sourceDB, sourceID string) (map
 		m["promoted_at"] = *promotedAt
 	}
 	return m, nil
+}
+
+// GetMemoryTopics returns all topics linked to a memory, ordered by role DESC (manual first) then name
+func (dm *DatabaseManager) GetMemoryTopics(memoryID string) ([]TopicRef, error) {
+	rows, err := dm.db.Query(`
+		SELECT t.id, t.name, tm.role
+		FROM topic_memberships tm
+		JOIN topics t ON t.id = tm.topic_id
+		WHERE tm.memory_id = ?
+		ORDER BY tm.role DESC, t.name
+	`, memoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []TopicRef
+	for rows.Next() {
+		var r TopicRef
+		if err := rows.Scan(&r.ID, &r.Name, &r.Role); err == nil {
+			refs = append(refs, r)
+		}
+	}
+	if refs == nil {
+		refs = []TopicRef{}
+	}
+	return refs, rows.Err()
+}
+
+// GetReferenceDoc returns a reference doc by ID (lightweight, no chunks)
+func (dm *DatabaseManager) GetReferenceDoc(docID string) (*ReferenceDocRef, error) {
+	if docID == "" {
+		return nil, nil
+	}
+	var title, filePath string
+	err := dm.db.QueryRow(`SELECT title, file_path FROM reference_docs WHERE id = ?`, docID).Scan(&title, &filePath)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ReferenceDocRef{ID: docID, Title: title, FilePath: filePath}, nil
+}
+
+// GetTopicTopMemories returns top-N memories for a topic (by weight DESC, created_at DESC)
+// plus the total count of all linked memories (for the count chip).
+// The content field is truncated to 120 chars for list display.
+func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]MemoryRef, int, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT m.id, m.content, m.collection, m.weight
+		FROM topic_memberships tm
+		JOIN memories m ON m.id = tm.memory_id
+		WHERE tm.topic_id = ? AND tm.memory_id IS NOT NULL AND m.deleted_at IS NULL
+		ORDER BY m.weight DESC, m.created_at DESC
+		LIMIT ?
+	`, topicID, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var refs []MemoryRef
+	for rows.Next() {
+		var r MemoryRef
+		var content string
+		if err := rows.Scan(&r.ID, &content, &r.Collection, &r.Weight); err == nil {
+			if len(content) > 120 {
+				r.Content = content[:120] + "…"
+			} else {
+				r.Content = content
+			}
+			refs = append(refs, r)
+		}
+	}
+	if refs == nil {
+		refs = []MemoryRef{}
+	}
+
+	var total int
+	dm.db.QueryRow(`SELECT COUNT(*) FROM topic_memberships WHERE topic_id = ? AND memory_id IS NOT NULL`, topicID).Scan(&total)
+
+	return refs, total, rows.Err()
 }
 
 // UpdateMemory updates an existing memory's content and metadata.
