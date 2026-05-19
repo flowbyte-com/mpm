@@ -509,7 +509,7 @@ function parseMpmResult(result: MpmRunResult): MpmJsonResult {
 // ---------------------------------------------------------------------------
 
 function makeQueryLongTermMemoryTool(
-  _ctx: OpenClawPluginToolContext
+  ctx: OpenClawPluginToolContext
 ): AnyAgentTool {
   return {
     name: "query_long_term_memory",
@@ -526,13 +526,28 @@ function makeQueryLongTermMemoryTool(
         limit?: number;
       };
 
-      const result = await runMpm([
+      // Detect Telegram or other constrained channels from context.
+      // OpenClaw's plugin SDK exposes activeModel and channel in the tool
+      // context. If the channel is telegram, use a tighter token budget.
+      // Otherwise default to 16000 (generous for most channels).
+      let tokenBudget = 16000;
+      const ctxAny = ctx as Record<string, unknown>;
+      const channel = String(ctxAny.channel || ctxAny.activeModel || "").toLowerCase();
+      if (channel.includes("telegram") || process.env.TELEGRAM_TOKEN) {
+        tokenBudget = 1000;
+      }
+
+      const args: string[] = [
         "recall",
         "--json",
+        "--token-budget",
+        String(tokenBudget),
         "--",
         query,
         String(limit),
-      ]);
+      ];
+
+      const result = await runMpm(args);
       const data = parseMpmResult(result);
 
       // Format memories for the agent's tool result display

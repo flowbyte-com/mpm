@@ -274,19 +274,50 @@ func handlePrimeDirectives() int {
 
 func handleMemoryAdd(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm memory add <content>", 1)
+		return respond("", "Usage: mpm memory add [--expires-in <duration>] <content>", 1)
 	}
 
-	// Pre-scan for --json flag (may appear anywhere in args)
-	jsonOutput, contentArgs := ExtractJSONFlag(args)
-	if len(contentArgs) == 0 {
-		return respond("", "Usage: mpm memory add <content>", 1)
+	// Pre-scan --json, -i/--interactive, and --expires-in flags
+	jsonOutput := false
+	expiresIn := ""
+	interactive := false
+	contentArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json", "-j":
+			jsonOutput = true
+		case "-i", "--interactive":
+			interactive = true
+		case "--expires-in":
+			if i+1 < len(args) {
+				i++
+				expiresIn = args[i]
+			}
+		default:
+			contentArgs = append(contentArgs, args[i])
+		}
 	}
-	content := strings.Join(contentArgs, " ")
+
+	var content string
+	if interactive {
+		drafted, err := draftInteractiveContent()
+		if err != nil {
+			return respond("", fmt.Sprintf("Interactive input failed: %v\n", err), 1)
+		}
+		if drafted == "" {
+			return respond("", "No content provided.\n", 0)
+		}
+		content = drafted
+	} else {
+		if len(contentArgs) == 0 {
+			return respond("", "Usage: mpm memory add [--expires-in <duration>] <content>", 1)
+		}
+		content = strings.Join(contentArgs, " ")
+	}
 
 	// Inject active mode/persona from config files
-injectActiveContext()
-defer clearActiveContext()
+	injectActiveContext()
+	defer clearActiveContext()
 
 	// Build metadata with active context
 	memMetadata := map[string]interface{}{}
@@ -303,12 +334,32 @@ defer clearActiveContext()
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
 
-	// Get topic suggestions (non-blocking — failures are silently ignored)
+	// Set TTL if --expires-in was provided
 	var suggestions []map[string]interface{}
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err == nil {
 		defer dm.Close()
+		if expiresIn != "" {
+			dur, parseErr := parseDuration(expiresIn)
+			if parseErr == nil {
+				dm.SetMemoryTTL(mem.ID, time.Now().Add(dur))
+			}
+		}
+
+		// Get topic suggestions (non-blocking — failures are silently ignored)
 		suggestions, _ = suggestTopicsForMemory(dm, mem.ID, content, 3, 0.3)
+
+		// Fire-and-forget: check for near-miss candidates and auto-synthesize.
+		// Opens its own DB connection since the enclosing dm will close.
+		go func(id, c string) {
+			synthDM, synthErr := mpminternal.NewDatabaseManager("")
+			if synthErr != nil {
+				return
+			}
+			defer synthDM.Close()
+			client := mpminternal.NewSynthClient()
+			mpminternal.AutoSynthesize(context.Background(), synthDM, client, id, c)
+		}(mem.ID, content)
 	}
 	mem.SuggestedTopics = suggestions
 
@@ -1653,6 +1704,17 @@ func handleWake(args []string) int {
 	}
 	defer dm.Close()
 
+	// Parse --strict flag
+	strictMode := false
+	cleanArgs := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--strict" {
+			strictMode = true
+		} else {
+			cleanArgs = append(cleanArgs, a)
+		}
+	}
+
 	var sessionID string
 
 	// Try to get the most recent explicit session record
@@ -1661,16 +1723,20 @@ func handleWake(args []string) int {
 		sessionID, _ = session["session_id"].(string)
 	}
 
-	// Get recent session-collection memories (fallback: no explicit session record needed)
-	// Use last 5 memories from "session" collection ordered by created_at
+	// Strict mode: bypass fallback queries, rely solely on explicit session
+	if strictMode && sessionID == "" {
+		fmt.Println("No previous session found.")
+		return 1
+	}
+
+	// Query all recent memories (any collection, not just 'session')
 	var memories []map[string]interface{}
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, collection, content, tags, metadata, created_at
 		FROM memories
-		WHERE collection = 'session'
-		  AND deleted_at IS NULL
+		WHERE deleted_at IS NULL
 		ORDER BY created_at DESC
-		LIMIT 5
+		LIMIT 10
 	`)
 	if err == nil {
 		defer rows.Close()
@@ -1696,75 +1762,116 @@ func handleWake(args []string) int {
 		}
 	}
 
-	if len(memories) == 0 {
-		fmt.Println("No previous session found.")
-		return 0
+	// Query recent lessons for additional cold-start context
+	var lessons []map[string]interface{}
+	lrows, err := dm.SQLDB().Query(`
+		SELECT id, type, content, tags, created
+		FROM lessons
+		ORDER BY created DESC
+		LIMIT 5
+	`)
+	if err == nil {
+		defer lrows.Close()
+		for lrows.Next() {
+			var lessonID, lessonType, content, tagsJSON, created string
+			if err := lrows.Scan(&lessonID, &lessonType, &content, &tagsJSON, &created); err != nil {
+				break
+			}
+			var tagList []string
+			if tagsJSON != "" {
+				json.Unmarshal([]byte(tagsJSON), &tagList)
+			}
+			lessons = append(lessons, map[string]interface{}{
+				"id":      lessonID,
+				"type":    lessonType,
+				"content": "[Lesson] " + content,
+				"tags":    tagList,
+				"created": created,
+			})
+		}
 	}
 
-	// Extract active_mode/persona from most recent memory's metadata
+	// Identity fallback: read active.json for persona and modes
 	var activeMode, activePersona string
-	if mem := memories[0]; mem["metadata"] != nil {
-		if m, ok := mem["metadata"].(map[string]interface{}); ok {
-			if v, ok := m["active_mode"]; ok {
-				activeMode = fmt.Sprintf("%v", v)
-			}
-			if v, ok := m["active_persona"]; ok {
-				activePersona = fmt.Sprintf("%v", v)
+	mpmDir := config.GetMPMDir()
+	activePath := filepath.Join(mpmDir, "active.json")
+	if data, err := os.ReadFile(activePath); err == nil {
+		type activeState struct {
+			Persona string   `json:"persona"`
+			Modes   []string `json:"modes"`
+		}
+		var active activeState
+		if json.Unmarshal(data, &active) == nil {
+			activePersona = active.Persona
+			if len(active.Modes) > 0 {
+				activeMode = strings.Join(active.Modes, ", ")
 			}
 		}
 	}
 
 	// Pre-scan for --json
-	jsonOutput, _ := ExtractJSONFlag(args)
+	jsonOutput, _ := ExtractJSONFlag(cleanArgs)
+
+	// Shared struct definitions for output
+	type memoryRef struct {
+		ID        string `json:"id"`
+		Content   string `json:"content"`
+		CreatedAt string `json:"created_at"`
+	}
+	type wakeResult struct {
+		SessionID      string       `json:"session_id"`
+		ActiveMode     string       `json:"active_mode"`
+		ActivePersona  string       `json:"active_persona"`
+		RecentTopics   []string     `json:"recent_topics"`
+		RecentMemories []memoryRef  `json:"recent_memories"`
+	}
+
+	// Collect topics and build consolidated memory references
+	topicSet := map[string]bool{}
+	memRefs := make([]memoryRef, 0)
+
+	for _, mem := range memories {
+		memRefs = append(memRefs, memoryRef{
+			ID:        mem["id"].(string),
+			Content:   mem["content"].(string),
+			CreatedAt: mem["created_at"].(string),
+		})
+		topics, _ := dm.GetMemoryTopics(mem["id"].(string))
+		for _, t := range topics {
+			topicSet[t.Name] = true
+		}
+	}
+
+	for _, l := range lessons {
+		memRefs = append(memRefs, memoryRef{
+			ID:        l["id"].(string),
+			Content:   l["content"].(string),
+			CreatedAt: l["created"].(string),
+		})
+	}
+
+	topics := make([]string, 0)
+	for t := range topicSet {
+		topics = append(topics, t)
+	}
+
+	result := wakeResult{
+		SessionID:      sessionID,
+		ActiveMode:     activeMode,
+		ActivePersona:  activePersona,
+		RecentTopics:   topics,
+		RecentMemories: memRefs,
+	}
 
 	if jsonOutput {
-		type memoryRef struct {
-			ID        string `json:"id"`
-			Content   string `json:"content"`
-			CreatedAt string `json:"created_at"`
-		}
-		type wakeResult struct {
-			SessionID      string   `json:"session_id"`
-			ActiveMode     string   `json:"active_mode"`
-			ActivePersona  string   `json:"active_persona"`
-			RecentTopics   []string `json:"recent_topics"`
-			RecentMemories []memoryRef `json:"recent_memories"`
-		}
-
-		// Collect topic names
-		topicSet := map[string]bool{}
-		var memRefs []memoryRef
-		for _, mem := range memories {
-			content := mem["content"].(string)
-			createdAt := mem["created_at"].(string)
-			if len(content) > 120 {
-				content = content[:120] + "…"
-			}
-			memRefs = append(memRefs, memoryRef{
-				ID:        mem["id"].(string),
-				Content:   content,
-				CreatedAt: createdAt,
-			})
-			// Get topics for this memory
-			topics, _ := dm.GetMemoryTopics(mem["id"].(string))
-			for _, t := range topics {
-				topicSet[t.Name] = true
-			}
-		}
-		var topics []string
-		for t := range topicSet {
-			topics = append(topics, t)
-		}
-
-		result := wakeResult{
-			SessionID:      sessionID,
-			ActiveMode:     activeMode,
-			ActivePersona:  activePersona,
-			RecentTopics:   topics,
-			RecentMemories: memRefs,
-		}
 		data, _ := json.Marshal(result)
 		fmt.Println(string(data))
+		return 0
+	}
+
+	// No context at all — human-readable empty state
+	if len(memRefs) == 0 && activeMode == "" && activePersona == "" {
+		fmt.Println("No previous session found.")
 		return 0
 	}
 
@@ -1776,19 +1883,6 @@ func handleWake(args []string) int {
 	if activePersona != "" {
 		fmt.Printf("│ Persona:  %-42s │\n", activePersona)
 	}
-
-	// Collect and deduplicate topics
-	topicSet := map[string]bool{}
-	for _, mem := range memories {
-		topics, _ := dm.GetMemoryTopics(mem["id"].(string))
-		for _, t := range topics {
-			topicSet[t.Name] = true
-		}
-	}
-	var topics []string
-	for t := range topicSet {
-		topics = append(topics, t)
-	}
 	if len(topics) > 0 {
 		topicStr := strings.Join(topics[:3], ", ")
 		if len(topics) > 3 {
@@ -1797,19 +1891,20 @@ func handleWake(args []string) int {
 		fmt.Printf("│ Topics:   %-42s │\n", topicStr)
 	}
 
-	fmt.Println("│                                                             │")
-	fmt.Println("│ Recent memories:                                            │")
-	for _, mem := range memories {
-		content := mem["content"].(string)
-		if len(content) > 54 {
-			content = content[:54] + "…"
+	if len(memRefs) > 0 {
+		fmt.Println("│                                                             │")
+		fmt.Println("│ Recent context:                                            │")
+		for _, ref := range memRefs {
+			content := ref.Content
+			if len(content) > 54 {
+				content = content[:54] + "…"
+			}
+			fmt.Printf("│   • %-53s │\n", content)
 		}
-		fmt.Printf("│   • %-53s │\n", content)
 	}
 	fmt.Println("╰─────────────────────────────────────────────────────────────╯")
 	return 0
 }
-
 func handleSessionSearch(args []string) int {
 	if len(args) == 0 {
 		return respond("", "Usage: mpm session search <query>", 1)
@@ -2941,8 +3036,11 @@ func getMemoryStore() *internal.MemoryStore {
 		dbManager = dm
 	}
 	// Wrap the shared *sql.DB in a SQLiteConnection to satisfy MemoryStore.DB.
+	// Set DM so that write-heavy paths (DecayWeights, DedupeMemories) route
+	// through DatabaseManager.ExecTracked for WAL-backoff observability.
 	return &internal.MemoryStore{
 		DB: &internal.SQLiteConnection{DB: dbManager.SQLDB()},
+		DM: dbManager,
 	}
 }
 
@@ -3127,6 +3225,9 @@ func startWatchGoroutine() error {
 			return fmt.Errorf("failed to open database for watcher: %w", err)
 		}
 		watchPool = NewWorkerPool(dm, defaultWorkerPoolSize)
+		// Pre-warm the synthesis dedup map from past merges so previously
+		// resolved pairs are not re-synthesised after a restart.
+		internal.InitSynthDedupFromDB(dm)
 	}
 	watcherCtx, watcherCancel = context.WithCancel(context.Background())
 	watcherDone = make(chan struct{})
@@ -3152,8 +3253,15 @@ func startWatchGoroutine() error {
 		// Start external DB polling goroutines (each spawns its own goroutine).
 		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
 
-		// Submit a startup sweep event to the pool.
+		// Start periodic reconciliation sweep goroutine.
+		go startReconciliationSweepGoroutine(watcherCtx, watchPool, false, false)
+
+		// Submit startup events to the pool.
 		watchPool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: false, Verbose: false})
+		// Immediate reconciliation sweep — catches orphan .jsonl files that the
+		// startup sweep skips, closing the 10-minute blind spot before the
+		// periodic sweeper fires.
+		watchPool.Submit(WatchEvent{Type: EventReconciliationSweep, DryRun: false, Verbose: false})
 
 		// Block until cancelled or signal received
 		select {
@@ -3199,18 +3307,22 @@ func handleWatchStop() int {
 	// Process is alive — send Interrupt signal and wait for graceful shutdown
 	proc.Signal(os.Interrupt)
 
-	// Give it a moment to shut down gracefully
-	// PIDs are reused slowly on Linux, so this avoids stale PID confusion
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify it's gone
-	if isWatchProcessAlive(pid) {
-		deleteWatchPID()
-		return respond(fmt.Sprintf("Watcher stop signal sent (PID %d) — it may take a moment to shut down.\n", pid), "", 0)
+	// Retry loop: wait up to 10 seconds for the PID to exit, polling every 200ms.
+	// The old 500ms sleep was insufficient when the watcher was in the middle of
+	// a long synthesis API call (up to 300s timeout), causing a false "still alive"
+	// report and stale PID file.
+	for wait := 0; wait < 50; wait++ { // 50 × 200ms = 10s
+		time.Sleep(200 * time.Millisecond)
+		if !isWatchProcessAlive(pid) {
+			deleteWatchPID()
+			return respond("Watcher stopped.\n", "", 0)
+		}
 	}
 
+	// Timed out — process still alive. Clean up PID file so the user can retry
+	// without a stale-PID error. The orphan process will be handled on next start.
 	deleteWatchPID()
-	return respond("Watcher stopped.\n", "", 0)
+	return respond(fmt.Sprintf("⚠️  Watcher (PID %d) did not stop within 10s — PID file cleaned. You may need to kill it manually.\n", pid), "", 0)
 }
 
 // handleWatchStatus checks if the watcher is running via the PID file.
@@ -3270,4 +3382,440 @@ Examples:
   mpm watch list-paths
 `
 	return respond(output, "", 0)
+}
+
+// draftInteractiveContent opens $EDITOR on a temp file, waits for the user
+// to save+exit, reads the result, shows a preview, and asks for y/N
+// confirmation. Returns the drafted content or an empty string if declined.
+func draftInteractiveContent() (string, error) {
+	tmpFile, err := os.CreateTemp("", "mpm_draft_*.md")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		if _, err := exec.LookPath("nano"); err == nil {
+			editor = "nano"
+		} else if _, err := exec.LookPath("vim"); err == nil {
+			editor = "vim"
+		} else {
+			return "", fmt.Errorf("no editor found — set $EDITOR or install nano/vim")
+		}
+	}
+
+	cmd := exec.Command(editor, tmpPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("editor exited with error: %w", err)
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("read drafted content: %w", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return "", nil
+	}
+
+	// Preview
+	fmt.Printf("\n%s─── Draft Preview ──────────────────────────────%s\n", "\033[1m\033[36m", "\033[0m")
+	fmt.Println(content)
+	fmt.Printf("%s──────────────────────────────────────────────────%s\n", "\033[1m\033[36m", "\033[0m")
+	fmt.Printf("\nSave this memory? [y/N] ")
+
+	var answer string
+	fmt.Scanln(&answer)
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer != "y" && answer != "yes" {
+		return "", nil
+	}
+
+	return content, nil
+}
+
+// ============================================================================
+// Epistemology Engine — Theories & Decisions
+// ============================================================================
+
+// extractField extracts the value of a named field from structured input text.
+// Fields are case-insensitive prefix matches on line starts.
+// Multi-line values are supported; field boundaries are detected automatically.
+func extractField(input, prefix string) string {
+	lines := strings.Split(input, "\n")
+	var result []string
+	inField := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		upper := strings.ToUpper(trimmed)
+		if strings.HasPrefix(upper, prefix) {
+			inField = true
+			rest := strings.TrimSpace(trimmed[len(prefix):])
+			if rest != "" {
+				result = append(result, rest)
+			}
+			continue
+		}
+		if inField {
+			isNewField := false
+			for _, p := range []string{"HYPOTHESIS:", "VALIDATION_CRITERIA:", "STATUS:", "TAGS:", "CONTEXT:", "CHOICE:", "RATIONALE:"} {
+				if strings.HasPrefix(strings.ToUpper(trimmed), p) {
+					isNewField = true
+					break
+				}
+			}
+			if isNewField {
+				inField = false
+			} else {
+				result = append(result, trimmed)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(result, " "))
+}
+
+// handleProposeTheory parses structured text into a theory and saves to the theories collection.
+func handleProposeTheory(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm propose_theory <text>", 1)
+	}
+
+	input := strings.Join(args, " ")
+
+	hypothesis := extractField(input, "HYPOTHESIS:")
+	validationCriteria := extractField(input, "VALIDATION_CRITERIA:")
+	status := extractField(input, "STATUS:")
+	tagsStr := extractField(input, "TAGS:")
+
+	if hypothesis == "" {
+		hypothesis = strings.TrimSpace(input)
+	}
+	if status == "" {
+		status = "pending"
+	}
+
+	var tags []string
+	if tagsStr != "" {
+		for _, t := range strings.Split(tagsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	content := hypothesis
+	if validationCriteria != "" {
+		content += "\n\nVALIDATION_CRITERIA: " + validationCriteria
+	}
+
+	meta := map[string]interface{}{
+		"status": status,
+	}
+	if validationCriteria != "" {
+		meta["validation_criteria"] = validationCriteria
+	}
+
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Error: memory store not available\n", 1)
+	}
+
+	mem, err := store.AddMemory(content, "theories", tags, meta, "", "cli")
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to save theory: %v\n", err), 1)
+	}
+
+	// Auto-link to theories topic (idempotent via INSERT OR IGNORE)
+	dm, dmErr := mpminternal.NewDatabaseManager("")
+	if dmErr == nil {
+		defer dm.Close()
+		topicID, tErr := dm.GetOrCreateTopic("theories")
+		if tErr == nil {
+			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
+		}
+	}
+
+	return respond("", fmt.Sprintf("✅ Theory proposed: %s (status: %s)\n", mem.ID, status), 0)
+}
+
+// handleResolveTheory marks a theory as resolved, updating metadata and bumping weight.
+func handleResolveTheory(args []string) int {
+	if len(args) < 2 {
+		return respond("", "Usage: mpm resolve_theory <id> <conclusion>", 1)
+	}
+
+	id := args[0]
+	conclusion := strings.Join(args[1:], " ")
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	mem, err := dm.GetMemory(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Theory not found: %s\n", id), 1)
+	}
+
+	coll, _ := mem["collection"].(string)
+	if coll != "theories" {
+		return respond("", fmt.Sprintf("Memory %s is not a theory (collection: %s)\n", id, coll), 1)
+	}
+
+	// Build metadata patch (upserts into existing metadata via json_patch)
+	now := time.Now().UTC().Format(time.RFC3339)
+	patch := map[string]interface{}{
+		"status":      "resolved",
+		"conclusion":  conclusion,
+		"resolved_at": now,
+	}
+	patchJSON, _ := json.Marshal(patch)
+
+	if err := dm.UpdateMemoryMetadata(id, string(patchJSON)); err != nil {
+		return respond("", fmt.Sprintf("Failed to resolve theory: %v\n", err), 1)
+	}
+
+	// Bump weight — reinforces the resolved theory
+	dm.ReinforceMemory(id, 1)
+
+	return respond("", fmt.Sprintf("✅ Theory resolved: %s — %s\n", id, conclusion), 0)
+}
+
+// handleRecordDecision parses structured decision text and saves to the decisions collection.
+func handleRecordDecision(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm record_decision <text>", 1)
+	}
+
+	input := strings.Join(args, " ")
+
+	contextText := extractField(input, "CONTEXT:")
+	choice := extractField(input, "CHOICE:")
+	rationale := extractField(input, "RATIONALE:")
+	tagsStr := extractField(input, "TAGS:")
+
+	if choice == "" {
+		choice = strings.TrimSpace(input)
+	}
+
+	var tags []string
+	if tagsStr != "" {
+		for _, t := range strings.Split(tagsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	content := "CHOICE: " + choice
+	if contextText != "" {
+		content += "\nCONTEXT: " + contextText
+	}
+	if rationale != "" {
+		content += "\nRATIONALE: " + rationale
+	}
+
+	meta := map[string]interface{}{}
+	if contextText != "" {
+		meta["context"] = contextText
+	}
+	if rationale != "" {
+		meta["rationale"] = rationale
+	}
+
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Error: memory store not available\n", 1)
+	}
+
+	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "cli")
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to record decision: %v\n", err), 1)
+	}
+
+	// Auto-link to decisions topic
+	dm, dmErr := mpminternal.NewDatabaseManager("")
+	if dmErr == nil {
+		defer dm.Close()
+		topicID, tErr := dm.GetOrCreateTopic("decisions")
+		if tErr == nil {
+			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
+		}
+	}
+
+	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
+}
+
+// handleTheories lists theories with status chips. Supports filter: all, pending, resolved.
+func handleTheories(args []string) int {
+	filter := "all"
+	if len(args) > 0 {
+		filter = args[0]
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	memories, err := dm.GetMemoriesForExport("theories", "", "")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(memories) == 0 {
+		return respond("", "No theories yet. Run `mpm propose_theory` to propose your first theory.\n", 0)
+	}
+
+	count := 0
+	for _, m := range memories {
+		content, _ := m["content"].(string)
+		id, _ := m["id"].(string)
+
+		var meta map[string]interface{}
+		metaStr, _ := m["metadata"].(string)
+		json.Unmarshal([]byte(metaStr), &meta)
+
+		status, _ := meta["status"].(string)
+		if status == "" {
+			status = "pending"
+		}
+
+		if filter != "all" && status != filter {
+			continue
+		}
+
+		display := strings.SplitN(content, "\n", 2)[0]
+		if len(display) > 80 {
+			display = display[:80] + "..."
+		}
+
+		fmt.Printf("[%s] %s  [status: %s]\n", id, display, status)
+		count++
+
+		if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
+			vcDisplay := vc
+			if len(vcDisplay) > 60 {
+				vcDisplay = vcDisplay[:60] + "..."
+			}
+			fmt.Printf("      validation: %s\n", vcDisplay)
+		}
+	}
+
+	if count == 0 {
+		fmt.Printf("No %s theories found.\n", filter)
+	}
+
+	return 0
+}
+
+// backfillEpistemologyTopics links existing theories/decisions memories to their topics.
+// Idempotent: AddMemoryToTopic uses INSERT OR IGNORE so it is safe to call repeatedly.
+func backfillEpistemologyTopics() {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return
+	}
+	defer dm.Close()
+
+	rows, err := dm.SQLDB().Query(
+		`SELECT id, collection FROM memories WHERE collection IN ('theories', 'decisions') AND deleted_at IS NULL`,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	linked := 0
+	now := time.Now().UTC().Format(time.RFC3339)
+	for rows.Next() {
+		var id, collection string
+		if err := rows.Scan(&id, &collection); err != nil {
+			continue
+		}
+		topicID, tErr := dm.GetOrCreateTopic(collection)
+		if tErr != nil {
+			continue
+		}
+		res, execErr := dm.SQLDB().Exec(
+			`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+			id, topicID, now, "primary",
+		)
+		if execErr == nil {
+			if ra, _ := res.RowsAffected(); ra > 0 {
+				linked++
+			}
+		}
+	}
+
+	if linked > 0 {
+		fmt.Printf("📚 Epistemology topics initialized: %d memories linked\n", linked)
+	}
+}
+
+// handleDecisions displays the decision ledger with context, choice, and rationale for each entry.
+func handleDecisions(args []string) int {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	memories, err := dm.GetMemoriesForExport("decisions", "", "")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(memories) == 0 {
+		return respond("", "No decisions recorded yet. Run `mpm record_decision` to log your first decision.\n", 0)
+	}
+
+	for _, m := range memories {
+		content, _ := m["content"].(string)
+		createdAt, _ := m["created_at"].(string)
+
+		var meta map[string]interface{}
+		metaStr, _ := m["metadata"].(string)
+		json.Unmarshal([]byte(metaStr), &meta)
+
+		contextText, _ := meta["context"].(string)
+		rationale, _ := meta["rationale"].(string)
+
+		choice := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(choice), "CHOICE: ") {
+			choice = strings.TrimSpace(choice[7:])
+		}
+
+		dateStr := createdAt
+		if len(dateStr) >= 10 {
+			dateStr = dateStr[:10]
+		}
+
+		fmt.Println("─────────────────────")
+		if contextText != "" {
+			fmt.Printf("CONTEXT:  %s\n", contextText)
+		} else {
+			fmt.Println("CONTEXT:  —")
+		}
+		fmt.Printf("CHOICE:   %s\n", choice)
+		if rationale != "" {
+			fmt.Printf("RATIONALE: %s\n", rationale)
+		} else {
+			fmt.Println("RATIONALE: —")
+		}
+		fmt.Printf("[%s]\n", dateStr)
+	}
+	fmt.Println("─────────────────────")
+
+	return 0
 }

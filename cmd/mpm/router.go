@@ -41,7 +41,9 @@ func NewRouter() *CommandRouter {
 		"patch-memory": {Name: "patch-memory", Description: "Patch metadata JSON in-place", MinArgs: 2},
 		"reinforce":  {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
 		"weaken":     {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
+		"snooze":     {Name: "snooze", Description: "Bump memory relevance (no LTM promotion)", MinArgs: 1},
 		"set-weight": {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
+		"synthesize": {Name: "synthesize", Description: "Merge near-duplicate memories via LLM synthesis", MinArgs: 0},
 		"shred":      {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
 		"stats":      {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
 		"prune":      {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
@@ -64,7 +66,7 @@ func NewRouter() *CommandRouter {
 		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
 		"mode":            {Name: "mode", Description: "Mode operations"},
-			"wake":            {Name: "wake", Description: "Show last session context (mode, persona, recent memories)", MinArgs: 0},
+			"wake":            {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":              {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
 		"backup":          {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
@@ -72,6 +74,14 @@ func NewRouter() *CommandRouter {
 		"_suggest_tags":   {Name: "_suggest_tags", Description: "Tag autocomplete for shell completion", MinArgs: 0},
 			"directives":       {Name: "directives", Description: "Show behavioral directives"},
 		"persona":         {Name: "persona", Description: "Persona operations"},
+		"ops":             {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
+
+		// Epistemology Engine
+		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
+		"resolve_theory":  {Name: "resolve_theory", Description: "Mark a theory as resolved", MinArgs: 2},
+		"record_decision": {Name: "record_decision", Description: "Record a decision with context, choice, and rationale", MinArgs: 1},
+		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
+		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
 	}
 
 	return r
@@ -134,7 +144,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":
-		runDoctorCommand()
+		runDoctorCommand(args[1:])
 		return 0
 	case "recall":
 		return handleRecall(args)
@@ -172,8 +182,12 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleReinforce(args)
 	case "weaken":
 		return handleWeaken(args)
+	case "snooze":
+		return handleSnooze(args)
 	case "set-weight":
 		return handleSetWeight(args)
+	case "synthesize":
+		return handleSynthesize(args)
 	case "shred":
 		return handleShredMem(args)
 	case "reference":
@@ -192,6 +206,19 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSession(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
+	case "propose_theory":
+		return handleProposeTheory(args[1:])
+	case "resolve_theory":
+		return handleResolveTheory(args[1:])
+	case "record_decision":
+		return handleRecordDecision(args[1:])
+	case "theories":
+		return handleTheories(args[1:])
+	case "decisions":
+		return handleDecisions(args[1:])
+	case "ops":
+		return handleOps(args)
+
 	default:
 		r.unknownCommand(cmdName)
 		return 1
@@ -289,6 +316,148 @@ func (r *CommandRouter) handleHelp(args []string) int {
 func (r *CommandRouter) handleSwitch() int {
 	StartSwitch()
 	return 0
+}
+
+// ============================================================================
+// Ops Subcommand — Maintenance, diagnostics, and engine-room tools
+// ============================================================================
+
+// handleOps routes to the appropriate sub-command under the ops parent.
+// All engine-room commands live here. Root-level aliases are kept for
+// backwards compatibility.
+func handleOps(args []string) int {
+	if len(args) < 2 {
+		printOpsHelp()
+		return 0
+	}
+
+	subCmd := args[1]
+	subArgs := args[2:]
+
+	switch subCmd {
+	// — Diagnostics & Maintenance —
+	case "doctor":
+		runDoctorCommand(subArgs)
+		return 0
+	case "maintain":
+		return handleMaintain(append([]string{"maintain"}, subArgs...))
+	case "synthesize":
+		return handleSynthesize(append([]string{"synthesize"}, subArgs...))
+	case "gc":
+		return handleGC(append([]string{"gc"}, subArgs...))
+
+	// — Watcher & Web —
+	case "watch":
+		return handleWatch(subArgs)
+	case "web":
+		return handleWeb(append([]string{"web"}, subArgs...))
+
+	// — Review & Stats —
+	case "review":
+		return handleReview(append([]string{"review"}, subArgs...))
+	case "stats":
+		return handleStats(append([]string{"stats"}, subArgs...))
+	case "prune":
+		return handlePrune(append([]string{"prune"}, subArgs...))
+	case "export":
+		return handleExport(append([]string{"export"}, subArgs...))
+
+	// — Backup & Restore & Ingest —
+	case "backup":
+		return handleBackup(append([]string{"backup"}, subArgs...))
+	case "restore-db":
+		return handleRestoreDB(append([]string{"restore-db"}, subArgs...))
+	case "ingest":
+		return handleIngest(append([]string{"ingest"}, subArgs...))
+
+	// — Interactive & Identity —
+	case "switch":
+		StartSwitch()
+		return 0
+	case "directives":
+		return handlePrimeDirectives()
+	case "mode":
+		return handleMode(subArgs)
+	case "persona":
+		return handlePersona(subArgs)
+
+	// — Memory, Topic, Lesson, Session —
+	case "memory":
+		return handleMemory(subArgs)
+	case "topic":
+		return handleTopic(subArgs)
+	case "lesson":
+		return handleLesson(subArgs)
+	case "session":
+		return handleSession(subArgs)
+	case "reference":
+		return handleRef(append([]string{"reference"}, subArgs...))
+	case "wake":
+		return handleWake(append([]string{"wake"}, subArgs...))
+
+	// — Gateway —
+	case "gateway":
+		handleGatewayCommand(subArgs)
+		return 0
+
+	// — Help —
+	case "help":
+		printOpsHelp()
+		return 0
+
+	default:
+		printOpsHelp()
+		return 0
+	}
+}
+
+// opsSubcommandDescs is the canonical list of all ops subcommands and their descriptions.
+var opsSubcommandDescs = []struct {
+	name string
+	desc string
+}{
+	{"doctor [--explain]", "Run diagnostics (--explain for FTS5 query plan)"},
+	{"maintain", "Self-maintenance: decay, consolidate, prune"},
+	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
+	{"gc [--dry-run/--review/--purge]", "Memory decay sweep"},
+	{"watch", "Start/stop/status watcher daemon"},
+	{"web", "Start web UI server"},
+	{"review", "Spaced reinforcement review"},
+	{"stats", "Memory statistics"},
+	{"prune", "Prune expired memories"},
+	{"export", "Export memories to JSON"},
+	{"backup [path]", "Database backup (.sql dump)"},
+	{"restore-db <path>", "Restore database from .sql dump"},
+	{"ingest", "Import memories from external SQLite"},
+	{"switch", "Interactive persona/mode switcher"},
+	{"directives", "Show behavioral directives"},
+	{"mode", "Mode operations"},
+	{"persona", "Persona operations"},
+	{"topic", "Topic operations"},
+	{"lesson", "Lesson operations"},
+	{"session", "Session operations"},
+	{"memory", "Memory operations"},
+	{"reference", "Reference library"},
+	{"wake", "Show last session context"},
+	{"gateway", "Gateway control"},
+	{"help", "Show this help"},
+}
+
+// printOpsHelp displays the ops subcommand help text.
+func printOpsHelp() {
+	fmt.Println()
+	fmt.Println("mpm ops — Engine Room: maintenance, diagnostics, and power tools")
+	fmt.Println()
+	fmt.Println("Usage: mpm ops <subcommand> [arguments]")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	for _, sc := range opsSubcommandDescs {
+		fmt.Printf("  %-22s %s\n", sc.name, sc.desc)
+	}
+	fmt.Println()
+	fmt.Println("All ops subcommands also work at the root level for")
+	fmt.Println("backwards compatibility (e.g. `mpm doctor` = `mpm ops doctor`).")
+	fmt.Println()
 }
 
 // ============================================================================

@@ -533,15 +533,17 @@ func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
 		chunkSize = 8192
 	}
 
+	// Fast path: empty content returns nil before touching tiktoken
+	if strings.TrimSpace(content) == "" {
+		return nil, nil
+	}
+
 	encoder, err := getTiktokenEncoder()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load tiktoken encoder: %w", err)
 	}
 
 	// Fast path: if total tokens <= chunkSize, return single chunk
-	if strings.TrimSpace(content) == "" {
-		return []Chunk{}, nil
-	}
 	fullTokens := encoder.Encode(content, nil, nil)
 	if len(fullTokens) <= chunkSize {
 		return []Chunk{{Index: 0, Content: strings.TrimSpace(content)}}, nil

@@ -287,6 +287,9 @@ type watcherDaemon struct {
 	verbose    bool
 	mu         sync.Mutex
 	stopCh     chan struct{}
+
+	synthClient       *mpminternal.SynthClient // cached, created once
+	lastClusterCheck  time.Time                // guards checkTopicClustering rate
 }
 
 func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) *watcherDaemon {
@@ -308,13 +311,15 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 	memoryStore := mpminternal.NewMemoryStore(projectRoot)
 
 	return &watcherDaemon{
-		watcher:    w,
-		dirs:       dirs,
-		db:         db,
-		memory:     memoryStore,
-		dryRun:     dryRun,
-		verbose:    verbose,
-		stopCh:     make(chan struct{}),
+		watcher:           w,
+		dirs:              dirs,
+		db:                db,
+		memory:            memoryStore,
+		dryRun:            dryRun,
+		verbose:           verbose,
+		stopCh:            make(chan struct{}),
+		synthClient:       mpminternal.NewSynthClient(),
+		lastClusterCheck:  time.Time{}, // zero — will fire on first ingest
 	}
 }
 
@@ -446,17 +451,56 @@ func (d *watcherDaemon) processMarkdownFile(path string, isStartup bool) {
 		return
 	}
 
+	// Epistemology detection: route HYPOTHESIS: content to theories, CHOICE: to decisions
+	contentUpper := strings.ToUpper(contentStr)
+	var memID string
+
+	if strings.Contains(contentUpper, "HYPOTHESIS:") {
+		memID, err = d.ingestAsEpistemologyMemory(contentStr, path, "theories")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "   ❌ Failed to ingest theory %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("   %s Theory saved: %s (id: %s)\n", prefix, name, memID[:8])
+		d.deleteFile(path, "theory processed")
+		return
+	}
+
+	if strings.Contains(contentUpper, "CHOICE:") {
+		memID, err = d.ingestAsEpistemologyMemory(contentStr, path, "decisions")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "   ❌ Failed to ingest decision %s: %v\n", name, err)
+			return
+		}
+		fmt.Printf("   %s Decision saved: %s (id: %s)\n", prefix, name, memID[:8])
+		d.deleteFile(path, "decision processed")
+		return
+	}
+
 	// Route A: Insert as LTM (is_long_term = true, weight = 10)
-	memID, err := d.ingestAsLongTermMemory(contentStr, path)
+	memID, err = d.ingestAsLongTermMemory(contentStr, path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "   ❌ Failed to ingest %s: %v\n", name, err)
 		return
 	}
 
-	// Check for topic clustering
-	d.checkTopicClustering()
+	// Fire-and-forget: check for near-miss candidates and auto-synthesize.
+	// Uses cached synthClient to avoid redundant config reads.
+	if d.synthClient != nil {
+		go func() {
+			mpminternal.AutoSynthesize(context.Background(), d.db, d.synthClient, memID, contentStr)
+		}()
+	}
 
-fmt.Printf("   %s LTM memory saved: %s (id: %s)\n", prefix, name, memID[:8])
+	// Check for topic clustering — rate-limited to once every 5 minutes.
+	// The full LTM scan is expensive; debouncing prevents O(n) waste on
+	// high-ingest bursts.
+	if time.Since(d.lastClusterCheck) > 5*time.Minute {
+		d.checkTopicClustering()
+		d.lastClusterCheck = time.Now()
+	}
+
+	fmt.Printf("   %s LTM memory saved: %s (id: %s)\n", prefix, name, memID[:8])
 	d.deleteFile(path, "processed successfully")
 }
 
@@ -801,6 +845,33 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 
 	// Also append to mirror
 	d.appendToMirror(id, content, "memories", tags, metadata)
+
+	return id, nil
+}
+
+// ingestAsEpistemologyMemory saves content to the theories or decisions collection
+// and auto-links to the corresponding topic.
+func (d *watcherDaemon) ingestAsEpistemologyMemory(content, sourcePath, collection string) (string, error) {
+	tags := d.extractKeywords(content)
+	tags = append(tags, collection)
+
+	metadata := map[string]interface{}{
+		"source_path": sourcePath,
+	}
+
+	embedding := mpminternal.HashEmbed(content)
+	id, err := d.db.SaveMemory(collection, content, "", tags, metadata, embedding, false, 5)
+	if err != nil {
+		return "", err
+	}
+
+	d.appendToMirror(id, content, collection, tags, metadata)
+
+	// Auto-link to epistemology topic
+	topicID, tErr := d.db.GetOrCreateTopic(collection)
+	if tErr == nil {
+		d.db.AddMemoryToTopic(id, topicID, "primary")
+	}
 
 	return id, nil
 }
@@ -1327,6 +1398,35 @@ switch {
 	return nil
 }
 
+// startReconciliationSweepGoroutine starts a periodic background sweep that
+// reconciles files on disk with ingested records in the database. This catches
+// files that fsnotify may have dropped (OS buffer overflow, system sleep, etc).
+//
+// Interval defaults to 10 minutes. The sweep is low-priority — it always
+// submits non-blocking (Select with default) to avoid starving live events.
+func startReconciliationSweepGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbose bool) {
+	interval := 10 * time.Minute
+
+	if verbose {
+		fmt.Printf("🔄 Reconciliation sweep: every %s\n", interval)
+	}
+
+	// Fire once after a short delay (startup may still be processing events)
+	time.Sleep(30 * time.Second)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pool.Submit(WatchEvent{Type: EventReconciliationSweep, DryRun: dryRun, Verbose: verbose})
+		}
+	}
+}
+
 // startExternalDBPollGoroutines starts one goroutine per external DB that
 // periodically pushes poll events to the worker pool.
 func startExternalDBPollGoroutines(ctx context.Context, pool *WorkerPool, dryRun, verbose bool) {
@@ -1432,16 +1532,26 @@ func (d *watcherDaemon) appendToMirror(id, content, collection string, tags []st
 
 	data, err := json.Marshal(record)
 	if err != nil {
+		if d.verbose {
+			fmt.Fprintf(os.Stderr, "   ⚠️  Mirror marshal failed: %v\n", err)
+		}
 		return
 	}
 
 	f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		if d.verbose {
+			fmt.Fprintf(os.Stderr, "   ⚠️  Mirror file open failed: %v\n", err)
+		}
 		return
 	}
 	defer f.Close()
 
-	f.WriteString(string(data) + "\n")
+	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+		if d.verbose {
+			fmt.Fprintf(os.Stderr, "   ⚠️  Mirror write failed: %v\n", err)
+		}
+	}
 }
 
 // isPoisoned checks content against toxic phrases

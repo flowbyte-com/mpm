@@ -268,11 +268,8 @@ For lessons, topics, references, and directives — use the dedicated tools:
 ## Session Startup
 
 On every session start, before responding to the user:
-```bash
-bash /home/v/workspace/scripts/mpm-startup-recall.sh
-```
-Then read `memory/startup-context.md` — recent memories, lessons, and LTM fragments. Files stay authoritative for identity. MPM holds everything else.
-```
+
+Call `read_wake_context` (OpenClaw plugin tool) or run `mpm wake --json` directly to get mode, persona, topics, and recent memories from the MPM database.
 
 ---
 

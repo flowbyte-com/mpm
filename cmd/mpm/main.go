@@ -1,8 +1,10 @@
 package main
 
 import (
-"database/sql"
+	"context"
+	"database/sql"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -89,6 +91,66 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+// hasStdinData checks if stdin has piped data available
+func hasStdinData() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) == 0
+}
+
+// readStdinContent reads all data from stdin and returns it trimmed
+func readStdinContent() (string, error) {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// isBinaryData detects binary content (null bytes or excessive non-printable chars)
+func isBinaryData(data string) bool {
+	if len(data) == 0 {
+		return false
+	}
+	nonPrintable := 0
+	for _, r := range data {
+		if r == 0 {
+			return true
+		}
+		if r < 32 && r != 9 && r != 10 && r != 13 {
+			nonPrintable++
+		}
+	}
+	return float64(nonPrintable)/float64(len(data)) > 0.3
+}
+
+// promptConfirmation reads [y/N] from /dev/tty (not stdin, which may be the pipe).
+// Returns true only if the user answered y or Y.
+func promptConfirmation() bool {
+	fmt.Print("[y/N]: ")
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		// No TTY available (e.g. fully non-interactive) — default to no
+		return false
+	}
+	defer tty.Close()
+	var response string
+	fmt.Fscanln(tty, &response)
+	return response == "y" || response == "Y"
+}
+
+// hasJSONFlagInArgs scans args for --json or -j before flag parsing
+func hasJSONFlagInArgs(args []string) bool {
+	for _, a := range args {
+		if a == "--json" || a == "-j" {
+			return true
+		}
+	}
+	return false
+}
+
 // handleGatewayCommand routes gateway subcommands
 func handleGatewayCommand(args []string) {
 	printGatewayHelp()
@@ -121,9 +183,55 @@ func main() {
 		os.Exit(exitCode)
 	}
 
-	// Create router
+	// Stdin detection: if data is piped in and no subcommand given, offer to save.
+	// This must happen before flag parsing so that `cat idea.md | mpm` "just works".
+	if len(os.Args) == 1 && hasStdinData() {
+		data, readErr := readStdinContent()
+		if readErr == nil && len(data) > 0 {
+			if isBinaryData(data) {
+				printWarning("stdin appears to be binary; skipping")
+			} else {
+				preview := truncate(data, 120)
+				fmt.Printf("Will save: \"%s\"\n", preview)
+				confirmed := promptConfirmation()
+				if confirmed {
+					store := getMemoryStore()
+					if store == nil {
+						printError("cannot open database")
+						os.Exit(0)
+					}
+					meta := map[string]interface{}{"source": "stdin"}
+					mem, addErr := store.AddMemory(data, "memories", nil, meta, "", "cli")
+					if addErr != nil {
+						printError("failed to save memory: %v", addErr)
+						os.Exit(0)
+					}
+					printSuccess("memory saved (id=%s)", mem.ID)
+					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
+					go func(id, c string) {
+						synthDM, synthErr := mpminternal.NewDatabaseManager("")
+						if synthErr != nil {
+							return
+						}
+						defer synthDM.Close()
+						mpminternal.AutoSynthesize(context.Background(), synthDM, mpminternal.NewSynthClient(), id, c)
+					}(mem.ID, data)
+				}
+				os.Exit(0)
+			}
+		}
+		// Empty stdin: fall through to normal routing
+	}
+
+	// Create router (needed for default-to-recall command resolution check)
 	router := NewRouter()
 	args := os.Args[1:]
+
+	// Default-to-recall: `mpm token budget` → `mpm recall token budget`
+	// Only triggers for a single bare positional string that isn't a flag or known command.
+	if len(args) == 1 && args[0] != "" && args[0][0] != '-' && router.resolveCommand(args[0]) == nil {
+		args = []string{"recall", args[0]}
+	}
 
 	// Handle "gateway" subcommand specially
 	if len(args) > 0 && args[0] == "gateway" {
@@ -134,13 +242,29 @@ func main() {
 	// Parse flags
 	args = router.parseFlags(args)
 	if len(args) == 0 || args[0] == "" {
-		// No command - show categorized quicklinks
 		PrintQuicklinks()
 		return
 	}
 
-	// In the unified architecture, all commands execute in-process.
-	// No daemon subprocess or socket IPC is needed.
+	// Early-exit for help/version — must resolve before alias processing
+	switch args[0] {
+	case "help", "version":
+		exitCode := router.Execute(args)
+		os.Exit(exitCode)
+	}
+
+	// CLI alias expansion: load from mpm_config.json and substitute.
+	// If args[0] matches an alias key, replace args[0] with the expanded tokens.
+	// Unrecognized aliases pass through unmodified.
+	if cfg, err := config.LoadConfig(); err == nil && cfg.Aliases != nil {
+		if expansion, ok := cfg.Aliases[args[0]]; ok {
+			expanded := strings.Fields(expansion)
+			if len(expanded) > 0 {
+				args = append(expanded, args[1:]...)
+			}
+		}
+	}
+
 	// Execute via router
 	exitCode := router.Execute(args)
 	os.Exit(exitCode)
@@ -177,9 +301,35 @@ const (
 	ansiReset  = "\033[0m"
 )
 
-// runDoctorCommand runs the diagnostic utility without daemon
-func runDoctorCommand() {
-	fix := len(os.Args) >= 3 && (os.Args[2] == "--fix" || os.Args[2] == "-f")
+// runDoctorCommand runs the diagnostic utility
+func runDoctorCommand(args []string) {
+	// Backfill epistemology topics on every doctor run (idempotent)
+	backfillEpistemologyTopics()
+
+	fix := false
+	explain := false
+	for _, a := range args {
+		if a == "--fix" {
+			fix = true
+		}
+		if a == "--explain" {
+			explain = true
+		}
+	}
+	// Check os.Args for -f shorthand (router.parseFlags consumes it as --force)
+	if !fix {
+		for _, a := range os.Args {
+			if a == "-f" {
+				fix = true
+				break
+			}
+		}
+	}
+
+	if explain {
+		runDoctorExplain()
+		return
+	}
 
 	fmt.Printf("\n%s[%s]%s %sRunning mpm Doctor...%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
 
@@ -215,6 +365,63 @@ func runDoctorCommand() {
 	if report.Failed > 0 {
 		os.Exit(1)
 	}
+}
+
+// runDoctorExplain runs EXPLAIN QUERY PLAN on the core FTS5 recall query
+// and prints the query plan tree to stdout for index health diagnosis.
+func runDoctorExplain() {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		return
+	}
+	defer dm.Close()
+
+	query := `
+EXPLAIN QUERY PLAN
+SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at, fts.rank
+FROM memories m
+JOIN memories_fts fts ON fts.rowid = m.rowid
+WHERE memories_fts MATCH 'test'
+  AND m.collection = 'memories'
+  AND m.deleted_at IS NULL
+ORDER BY rank
+LIMIT 10`
+
+	rows, err := dm.SQLDB().Query(query)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ EXPLAIN QUERY PLAN failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "   This may indicate FTS5 is not enabled or the memories_fts table is missing.\n")
+		return
+	}
+	defer rows.Close()
+
+	fmt.Println("\n📊 FTS5 Query Plan")
+	fmt.Println("═══════════════════════════════════════════════════")
+
+	var id, parent, notused int
+	var detail string
+	for rows.Next() {
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Scan error: %v\n", err)
+			continue
+		}
+		indent := ""
+		if parent > 0 {
+			indent = "  "
+		}
+		fmt.Printf("  %s├── %s\n", indent, detail)
+	}
+
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  Rows error: %v\n", err)
+	}
+
+	fmt.Println("\n✅ If you see `SEARCH memories_fts USING VIRTUAL TABLE INDEX`")
+	fmt.Println("   the FTS5 index is being used correctly.")
+	fmt.Println("   If you see `SCAN memories` or `SCAN memories_fts`,")
+	fmt.Println("   the query is falling back to a full table scan.")
+	fmt.Println()
 }
 
 // Color helper functions (no external dependencies)
@@ -1079,69 +1286,66 @@ var (
 		Italic(true)
 )
 
-// PrintQuicklinks displays the categorized quicklinks when mpm is run with no args.
+// PrintQuicklinks displays the compact quicklinks when mpm is run with no args.
 func PrintQuicklinks() {
 	fmt.Println()
-	fmt.Println("MPM — Memory Persistence Module")
+	fmt.Println("mpm · Memory Persistence Module")
 	fmt.Println()
-	fmt.Println("Usage: mpm <command> [arguments]")
+	fmt.Println("Usage: mpm <query|text> [flags]")
 	fmt.Println()
-	fmt.Println("Core Memory:")
-	fmt.Println("  add             Add a new memory or fact")
-	fmt.Println("  recall          Search through your memories")
-	fmt.Println("  watch           File watcher lifecycle (start/stop/status)")
+	fmt.Println("Daily Commands:")
+	fmt.Println("  mpm <query>       Search memories (default when called with a bare string)")
+	fmt.Println("  mpm add <text>    Add a new memory")
+	fmt.Println("  mpm add -i        Interactive add — opens $EDITOR")
+	fmt.Println("  mpm snooze <id>   Bump a memory's relevance (no LTM promotion)")
+	fmt.Println("  mpm ls            List memories")
+	fmt.Println("  mpm show <id>     Show memory details")
+	fmt.Println("  mpm rm <id>       Delete a memory")
+	fmt.Println("  mpm help          Show this help")
 	fmt.Println()
-	fmt.Println("Knowledge base:")
-	fmt.Println("  topic           Manage memory clusters and topics")
-	fmt.Println("  reference       Search and manage ingested documents")
-	fmt.Println("  lesson          Review learned insights and warnings")
+	fmt.Println("Engine Room (ops):")
+	fmt.Println("  mpm ops           Run maintenance, diagnostics, synthesis, and more")
+	fmt.Println("  mpm ops help      List all ops subcommands")
 	fmt.Println()
-	fmt.Println("Identity & Behavior:")
-	fmt.Println("  switch          Interactive UI to change active persona/mode")
-	fmt.Println("  persona         Manage identity profiles")
-	fmt.Println("  mode            Manage behavioral modes")
-	fmt.Println("  directives       View current behavioral rules")
-	fmt.Println()
-	fmt.Println("Run 'mpm help' for a complete list of all commands.")
-	fmt.Println("Run 'mpm help <command>' for detailed usage.")
+	fmt.Println("Also available via mpm ops:")
+	fmt.Println("  mpm ops mode | persona | topic | lesson | session | reference | wake")
 	fmt.Println()
 }
 
 // printHelp displays the mpm help text with lipgloss styling
 func printHelp() {
-	// Build sections
-	coreSection := buildHelpSection("Core Commands", []helpCmd{
-		{"persona", "Persona management", true},
-		{"mode", "Mode management", true},
-		{"memory", "Memory management", true},
-		{"session", "Session management", true},
-		{"topics", "Topic operations", true},
-		{"reference", "Reference library", true},
-		{"lesson", "Lesson operations", true},
-		{"recall <query>", "Semantic memory search", false},
-	})
-
-	sysSection := buildHelpSection("System", []helpCmd{
-		{"watch", "File watcher (start/stop/status)", true},
-		{"doctor", "Run diagnostics", false},
-	})
-
-	infoSection := buildHelpSection("Info", []helpCmd{
+	dailyCmds := buildHelpSection("Daily Commands", []helpCmd{
+		{"<query>", "Search memories (default when called with a bare string)", false},
+		{"add <text>", "Add a new memory", false},
+		{"add -i", "Interactive add — opens $EDITOR", false},
+		{"snooze <id>", "Bump a memory's relevance (no LTM promotion)", false},
+		{"ls", "List memories", false},
+		{"show <id>", "Show memory details", false},
+		{"rm <id>", "Delete a memory", false},
 		{"help", "Show this help", false},
-		{"version", "Show version info", false},
-		{"switch", "Interactive UI for persona/mode", false},
-		{"directives", "Show current directives", false},
-		{"gateway", "Gateway control", true},
 	})
 
-	// Assemble with border
+	opsSection := buildHelpSection("Engine Room (ops)", []helpCmd{
+		{"ops", "Maintenance, diagnostics, synthesis, and more", true},
+	})
+
+	alsoSection := buildHelpSection("Also available via ops", []helpCmd{
+		{"mode | persona | topic", "", false},
+		{"lesson | session | reference", "", false},
+		{"wake | directives | switch", "", false},
+		{"doctor | maintain | gc", "", false},
+		{"watch | web | review", "", false},
+		{"stats | prune | export", "", false},
+		{"backup | restore-db | ingest", "", false},
+		{"gateway", "", false},
+	})
+
 	mainStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(helpBorder).
 		Padding(1, 2).
 		Margin(1)
 
-	// Title
 	titleStyle := lipgloss.NewStyle().
 		Foreground(helpGold).
 		Bold(true).
@@ -1151,12 +1355,12 @@ func printHelp() {
 	subtitleStyle := lipgloss.NewStyle().
 		Foreground(helpCyan).
 		Align(lipgloss.Center).
-		Render("Your long-term memory and persona system")
+		Render("Your long-term memory, always within reach")
 
 	content := "\n" + titleStyle + "\n" + subtitleStyle + "\n\n" +
-		coreSection + "\n" +
-		sysSection + "\n" +
-		infoSection + "\n"
+		dailyCmds + "\n" +
+		opsSection + "\n" +
+		alsoSection + "\n"
 
 	fmt.Println(mainStyle.Render(content))
 }

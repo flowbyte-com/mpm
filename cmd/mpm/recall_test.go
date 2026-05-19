@@ -90,7 +90,7 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 	insertMemory(t, db, "mem-2", "memories", "golang is great", "sess1", `[]`)
 
 	// Simulate what handleRecall does: query then reinforce per unique ID
-	rows, err := keywordSearchWithTime(db, "golang", "memories", "", "", 10)
+	rows, err := keywordSearchWithTime(db, "golang", "memories", "", "", 0, "", 10)
 	if err != nil {
 		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 	insertMemory(t, db, "mem-dup", "memories", "duplicate test content", "sess1", `[]`)
 
 	// Simulate recall returning the same memory twice (duplicate rows)
-	rows, err := keywordSearchWithTime(db, "duplicate", "memories", "", "", 10)
+	rows, err := keywordSearchWithTime(db, "duplicate", "memories", "", "", 0, "", 10)
 	if err != nil {
 		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
