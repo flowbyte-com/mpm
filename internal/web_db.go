@@ -199,9 +199,9 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var promotedAt *float64
 
 	err := dm.db.QueryRow(`
-		SELECT collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at
+		SELECT collection, content, session_id, tags, metadata, created_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL
-	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &sourceDB, &sourceID, &promotedAt)
+	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
