@@ -263,7 +263,7 @@ Systematic, precise, architectural. Thinks in code structures and abstraction bo
 
 ## OpenClaw Plugin Integration
 
-MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 16 tools:
+MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 17 tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -283,6 +283,7 @@ MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calli
 | `record_decision` | Log architectural choices with rationale |
 | `propose_theory` | Log hypothesis before writing fix |
 | `resolve_theory` | Mark theory proven/disproven, patch metadata in-place |
+| `proactive_recall_hint` | Surface relevant decisions/theories from conversation context |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
 
@@ -423,6 +424,7 @@ mpm ops review              Spaced reinforcement review
 mpm ops watch start [--bg]  Watcher daemon (start/stop/status)
 mpm ops web                 Start web UI
 mpm ops stats                Memory statistics
+mpm ops status               System dashboard (memory counts, daemon, synthesis stats)
 mpm ops prune                Prune expired memories
 mpm ops export               Export all to JSON
 mpm ops backup [path]        Database backup
@@ -487,7 +489,8 @@ Chain expansion: `mpm s foo bar` → `mpm recall foo bar`. `--version`, `-v`, `h
 | `mpm hint <text> [--max <n>] [--json]` | Proactive recall hint from conversation context |
 | `mpm ops watch start [--bg]\|stop\|status` | Watcher daemon |
 | `mpm ops web [--port <n>]` | Web UI |
-| `mpm ops stats` | Statistics |
+| `mpm ops stats` | Memory statistics |
+| `mpm ops status` | System dashboard with memory counts, daemon status, synthesis stats |
 | `mpm ops prune [--older-than <n>d]` | Prune old memories |
 | `mpm ops export [--jsonl]` | Export |
 | `mpm ops backup [path]` | Database backup |
