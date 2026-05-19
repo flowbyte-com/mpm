@@ -45,6 +45,7 @@ _(all low-priority items complete — see Completed below)_
 | 17 | Context-Aware Synthesis Deduplication | ✅ Done (2026-05-19): Fixed synthesis to delete triggering memory after LTM save, preserve oldest `created_at`, transfer topic_memberships, exclude epistemology collections, quality gate ≥2 candidates. |
 | 18 | Proactive Review Hook | ✅ Done (2026-05-19): FTS5-triggered recall hints via `mpm hint` and `proactive_recall_hint` MCP tool; `ExtractConversationKeywords` (tiktoken, stopword filter); `FindEpistemologyOverlaps` with bm25; quality rules (one hint/turn, score >= -3.0, 10-turn suppression window); bugfix: bm25() zero-weight arg → no-arg form in both synthesize.go and keywords.go |
 | 19 | Context Switcher (`mpm ops switch`) | ✅ Done (2026-05-19): Interactive TUI for persona + mode switching; `ActiveState` struct with `loadActiveJSON`/`saveActiveJSON`; `GetSystemPrompt()` reads active frontmatter; multi-select modes (comma-separated); graceful fallback; wired to both `ops switch` and root `switch` |
+| 20 | Autonomous Epistemological Pruning | ✅ Done (2026-05-19): `mpm challenge <id> "<evidence>"` — weakens by 3, creates pending theory + decision; `mpm ops gc --shred-negative` shreds only weight<0 AND proven theory exists; immune system workflow deployed; MCP tool `challenge_memory` registered in OpenClaw plugin |
 
 ---
 
@@ -65,7 +66,7 @@ _(all low-priority items complete — see Completed below)_
 ---
 ## Future Wishlist (2026-05-19)
 
-_(All items complete — 19/19 items shipped.)_
+_(All items complete — 20/20 items shipped. Future Wishlist closed.)_
 
 ### Item #3 Rewrite: Context-Aware Deduplication
 
