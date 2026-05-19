@@ -65,10 +65,11 @@ _(all low-priority items complete — see Completed below)_
 
 _(All items complete — see Completed above.)_
 
----
-
 ### Item #3 Rewrite: Context-Aware Deduplication
 
-**Old scope (Low priority):** `content_hash` exists; `mpm dedup` to find/merge near-identical memories by dropping one.
-
+~~**Old scope (Low priority):** `content_hash` exists; `mpm dedup` to find/merge near-identical memories by dropping one.~~
 **New scope (Medium priority — DONE):** Instead of hash-based dedup, route near-misses through MiniMax-M2.7 backend to allow 808 to actively synthesize two redundant memories into a single, richer Long-Term Memory (LTM). The synth step becomes a first-class operation rather than a blind dedup. ✅
+
+### Proactive Review Hook
+
+~~**Proactive Review Hook** — FTS5-triggered recall hints during conversation with STATUS and RATIONALE.~~ **DONE.**

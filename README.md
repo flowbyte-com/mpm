@@ -25,6 +25,7 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Security scanning** — 20 regex patterns for API keys, tokens, secrets
 - **Modes & Personas** — file-based (`.md`), multi-select modes, single-select persona
 - **Invisible CLI** — `cat idea.md | mpm` pipes stdin to add; bare `mpm token budget` defaults to recall; 7-command daily surface with everything else under `mpm ops`
+- **Proactive recall hints** — `mpm hint "conversation text"` and `proactive_recall_hint` MCP tool surface relevant decisions and theories during conversation based on FTS5 keyword overlap
 
 ### What MPM Is NOT
 
@@ -444,6 +445,7 @@ Chain expansion: `mpm s foo bar` → `mpm recall foo bar`. `--version`, `-v`, `h
 | `mpm ops synthesize [--dry-run]` | LLM synthesis |
 | `mpm ops gc [--dry-run\|--review\|--purge]` | Decay sweep |
 | `mpm ops review [--promoted\|--stale]` | Spaced reinforcement |
+| `mpm hint <text> [--max <n>] [--json]` | Proactive recall hint from conversation context |
 | `mpm ops watch start [--bg]\|stop\|status` | Watcher daemon |
 | `mpm ops web [--port <n>]` | Web UI |
 | `mpm ops stats` | Statistics |

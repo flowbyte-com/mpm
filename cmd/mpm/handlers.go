@@ -3819,3 +3819,125 @@ func handleDecisions(args []string) int {
 
 	return 0
 }
+
+// handleHint checks recent conversation context for epistemologically relevant
+// memories (theories and decisions). Supports --json and --max <n> flags.
+func handleHint(args []string) int {
+	// Parse --max and --json flags
+	maxHints := 1
+	jsonOutput := false
+	cleanArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOutput = true
+		case "--max":
+			if i+1 < len(args) {
+				i++
+				n, err := strconv.Atoi(args[i])
+				if err == nil && n > 0 {
+					maxHints = n
+				}
+			}
+		default:
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+
+	if len(cleanArgs) == 0 {
+		return respond("", "Usage: mpm hint [--json] [--max N] <conversation text>\n", 1)
+	}
+
+	conversationText := strings.Join(cleanArgs, " ")
+
+	keywords := internal.ExtractConversationKeywords(conversationText, 50)
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	overlaps, err := internal.FindEpistemologyOverlaps(dm, keywords, maxHints, -3.0)
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(overlaps) == 0 {
+		if jsonOutput {
+			return respond("", "[]\n", 0)
+		}
+		return respond("", "", 0)
+	}
+
+	if jsonOutput {
+		out, _ := json.MarshalIndent(overlaps, "", "  ")
+		return respond("", string(out)+"\n", 0)
+	}
+
+	// Regular mode: show first hint only, formatted
+	hint := overlaps[0]
+	collection, _ := hint["collection"].(string)
+	content, _ := hint["content"].(string)
+	createdAt, _ := hint["created_at"].(string)
+	if len(createdAt) >= 10 {
+		createdAt = createdAt[:10]
+	}
+	meta, _ := hint["metadata"].(map[string]interface{})
+
+	var status string
+	if meta != nil {
+		if s, ok := meta["status"].(string); ok {
+			status = s
+		}
+	}
+	if status == "" {
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToUpper(trimmed), "STATUS:") {
+				status = strings.TrimSpace(trimmed[7:])
+				break
+			}
+		}
+	}
+
+	switch collection {
+	case "decisions":
+		choice := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(choice), "CHOICE: ") {
+			choice = strings.TrimSpace(choice[7:])
+		}
+		var rationale string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.HasPrefix(strings.ToUpper(line), "RATIONALE:") {
+				rationale = strings.TrimSpace(line[10:])
+				break
+			}
+		}
+		fmt.Printf("[Recall] You decided: %s\n", choice)
+		if status != "" {
+			fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+		}
+		if rationale != "" {
+			fmt.Printf("  RATIONALE: %s\n", rationale)
+		}
+	case "theories":
+		hypothesis := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(hypothesis), "HYPOTHESIS: ") {
+			hypothesis = strings.TrimSpace(hypothesis[11:])
+		}
+		fmt.Printf("[Recall] Hypothesis: %s\n", hypothesis)
+		if meta != nil {
+			if conclusion, ok := meta["conclusion"].(string); ok && conclusion != "" {
+				fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+				fmt.Printf("  CONCLUSION: %s\n", conclusion)
+			} else {
+				fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+			}
+		} else {
+			fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+		}
+	}
+
+	return 0
+}
