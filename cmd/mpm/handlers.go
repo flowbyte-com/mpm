@@ -968,6 +968,9 @@ func handleGC(args []string) int {
 		if arg == "--purge" {
 			purge = true
 		}
+		if arg == "--shred-negative" {
+			dryRun = false // explicit override to allow actual shredding
+		}
 		if strings.HasPrefix(arg, "--max-age=") {
 			fmt.Sscanf(arg, "--max-age=%d", &maxAgeHours)
 		}
@@ -979,6 +982,55 @@ func handleGC(args []string) int {
 		return 1
 	}
 	defer dm.Close()
+
+	// --shred-negative: hard-delete negative-weight memories that have a proven theory
+	if shredNegative := func() bool {
+		for _, arg := range args {
+			if arg == "--shred-negative" {
+				return true
+			}
+		}
+		return false
+	}(); shredNegative {
+		negMemories, err := dm.GetNegativeWeightMemories()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		if len(negMemories) == 0 {
+			fmt.Println("No negative-weight memories found.")
+			return 0
+		}
+		fmt.Printf("Found %d negative-weight memories:\n\n", len(negMemories))
+		var shredded int
+		for _, m := range negMemories {
+			id, _ := m["id"].(string)
+			weight, _ := m["weight"].(int)
+			theory, err := dm.GetProvenTheoryForMemory(id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  [%s] error checking theory: %v\n", id, err)
+				continue
+			}
+			if theory != nil {
+				if dryRun {
+					fmt.Printf("  [%s] weight=%d → WOULD SHRED (proven theory %s)\n", id, weight, theory["id"])
+				} else {
+					if err := dm.ShredMemory(id); err != nil {
+						fmt.Fprintf(os.Stderr, "  [%s] shred error: %v\n", id, err)
+						continue
+					}
+					fmt.Printf("  [%s] weight=%d → SHREDDED (proven theory %s)\n", id, weight, theory["id"])
+					shredded++
+				}
+			} else {
+				fmt.Printf("  [%s] weight=%d → SKIP (no proven theory)\n", id, weight)
+			}
+		}
+		if !dryRun && shredded > 0 {
+			fmt.Printf("\nShredded %d memories with proven theories.\n", shredded)
+		}
+		return 0
+	}
 
 	now := time.Now()
 	gcTimestampJSON, _ := json.Marshal(map[string]string{"timestamp": now.Format(time.RFC3339)})
@@ -3159,6 +3211,50 @@ func getRecentWatchdogEvents(dm *mpminternal.DatabaseManager, limit int) []watch
 		}
 	}
 	return events
+}
+
+// ============================================================================
+// Challenge — mpm challenge <id> "<evidence>"
+// ============================================================================
+
+func handleChallenge(args []string) int {
+	if len(args) < 2 {
+		return respond("", "Usage: mpm challenge <id> \"<evidence>\"\n", 1)
+	}
+	id := args[0]
+	evidence := strings.Join(args[1:], " ")
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	mem, err := dm.GetMemory(id)
+	if err != nil || mem == nil {
+		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
+	}
+
+	dm.UpdateMemoryWeight(id, -3)
+
+	theoryContent := fmt.Sprintf(
+		"HYPOTHESIS: Memory %s is obsolete.\nRATIONALE: %s\nSTATUS: pending\nVALIDATION_CRITERIA: Check weight trend over 30 days. If declining and evidence is strong, mark proven.",
+		id, evidence)
+	dm.SaveMemory("theories", theoryContent, "", nil, nil, nil, false, 1)
+
+	collection := ""
+	if c, ok := mem["collection"].(string); ok {
+		collection = c
+	}
+	decisionContent := fmt.Sprintf(
+		"CONTEXT: Challenged memory %s (%s)\nCHOICE: Weaken by 3, create pending theory for resolution\nRATIONALE: %s",
+		id, collection, evidence)
+	dm.SaveMemory("decisions", decisionContent, "", nil, nil, nil, false, 1)
+
+	fmt.Printf("⚡ Memory challenged. Weakened by 3. Theory pending review.\n")
+	fmt.Printf("   Memory: %s\n", id)
+	fmt.Printf("   Evidence: %s\n", evidence)
+	return 0
 }
 
 // ============================================================================
