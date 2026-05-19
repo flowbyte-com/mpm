@@ -350,6 +350,22 @@ const RESOLVE_THEORY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const CHALLENGE_MEMORY_SCHEMA = {
+  type: "object",
+  properties: {
+    memoryId: {
+      type: "string",
+      description: "The MPM memory ID to challenge.",
+    },
+    evidence: {
+      type: "string",
+      description: "Evidence that contradicts the memory. Be specific about what changed and why the memory is no longer accurate.",
+    },
+  },
+  required: ["memoryId", "evidence"],
+  additionalProperties: false,
+} as const;
+
 // ---------------------------------------------------------------------------
 // runMpm — robust child_process spawn to Go binary
 // ---------------------------------------------------------------------------
@@ -1753,6 +1769,67 @@ function makeResolveTheoryTool(
   };
 }
 
+function makeChallengeTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "challenge_memory",
+    description:
+      "Challenge an existing memory by presenting contradictory evidence. " +
+      "This weakens the memory, creates a pending theory, and logs a decision. " +
+      "Use when you discover that a stored memory is no longer accurate. " +
+      "Trigger: conversation or test results contradict a specific stored memory.",
+    parameters: CHALLENGE_MEMORY_SCHEMA,
+    emoji_name: "warning",
+    execute: async (toolCallId, params) => {
+      const {
+        memoryId = "",
+        evidence = "",
+      } = params as {
+        memoryId: string;
+        evidence: string;
+      };
+
+      if (!memoryId.trim() || !evidence.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [
+              {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      success: false,
+                      error: "missing_required_field",
+                      message: "memoryId and evidence are both required.",
+                    }),
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+
+      const result = await runMpm([
+        "challenge", memoryId, "--",
+        evidence,
+      ]);
+      const data = parseMpmResult(result);
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify(data) }] }],
+        },
+      };
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Plugin Entry
 // ---------------------------------------------------------------------------
@@ -1858,6 +1935,11 @@ export default definePluginEntry({
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeResolveTheoryTool(ctx),
       { names: ["resolve_theory"], optional: false }
+    );
+
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeChallengeTool(ctx),
+      { names: ["challenge_memory"], optional: false }
     );
 
     // ── Memory Capability (prompt builder for recall guidance) ────────────

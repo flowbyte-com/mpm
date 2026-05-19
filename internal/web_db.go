@@ -492,6 +492,63 @@ func (dm *DatabaseManager) ShredMemory(id string) error {
 	return ShredMemory(dm.db, id)
 }
 
+// UpdateMemoryWeight adjusts a memory's weight by delta (positive or negative)
+// without the reinforcement_count side effects of WeakenMemory/ReinforceMemory.
+// Allows weight to go negative for challenge/immune-system tracking.
+func (dm *DatabaseManager) UpdateMemoryWeight(id string, delta int) error {
+	_, err := dm.db.Exec(`
+		UPDATE memories SET weight = weight + ?, last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND deleted_at IS NULL
+	`, delta, id)
+	return err
+}
+
+// GetNegativeWeightMemories returns all non-deleted memories with weight < 0.
+func (dm *DatabaseManager) GetNegativeWeightMemories() ([]map[string]interface{}, error) {
+	rows, err := dm.db.Query(`
+		SELECT id, collection, content, weight, metadata, created_at
+		FROM memories WHERE weight < 0 AND deleted_at IS NULL
+		ORDER BY weight ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []map[string]interface{}
+	for rows.Next() {
+		var id, collection, content, metadata, createdAt string
+		var weight int
+		if err := rows.Scan(&id, &collection, &content, &weight, &metadata, &createdAt); err != nil {
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"id": id, "collection": collection, "content": content,
+			"weight": weight, "metadata": metadata, "created_at": createdAt,
+		})
+	}
+	return results, rows.Err()
+}
+
+// GetProvenTheoryForMemory searches for a resolved theory whose content
+// references the given memory ID. Returns nil if no proven theory exists.
+func (dm *DatabaseManager) GetProvenTheoryForMemory(memoryID string) (map[string]interface{}, error) {
+	var id, content, metadata string
+	err := dm.db.QueryRow(`
+		SELECT id, content, metadata FROM memories
+		WHERE collection = 'theories' AND deleted_at IS NULL
+		AND json_extract(metadata, '$.status') = 'resolved'
+		AND content LIKE '%' || ? || '%'
+		ORDER BY created_at DESC LIMIT 1
+	`, memoryID).Scan(&id, &content, &metadata)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"id": id, "content": content, "metadata": metadata}, nil
+}
+
 // ==================== Reference queries (for web UI) ====================
 
 // ListReferences returns all reference documents

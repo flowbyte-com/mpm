@@ -85,6 +85,7 @@ func NewRouter() *CommandRouter {
 		"record_decision": {Name: "record_decision", Description: "Record a decision with context, choice, and rationale", MinArgs: 1},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
+		"challenge":       {Name: "challenge", Description: "Challenge a memory — weaken, create theory, log decision", MinArgs: 1},
 	}
 
 	return r
@@ -221,6 +222,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTheories(args[1:])
 	case "decisions":
 		return handleDecisions(args[1:])
+	case "challenge":
+		return handleChallenge(args[1:])
 	case "ops":
 		return handleOps(args)
 
