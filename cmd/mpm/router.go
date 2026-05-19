@@ -405,6 +405,10 @@ func handleOps(args []string) int {
 		handleGatewayCommand(subArgs)
 		return 0
 
+	// — Status Dashboard —
+	case "status":
+		return handleStatus()
+
 	// — Help —
 	case "help":
 		printOpsHelp()
@@ -445,6 +449,7 @@ var opsSubcommandDescs = []struct {
 	{"reference", "Reference library"},
 	{"wake", "Show last session context"},
 	{"gateway", "Gateway control"},
+	{"status", "System status dashboard"},
 	{"help", "Show this help"},
 }
 

@@ -3022,6 +3022,145 @@ func handleMenu() int {
 }
 
 // ============================================================================
+// Status Dashboard — mpm ops status
+// ============================================================================
+
+func handleStatus() int {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+	printStatusDashboard(dm)
+	return 0
+}
+
+func printStatusDashboard(dm *mpminternal.DatabaseManager) {
+	totalMemories, _ := countMemories(dm, "")
+	ltmCount, _ := countMemories(dm, "weight >= 10")
+	theoriesCount, _ := countMemories(dm, "collection = 'theories'")
+	decisionsCount, _ := countMemories(dm, "collection = 'decisions'")
+	activeTheories, _ := countTheoriesByStatus(dm, "pending")
+	resolvedTheories, _ := countTheoriesByStatus(dm, "resolved")
+
+	daemonStatus := getDaemonStatus()
+
+	synthCount, lastSynth := getSynthesisStats(dm)
+
+	recentEvents := getRecentWatchdogEvents(dm, 3)
+
+	fmt.Println("⚡ MPM · System Status")
+	fmt.Println("────────────────────────────────────")
+	fmt.Printf("Memories:  %d total | %d LTM\n", totalMemories, ltmCount)
+	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", theoriesCount, activeTheories, resolvedTheories)
+	fmt.Printf("Decisions: %d total\n", decisionsCount)
+	fmt.Printf("Watcher:   %s\n", daemonStatus)
+	fmt.Printf("Synthesis: %d merged | last: %s\n", synthCount, lastSynth)
+	if len(recentEvents) > 0 {
+		fmt.Println("────────────────────────────────────")
+		fmt.Println("Recent events:")
+		for _, e := range recentEvents {
+			fmt.Printf("  %s %s\n", e.op, e.detail)
+		}
+	}
+	fmt.Println("────────────────────────────────────")
+	fmt.Println("Run `mpm help` for daily commands.")
+	fmt.Println("Run `mpm ops help` for engine room.")
+}
+
+func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
+	var query string
+	var args []interface{}
+	if where == "" {
+		query = "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"
+	} else {
+		query = "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND " + where
+	}
+	var count int
+	err := dm.SQLDB().QueryRow(query, args...).Scan(&count)
+	return count, err
+}
+
+func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM memories
+		WHERE collection = 'theories' AND deleted_at IS NULL
+		AND json_extract(metadata, '$.status') = ?`
+	err := dm.SQLDB().QueryRow(query, status).Scan(&count)
+	return count, err
+}
+
+func getDaemonStatus() string {
+	pid := readWatchPID()
+	if pid == 0 {
+		return "not running"
+	}
+	if !isWatchProcessAlive(pid) {
+		return "not running"
+	}
+	return fmt.Sprintf("running (PID %d)", pid)
+}
+
+func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {
+	var count int
+	var lastTime string
+	dm.SQLDB().QueryRow(`
+		SELECT COUNT(*), MAX(json_extract(metadata, '$.synthesized_at'))
+		FROM memories
+		WHERE deleted_at IS NULL
+		AND json_extract(metadata, '$.synthesized') = 'true'
+	`).Scan(&count, &lastTime)
+	if lastTime == "" {
+		lastTime = "never"
+	}
+	return count, lastTime
+}
+
+type watchdogEvent struct {
+	op     string
+	detail string
+}
+
+func getRecentWatchdogEvents(dm *mpminternal.DatabaseManager, limit int) []watchdogEvent {
+	path := dm.WatchdogPath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	var events []watchdogEvent
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(line), &m) != nil {
+			continue
+		}
+		op := ""
+		if v, ok := m["op"].(string); ok {
+			op = v
+		}
+		detail := ""
+		if v, ok := m["reason"].(string); ok {
+			detail = v
+		} else if v, ok := m["error"].(string); ok {
+			detail = v
+		}
+		if op != "" {
+			events = append(events, watchdogEvent{op: op, detail: detail})
+		}
+	}
+	return events
+}
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 
