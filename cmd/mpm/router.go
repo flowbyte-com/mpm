@@ -319,8 +319,7 @@ func (r *CommandRouter) handleHelp(args []string) int {
 }
 
 func (r *CommandRouter) handleSwitch() int {
-	StartSwitch()
-	return 0
+	return handleSwitch([]string{})
 }
 
 // ============================================================================
@@ -377,8 +376,7 @@ func handleOps(args []string) int {
 
 	// — Interactive & Identity —
 	case "switch":
-		StartSwitch()
-		return 0
+		return handleSwitch(subArgs)
 	case "directives":
 		return handlePrimeDirectives()
 	case "mode":

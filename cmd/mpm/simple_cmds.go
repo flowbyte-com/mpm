@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"mpm/internal/config"
+
 	mpminternal "mpm/internal"
 )
 
@@ -1034,4 +1036,140 @@ Usage:
   mpm reference shred <id>                   Delete a reference
 
 Supported formats: .txt, .md, .html, .epub, .pdf`)
+}
+
+// =============================================================================
+// Context Switcher — Active State
+// =============================================================================
+
+// ActiveState represents the current persona and mode configuration.
+// Persisted as active.json in the MPM directory.
+type ActiveState struct {
+	Persona string   `json:"persona"`
+	Modes   []string `json:"modes"`
+	Updated string   `json:"updated"`
+}
+
+func activeJSONPath() string {
+	return filepath.Join(config.GetMPMDir(), "active.json")
+}
+
+func loadActiveJSON() (*ActiveState, error) {
+	path := activeJSONPath()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return &ActiveState{
+			Persona: "default",
+			Modes:   []string{"standard"},
+			Updated: time.Now().UTC().Format(time.RFC3339),
+		}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var state ActiveState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func saveActiveJSON(s *ActiveState) error {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(activeJSONPath(), data, 0644)
+}
+
+func getModeFiles() []string {
+	dir := filepath.Join(config.GetMPMDir(), "mode")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".md") {
+			names = append(names, strings.TrimSuffix(name, ".md"))
+		}
+	}
+	return names
+}
+
+func getPersonaFiles() []string {
+	dir := filepath.Join(config.GetMPMDir(), "persona")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".md") {
+			names = append(names, strings.TrimSuffix(name, ".md"))
+		}
+	}
+	return names
+}
+
+// GetSystemPrompt reads the active persona and mode .md files and concatenates
+// their frontmatter directives into a single system prompt string.
+func GetSystemPrompt() string {
+	active, err := loadActiveJSON()
+	if err != nil {
+		return ""
+	}
+
+	var parts []string
+
+	personaPath := filepath.Join(config.GetMPMDir(), "persona", active.Persona+".md")
+	if data, err := os.ReadFile(personaPath); err == nil {
+		if content := extractFrontmatterDirective(string(data)); content != "" {
+			parts = append(parts, content)
+		}
+	}
+
+	for _, mode := range active.Modes {
+		modePath := filepath.Join(config.GetMPMDir(), "mode", mode+".md")
+		if data, err := os.ReadFile(modePath); err == nil {
+			if content := extractFrontmatterDirective(string(data)); content != "" {
+				parts = append(parts, content)
+			}
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+// extractFrontmatterDirective reads YAML frontmatter from a .md file and returns
+// the "directive" or "purpose" or "description" field, whichever is found first.
+func extractFrontmatterDirective(content string) string {
+	idx := strings.Index(content, "---")
+	if idx == -1 {
+		return ""
+	}
+	body := content[idx+3:]
+	endIdx := strings.Index(body, "---")
+	if endIdx == -1 {
+		return ""
+	}
+	fm := body[:endIdx]
+
+	for _, key := range []string{"directive", "purpose", "description"} {
+		prefix := key + ":"
+		for _, line := range strings.Split(fm, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+	}
+	return ""
 }

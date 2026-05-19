@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -3158,6 +3159,140 @@ func getRecentWatchdogEvents(dm *mpminternal.DatabaseManager, limit int) []watch
 		}
 	}
 	return events
+}
+
+// ============================================================================
+// Context Switcher — mpm ops switch
+// ============================================================================
+
+func handleSwitch(args []string) int {
+	active, err := loadActiveJSON()
+	if err != nil {
+		fmt.Printf("[!] Error loading active.json: %v\n", err)
+		return 1
+	}
+
+	fmt.Println("⚡ MPM Context Switcher")
+	fmt.Println("─────────────────────────────────────────")
+	fmt.Printf("Active Persona: %s\n", active.Persona)
+	fmt.Printf("Active Modes:  %s\n", strings.Join(active.Modes, ", "))
+	fmt.Println("─────────────────────────────────────────")
+
+	fmt.Println("\nWhat do you want to change?")
+	fmt.Println("  [1] Switch Persona")
+	fmt.Println("  [2] Toggle Modes")
+	fmt.Println("  [3] Exit")
+	fmt.Print("\n> ")
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("[!] Read error")
+		return 1
+	}
+	line = strings.TrimSpace(line)
+
+	switch line {
+	case "1":
+		switchPersona(reader, active)
+	case "2":
+		toggleModes(reader, active)
+	case "3":
+		fmt.Println("No changes made.")
+		return 0
+	default:
+		fmt.Println("[!] Invalid option")
+		return 1
+	}
+
+	active.Updated = time.Now().UTC().Format(time.RFC3339)
+	if err := saveActiveJSON(active); err != nil {
+		fmt.Printf("[!] Error saving: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("\n⚡ Context updated: [Persona: %s] | [Modes: %s]\n",
+		active.Persona, strings.Join(active.Modes, ", "))
+	return 0
+}
+
+func switchPersona(reader *bufio.Reader, active *ActiveState) {
+	personas := getPersonaFiles()
+	if len(personas) == 0 {
+		fmt.Println("[!] No persona files found in persona/")
+		return
+	}
+
+	fmt.Println("\nAvailable Personas:")
+	for i, p := range personas {
+		marker := ""
+		if p == active.Persona {
+			marker = " (current)"
+		}
+		fmt.Printf("  [%d] %s%s\n", i+1, p, marker)
+	}
+	fmt.Print("\nSelect persona (number): ")
+
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	idx, err := strconv.Atoi(line)
+	if err != nil || idx < 1 || idx > len(personas) {
+		fmt.Println("[!] Invalid selection — no change made.")
+		return
+	}
+	active.Persona = personas[idx-1]
+}
+
+func toggleModes(reader *bufio.Reader, active *ActiveState) {
+	modes := getModeFiles()
+	if len(modes) == 0 {
+		fmt.Println("[!] No mode files found in mode/")
+		return
+	}
+
+	fmt.Println("\nAvailable Modes (enter numbers separated by commas, e.g. 1,3):")
+	activeMap := make(map[string]bool)
+	for _, m := range active.Modes {
+		activeMap[m] = true
+	}
+
+	for i, m := range modes {
+		marker := ""
+		if activeMap[m] {
+			marker = " [*]"
+		}
+		fmt.Printf("  [%d] %s%s\n", i+1, m, marker)
+	}
+	fmt.Print("\nSelect modes: ")
+
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+
+	selected := parseModeSelection(line, modes)
+	if selected == nil {
+		fmt.Println("[!] Invalid selection — no change made.")
+		return
+	}
+	active.Modes = selected
+}
+
+func parseModeSelection(line string, modes []string) []string {
+	parts := strings.Split(line, ",")
+	var result []string
+	seen := make(map[string]bool)
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		idx, err := strconv.Atoi(p)
+		if err != nil || idx < 1 || idx > len(modes) {
+			return nil
+		}
+		name := modes[idx-1]
+		if !seen[name] {
+			result = append(result, name)
+			seen[name] = true
+		}
+	}
+	return result
 }
 
 // ============================================================================
