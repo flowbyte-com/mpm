@@ -35,7 +35,9 @@ MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch star
 
 ## Epistemology Engine
 
-MPM tracks not just *what* it knows, but *why* it knows it and *how* it decided to act. Three new collections extend the memory model into agency:
+MPM tracks not just *what* it knows, but *why* it knows it, *how* it decided to act, and *what it believes but hasn't proven yet*. The Epistemology Engine extends the memory model into genuine agency — reasoning that can be examined, revised, and rendered obsolete.
+
+The core problem it solves: AI agents retrieve facts but lose the chain of reasoning behind them. Weeks later, 808 might redo work it already discarded, re-evaluate a decision that was already made, or miss that a hypothesis it formed was already tested and resolved. The Epistemology Engine makes reasoning explicit and persistent.
 
 ### Decision Ledger (`mpm record_decision`)
 
@@ -44,9 +46,9 @@ An append-only audit trail of architectural choices. Captures the context, the c
 ```bash
 mpm record_decision "CONTEXT: We needed a CSS injection mechanism that survives wp_kses filtering
 CHOICE: Route all widget CSS through agentshell_register_widget → wp_options → widgets.php <head> injection
-RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() even for admins." --tag agent-shell --weight 8
+RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() even for admins. The widget init JS also needs a footer injection point. Both requirements pointed to wp_options as the store."
 
-mpm decisions                   # Show full decision ledger
+mpm decisions                   # Formatted decision ledger
 ```
 
 ### Theory Tracker (`mpm propose_theory` / `mpm resolve_theory`)
@@ -55,24 +57,61 @@ A hypothesis ledger for debugging and design. When 808 forms a causal assumption
 
 ```bash
 mpm propose_theory "HYPOTHESIS: passing --json before the positional arg causes the parse bug
-VALIDATION_CRITERIA: write a unit test — invoke mpm with --json flag first vs positional-first
+VALIDATION_CRITERIA: write a unit test — invoke mpm with --json flag first vs positional-first, compare parse error rate
 STATUS: pending"
 
 mpm theories                    # List all theories with status chips
 mpm theories pending           # Filter to pending only
 
-mpm resolve_theory abc123 "confirmed: flag order matters"
+mpm resolve_theory abc123 "confirmed: flag order matters, --json consumed before positional processing"
 ```
+
+### Proactive Recall Hints (`mpm hint`)
+
+During a conversation, 808 can surface relevant decisions and theories before you know you need them. FTS5 keyword extraction detects semantic overlap with your current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content.
+
+```bash
+mpm hint "discussing the CSS injection approach for the widget system"
+# → 💡 [Recall] You decided: Route all widget CSS through agentshell_register_widget...
+#    RATIONALE: WordPress strips <style> blocks from post content...
+
+mpm hint "token budget handling in the CLI"
+# → 💡 [Recall] Hypothesis: passing --json before the positional arg...
+#    STATUS: resolved | CONCLUSION: confirmed...
+```
+
+The MCP tool `proactive_recall_hint` is wired into the OpenClaw agent loop — 808 calls it after context shifts and surfaces the most relevant epistemology memory automatically.
+
+### How It All Connects
+
+| Component | Role |
+|---|---|
+| `propose_theory` / `record_decision` | Ingest reasoning into structured collections |
+| Topic auto-link | Theories and decisions are automatically linked to their respective topics |
+| `resolve_theory` | Closes the hypothesis lifecycle — status + conclusion, weight bumped |
+| `theories` / `decisions` | Display formatted views with STATUS chips |
+| `mpm hint` | Proactive surfacing via FTS5 keyword overlap |
+| Synthesis engine | Epistemology collections are **excluded** from auto-synthesis — their lifecycle is separate |
+| Watcher | Auto-detects `HYPOTHESIS:` and `CHOICE:` prefixes in `.md` files and routes to correct collection |
+| Backfill | On first `mpm doctor` run, existing epistemology memories are linked to their topics |
+
+### Content Format Conventions
+
+| Collection | Content Format |
+| --- | --- |
+| `decisions` | `CONTEXT:\nCHOICE:\nRATIONALE:\n[OUTCOME:]` |
+| `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
 
 ### Epistemology CLI Commands
 
 | Command | Purpose |
 | --- | --- |
 | `mpm record_decision <text>` | Log a decision with context, choice, rationale |
-| `mpm decisions` | Show formatted decision ledger |
+| `mpm decisions` | Formatted decision ledger |
 | `mpm propose_theory <text>` | Record a hypothesis with validation criteria |
 | `mpm theories [pending\|resolved\|all]` | List theories with status chips |
 | `mpm resolve_theory <id> <conclusion>` | Mark theory resolved, bump weight |
+| `mpm hint <text> [--max <n>] [--json]` | Proactive recall from conversation context |
 
 Topics `theories` and `decisions` are auto-created on first use. Memories in these collections are auto-linked to their topic via `topic_memberships`. The watcher auto-detects `HYPOTHESIS:` and `CHOICE:` prefixes in `.md` files and routes them to the correct collection.
 
