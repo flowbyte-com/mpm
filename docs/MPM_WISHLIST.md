@@ -43,6 +43,8 @@ _(all low-priority items complete — see Completed below)_
 | 15 | Proactive Deadlock Observability | ✅ Done (2026-05-19): DatabaseManager watchdog with `watchdog.jsonl` (separate from mirror.jsonl), exponential backoff, 100ms slow-query threshold. `ExecTracked`, `QueryTracked`, `QueryRowTracked` methods. |
 | 16 | Fsnotify Reconciliation Sweep | ✅ Done (2026-05-19): 30s startup delay + 10-min periodic sweep via `time.NewTicker`; 25 file/sweep cap; `source_path` metadata check to detect already-ingested files; `EventReconciliationSweep` worker pool event. |
 | 17 | Context-Aware Synthesis Deduplication | ✅ Done (2026-05-19): Fixed synthesis to delete triggering memory after LTM save, preserve oldest `created_at`, transfer topic_memberships, exclude epistemology collections, quality gate ≥2 candidates. |
+| 18 | Proactive Review Hook | ✅ Done (2026-05-19): FTS5-triggered recall hints via `mpm hint` and `proactive_recall_hint` MCP tool; `ExtractConversationKeywords` (tiktoken, stopword filter); `FindEpistemologyOverlaps` with bm25; quality rules (one hint/turn, score >= -3.0, 10-turn suppression window); bugfix: bm25() zero-weight arg → no-arg form in both synthesize.go and keywords.go |
+| 19 | Context Switcher (`mpm ops switch`) | ✅ Done (2026-05-19): Interactive TUI for persona + mode switching; `ActiveState` struct with `loadActiveJSON`/`saveActiveJSON`; `GetSystemPrompt()` reads active frontmatter; multi-select modes (comma-separated); graceful fallback; wired to both `ops switch` and root `switch` |
 
 ---
 
@@ -63,13 +65,17 @@ _(all low-priority items complete — see Completed below)_
 ---
 ## Future Wishlist (2026-05-19)
 
-_(All items complete — see Completed above.)_
+_(All items complete — 19/19 items shipped.)_
 
 ### Item #3 Rewrite: Context-Aware Deduplication
 
-~~**Old scope (Low priority):** `content_hash` exists; `mpm dedup` to find/merge near-identical memories by dropping one.~~
-**New scope (Medium priority — DONE):** Instead of hash-based dedup, route near-misses through MiniMax-M2.7 backend to allow 808 to actively synthesize two redundant memories into a single, richer Long-Term Memory (LTM). The synth step becomes a first-class operation rather than a blind dedup. ✅
+~~**Old scope:** `content_hash` exists; `mpm dedup` to find/merge near-identical memories by dropping one.~~
+**Done:** Context-aware synthesis deduplication via LLM — compresses redundant fragments into richer LTM records. ✅
 
 ### Proactive Review Hook
 
-~~**Proactive Review Hook** — FTS5-triggered recall hints during conversation with STATUS and RATIONALE.~~ **DONE.**
+~~**Proactive Review Hook** — FTS5-triggered recall hints during conversation with STATUS and RATIONALE.~~ **Done.** ✅
+
+### Context Switcher (`mpm ops switch`)
+
+~~**Context Switcher** — unified interactive TUI for persona + mode switching.~~ **Done.** ✅
