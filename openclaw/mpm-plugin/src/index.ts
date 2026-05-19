@@ -1447,6 +1447,133 @@ function makeRecordDecisionTool(
   };
 }
 
+// ── Proactive Recall Hint ─────────────────────────────────────────────────────
+
+const PROACTIVE_RECALL_HINT_SCHEMA = {
+  type: "object",
+  properties: {
+    conversation_text: {
+      type: "string",
+      description: "Recent conversation context to check for semantically relevant decisions and theories.",
+    },
+    max_hints: {
+      type: "number",
+      description: "Maximum number of hint results to return (default: 3).",
+      default: 3,
+    },
+    min_score: {
+      type: "number",
+      description: "Minimum bm25 score threshold — lower (more negative) = stronger match (default: -3.0).",
+      default: -3.0,
+    },
+  },
+  required: ["conversation_text"],
+  additionalProperties: false,
+} as const;
+
+function makeProactiveRecallHintTool(
+  _ctx: OpenClawPluginToolContext
+): AnyAgentTool {
+  return {
+    name: "proactive_recall_hint",
+    description:
+      "Checks recent conversation context for overlap with decisions and theories. " +
+      "Returns a structured Recall Hint if a semantic match is found. " +
+      "Call this after each user message — one hint per turn max. " +
+      "Surface only the top hint (rank 0) when hints are returned.",
+    parameters: PROACTIVE_RECALL_HINT_SCHEMA,
+    emoji_name: "bell",
+    execute: async (toolCallId, params) => {
+      const {
+        conversation_text = "",
+        max_hints = 3,
+        min_score = -3.0,
+      } = params as {
+        conversation_text: string;
+        max_hints?: number;
+        min_score?: number;
+      };
+
+      if (!conversation_text.trim()) {
+        return {
+          toolCallId,
+          result: {
+            type: "ok" as const,
+            results: [{ content: [{ type: "text" as const, text: "[]" }] }],
+          },
+        };
+      }
+
+      const result = await runMpm([
+        "hint", "--json", "--max", String(max_hints), "--", conversation_text,
+      ]);
+      const data = JSON.parse(result.stdout || "[]");
+
+      // Format hints as structured RecallHint[] for the agent
+      const hints = (Array.isArray(data) ? data : []).map((m: any) => {
+        const content = m.content || "";
+        const meta = m.metadata || {};
+        let status = meta.status || "";
+        const conclusion = meta.conclusion || "";
+
+        let choice = "";
+        let rationale = "";
+        let hypothesis = "";
+
+        // Extract fields from content
+        if (m.collection === "decisions") {
+          const firstLine = content.split("\n")[0] || "";
+          if (firstLine.toUpperCase().startsWith("CHOICE: ")) {
+            choice = firstLine.slice(7).trim();
+          }
+          const rLine = content.split("\n").find((l: string) =>
+            l.toUpperCase().startsWith("RATIONALE:")
+          );
+          if (rLine) {
+            rationale = rLine.slice(10).trim();
+          }
+        } else if (m.collection === "theories") {
+          const firstLine = content.split("\n")[0] || "";
+          if (firstLine.toUpperCase().startsWith("HYPOTHESIS: ")) {
+            hypothesis = firstLine.slice(11).trim();
+          }
+        }
+
+        if (!status) {
+          // Fallback: parse STATUS from content
+          const sLine = content.split("\n").find((l: string) =>
+            l.toUpperCase().startsWith("STATUS:")
+          );
+          if (sLine) {
+            status = sLine.split(":")[1]?.trim() || "";
+          }
+        }
+
+        return {
+          id: m.id,
+          collection: m.collection,
+          content: m.content,
+          status,
+          conclusion,
+          rationale,
+          choice,
+          hypothesis,
+          relevance_score: m.score,
+          created_at: m.created_at,
+        };
+      });
+
+      return {
+        toolCallId,
+        result: {
+          type: "ok" as const,
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify(hints) }] }],
+        },
+      };
+    },
+  };
+}
+
 function makeProposeTheoryTool(
   _ctx: OpenClawPluginToolContext
 ): AnyAgentTool {
@@ -1709,6 +1836,12 @@ export default definePluginEntry({
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeReadDirectivesTool(ctx),
       { names: ["read_directives"], optional: false }
+    );
+
+    // ── Proactive Recall Hint ───────────────────────────────────────────
+    api.registerTool(
+      (_ctx: OpenClawPluginToolContext) => makeProactiveRecallHintTool(_ctx),
+      { names: ["proactive_recall_hint"], optional: true }
     );
 
     // ── Epistemology Engine ──────────────────────────────────────────────

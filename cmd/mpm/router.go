@@ -76,6 +76,9 @@ func NewRouter() *CommandRouter {
 		"persona":         {Name: "persona", Description: "Persona operations"},
 		"ops":             {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
+		// Proactive Recall Hint
+		"hint":           {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
+
 		// Epistemology Engine
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
 		"resolve_theory":  {Name: "resolve_theory", Description: "Mark a theory as resolved", MinArgs: 2},
@@ -206,6 +209,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSession(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
+	case "hint":
+		return handleHint(args[1:])
 	case "propose_theory":
 		return handleProposeTheory(args[1:])
 	case "resolve_theory":
