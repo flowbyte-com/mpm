@@ -1912,8 +1912,8 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
 		WHERE m.collection = 'session' AND memories_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?
+			ORDER BY bm25(memories_fts)
+			LIMIT ?
 	`, query, limit)
 	if err != nil {
 		// FTS5 not available, use substring search
@@ -2013,7 +2013,7 @@ func (s *MemoryStore) SearchTopics(query string, limit int) ([]*SearchResult, er
 		SELECT id, name, description, created_at
 		FROM topics
 		WHERE name MATCH ? OR description MATCH ?
-		ORDER BY rank
+		ORDER BY bm25(topics)
 		LIMIT ?
 	`, query, query, limit)
 	if err != nil {

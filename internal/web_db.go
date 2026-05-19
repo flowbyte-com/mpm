@@ -596,7 +596,7 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 	if found {
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE id IN (SELECT rowid FROM references_fts WHERE references_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
+		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE id IN (SELECT rowid FROM references_fts WHERE references_fts MATCH ?) ORDER BY bm25(references_fts) LIMIT ?`, ftsQuery, limit)
 	} else {
 		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?`, "%"+q+"%", "%"+q+"%", limit)
 	}
@@ -648,7 +648,7 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 	if found {
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN reference_docs r ON rc.doc_id = r.id WHERE rc.id IN (SELECT rowid FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) ORDER BY rank LIMIT ?`, ftsQuery, limit)
+		rows, err = dm.db.Query(`WITH scores AS (SELECT rowid, bm25(reference_chunks_fts) as s FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN scores ON rc.rowid = scores.rowid JOIN reference_docs r ON rc.doc_id = r.id ORDER BY scores.s LIMIT ?`, ftsQuery, limit)
 	} else {
 		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN reference_docs r ON rc.doc_id = r.id WHERE rc.content LIKE ? ORDER BY rc.chunk_index LIMIT ?`, "%"+q+"%", limit)
 	}
@@ -737,7 +737,7 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 	var args []interface{}
 
 	if found {
-		query = `SELECT t.id, t.name, COALESCE(t.description,''), t.created_at, COALESCE(t.tags,'{}') FROM topics t JOIN topics_fts f ON t.rowid = f.rowid WHERE topics_fts MATCH ?`
+		query = `WITH scores AS (SELECT rowid, bm25(topics_fts) as s FROM topics_fts WHERE topics_fts MATCH ?) SELECT t.id, t.name, COALESCE(t.description,''), t.created_at, COALESCE(t.tags,'{}'), scores.s FROM topics t JOIN scores ON t.rowid = scores.rowid`
 		args = []interface{}{ftsQuery}
 	} else {
 		query = `SELECT id, name, COALESCE(description,''), created_at, COALESCE(tags,'{}') FROM topics WHERE is_active = 1 AND (name LIKE ? OR description LIKE ?)`
@@ -745,7 +745,7 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 	}
 
 	if found {
-		query += " ORDER BY rank LIMIT ?"
+		query += " ORDER BY scores.s LIMIT ?"
 	} else {
 		query += " ORDER BY created_at DESC LIMIT ?"
 	}
