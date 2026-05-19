@@ -873,16 +873,14 @@ func handleRefSearch(args []string) int {
 		return 1
 	}
 
-	query := strings.Join(args[1:], " ")
+	jsonOutput, cleanArgs := ExtractJSONFlag(args[1:])
+	query := strings.Join(cleanArgs, " ")
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
 	defer dm.Close()
-
-	// Pre-scan for --json
-	jsonOutput, _ := ExtractJSONFlag(args[2:])
 
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {
