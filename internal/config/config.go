@@ -18,6 +18,7 @@ type Config struct {
 	OpenClawDBPath string `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
 	WebToken       string `json:"web_token,omitempty"`         // Optional bearer token for web UI auth
 	Synth          *SynthConfig `json:"synth,omitempty"`
+	Aliases        map[string]string `json:"aliases,omitempty"` // CLI command aliases: "mem" → "recall --collection memories"
 }
 
 // ExternalDB describes an external SQLite database to poll for memories.

@@ -419,6 +419,48 @@ func handleSetWeight(args []string) int {
 	return 0
 }
 
+// mpm snooze <id> [--days N] — Bump memory relevance without promoting to LTM.
+// Increments weight by 1 (capped at 9 to avoid LTM promotion) and refreshes
+// last_accessed_at. Never sets is_long_term or inflates weight to >= 10.
+func handleSnooze(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: mpm snooze <id> [--days N]\n")
+		return 1
+	}
+	id := args[1]
+	days := 1
+	for i := 2; i < len(args); i++ {
+		if args[i] == "--days" && i+1 < len(args) {
+			i++
+			if d, err := strconv.Atoi(args[i]); err == nil && d > 0 {
+				days = d
+			}
+		}
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	// Bump weight by 1 (cap at 9 to prevent LTM promotion), refresh timestamp
+	_, err = dm.SQLDB().Exec(`
+		UPDATE memories
+		SET weight = MIN(weight + 1, 9),
+		    last_accessed_at = datetime('now', '+' || ? || ' days')
+		WHERE id = ? AND deleted_at IS NULL
+	`, days, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Snoozed memory %s (+1 weight, +%d day(s) last_accessed)\n", id, days)
+	return 0
+}
+
 // mpm shred <id> — Secure delete memory
 func handleShredMem(args []string) int {
 	if len(args) < 2 {

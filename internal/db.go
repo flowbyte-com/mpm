@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"mpm/internal/config"
@@ -138,7 +139,12 @@ type DatabaseManager struct {
 	db          *sql.DB
 	dbPath      string // stored for shareable store init
 	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
+
+	watchdogPath string        // path to watchdog.jsonl for query observability
+	watchdogMu   sync.Mutex    // serializes watchdog log writes
 }
+
+const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
 
 // SQLDB returns the underlying *sql.DB for direct queries.
 func (dm *DatabaseManager) SQLDB() *sql.DB {
@@ -149,6 +155,167 @@ func (dm *DatabaseManager) SQLDB() *sql.DB {
 func (dm *DatabaseManager) IsOpen() bool {
 	return dm.db != nil
 }
+
+// ==================== Watchdog / Query Observability ====================
+
+// watchdogOp represents a single operation entry written to watchdog.jsonl.
+type watchdogOp struct {
+	Timestamp string `json:"timestamp"`
+	Operation string `json:"operation"`
+	DurationMs int64 `json:"duration_ms"`
+	Query     string `json:"query,omitempty"`
+	Retries   int    `json:"retries,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Slow      bool   `json:"slow"`
+}
+
+// logWatchdog appends a watchdog entry to watchdog.jsonl.
+// File-write contention is serialised by watchdogMu so that concurrent
+// DatabaseManager users do not corrupt the log.
+func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
+	if dm.watchdogPath == "" {
+		return
+	}
+	dm.watchdogMu.Lock()
+	defer dm.watchdogMu.Unlock()
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	f.Write(data)
+	f.Write([]byte("\n"))
+	f.Close()
+}
+
+// logWatchdogRaw appends raw JSON bytes to watchdog.jsonl under the dm mutex.
+// Used by synthesis and other subsystems that want structured events with
+// custom schemas rather than the watchdogOp query-timing format.
+func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
+	if dm == nil || dm.watchdogPath == "" {
+		return
+	}
+	dm.watchdogMu.Lock()
+	defer dm.watchdogMu.Unlock()
+	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(line)
+	f.Write([]byte("\n"))
+}
+
+// ExecTracked runs db.Exec with timing and optional retry-backoff.
+// If retries > 0 the query is re-attempted on SQLITE_BUSY with exponential
+// backoff (100ms, 200ms, 400ms, … capped at 5s).
+func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error) {
+	start := time.Now()
+	attempts := 0
+	backoff := 100 * time.Millisecond
+	maxBackoff := 5 * time.Second
+
+	for {
+		attempts++
+		result, err := dm.db.Exec(query, args...)
+		elapsed := time.Since(start)
+
+		if err != nil && isBusyError(err) && attempts <= retries {
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
+		}
+
+		entry := watchdogOp{
+			Timestamp:  start.UTC().Format(time.RFC3339Nano),
+			Operation:  "exec",
+			DurationMs: elapsed.Milliseconds(),
+			Query:      truncateQuery(query),
+			Retries:    attempts - 1,
+			Slow:       elapsed > slowQueryThreshold,
+		}
+		if err != nil {
+			entry.Error = err.Error()
+		}
+		dm.logWatchdog(entry)
+
+		return result, err
+	}
+}
+
+// QueryTracked runs db.Query with timing.
+func (dm *DatabaseManager) QueryTracked(query string, args ...interface{}) (*sql.Rows, error) {
+	start := time.Now()
+	rows, err := dm.db.Query(query, args...)
+	elapsed := time.Since(start)
+
+	entry := watchdogOp{
+		Timestamp:  start.UTC().Format(time.RFC3339Nano),
+		Operation:  "query",
+		DurationMs: elapsed.Milliseconds(),
+		Query:      truncateQuery(query),
+		Slow:       elapsed > slowQueryThreshold,
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	}
+	dm.logWatchdog(entry)
+
+	return rows, err
+}
+
+// QueryRowTracked runs db.QueryRow with timing.
+func (dm *DatabaseManager) QueryRowTracked(query string, args ...interface{}) *sql.Row {
+	start := time.Now()
+	row := dm.db.QueryRow(query, args...)
+	elapsed := time.Since(start)
+
+	entry := watchdogOp{
+		Timestamp:  start.UTC().Format(time.RFC3339Nano),
+		Operation:  "queryrow",
+		DurationMs: elapsed.Milliseconds(),
+		Query:      truncateQuery(query),
+		Slow:       elapsed > slowQueryThreshold,
+	}
+	// We cannot inspect the error without scanning the row, so we log
+	// duration-only here. Callers that scan will see any sql.ErrNoRows etc.
+	dm.logWatchdog(entry)
+
+	return row
+}
+
+// isBusyError returns true when the error is an SQLITE_BUSY / database-locked.
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "cannot commit") && strings.Contains(msg, "locked")
+}
+
+// truncateQuery keeps only the first 120 characters of a query for watchdog
+// log entries, preventing massive SQL strings from bloating the log.
+func truncateQuery(q string) string {
+	if len(q) > 120 {
+		return q[:120] + "..."
+	}
+	return q
+}
+
+// WatchdogPath returns the path to the watchdog log file this manager writes to.
+func (dm *DatabaseManager) WatchdogPath() string {
+	return dm.watchdogPath
+}
+
+// ==================== Shared Store ====================
 
 // getSharedStore returns a MemoryStore backed by dm.db, creating it once.
 // This avoids redundant InitSQLite() calls in self-maintenance methods.
@@ -184,7 +351,11 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	db.Exec("PRAGMA synchronous = NORMAL")
 	db.Exec("PRAGMA cache_size = -64000")
 
-	manager := &DatabaseManager{db: db, dbPath: dbPath}
+	manager := &DatabaseManager{
+		db:           db,
+		dbPath:       dbPath,
+		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
+	}
 
 	if err := manager.initUnifiedSchema(); err != nil {
 		db.Close()
@@ -197,7 +368,11 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 // NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.
 // Use this for one-off CLI commands that don't need managed persistence.
 func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
-	return &DatabaseManager{db: db}
+	wdPath := ""
+	if mpmDir := config.GetMPMDir(); mpmDir != "" {
+		wdPath = filepath.Join(mpmDir, "src", "db", "watchdog.jsonl")
+	}
+	return &DatabaseManager{db: db, watchdogPath: wdPath}
 }
 
 func (dm *DatabaseManager) initUnifiedSchema() error {

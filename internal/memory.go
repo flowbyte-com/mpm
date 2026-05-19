@@ -63,6 +63,17 @@ type MemoryStore struct {
 	SQLiteDBPath string
 	Collections  []string
 	DB           *SQLiteConnection
+
+	DM *DatabaseManager // optional — when set, writes route through ExecTracked for watchdog
+}
+
+// execTracked routes through DatabaseManager.ExecTracked when available,
+// falling back to the raw s.DB.Exec for standalone/test usage.
+func (s *MemoryStore) execTracked(query string, retries int, args ...interface{}) (sql.Result, error) {
+	if s.DM != nil {
+		return s.DM.ExecTracked(query, retries, args...)
+	}
+	return s.DB.Exec(query, args...)
 }
 
 // MemoryPaths represents the INPUT (watch) and OUTPUT (storage) paths for MPM.
@@ -963,38 +974,70 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 // Features: decay, auto-prune, consolidation, spaced reinforcement
 // =============================================================================
 
-// DecayWeights reduces weight of memories that haven't been reinforced recently.
-// Memories decay by decayPercent per intervalDays. LTM memories (weight >= 10) are preserved.
-func (s *MemoryStore) DecayWeights(decayPercent float64, intervalDays int) (int, error) {
+// DecayPolicy defines per-collection weight decay behaviour.
+type DecayPolicy struct {
+	DecayPercent float64 // percentage weight reduction per interval
+	Floor        int     // minimum weight after decay (0 = can reach zero)
+}
+
+// DefaultDecayPolicies maps collection names to their decay policies.
+// Collections not listed use the "default" policy.
+var DefaultDecayPolicies = map[string]DecayPolicy{
+	"default":   {DecayPercent: 2.0, Floor: 0},   // fast decay, can reach zero
+	"session":   {DecayPercent: 2.0, Floor: 0},   // session facts decay fast
+	"memories":  {DecayPercent: 1.0, Floor: 1},   // moderate decay, floor of 1
+	"theories":  {DecayPercent: 1.0, Floor: 1},   // pending theories stay visible
+	"decisions": {DecayPercent: 0, Floor: 0},      // zero decay — append-only audit trail
+}
+
+// DecayWeights applies per-collection weight decay policies.
+// Each collection decays independently using its configured decay percent and floor.
+// LTM memories (is_long_term = 1) and those accessed within intervalDays are preserved.
+func (s *MemoryStore) DecayWeights(policies map[string]DecayPolicy, intervalDays int) (int, error) {
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
 			return 0, fmt.Errorf("failed to init db: %w", err)
 		}
 	}
 
-	if decayPercent <= 0 || decayPercent >= 100 {
-		decayPercent = 1.0 // 1% default
-	}
 	if intervalDays <= 0 {
-		intervalDays = 7 // weekly default
+		intervalDays = 7
 	}
 
-	// Decay formula: new_weight = old_weight * (1 - decayPercent/100)
-	// Only decay if: reinforcement_count = 0 AND not LTM AND last_accessed > intervalDays ago
-	result, err := s.DB.Exec(`
-		UPDATE memories
-		SET weight = MAX(1, CAST(weight * (1 - ? / 100.0) AS INTEGER))
-		WHERE deleted_at IS NULL
-		  AND is_long_term = 0
-		  AND weight > 1
-		  AND reinforcement_count = 0
-		  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
-	`, decayPercent, intervalDays)
-	if err != nil {
-		return 0, fmt.Errorf("weight decay failed: %w", err)
+	// Use default policies if none provided
+	if policies == nil {
+		policies = DefaultDecayPolicies
 	}
-	rows, _ := result.RowsAffected()
-	return int(rows), nil
+
+	total := 0
+	for collection, policy := range policies {
+		if policy.DecayPercent <= 0 {
+			continue // zero decay — skip this collection entirely
+		}
+		if policy.DecayPercent >= 100 {
+			policy.DecayPercent = 1.0
+		}
+		if policy.Floor < 0 {
+			policy.Floor = 0
+		}
+
+		res, err := s.execTracked(`
+			UPDATE memories
+			SET weight = MAX(?, CAST(weight * (1 - ? / 100.0) AS INTEGER))
+			WHERE collection = ?
+			  AND deleted_at IS NULL
+			  AND is_long_term = 0
+			  AND weight > ?
+			  AND reinforcement_count = 0
+			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+		`, 0, policy.Floor, policy.DecayPercent, collection, policy.Floor, intervalDays)
+		if err != nil {
+			return total, fmt.Errorf("weight decay failed for collection %s: %w", collection, err)
+		}
+		r, _ := res.RowsAffected()
+		total += int(r)
+	}
+	return total, nil
 }
 
 // AutoPruneConfig holds auto-pruning policy settings
@@ -1018,10 +1061,10 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 
 	// Prune expired
 	if cfg.ExpiredEnabled {
-		result, err := s.DB.Exec(`
+		result, err := s.execTracked(`
 			DELETE FROM memories
 			WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
-		`)
+		`, 0)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
 				totalPruned += int(rows)
@@ -1031,14 +1074,14 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 
 	// Prune never accessed older than threshold
 	if cfg.NeverAccessedMaxDays > 0 {
-		result, err := s.DB.Exec(`
+		result, err := s.execTracked(`
 			DELETE FROM memories
 			WHERE deleted_at IS NULL
 			  AND last_accessed_at IS NULL
 			  AND reinforcement_count = 0
 			  AND is_long_term = 0
 			  AND created_at < datetime('now', '-' || ? || ' days')
-		`, cfg.NeverAccessedMaxDays)
+		`, 0, cfg.NeverAccessedMaxDays)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
 				totalPruned += int(rows)
@@ -1048,7 +1091,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 
 	// Prune low weight (weight=1) older than threshold
 	if cfg.LowWeightMaxDays > 0 {
-		result, err := s.DB.Exec(`
+		result, err := s.execTracked(`
 			DELETE FROM memories
 			WHERE deleted_at IS NULL
 			  AND weight = 1
@@ -1081,12 +1124,14 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 	}
 
 	// Get all LTM and reinforced memories grouped by tag
+	// LIMIT 500 prevents O(n²) CPU lock on massive databases
 	rows, err := s.DB.Query(`
 		SELECT id, collection, content, tags, embedding, created_at, weight, reinforcement_count
 		FROM memories
 		WHERE deleted_at IS NULL
 		  AND (is_long_term = 1 OR reinforcement_count > 0 OR weight > 1)
 		ORDER BY collection, created_at DESC
+		LIMIT 500
 	`)
 	if err != nil {
 		return 0, err
@@ -1165,7 +1210,7 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 			// Delete all except the best
 			for k := 0; k < len(cluster); k++ {
 				if k != bestIdx {
-					s.DB.Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, cluster[k])
+					s.execTracked(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, 0, cluster[k])
 					consolidated++
 				}
 			}
@@ -1376,8 +1421,8 @@ type MaintenanceStats struct {
 func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 	stats := &MaintenanceStats{}
 
-	// 1. Decay unused weights (1% per week)
-	decayed, err := s.DecayWeights(1.0, 7)
+	// 1. Decay unused weights (per-collection policies, weekly)
+	decayed, err := s.DecayWeights(DefaultDecayPolicies, 7)
 	if err == nil {
 		stats.DecayedWeights = decayed
 	}
@@ -2126,7 +2171,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete exact duplicates
 	for _, id := range dupeIDs {
-		s.DB.Exec("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+		s.execTracked("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 
@@ -2230,7 +2275,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete near duplicates
 	for id := range seenNearDupes {
-		s.DB.Exec("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+		s.execTracked("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 

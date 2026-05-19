@@ -17,13 +17,14 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Spaced reinforcement review** — `mpm review --promoted` shows recently elevated; `mpm review --stale` surfaces forgotten LTM memories
 - **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
 - **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
-- **Automatic file watching** — `.md` files ingested as LTM; sessions swept, synthesized, archived
+- **Automatic file watching** — `.md` files ingested as LTM; sessions swept, synthesized (compression), archived
 - **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
 - **Reference chunking control** — `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding
 - **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
 - **Session memory context** — `mpm wake` surfaces last session's mode, persona, topics, and recent memories
 - **Security scanning** — 20 regex patterns for API keys, tokens, secrets
 - **Modes & Personas** — file-based (`.md`), multi-select modes, single-select persona
+- **Invisible CLI** — `cat idea.md | mpm` pipes stdin to add; bare `mpm token budget` defaults to recall; 7-command daily surface with everything else under `mpm ops`
 
 ### What MPM Is NOT
 
@@ -35,45 +36,44 @@ MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch star
 
 MPM tracks not just *what* it knows, but *why* it knows it and *how* it decided to act. Three new collections extend the memory model into agency:
 
-### Decision Ledger (`collection: decisions`)
+### Decision Ledger (`mpm record_decision`)
 
 An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, 808 can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
 
 ```bash
-# Via CLI (structured format)
-mpm add --collection decisions --json -- "CONTEXT: We needed a CSS injection mechanism that survives wp_kses filtering
+mpm record_decision "CONTEXT: We needed a CSS injection mechanism that survives wp_kses filtering
 CHOICE: Route all widget CSS through agentshell_register_widget → wp_options → widgets.php <head> injection
-RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() even for admins. The widget init JS also needs a footer injection point. Both requirements pointed to wp_options as the store and a dedicated loader as the mechanism." --tag agent-shell --weight 8
+RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() even for admins." --tag agent-shell --weight 8
 
-# Or use the OpenClaw tool directly (record_decision)
+mpm decisions                   # Show full decision ledger
 ```
 
-### Theory Tracker (`collection: theories`)
+### Theory Tracker (`mpm propose_theory` / `mpm resolve_theory`)
 
 A hypothesis ledger for debugging and design. When 808 forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
 
 ```bash
-# Propose (via CLI)
-mpm add --collection theories --json -- "HYPOTHESIS: passing --json before the positional arg causes the parse bug
-VALIDATION_CRITERIA: write a unit test — invoke mpm with --json flag first vs positional-first, compare parse error rate
-STATUS: pending" --tag debugging
+mpm propose_theory "HYPOTHESIS: passing --json before the positional arg causes the parse bug
+VALIDATION_CRITERIA: write a unit test — invoke mpm with --json flag first vs positional-first
+STATUS: pending"
 
-# Resolve via patch-memory (no FTS re-index)
-mpm patch-memory <theory-id> '{"status":"proven","conclusion":"Flag order matters — --json consumed by the flag parser before positional processing"}'
+mpm theories                    # List all theories with status chips
+mpm theories pending           # Filter to pending only
+
+mpm resolve_theory abc123 "confirmed: flag order matters"
 ```
 
-### Content Format Conventions
+### Epistemology CLI Commands
 
-| Collection | Content Format |
+| Command | Purpose |
 | --- | --- |
-| `decisions` | `CONTEXT:\nCHOICE:\nRATIONALE:\n[OUTCOME:]` |
-| `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
+| `mpm record_decision <text>` | Log a decision with context, choice, rationale |
+| `mpm decisions` | Show formatted decision ledger |
+| `mpm propose_theory <text>` | Record a hypothesis with validation criteria |
+| `mpm theories [pending\|resolved\|all]` | List theories with status chips |
+| `mpm resolve_theory <id> <conclusion>` | Mark theory resolved, bump weight |
 
-FTS5 indexes the content field directly — no new tables or indices needed.
-
-### Metadata Patching
-
-`mpm patch-memory <id> '<json-patch>'` uses SQLite's `json_patch()` to update the `metadata` column in-place. Content is untouched, so the FTS index is not affected. Used by `resolve_theory` to close the loop on a pending theory without triggering a re-index.
+Topics `theories` and `decisions` are auto-created on first use. Memories in these collections are auto-linked to their topic via `topic_memberships`. The watcher auto-detects `HYPOTHESIS:` and `CHOICE:` prefixes in `.md` files and routes them to the correct collection.
 
 ---
 
@@ -292,6 +292,11 @@ MPM reads `mpm_config.json` from the workspace root.
 **Example:**
 ```json
 {
+  "aliases": {
+    "s": "recall",
+    "in": "add -i",
+    "mem": "recall --collection memories"
+  },
   "memory_dirs": ["/home/user/.openclaw/workspace/memory"],
   "sessions_dirs": ["/home/user/.openclaw/agents/main/sessions"],
   "external_dbs": [
@@ -332,194 +337,139 @@ MPM reads `mpm_config.json` from the workspace root.
 
 ## Usage & Commands
 
-### Core Memory
+### Daily Commands (7 total — everything else is `mpm ops`)
 
 ```bash
-mpm add "Remember to use gRPC for internal services"
-mpm add "Payment service requires JWT validation" --tag security --weight 5
-
-mpm ls                          # Recent 20
-mpm ls --collection memories    # Filter by collection
-mpm ls --collection session     # Operational state-changes
-mpm ls --tag important           # Filter by tag
-mpm ls --since 2026-01-01       # Since date
-mpm ls --limit 50               # Custom limit
-
-mpm show abc123                 # Show details
-mpm rm abc123                   # Soft delete
-mpm shred abc123                # Secure delete (DELETE + deferred VACUUM)
+mpm <query>       Search memories (default-to-recall for bare string)
+mpm add <text>    Add a new memory
+mpm add -i        Interactive add — opens $EDITOR
+mpm snooze <id>   Bump a memory's relevance (no LTM promotion)
+mpm ls            List memories
+mpm show <id>     Show memory details
+mpm rm <id>       Delete a memory
+mpm ops           Engine room — maintenance, diagnostics, synthesis
+mpm help          Full help
 ```
 
-### Search & Recall
+### Pipe & Aliases
 
 ```bash
-mpm recall sqlite               # Full-text search (FTS5 + LIKE fallback)
-mpm recall "JWT authentication"
-mpm recall "payment" --limit 10
+cat idea.md | mpm       Pipe stdin to add (shows preview, confirms before save)
+mpm s "query"          User alias for recall (defined in mpm_config.json)
+mpm in                 User alias for add -i
 ```
 
-### Memory Importance
+### Epistemology Engine
 
 ```bash
-mpm promote abc123              # LTM (weight=10, clears TTL)
-mpm reinforce abc123            # +1 reinforcement
-mpm reinforce abc123 3          # +3
-mpm weaken abc123               # -1
-mpm set-weight abc123 7        # Set directly (0-100)
-mpm patch-memory abc123 '{"status":"proven"}'  # Patch metadata in-place (FTS untouched)
+mpm propose_theory "HYPOTHESIS: ...\nVALIDATION_CRITERIA: ..."
+mpm theories           List all theories with status chips
+mpm theories pending  Filter to pending only
+mpm resolve_theory <id> <conclusion>
+mpm record_decision "CONTEXT: ...\nCHOICE: ...\nRATIONALE: ..."
+mpm decisions          Show formatted decision ledger
 ```
 
-### Stats & Maintenance
+### Engine Room (`mpm ops <command>`)
+
+All maintenance, diagnostics, and rare commands. `mpm ops help` lists them all. All commands below also work at root level (backwards compatible).
 
 ```bash
-mpm stats                       # Counts, tag distribution, reinforcement
-mpm prune                       # Older than 90 days
-mpm prune --older-than 30d     # Custom TTL
-mpm export                      # Export all to JSON
-mpm maintain                    # Run maintenance cycle (decay, consolidate, prune)
-mpm maintain --days 30         # Prune memories not accessed in 30 days
+mpm ops doctor [--fix]       Diagnostics + auto-repair
+mpm ops maintain            Self-maintenance (decay, consolidate, prune)
+mpm ops synthesize          LLM synthesis on all memories
+mpm ops gc [--dry-run]       Memory decay sweep
+mpm ops review              Spaced reinforcement review
+mpm ops watch start [--bg]  Watcher daemon (start/stop/status)
+mpm ops web                 Start web UI
+mpm ops stats                Memory statistics
+mpm ops prune                Prune expired memories
+mpm ops export               Export all to JSON
+mpm ops backup [path]        Database backup
+mpm ops restore-db <path>    Restore from .sql dump
+mpm ops ingest <path>        Import from external SQLite
+mpm ops switch               Interactive persona/mode switcher
+mpm ops mode | persona       Mode and persona operations
+mpm ops topic | lesson       Topic and lesson operations
+mpm ops session | memory     Session and memory operations
+mpm ops reference             Reference library
+mpm ops wake                  Show last session context
+mpm ops gateway               Gateway control
 ```
 
-### Modes & Personas
+### Aliases Configuration
 
-```bash
-# Interactive TUI (multi-select modes, single-select persona)
-mpm mode                        # Pick modes
-mpm persona                     # Pick persona
+User-defined shortcuts in `mpm_config.json`. The DWIM layer is entirely user-controlled.
 
-# Direct management
-mpm mode list                   # Show available modes
-mpm mode active                 # Show active modes
-mpm mode remove programming     # Remove a mode file
-mpm mode clear                  # Clear all active modes
-
-mpm persona list                # Show available personas
-mpm persona active              # Show active persona
-mpm persona set whiterabbit     # Set active persona
-mpm persona clear               # Clear active persona
-
-mpm prime-directives            # Display 808 rules
+```json
+{
+  "aliases": {
+    "s": "recall",
+    "in": "add -i",
+    "mem": "recall --collection memories"
+  }
+}
 ```
 
-### Topics
+Chain expansion: `mpm s foo bar` → `mpm recall foo bar`. `--version`, `-v`, `help` bypass alias resolution.
 
-```bash
-mpm topic create "golang patterns" --desc "Go idioms and patterns"
-mpm topic add abc123 "golang patterns"    # Add memory to topic
-mpm topic remove abc123 "golang patterns"  # Remove from topic
-mpm topic list                            # List all topics
-mpm topic show def456                     # Show topic details
-mpm topic promote def456                 # Promote topic to memory
-```
+### All Commands (Full Reference)
 
-### Reference Library
-
-```bash
-mpm reference add book.pdf
-mpm reference add manual.md --tag golang
-mpm reference list               # All references
-mpm reference search "performance"
-mpm reference show abc123        # Full document with chunks
-mpm reference shred abc123
-```
-
-**Chunking control:** Use `--chunk-size` to control tokens per chunk (64–2048, default 512). Uses tiktoken (cl100k_base) for accurate token-based splitting.
-
-```bash
-mpm reference add big-doc.pdf --chunk-size 1024
-```
-
-### Sessions
-
-```bash
-mpm session list                 # Recent sessions
-mpm session search "project"    # Search sessions
-mpm session show abc123         # Session details
-```
-
-### Session Memory Context
-
-```bash
-mpm wake                        # Human-readable last session summary
-mpm wake --json                 # Structured JSON for tool use
-```
-
-`mpm wake` returns mode, persona, recent topics, and recent memories from the most recent session. The OpenClaw plugin's `read_wake_context` tool wraps this — 808 calls it automatically on session start (forced by AGENTS.md directive).
-
-Active mode and persona are injected into memory metadata on every `mpm add` via `detectActiveContext()`, so the session context is preserved across restarts.
-
-### Lessons
-
-```bash
-mpm lesson add "Always validate JWT expiration" --type warning --tags security
-mpm lesson add "Use connection pooling for external APIs" --type practice --tags golang
-mpm lesson list                 # All lessons
-mpm lesson list --type warning  # Filter by type
-mpm lesson search "security"
-mpm lesson get abc123
-mpm lesson shred abc123
-mpm lesson stats               # Statistics by type
-```
-
-### File Watcher
-
-* **`.md` files** → ingested as LTM, then deleted
-* **Orphan Sweep** → `.jsonl.lock` Create triggers synthesis of old `.jsonl` files without locks, then archived (not deleted)
-
-```bash
-mpm watch start                 # Start watcher (goroutine-based)
-mpm watch stop                  # Stop gracefully
-mpm watch status                # Check if running
-mpm watch start --bg           # Detached mode (systemd)
-
-mpm watch add-path /path/to/memory --type memory
-mpm watch remove-path /path/to/memory --type memory
-mpm watch list-paths            # Show all configured paths
-```
-
-### Web UI
-
-```bash
-mpm web         # Start at http://localhost:18792 (requires web_token in config)
-```
-
-### Cross-reference Linking
-
-Recall and topic show include bounded cross-reference data:
-
-- **`mpm recall <query>`** shows a `── Related ───` block per result: topic chips + reference doc name
-- **`mpm topic show <name>`** shows top-3 linked memories and a count chip
-
-Links are derived on-demand via JOINs on existing `topic_memberships` and `reference_id` columns — no new tables or FTS indices needed.
-
-### System Diagnostics
-
-```bash
-mpm doctor              # Run diagnostics (6 categories)
-mpm doctor --fix        # Apply automatic repairs
-```
-
-### Synthesis (LLM Tagging) — Not yet implemented
-
-```bash
-mpm synthesize <session-uuid>   # Generate memories from session via LLM
-```
-
-Configure LLM in `mpm_config.json` `[synth]` section. Requires external LLM API (e.g. Minimax).
-
-### Other Commands
-
-```bash
-mpm version               # Show version
-mpm help                  # Show help
-mpm ingest <path>         # Import from external SQLite
-mpm ingest list-schemas   # Show available tables
-mpm patch-memory <id> '<json-patch>'  # Patch metadata in-place (used by resolve_theory)
-mpm shred sessions -f     # Delete all sessions (requires --force)
-mpm shred memories -f     # Delete all memories
-mpm shred topics -f       # Delete all topics
-mpm shred database -f     # Wipe and recreate database
-```
+| Command | Notes |
+| --- | --- |
+| **Daily** | |
+| `mpm add <text> [--tag <tag>] [--weight <n>]` | Add memory |
+| `mpm add -i` | Interactive add via $EDITOR |
+| `mpm recall <query>` | FTS5 search (or bare `mpm <query>`) |
+| `mpm snooze <id>` | Bump relevance |
+| `mpm ls [--collection <c>] [--tag <t>] [--since <date>] [--limit <n>]` | List memories |
+| `mpm show <id>` | Show one memory |
+| `mpm rm <id>` | Soft delete |
+| **Epistemology** | |
+| `mpm propose_theory <text>` | Record hypothesis + validation criteria |
+| `mpm theories [pending\|resolved\|all]` | List theories with status chips |
+| `mpm resolve_theory <id> <conclusion>` | Mark resolved, bump weight |
+| `mpm record_decision <text>` | Log decision (context + choice + rationale) |
+| `mpm decisions` | Formatted decision ledger |
+| **Memory lifecycle** | |
+| `mpm promote <id>` | Elevate to LTM (weight=10) |
+| `mpm reinforce <id> [n]` | +N reinforcement |
+| `mpm weaken <id>` | -1 reinforcement |
+| `mpm set-weight <id> <n>` | Set weight directly |
+| `mpm patch-memory <id> '<json>'` | Patch metadata in-place (FTS untouched) |
+| `mpm shred <id>` | Secure delete |
+| **Engine room (`ops`)** | |
+| `mpm ops doctor [--fix]` | Diagnostics |
+| `mpm ops maintain [--days <n>]` | Decay + consolidate + prune |
+| `mpm ops synthesize [--dry-run]` | LLM synthesis |
+| `mpm ops gc [--dry-run\|--review\|--purge]` | Decay sweep |
+| `mpm ops review [--promoted\|--stale]` | Spaced reinforcement |
+| `mpm ops watch start [--bg]\|stop\|status` | Watcher daemon |
+| `mpm ops web [--port <n>]` | Web UI |
+| `mpm ops stats` | Statistics |
+| `mpm ops prune [--older-than <n>d]` | Prune old memories |
+| `mpm ops export [--jsonl]` | Export |
+| `mpm ops backup [path]` | Database backup |
+| `mpm ops restore-db <path>` | Restore .sql dump |
+| `mpm ops ingest <path>` | Import from external SQLite |
+| `mpm ops switch` | Interactive mode/persona switcher |
+| **Modes & Personas** | |
+| `mpm mode` | Interactive mode picker |
+| `mpm mode list\|active\|remove\|clear` | Direct mode management |
+| `mpm persona` | Interactive persona picker |
+| `mpm persona list\|active\|set\|clear` | Direct persona management |
+| `mpm prime-directives` | Display 808 rules |
+| **Topics, References, Sessions, Lessons** | |
+| `mpm topic create\|add\|remove\|list\|show\|promote` | Topic operations |
+| `mpm reference add\|list\|search\|show\|shred [--chunk-size <n>]` | Reference library |
+| `mpm session list\|search\|show` | Session operations |
+| `mpm lesson add\|list\|search\|get\|shred\|stats` | Lesson operations |
+| `mpm wake [--json]` | Last session context |
+| **System** | |
+| `mpm version\|help\|--version\|-h` | Info |
+| `mpm gateway <sub>` | OpenClaw gateway control |
+| `mpm ingest list-schemas` | Available import schemas |
+| `mpm shred sessions\|memories\|topics\|database [-f]` | Destructive ops |
 
 ---
 
