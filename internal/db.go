@@ -761,6 +761,13 @@ func (dm *DatabaseManager) GetSystemConfig(key string) (map[string]interface{}, 
 	}, nil
 }
 
+// DeleteSystemConfig removes a system config entry by key.
+// Returns nil even if the key does not exist (idempotent).
+func (dm *DatabaseManager) DeleteSystemConfig(key string) error {
+	_, err := dm.db.Exec(`DELETE FROM system_config WHERE key = ?`, key)
+	return err
+}
+
 // GetAllSystemConfigs returns all system config entries
 func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, error) {
 	rows, err := dm.db.Query(`SELECT key, raw_json, content_hash, updated_at, config_snapshot FROM system_config ORDER BY updated_at DESC`)

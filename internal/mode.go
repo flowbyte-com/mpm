@@ -15,17 +15,19 @@ import (
 
 // Mode represents a mode configuration from .md file
 type Mode struct {
-	Name         string `yaml:"name"`
-	Title        string `yaml:"title"`
-	Version      string `yaml:"version"`
-	Status       string `yaml:"status"`
-	Purpose      string `yaml:"purpose,omitempty"`
-	Description  string `yaml:"description,omitempty"`
-	Patterns     string `yaml:"patterns,omitempty"`
-	Checklist    string `yaml:"checklist,omitempty"`
-	AntiPatterns string `yaml:"anti_patterns,omitempty"`
-	Tools        string `yaml:"tools,omitempty"`
-	Content      string `yaml:"-"` // Markdown body after frontmatter
+	Name              string  `yaml:"name"`
+	Title             string  `yaml:"title"`
+	Version           string  `yaml:"version"`
+	Status            string  `yaml:"status"`
+	Purpose           string  `yaml:"purpose,omitempty"`
+	Description       string  `yaml:"description,omitempty"`
+	Patterns          string  `yaml:"patterns,omitempty"`
+	Checklist         string  `yaml:"checklist,omitempty"`
+	AntiPatterns      string  `yaml:"anti_patterns,omitempty"`
+	Tools             string  `yaml:"tools,omitempty"`
+	RetrievalLimit    int     `yaml:"retrieval_limit"`
+	RetrievalThreshold float64 `yaml:"retrieval_threshold"`
+	Content           string  `yaml:"-"` // Markdown body after frontmatter
 }
 
 // ModeManager handles mode operations from .md files
@@ -69,6 +71,12 @@ func parseModeFile(path string) (*Mode, error) {
 		if err := yaml.Unmarshal([]byte(frontmatter), &m); err != nil {
 			return nil, fmt.Errorf("invalid frontmatter in %s: %w", path, err)
 		}
+	}
+	if m.RetrievalLimit <= 0 {
+		m.RetrievalLimit = 5
+	}
+	if m.RetrievalThreshold == 0 {
+		m.RetrievalThreshold = -1.0
 	}
 	m.Content = body
 
