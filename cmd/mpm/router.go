@@ -429,7 +429,7 @@ var opsSubcommandDescs = []struct {
 	{"doctor [--explain]", "Run diagnostics (--explain for FTS5 query plan)"},
 	{"maintain", "Self-maintenance: decay, consolidate, prune"},
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
-	{"gc [--dry-run/--review/--purge]", "Memory decay sweep"},
+	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"watch", "Start/stop/status watcher daemon"},
 	{"web", "Start web UI server"},
 	{"review", "Spaced reinforcement review"},

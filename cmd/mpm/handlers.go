@@ -3262,6 +3262,12 @@ func handleChallenge(args []string) int {
 // ============================================================================
 
 func handleSwitch(args []string) int {
+	stat, _ := os.Stdin.Stat()
+	if (stat.Mode() & os.ModeCharDevice) == 0 {
+		fmt.Println("[!] Error: Interactive switch requires a TTY. Cannot run in headless/MCP mode.")
+		return 1
+	}
+
 	active, err := loadActiveJSON()
 	if err != nil {
 		fmt.Printf("[!] Error loading active.json: %v\n", err)
