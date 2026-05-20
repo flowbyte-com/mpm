@@ -23,7 +23,8 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
 - **Session memory context** — `mpm wake` surfaces last session's mode, persona, topics, and recent memories
 - **Security scanning** — 20 regex patterns for API keys, tokens, secrets
-- **Modes & Personas** — file-based (`.md`), multi-select modes, single-select persona
+- **XITL Routing Engine** — `assume_stance`, `synthesize_stance`, `mpm ops promote` — hot-swap or generate personas with automatic mode-driven retrieval depth
+- **Mode-Driven Context Retrieval** — each mode specifies `retrieval_limit` and `retrieval_threshold` controlling how many FTS5 chunks the proactive hint engine pulls. Debugging mode: tunnel vision (3 chunks, strict threshold). Research mode: wide gather (20 chunks, loose threshold). The LLM sees its own retrieval parameters as operating instructions.
 - **Invisible CLI** — `cat idea.md | mpm` pipes stdin to add; bare `mpm token budget` defaults to recall; 7-command daily surface with everything else under `mpm ops`
 - **Proactive recall hints** — `mpm hint "conversation text"` and `proactive_recall_hint` MCP tool surface relevant decisions and theories during conversation based on FTS5 keyword overlap
 
@@ -248,16 +249,39 @@ Systematic, precise, architectural. Thinks in code structures and abstraction bo
 - Silent error handling
 ```
 
-**Frontmatter fields:** `name`, `title`, `version`, `status`, `purpose`, `description`, plus persona-specific fields (`creature`, `vibe`, `voice`, `emoji`).
+**Mode-Driven Retrieval Parameters**
+
+Each mode file specifies two YAML fields that govern the proactive recall engine:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `retrieval_limit` | int | Max FTS5 chunks to pull per hint query |
+| `retrieval_threshold` | float64 | Min BM25 score to be considered relevant (lower = stricter) |
+
+Defaults: `retrieval_limit: 5`, `retrieval_threshold: -1.0` when mode lacks the fields.
+
+| Mode | limit | threshold | Behavior |
+|---|---|---|---|
+| `debugging` | 3 | -2.5 | Tunnel vision — only the most highly weighted, directly relevant facts |
+| `research` | 20 | -1.0 | Wide gather — build the full picture from scattered fragments |
+| `architect` | 10 | -1.5 | Structural depth — trades breadth for clarity of component edges |
+| `programming` | 5 | -2.0 | Precision — clean, minimal, high-signal only |
+| `standard` | 7 | -1.5 | Balanced — neither turbocharged nor constrained |
+
+These parameters apply only to the **proactive hint engine** and are exposed to the LLM in `GetSystemPrompt()` as operating instructions. Explicit `mpm recall` is **untouched** — human commands always override.
+
+JIT ephemeral personas can set custom `retrieval_limit` in their JSON blob. A 50-chunk window for a massive codebase migration is valid — the Go backend respects whatever limit the ephemeral persona specifies.
 
 **Active state** (`active.json`):
 ```json
 {
-  "persona": "whiterabbit",
-  "modes": ["programming", "research"],
-  "updated": "2026-05-13T15:00:00Z"
+  "persona": "auto",
+  "modes": ["auto"],
+  "updated": "2026-05-20T11:00:00Z"
 }
 ```
+
+Setting `mode` or `persona` to `"auto"` enables the XITL self-routing engine. When auto is active, 808 can invoke `assume_stance` to hot-swap an existing persona, or `synthesize_stance` to generate a JIT ephemeral persona stored in `system_config`. Only `mpm ops promote` writes a new `.md` file to disk — no disk bloat from experimental personas.
 
 ---
 
@@ -284,6 +308,9 @@ MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calli
 | `propose_theory` | Log hypothesis before writing fix |
 | `resolve_theory` | Mark theory proven/disproven, patch metadata in-place |
 | `proactive_recall_hint` | Surface relevant decisions/theories from conversation context |
+| `assume_stance` | XITL: hot-swap existing persona when `auto` mode is active |
+| `synthesize_stance` | XITL: generate JIT ephemeral persona for novel edge cases |
+| `challenge_memory` | Challenge a memory — weaken, create theory, log decision |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
 
@@ -430,7 +457,9 @@ mpm ops export               Export all to JSON
 mpm ops backup [path]        Database backup
 mpm ops restore-db <path>    Restore from .sql dump
 mpm ops ingest <path>        Import from external SQLite
-mpm ops switch               Interactive persona/mode switcher
+mpm ops stance assume <mode> <persona> <rationale>  XITL: hot-swap existing persona (auto required)
+mpm ops stance synthesize <name> [flags]          XITL: generate JIT ephemeral persona
+mpm ops promote                                   XITL: flush ephemeral persona to disk
 mpm ops mode | persona       Mode and persona operations
 mpm ops topic | lesson       Topic and lesson operations
 mpm ops session | memory     Session and memory operations
