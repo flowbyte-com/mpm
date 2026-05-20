@@ -1332,12 +1332,13 @@ func printHelp() {
 	alsoSection := buildHelpSection("Also available via ops", []helpCmd{
 		{"mode | persona | topic", "", false},
 		{"lesson | session | reference", "", false},
-		{"wake | directives | switch", "", false},
+		{"wake | directives | switch | status", "", false},
 		{"doctor | maintain | gc", "", false},
 		{"watch | web | review", "", false},
 		{"stats | prune | export", "", false},
 		{"backup | restore-db | ingest", "", false},
 		{"gateway", "", false},
+		{"hint", "Proactive epistemology recall", false},
 	})
 
 	mainStyle := lipgloss.NewStyle().
