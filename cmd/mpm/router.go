@@ -407,10 +407,16 @@ func handleOps(args []string) int {
 		return 0
 
 	// — Status Dashboard —
-	case "status":
-		return handleStatus()
+		case "stance":
+			return handleStance(subArgs)
 
-	// — Help —
+		case "promote":
+			return handleOpsPromote()
+
+		case "status":
+			return handleStatus()
+
+		// — Help —
 	case "help":
 		printOpsHelp()
 		return 0
@@ -451,10 +457,13 @@ var opsSubcommandDescs = []struct {
 	{"wake", "Show last session context"},
 	{"gateway", "Gateway control"},
 	{"status", "System status dashboard"},
-	{"help", "Show this help"},
-}
+		{"stance assume <mode> <persona> <rationale>", "XITL: hot-swap existing persona when auto active"},
+		{"stance synthesize <name> [flags]", "XITL: generate JIT persona for novel edge cases"},
+		{"promote", "XITL: promote ephemeral persona to permanent disk file"},
+		{"help", "Show this help"},
+	}
 
-// printOpsHelp displays the ops subcommand help text.
+	// printOpsHelp displays the ops subcommand help text.
 func printOpsHelp() {
 	fmt.Println()
 	fmt.Println("mpm ops — Engine Room: maintenance, diagnostics, and power tools")

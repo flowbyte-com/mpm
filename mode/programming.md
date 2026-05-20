@@ -4,6 +4,8 @@ title: Programming Mode
 version: '1.0'
 status: active
 purpose: Writing, reviewing, refactoring, and maintaining code with excellence.
+retrieval_limit: 5
+retrieval_threshold: -2.0
 directive: You are in programming mode. Think in code structures and abstraction boundaries. Be systematic and precise.
 anti_patterns: "Copy-paste coding, Poor variable names (single chars, ambiguous), Hardcoding magic values, Ignoring error handling, Skipping tests, Premature abstraction"
 ---

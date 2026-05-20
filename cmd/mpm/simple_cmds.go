@@ -1120,6 +1120,8 @@ func getPersonaFiles() []string {
 
 // GetSystemPrompt reads the active persona and mode .md files and concatenates
 // their frontmatter directives into a single system prompt string.
+// If the active persona is "ephemeral", it fetches the JIT persona blob from
+// system_config and formats it as YAML frontmatter in place of a file read.
 func GetSystemPrompt() string {
 	active, err := loadActiveJSON()
 	if err != nil {
@@ -1128,10 +1130,22 @@ func GetSystemPrompt() string {
 
 	var parts []string
 
-	personaPath := filepath.Join(config.GetMPMDir(), "persona", active.Persona+".md")
-	if data, err := os.ReadFile(personaPath); err == nil {
-		if content := extractFrontmatterDirective(string(data)); content != "" {
-			parts = append(parts, content)
+	// Ephemeral persona intercept: fetch from system_config
+	if active.Persona == "ephemeral" {
+		if dm, dmErr := mpminternal.NewDatabaseManager(""); dmErr == nil {
+			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
+				if fm, fmErr := mpminternal.FormatEphemeralPersonaAsFrontmatter(ep); fmErr == nil {
+					parts = append(parts, "## Active Persona (JIT)\n\n"+fm)
+				}
+			}
+			dm.Close()
+		}
+	} else {
+		personaPath := filepath.Join(config.GetMPMDir(), "persona", active.Persona+".md")
+		if data, err := os.ReadFile(personaPath); err == nil {
+			if content := extractFrontmatterDirective(string(data)); content != "" {
+				parts = append(parts, content)
+			}
 		}
 	}
 
@@ -1140,6 +1154,9 @@ func GetSystemPrompt() string {
 		if data, err := os.ReadFile(modePath); err == nil {
 			if content := extractFrontmatterDirective(string(data)); content != "" {
 				parts = append(parts, content)
+			}
+			if limit, threshold := extractRetrievalParams(string(data)); limit > 0 {
+				parts = append(parts, fmt.Sprintf("retrieval_limit=%d, retrieval_threshold=%.1f", limit, threshold))
 			}
 		}
 	}
@@ -1170,4 +1187,38 @@ func extractFrontmatterDirective(content string) string {
 		}
 	}
 	return ""
+}
+
+// extractRetrievalParams reads retrieval_limit and retrieval_threshold from
+// a mode .md file's YAML frontmatter. Returns (0, 0) if not found.
+func extractRetrievalParams(content string) (int, float64) {
+	idx := strings.Index(content, "---")
+	if idx == -1 {
+		return 0, 0
+	}
+	body := content[idx+3:]
+	endIdx := strings.Index(body, "---")
+	if endIdx == -1 {
+		return 0, 0
+	}
+	fm := body[:endIdx]
+
+	limit := 0
+	threshold := 0.0
+	for _, line := range strings.Split(fm, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "retrieval_limit:") {
+			val := strings.TrimSpace(trimmed[16:])
+			if n, err := strconv.Atoi(val); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if strings.HasPrefix(trimmed, "retrieval_threshold:") {
+			val := strings.TrimSpace(trimmed[20:])
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				threshold = f
+			}
+		}
+	}
+	return limit, threshold
 }
