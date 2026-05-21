@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -465,14 +466,16 @@ func handleRecall(args []string) int {
 			ids = append(ids, "?")
 			vals = append(vals, id)
 		}
-		dm.SQLDB().Exec(fmt.Sprintf(`
+		if _, err := dm.SQLDB().Exec(fmt.Sprintf(`
 			UPDATE memories
 			SET weight = MIN(weight + 0.5, 100.0),
 			    last_accessed_at = CURRENT_TIMESTAMP
 			WHERE id IN (%s)
 			  AND weight >= 1
 			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-1 hour'))
-		`, strings.Join(ids, ",")), vals...)
+		`, strings.Join(ids, ",")), vals...); err != nil {
+			slog.Warn("implicit reinforcement failed", "error", err)
+		}
 	}
 
 	return 0

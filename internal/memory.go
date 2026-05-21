@@ -14,10 +14,15 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"mpm/internal/config"
 )
 
+// NOTE: All code in this file connects through the shared DatabaseManager
+// (mattn/go-sqlite3 with FTS5 enabled). Full-text search operations
+// belong in db.go or recall.go, not here. If you need FTS, call
+// DatabaseManager methods — do NOT open a separate connection or import
+// a pure-Go driver (modernc.org/sqlite) that lacks FTS5 support.
+//
 // Memory represents a single memory unit
 type Memory struct {
 	ID                 string                 `json:"id"`
@@ -155,10 +160,26 @@ func (s *MemoryStore) InitCollections() {
 	_ = s.Collections
 }
 
+var validTableNames = map[string]bool{
+	"sessions":            true,
+	"topics":              true,
+	"topic_memberships":   true,
+	"memories":            true,
+	"system_config":       true,
+	"lessons":             true,
+	"raw_memories":        true,
+	"external_db_cursors": true,
+	"reference_docs":      true,
+	"reference_chunks":    true,
+}
+
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.
 // SQLite's "ALTER TABLE t ADD COLUMN c TYPE" is idempotent — it succeeds if column exists
 // (SQLite ignores duplicate column errors), but we check first for clarity.
 func (s *MemoryStore) addColumnIfNotExists(table, column, colType string) error {
+	if !validTableNames[table] {
+		return fmt.Errorf("invalid table name: %s", table)
+	}
 	rows, err := s.DB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return fmt.Errorf("failed to query table info for %s: %w", table, err)
@@ -226,7 +247,6 @@ func (s *MemoryStore) InitSQLite() error {
 		{"sessions_fts", "content, session_id, content_hash UNINDEXED", "sessions"},
 		{"topics_fts", "name, description", "topics"},
 		{"lessons_fts", "content, tags", "lessons"},
-		{"references_fts", "title, content, tags", "reference_docs"},
 	}
 	ftsAvailable := true
 	for _, ft := range fts {
@@ -256,9 +276,6 @@ func (s *MemoryStore) InitSQLite() error {
 		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END`,
 		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
-		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON reference_docs BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
-		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END`,
-		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END`,
 	}
 	for _, sql := range triggers {
 		if _, err := s.DB.Exec(sql); err != nil {

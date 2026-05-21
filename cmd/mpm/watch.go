@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"log/slog"
 	"strings"
 	"sync"
 	"syscall"
@@ -1281,10 +1282,12 @@ func (d *watcherDaemon) createTopicFromCluster(tag string, memoryIDs []string) (
 		}
 
 		// Insert membership link
-		d.db.SQLDB().Exec(`
+		if _, err := d.db.SQLDB().Exec(`
 			INSERT OR IGNORE INTO topic_memberships (session_id, topic_id)
 			VALUES (?, ?)
-		`, sessionID, topicID)
+		`, sessionID, topicID); err != nil {
+			slog.Warn("topic membership insert failed", "session_id", sessionID, "topic_id", topicID, "error", err)
+		}
 	}
 
 	return topicID, nil
