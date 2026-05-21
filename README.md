@@ -281,7 +281,7 @@ JIT ephemeral personas can set custom `retrieval_limit` in their JSON blob. A 50
 }
 ```
 
-Setting `mode` or `persona` to `"auto"` enables the XITL self-routing engine. When auto is active, 808 can invoke `assume_stance` to hot-swap an existing persona, or `synthesize_stance` to generate a JIT ephemeral persona stored in `system_config`. Only `mpm ops promote` writes a new `.md` file to disk — no disk bloat from experimental personas.
+Setting `mode` or `persona` to `"auto"` enables the XITL self-routing engine. When auto is active, 808 can invoke `assume_stance` to hot-swap an existing persona, or `synthesize_stance` to generate a JIT ephemeral persona stored in `system_config`. The new directive is printed to stdout — OpenClaw captures it and injects into the session chat history, so 808 reads and adopts it on the very next turn. No restart, no polling, no core changes. Only `mpm ops promote` writes a new `.md` file to disk — no disk bloat from experimental personas.
 
 ---
 
