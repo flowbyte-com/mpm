@@ -58,9 +58,17 @@ func NewSQLiteConnection(dbPath string) (*SQLiteConnection, error) {
 	return &SQLiteConnection{DB: db}, nil
 }
 
+// WipeTableNames is the allowlist of tables that can be wiped/deleted
+var WipeTableNames = map[string]string{
+	"sessions": "sessions",
+	"memories": "memories",
+	"topics":   "topics",
+}
+
 // WipeRecord performs a hard delete with VACUUM (on SQLiteConnection for backwards compatibility)
 func (sc *SQLiteConnection) WipeRecord(tier, id string) error {
-	if tier != "sessions" && tier != "memories" && tier != "topics" {
+	tableName := WipeTableNames[tier]
+	if tableName == "" {
 		return fmt.Errorf("cannot wipe from tier: %s", tier)
 	}
 	tx, err := sc.DB.Begin()
@@ -69,7 +77,7 @@ func (sc *SQLiteConnection) WipeRecord(tier, id string) error {
 	}
 	defer tx.Rollback()
 
-	if _, err = tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", tier), id); err != nil {
+	if _, err = tx.Exec("DELETE FROM "+tableName+" WHERE id = ?", id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -434,7 +442,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags UNINDEXED, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_docs_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
 
 		`CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
@@ -454,9 +462,9 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS topics_au AFTER UPDATE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END;`,
 
-		`CREATE TRIGGER IF NOT EXISTS reference_docs_ai AFTER INSERT ON reference_docs BEGIN INSERT INTO reference_docs_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
-		`CREATE TRIGGER IF NOT EXISTS reference_docs_ad AFTER DELETE ON reference_docs BEGIN DELETE FROM reference_docs_fts WHERE rowid = old.rowid; END;`,
-		`CREATE TRIGGER IF NOT EXISTS reference_docs_au AFTER UPDATE ON reference_docs BEGIN DELETE FROM reference_docs_fts WHERE rowid = old.rowid; INSERT INTO reference_docs_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS references_ai AFTER INSERT ON reference_docs BEGIN INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS references_ad AFTER DELETE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS references_au AFTER UPDATE ON reference_docs BEGIN DELETE FROM references_fts WHERE rowid = old.rowid; INSERT INTO references_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags); END;`,
 
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ai AFTER INSERT ON reference_chunks BEGIN INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ad AFTER DELETE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; END;`,
@@ -856,6 +864,9 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 		sim := cosineSimilarity(queryEmbedding, dbEmbedding)
 		results = append(results, searchResult{id, content, createdAt, sim})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].similarity > results[j].similarity })
 	if len(results) > limit {
@@ -878,7 +889,8 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 
 // WipeRecord performs a hard delete (on DatabaseManager)
 func (dm *DatabaseManager) WipeRecord(tier, id string) error {
-	if tier != "sessions" && tier != "memories" && tier != "topics" {
+	tableName := WipeTableNames[tier]
+	if tableName == "" {
 		return fmt.Errorf("cannot wipe from tier: %s", tier)
 	}
 	// Clean up topic_memberships when deleting a topic
@@ -887,7 +899,7 @@ func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 			return err
 		}
 	}
-	_, err := dm.db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", tier), id)
+	_, err := dm.db.Exec("DELETE FROM "+tableName+" WHERE id = ?", id)
 	return err
 }
 
@@ -905,10 +917,11 @@ func ShredSession(db *sql.DB, id string) error {
 
 // DeleteByID performs a hard delete (for general use)
 func DeleteByID(db *sql.DB, table, id string) error {
-	if table != "sessions" && table != "memories" && table != "topics" {
+	tableName := WipeTableNames[table]
+	if tableName == "" {
 		return fmt.Errorf("cannot delete from table: %s", table)
 	}
-	_, err := db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
+	_, err := db.Exec("DELETE FROM "+tableName+" WHERE id = ?", id)
 	return err
 }
 
@@ -1257,6 +1270,9 @@ func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
 			UnmarshalJSON(tagsJSON, &lesson.Tags)
 		}
 		lessons = append(lessons, &lesson)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return lessons, nil
 }

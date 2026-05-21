@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,12 +208,13 @@ func main() {
 						os.Exit(0)
 					}
 					printSuccess("memory saved (id=%s)", mem.ID)
-					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
-					go func(id, c string) {
-						synthDM, synthErr := mpminternal.NewDatabaseManager("")
-						if synthErr != nil {
-							return
-						}
+				// Fire-and-forget auto-synthesis (same pattern as memory add handler)
+				go func(id, c string) {
+					synthDM, synthErr := mpminternal.NewDatabaseManager("")
+					if synthErr != nil {
+						slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
+						return
+					}
 						defer synthDM.Close()
 						mpminternal.AutoSynthesize(context.Background(), synthDM, mpminternal.NewSynthClient(), id, c)
 					}(mem.ID, data)
@@ -1081,9 +1083,8 @@ func runDatabaseCheck(result *PreFlightResult) {
 }
 
 // openDatabase opens a SQLite database and returns the connection
-// Uses modernc.org/sqlite (pure Go, no cgo)
 func openDatabase(path string) (*sql.DB, error) {
-	return sql.Open("sqlite", path+"?mode=ro") // Read-only mode for checks
+	return sql.Open("sqlite3", path+"?mode=ro") // Read-only mode for checks
 }
 
 // runPersonaCheck validates active persona exists

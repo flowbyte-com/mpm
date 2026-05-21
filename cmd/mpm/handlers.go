@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"log/slog"
 	"strconv"
 	"strings"
 	"syscall"
@@ -355,6 +356,7 @@ func handleMemoryAdd(args []string) int {
 		go func(id, c string) {
 			synthDM, synthErr := mpminternal.NewDatabaseManager("")
 			if synthErr != nil {
+				slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
 				return
 			}
 			defer synthDM.Close()
@@ -1205,10 +1207,14 @@ func handleGC(args []string) int {
 	// Also catches existing zombies (weight <= 0 from previous GC runs that were never cleaned).
 	if review && !dryRun {
 		for _, m := range deadMemories {
-			dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, m["id"])
+			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, m["id"]); err != nil {
+				slog.Warn("gc soft-delete failed", "id", m["id"], "error", err)
+			}
 		}
 		// Clean any lingering zombies not caught by this pass
-		dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`)
+		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
+			slog.Warn("gc zombie cleanup failed", "error", err)
+		}
 		if len(deadMemories) > 0 {
 			fmt.Printf("Soft-deleted %d dead memories\n", len(deadMemories))
 		}
@@ -1796,6 +1802,7 @@ func handleWake(args []string) int {
 		for rows.Next() {
 			var memID, collection, content, tagsJSON, metadataJSON, createdAt string
 			if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
+				slog.Warn("handleWake: rows.Scan failed", "error", err)
 				break
 			}
 			var tags []string
@@ -4432,6 +4439,15 @@ func handleStanceAssume(args []string) int {
 	auditContent := fmt.Sprintf("CONTEXT: Stance hot-swap to %s/%s. RATIONALE: %s. CHOICE: assume_stance", mode, persona, rationale)
 	dm.SaveMemory("decisions", auditContent, "", nil, nil, nil, false, 1)
 
+	// Inject new directive into LLM context mid-session via stdout.
+	// OpenClaw captures tool stdout and injects it into the session chat history,
+	// so 808 reads this on the very next turn and hot-swaps without restart.
+	directive := GetSystemPrompt()
+	fmt.Print("\n[SYSTEM NOTIFICATION: STANCE HOT-SWAPPED]\n")
+	fmt.Print("You must immediately adopt the following Mode and Persona directives for the remainder of this session:\n\n")
+	fmt.Print(directive)
+	fmt.Print("\n")
+
 	return respond(fmt.Sprintf("Stance assumed: mode=%s persona=%s\n", mode, persona), "", 0)
 }
 
@@ -4520,6 +4536,16 @@ func handleStanceSynthesize(args []string) int {
 	if title != "" {
 		displayName = title
 	}
+
+	// Inject new directive into LLM context mid-session via stdout.
+	// OpenClaw captures tool stdout and injects it into the session chat history,
+	// so 808 reads this on the very next turn and hot-swaps without restart.
+	directive := GetSystemPrompt()
+	fmt.Print("\n[SYSTEM NOTIFICATION: STANCE HOT-SWAPPED]\n")
+	fmt.Print("You must immediately adopt the following Mode and Persona directives for the remainder of this session:\n\n")
+	fmt.Print(directive)
+	fmt.Print("\n")
+
 	return respond(fmt.Sprintf("Synthesized ephemeral persona: %q (active: ephemeral)\n", displayName), "", 0)
 }
 

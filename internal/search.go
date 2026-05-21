@@ -6,19 +6,13 @@ import (
 
 type SearchOptions struct {
 	Query string
-	Table string // Validated against tableAllowlist
+	Table string // Validated against WipeTableNames
 	Limit int
 	ID    string
 }
 
-var tableAllowlist = map[string]bool{
-	"sessions": true,
-	"memories": true,
-	"topics":   true,
-}
-
 func (dm *DatabaseManager) SearchWithSnippet(opts SearchOptions) ([]map[string]interface{}, error) {
-	if !tableAllowlist[opts.Table] {
+	if WipeTableNames[opts.Table] == "" {
 		return nil, fmt.Errorf("invalid table: %s", opts.Table)
 	}
 
@@ -55,7 +49,7 @@ func (dm *DatabaseManager) SearchWithSnippet(opts SearchOptions) ([]map[string]i
 
 // Shred now correctly verifies the deletion on the primary table.
 func (dm *DatabaseManager) Shred(opts SearchOptions) error {
-	if !tableAllowlist[opts.Table] {
+	if WipeTableNames[opts.Table] == "" {
 		return fmt.Errorf("invalid tier for shredding: %s", opts.Table)
 	}
 
