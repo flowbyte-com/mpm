@@ -6,14 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // IdleConsolidationWorker runs low-priority pattern detection when the
 // filesystem watcher has been quiet for a configurable period.
-// It uses semantic search to find pairs of high-weight LTM memories that
+// It uses stochastic sampling to find pairs of high-weight LTM memories that
 // are similar but unlinked, synthesizes them, and proposes new Theories
 // or Lessons when patterns are detected.
+//
+// CPU behavior: O(1) per cycle regardless of corpus size.
+// Each cycle samples 20 seeds × 10 candidates = 200 comparisons max.
+// The combinatorial space is slowly covered over weeks of idle operation.
 type IdleConsolidationWorker struct {
 	db          *DatabaseManager
 	quietPeriod time.Duration // e.g. 30 minutes
@@ -61,8 +66,6 @@ func (w *IdleConsolidationWorker) Stop() {
 func (w *IdleConsolidationWorker) run() {
 	defer w.wg.Done()
 
-	// Wait for the initial quiet period before starting the first cycle.
-	// Don't fire immediately on startup — give the system time to settle.
 	ticker := time.NewTicker(w.checkEvery)
 	defer ticker.Stop()
 
@@ -128,17 +131,24 @@ func (w *IdleConsolidationWorker) doCycle() {
 		"failed", failed)
 }
 
-// lastWatcherEventAt is set by the watcher event loop (cmd/mpm/handlers.go).
-// This is the shared activity clock between the watcher and the idle worker.
-var lastWatcherEventAt time.Time
+// lastWatcherEventAtNano is the atomic activity clock written by the watcher
+// goroutine and read by the idle worker. Storing UnixNano avoids data races
+// on time.Time without adding mutex overhead to the hot watcher path.
+var lastWatcherEventAtNano atomic.Int64
+
+// UpdateLastWatcherEvent is called by the watcher event loop on every fsnotify event.
+func UpdateLastWatcherEvent() {
+	lastWatcherEventAtNano.Store(time.Now().UnixNano())
+}
 
 // isQuiet returns true if no filesystem events have been seen for
-// at least quietPeriod duration.
+// at least quietPeriod duration. Atomic read — race-free.
 func (w *IdleConsolidationWorker) isQuiet() bool {
-	if lastWatcherEventAt.IsZero() {
+	lastNano := lastWatcherEventAtNano.Load()
+	if lastNano == 0 {
 		return false
 	}
-	return time.Since(lastWatcherEventAt) >= w.quietPeriod
+	return time.Since(time.Unix(0, lastNano)) >= w.quietPeriod
 }
 
 // MemoryPair represents two memories that are semantically similar but
@@ -149,10 +159,87 @@ type MemoryPair struct {
 	CosineSim float32
 }
 
-// findUnlinkedSimilarPairs uses semantic search to find pairs of high-weight
+// findUnlinkedSimilarPairs uses stochastic sampling to find pairs of high-weight
 // LTM memories (weight >= 10) with cosine similarity > 0.75 that share no
-// common topic. These are candidates for cross-pollination.
+// common topic. Bounded to O(1) comparisons per cycle — 20 seeds × 10 candidates = 200 max.
+// This caps CPU at a fixed ceiling regardless of corpus size.
 func (w *IdleConsolidationWorker) findUnlinkedSimilarPairs() ([]MemoryPair, error) {
+	const seedLimit = 20       // random LTM seeds per cycle
+	const candidateLimit = 10  // random candidates per seed
+	const similarityThreshold = 0.75
+	const pairCap = 10
+
+	// Sample seeds with ORDER BY RANDOM()
+	seeds, err := w.fetchRandomMemories(seedLimit)
+	if err != nil || len(seeds) < 2 {
+		return nil, err
+	}
+
+	// Fetch candidates (separate random sample)
+	candidates, err := w.fetchRandomMemories(candidateLimit)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+
+	// Build topic map for seeds only (reduce query surface)
+	seedIDs := make([]string, len(seeds))
+	for i, s := range seeds {
+		seedIDs[i] = s.ID
+	}
+	topicMap := w.fetchTopicMap(seedIDs)
+
+	var pairs []MemoryPair
+	for _, seed := range seeds {
+		vecSeed := parseEmbedding(seed.Embedding)
+		if len(vecSeed) == 0 {
+			continue
+		}
+
+		for _, cand := range candidates {
+			if cand.ID == seed.ID {
+				continue
+			}
+
+			vecCand := parseEmbedding(cand.Embedding)
+			if len(vecCand) == 0 {
+				continue
+			}
+
+			sim := cosineSimilarity(vecSeed, vecCand)
+			if sim < similarityThreshold {
+				continue
+			}
+
+			// Check topic overlap
+			t1 := topicMap[seed.ID]
+			t2 := topicMap[cand.ID]
+			if shareTopics(t1, t2) {
+				continue
+			}
+
+			pairs = append(pairs, MemoryPair{
+				Memory1:   Memory{ID: seed.ID, Content: seed.Content, Tags: parseTags(seed.Tags), Weight: seed.Weight},
+				Memory2:   Memory{ID: cand.ID, Content: cand.Content, Tags: parseTags(cand.Tags), Weight: cand.Weight},
+				CosineSim: sim,
+			})
+
+			if len(pairs) >= pairCap {
+				return pairs, nil
+			}
+		}
+	}
+
+	return pairs, nil
+}
+
+type rawMem struct {
+	ID, Content, Collection, Tags, Metadata, Embedding string
+	Weight                                              int
+	Created                                             string
+}
+
+// fetchRandomMemories returns a random sample of high-weight LTMs.
+func (w *IdleConsolidationWorker) fetchRandomMemories(limit int) ([]rawMem, error) {
 	rows, err := w.db.SQLDB().Query(`
 		SELECT id, content, collection, tags, metadata, embedding, weight, created
 		FROM memories
@@ -161,83 +248,70 @@ func (w *IdleConsolidationWorker) findUnlinkedSimilarPairs() ([]MemoryPair, erro
 		  AND weight >= 10
 		  AND embedding IS NOT NULL
 		  AND embedding != 'null'
-		ORDER BY weight DESC, created DESC
-		LIMIT 100
-	`)
+		ORDER BY RANDOM()
+		LIMIT ?
+	`, limit)
 	if err != nil {
-		return nil, fmt.Errorf("idle_worker: query failed: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
-	type rawMem struct {
-		ID, Content, Collection, Tags, Metadata, Embedding string
-		Weight                                            int
-		Created                                           string
-	}
-	var memories []rawMem
+	var result []rawMem
 	for rows.Next() {
 		var m rawMem
 		if err := rows.Scan(&m.ID, &m.Content, &m.Collection, &m.Tags, &m.Metadata, &m.Embedding, &m.Weight, &m.Created); err != nil {
 			continue
 		}
-		memories = append(memories, m)
+		result = append(result, m)
+	}
+	return result, rows.Err()
+}
+
+// fetchTopicMap returns topic IDs for each memory ID in the input slice.
+func (w *IdleConsolidationWorker) fetchTopicMap(memIDs []string) map[string][]string {
+	result := make(map[string][]string)
+	if len(memIDs) == 0 {
+		return result
 	}
 
-	if len(memories) < 2 {
-		return nil, nil
+	// Build ? placeholders for IN clause
+	placeholders := make([]byte, 0, len(memIDs)*2)
+	args := make([]interface{}, len(memIDs))
+	for i, id := range memIDs {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = id
 	}
 
-	// Build topic membership map
-	topicMap := make(map[string][]string)
-	topicRows, err := w.db.SQLDB().Query(`
-		SELECT memory_id, topic_id FROM topic_memberships
-		WHERE memory_id IN (SELECT id FROM memories WHERE deleted_at IS NULL)
-	`)
-	if err == nil {
-		defer topicRows.Close()
-		for topicRows.Next() {
-			var memID, topicID string
-			topicRows.Scan(&memID, &topicID)
-			topicMap[memID] = append(topicMap[memID], topicID)
+	query := fmt.Sprintf(`SELECT memory_id, topic_id FROM topic_memberships WHERE memory_id IN (%s)`, string(placeholders))
+	rows, err := w.db.SQLDB().Query(query, args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var memID, topicID string
+		rows.Scan(&memID, &topicID)
+		result[memID] = append(result[memID], topicID)
+	}
+	return result
+}
+
+// shareTopics returns true if any topic ID appears in both lists.
+func shareTopics(a, b []string) bool {
+	seen := make(map[string]bool)
+	for _, t := range a {
+		seen[t] = true
+	}
+	for _, t := range b {
+		if seen[t] {
+			return true
 		}
 	}
-
-	var pairs []MemoryPair
-	for i := 0; i < len(memories); i++ {
-		for j := i + 1; j < len(memories); j++ {
-			m1, m2 := memories[i], memories[j]
-
-			vec1 := parseEmbedding(m1.Embedding)
-			vec2 := parseEmbedding(m2.Embedding)
-			if len(vec1) == 0 || len(vec2) == 0 {
-				continue
-			}
-
-			sim := cosineSimilarity(vec1, vec2)
-			if sim < 0.75 {
-				continue
-			}
-
-			// Check for topic overlap
-			t1 := topicMap[m1.ID]
-			t2 := topicMap[m2.ID]
-			if shareTopics(t1, t2) {
-				continue
-			}
-
-			pairs = append(pairs, MemoryPair{
-				Memory1:   Memory{ID: m1.ID, Content: m1.Content, Tags: parseTags(m1.Tags), Weight: m1.Weight},
-				Memory2:   Memory{ID: m2.ID, Content: m2.Content, Tags: parseTags(m2.Tags), Weight: m2.Weight},
-				CosineSim: sim,
-			})
-
-			if len(pairs) >= 10 {
-				return pairs, nil
-			}
-		}
-	}
-
-	return pairs, nil
+	return false
 }
 
 func parseEmbedding(raw string) []float32 {
@@ -260,20 +334,6 @@ func parseTags(raw string) []string {
 	return t
 }
 
-// shareTopics returns true if any topic ID appears in both lists.
-func shareTopics(a, b []string) bool {
-	seen := make(map[string]bool)
-	for _, t := range a {
-		seen[t] = true
-	}
-	for _, t := range b {
-		if seen[t] {
-			return true
-		}
-	}
-	return false
-}
-
 // cycleResult tracks what happened with a pair examination.
 type cycleResult int
 
@@ -285,11 +345,11 @@ const (
 
 // SynthResult holds the parsed result of the idle synthesis prompt.
 type SynthResult struct {
-	PatternDetected     bool    `json:"pattern_detected"`
-	PatternName         string  `json:"pattern_name"`
-	PatternExplanation  string  `json:"pattern_explanation"`
-	Confidence          float32 `json:"confidence"`
-	ProposedAs          string  `json:"proposed_as"`
+	PatternDetected    bool    `json:"pattern_detected"`
+	PatternName        string  `json:"pattern_name"`
+	PatternExplanation string  `json:"pattern_explanation"`
+	Confidence         float32 `json:"confidence"`
+	ProposedAs         string  `json:"proposed_as"`
 }
 
 // examinePair runs a lightweight synthesis on a pair of memories to detect
@@ -358,7 +418,6 @@ func min(a, b int) int {
 
 // proposeTheoryOrLesson saves a proposed pattern as a pending theory or lesson.
 func (w *IdleConsolidationWorker) proposeTheoryOrLesson(pair MemoryPair, result SynthResult) {
-	// Dedup check
 	key := fmt.Sprintf("idle:%s:%s", pair.Memory1.ID, pair.Memory2.ID)
 	if !checkSynthDedup(key) {
 		return
@@ -409,8 +468,8 @@ func (w *IdleConsolidationWorker) proposeTheoryOrLesson(pair MemoryPair, result 
 		"type", result.ProposedAs)
 }
 
-// checkSynthDedup and markSynthDedup are the local wrappers around the
-// package-level synthSeen map in synthesize.go.
+// checkSynthDedup and markSynthDedup are wrappers around the package-level
+// synthSeen map defined in synthesize.go.
 func checkSynthDedup(key string) bool {
 	synthSeenMu.Lock()
 	defer synthSeenMu.Unlock()
