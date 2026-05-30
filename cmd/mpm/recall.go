@@ -40,6 +40,8 @@ func handleRecall(args []string) int {
 	tokenBudget := fs.Int("token-budget", 0, "Max cumulative tokens before truncation (0=unlimited)")
 	weightBelow := fs.Int("weight-below", 0, "Only results with weight below this value (0=no filter)")
 	before := fs.String("before", "", "Only results created before this date (YYYY-MM-DD)")
+	semantic := fs.Bool("semantic", false, "Use hybrid semantic search (FTS5 + embeddings)")
+	vectorWeight := fs.Float64("vector-weight", 0.5, "Vector weight in hybrid search (0=FTS5-only, 1=vector-only)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
 		fmt.Println("\nRecall options:")
@@ -166,6 +168,24 @@ func handleRecall(args []string) int {
 
 	db := dm.SQLDB()
 	returnedIDs := make(map[string]bool)
+
+	// Hybrid semantic search: FTS5 + vector embeddings blended
+	if *semantic {
+		cfg := mpminternal.DefaultHybridConfig()
+		cfg.Limit = *limit
+		cfg.VectorWeight = *vectorWeight
+		hybridResults, err := mpminternal.HybridSearch(dm, query, *collection, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Semantic search failed: %v\n", err)
+			return 1
+		}
+		if len(hybridResults) == 0 {
+			fmt.Printf("No memories found for: %s\n", query)
+			return 0
+		}
+		// Render hybrid results as recall entries and output
+		return renderHybridResults(hybridResults, query, *jsonOutput, *tokenBudget, *staleDays, dm)
+	}
 
 	// Keyword search using LIKE + FTS5 fallback with time and weight filters
 	rows, err := keywordSearchWithTime(db, query, *collection, *since, *until, *weightBelow, *before, *limit)
@@ -691,4 +711,68 @@ func isMemoryStale(createdAt, lastAccessed time.Time, staleDays int) bool {
 		return time.Since(createdAt) > threshold
 	}
 	return false
+}
+
+// renderHybridResults outputs hybrid search results in the same format as keyword recall.
+func renderHybridResults(results []mpminternal.HybridResult, query string, jsonOutput bool, tokenBudget, staleDays int, dm *mpminternal.DatabaseManager) int {
+	if jsonOutput {
+		type hybridEntry struct {
+			ID                 string  `json:"id"`
+			Content            string  `json:"content"`
+			Tags               string  `json:"tags"`
+			CreatedAt          string  `json:"created_at"`
+			ReinforcementCount int     `json:"reinforcement_count"`
+			Weight             int     `json:"weight"`
+			Score              float64 `json:"score"`
+			Source string  `json:"source"` // "fts5", "vector", "hybrid"
+			FTS5Score          float64 `json:"fts5_score,omitempty"`
+			VectorSimilarity   float64 `json:"vector_similarity,omitempty"`
+			Rationale          string  `json:"rationale"`
+			IsStale            bool    `json:"is_stale"`
+		}
+		entries := make([]hybridEntry, 0, len(results))
+		for _, r := range results {
+			createdAt := time.Time{}
+			if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
+				createdAt = t
+			}
+			entries = append(entries, hybridEntry{
+				ID:                 shortID(r.ID),
+				Content:            r.Content,
+				Tags:               r.Tags,
+				CreatedAt:          r.CreatedAt,
+				ReinforcementCount: r.ReinforcementCount,
+				Weight:             r.Weight,
+				Score:              r.CombinedScore,
+				Source:             r.Source,
+				FTS5Score:          r.FTS5Score,
+				VectorSimilarity:   r.VectorSimilarity,
+				Rationale:          fmt.Sprintf("hybrid fts5+vec weight=%.2f", r.CombinedScore),
+				IsStale:            isMemoryStale(createdAt, time.Time{}, staleDays),
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{"query": query, "memories": entries, "search_mode": "hybrid"})
+		fmt.Println(string(data))
+		return 0
+	}
+
+	cyan := "\033[36m"
+	reset := "\033[0m"
+	bold := "\033[1m"
+	fmt.Printf("%s%sHybrid Recall — %s%s\n\n", bold, cyan, query, reset)
+
+	for i, r := range results {
+		createdAt := time.Time{}
+		if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
+			createdAt = t
+		}
+		score := r.CombinedScore
+		source := r.Source
+		content := r.Content
+		if len(content) > 80 {
+			content = content[:80] + "..."
+		}
+		fmt.Printf("%d. [%.2f] [%s] %s\n   %s\n\n", i+1, score, source, createdAt.Format("2006-01-02"), content)
+	}
+	return 0
 }
