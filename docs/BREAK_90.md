@@ -1,135 +1,209 @@
 # MPM — Breaking 90/99
 
-Current score: ~71/99. Target: 90+.
-
-This document identifies the gaps and the specific items that close them. Sorted by impact.
+**Updated for machine-to-machine infrastructure context.** MPM is not a human-facing product — it is the memory and epistemology layer for a cognitive agent (808). Scores reflect agent utility, not aesthetics.
 
 ---
 
-## The Ceiling Problem
+## The Reframe
 
-MPM scores71 because it does what it does adequately. To break 90, it needs to do things that **genuinely differentiate it from a notepad with FTS5.** The delta is in capability class, not feature count.
+The original 71/99 ceiling was scored through a human lens: dashboards, serendipity, visual graphs. Through the agent-loop lens, the priorities collapse to:
 
-The difference between 71 and 90 is:
-- **71:** retrieves facts you stored
-- **90:** understands what you know, surfaces what you need before you ask, and maintains a coherent model of reality that gets smarter over time
+1. **Deterministic retrieval** — what the agent queries, it gets
+2. **Fault tolerance** — synthesis failures must never stall the watcher
+3. **Context integrity** — token-budgeted responses that never blow the agent's window
+4. **Unshakeable loop stability** — isolated processes that survive vendor API hangs
+
+The score delta (71 → 90) is not about features — it's about the agent never having to think about the memory layer.
 
 ---
 
 ## Items That Move the Needle
 
-### 🔴 Critical (must-have for 85+)
+### 🔴 Critical — Agent Loop Infrastructure
 
-**1. Semantic Search — Embeddings Layer**
-- FTS5 keyword search is the single biggest ceiling. BM25 is matching, not understanding.
-- Add an embeddings column (local via Go+ SQLite, or Ollama) with cosine similarity scoring.
-- Hybrid search: FTS5 for exact matches + embeddings for semantic recall.
-- This alone could move the score 8-12 points.
-- Scope: `src/embeddings.go`, `internal/embed_manager.go`, new `mpm recall --semantic` flag, existing FTS5 path unchanged for backward compat.
+**1. Watcher/Synth Isolation (NOW #1)**
+- Watcher and synthesis share a concurrency context. A synthesis API hang blocks the watch loop. A watch loop stall deadlocks synthesis.
+- **Fix:** Separate SQLite read connection for watcher (WAL readers are thread-safe). Spawn synthesis as an isolated goroutine with deadline propagation and independent panic recovery. Pass events via a typed channel.
+- **DLQ (Dead Letter Queue):** Failed synthesis events (hard API outage across all vendors) route to a `synthesis_dlq` SQLite table rather than being dropped or blocking the channel. A periodic retry tick processes the DLQ when vendors recover.
+- **Shutdown protocol:** `select` over `{event channel, shutdown signal, dlq-retry tick}`. On shutdown, drain the channel before exiting — no lost events.
+- **Score impact:** +3 (reliability perception = loop stability = agent trust)
+- **Scope:** `cmd/mpm/watch.go` goroutine split, `internal/synthesis_isolation.go`, `internal/dlq.go`, `internal/synth.go` multi-vendor chain
 
-**2. Visual Memory Graph**
-- Memory relationships are invisible in CLI. A graph view changes the interaction model entirely.
-- Canvas-based (use the canvas skill) or lightweight web UI showing nodes (memories), edges (topic links, cross-refs), and state (challenged = red, LTM = gold, stale = dim).
-- This moves it from "tool you query" to "environment you inhabit."
-- Scope: `docs/graph_explorer.md` spec, canvas or web renderer, `mpm graph` command.
+**2. Multi-vendor Synth Failover**
+- Single-vendor synthesis is a single point of failure for 808's cognition. If MiniMax is down, the agent's synthesis pipeline stalls.
+- **Fix:** Provider abstraction with ordered fallback chain. Env vars for per-vendor API keys/urls. Silent failover — 808 never knows a vendor切换 occurred.
+- **Chain:** MiniMax → OpenAI → Ollama (local). Each provider has independent timeout (10s default). All vendors fail → event routes to DLQ.
+- **Score impact:** +2 (hardened against vendor outage)
+- **Scope:** `internal/synth.go` provider chain, env vars for `MINIMAX_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_ENDPOINT`
 
-**3. Watcher + Synthesis Isolation**
-- Both run in the same process. A synthesis panic kills the watcher. A watcher deadlock stalls synthesis.
-- Move synthesis to a subprocess or goroutine pool with explicit panic recovery.
-- Score impact is about reliability perception — a system that never fails feels higher quality.
-- Scope: `cmd/mpm/synthesis.go` goroutine isolation, panic handlers, restart-on-failure.
-
-**4. Multi-vendor Synth**
-- Currently synth is single-vendor (MiniMax). API failure = silent synth failure.
-- Add a provider abstraction: OpenAI → MiniMax → Ollama fallback chain.
-- Score impact: 2-3 points, mostly perception of robustness.
-- Scope: `internal/synth.go` provider chain, env var config for API keys/urls.
+**3. Native Token Budgeting (MCP tool layer)**
+- 808 consumes MPM output directly into its context window. Unbounded hybrid search results can blow the window silently.
+- **Fix:** MCP tool layer (OpenClaw plugin wrapping MPM) implements strict token budget using tiktoken. Results packed, measured, truncated to defined limit before JSON is handed to the agent.
+- MPM core returns the best structured data; transport layer handles projection. Clean separation.
+- **Score impact:** +2 (prevents silent context corruption — critical for agent reliability)
+- **Scope:** OpenClaw MCP plugin, not MPM core. MPM returns, plugin projects.
 
 ---
 
-### 🟡 High Impact (moves to 87-90)
+### 🟡 High Impact — Capability Class
 
-**5. Proactive Suggestion Engine**
-- Not just `mpm hint` when you mention something — periodic "you haven't looked at X in a while" driven by cron.
-- Surfaces stale but important memories, undiscussed topics, pending challenge theories.
-- Changes MPM from reactive to pre-emptive.
-- Scope: `mpm cron suggest` (cron job), `internal/suggestion_engine.go`, MCP tool `proactive_suggest`.
+**4. Semantic Search (✅ Done)**
+- Hybrid BM25 + cosine similarity. Ollama `nomic-embed-text` (768d). Sigmoid-normalized BM25 unbounded scores.
+- **Score impact:** +10 (score: 81/99 post-semantic)
+- **Scope:** `internal/embeddings.go`, `internal/hybrid_search.go`, `cmd/mpm/recall.go`
 
-**6. Memory Lifecycle Dashboard**
-- `mpm ops status` is a text dump. A real dashboard: decay curves, challenge queue depth, synthesis rate, heaviest topics.
-- Makes the epistemology engine visible and actionable.
-- Scope: `cmd/mpm/dashboard.go`, terminal UI or canvas render.
+**5. Embedding Backfill Pipeline (✅ Done)**
+- `mpm ops backfill-embeddings`: batched, resilient, resume-safe. Auto-embed on `mpm add` and all watcher ingest paths.
+- **Score impact:** already folded into semantic search score
 
-**7. External Import Pipeline**
-- Readwise, Pocket, Raindrop, Notion — these are where memories go to die.
-- A structured ingest pipeline that normalizes bookmarks/articles/notes into MPM memories with source attribution.
-- Scope: `cmd/mpm/ingest/` package, `mpm ops ingest` commands per source.
+**6. Memory Versioning**
+- Decisions and theories change. The audit trail must be traceable.
+- `mpm history <id>`, `mpm diff <id> <v1> <v2>`
+- **Score impact:** +1 (epistemology integrity — 808 can audit its own reasoning)
+- **Scope:** `internal/history.go`, `mpm history/diff` commands
 
-**8. Memory Versioning**
-- Currently: overwrite. No history.
-- Add a lightweight revision log: `mpm history<id>`, `mpm diff<id> <v1> <v2>`.
-- Critical for epistemology — decisions and theories change, and the audit trail should be traceable.
-- Scope: `internal/history.go`, `mpm history/diff` commands.
+**7. Feedback-Driven Weight Adjustment**
+- `mpm +<id>` / `mpm -<id>` — lightweight feedback, weight adjusts, system learns from interaction.
+- **Score impact:** +1
+- **Scope:** `cmd/mpm/handlers.go` feedback handlers, weight adjustment logic
+
+**8. Proactive Suggestion Engine**
+- Not reactive. Cron-driven: "you haven't looked at X in a while" — stale but important memories, pending theories.
+- **Score impact:** +1 (shifts MPM from tool to proactive partner)
+- **Scope:** `mpm cron suggest`, `internal/suggestion_engine.go`, MCP tool `proactive_suggest`
 
 ---
 
-### 🟢 Ecosystem (moves to 90+)
+### 🟢 Ecosystem — Unlock Scale
 
-**9. Plugin Architecture**
-- MPM is a platform, not just a tool. Third-party tools should be able to register commands, hooks, and data sources.
-- Minimal plugin API: register command handler, register MCP tool, subscribe to memory events.
-- Scope: `internal/plugin.go`, `docs/PLUGIN_API.md`.
+**9. External Import Pipeline**
+- Readwise, Pocket, Raindrop, Notion — memories go to die in these. Structured ingest normalizes bookmarks/articles/notes with source attribution.
+- **Score impact:** +1
+- **Scope:** `cmd/mpm/ingest/` package, `mpm ops ingest` commands
 
-**10. Feedback-Driven Weight Adjustment**
-- Currently weight is manual or decay-based. A feedback loop: user says "this was useful" or "this is wrong" and weight adjusts.
-- `mpm +<id>` / `mpm - <id>` as lightweight feedback, not just `reinforce`/`weaken`.
-- The system learns from interaction, not just time.
-- Scope: `cmd/mpm/handlers.go` feedback handlers, weight adjustment logic.
+**10. Plugin Architecture**
+- Third-party tools register command handlers, MCP tools, memory event subscriptions.
+- **Score impact:** +1
+- **Scope:** `internal/plugin.go`, `docs/PLUGIN_API.md`
 
 **11. Shared Memory Across Agents**
-- Sessions currently siloed. A shared memory layer (opt-in) for multi-agent workflows.
-- `mpm share<id> --scope<team|project>` — memory visible to other agents working in the same scope.
-- Scope: `internal/shared.go`, `mpm share` command, scope-based ACL.
+- `mpm share <id> --scope <team|project>` — multi-agent workflows, opt-in shared layer.
+- **Score impact:** +1
+- **Scope:** `internal/shared.go`, `mpm share` command
 
 ---
 
-## Score Projection
+## Score Projection (Machine-to-Machine)
 
-| Item | Points Gained | Running Total |
-|------|--------------|---------------|
-| Semantic Search | ✅ Done | +10 | 81 |
-| Visual Graph | +4 | 85 |
-| Watcher/Synth Isolation | +2 | 87 |
-| Multi-vendor Synth | +2 | 89 |
-| Proactive Suggestion | +1 | 90 |
-| Dashboard | +1 | 91 |
-| External Import | +1 | 92 |
-| Memory Versioning | +1 | 93 |
-| Plugin Architecture | +1 | 94 |
-| Feedback-Driven Weights | +1 | 95 |
-| Shared Memory | +1 | 96 |
+| Item | Status | Points Gained | Running Total |
+|------|--------|--------------|---------------|
+| Semantic Search + Backfill | ✅ Done | +10 | 81 |
+| Watcher/Synth Isolation + DLQ | 🔴 In Progress | +3 | 84 |
+| Multi-vendor Synth Failover | 🔴 Next | +2 | 86 |
+| Token Budgeting (MCP layer) | 🟡 Planned | +2 | 88 |
+| Memory Versioning | 🟡 Pending | +1 | 89 |
+| Feedback-Driven Weights | 🟡 Pending | +1 | 90 |
+| Proactive Suggestion | 🟢 Pending | +1 | 91 |
+| External Import | 🟢 Pending | +1 | 92 |
+| Plugin Architecture | 🟢 Pending | +1 | 93 |
+| Shared Memory | 🟢 Pending | +1 | 94 |
+
+**Target: 90/99** — achievable once Isolation, Multi-vendor, and Token Budgeting ship.
 
 ---
 
 ## Execution Order
 
-1. **Semantic Search** — biggest ceiling, do first
-2. **Multi-vendor Synth** — easy win, quick win
-3. **Watcher/Synth Isolation** — reliability, before it becomes a problem
-4. **Visual Graph** — changes the interaction model
-5. **Proactive Suggestion** — makes MPM pre-emptive, not reactive
-6. **Dashboard** — makes everything visible
+1. **Watcher/Synth Isolation + DLQ** — existential for agent loop stability
+2. **Multi-vendor Synth Failover** — hardened vendor chain, isolation makes this safe to implement
+3. **Token Budgeting** — MCP tool layer, not MPM core
+4. **Memory Versioning** — epistemology audit trail
+5. **Feedback-Driven Weights** — interaction learning loop
+6. **Proactive Suggestion** — pre-emptive not reactive
 7. **External Import** — ecosystem unlock
-8. **Memory Versioning** — epistemology audit trail
-9. **Plugin Architecture** — platform scale
-10. **Feedback-Driven Weights** — learning loop
-11. **Shared Memory** — multi-agent
+8. **Plugin Architecture** — platform scale
+9. **Shared Memory** — multi-agent
 
 ---
 
-## What NOT to Add
+## What NOT to Add (Revised)
 
-- Mobile UI — scope creep, wrong platform
-- Cloud sync — contradicts single-binary zero-dependency philosophy
-- AI summarization of memories — adds vendor dependency without solving the retrieval problem
-- Collaborative editing — wrong threat model (personal knowledge management, not team wiki)
+- **Visual Graph** — dropped. A cognitive agent doesn't browse a graph. CLI + structured output is sufficient.
+- **Dashboard** — dropped. Text/status output is adequate for machine consumers.
+- **Mobile UI** — scope creep, wrong platform
+- **Cloud sync** — contradicts single-binary zero-dependency philosophy
+- **AI summarization of memories** — adds vendor dependency without solving the retrieval problem
+
+---
+
+## Architecture Notes
+
+### Watcher/Synth Select Pattern
+
+```go
+// synthesisWorker runs with isolated context, independent SQLite read connection
+func synthesisWorker(events <-chan MemoryEvent, shutdown <-chan struct{}, dlq *DLQ) {
+    for {
+        select {
+        case event := <-events:
+            // Independent goroutine per event, deadline propagated
+            go func(e MemoryEvent) {
+                if err := synthWithFailover(e); err != nil {
+                    dlq.Enqueue(e, err) // Route to DLQ, never block
+                }
+            }(event)
+
+        case <-shutdown:
+            // Graceful drain: process remaining events before exit
+            drainChan(events)
+            return
+
+        case <-time.NewTicker(dlqRetryInterval).C:
+            dlq.ProcessRetry() // Background DLQ retry when vendors recover
+        }
+    }
+}
+
+func drainChan(events <-chan MemoryEvent) {
+    for {
+        select {
+        case event := <-events:
+            synthWithFailover(event) // Process remaining, drop failures
+        default:
+            return
+        }
+    }
+}
+```
+
+### DLQ Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS synthesis_dlq (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    tags        TEXT,           -- JSON array
+    attempt     INTEGER DEFAULT 0,
+    last_error  TEXT,
+    created_at  TEXT DEFAULT (datetime('now')),
+    next_retry  TEXT            -- ISO8601, updated after each attempt
+);
+CREATE INDEX IF NOT EXISTS idx_dlq_next_retry ON synthesis_dlq(next_retry);
+```
+
+### Multi-Vendor Fallback Chain
+
+```
+MiniMax → OpenAI → Ollama (local) → DLQ
+```
+
+Each vendor has independent timeout (10s). All vendors fail → DLQ enqueue, synthesis returns `nil` (no panic, no stall). DLQ processed on retry tick (every 5min).
+
+### Token Budget (MCP Layer)
+
+```
+HybridSearchResults → tiktoken count → pack to budget → truncate → JSON → agent
+```
+
+Budget is a MCP tool config value (default: 8k tokens). 808's context window projection handled in the OpenClaw plugin, not MPM core.
