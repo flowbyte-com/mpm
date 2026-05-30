@@ -312,7 +312,7 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	}
 
 	// Generate embedding for vector search
-	embedding := HashEmbed(content)
+	embedding := EmbedText(content)
 
 	// Create memory record
 	mem := &Memory{
@@ -2646,7 +2646,7 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
-	embedding := HashEmbed(content)
+	embedding := EmbedText(content)
 	embeddingJSON, _ := json.Marshal(embedding)
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 

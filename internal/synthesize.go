@@ -495,7 +495,7 @@ func AutoSynthesize(ctx context.Context, dm *DatabaseManager, client *SynthClien
 		allTags = []string{}
 	}
 	allTags = append(allTags, "synthesized", "ltm")
-	embedding := HashEmbed(result.Content)
+	embedding := EmbedText(result.Content)
 
 	// 8. Save the synthesized LTM
 	newSynthID, err := dm.SaveMemory("memories", result.Content, "", allTags, metadata, embedding, true, 10)

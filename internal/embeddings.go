@@ -142,6 +142,18 @@ func DefaultEmbeddingConfig() *EmbeddingConfig {
 	return cfg
 }
 
+// EmbedText tries the real embedding provider; falls back to HashEmbed on failure.
+// This is the correct usage in all hot paths (mpm add, watcher ingest).
+func EmbedText(text string) []float32 {
+	cfg := DefaultEmbeddingConfig()
+	if cfg.Provider.Name() != "null" {
+		if vec, err := cfg.Provider.Embed(text); err == nil && len(vec) > 0 {
+			return vec
+		}
+	}
+	return HashEmbed(text)
+}
+
 func getEnv(key, defaultVal string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

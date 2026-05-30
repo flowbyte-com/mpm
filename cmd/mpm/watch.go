@@ -209,7 +209,7 @@ func pollOnce(dbCfg *config.ExternalDB, dm *mpminternal.DatabaseManager, dryRun,
 				"source_id":    mem.ID,
 			}
 			metadataJSON, _ := json.Marshal(metadataMap)
-			embedding := mpminternal.HashEmbed(mem.Content)
+			embedding := mpminternal.EmbedText(mem.Content)
 			embeddingJSON, _ := json.Marshal(embedding)
 			contentHash := sha256.Sum256([]byte(mem.Content))
 			now := time.Now()
@@ -835,8 +835,8 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 		"promoted_at":  time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Generate hash-based embedding
-	embedding := mpminternal.HashEmbed(content)
+	// Generate embedding (real if provider available, hash fallback)
+	embedding := mpminternal.EmbedText(content)
 
 	// Save to database (LTM: isLongTerm=true, weight=10)
 	id, err := d.db.SaveMemory("memories", content, "", tags, metadata, embedding, true, 10)
@@ -860,7 +860,7 @@ func (d *watcherDaemon) ingestAsEpistemologyMemory(content, sourcePath, collecti
 		"source_path": sourcePath,
 	}
 
-	embedding := mpminternal.HashEmbed(content)
+	embedding := mpminternal.EmbedText(content)
 	id, err := d.db.SaveMemory(collection, content, "", tags, metadata, embedding, false, 5)
 	if err != nil {
 		return "", err
@@ -921,8 +921,8 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 		"promoted_at":  time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Generate embedding
-	embedding := mpminternal.HashEmbed(content)
+	// Generate embedding (real if provider available, hash fallback)
+	embedding := mpminternal.EmbedText(content)
 
 	// Save to database — explicitly use "session" collection to isolate from LTM.
 	// Pass expires_at explicitly so SaveMemory can write it to the correct column.
