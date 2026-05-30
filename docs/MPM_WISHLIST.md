@@ -64,9 +64,29 @@ _(all low-priority items complete — see Completed below)_
 - ~~`TestChunkByTokens_EdgeCases`~~ — ✅ Fixed 2026-05-19: (1) `strings.TrimSpace(content)==""` guard moved BEFORE `getTiktokenEncoder()` call — previously tiktoken init failure would cause error on empty content before reaching the guard; (2) `return []Chunk{}, nil` → `return nil, nil`. Empty slice vs nil distinction in Go caught both issues.
 
 ---
-## Future Wishlist (2026-05-19)
+## Future Wishlist (2026-05-30)
 
-_(All items complete — 20/20 items shipped. Future Wishlist closed.)_
+### v1.2 — Automatic Theory Resolution
+
+Closed loop for the epistemological pruning system:
+
+| # | Item | Status |
+|---|------|--------|
+| 21 | **Bidirectional links** — store `challenged_theory_id` in memory metadata and `memory_id` in theory metadata at challenge time | Pending |
+| 22 | **Transactional challenge** — atomic transaction: metadata patch + theory creation with rollback on failure | Pending |
+| 23 | **Auto-resolve on restore** — `mpm challenge restore <id>` resolves linked theory (status → disproven) and clears memory metadata in one tx | Pending |
+| 24 | **Cascade theory delete on shred** — `mpm shred <id>` deletes linked theory alongside memory in one tx | Pending |
+| 25 | **Warning injector** — LLM-visible `[Note: This memory is challenged — treat as unverified]` prepended to content at recall time | Pending |
+| 26 | **[CHALLENGED] chip** — human-visible flag in `mpm ls` and `mpm show` output | Pending |
+
+Spec: `docs/PRUNING_AUTOMATION.md`
+
+
+### v1.3 — Optional
+
+| # | Item | Status |
+|---|------|--------|
+| 27 | `mpm resolve <theory_id> --proven\|--disproven` — manual adjudication for edge cases where human override is needed | Pending |
 
 ### Item #3 Rewrite: Context-Aware Deduplication
 
