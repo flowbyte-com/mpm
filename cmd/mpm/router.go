@@ -223,6 +223,10 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "decisions":
 		return handleDecisions(args[1:])
 	case "challenge":
+		sub := args[1]
+		if sub == "restore" && len(args) >= 3 {
+			return handleChallengeRestore(args[1:])
+		}
 		return handleChallenge(args[1:])
 	case "ops":
 		return handleOps(args)

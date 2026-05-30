@@ -178,6 +178,7 @@ func handleRecall(args []string) int {
 	type recallEntry struct {
 		id                   string
 		content              string
+		metadata             string
 		sessionID            string
 		createdAt            time.Time
 		tags                 string
@@ -192,9 +193,9 @@ func handleRecall(args []string) int {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
 		var reinforcementCount, weight int64
-		var nullableLastAccessed, nullableRefID sql.NullString
+		var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
 
-		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &createdAt,
+		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
 			&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
 			continue
 		}
@@ -212,6 +213,7 @@ func handleRecall(args []string) int {
 		entry := recallEntry{
 			id:                  id,
 			content:             content,
+			metadata:            nullableMetadata.String,
 			sessionID:           sessionID,
 			tags:                nullableTags.String,
 			reinforcementCount:  int(reinforcementCount),
@@ -358,6 +360,9 @@ func handleRecall(args []string) int {
 		}
 
 		content := e.content
+		if strings.Contains(e.metadata, `"status":"challenged"`) {
+			content = "[Note: This memory is challenged — treat as unverified]\n" + content
+		}
 		if len(content) > 250 {
 			content = content[:250] + "..."
 		}
@@ -518,7 +523,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 	useFTS := false
 
 	ftsQuery := `
-		SELECT m.id, m.content, m.session_id, m.tags, m.created_at,
+		SELECT m.id, m.content, m.session_id, m.tags, m.metadata, m.created_at,
 		       COALESCE(m.reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(m.weight, 1) as weight,
 		       m.last_accessed_at,
