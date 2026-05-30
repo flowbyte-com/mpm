@@ -40,11 +40,6 @@ var watchSynthWorker *mpminternal.SynthesisWorker
 // filesystem watcher has been quiet for 30+ minutes.
 var watchIdleWorker *mpminternal.IdleConsolidationWorker
 
-// lastWatcherEventAt tracks the last filesystem event timestamp.
-// Updated by eventFromFsnotify; read by idle consolidation worker to detect
-// quiet periods and trigger background pattern synthesis.
-var lastWatcherEventAt time.Time
-
 // Default worker pool size for the watcher background goroutines.
 const defaultWorkerPoolSize = 3
 

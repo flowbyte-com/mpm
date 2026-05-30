@@ -1360,7 +1360,7 @@ func startWatcherGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbos
 			ev := eventFromFsnotify(event, dryRun, verbose)
 			if ev != nil {
 				pool.Submit(*ev)
-				lastWatcherEventAt = time.Now()
+				mpminternal.UpdateLastWatcherEvent()
 			}
 		case err, ok := <-w.Errors:
 			if !ok {
