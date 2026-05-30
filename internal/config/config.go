@@ -57,14 +57,24 @@ func (c *Config) GetExternalDbs() []ExternalDB {
 	return c.ExternalDbs
 }
 
+// SynthVendor describes a single vendor in the fallback chain.
+type SynthVendor struct {
+	Name       string `json:"name"`        // "minimax", "openai", "ollama"
+	APIKey     string `json:"api_key"`     // vendor-specific key (overrides synth-level)
+	BaseURL    string `json:"base_url"`    // e.g. "https://api.minimax.io/anthropic/v1"
+	Model      string `json:"model"`       // model name for this vendor
+	TimeoutSec int    `json:"timeout_sec"`  // per-vendor timeout (0 = use default)
+}
+
 // SynthConfig holds LLM settings for the synth command.
-// All fields are optional — missing fields fall back to env vars or defaults.
+// Vendors field defines the ordered fallback chain. If empty, MiniMax is used alone.
 type SynthConfig struct {
-	Model        string `json:"model"`          // e.g. "MiniMax-M2.7", "llama3", "gpt-4o"
-	APIKey      string `json:"api_key"`        // defaults to MINIMAX_API_KEY env var
-	BaseURL     string `json:"base_url"`       // e.g. "http://localhost:11434/v1"
-	MaxTokens   int    `json:"max_tokens"`    // default 1024
-	TimeoutSecs int    `json:"timeout_seconds"` // default 300
+	Model        string        `json:"model"`          // e.g. "MiniMax-M2.7", "gpt-4o", "llama3"
+	APIKey      string        `json:"api_key"`        // primary API key
+	BaseURL     string        `json:"base_url"`       // e.g. "http://localhost:11434/v1"
+	MaxTokens   int           `json:"max_tokens"`
+	TimeoutSecs int           `json:"timeout_seconds"`
+	Vendors     []SynthVendor `json:"vendors,omitempty"` // ordered fallback chain
 }
 
 // ConfigPath returns the path to the MPM config file
