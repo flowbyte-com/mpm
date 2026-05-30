@@ -66,27 +66,56 @@ _(all low-priority items complete — see Completed below)_
 ---
 ## Future Wishlist (2026-05-30)
 
-### v1.2 — Automatic Theory Resolution
+### v1.2 — Automatic Theory Resolution ✅ Done (2026-05-30)
 
-Closed loop for the epistemological pruning system:
+Closed loop for the epistemological pruning system. Spec: `docs/PRUNING_AUTOMATION.md`.
+
 
 | # | Item | Status |
 |---|------|--------|
-| 21 | **Bidirectional links** — store `challenged_theory_id` in memory metadata and `memory_id` in theory metadata at challenge time | Pending |
-| 22 | **Transactional challenge** — atomic transaction: metadata patch + theory creation with rollback on failure | Pending |
-| 23 | **Auto-resolve on restore** — `mpm challenge restore <id>` resolves linked theory (status → disproven) and clears memory metadata in one tx | Pending |
-| 24 | **Cascade theory delete on shred** — `mpm shred <id>` deletes linked theory alongside memory in one tx | Pending |
-| 25 | **Warning injector** — LLM-visible `[Note: This memory is challenged — treat as unverified]` prepended to content at recall time | Pending |
-| 26 | **[CHALLENGED] chip** — human-visible flag in `mpm ls` and `mpm show` output | Pending |
-
-Spec: `docs/PRUNING_AUTOMATION.md`
-
+| 21 | Bidirectional links | ✅ Done |
+| 22 | Transactional challenge | ✅ Done |
+| 23 | Auto-resolve on restore | ✅ Done |
+| 24 | Cascade theory delete on shred | ✅ Done |
+| 25 | Warning injector | ✅ Done |
+| 26 | [CHALLENGED] chip | ✅ Done |
 
 ### v1.3 — Optional
 
 | # | Item | Status |
 |---|------|--------|
-| 27 | `mpm resolve <theory_id> --proven\|--disproven` — manual adjudication for edge cases where human override is needed | Pending |
+| 27 | `mpm resolve <theory_id> --proven\|--disproven` — manual adjudication for edge cases | Pending |
+
+### Breaking 90 — Roadmap to 90+
+
+Master planning doc: `docs/BREAK_90.md`. Score projection and execution order documented there.
+
+**Priority order:**
+1. Semantic Search (embeddings) — biggest ceiling
+2. Multi-vendor Synth — easy win
+3. Watcher/Synth Isolation — reliability
+4. Visual Memory Graph — interaction model change
+5. Proactive Suggestion Engine — pre-emptive, not reactive
+6. Memory Lifecycle Dashboard
+7. External Import Pipeline (Readwise, Pocket, Raindrop)
+8. Memory Versioning
+9. Plugin Architecture
+10. Feedback-Driven Weights
+11. Shared Memory Across Agents
+
+| # | Item | Status |
+|---|------|--------|
+| 28 | Semantic Search (embeddings) | ✅ Done (2026-05-30) |
+| 29 | Multi-vendor Synth | Pending |
+| 30 | Watcher/Synth Isolation | Pending |
+| 31 | Visual Memory Graph | Pending |
+| 32 | Proactive Suggestion Engine | Pending |
+| 33 | Memory Lifecycle Dashboard | Pending |
+| 34 | External Import Pipeline | Pending |
+| 35 | Memory Versioning | Pending |
+| 36 | Plugin Architecture | Pending |
+| 37 | Feedback-Driven Weights | Pending |
+| 38 | Shared Memory Across Agents | Pending |
 
 ### Item #3 Rewrite: Context-Aware Deduplication
 

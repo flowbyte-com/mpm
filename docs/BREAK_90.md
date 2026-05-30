@@ -97,7 +97,7 @@ The difference between 71 and 90 is:
 
 | Item | Points Gained | Running Total |
 |------|--------------|---------------|
-| Semantic Search | +10 | 81 |
+| Semantic Search | ✅ Done | +10 | 81 |
 | Visual Graph | +4 | 85 |
 | Watcher/Synth Isolation | +2 | 87 |
 | Multi-vendor Synth | +2 | 89 |
