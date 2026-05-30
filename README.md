@@ -17,7 +17,7 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Spaced reinforcement review** — `mpm review --promoted` shows recently elevated; `mpm review --stale` surfaces forgotten LTM memories
 - **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
 - **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
-- **Automatic file watching** — `.md` files ingested as LTM; sessions swept, synthesized (compression), archived
+- **Epistemological pruning loop** — `mpm challenge <id>` flags a memory as challenged, creates a linked pending theory, and injects a warning into LLM recall; `mpm challenge restore <id>` resolves the theory and clears the flag; `mpm shred <id>` cascade-deletes both memory and theory. Fully closed loop, zero manual cleanup.
 - **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
 - **Reference chunking control** — `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding
 - **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
@@ -102,6 +102,35 @@ The MCP tool `proactive_recall_hint` is wired into the OpenClaw agent loop — 8
 | --- | --- |
 | `decisions` | `CONTEXT:\nCHOICE:\nRATIONALE:\n[OUTCOME:]` |
 | `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
+| `theories` (challenge) | `HYPOTHESIS: Memory <id> is obsolete.\nRATIONALE: <evidence>\nSTATUS: pending` |
+
+### Challenge Lifecycle (v1.2+)
+
+The challenge system is a closed-loop immune response for memory integrity:
+
+```
+challenge ──────────────────────────────────────────────────────▶ [pending theory]
+    │
+    ├── challenge restore ──────────────────────────▶ [theory: disproven]
+    │
+    └── shred ──────────────────────────────────────▶ [theory: deleted]
+```
+
+**`mpm challenge <id> "<evidence>"`** — Atomic transaction:
+1. Patch memory metadata: `{"status":"challenged","challenged_theory_id":"<theory_id>"}`
+2. Create theory with back-link: `{"status":"pending","type":"challenge","memory_id":"<memory_id>"}`
+3. Weaken memory weight by 3
+
+**`mpm challenge restore <id>`** — Atomic transaction:
+1. Resolve theory: `status → disproven`, clear `memory_id`
+2. Clear memory metadata: `status + challenged_theory_id` set to `null` (key removal, RFC 7396)
+
+**`mpm shred <id>`** — Atomic transaction:
+1. DELETE topic_memberships WHERE memory_id = ?
+2. DELETE theory (if exists)
+3. DELETE memory
+
+**Recall warning:** Challenged memories surface with `[Note: This memory is challenged — treat as unverified]` prepended to LLM content. Human output shows `[CHALLENGED]` chip.
 
 ### Epistemology CLI Commands
 
@@ -112,6 +141,9 @@ The MCP tool `proactive_recall_hint` is wired into the OpenClaw agent loop — 8
 | `mpm propose_theory <text>` | Record a hypothesis with validation criteria |
 | `mpm theories [pending\|resolved\|all]` | List theories with status chips |
 | `mpm resolve_theory <id> <conclusion>` | Mark theory resolved, bump weight |
+| `mpm challenge <id> "<evidence>"` | Flag memory as challenged, create linked pending theory (atomic tx) |
+| `mpm challenge restore <id>` | Resolve linked theory (status → disproven), clear challenged flag (atomic tx) |
+| `mpm shred <id>` | Cascade-delete memory and linked theory (atomic tx) |
 | `mpm hint <text> [--max <n>] [--json]` | Proactive recall from conversation context |
 
 Topics `theories` and `decisions` are auto-created on first use. Memories in these collections are auto-linked to their topic via `topic_memberships`. The watcher auto-detects `HYPOTHESIS:` and `CHOICE:` prefixes in `.md` files and routes them to the correct collection.
@@ -310,7 +342,7 @@ MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calli
 | `proactive_recall_hint` | Surface relevant decisions/theories from conversation context |
 | `assume_stance` | XITL: hot-swap existing persona when `auto` mode is active |
 | `synthesize_stance` | XITL: generate JIT ephemeral persona for novel edge cases |
-| `challenge_memory` | Challenge a memory — weaken, create theory, log decision |
+| `challenge_memory` | Challenge a memory — atomic transactional flag with linked theory; auto-resolves on restore; cascade-deletes on shred |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
 
@@ -508,7 +540,7 @@ Chain expansion: `mpm s foo bar` → `mpm recall foo bar`. `--version`, `-v`, `h
 | `mpm weaken <id>` | -1 reinforcement |
 | `mpm set-weight <id> <n>` | Set weight directly |
 | `mpm patch-memory <id> '<json>'` | Patch metadata in-place (FTS untouched) |
-| `mpm shred <id>` | Secure delete |
+| `mpm shred <id>` | Cascade-delete memory + linked theory (atomic) |
 | **Engine room (`ops`)** | |
 | `mpm ops doctor [--fix]` | Diagnostics |
 | `mpm ops maintain [--days <n>]` | Decay + consolidate + prune |
