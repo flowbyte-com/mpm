@@ -292,6 +292,8 @@ type watcherDaemon struct {
 	synthClient       *mpminternal.SynthClient   // cached, created once
 	synthWorker       *mpminternal.SynthesisWorker // isolated synthesis goroutine pool
 	lastClusterCheck  time.Time                  // guards checkTopicClustering rate
+	lastEventAt       time.Time                  // last fsnotify event (for idle detection)
+	idleWorker        *mpminternal.IdleConsolidationWorker // idle-time pattern synthesis
 }
 
 func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) *watcherDaemon {
@@ -323,6 +325,8 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 		synthClient:       mpminternal.NewSynthClient(),
 		synthWorker:       mpminternal.NewSynthesisWorker(db, mpminternal.NewSynthClient(), 3),
 		lastClusterCheck:  time.Time{}, // zero — will fire on first ingest
+		lastEventAt:       time.Now(),
+		idleWorker:        mpminternal.NewIdleConsolidationWorker(db, 30*time.Minute),
 	}
 }
 
@@ -1356,6 +1360,7 @@ func startWatcherGoroutine(ctx context.Context, pool *WorkerPool, dryRun, verbos
 			ev := eventFromFsnotify(event, dryRun, verbose)
 			if ev != nil {
 				pool.Submit(*ev)
+				lastWatcherEventAt = time.Now()
 			}
 		case err, ok := <-w.Errors:
 			if !ok {
