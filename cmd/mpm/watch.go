@@ -289,8 +289,9 @@ type watcherDaemon struct {
 	mu         sync.Mutex
 	stopCh     chan struct{}
 
-	synthClient       *mpminternal.SynthClient // cached, created once
-	lastClusterCheck  time.Time                // guards checkTopicClustering rate
+	synthClient       *mpminternal.SynthClient   // cached, created once
+	synthWorker       *mpminternal.SynthesisWorker // isolated synthesis goroutine pool
+	lastClusterCheck  time.Time                  // guards checkTopicClustering rate
 }
 
 func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) *watcherDaemon {
@@ -320,6 +321,7 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 		verbose:           verbose,
 		stopCh:            make(chan struct{}),
 		synthClient:       mpminternal.NewSynthClient(),
+		synthWorker:       mpminternal.NewSynthesisWorker(db, mpminternal.NewSynthClient(), 3),
 		lastClusterCheck:  time.Time{}, // zero — will fire on first ingest
 	}
 }
@@ -485,12 +487,15 @@ func (d *watcherDaemon) processMarkdownFile(path string, isStartup bool) {
 		return
 	}
 
-	// Fire-and-forget: check for near-miss candidates and auto-synthesize.
-	// Uses cached synthClient to avoid redundant config reads.
-	if d.synthClient != nil {
-		go func() {
-			mpminternal.AutoSynthesize(context.Background(), d.db, d.synthClient, memID, contentStr)
-		}()
+	// Fire synthesis event into the isolated worker pool.
+	// Non-blocking: enqueue returns immediately. 3-worker semaphore caps
+	// concurrent LLM calls. All vendor failures route to DLQ.
+	if d.synthWorker != nil {
+		d.synthWorker.Enqueue(mpminternal.MemoryEvent{
+			ID:      memID,
+			Content: contentStr,
+			Tags:    []string{"ltm", "auto-synth"},
+		})
 	}
 
 	// Check for topic clustering — rate-limited to once every 5 minutes.
