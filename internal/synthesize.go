@@ -19,6 +19,15 @@ import (
 // SynthClient — LLM API caller for memory synthesis
 // =============================================================================
 
+// SynthVendor describes a single vendor in the fallback chain.
+type SynthVendor struct {
+	Name       string `json:"name"`
+	APIKey     string `json:"api_key"`
+	BaseURL    string `json:"base_url"`
+	Model      string `json:"model"`
+	TimeoutSec int    `json:"timeout_sec"`
+}
+
 // SynthClient handles external LLM calls for memory synthesis.
 type SynthClient struct {
 	Model       string
@@ -159,11 +168,11 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*syn
 	}
 
 	// Parse Anthropic-compatible response wrapper
-	var wrapper struct {
+	wrapper := struct {
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
-	}
+	}{}
 	if err := json.Unmarshal(respBody, &wrapper); err != nil {
 		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
 	}
@@ -183,9 +192,141 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*syn
 	return &result, nil
 }
 
-// =============================================================================
-// FTS5 Near-Miss Detection
-// =============================================================================
+// SynthesizeWithVendor sends fragments to a specific vendor and returns the
+// parsed synthesis result. Uses the vendor's BaseURL, APIKey, Model and
+// per-vendor timeout. If vendor.TimeoutSec is 0, falls back to sc.Timeout.
+func (sc *SynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVendor, content string, tags []string) (*synthResult, error) {
+	vendorAPIKey := vendor.APIKey
+	if vendorAPIKey == "" {
+		vendorAPIKey = sc.APIKey
+	}
+	if vendorAPIKey == "" {
+		vendorAPIKey = getEnv("MINIMAX_API_KEY", "")
+		if vendorAPIKey == "" {
+			vendorAPIKey = getEnv("OPENAI_API_KEY", "")
+		}
+	}
+
+	model := vendor.Model
+	if model == "" {
+		model = sc.Model
+	}
+
+	baseURL := vendor.BaseURL
+	if baseURL == "" {
+		baseURL = sc.BaseURL
+	}
+
+	timeout := sc.Timeout
+	if vendor.TimeoutSec > 0 {
+		timeout = time.Duration(vendor.TimeoutSec) * time.Second
+	}
+
+	userContent := content
+
+	body := map[string]interface{}{
+		"model":      model,
+		"max_tokens": sc.MaxTokens,
+		"messages": []map[string]string{
+			{"role": "system", "content": synthesisSystemPrompt},
+			{"role": "user", "content": userContent},
+		},
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/messages", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+vendorAPIKey)
+
+	var resp *http.Response
+	var respBody []byte
+
+	for attempt := 0; attempt <= 1; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+		}
+
+		client := &http.Client{Timeout: timeout}
+		resp, err = client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("API request failed: %w", err)
+		}
+
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == 200 {
+			break
+		}
+
+		if attempt == 0 && resp.StatusCode >= 500 && resp.StatusCode < 600 {
+			continue
+		}
+		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var wrapper struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
+	}
+	if len(wrapper.Content) == 0 {
+		return nil, fmt.Errorf("API returned empty content")
+	}
+
+	raw := strings.TrimSpace(wrapper.Content[0].Text)
+	var result synthResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse synthesis JSON from LLM output: %w (raw: %s)", err, raw)
+	}
+	if result.Content == "" {
+		return nil, fmt.Errorf("LLM returned empty synthesized content")
+	}
+	return &result, nil
+}
+
+// parseResponseBody parses the Anthropic-style response wrapper and returns
+// the inner synthResult. Extracted to avoid duplication between Synthesize
+// and SynthesizeWithVendor.
+func parseResponseBody(respBody []byte) (*synthResult, error) {
+	wrapper := struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}{}
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
+	}
+	if len(wrapper.Content) == 0 {
+		return nil, fmt.Errorf("API returned empty content")
+	}
+	raw := strings.TrimSpace(wrapper.Content[0].Text)
+	var result synthResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse synthesis JSON from LLM output: %w (raw: %s)", err, raw)
+	}
+	if result.Content == "" {
+		return nil, fmt.Errorf("LLM returned empty synthesized content")
+	}
+	return &result, nil
+}
 
 // nearMissCandidate represents a single FTS5 match that is semantically close
 // to the newly ingested memory.
