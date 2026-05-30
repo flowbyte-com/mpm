@@ -2,6 +2,8 @@ package internal
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,11 +24,12 @@ const DefaultMaxWorkers = 3
 
 // SynthesisWorker manages the isolated synthesis goroutine pool.
 type SynthesisWorker struct {
-	db     *DatabaseManager
-	synth  *SynthClient
+	db          *DatabaseManager
+	synth       SynthClientInterface // interface allows mock injection in tests
+	vendorChain []SynthVendor         // ordered fallback chain; nil = use getSynthVendorChain()
 
 	events   chan MemoryEvent // inbound event channel
-	shutdown chan struct{}    // shutdown signal
+	shutdown chan struct{} // shutdown signal
 
 	wg  sync.WaitGroup
 	sem chan struct{} // concurrency semaphore
@@ -39,18 +42,57 @@ type SynthesisWorker struct {
 // NewSynthesisWorker creates a worker with isolated goroutine context.
 // The worker holds its own event channel and manages a pool of maxWorkers
 // concurrent synthesis tasks via semaphore.
-func NewSynthesisWorker(db *DatabaseManager, synth *SynthClient, maxWorkers int) *SynthesisWorker {
+func NewSynthesisWorker(db *DatabaseManager, synth SynthClientInterface, maxWorkers int) *SynthesisWorker {
 	if maxWorkers <= 0 {
 		maxWorkers = DefaultMaxWorkers
 	}
 	return &SynthesisWorker{
-		db:      db,
-		synth:   synth,
-		events:  make(chan MemoryEvent, 200), // bounded queue
-		shutdown: make(chan struct{}),
-		sem:     make(chan struct{}, maxWorkers),
-		dlqTick: time.NewTicker(5 * time.Minute).C,
-		logger:  slog.Default(),
+		db:          db,
+		synth:       synth,
+		vendorChain: getSynthVendorChain(),
+		events:      make(chan MemoryEvent, 200), // bounded queue
+		shutdown:    make(chan struct{}),
+		sem:         make(chan struct{}, maxWorkers),
+		dlqTick:     time.NewTicker(5 * time.Minute).C,
+		logger:      slog.Default(),
+	}
+}
+
+// NewSynthesisWorkerWithManualTick creates a worker where the DLQ tick is
+// driven by an external channel (for testing). Production code should use
+// NewSynthesisWorker which creates its own 5-minute ticker.
+func NewSynthesisWorkerWithManualTick(db *DatabaseManager, synth SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time) *SynthesisWorker {
+	if maxWorkers <= 0 {
+		maxWorkers = DefaultMaxWorkers
+	}
+	return &SynthesisWorker{
+		db:          db,
+		synth:       synth,
+		vendorChain: getSynthVendorChain(),
+		events:      make(chan MemoryEvent, 200),
+		shutdown:    make(chan struct{}),
+		sem:         make(chan struct{}, maxWorkers),
+		dlqTick:     dlqTick,
+		logger:      slog.Default(),
+	}
+}
+
+// NewSynthesisWorkerForTest creates a worker for unit testing with an explicit
+// vendor chain and manual DLQ tick channel. This bypasses getSynthVendorChain()
+// which requires real API keys.
+func NewSynthesisWorkerForTest(db *DatabaseManager, synth SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time, vendorChain []SynthVendor) *SynthesisWorker {
+	if maxWorkers <= 0 {
+		maxWorkers = DefaultMaxWorkers
+	}
+	return &SynthesisWorker{
+		db:          db,
+		synth:       synth,
+		vendorChain: vendorChain,
+		events:      make(chan MemoryEvent, 200),
+		shutdown:    make(chan struct{}),
+		sem:         make(chan struct{}, maxWorkers),
+		dlqTick:     dlqTick,
+		logger:      slog.Default(),
 	}
 }
 
@@ -117,7 +159,7 @@ func (w *SynthesisWorker) processEvent(event MemoryEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err := synthWithMultiVendor(ctx, w.db, w.synth, event.ID, event.Content, event.Tags)
+	err := w.synthWithMultiVendor(ctx, event.ID, event.Content, event.Tags)
 	if err != nil {
 		// All vendors failed — route to DLQ
 		enqueueErr := DLQEnqueue(w.db.SQLDB(), event.ID, event.Content, event.Tags, err)
@@ -137,14 +179,87 @@ func (w *SynthesisWorker) processDLQ() {
 		return
 	}
 	if len(entries) == 0 {
+		w.logger.Debug("synthesis_worker: processDLQ called but DLQReady returned empty")
 		return
 	}
 
 	w.logger.Info("synthesis_worker: processing dlq retry", "count", len(entries))
+	for _, e := range entries {
+		w.logger.Info("synthesis_worker: dlq entry", "id", e.ID, "memory_id", e.MemoryID, "attempt", e.Attempt, "next_retry", e.NextRetry)
+	}
 
+	w.processDLQEntries(entries)
+}
+
+// processDLQForced retrieves all non-HARD-STOPPED DLQ entries regardless of
+// next_retry time and processes them. For unit testing only.
+func (w *SynthesisWorker) processDLQForced() {
+	entries, err := w.dlqEntriesForTest()
+	if err != nil {
+		w.logger.Error("synthesis_worker: dlq read failed", "error", err.Error())
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	w.logger.Info("synthesis_worker: processing dlq retry (forced)", "count", len(entries))
+	w.processDLQEntries(entries)
+}
+
+// dlqEntriesForTest returns all DLQ entries with no time filter.
+// Mirrors DLQReady's column scan so the same entry parsing works.
+func (w *SynthesisWorker) dlqEntriesForTest() ([]DLQEntry, error) {
+	rows, err := w.db.SQLDB().Query(`
+		SELECT id, memory_id, content, tags, attempt, last_error, created_at, next_retry
+		FROM synthesis_dlq
+		ORDER BY created_at ASC
+		LIMIT 20
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []DLQEntry
+	for rows.Next() {
+		var e DLQEntry
+		var tagsStr, lastErr, nextRetryStr, createdAtStr string
+		if err := rows.Scan(&e.ID, &e.MemoryID, &e.Content, &tagsStr, &e.Attempt, &lastErr, &createdAtStr, &nextRetryStr); err != nil {
+			continue
+		}
+		e.LastError = lastErr
+		if nextRetryStr != "" {
+			t, _ := time.Parse(time.RFC3339, nextRetryStr)
+			e.NextRetry = t
+		}
+		if createdAtStr != "" {
+			t, _ := time.Parse(time.RFC3339, createdAtStr)
+			e.CreatedAt = t
+		}
+		if tagsStr != "" {
+			json.Unmarshal([]byte(tagsStr), &e.Tags)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func (w *SynthesisWorker) processDLQEntries(entries []DLQEntry) {
 	for _, entry := range entries {
+		// Check if source memory was already synthesized (soft-deleted).
+		// This can happen when: (1) event goroutine succeeded but DLQ row not yet removed,
+		// OR (2) a prior processDLQ call already handled this entry.
+		var deletedAt sql.NullString
+		row := w.db.SQLDB().QueryRow("SELECT deleted_at FROM memories WHERE id = ?", entry.MemoryID)
+		if err := row.Scan(&deletedAt); err == nil && deletedAt.Valid && deletedAt.String != "" {
+			// Source was soft-deleted — synthesis already completed. Clean up stale DLQ entry.
+			DLQRemove(w.db.SQLDB(), entry.ID)
+			w.logger.Info("synthesis_worker: dlq entry cleared (already synthesized)", "memory_id", entry.MemoryID)
+			continue
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := synthWithMultiVendor(ctx, w.db, w.synth, entry.MemoryID, entry.Content, entry.Tags)
+		err := w.synthWithMultiVendor(ctx, entry.MemoryID, entry.Content, entry.Tags)
 		cancel()
 
 		if err == nil {
@@ -153,7 +268,6 @@ func (w *SynthesisWorker) processDLQ() {
 		} else {
 			newAttempt := entry.Attempt + 1
 			if newAttempt >= 5 {
-				// Hard stop: requires manual intervention
 				w.logger.Warn("synthesis_worker: dlq entry hard-stopped after 5 attempts",
 					"memory_id", entry.MemoryID, "last_error", err.Error())
 			}
@@ -183,7 +297,7 @@ func (w *SynthesisWorker) drainAndExit() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				synthWithMultiVendor(ctx, w.db, w.synth, e.ID, e.Content, e.Tags)
+				w.synthWithMultiVendor(ctx, e.ID, e.Content, e.Tags)
 			}(event)
 		default:
 			goto drainComplete
@@ -198,8 +312,12 @@ drainComplete:
 
 // synthWithMultiVendor tries each vendor in order until one succeeds.
 // Returns error only if all vendors fail.
-func synthWithMultiVendor(ctx context.Context, db *DatabaseManager, client *SynthClient, memoryID, content string, tags []string) error {
-	vendors := getSynthVendorChain()
+// Uses w.vendorChain if non-nil, otherwise calls getSynthVendorChain().
+func (w *SynthesisWorker) synthWithMultiVendor(ctx context.Context, memoryID, content string, tags []string) error {
+	vendors := w.vendorChain
+	if vendors == nil {
+		vendors = getSynthVendorChain()
+	}
 
 	for _, vendor := range vendors {
 		select {
@@ -208,10 +326,10 @@ func synthWithMultiVendor(ctx context.Context, db *DatabaseManager, client *Synt
 		default:
 		}
 
-		result, err := client.SynthesizeWithVendor(ctx, vendor, content, tags)
+		result, err := w.synth.SynthesizeWithVendor(ctx, vendor, content, tags)
 		if err == nil && result != nil {
 			// Success — persist synthesized LTM
-			persistSynthesizedMemory(db, memoryID, content, result.Content, tags, vendor)
+			persistSynthesizedMemory(w.db, memoryID, content, result.Content, tags, vendor)
 			return nil
 		}
 		// Vendor failed — log and try next

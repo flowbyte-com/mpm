@@ -29,6 +29,13 @@ type SynthVendor struct {
 }
 
 // SynthClient handles external LLM calls for memory synthesis.
+// The interface allows test doubles (mock) for isolation testing.
+type SynthClientInterface interface {
+	Synthesize(ctx context.Context, fragments []string) (*synthResult, error)
+	SynthesizeWithVendor(ctx context.Context, vendor SynthVendor, content string, tags []string) (*synthResult, error)
+}
+
+// SynthClient handles external LLM calls for memory synthesis.
 type SynthClient struct {
 	Model       string
 	APIKey      string
@@ -167,29 +174,7 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*syn
 		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Parse Anthropic-compatible response wrapper
-	wrapper := struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}{}
-	if err := json.Unmarshal(respBody, &wrapper); err != nil {
-		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
-	}
-	if len(wrapper.Content) == 0 {
-		return nil, fmt.Errorf("API returned empty content")
-	}
-
-	// The inner text should be a JSON object with content + tags
-	raw := strings.TrimSpace(wrapper.Content[0].Text)
-	var result synthResult
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse synthesis JSON from LLM output: %w (raw: %s)", err, raw)
-	}
-	if result.Content == "" {
-		return nil, fmt.Errorf("LLM returned empty synthesized content")
-	}
-	return &result, nil
+	return parseResponseBody(respBody)
 }
 
 // SynthesizeWithVendor sends fragments to a specific vendor and returns the
@@ -279,27 +264,7 @@ func (sc *SynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVen
 		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var wrapper struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(respBody, &wrapper); err != nil {
-		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
-	}
-	if len(wrapper.Content) == 0 {
-		return nil, fmt.Errorf("API returned empty content")
-	}
-
-	raw := strings.TrimSpace(wrapper.Content[0].Text)
-	var result synthResult
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse synthesis JSON from LLM output: %w (raw: %s)", err, raw)
-	}
-	if result.Content == "" {
-		return nil, fmt.Errorf("LLM returned empty synthesized content")
-	}
-	return &result, nil
+	return parseResponseBody(respBody)
 }
 
 // parseResponseBody parses the Anthropic-style response wrapper and returns
