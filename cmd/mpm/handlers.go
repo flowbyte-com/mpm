@@ -32,6 +32,10 @@ var dbManagerInitErr error
 // It is initialized by main() in the unified process architecture.
 var watchPool *WorkerPool
 
+// Global synthesis worker — initialized in startWatchGoroutine, shared across
+// all file event processors. Wired here to avoid creating per-event instances.
+var watchSynthWorker *mpminternal.SynthesisWorker
+
 // Default worker pool size for the watcher background goroutines.
 const defaultWorkerPoolSize = 3
 
@@ -3754,6 +3758,14 @@ func startWatchGoroutine() error {
 	watcherDone = make(chan struct{})
 	watchPool.Start(watcherCtx)
 
+	// Initialize and start the isolated synthesis worker pool.
+	// This worker handles all LLM synthesis calls — never blocks the watcher.
+	if watchSynthWorker == nil {
+		synthClient := internal.NewSynthClient()
+		watchSynthWorker = internal.NewSynthesisWorker(watchPool.DM(), synthClient, 3)
+		watchSynthWorker.Start()
+	}
+
 	// Write PID file only in detached mode (--bg flag).
 	// In in-process goroutine mode the PID would point to the main mpm process,
 	// causing stale PID file confusion on abnormal exit.
@@ -3808,6 +3820,13 @@ func stopWatchGoroutine() {
 	watcherCancel = nil
 	watcherCtx = nil
 	watcherDone = nil
+
+	// Stop the isolated synthesis worker — waits for in-flight LLM calls
+	// to complete (or hit their 30s deadline) before returning.
+	if watchSynthWorker != nil {
+		watchSynthWorker.Stop()
+		watchSynthWorker = nil
+	}
 }
 
 // handleWatchStop reads the PID from watch.pid and signals the watcher to stop.
