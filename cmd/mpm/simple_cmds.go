@@ -74,7 +74,18 @@ func handleAdd(args []string) int {
 		"source": "cli",
 	}
 
-	embedding := mpminternal.HashEmbed(content)
+	// Auto-embed: try real embeddings, fall back to hash if provider unavailable
+	var embedding []float32
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	if cfg.Provider.Name() != "null" {
+		if vec, err := cfg.Provider.Embed(content); err == nil && len(vec) > 0 {
+			embedding = vec
+		} else {
+			embedding = mpminternal.HashEmbed(content)
+		}
+	} else {
+		embedding = mpminternal.HashEmbed(content)
+	}
 	isLongTerm := *weight >= 10
 
 	id, err := dm.SaveMemory(*collection, content, *session, tags, metadata, embedding, isLongTerm, *weight)

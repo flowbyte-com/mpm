@@ -68,6 +68,7 @@ func NewRouter() *CommandRouter {
 		"mode":            {Name: "mode", Description: "Mode operations"},
 			"wake":            {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":              {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+		"backfill-embeddings": {Name: "backfill-embeddings", Description: "Backfill embeddings for existing memories (--batch-size, --collection, --dry-run)", MinArgs: 0},
 		"backup":          {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
 		"restore-db":      {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
@@ -356,6 +357,8 @@ func handleOps(args []string) int {
 		return handleSynthesize(append([]string{"synthesize"}, subArgs...))
 	case "gc":
 		return handleGC(append([]string{"gc"}, subArgs...))
+	case "backfill-embeddings":
+		return handleBackfillEmbeddings(subArgs)
 
 	// — Watcher & Web —
 	case "watch":
@@ -440,6 +443,7 @@ var opsSubcommandDescs = []struct {
 	{"maintain", "Self-maintenance: decay, consolidate, prune"},
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
+	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
 	{"watch", "Start/stop/status watcher daemon"},
 	{"web", "Start web UI server"},
 	{"review", "Spaced reinforcement review"},
