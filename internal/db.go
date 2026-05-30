@@ -383,6 +383,12 @@ func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
 	return &DatabaseManager{db: db, watchdogPath: wdPath}
 }
 
+// InitSchema initializes the shared MPM schema (tables, indexes, migrations, FTS).
+// Exported so test code can call it after NewDatabaseManagerForDB with a custom *sql.DB.
+func (dm *DatabaseManager) InitSchema() error {
+	return dm.initUnifiedSchema()
+}
+
 func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Use shared schema definitions from schema.go
 	for _, sqlQuery := range BaseTables {

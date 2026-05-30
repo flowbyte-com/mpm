@@ -153,13 +153,15 @@ func DLQStats(db *sql.DB) (int, time.Time, error) {
 	if err := row.Scan(&count); err != nil {
 		return 0, time.Time{}, err
 	}
-	var oldest sql.NullTime
+	var oldestStr string
 	row = db.QueryRow(`SELECT MIN(created_at) FROM synthesis_dlq`)
-	if err := row.Scan(&oldest); err != nil {
-		return count, time.Time{}, err
+	if err := row.Scan(&oldestStr); err != nil || oldestStr == "" {
+		return count, time.Time{}, nil
 	}
-	if oldest.Valid {
-		return count, oldest.Time, nil
+	// Parse RFC3339 string — created_at stored as datetime('now') → "2026-05-30 19:57:51"
+	t, err := time.Parse("2006-01-02 15:04:05", oldestStr)
+	if err != nil {
+		return count, time.Time{}, nil
 	}
-	return count, time.Time{}, nil
+	return count, t, nil
 }
