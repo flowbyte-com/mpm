@@ -163,11 +163,16 @@ func handleLs(args []string) int {
 			w = int(we)
 		}
 		content, _ := m["content"].(string)
+		meta, _ := m["metadata"].(string)
+		chip := ""
+		if strings.Contains(meta, `"status":"challenged"`) {
+			chip = " [CHALLENGED]"
+		}
 		if len(content) > 50 {
 			content = content[:50] + "..."
 		}
 
-		fmt.Printf("%4d  %.20s %-10s %-6d %s\n", i+1, created, coll, w, content)
+		fmt.Printf("%4d  %.20s %-10s %-6d%s %s\n", i+1, created, coll, w, chip, content)
 		_ = id
 	}
 
@@ -225,6 +230,11 @@ func handleShow(args []string) int {
 		w = int(we)
 	}
 	fmt.Printf("Weight:       %d\n", w)
+
+	meta, _ := mem["metadata"].(string)
+	if strings.Contains(meta, `"status":"challenged"`) {
+		fmt.Println("[CHALLENGED]")
+	}
 
 	fmt.Printf("Tags:         %s\n", mem["tags"])
 
@@ -479,13 +489,53 @@ func handleShredMem(args []string) int {
 	}
 	defer dm.Close()
 
-	err = mpminternal.ShredMemory(dm.SQLDB(), id)
+	// Fetch memory to extract challenged_theory_id before deletion
+	mem, err := dm.GetMemory(id)
+	var theoryID string
+	if err == nil && mem != nil {
+		metaStr, _ := mem["metadata"].(string)
+		var meta map[string]interface{}
+		if metaStr != "" {
+			json.Unmarshal([]byte(metaStr), &meta)
+		}
+		theoryID, _ = meta["challenged_theory_id"].(string)
+	}
+
+	// Transaction: DELETE topic_memberships → DELETE theory (if exists) → DELETE memory
+	tx, err := dm.SQLDB().Begin()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
+	defer tx.Rollback()
 
-	fmt.Printf("Securely deleted memory %s\n", id)
+	if _, err = tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, id); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	if theoryID != "" {
+		if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+	}
+
+	if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	if theoryID != "" {
+		fmt.Printf("⚡ Memory %s shredded. Theory %s purged.\n", id, theoryID)
+	} else {
+		fmt.Printf("⚡ Memory %s shredded.\n", id)
+	}
 	return 0
 }
 
