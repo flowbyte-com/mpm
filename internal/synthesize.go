@@ -37,11 +37,11 @@ type SynthClientInterface interface {
 
 // SynthClient handles external LLM calls for memory synthesis.
 type SynthClient struct {
-	Model       string
-	APIKey      string
-	BaseURL     string
-	MaxTokens   int
-	Timeout     time.Duration
+	Model     string
+	APIKey    string
+	BaseURL   string
+	MaxTokens int
+	Timeout   time.Duration
 }
 
 // NewSynthClient reads LLM configuration from mpm_config.json and returns a
@@ -174,7 +174,18 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*syn
 		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return parseResponseBody(respBody)
+	rawResult, err := sc.parseResponseBody(respBody, "default")
+	if err != nil {
+		return nil, fmt.Errorf("synthesis [vendor=default]: %w", err)
+	}
+	var result synthResult
+	if err := json.Unmarshal(rawResult, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse synthesis JSON: %w (raw: %s)", err, string(rawResult))
+	}
+	if result.Content == "" {
+		return nil, fmt.Errorf("LLM returned empty synthesized content")
+	}
+	return &result, nil
 }
 
 // SynthesizeWithVendor sends fragments to a specific vendor and returns the
@@ -264,33 +275,41 @@ func (sc *SynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVen
 		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return parseResponseBody(respBody)
+	rawResult, err := sc.parseResponseBody(respBody, vendor.Name)
+	if err != nil {
+		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", vendor.Name, err)
+	}
+	var result synthResult
+	if err := json.Unmarshal(rawResult, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse synthesis JSON from vendor %s: %w (raw: %s)", vendor.Name, err, string(rawResult))
+	}
+	if result.Content == "" {
+		return nil, fmt.Errorf("vendor %s: LLM returned empty synthesized content", vendor.Name)
+	}
+	return &result, nil
 }
 
 // parseResponseBody parses the Anthropic-style response wrapper and returns
-// the inner synthResult. Extracted to avoid duplication between Synthesize
-// and SynthesizeWithVendor.
-func parseResponseBody(respBody []byte) (*synthResult, error) {
+// the inner LLM output text as raw bytes. Extracted into a method to serve
+// both synchronous and asynchronous ingestion paths through a single parser.
+// The vendor parameter is included for contextual error messages.
+func (sc *SynthClient) parseResponseBody(body []byte, vendor string) ([]byte, error) {
 	wrapper := struct {
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	}{}
-	if err := json.Unmarshal(respBody, &wrapper); err != nil {
-		return nil, fmt.Errorf("failed to parse response wrapper: %w (body: %s)", err, string(respBody))
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("vendor %s: failed to parse response wrapper: %w (body: %s)", vendor, err, string(body))
 	}
 	if len(wrapper.Content) == 0 {
-		return nil, fmt.Errorf("API returned empty content")
+		return nil, fmt.Errorf("vendor %s: API returned empty content", vendor)
 	}
 	raw := strings.TrimSpace(wrapper.Content[0].Text)
-	var result synthResult
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse synthesis JSON from LLM output: %w (raw: %s)", err, raw)
+	if raw == "" {
+		return nil, fmt.Errorf("vendor %s: LLM returned empty response text", vendor)
 	}
-	if result.Content == "" {
-		return nil, fmt.Errorf("LLM returned empty synthesized content")
-	}
-	return &result, nil
+	return []byte(raw), nil
 }
 
 // nearMissCandidate represents a single FTS5 match that is semantically close
@@ -479,10 +498,10 @@ func hasSynthPair(a, b string) bool {
 // =============================================================================
 
 // AutoSynthesize is called after a new memory has been written. It:
-//   1. Runs FTS5 near-miss detection against the new memory content
-//   2. If candidates are found, invokes the LLM for consolidation
-//   3. On success: writes the synthesized LTM, soft-deletes originals
-//   4. On failure: logs to watchdog, writes original without merging
+//  1. Runs FTS5 near-miss detection against the new memory content
+//  2. If candidates are found, invokes the LLM for consolidation
+//  3. On success: writes the synthesized LTM, soft-deletes originals
+//  4. On failure: logs to watchdog, writes original without merging
 //
 // The caller may pass a cancellable ctx. If ctx is cancelled before the API
 // call completes, the write degrades gracefully — the original memory remains
