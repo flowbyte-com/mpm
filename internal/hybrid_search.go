@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const challengeWarning = "[Note: This memory is challenged — treat as unverified]"
+
 // HybridConfig controls how FTS5 and vector scores are blended.
 type HybridConfig struct {
 	// VectorWeight (0.0–1.0): how much to weight vector similarity.
@@ -27,9 +29,9 @@ type HybridConfig struct {
 // DefaultHybridConfig returns sensible defaults.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
-		VectorWeight:      0.5,
+		VectorWeight:       0.5,
 		RetrievalThreshold: -3.0, // BM25 can be negative; threshold here is on combined score
-		Limit:             15,
+		Limit:              15,
 	}
 }
 
@@ -45,10 +47,12 @@ type HybridResult struct {
 	Weight             int
 	LastAccessedAt     *string
 	ReferenceID        *string
-	FTS5Score float64 // raw BM25
-	VectorSimilarity  float64 // cosine similarity (0.0–1.0)
-	CombinedScore     float64 // weighted blend
-	Source string  // "fts5", "vector", "hybrid"
+	FTS5Score          float64 // raw BM25
+	VectorSimilarity   float64 // cosine similarity (0.0–1.0)
+	CombinedScore      float64 // weighted blend
+	Source             string  // "fts5", "vector", "hybrid"
+	IsChallenged       bool
+	ChallengedTheoryID string
 }
 
 // HybridSearch performs a combined FTS5 + vector search.
@@ -133,6 +137,20 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			continue
 		}
 
+		isChallenged := false
+		challengedTheoryID := ""
+		if fts.Metadata != "" {
+			var meta map[string]interface{}
+			if json.Unmarshal([]byte(fts.Metadata), &meta) == nil {
+				if status, _ := meta["status"].(string); status == "challenged" {
+					isChallenged = true
+				}
+				if tid, _ := meta["challenged_theory_id"].(string); tid != "" {
+					challengedTheoryID = tid
+				}
+			}
+		}
+
 		combined = append(combined, HybridResult{
 			ID:                 id,
 			Content:            fts.Content,
@@ -145,9 +163,11 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			LastAccessedAt:     fts.LastAccessedAt,
 			ReferenceID:        fts.ReferenceID,
 			FTS5Score:          ftsScore,
-			VectorSimilarity:  vecSim,
-			CombinedScore:     combinedScore,
+			VectorSimilarity:   vecSim,
+			CombinedScore:      combinedScore,
 			Source:             source,
+			IsChallenged:       isChallenged,
+			ChallengedTheoryID: challengedTheoryID,
 		})
 	}
 
@@ -158,6 +178,74 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 
 	if len(combined) > cfg.Limit {
 		combined = combined[:cfg.Limit]
+	}
+
+	// ── Phase 4: Contradiction Detection (Cognitive Immune System) ─────
+	// Limit to top 15 candidates for O(1) pairwise evaluation (C(15,2) = 105)
+	scanLimit := 15
+	if len(combined) < scanLimit {
+		scanLimit = len(combined)
+	}
+	scanSet := combined[:scanLimit]
+
+	// Load embeddings for pairwise cosine similarity
+	type candidateEmbedding struct {
+		embedding    []float32
+		isChallenged bool
+	}
+	candMap := make(map[string]candidateEmbedding, scanLimit)
+	for _, c := range scanSet {
+		var embStr string
+		err := dm.SQLDB().QueryRow(
+			`SELECT embedding FROM memories WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`,
+			c.ID,
+		).Scan(&embStr)
+		if err == nil && embStr != "" {
+			var emb []float32
+			if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
+				candMap[c.ID] = candidateEmbedding{embedding: emb, isChallenged: c.IsChallenged}
+			}
+		}
+	}
+
+	// Pairwise O(1) contradiction scan
+	for i := 0; i < scanLimit; i++ {
+		ci, ciOK := candMap[scanSet[i].ID]
+		if !ciOK || len(ci.embedding) == 0 {
+			continue
+		}
+		for j := i + 1; j < scanLimit; j++ {
+			cj, cjOK := candMap[scanSet[j].ID]
+			if !cjOK || len(cj.embedding) == 0 {
+				continue
+			}
+			sim := cosineSimilarity(ci.embedding, cj.embedding)
+			if sim < 0.85 {
+				continue
+			}
+			// State collision: one challenged, one not
+			if ci.isChallenged != cj.isChallenged {
+				var challengedID, unchallengedID string
+				if ci.isChallenged {
+					challengedID = scanSet[i].ID
+					unchallengedID = scanSet[j].ID
+				} else {
+					challengedID = scanSet[j].ID
+					unchallengedID = scanSet[i].ID
+				}
+				evidence := fmt.Sprintf(
+					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
+					sim, challengedID, unchallengedID)
+				dm.ChallengeMemoryAsync(unchallengedID, evidence)
+			}
+		}
+	}
+
+	// ── Phase 5: In-Memory Warning Prepend ─────────────────────────────────
+	for i := range combined {
+		if combined[i].IsChallenged {
+			combined[i].Content = challengeWarning + "\n" + combined[i].Content
+		}
 	}
 
 	return combined, nil
@@ -197,7 +285,7 @@ type vecEntry struct {
 
 // VectorMatch is returned by DatabaseManager.VectorMatch.
 type VectorMatch struct {
-	ID string
+	ID         string
 	Content    string
 	CreatedAt  string
 	Similarity float64
