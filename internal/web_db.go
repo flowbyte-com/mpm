@@ -197,11 +197,12 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var collection, content, tagsJSON, metadataJSON, createdAt string
 	var sessionID, sourceDB, sourceID *string
 	var promotedAt *float64
+	var weight int
 
 	err := dm.db.QueryRow(`
-		SELECT collection, content, session_id, tags, metadata, created_at
+		SELECT collection, content, session_id, tags, metadata, created_at, weight
 		FROM memories WHERE id = ? AND deleted_at IS NULL
-	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt)
+	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &weight)
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +214,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 		"tags":       tagsJSON,
 		"metadata":   metadataJSON,
 		"created_at": createdAt,
+		"weight":     weight,
 	}
 	if sessionID != nil {
 		m["session_id"] = *sessionID
@@ -382,6 +384,87 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 		WHERE id = ?
 	`, delta, weightGain, id)
 	return err
+}
+
+// AdjustMemoryWeight adjusts weight by delta with a hard floor of 1.
+// Used by the +/- feedback shortcuts.
+func (dm *DatabaseManager) AdjustMemoryWeight(id string, delta int) error {
+	_, err := dm.db.Exec(`
+		UPDATE memories
+		SET weight = MAX(weight + ?, 1),
+		    last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, delta, id)
+	return err
+}
+
+// ChallengeAndReinforce clears the challenged status (if any) and applies
+// reinforcement in a single transaction. Used when +<id> hits a challenged memory.
+func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
+	if delta <= 0 {
+		delta = 1
+	}
+	weightGain := (delta + 1) / 2
+	if weightGain == 0 {
+		weightGain = 1
+	}
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Fetch challenged_theory_id from memory metadata
+	var metaStr string
+	err = tx.QueryRow(`SELECT metadata FROM memories WHERE id = ?`, id).Scan(&metaStr)
+	if err != nil {
+		return err
+	}
+	var theoryID string
+	if metaStr != "" {
+		var meta map[string]interface{}
+		if json.Unmarshal([]byte(metaStr), &meta) == nil {
+			if t, ok := meta["challenged_theory_id"].(string); ok {
+				theoryID = t
+			}
+		}
+	}
+
+	// 1. Resolve theory if present
+	if theoryID != "" {
+		resolvePatch := map[string]interface{}{"status": "disproven", "memory_id": nil}
+		resolveJSON, _ := json.Marshal(resolvePatch)
+		_, err = tx.Exec(
+			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
+			string(resolveJSON), theoryID)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 2. Clear challenged status from memory
+	clearPatch := map[string]interface{}{"status": nil, "challenged_theory_id": nil}
+	clearJSON, _ := json.Marshal(clearPatch)
+	_, err = tx.Exec(
+		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
+		string(clearJSON), id)
+	if err != nil {
+		return err
+	}
+
+	// 3. Apply reinforcement and bump last_accessed_at
+	_, err = tx.Exec(`
+		UPDATE memories
+		SET reinforcement_count = reinforcement_count + ?,
+		    weight = MIN(weight + ?, 100),
+		    last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, delta, weightGain, id)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // WeakenMemory decrements reinforcement count and reduces weight.

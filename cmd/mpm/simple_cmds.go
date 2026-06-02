@@ -344,6 +344,76 @@ func handlePromote(args []string) int {
 }
 
 // mpm reinforce <id> [delta] — Increment reinforcement
+// handleFeedback dispatches +<id> and -<id> shortcuts.
+// Delta sign is determined by the caller: +1 for reinforce, -1 for weaken.
+func handleFeedback(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Error: internal: handleFeedback requires id and delta\n")
+		return 1
+	}
+	id := args[1]
+	delta, err := strconv.Atoi(args[2])
+	if err != nil || delta == 0 {
+		fmt.Fprintf(os.Stderr, "Error: invalid delta %q\n", args[2])
+		return 1
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	// Check memory exists and challenged status
+	mem, err := dm.GetMemory(id)
+	if err != nil || mem == nil {
+		fmt.Fprintf(os.Stderr, "Error: memory not found: %s\n", id)
+		return 1
+	}
+	isChallenged := false
+	if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {
+		var meta map[string]interface{}
+		if json.Unmarshal([]byte(metaStr), &meta) == nil {
+			if s, ok := meta["status"].(string); ok && s == "challenged" {
+				isChallenged = true
+			}
+		}
+	}
+
+	if delta > 0 {
+		// Positive feedback: implicit challenge restore if challenged, then reinforce
+		if isChallenged {
+			if err := dm.ChallengeAndReinforce(id, delta); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				return 1
+			}
+			fmt.Printf("⚡ Reinforced memory %s (+%d) — challenge cleared\n", id, delta)
+		} else {
+			if err := dm.ReinforceMemory(id, delta); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				return 1
+			}
+			fmt.Printf("⚡ Reinforced memory %s (+%d)\n", id, delta)
+		}
+	} else {
+		// Negative feedback: weaken with hard floor at 1
+		if err := dm.AdjustMemoryWeight(id, delta); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		// Check if already at minimum
+		updated, _ := dm.GetMemory(id)
+		if w, ok := updated["weight"].(int64); ok && w <= 1 {
+			fmt.Printf("Weakened memory %s (%d) — at minimum weight (1)\n", id, delta)
+		} else {
+			fmt.Printf("⚡ Weakened memory %s (%d)\n", id, delta)
+		}
+	}
+	return 0
+}
+
+// handleReinforce is the public command handler for `mpm reinforce`.
 func handleReinforce(args []string) int {
 	if len(args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mpm reinforce <id> [delta]\n")
@@ -697,11 +767,11 @@ func handleRefAdd(args []string) int {
 	if *jsonOutput {
 		tagsStr := strings.Join(tags, ",")
 		data, _ := json.Marshal(map[string]interface{}{
-			"success":       true,
-			"id":            doc.ID,
-			"title":         doc.Title,
-			"total_chunks":  doc.TotalChunks,
-			"tags":          tagsStr,
+			"success":      true,
+			"id":           doc.ID,
+			"title":        doc.Title,
+			"total_chunks": doc.TotalChunks,
+			"tags":         tagsStr,
 		})
 		fmt.Println(string(data))
 	} else {
@@ -961,11 +1031,11 @@ func handleRefSearch(args []string) int {
 
 	if jsonOutput {
 		type chunkResult struct {
-			DocID       string  `json:"doc_id"`
-			DocTitle    string  `json:"doc_title"`
-			ChunkIndex  int     `json:"chunk_index"`
-			Content     string  `json:"content"`
-			Score       float64 `json:"score"`
+			DocID      string  `json:"doc_id"`
+			DocTitle   string  `json:"doc_title"`
+			ChunkIndex int     `json:"chunk_index"`
+			Content    string  `json:"content"`
+			Score      float64 `json:"score"`
 		}
 		results := make([]chunkResult, 0, len(chunks))
 		for _, c := range chunks {
