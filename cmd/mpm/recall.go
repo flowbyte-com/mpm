@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
-	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +42,7 @@ func handleRecall(args []string) int {
 	before := fs.String("before", "", "Only results created before this date (YYYY-MM-DD)")
 	semantic := fs.Bool("semantic", false, "Use hybrid semantic search (FTS5 + embeddings)")
 	vectorWeight := fs.Float64("vector-weight", 0.5, "Vector weight in hybrid search (0=FTS5-only, 1=vector-only)")
+	asOf := fs.String("as-of", "", "Point-in-time reconstruction: retrieve memory state as of this timestamp (RFC3339)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
 		fmt.Println("\nRecall options:")
@@ -196,17 +197,17 @@ func handleRecall(args []string) int {
 	defer rows.Close()
 
 	type recallEntry struct {
-		id                   string
-		content              string
-		metadata             string
-		sessionID            string
-		createdAt            time.Time
-		tags                 string
-		synthesized          bool
-		reinforcementCount   int
-		weight               int
-		lastAccessedAt       time.Time
-		referenceID          string
+		id                 string
+		content            string
+		metadata           string
+		sessionID          string
+		createdAt          time.Time
+		tags               string
+		synthesized        bool
+		reinforcementCount int
+		weight             int
+		lastAccessedAt     time.Time
+		referenceID        string
 	}
 	var entries []recallEntry
 	for rows.Next() {
@@ -231,14 +232,14 @@ func handleRecall(args []string) int {
 			refID = nullableRefID.String
 		}
 		entry := recallEntry{
-			id:                  id,
-			content:             content,
-			metadata:            nullableMetadata.String,
-			sessionID:           sessionID,
-			tags:                nullableTags.String,
-			reinforcementCount:  int(reinforcementCount),
-			weight:              int(weight),
-			referenceID:         refID,
+			id:                 id,
+			content:            content,
+			metadata:           nullableMetadata.String,
+			sessionID:          sessionID,
+			tags:               nullableTags.String,
+			reinforcementCount: int(reinforcementCount),
+			weight:             int(weight),
+			referenceID:        refID,
 		}
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			entry.createdAt = t
@@ -260,23 +261,57 @@ func handleRecall(args []string) int {
 		return entries[i].createdAt.After(entries[j].createdAt)
 	})
 
+	// ── Point-in-Time Reconstruction (--as-of) ─────────────────────────
+	//
+	// NOTE: FTS5/keyword search operates on the *current* indexed text only.
+	// When --as-of is active, results are filtered and their content substituted
+	// from memory_revisions after the initial search pass. This means:
+	//   - A memory whose current text no longer matches the query may still be
+	//     returned if it matched at the --as-of timestamp (the FTS match is
+	//     against current indexed content; reconstruction happens post-selection).
+	//   - A memory that was created after --as-of is silently dropped.
+	//   - The reconstructed content reflects the historical text, not current.
+	var timeTravelVersionMap map[string]int
+	if *asOf != "" {
+		asOfTime, err := time.Parse(time.RFC3339, *asOf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: --as-of must be an RFC3339 timestamp, got %q\n", *asOf)
+			return 1
+		}
+
+		timeTravelVersionMap = make(map[string]int, len(entries))
+		var filtered []recallEntry
+		for _, e := range entries {
+			rev, err := dm.GetMemoryRevisionAtTime(e.id, asOfTime)
+			if err != nil || rev == nil {
+				continue // memory didn't exist yet at that time — drop silently
+			}
+			e.content = rev.Content
+			e.weight = rev.Weight
+			timeTravelVersionMap[e.id] = rev.Version
+			filtered = append(filtered, e)
+		}
+		entries = filtered
+	}
+
 	// JSON output for tool integration — even with zero results, return valid JSON
 	if *jsonOutput {
 		type memoryEntry struct {
-			ID                 string `json:"id"`
-			Content            string `json:"content"`
-			Tags               string `json:"tags"`
-			SessionID          string `json:"session_id,omitempty"`
-			CreatedAt          string `json:"created_at"`
-			ReinforcementCount int    `json:"reinforcement_count"`
-			Weight             int    `json:"weight"`
-			LastAccessedAt     string `json:"last_accessed_at,omitempty"`
-			Score              float64 `json:"score"`
-			Rationale          string  `json:"rationale"`
-			IsStale            bool    `json:"is_stale"`
-			CrossReferences    struct {
-				Topics       []mpminternal.TopicRef         `json:"topics"`
-				ReferenceDoc *mpminternal.ReferenceDocRef   `json:"reference_doc"`
+			ID                   string  `json:"id"`
+			Content              string  `json:"content"`
+			Tags                 string  `json:"tags"`
+			SessionID            string  `json:"session_id,omitempty"`
+			CreatedAt            string  `json:"created_at"`
+			ReinforcementCount   int     `json:"reinforcement_count"`
+			Weight               int     `json:"weight"`
+			LastAccessedAt       string  `json:"last_accessed_at,omitempty"`
+			Score                float64 `json:"score"`
+			Rationale            string  `json:"rationale"`
+			IsStale              bool    `json:"is_stale"`
+			ReconstructedVersion *int    `json:"reconstructed_version,omitempty"`
+			CrossReferences      struct {
+				Topics       []mpminternal.TopicRef       `json:"topics"`
+				ReferenceDoc *mpminternal.ReferenceDocRef `json:"reference_doc"`
 			} `json:"cross_references"`
 		}
 		result := make([]memoryEntry, 0, len(entries))
@@ -320,24 +355,35 @@ func handleRecall(args []string) int {
 				}
 			}
 
+			var recVer *int
+			if timeTravelVersionMap != nil {
+				if v, ok := timeTravelVersionMap[e.id]; ok {
+					recVer = &v
+				}
+			}
+
 			result = append(result, memoryEntry{
-				ID:                 shortID(e.id),
-				Content:            e.content,
-				Tags:               e.tags,
-				SessionID:          e.sessionID,
-				CreatedAt:          e.createdAt.Format(time.RFC3339),
-				ReinforcementCount: e.reinforcementCount,
-				Weight:             e.weight,
-				LastAccessedAt:     lastAccessStr,
-				Score:              score,
-				Rationale:         rationale,
-				IsStale:            isStale,
-				CrossReferences:   crossRefs,
+				ID:                   shortID(e.id),
+				Content:              e.content,
+				Tags:                 e.tags,
+				SessionID:            e.sessionID,
+				CreatedAt:            e.createdAt.Format(time.RFC3339),
+				ReinforcementCount:   e.reinforcementCount,
+				Weight:               e.weight,
+				LastAccessedAt:       lastAccessStr,
+				Score:                score,
+				Rationale:            rationale,
+				IsStale:              isStale,
+				ReconstructedVersion: recVer,
+				CrossReferences:      crossRefs,
 			})
 		}
 		output := map[string]interface{}{
 			"query":    query,
 			"memories": result,
+		}
+		if *asOf != "" {
+			output["reconstructed_as_of"] = *asOf
 		}
 		if truncated {
 			output["truncated"] = true
@@ -359,7 +405,11 @@ func handleRecall(args []string) int {
 	reset := "\033[0m"
 	bold := "\033[1m"
 
-	fmt.Printf("%s%sRecall — %s%s\n\n", bold, cyan, query, reset)
+	header := fmt.Sprintf("%s%sRecall — %s%s", bold, cyan, query, reset)
+	if *asOf != "" {
+		header = fmt.Sprintf("%s%sReconstructed Past State as of %s%s", bold, yellow, *asOf, reset)
+	}
+	fmt.Printf("%s\n\n", header)
 
 	dim := "\033[2m"
 	accumulatedTokens := 0
@@ -442,10 +492,17 @@ func handleRecall(args []string) int {
 			synthTag = fmt.Sprintf(" %s[synth]%s", magenta, reset)
 		}
 
-		fmt.Printf("%s%d.%s %s%s%s\n    %s\n\n",
+		versionNote := ""
+		if timeTravelVersionMap != nil {
+			if v, ok := timeTravelVersionMap[e.id]; ok {
+				versionNote = fmt.Sprintf(" %s[Reconstructed Past State: Version %d as of %s]%s", yellow, v, *asOf, reset)
+			}
+		}
+
+		fmt.Printf("%s%d.%s %s%s%s%s\n    %s\n\n",
 			cyan, i+1, reset,
 			chipsLine, synthTag,
-			reset,
+			versionNote, reset,
 			content)
 
 		// Fetch and display cross-references
@@ -724,7 +781,7 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 			ReinforcementCount int     `json:"reinforcement_count"`
 			Weight             int     `json:"weight"`
 			Score              float64 `json:"score"`
-			Source string  `json:"source"` // "fts5", "vector", "hybrid"
+			Source             string  `json:"source"` // "fts5", "vector", "hybrid"
 			FTS5Score          float64 `json:"fts5_score,omitempty"`
 			VectorSimilarity   float64 `json:"vector_similarity,omitempty"`
 			Rationale          string  `json:"rationale"`
