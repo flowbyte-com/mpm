@@ -94,14 +94,14 @@ func testSynthesisIsolationOverflow(t *testing.T) {
 		"all 250 events should be accounted for: dlq=%d overflow=%d", dlqCount, overflowCount)
 }
 
-// ── Test 2: Cognitive Immune System — Contradiction Detection ────────────
+// ── Test 2: Cognitive Immune System — Contradiction Detection ───────────
 
 func testRetrievalContradictionTrigger(t *testing.T) {
 	db := reliabilityFreshDB(t)
 	defer db.Close()
 
-	// Insert two memories with semantically overlapping content.
-	// Use identical content so HashEmbed produces the same embedding → cosine=1.0.
+	// Insert two memories with identical content so HashEmbed produces the same
+	// embedding → cosine=1.0, guaranteeing the 0.85 contradiction threshold is met.
 	overlappingContent := "The user prefers concise and direct communication without unnecessary elaboration or fluff in their messages."
 	embedding := HashEmbed(overlappingContent)
 
@@ -122,14 +122,16 @@ func testRetrievalContradictionTrigger(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, id2)
 
-	// Run HybridSearch
+	// Run HybridSearch: use single-word query "concise" which matches verbatim
+	// in both memories. searchLike uses LIKE '%concise%' — direct substring match.
 	cfg := DefaultHybridConfig()
 	cfg.Limit = 10
+	cfg.VectorWeight = 0 // force LIKE-only, no vector dependency
 	cfg.RetrievalThreshold = -100 // accept all results
 
-	results, err := HybridSearch(db, "concise direct communication", "memories", cfg)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(results), 1, "should return at least one result")
+	results, err := HybridSearch(db, "concise", "memories", cfg)
+	require.NoError(t, err, "HybridSearch should not error: %v")
+	require.GreaterOrEqual(t, len(results), 1, "should return at least one result, got: %d", len(results))
 
 	// Verify the challenged memory has the warning prepended
 	var challengedFound bool

@@ -32,54 +32,54 @@ func NewRouter() *CommandRouter {
 		"doctor":  {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
 
 		// Memory commands
-		"recall":     {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
-		"add":        {Name: "add", Description: "Add a new memory", MinArgs: 1},
-		"ls":         {Name: "ls", Description: "List memories", MinArgs: 0},
-		"show":       {Name: "show", Description: "Show memory details", MinArgs: 1},
-		"rm":         {Name: "rm", Description: "Delete a memory", MinArgs: 1},
-		"promote":    {Name: "promote", Description: "Make memory LTM", MinArgs: 1},
+		"recall":       {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
+		"add":          {Name: "add", Description: "Add a new memory", MinArgs: 1},
+		"ls":           {Name: "ls", Description: "List memories", MinArgs: 0},
+		"show":         {Name: "show", Description: "Show memory details", MinArgs: 1},
+		"rm":           {Name: "rm", Description: "Delete a memory", MinArgs: 1},
+		"promote":      {Name: "promote", Description: "Make memory LTM", MinArgs: 1},
 		"patch-memory": {Name: "patch-memory", Description: "Patch metadata JSON in-place", MinArgs: 2},
-		"reinforce":  {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
-		"weaken":     {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
-		"snooze":     {Name: "snooze", Description: "Bump memory relevance (no LTM promotion)", MinArgs: 1},
-		"set-weight": {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
-		"synthesize": {Name: "synthesize", Description: "Merge near-duplicate memories via LLM synthesis", MinArgs: 0},
-		"shred":      {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
-		"stats":      {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
-		"prune":      {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
-		"export":     {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
-		"maintain":   {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
+		"reinforce":    {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
+		"weaken":       {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
+		"snooze":       {Name: "snooze", Description: "Bump memory relevance (no LTM promotion)", MinArgs: 1},
+		"set-weight":   {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
+		"synthesize":   {Name: "synthesize", Description: "Merge near-duplicate memories via LLM synthesis", MinArgs: 0},
+		"shred":        {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
+		"stats":        {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
+		"prune":        {Name: "prune", Description: "Prune old/expired memories", MinArgs: 0},
+		"export":       {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"maintain":     {Name: "maintain", Description: "Run self-maintenance (decay, consolidate, prune)", MinArgs: 0},
 
 		// Review commands
-		"review":         {Name: "review", Description: "Spaced reinforcement review", MinArgs: 0},
+		"review": {Name: "review", Description: "Spaced reinforcement review", MinArgs: 0},
 
 		// Feature commands
-		"watch":           {Name: "watch", Description: "File watcher for memory ingestion"},
-		"web":             {Name: "web", Description: "Start web UI server", MinArgs: 0},
-		"switch":          {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
-		"reference":       {Name: "reference", Description: "Reference library", MinArgs: 1},
-		"topic":           {Name: "topic", Description: "Topic management", MinArgs: 1},
-		"session":         {Name: "session", Description: "Session operations"},
-		"lesson":          {Name: "lesson", Description: "Lesson operations"},
-		"memory":          {Name: "memory", Description: "Memory operations"},
+		"watch":     {Name: "watch", Description: "File watcher for memory ingestion"},
+		"web":       {Name: "web", Description: "Start web UI server", MinArgs: 0},
+		"switch":    {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
+		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
+		"topic":     {Name: "topic", Description: "Topic management", MinArgs: 1},
+		"session":   {Name: "session", Description: "Session operations"},
+		"lesson":    {Name: "lesson", Description: "Lesson operations"},
+		"memory":    {Name: "memory", Description: "Memory operations"},
 
-		"ingest":          {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"ingest": {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
-		"mode":            {Name: "mode", Description: "Mode operations"},
-			"wake":            {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
-		"gc":              {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+		"mode":                {Name: "mode", Description: "Mode operations"},
+		"wake":                {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
+		"gc":                  {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
 		"backfill-embeddings": {Name: "backfill-embeddings", Description: "Backfill embeddings for existing memories (--batch-size, --collection, --dry-run)", MinArgs: 0},
-		"dlq:review":        {Name: "dlq:review", Description: "Inspect DLQ (review/clear/retry) — synth failures awaiting retry", MinArgs: 0},
-		"backup":          {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
-		"restore":         {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
-		"restore-db":      {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
-		"_suggest_tags":   {Name: "_suggest_tags", Description: "Tag autocomplete for shell completion", MinArgs: 0},
-			"directives":       {Name: "directives", Description: "Show behavioral directives"},
-		"persona":         {Name: "persona", Description: "Persona operations"},
-		"ops":             {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
+		"dlq:review":          {Name: "dlq:review", Description: "Inspect DLQ (review/clear/retry) — synth failures awaiting retry", MinArgs: 0},
+		"backup":              {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
+		"restore":             {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
+		"restore-db":          {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
+		"_suggest_tags":       {Name: "_suggest_tags", Description: "Tag autocomplete for shell completion", MinArgs: 0},
+		"directives":          {Name: "directives", Description: "Show behavioral directives"},
+		"persona":             {Name: "persona", Description: "Persona operations"},
+		"ops":                 {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
 		// Proactive Recall Hint
-		"hint":           {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
+		"hint": {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
 
 		// Epistemology Engine
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
@@ -88,6 +88,11 @@ func NewRouter() *CommandRouter {
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
 		"challenge":       {Name: "challenge", Description: "Challenge a memory — weaken, create theory, log decision", MinArgs: 1},
+
+		// Epistemological Time Travel
+		"history":    {Name: "history", Description: "Show version history for a memory", MinArgs: 1, MaxArgs: 1},
+		"diff":       {Name: "diff", Description: "Show unified diff between two versions", MinArgs: 3, MaxArgs: 3},
+		"diff-lines": {Name: "diff-lines", Description: "Compute unified diff of two text blocks", MinArgs: 2, MaxArgs: 2},
 	}
 
 	return r
@@ -112,6 +117,17 @@ func (r *CommandRouter) Execute(args []string) int {
 	if cmdName == "" {
 		PrintHelp()
 		return 0
+	}
+
+	// Intercept bare +/- feedback: +<id> or -<id>
+	// Requires len > 2 to avoid colliding with single-dash flags like -v, -h
+	if len(cmdName) > 1 {
+		if cmdName[0] == '+' {
+			return handleFeedback([]string{"feedback", cmdName[1:], "1"})
+		}
+		if cmdName[0] == '-' && cmdName[1] != '-' && len(cmdName) > 2 {
+			return handleFeedback([]string{"feedback", cmdName[1:], "-1"})
+		}
 	}
 
 	cmd := r.resolveCommand(cmdName)
@@ -224,6 +240,12 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTheories(args[1:])
 	case "decisions":
 		return handleDecisions(args[1:])
+	case "history":
+		return handleHistory(args)
+	case "diff":
+		return handleDiff(args)
+	case "diff-lines":
+		return handleDiffLines(args)
 	case "challenge":
 		sub := args[1]
 		if sub == "restore" && len(args) >= 3 {
@@ -416,15 +438,15 @@ func handleOps(args []string) int {
 		handleGatewayCommand(subArgs)
 		return 0
 
-	// — Status Dashboard —
-		case "stance":
-			return handleStance(subArgs)
+		// — Status Dashboard —
+	case "stance":
+		return handleStance(subArgs)
 
-		case "promote":
-			return handleOpsPromote()
+	case "promote":
+		return handleOpsPromote()
 
-		case "status":
-			return handleStatus()
+	case "status":
+		return handleStatus()
 
 		// — Help —
 	case "help":
@@ -469,13 +491,13 @@ var opsSubcommandDescs = []struct {
 	{"wake", "Show last session context"},
 	{"gateway", "Gateway control"},
 	{"status", "System status dashboard"},
-		{"stance assume <mode> <persona> <rationale>", "XITL: hot-swap existing persona when auto active"},
-		{"stance synthesize <name> [flags]", "XITL: generate JIT persona for novel edge cases"},
-		{"promote", "XITL: promote ephemeral persona to permanent disk file"},
-		{"help", "Show this help"},
-	}
+	{"stance assume <mode> <persona> <rationale>", "XITL: hot-swap existing persona when auto active"},
+	{"stance synthesize <name> [flags]", "XITL: generate JIT persona for novel edge cases"},
+	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
+	{"help", "Show this help"},
+}
 
-	// printOpsHelp displays the ops subcommand help text.
+// printOpsHelp displays the ops subcommand help text.
 func printOpsHelp() {
 	fmt.Println()
 	fmt.Println("mpm ops — Engine Room: maintenance, diagnostics, and power tools")
