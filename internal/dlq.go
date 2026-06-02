@@ -146,6 +146,81 @@ func DLQUpdateRetry(db *sql.DB, id string, attempt int, lastErr error) error {
 	return err
 }
 
+// ── Overflow Deferred Queue ──────────────────────────────────────────────
+
+// OverflowEntry mirrors DLQEntry for raw_memories overflow_deferred entries.
+type OverflowEntry struct {
+	ID        string
+	MemoryID  string
+	Content   string
+	Tags      []string
+	Attempt   int
+	LastError string
+	CreatedAt time.Time
+	NextRetry time.Time
+}
+
+// OverflowReady returns overflow_deferred raw_memory entries whose next_retry has passed.
+func OverflowReady(db *sql.DB) ([]OverflowEntry, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := db.Query(`
+		SELECT id, source_id, text, metadata, COALESCE(attempt, 0),
+		       ingested_at, next_retry
+		FROM raw_memories
+		WHERE status IN ('pending', 'overflow_deferred')
+		  AND next_retry IS NOT NULL AND next_retry <= ?
+		ORDER BY ingested_at ASC
+		LIMIT 20
+	`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []OverflowEntry
+	for rows.Next() {
+		var e OverflowEntry
+		var metadataStr, nextRetryStr string
+		var ingestedAt float64
+		if err := rows.Scan(&e.ID, &e.MemoryID, &e.Content, &metadataStr, &e.Attempt,
+			&ingestedAt, &nextRetryStr); err != nil {
+			continue
+		}
+		if nextRetryStr != "" {
+			t, _ := time.Parse(time.RFC3339, nextRetryStr)
+			e.NextRetry = t
+		}
+		e.CreatedAt = time.Unix(int64(ingestedAt), 0)
+		if metadataStr != "" {
+			var meta struct {
+				Tags []string `json:"tags"`
+			}
+			json.Unmarshal([]byte(metadataStr), &meta)
+			e.Tags = meta.Tags
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// OverflowResolve marks an overflow_deferred entry as successfully processed.
+func OverflowResolve(db *sql.DB, id string) error {
+	_, err := db.Exec(`UPDATE raw_memories SET status = 'overflow_resolved' WHERE id = ?`, id)
+	return err
+}
+
+// OverflowUpdateRetry updates attempt count and next_retry after a failed retry.
+func OverflowUpdateRetry(db *sql.DB, id string, attempt int, lastErr error) {
+	delay := nextRetryDelay(attempt)
+	nextRetry := time.Now().Add(delay).UTC()
+	lastErrStr := ""
+	if lastErr != nil {
+		lastErrStr = lastErr.Error()
+	}
+	db.Exec(`UPDATE raw_memories SET attempt = ?, next_retry = ?, llm_notes = ? WHERE id = ?`,
+		attempt, nextRetry.Format(time.RFC3339), lastErrStr, id)
+}
+
 // DLQStats returns count and oldest entry age for status reporting.
 func DLQStats(db *sql.DB) (int, time.Time, error) {
 	var count int

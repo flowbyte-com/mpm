@@ -145,11 +145,11 @@ func UnmarshalJSON(data string, v interface{}) error {
 // DatabaseManager manages the single unified database
 type DatabaseManager struct {
 	db          *sql.DB
-	dbPath      string // stored for shareable store init
+	dbPath      string       // stored for shareable store init
 	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
 
-	watchdogPath string        // path to watchdog.jsonl for query observability
-	watchdogMu   sync.Mutex    // serializes watchdog log writes
+	watchdogPath string     // path to watchdog.jsonl for query observability
+	watchdogMu   sync.Mutex // serializes watchdog log writes
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
@@ -168,13 +168,13 @@ func (dm *DatabaseManager) IsOpen() bool {
 
 // watchdogOp represents a single operation entry written to watchdog.jsonl.
 type watchdogOp struct {
-	Timestamp string `json:"timestamp"`
-	Operation string `json:"operation"`
-	DurationMs int64 `json:"duration_ms"`
-	Query     string `json:"query,omitempty"`
-	Retries   int    `json:"retries,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Slow      bool   `json:"slow"`
+	Timestamp  string `json:"timestamp"`
+	Operation  string `json:"operation"`
+	DurationMs int64  `json:"duration_ms"`
+	Query      string `json:"query,omitempty"`
+	Retries    int    `json:"retries,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Slow       bool   `json:"slow"`
 }
 
 // logWatchdog appends a watchdog entry to watchdog.jsonl.
@@ -420,6 +420,44 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	} else {
 		// FTS5 tables ready — backfill any existing data that predates the triggers
 		dm.backfillFTSTables()
+	}
+
+	// Memory revision triggers (independent of FTS5 — always required for versioning)
+	revisionTriggers := []string{
+		`CREATE TRIGGER IF NOT EXISTS memories_rev_ai AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term)
+			VALUES (
+				NEW.id,
+				COALESCE((SELECT MAX(version) FROM memory_revisions WHERE memory_id = NEW.id), 0) + 1,
+				NEW.content,
+				COALESCE(NEW.weight, 0),
+				NEW.collection,
+				COALESCE(NEW.is_long_term, 0)
+			);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS memories_rev_au AFTER UPDATE ON memories
+		WHEN OLD.content != NEW.content
+		   OR OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+		   OR OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
+		   OR OLD.weight != NEW.weight
+		   OR OLD.collection != NEW.collection
+		BEGIN
+			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term)
+			VALUES (
+				NEW.id,
+				COALESCE((SELECT MAX(version) FROM memory_revisions WHERE memory_id = NEW.id), 0) + 1,
+				NEW.content,
+				COALESCE(NEW.weight, 0),
+				NEW.collection,
+				COALESCE(NEW.is_long_term, 0)
+			);
+		END;`,
+	}
+	for _, sql := range revisionTriggers {
+		if _, err := dm.db.Exec(sql); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: revision trigger creation failed: %v\nSQL: %s\n", err, sql)
+		}
 	}
 
 	return nil
@@ -1358,6 +1396,185 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 func (dm *DatabaseManager) DeleteLesson(id string) error {
 	_, err := dm.db.Exec(`DELETE FROM lessons WHERE id = ?`, id)
 	return err
+}
+
+// =============================================================================
+// Memory Revision Helpers (Epistemological Time Travel)
+// =============================================================================
+
+// MemoryRevision represents a single entry in the memory_revisions table.
+type MemoryRevision struct {
+	ID                 int64
+	MemoryID           string
+	Version            int
+	Content            string
+	Weight             int
+	Collection         string
+	IsLongTerm         bool
+	IsChallenged       bool
+	ChallengedTheoryID string
+	CreatedAt          time.Time
+}
+
+// GetMemoryRevisions returns all versions for a memory in reverse-chronological
+// order (newest first). Returns empty slice if the memory has no revisions.
+func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision, error) {
+	rows, err := dm.db.Query(`
+		SELECT id, memory_id, version, content, weight, collection,
+		       is_long_term, is_challenged, COALESCE(challenged_theory_id, ''), created_at
+		FROM memory_revisions
+		WHERE memory_id = ?
+		ORDER BY version DESC
+	`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("GetMemoryRevisions: %w", err)
+	}
+	defer rows.Close()
+
+	var revisions []MemoryRevision
+	for rows.Next() {
+		var r MemoryRevision
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
+			&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
+			&r.ChallengedTheoryID, &createdAt); err != nil {
+			continue
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+			r.CreatedAt = t
+		} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			r.CreatedAt = t
+		}
+		revisions = append(revisions, r)
+	}
+	if revisions == nil {
+		return []MemoryRevision{}, nil
+	}
+	return revisions, rows.Err()
+}
+
+// GetMemoryRevisionAtTime returns the memory revision active at the given
+// timestamp. Returns nil if the memory did not exist yet at that time.
+//
+// The query selects the most recent version whose created_at <= asOf.
+// This provides point-in-time reconstruction without replaying a log.
+func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Time) (*MemoryRevision, error) {
+	// First verify the memory existed at that time
+	var createdAt string
+	err := dm.db.QueryRow(`SELECT created_at FROM memories WHERE id = ?`, memoryID).Scan(&createdAt)
+	if err != nil {
+		return nil, nil // memory doesn't exist
+	}
+	var createdTime time.Time
+	if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+		createdTime = t
+	} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		createdTime = t
+	} else {
+		return nil, nil
+	}
+	if createdTime.After(asOf) {
+		return nil, nil // memory didn't exist yet
+	}
+
+	// Check if the memory was soft-deleted before asOf
+	var deletedAt *string
+	err = dm.db.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, memoryID).Scan(&deletedAt)
+	if err == nil && deletedAt != nil && *deletedAt != "" {
+		var deletedTime time.Time
+		if t, err := time.Parse("2006-01-02 15:04:05", *deletedAt); err == nil {
+			deletedTime = t
+		} else if t, err := time.Parse(time.RFC3339, *deletedAt); err == nil {
+			deletedTime = t
+		}
+		if !deletedTime.IsZero() && deletedTime.Before(asOf) {
+			return nil, nil // memory was deleted before asOf
+		}
+	}
+
+	asOfStr := asOf.UTC().Format(time.RFC3339)
+	row := dm.db.QueryRow(`
+		SELECT id, memory_id, version, content, weight, collection,
+		       is_long_term, is_challenged, COALESCE(challenged_theory_id, ''), created_at
+		FROM memory_revisions
+		WHERE memory_id = ?
+		  AND created_at <= ?
+		ORDER BY version DESC
+		LIMIT 1
+	`, memoryID, asOfStr)
+
+	var r MemoryRevision
+	var revCreatedAt string
+	err = row.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
+		&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
+		&r.ChallengedTheoryID, &revCreatedAt)
+	if err != nil {
+		return nil, nil // no revision found for that time
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", revCreatedAt); err == nil {
+		r.CreatedAt = t
+	} else if t, err := time.Parse(time.RFC3339, revCreatedAt); err == nil {
+		r.CreatedAt = t
+	}
+	return &r, nil
+}
+
+// =============================================================================
+// Overflow Deferred Enqueue (Ingestion Backpressure)
+// =============================================================================
+
+// DLQEnqueueOverflow writes an overflowed event to the raw_memories table with
+// status='overflow_deferred'. Called from the non-blocking default branch of
+// Enqueue() when the channel buffer is saturated. Runs in an isolated goroutine
+// to prevent blocking the hot fsnotify loop. Overflow entries follow the same
+// exponential backoff timeline as normal DLQ entries via processDLQ.
+func (dm *DatabaseManager) DLQEnqueueOverflow(event MemoryEvent) error {
+	id := GenerateID()
+	contentHash := sha256.Sum256([]byte(event.Content))
+
+	tagsJSON, _ := json.Marshal(event.Tags)
+	metadata := fmt.Sprintf(`{"tags":%s,"overflowed":true,"overflowed_at":"%s"}`,
+		string(tagsJSON), time.Now().UTC().Format(time.RFC3339))
+
+	now := float64(time.Now().Unix())
+	expiresAt := float64(time.Now().Add(24 * time.Hour).Unix())
+	nextRetry := time.Now().Add(1 * time.Minute).UTC().Format(time.RFC3339)
+
+	_, err := dm.db.Exec(`
+		INSERT INTO raw_memories (id, source_id, source_db, content_hash, text, metadata,
+			ingested_at, status, import_batch, updated_at, expires_at, next_retry, attempt)
+		VALUES (?, ?, 'overflow', ?, ?, ?, ?, 'overflow_deferred', ?, ?, ?, ?, 0)
+	`, id, event.ID, hex.EncodeToString(contentHash[:]), event.Content, metadata,
+		now, "", now, expiresAt, nextRetry)
+	return err
+}
+
+// =============================================================================
+// Cognitive Immune System: Async Challenge
+// =============================================================================
+
+// ChallengeMemoryAsync logs a contradiction collision to mirror.jsonl in an
+// independent, detached goroutine. Does NOT block the search query or write to
+// the database — only appends to the audit mirror. The evidence parameter
+// describes which memories collided and why.
+func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string) {
+	go func() {
+		mirrorPath := filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl")
+		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+
+		entry := map[string]interface{}{
+			"event":     "contradiction_detected",
+			"memory_id": memoryID,
+			"evidence":  evidence,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		line, _ := json.Marshal(entry)
+		f.WriteString(string(line) + "\n")
+	}()
 }
 
 // GetLessonStats returns statistics about lessons

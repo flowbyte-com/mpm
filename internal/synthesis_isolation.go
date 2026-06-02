@@ -26,10 +26,10 @@ const DefaultMaxWorkers = 3
 type SynthesisWorker struct {
 	db          *DatabaseManager
 	synth       SynthClientInterface // interface allows mock injection in tests
-	vendorChain []SynthVendor         // ordered fallback chain; nil = use getSynthVendorChain()
+	vendorChain []SynthVendor        // ordered fallback chain; nil = use getSynthVendorChain()
 
 	events   chan MemoryEvent // inbound event channel
-	shutdown chan struct{} // shutdown signal
+	shutdown chan struct{}    // shutdown signal
 
 	wg  sync.WaitGroup
 	sem chan struct{} // concurrency semaphore
@@ -98,15 +98,19 @@ func NewSynthesisWorkerForTest(db *DatabaseManager, synth SynthClientInterface, 
 
 // Enqueue fires a synthesis event. Never blocks the caller.
 // Returns immediately — caller (watcher) continues without waiting.
+// When the channel buffer is saturated, events are offloaded to the overflow
+// staging area (raw_memories with status='overflow_deferred') in a background
+// goroutine to prevent file-system event drop-loss.
 func (w *SynthesisWorker) Enqueue(event MemoryEvent) {
 	select {
 	case w.events <- event:
 		// enqueued
 	default:
-		// Channel full — log and drop (watcher must never block)
-		w.logger.Warn("synthesis_worker: event channel full, dropping",
+		// Channel full — non-blocking background write to overflow staging
+		w.logger.Warn("synthesis_worker: event channel full, offloading to overflow",
 			"memory_id", event.ID,
 			"content_len", len(event.Content))
+		go w.db.DLQEnqueueOverflow(event)
 	}
 }
 
@@ -119,8 +123,8 @@ func (w *SynthesisWorker) Start() {
 // Stop initiates graceful shutdown. Blocks until all in-flight
 // synthesis tasks complete (or hit their context deadline).
 func (w *SynthesisWorker) Stop() {
-	close(w.shutdown)  // signal run loop to stop accepting new events
-	w.wg.Wait()         // wait for all in-flight goroutines to finish
+	close(w.shutdown) // signal run loop to stop accepting new events
+	w.wg.Wait()       // wait for all in-flight goroutines to finish
 }
 
 // ── Internal ─────────────────────────────────────────────────────────────────
@@ -137,7 +141,7 @@ func (w *SynthesisWorker) run() {
 				return
 			}
 			w.wg.Add(1)
-			w.sem <- struct{}{} // acquire semaphore slot
+			w.sem <- struct{}{}      // acquire semaphore slot
 			go w.processEvent(event) // fire-and-forget with deadline
 
 		case <-w.shutdown:
@@ -173,22 +177,31 @@ func (w *SynthesisWorker) processEvent(event MemoryEvent) {
 }
 
 func (w *SynthesisWorker) processDLQ() {
+	// 1. Standard DLQ entries
 	entries, err := DLQReady(w.db.SQLDB())
 	if err != nil {
 		w.logger.Error("synthesis_worker: dlq read failed", "error", err.Error())
 		return
 	}
-	if len(entries) == 0 {
-		w.logger.Debug("synthesis_worker: processDLQ called but DLQReady returned empty")
+
+	// 2. Overflow-deferred entries from raw_memories
+	overflowEntries, err := OverflowReady(w.db.SQLDB())
+	if err != nil {
+		w.logger.Error("synthesis_worker: overflow read failed", "error", err.Error())
 		return
 	}
 
-	w.logger.Info("synthesis_worker: processing dlq retry", "count", len(entries))
-	for _, e := range entries {
-		w.logger.Info("synthesis_worker: dlq entry", "id", e.ID, "memory_id", e.MemoryID, "attempt", e.Attempt, "next_retry", e.NextRetry)
+	total := len(entries) + len(overflowEntries)
+	if total == 0 {
+		w.logger.Debug("synthesis_worker: processDLQ called but no entries ready")
+		return
 	}
 
+	w.logger.Info("synthesis_worker: processing retry queue",
+		"dlq_count", len(entries), "overflow_count", len(overflowEntries))
+
 	w.processDLQEntries(entries)
+	w.processOverflowEntries(overflowEntries)
 }
 
 // processDLQForced retrieves all non-HARD-STOPPED DLQ entries regardless of
@@ -272,6 +285,34 @@ func (w *SynthesisWorker) processDLQEntries(entries []DLQEntry) {
 					"memory_id", entry.MemoryID, "last_error", err.Error())
 			}
 			DLQUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err)
+		}
+	}
+}
+
+func (w *SynthesisWorker) processOverflowEntries(entries []OverflowEntry) {
+	for _, entry := range entries {
+		var deletedAt sql.NullString
+		row := w.db.SQLDB().QueryRow("SELECT deleted_at FROM memories WHERE id = ?", entry.MemoryID)
+		if err := row.Scan(&deletedAt); err == nil && deletedAt.Valid && deletedAt.String != "" {
+			OverflowResolve(w.db.SQLDB(), entry.ID)
+			w.logger.Info("synthesis_worker: overflow entry cleared (already synthesized)", "memory_id", entry.MemoryID)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := w.synthWithMultiVendor(ctx, entry.MemoryID, entry.Content, entry.Tags)
+		cancel()
+
+		if err == nil {
+			OverflowResolve(w.db.SQLDB(), entry.ID)
+			w.logger.Info("synthesis_worker: overflow retry succeeded", "memory_id", entry.MemoryID)
+		} else {
+			newAttempt := entry.Attempt + 1
+			if newAttempt >= 5 {
+				w.logger.Warn("synthesis_worker: overflow entry hard-stopped after 5 attempts",
+					"memory_id", entry.MemoryID, "last_error", err.Error())
+			}
+			OverflowUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err)
 		}
 	}
 }
