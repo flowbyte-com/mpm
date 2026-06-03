@@ -3121,11 +3121,12 @@ func handleStatus() int {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 	}
 	defer dm.Close()
-	printStatusDashboard(dm)
+	printStatusDashboard(dm, startTime)
 	return 0
 }
 
-func printStatusDashboard(dm *mpminternal.DatabaseManager) {
+func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
+	uptime := formatUptime(time.Since(startTime))
 	totalMemories, _ := countMemories(dm, "")
 	ltmCount, _ := countMemories(dm, "weight >= 10")
 	theoriesCount, _ := countMemories(dm, "collection = 'theories'")
@@ -3168,6 +3169,7 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager) {
 
 	fmt.Println("⚡ MPM · System Status")
 	fmt.Println("────────────────────────────────────")
+	fmt.Printf("Uptime:    %s\n", uptime)
 	if modeLine != "" {
 		fmt.Printf("  %s\n", modeLine)
 	}

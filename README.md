@@ -30,7 +30,7 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **XITL Routing Engine** — `assume_stance`, `synthesize_stance`, `mpm ops promote` — hot-swap or generate personas with automatic mode-driven retrieval depth
 - **Mode-Driven Context Retrieval** — each mode specifies `retrieval_limit` and `retrieval_threshold` controlling how many FTS5 chunks the proactive hint engine pulls. Debugging mode: tunnel vision (3 chunks, strict threshold). Research mode: wide gather (20 chunks, loose threshold). The LLM sees its own retrieval parameters as operating instructions.
 - **Invisible CLI** — `cat idea.md | mpm` pipes stdin to add; bare `mpm token budget` defaults to recall; 7-command daily surface with everything else under `mpm ops`
-- **Proactive recall hints** — `mpm hint "conversation text"` and `proactive_recall_hint` MCP tool surface relevant decisions and theories during conversation based on FTS5 keyword overlap
+- **Proactive recall hints** — `mpm hint "conversation text"` and the `proactive_recall_hint` plugin tool surface relevant decisions and theories during conversation based on FTS5 keyword overlap
 
 ### What MPM Is NOT
 
