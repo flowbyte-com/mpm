@@ -182,29 +182,47 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 
 	// ── Phase 4: Contradiction Detection (Cognitive Immune System) ─────
 	// Limit to top 15 candidates for O(1) pairwise evaluation (C(15,2) = 105)
+	// Uses provenance-based tiebreaker rules when a collision is detected.
 	scanLimit := 15
 	if len(combined) < scanLimit {
 		scanLimit = len(combined)
 	}
 	scanSet := combined[:scanLimit]
 
-	// Load embeddings for pairwise cosine similarity
-	type candidateEmbedding struct {
+	// Load embeddings + provenance for pairwise cosine similarity
+	type candidateInfo struct {
 		embedding    []float32
 		isChallenged bool
+		metadataJSON string
 	}
-	candMap := make(map[string]candidateEmbedding, scanLimit)
+	candMap := make(map[string]candidateInfo, scanLimit)
 	for _, c := range scanSet {
 		var embStr string
 		err := dm.SQLDB().QueryRow(
-			`SELECT embedding FROM memories WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`,
+			`SELECT embedding, COALESCE(metadata, '{}') FROM memories WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`,
 			c.ID,
-		).Scan(&embStr)
+		).Scan(&embStr, &c.Metadata)
 		if err == nil && embStr != "" {
 			var emb []float32
 			if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-				candMap[c.ID] = candidateEmbedding{embedding: emb, isChallenged: c.IsChallenged}
+				candMap[c.ID] = candidateInfo{embedding: emb, isChallenged: c.IsChallenged, metadataJSON: c.Metadata}
 			}
+		}
+	}
+
+	// Provenance tier priority for tiebreaker: absolute > high > standard > ephemeral
+	provenanceTier := func(compute string) int {
+		switch compute {
+		case "absolute":
+			return 4
+		case "high":
+			return 3
+		case "standard":
+			return 2
+		case "ephemeral":
+			return 1
+		default:
+			return 2 // default to standard
 		}
 	}
 
@@ -223,7 +241,14 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			if sim < 0.85 {
 				continue
 			}
-			// State collision: one challenged, one not
+
+			// Extract provenance compute for both memories
+			ciCompute := extractProvenanceCompute(ci.metadataJSON)
+			cjCompute := extractProvenanceCompute(cj.metadataJSON)
+			ciTier := provenanceTier(ciCompute)
+			cjTier := provenanceTier(cjCompute)
+
+			// State collision: one challenged, one not (legacy path)
 			if ci.isChallenged != cj.isChallenged {
 				var challengedID, unchallengedID string
 				if ci.isChallenged {
@@ -237,12 +262,49 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
 					sim, challengedID, unchallengedID)
 				dm.ChallengeMemoryAsync(unchallengedID, evidence)
+				continue
+			}
+
+			// Provenance-based tiebreaker: different tiers
+			if ciTier != cjTier {
+				var winnerID, loserID string
+				var loserCompute string
+				var slashAmount int
+				if ciTier > cjTier {
+					winnerID = scanSet[i].ID
+					loserID = scanSet[j].ID
+					loserCompute = cjCompute
+				} else {
+					winnerID = scanSet[j].ID
+					loserID = scanSet[i].ID
+					loserCompute = ciCompute
+				}
+				// Human vs Model: slash -5
+				// High vs Ephemeral: slash -3
+				if loserCompute == "ephemeral" {
+					slashAmount = 3
+				} else {
+					slashAmount = 5
+				}
+				evidence := fmt.Sprintf(
+					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — resolved in favor of %s",
+					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
+				dm.ChallengeMemory(loserID, slashAmount, evidence)
+			} else {
+				// Equal tier — log as pending theory to mirror.jsonl
+				evidence := fmt.Sprintf(
+					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
+					sim, scanSet[i].ID, scanSet[j].ID)
+				dm.ChallengeMemoryAsync(scanSet[i].ID, evidence)
 			}
 		}
 	}
 
-	// ── Phase 5: In-Memory Warning Prepend ─────────────────────────────────
+	// ── Phase 5: In-Memory Provenance Preamble + Warning Prepend ─────────
 	for i := range combined {
+		if preamble := ProvenancePreamble(combined[i].Metadata); preamble != "" {
+			combined[i].Content = preamble + "\n" + combined[i].Content
+		}
 		if combined[i].IsChallenged {
 			combined[i].Content = challengeWarning + "\n" + combined[i].Content
 		}

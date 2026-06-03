@@ -71,7 +71,13 @@ func handleAdd(args []string) int {
 	}
 
 	metadata := map[string]interface{}{
-		"source": "cli",
+		"provenance": map[string]interface{}{
+			"source":  "human",
+			"model":   "direct",
+			"compute": "absolute",
+			"agent":   "mpm_cli",
+			"persona": "operator",
+		},
 	}
 
 	// Auto-embed: try real embeddings, fall back to hash if provider unavailable

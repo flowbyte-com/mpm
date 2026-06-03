@@ -362,9 +362,14 @@ func handleRecall(args []string) int {
 				}
 			}
 
-			result = append(result, memoryEntry{
+			jsonContent := e.content
+		if preamble := mpminternal.ProvenancePreamble(e.metadata); preamble != "" {
+			jsonContent = preamble + "\n" + jsonContent
+		}
+
+		result = append(result, memoryEntry{
 				ID:                   shortID(e.id),
-				Content:              e.content,
+				Content:              jsonContent,
 				Tags:                 e.tags,
 				SessionID:            e.sessionID,
 				CreatedAt:            e.createdAt.Format(time.RFC3339),
@@ -430,6 +435,9 @@ func handleRecall(args []string) int {
 		}
 
 		content := e.content
+		if preamble := mpminternal.ProvenancePreamble(e.metadata); preamble != "" {
+			content = preamble + "\n" + content
+		}
 		if strings.Contains(e.metadata, `"status":"challenged"`) {
 			content = "[Note: This memory is challenged — treat as unverified]\n" + content
 		}

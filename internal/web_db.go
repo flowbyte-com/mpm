@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -990,6 +991,116 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 			}
 		}
 		stats["reinforce_dist"] = dist
+	}
+
+	// ── Epistemic Provenance Registry (ISR Telemetry) ──────────────────────
+	// Nested grouping: agent → model/compute → persona
+	rows, err = dm.db.Query(`
+		SELECT COALESCE(json_extract(metadata, '$.provenance.agent'), 'unknown') as agent,
+		       COALESCE(json_extract(metadata, '$.provenance.model'), 'unknown') as model,
+		       COALESCE(json_extract(metadata, '$.provenance.compute'), 'unknown') as compute,
+		       COALESCE(json_extract(metadata, '$.provenance.persona'), 'unknown') as persona,
+		       COUNT(*) as total,
+		       SUM(CASE WHEN weight > 1 THEN 1 ELSE 0 END) as active
+		FROM memories
+		WHERE deleted_at IS NULL
+		  AND json_extract(metadata, '$.provenance.agent') IS NOT NULL
+		GROUP BY json_extract(metadata, '$.provenance.agent'),
+		         json_extract(metadata, '$.provenance.model'),
+		         json_extract(metadata, '$.provenance.compute'),
+		         json_extract(metadata, '$.provenance.persona')
+		ORDER BY agent, total DESC
+	`)
+	if err == nil {
+		defer rows.Close()
+
+		type isrPersona struct {
+			persona string
+			total   int
+			active  int
+		}
+		type isrModel struct {
+			model    string
+			compute  string
+			personas []isrPersona
+		}
+		type isrAgent struct {
+			agent  string
+			models []isrModel
+		}
+
+		var agents []isrAgent
+		agentIndex := make(map[string]int)
+
+		for rows.Next() {
+			var agent, model, compute, persona sql.NullString
+			var total, active int
+			if rows.Scan(&agent, &model, &compute, &persona, &total, &active) == nil {
+				a := agent.String
+				ai, ok := agentIndex[a]
+				if !ok {
+					ai = len(agents)
+					agentIndex[a] = ai
+					agents = append(agents, isrAgent{agent: a})
+				}
+				var mi int
+				found := false
+				for i, m := range agents[ai].models {
+					if m.model == model.String && m.compute == compute.String {
+						mi = i
+						found = true
+						break
+					}
+				}
+				if !found {
+					mi = len(agents[ai].models)
+					agents[ai].models = append(agents[ai].models, isrModel{
+						model:   model.String,
+						compute: compute.String,
+					})
+				}
+				agents[ai].models[mi].personas = append(agents[ai].models[mi].personas, isrPersona{
+					persona: persona.String,
+					total:   total,
+					active:  active,
+				})
+			}
+		}
+
+		// Serialize to nested maps for JSON/display compatibility
+		var registry []map[string]interface{}
+		for _, a := range agents {
+			var models []map[string]interface{}
+			for _, m := range a.models {
+				var personas []map[string]interface{}
+				for _, p := range m.personas {
+					isrVal := 0.0
+					if p.total > 0 {
+						isrVal = float64(p.active) / float64(p.total) * 100.0
+					}
+					personas = append(personas, map[string]interface{}{
+						"persona":          p.persona,
+						"total_memories":   p.total,
+						"active_memories":  p.active,
+						"decayed_to_floor": p.total - p.active,
+						"isr":              math.Round(isrVal*10) / 10,
+					})
+				}
+				models = append(models, map[string]interface{}{
+					"model":    m.model,
+					"compute":  m.compute,
+					"personas": personas,
+				})
+			}
+			registry = append(registry, map[string]interface{}{
+				"agent":  a.agent,
+				"models": models,
+			})
+		}
+
+		if len(registry) > 0 {
+			stats["provenance_registry"] = registry
+		}
 	}
 
 	return stats, nil

@@ -611,6 +611,11 @@ func AutoSynthesize(ctx context.Context, dm *DatabaseManager, client *SynthClien
 
 	// 7. Build metadata for the new synthetic memory
 	metadata := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "synthetic",
+			"model":   client.Model,
+			"compute": "high",
+		},
 		"synthesized":    true,
 		"source_ids":     sourceIDs,
 		"synthesized_at": time.Now().UTC().Format(time.RFC3339),

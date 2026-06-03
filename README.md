@@ -22,6 +22,8 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
 - **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
 - **Epistemological pruning loop** — `mpm challenge <id>` flags a memory as challenged, creates a linked pending theory, and injects a warning into LLM recall; `mpm challenge restore <id>` resolves the theory and clears the flag; `mpm shred <id>` cascade-deletes both memory and theory. Fully closed loop, zero manual cleanup.
+- **Epistemic provenance stamping** — every memory tracks its origin: client (`mpm_cli`, `mpm_watch`), mode (`native`, `watch`), and persona (`operator`, `watch-daemon`). Stamped at write time in the metadata JSON under `$.provenance`.
+- **Multi-dimensional ISR telemetry** — `mpm ops stats` surfaces a nested Client → Model → Persona survival rate matrix, showing per-provenance active/total/decayed counts and Idea Survival Rate (ISR %).
 - **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
 - **Reference chunking control** — `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding
 - **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
@@ -135,6 +137,38 @@ challenge ───────────────────────�
 3. DELETE memory
 
 **Recall warning:** Challenged memories surface with `[Note: This memory is challenged — treat as unverified]` prepended to LLM content. Human output shows `[CHALLENGED]` chip.
+
+### Provenance Stamping & ISR Telemetry
+
+Every memory carries a provenance block in its JSON metadata, stamped at write time. Three fields identify the origin:
+
+| Field | Meaning | CLI Value | Watch Value |
+| --- | --- | --- | --- |
+| `client` | Ingress point | `mpm_cli` | `mpm_watch` |
+| `mpm_mode` | Operating mode at write time | `native` | `watch` |
+| `mpm_persona` | Active persona at write time | `operator` | `watch-daemon` |
+
+The provenance block sits under `$.provenance` alongside `source`, `model`, and `compute`, and is entirely transparent to the decay engine (decay targets `$.provenance.compute` — new fields are co-located but ignored by the decay multiplier).
+
+**ISR Telemetry** (`mpm ops stats`):
+
+The epistemic provenance registry groups memories by their origin into a nested client → model → persona matrix, computing Idea Survival Rate (ISR) as the percentage of memories in each cell with weight > 1 (i.e., not decayed to floor):
+
+```
+== Epistemic Provenance Registry (Client → Model → Persona) ==
+
+  Client: mpm_cli
+  ├─ Model: direct (Compute: absolute)
+  │  └─ Persona: operator
+  │     Total: 42 | Active: 38 | Decayed: 4 | ISR: 90.5%
+
+  Client: mpm_watch
+  └─ Model: direct (Compute: absolute)
+     └─ Persona: watch-daemon
+        Total: 15 | Active: 12 | Decayed: 3 | ISR: 80.0%
+```
+
+Legacy memories without provenance fields produce `"unknown"` values and appear in their own group, ensuring zero breakage on upgrade.
 
 ### Epistemology CLI Commands
 

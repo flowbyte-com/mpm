@@ -71,6 +71,39 @@ func printStats(s map[string]interface{}) {
 		fmt.Printf("    • %d memories with rc=%v\n", r["count"], r["reinforcement_count"])
 	}
 
+	// ── Epistemic Provenance Registry ─────────────────────────────────
+	if registry, ok := s["provenance_registry"].([]map[string]interface{}); ok && len(registry) > 0 {
+		fmt.Println("\n== Epistemic Provenance Registry (Agent → Model → Persona) ==")
+		for _, agentEntry := range registry {
+			agent, _ := agentEntry["agent"].(string)
+			fmt.Printf("\n  Agent: %s\n", agent)
+			models, _ := agentEntry["models"].([]map[string]interface{})
+			for mi, modelEntry := range models {
+				model, _ := modelEntry["model"].(string)
+				compute, _ := modelEntry["compute"].(string)
+				prefix := "  ├─ "
+				if mi == len(models)-1 {
+					prefix = "  └─ "
+				}
+				fmt.Printf("%sModel: %s (Compute: %s)\n", prefix, model, compute)
+				personas, _ := modelEntry["personas"].([]map[string]interface{})
+				for pi, personaEntry := range personas {
+					persona, _ := personaEntry["persona"].(string)
+					active, _ := personaEntry["active_memories"].(int)
+					total, _ := personaEntry["total_memories"].(int)
+					decayed, _ := personaEntry["decayed_to_floor"].(int)
+					isr, _ := personaEntry["isr"].(float64)
+					pPrefix := "     ├─ "
+					if pi == len(personas)-1 {
+						pPrefix = "     └─ "
+					}
+					fmt.Printf("%sPersona: %s\n", pPrefix, persona)
+					fmt.Printf("        Total: %d | Active: %d | Decayed: %d | ISR: %.1f%%\n", total, active, decayed, isr)
+				}
+			}
+		}
+	}
+
 	fmt.Print("\n══════════════════════════════════════════\n")
 }
 

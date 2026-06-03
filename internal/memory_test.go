@@ -1,9 +1,13 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestGetByID tests the GetByID function with various scenarios.
@@ -541,4 +545,161 @@ func TestGetSessionCount(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected count 1 after adding non-session memory, got %d", count)
 	}
+}
+
+// TestMemoryProvenanceStorage verifies provenance-based decay multipliers.
+// A compute:"high" memory decays at half the rate of compute:"standard".
+func TestMemoryProvenanceStorage(t *testing.T) {
+	db := freshDB(t)
+	defer db.Close()
+
+	// Insert high-compute memory
+	highMeta := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "model",
+			"model":   "DeepSeek-R1",
+			"compute": "high",
+		},
+	}
+	id1, err := db.SaveMemory("memories", "high compute memory content", "", nil, highMeta, nil, true, 20)
+	require.NoError(t, err)
+
+	// Insert standard-compute memory
+	stdMeta := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "synthetic",
+			"model":   "MiniMax-M2.7",
+			"compute": "standard",
+		},
+	}
+	id2, err := db.SaveMemory("memories", "standard compute memory content", "", nil, stdMeta, nil, true, 20)
+	require.NoError(t, err)
+
+	// Bump updated_at so both are eligible for decay
+	db.SQLDB().Exec(`UPDATE memories SET updated_at = DATETIME('now', '-30 days') WHERE id IN (?, ?)`, id1, id2)
+
+	// Run decay with aggressive rate so we can measure the difference
+	policy := map[string]DecayPolicy{
+		"memories": {DecayPercent: 50, Floor: 1},
+	}
+	decayed, err := db.DecayWeights(policy, 1)
+	require.NoError(t, err)
+	require.Greater(t, decayed, 0, "at least one memory should decay")
+
+	// Read back weights
+	var w1, w2 int
+	err = db.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = ?`, id1).Scan(&w1)
+	require.NoError(t, err)
+	err = db.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = ?`, id2).Scan(&w2)
+	require.NoError(t, err)
+
+	t.Logf("high-compute weight after decay: %d", w1)
+	t.Logf("standard-compute weight after decay: %d", w2)
+
+	// High-compute decays at half rate → should retain more weight
+	assert.GreaterOrEqual(t, w1, w2,
+		"high-compute memory should decay slower than standard")
+}
+
+// TestImmuneProvenanceTieBreaker verifies provenance-based contradiction resolution.
+// Insert absolute (human) and ephemeral (model) memories with identical embeddings,
+// assert the ephemeral is challenged and its weight slashed.
+func TestImmuneProvenanceTieBreaker(t *testing.T) {
+	db := freshDB(t)
+	defer db.Close()
+
+	content := "The user always prefers direct yes/no answers without explanation."
+	embedding := HashEmbed(content)
+
+	// Absolute (human) memory
+	humanMeta := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "human",
+			"model":   "direct",
+			"compute": "absolute",
+		},
+	}
+	id1, err := db.SaveMemory("memories", content, "", []string{"preference"}, humanMeta, embedding, false, 10)
+	require.NoError(t, err)
+
+	// Ephemeral (model) memory with identical content → cosine=1.0
+	modelMeta := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "model",
+			"model":   "DeepSeek-R1",
+			"compute": "ephemeral",
+		},
+	}
+	id2, err := db.SaveMemory("memories", content, "", []string{"preference"}, modelMeta, embedding, false, 8)
+	require.NoError(t, err)
+
+	// Run HybridSearch to trigger contradiction detection
+	cfg := DefaultHybridConfig()
+	cfg.Limit = 10
+	cfg.VectorWeight = 1.0 // pure vector search
+	cfg.RetrievalThreshold = -100
+	_, err = HybridSearch(db, content, "memories", cfg)
+	require.NoError(t, err)
+
+	// The ephemeral memory should now have challenged status and reduced weight
+	var w2 int
+	var metaJSON string
+	err = db.SQLDB().QueryRow(`SELECT weight, COALESCE(metadata, '{}') FROM memories WHERE id = ?`, id2).Scan(&w2, &metaJSON)
+	require.NoError(t, err)
+	var meta map[string]interface{}
+	json.Unmarshal([]byte(metaJSON), &meta)
+	status, _ := meta["status"].(string)
+
+	assert.Equal(t, "challenged", status, "ephemeral memory should be challenged after tiebreaker")
+	assert.Less(t, w2, 8, "ephemeral memory weight should be slashed below initial value of 8")
+
+	// Absolute memory should remain unchallenged with original weight
+	var w1 int
+	var metaJSON1 string
+	err = db.SQLDB().QueryRow(`SELECT weight, COALESCE(metadata, '{}') FROM memories WHERE id = ?`, id1).Scan(&w1, &metaJSON1)
+	require.NoError(t, err)
+	var meta1 map[string]interface{}
+	json.Unmarshal([]byte(metaJSON1), &meta1)
+	status1, _ := meta1["status"].(string)
+
+	assert.NotEqual(t, "challenged", status1, "absolute memory should NOT be challenged")
+	assert.Equal(t, 10, w1, "absolute memory weight should remain unchanged")
+}
+
+// TestMemoryProvenanceGracefulDegradation verifies that malformed metadata JSON
+// does not cause panics and defaults to "standard" compute logic.
+func TestMemoryProvenanceGracefulDegradation(t *testing.T) {
+	db := freshDB(t)
+	defer db.Close()
+
+	// Insert a memory with a broken metadata string via raw SQL
+	brokenMeta := `{broken_json_!}`
+	_, err := db.SQLDB().Exec(
+		`INSERT INTO memories (id, collection, content, metadata, is_long_term, weight) VALUES (?, ?, ?, ?, ?, ?)`,
+		"broken-meta-test", "memories", "test content with broken metadata", brokenMeta, 1, 10,
+	)
+	require.NoError(t, err)
+
+	// Run decay — should not panic, defaults to multiplier 1.0
+	policy := map[string]DecayPolicy{
+		"memories": {DecayPercent: 50, Floor: 1},
+	}
+	_, err = db.DecayWeights(policy, 1)
+	assert.NoError(t, err, "decay should not error with broken metadata")
+
+	// Verify the memory is still queryable via recall-like query
+	var content string
+	err = db.SQLDB().QueryRow(
+		`SELECT content FROM memories WHERE id = ? AND deleted_at IS NULL`, "broken-meta-test",
+	).Scan(&content)
+	assert.NoError(t, err, "memory with broken metadata should still be readable")
+	assert.Contains(t, content, "test content with broken metadata")
+
+	// ProvenancePreamble should return empty string (graceful degradation)
+	preamble := ProvenancePreamble(brokenMeta)
+	assert.Empty(t, preamble, "ProvenancePreamble should return empty for broken JSON")
+
+	// extractProvenanceCompute should return empty string
+	compute := extractProvenanceCompute(brokenMeta)
+	assert.Empty(t, compute, "extractProvenanceCompute should return empty for broken JSON")
 }
