@@ -1040,7 +1040,14 @@ func (s *MemoryStore) DecayWeights(policies map[string]DecayPolicy, intervalDays
 
 		res, err := s.execTracked(`
 			UPDATE memories
-			SET weight = MAX(?, CAST(weight * (1 - ? / 100.0) AS INTEGER))
+			SET weight = MAX(?, CAST(weight * (1 - (? / 100.0) *
+			    COALESCE(
+			        CASE json_extract(metadata, '$.provenance.compute')
+			            WHEN 'absolute' THEN 0.0
+			            WHEN 'high' THEN 0.5
+			            WHEN 'ephemeral' THEN 2.0
+			            ELSE 1.0
+			        END, 1.0)) AS INTEGER))
 			WHERE collection = ?
 			  AND deleted_at IS NULL
 			  AND is_long_term = 0

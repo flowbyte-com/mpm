@@ -1598,6 +1598,45 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 	}()
 }
 
+// ChallengeMemory applies provenance-based contradiction resolution:
+// slashes the loser's weight and sets challenged status in the DB.
+// The slashAmount is the weight reduction (positive integer).
+func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evidence string) error {
+	patch := map[string]interface{}{
+		"status":               "challenged",
+		"challenged_theory_id": evidence,
+	}
+	patchJSON, _ := json.Marshal(patch)
+	if err := dm.UpdateMemoryMetadata(memoryID, string(patchJSON)); err != nil {
+		return err
+	}
+	_, err := dm.db.Exec(`UPDATE memories SET weight = weight - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID)
+	if err != nil {
+		return err
+	}
+	// Also log async
+	dm.ChallengeMemoryAsync(memoryID, evidence)
+	return nil
+}
+
+// extractProvenanceCompute reads the provenance.compute field from metadata JSON.
+// Returns empty string if not found, allowing graceful default to "standard".
+func extractProvenanceCompute(metadataJSON string) string {
+	if metadataJSON == "" || metadataJSON == "{}" || metadataJSON == "null" {
+		return ""
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		return ""
+	}
+	prov, ok := meta["provenance"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	compute, _ := prov["compute"].(string)
+	return compute
+}
+
 // =============================================================================
 // Heartbeat-Driven Knowledge Lifecycle (Decay & Archival)
 // =============================================================================
@@ -1623,9 +1662,18 @@ func (dm *DatabaseManager) DecayWeights(policies map[string]DecayPolicy, interva
 
 		// The exponential step-down formula: subtract at least 1, never go below 1.
 		// CAST to INTEGER truncates toward zero, so MAX(1, …) guarantees minimum delta.
+		// Provenance multiplier via json_extract:
+		//   absolute → * 0.0 (exempt), high → * 0.5, ephemeral → * 2.0, else → * 1.0
 		result, err := dm.db.Exec(`
 			UPDATE memories
-			SET weight = MAX(weight - MAX(1, CAST(weight * ? AS INTEGER)), 1),
+			SET weight = MAX(weight - MAX(1, CAST(weight * ? *
+			    COALESCE(
+			        CASE json_extract(metadata, '$.provenance.compute')
+			            WHEN 'absolute' THEN 0.0
+			            WHEN 'high' THEN 0.5
+			            WHEN 'ephemeral' THEN 2.0
+			            ELSE 1.0
+			        END, 1.0) AS INTEGER)), 1),
 			    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
 			WHERE is_long_term = 1
 			  AND deleted_at IS NULL
@@ -1747,4 +1795,36 @@ func (dm *DatabaseManager) GetLessonStats() (map[string]interface{}, error) {
 	stats["by_type"] = typeCounts
 
 	return stats, nil
+}
+
+// ProvenancePreamble extracts the provenance trust signal from metadata JSON
+// and returns a formatted preamble string. Returns empty string if no provenance
+// is found, allowing graceful degradation.
+func ProvenancePreamble(metadataJSON string) string {
+	if metadataJSON == "" || metadataJSON == "{}" || metadataJSON == "null" {
+		return ""
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+		return ""
+	}
+	prov, ok := meta["provenance"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	model, _ := prov["model"].(string)
+	compute, _ := prov["compute"].(string)
+
+	switch compute {
+	case "absolute":
+		return "[Source: Human | Authority: Absolute]"
+	case "high":
+		label := model
+		if label == "" {
+			label = "High-Compute"
+		}
+		return "[Source: " + label + " | Compute: High]"
+	default:
+		return ""
+	}
 }

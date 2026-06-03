@@ -327,8 +327,16 @@ func handleMemoryAdd(args []string) int {
 	injectActiveContext()
 	defer clearActiveContext()
 
-	// Build metadata with active context
-	memMetadata := map[string]interface{}{}
+	// Build metadata with provenance + active context
+	memMetadata := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "human",
+			"model":   "direct",
+			"compute": "absolute",
+			"agent":   "mpm_cli",
+			"persona": "operator",
+		},
+	}
 	if activeMode != "" {
 		memMetadata["active_mode"] = activeMode
 	}
@@ -433,6 +441,10 @@ func handleMemorySearch(args []string) int {
 
 	for _, mem := range memories {
 		snippet := mem.Content
+		metaJSON, _ := json.Marshal(mem.Metadata)
+		if preamble := mpminternal.ProvenancePreamble(string(metaJSON)); preamble != "" {
+			snippet = preamble + "\n" + snippet
+		}
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}
@@ -1742,7 +1754,15 @@ func handleSessionAdd(args []string) int {
 	injectActiveContext()
 	defer clearActiveContext()
 
-	memMetadata := map[string]interface{}{}
+	memMetadata := map[string]interface{}{
+		"provenance": map[string]interface{}{
+			"source":  "human",
+			"model":   "direct",
+			"compute": "absolute",
+			"agent":   "mpm_cli",
+			"persona": "operator",
+		},
+	}
 	if activeMode != "" {
 		memMetadata["active_mode"] = activeMode
 	}
@@ -1993,6 +2013,10 @@ func handleSessionSearch(args []string) int {
 
 	for _, mem := range memories {
 		snippet := mem.Content
+		metaJSON, _ := json.Marshal(mem.Metadata)
+		if preamble := mpminternal.ProvenancePreamble(string(metaJSON)); preamble != "" {
+			snippet = preamble + "\n" + snippet
+		}
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}

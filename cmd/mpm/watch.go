@@ -841,6 +841,10 @@ func (d *watcherDaemon) ingestAsLongTermMemory(content, sourcePath string) (stri
 		"weight":       10,
 		"source_path":  sourcePath,
 		"promoted_at":  time.Now().UTC().Format(time.RFC3339),
+		"provenance": map[string]interface{}{
+			"agent":   "mpm_watch",
+			"persona": "watch-daemon",
+		},
 	}
 
 	// Generate embedding (real if provider available, hash fallback)
@@ -866,6 +870,10 @@ func (d *watcherDaemon) ingestAsEpistemologyMemory(content, sourcePath, collecti
 
 	metadata := map[string]interface{}{
 		"source_path": sourcePath,
+		"provenance": map[string]interface{}{
+			"agent":   "mpm_watch",
+			"persona": "watch-daemon",
+		},
 	}
 
 	embedding := mpminternal.EmbedText(content)
@@ -927,6 +935,10 @@ func (d *watcherDaemon) ingestAsSessionMemory(content, sourcePath string) (strin
 		"weight":       1,
 		"source_path":  sourcePath,
 		"promoted_at":  time.Now().UTC().Format(time.RFC3339),
+		"provenance": map[string]interface{}{
+			"agent":   "mpm_watch",
+			"persona": "watch-daemon",
+		},
 	}
 
 	// Generate embedding (real if provider available, hash fallback)

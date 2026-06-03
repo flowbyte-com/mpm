@@ -6,8 +6,18 @@ A running list of things I want to add or change in MPM. Updated as I think of t
 
 ## In Progress
 
-_(empty — all queues clear)_
+The v2.0 Horizon (The Final 9%)
+1. Concept Drift Detection (The Next Cognitive Step)
+Now that you have the Memory Decay engine running, you have the thermodynamics to build Concept Drift. If 808 notices that an older, highly reinforced memory (e.g., "User prefers monoliths") is suddenly being challenged by a cluster of new, rapidly reinforcing memories ("User is deploying microservices"), the system could automatically flag an "Epoch Shift." Instead of just forgetting, it actively recognizes that your engineering philosophy has evolved and re-aligns its baseline.
 
+2. Multi-Agent Shared Epistemology (ATTACH DATABASE)
+If you ever spin up three different specialized OpenClaw agents (e.g., a coder, a security auditor, and a tech writer) in three different workspaces, they are currently walled off from each other. Using SQLite's native ATTACH DATABASE command to give all of them read-access to a central global_rules.db would allow them to share core lessons and prime directives without cross-contaminating their local project contexts.
+
+3. Native Event-Driven Hooks
+Right now, when 808 successfully resolves a Theory or synthesizes a Lesson in the background, it just writes to the database. Adding a UNIX drop-in hook directory (~/.mpm/hooks/on_theory_resolved/) would allow the database to trigger active side-effects. For example, 808 could resolve a theory and the system automatically executes a local shell script that creates a GitHub Issue or updates a README.
+
+4. Memory Encryption at Rest (SQLCipher)
+For a local AI memory system that ingests everything about your workspace, an unencrypted SQLite database sitting on disk is a theoretical trust gap. Swapping standard SQLite for SQLCipher to encrypt the database with AES-256 would make the engine enterprise-grade from a security standpoint.
 ---
 
 ## Medium-Priority
