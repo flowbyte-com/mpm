@@ -10,7 +10,6 @@ import (
 	"os"
 	"time"
 
-
 	mpminternal "mpm/internal"
 	"mpm/internal/config"
 )
@@ -174,10 +173,10 @@ func updateMemoryEmbedding(db *sql.DB, id string, vec []float32) error {
 
 func logEmbeddingFailure(id, content string, err error) {
 	entry := map[string]interface{}{
-		"ts":      time.Now().UTC().Format(time.RFC3339),
-		"type":    "embedding_failure",
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+		"type":      "embedding_failure",
 		"memory_id": id,
-		"error":   err.Error(),
+		"error":     err.Error(),
 	}
 	data, _ := json.Marshal(entry)
 	var buf bytes.Buffer

@@ -9,7 +9,7 @@ import (
 func TestComputeDecay_LTM(t *testing.T) {
 	now := time.Now()
 	created := now.Add(-30 * 24 * time.Hour)
-	
+
 	decay := computeDecay(10.0, 10.0, true, &created, false, now)
 	expected := 10.0 * 0.01
 	if !floatEquals(decay, expected) {
@@ -20,7 +20,7 @@ func TestComputeDecay_LTM(t *testing.T) {
 func TestComputeDecay_Weight10Plus(t *testing.T) {
 	now := time.Now()
 	created := now.Add(-30 * 24 * time.Hour)
-	
+
 	decay := computeDecay(10.0, 10.0, false, &created, false, now)
 	expected := 10.0 * 0.02
 	if !floatEquals(decay, expected) {
@@ -31,7 +31,7 @@ func TestComputeDecay_Weight10Plus(t *testing.T) {
 func TestComputeDecay_Weight5Plus(t *testing.T) {
 	now := time.Now()
 	created := now.Add(-30 * 24 * time.Hour)
-	
+
 	decay := computeDecay(7.0, 10.0, false, &created, false, now)
 	expected := 10.0 * 0.05
 	if !floatEquals(decay, expected) {
@@ -42,7 +42,7 @@ func TestComputeDecay_Weight5Plus(t *testing.T) {
 func TestComputeDecay_LowWeight_Fresh(t *testing.T) {
 	now := time.Now()
 	created := now
-	
+
 	decay := computeDecay(3.0, 3.0, false, &created, false, now)
 	// ageFactor = 0/30 = 0, baseDecay = 0.1
 	// 3 days * 0.1 = 0.3
@@ -54,7 +54,7 @@ func TestComputeDecay_LowWeight_Fresh(t *testing.T) {
 func TestComputeDecay_LowWeight_Old(t *testing.T) {
 	now := time.Now()
 	created := now.Add(-60 * 24 * time.Hour)
-	
+
 	decay := computeDecay(3.0, 10.0, false, &created, false, now)
 	// ageFactor = 1.0, baseDecay = 0.3
 	// 10 days * 0.3 = 3.0
@@ -66,7 +66,7 @@ func TestComputeDecay_LowWeight_Old(t *testing.T) {
 func TestComputeDecay_Aggressive(t *testing.T) {
 	now := time.Now()
 	created := now.Add(-30 * 24 * time.Hour)
-	
+
 	decay := computeDecay(7.0, 10.0, false, &created, true, now)
 	expected := 10.0 * 0.05 * 2.0
 	if !floatEquals(decay, expected) {

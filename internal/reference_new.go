@@ -10,10 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/pkoukk/tiktoken-go"

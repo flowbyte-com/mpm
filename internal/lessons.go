@@ -70,4 +70,3 @@ func (s *LessonStore) GetLessonStats() (map[string]interface{}, error) {
 	}
 	return s.dm.GetLessonStats()
 }
-

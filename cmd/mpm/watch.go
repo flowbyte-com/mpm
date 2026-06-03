@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"log/slog"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,7 +57,6 @@ var (
 	hashPattern  = regexp.MustCompile(`#([a-zA-Z][a-zA-Z0-9_-]*)`)
 	camelPattern = regexp.MustCompile(`([A-Z][a-z]+[A-Z][a-zA-Z]*)`)
 )
-
 
 // resolveWatchDirs determines which directories to watch for the daemon
 // Priority: 1) CLI flags, 2) Config file (memory_dirs/sessions_dirs), 3) OpenClaw workspace defaults
@@ -280,20 +279,20 @@ func isSystemFile(name string) bool {
 // =============================================================================
 
 type watcherDaemon struct {
-	watcher    *fsnotify.Watcher
-	dirs       []string
-	db         *mpminternal.DatabaseManager
-	memory     *mpminternal.MemoryStore
-	dryRun     bool
-	verbose    bool
-	mu         sync.Mutex
-	stopCh     chan struct{}
+	watcher *fsnotify.Watcher
+	dirs    []string
+	db      *mpminternal.DatabaseManager
+	memory  *mpminternal.MemoryStore
+	dryRun  bool
+	verbose bool
+	mu      sync.Mutex
+	stopCh  chan struct{}
 
-	synthClient       *mpminternal.SynthClient   // cached, created once
-	synthWorker       *mpminternal.SynthesisWorker // isolated synthesis goroutine pool
-	lastClusterCheck  time.Time                  // guards checkTopicClustering rate
-	lastEventAt       time.Time                  // last fsnotify event (for idle detection)
-	idleWorker        *mpminternal.IdleConsolidationWorker // idle-time pattern synthesis
+	synthClient      *mpminternal.SynthClient             // cached, created once
+	synthWorker      *mpminternal.SynthesisWorker         // isolated synthesis goroutine pool
+	lastClusterCheck time.Time                            // guards checkTopicClustering rate
+	lastEventAt      time.Time                            // last fsnotify event (for idle detection)
+	idleWorker       *mpminternal.IdleConsolidationWorker // idle-time pattern synthesis
 }
 
 func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) *watcherDaemon {
@@ -315,18 +314,18 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 	memoryStore := mpminternal.NewMemoryStore(projectRoot)
 
 	return &watcherDaemon{
-		watcher:           w,
-		dirs:              dirs,
-		db:                db,
-		memory:            memoryStore,
-		dryRun:            dryRun,
-		verbose:           verbose,
-		stopCh:            make(chan struct{}),
-		synthClient:       mpminternal.NewSynthClient(),
-		synthWorker:       mpminternal.NewSynthesisWorker(db, mpminternal.NewSynthClient(), 3),
-		lastClusterCheck:  time.Time{}, // zero — will fire on first ingest
-		lastEventAt:       time.Now(),
-		idleWorker:        mpminternal.NewIdleConsolidationWorker(db, 30*time.Minute),
+		watcher:          w,
+		dirs:             dirs,
+		db:               db,
+		memory:           memoryStore,
+		dryRun:           dryRun,
+		verbose:          verbose,
+		stopCh:           make(chan struct{}),
+		synthClient:      mpminternal.NewSynthClient(),
+		synthWorker:      mpminternal.NewSynthesisWorker(db, mpminternal.NewSynthClient(), 3),
+		lastClusterCheck: time.Time{}, // zero — will fire on first ingest
+		lastEventAt:      time.Now(),
+		idleWorker:       mpminternal.NewIdleConsolidationWorker(db, 30*time.Minute),
 	}
 }
 
@@ -1389,7 +1388,7 @@ func eventFromFsnotify(event fsnotify.Event, dryRun, verbose bool) *WatchEvent {
 		return nil
 	}
 
-switch {
+	switch {
 	case ext == ".md" && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)):
 		return &WatchEvent{Type: EventMarkdownFile, Path: event.Name, DryRun: dryRun, Verbose: verbose}
 	case ext == ".lock" && event.Has(fsnotify.Create):

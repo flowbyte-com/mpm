@@ -164,8 +164,8 @@ type MemoryPair struct {
 // common topic. Bounded to O(1) comparisons per cycle — 20 seeds × 10 candidates = 200 max.
 // This caps CPU at a fixed ceiling regardless of corpus size.
 func (w *IdleConsolidationWorker) findUnlinkedSimilarPairs() ([]MemoryPair, error) {
-	const seedLimit = 20       // random LTM seeds per cycle
-	const candidateLimit = 10  // random candidates per seed
+	const seedLimit = 20      // random LTM seeds per cycle
+	const candidateLimit = 10 // random candidates per seed
 	const similarityThreshold = 0.75
 	const pairCap = 10
 
@@ -234,8 +234,8 @@ func (w *IdleConsolidationWorker) findUnlinkedSimilarPairs() ([]MemoryPair, erro
 
 type rawMem struct {
 	ID, Content, Collection, Tags, Metadata, Embedding string
-	Weight                                              int
-	Created                                             string
+	Weight                                             int
+	Created                                            string
 }
 
 // fetchRandomMemories returns a random sample of high-weight LTMs.

@@ -508,7 +508,6 @@ func orEmpty(s, fallback string) string {
 	return s
 }
 
-
 func stripMarkdownDisplay(s string) string {
 	s = strings.TrimPrefix(s, "#")
 	s = strings.TrimPrefix(s, " ")
@@ -536,34 +535,34 @@ func stripMarkdownDisplay(s string) string {
 // =============================================================================
 
 var stopWords = map[string]bool{
-	"the":    true,
-	"is":     true,
-	"at":     true,
-	"to":     true,
-	"a":      true,
-	"in":     true,
-	"on":     true,
-	"for":    true,
-	"of":     true,
-	"and":    true,
-	"or":     true,
-	"but":    true,
-	"with":   true,
-	"as":     true,
-	"by":     true,
-	"from":   true,
-	"it":     true,
-	"this":   true,
-	"that":   true,
-	"be":     true,
-	"have":   true,
-	"has":    true,
-	"had":    true,
-	"were":   true,
-	"was":    true,
-	"are":    true,
-	"been":   true,
-	"being":  true,
+	"the":   true,
+	"is":    true,
+	"at":    true,
+	"to":    true,
+	"a":     true,
+	"in":    true,
+	"on":    true,
+	"for":   true,
+	"of":    true,
+	"and":   true,
+	"or":    true,
+	"but":   true,
+	"with":  true,
+	"as":    true,
+	"by":    true,
+	"from":  true,
+	"it":    true,
+	"this":  true,
+	"that":  true,
+	"be":    true,
+	"have":  true,
+	"has":   true,
+	"had":   true,
+	"were":  true,
+	"was":   true,
+	"are":   true,
+	"been":  true,
+	"being": true,
 }
 
 // sanitizeContentForFTS strips markdown, filters stop-words and short words,

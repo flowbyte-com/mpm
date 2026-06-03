@@ -311,13 +311,13 @@ func TestIsMemoryStale(t *testing.T) {
 
 func TestComputeScore(t *testing.T) {
 	tests := []struct {
-		rc, weight int
+		rc, weight       int
 		wantMin, wantMax float64
 	}{
-		{0, 1, 0.0, 0.1},      // default: very low score
-		{5, 10, 0.4, 0.5},     // moderate: mid score
-		{10, 10, 0.6, 0.7},    // high: upper mid
-		{50, 20, 1.0, 1.0},    // capped at 1.0
+		{0, 1, 0.0, 0.1},   // default: very low score
+		{5, 10, 0.4, 0.5},  // moderate: mid score
+		{10, 10, 0.6, 0.7}, // high: upper mid
+		{50, 20, 1.0, 1.0}, // capped at 1.0
 	}
 	for _, tt := range tests {
 		got := computeScore(tt.rc, tt.weight)

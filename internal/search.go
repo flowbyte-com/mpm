@@ -39,8 +39,8 @@ func (dm *DatabaseManager) SearchWithSnippet(opts SearchOptions) ([]map[string]i
 			continue
 		}
 		results = append(results, map[string]interface{}{
-			"rowid":     rowid,
-			"snippet":   snippet,
+			"rowid":      rowid,
+			"snippet":    snippet,
 			"session_id": sessionID,
 		})
 	}

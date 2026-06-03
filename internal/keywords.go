@@ -105,12 +105,12 @@ func FindEpistemologyOverlaps(dm *DatabaseManager, keywords []string, limit int,
 		}
 
 		record := map[string]interface{}{
-			"id":          id,
-			"content":     content,
-			"collection":  collection,
-			"tags":        tags.String,
-			"created_at":  createdAt,
-			"score":       score,
+			"id":         id,
+			"content":    content,
+			"collection": collection,
+			"tags":       tags.String,
+			"created_at": createdAt,
+			"score":      score,
 		}
 
 		if metadata.Valid && metadata.String != "" {

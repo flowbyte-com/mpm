@@ -53,8 +53,8 @@ var (
 	HelpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
-	StatusOK   = lipgloss.NewStyle().Foreground(ColorGreen).Render("●")
-	StatusDim  = lipgloss.NewStyle().Foreground(ColorDim).Render("●")
+	StatusOK  = lipgloss.NewStyle().Foreground(ColorGreen).Render("●")
+	StatusDim = lipgloss.NewStyle().Foreground(ColorDim).Render("●")
 )
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ type Model struct {
 	mpmDir        string
 	modeList      list.Model
 	personaList   list.Model
-	activePanel   int          // 0 = modes, 1 = personas
+	activePanel   int // 0 = modes, 1 = personas
 	selectedModes map[int]bool
 	quitting      bool
 
@@ -106,8 +106,8 @@ func (p PersonaItemWrap) FilterValue() string { return p.Title() + " " + p.Descr
 
 // Global name/desc slices populated at init (needed for Item interface methods)
 var (
-	modeNames   []string
-	modeDescs   []string
+	modeNames    []string
+	modeDescs    []string
 	personaNames []string
 	personaDescs []string
 )

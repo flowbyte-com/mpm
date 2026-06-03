@@ -403,6 +403,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_, _ = dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]))
 	}
 
+	// Backfill: set updated_at = created_at for rows migrated without updated_at
+	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
+
 	// Use shared index definitions
 	var indexErrs []error
 	for _, sql := range CommonIndexes {
@@ -426,14 +429,15 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	revisionTriggers := []string{
 		`CREATE TRIGGER IF NOT EXISTS memories_rev_ai AFTER INSERT ON memories
 		BEGIN
-			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term)
+			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term, created_at)
 			VALUES (
 				NEW.id,
 				COALESCE((SELECT MAX(version) FROM memory_revisions WHERE memory_id = NEW.id), 0) + 1,
 				NEW.content,
 				COALESCE(NEW.weight, 0),
 				NEW.collection,
-				COALESCE(NEW.is_long_term, 0)
+				COALESCE(NEW.is_long_term, 0),
+				STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
 			);
 		END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_rev_au AFTER UPDATE ON memories
@@ -443,14 +447,15 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		   OR OLD.weight != NEW.weight
 		   OR OLD.collection != NEW.collection
 		BEGIN
-			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term)
+			INSERT INTO memory_revisions (memory_id, version, content, weight, collection, is_long_term, created_at)
 			VALUES (
 				NEW.id,
 				COALESCE((SELECT MAX(version) FROM memory_revisions WHERE memory_id = NEW.id), 0) + 1,
 				NEW.content,
 				COALESCE(NEW.weight, 0),
 				NEW.collection,
-				COALESCE(NEW.is_long_term, 0)
+				COALESCE(NEW.is_long_term, 0),
+				STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
 			);
 		END;`,
 	}
@@ -1440,7 +1445,11 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 			&r.ChallengedTheoryID, &createdAt); err != nil {
 			continue
 		}
-		if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+		if t, err := time.Parse("2006-01-02 15:04:05.999999999", createdAt); err == nil {
+			r.CreatedAt = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+			r.CreatedAt = t
+		} else if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
 			r.CreatedAt = t
 		} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 			r.CreatedAt = t
@@ -1466,7 +1475,11 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 		return nil, nil // memory doesn't exist
 	}
 	var createdTime time.Time
-	if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999", createdAt); err == nil {
+		createdTime = t
+	} else if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+		createdTime = t
+	} else if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
 		createdTime = t
 	} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		createdTime = t
@@ -1482,7 +1495,11 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 	err = dm.db.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, memoryID).Scan(&deletedAt)
 	if err == nil && deletedAt != nil && *deletedAt != "" {
 		var deletedTime time.Time
-		if t, err := time.Parse("2006-01-02 15:04:05", *deletedAt); err == nil {
+		if t, err := time.Parse("2006-01-02 15:04:05.999999999", *deletedAt); err == nil {
+			deletedTime = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", *deletedAt); err == nil {
+			deletedTime = t
+		} else if t, err := time.Parse(time.RFC3339Nano, *deletedAt); err == nil {
 			deletedTime = t
 		} else if t, err := time.Parse(time.RFC3339, *deletedAt); err == nil {
 			deletedTime = t
@@ -1492,7 +1509,7 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 		}
 	}
 
-	asOfStr := asOf.UTC().Format(time.RFC3339)
+	asOfStr := asOf.UTC().Format("2006-01-02 15:04:05.999999999")
 	row := dm.db.QueryRow(`
 		SELECT id, memory_id, version, content, weight, collection,
 		       is_long_term, is_challenged, COALESCE(challenged_theory_id, ''), created_at
@@ -1511,7 +1528,11 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 	if err != nil {
 		return nil, nil // no revision found for that time
 	}
-	if t, err := time.Parse("2006-01-02 15:04:05", revCreatedAt); err == nil {
+	if t, err := time.Parse("2006-01-02 15:04:05.999999999", revCreatedAt); err == nil {
+		r.CreatedAt = t
+	} else if t, err := time.Parse("2006-01-02 15:04:05", revCreatedAt); err == nil {
+		r.CreatedAt = t
+	} else if t, err := time.Parse(time.RFC3339Nano, revCreatedAt); err == nil {
 		r.CreatedAt = t
 	} else if t, err := time.Parse(time.RFC3339, revCreatedAt); err == nil {
 		r.CreatedAt = t
@@ -1575,6 +1596,130 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 		line, _ := json.Marshal(entry)
 		f.WriteString(string(line) + "\n")
 	}()
+}
+
+// =============================================================================
+// Heartbeat-Driven Knowledge Lifecycle (Decay & Archival)
+// =============================================================================
+
+// DecayWeights applies exponential step-down decay to LTM memories whose
+// updated_at predates the interval window. Each decayed memory has its weight
+// reduced by at least 1 (floor = 1) and its updated_at refreshed so the same
+// memory is not decayed again on the next heartbeat pass.
+func (dm *DatabaseManager) DecayWeights(policies map[string]DecayPolicy, intervalDays int) (int, error) {
+	if intervalDays <= 0 {
+		intervalDays = 7
+	}
+	if policies == nil {
+		policies = DefaultDecayPolicies
+	}
+
+	total := 0
+	for collection, policy := range policies {
+		if policy.DecayPercent <= 0 {
+			continue
+		}
+		decayFactor := policy.DecayPercent / 100.0
+
+		// The exponential step-down formula: subtract at least 1, never go below 1.
+		// CAST to INTEGER truncates toward zero, so MAX(1, …) guarantees minimum delta.
+		result, err := dm.db.Exec(`
+			UPDATE memories
+			SET weight = MAX(weight - MAX(1, CAST(weight * ? AS INTEGER)), 1),
+			    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			WHERE is_long_term = 1
+			  AND deleted_at IS NULL
+			  AND collection = ?
+			  AND updated_at < DATETIME('now', '-' || ? || ' days')
+			  AND weight > 1
+		`, decayFactor, collection, intervalDays)
+		if err != nil {
+			return total, fmt.Errorf("DecayWeights: collection %s: %w", collection, err)
+		}
+		affected, _ := result.RowsAffected()
+		total += int(affected)
+	}
+	return total, nil
+}
+
+// ArchiveStaleMemories soft-deletes weight=1 memories whose updated_at predates
+// the archive window. The soft-delete trips the memories_rev_au trigger,
+// capturing the terminal state in memory_revisions for --as-of retrospectivity.
+// A hard LIMIT of 100 prevents un-indexed full-table sweeps under active WAL.
+func (dm *DatabaseManager) ArchiveStaleMemories(archiveDays int) (int, error) {
+	if archiveDays <= 0 {
+		archiveDays = 30
+	}
+	result, err := dm.db.Exec(`
+		UPDATE memories
+		SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+		WHERE id IN (
+			SELECT id FROM memories
+			WHERE weight = 1
+			  AND deleted_at IS NULL
+			  AND updated_at < DATETIME('now', '-' || ? || ' days')
+			LIMIT 100
+		)
+	`, archiveDays)
+	if err != nil {
+		return 0, fmt.Errorf("ArchiveStaleMemories: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
+}
+
+// RunLifecycleDecayAndArchival runs a single heartbeat pass of the decay sweep
+// followed by stale-memory archival. Both operations run on an isolated SQLite
+// connection to avoid hot-path WAL contention with the fsnotify ingestion thread.
+// Metrics are logged to mirror.jsonl as a structured [lifecycle] token line.
+func (dm *DatabaseManager) RunLifecycleDecayAndArchival(decayRate float64, archiveDays int) error {
+	if dm.dbPath == "" {
+		// No file path available (in-memory/test DB) — run inline
+		return dm.runLifecycleInline(decayRate, archiveDays)
+	}
+	// Open an isolated connection — zero hot path contention
+	isoDB, err := sql.Open("sqlite3", dm.dbPath)
+	if err != nil {
+		return fmt.Errorf("lifecycle: isolated connection: %w", err)
+	}
+	defer isoDB.Close()
+	isoDB.Exec("PRAGMA journal_mode = WAL")
+	isoDB.Exec("PRAGMA busy_timeout = 5000")
+	isoDB.Exec("PRAGMA synchronous = NORMAL")
+
+	isoDM := NewDatabaseManagerForDB(isoDB)
+	return isoDM.runLifecycleInline(decayRate, archiveDays)
+}
+
+// runLifecycleInline executes the decay + archival pass on the current
+// DatabaseManager connection. Extracted so both inline and isolated paths
+// share the same logic.
+func (dm *DatabaseManager) runLifecycleInline(decayRate float64, archiveDays int) error {
+	intervalDays := archiveDays / 7
+	if intervalDays < 1 {
+		intervalDays = 1
+	}
+
+	// Apply the same decay rate to all non-audit collections
+	nonAudit := []string{"default", "session", "memories", "theories"}
+	policy := make(map[string]DecayPolicy, len(nonAudit))
+	for _, c := range nonAudit {
+		policy[c] = DecayPolicy{DecayPercent: decayRate, Floor: 1}
+	}
+	decayed, _ := dm.DecayWeights(policy, intervalDays)
+	if decayed < 0 {
+		decayed = 0
+	}
+
+	archived, _ := dm.ArchiveStaleMemories(archiveDays)
+	if archived < 0 {
+		archived = 0
+	}
+
+	line := fmt.Sprintf("[lifecycle] decay swept: %d weights adjusted, %d records archived to revisions ledger\n",
+		decayed, archived)
+	dm.logWatchdogRaw([]byte(line))
+	return nil
 }
 
 // GetLessonStats returns statistics about lessons

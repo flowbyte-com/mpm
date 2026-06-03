@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"mpm/internal/config"
 	mpminternal "mpm/internal"
+	"mpm/internal/config"
 )
 
 func TestWatchStartStopLifecycle(t *testing.T) {
@@ -111,7 +111,7 @@ func TestWatchExternalDBPoolInitialization(t *testing.T) {
 	// when no external DBs are configured
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
-		MemoryDirs:  []string{tmpDir},
+		MemoryDirs:   []string{tmpDir},
 		SessionsDirs: []string{},
 		ExternalDbs:  []config.ExternalDB{},
 	}
