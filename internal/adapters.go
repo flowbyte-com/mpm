@@ -87,12 +87,12 @@ func (a *MPMAdapter) FetchNew(db *sql.DB, cursor string) ([]Memory, string, erro
 			json.Unmarshal([]byte(tags), &tagSlice)
 		}
 		mem := Memory{
-			ID:         id,
-			Content:    content,
-			SessionID:  sessionID,
-			Tags:       tagSlice,
-			Metadata:   map[string]interface{}{"source_id": id, "original_tags": tags},
-			Source:     "mpm",
+			ID:        id,
+			Content:   content,
+			SessionID: sessionID,
+			Tags:      tagSlice,
+			Metadata:  map[string]interface{}{"source_id": id, "original_tags": tags},
+			Source:    "mpm",
 		}
 		memories = append(memories, mem)
 	}

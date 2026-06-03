@@ -95,14 +95,14 @@ func TestFeedbackCLIFlagCollision(t *testing.T) {
 	// The router guard: len(cmdName) > 2 for negative feedback
 	// This test documents the invariant: a bare "-v" (len=2) is NOT treated as feedback
 	testCases := []struct {
-		raw       string
+		raw        string
 		isFeedback bool
 	}{
 		{"+abc123", true},
 		{"-abc123", true},
 		{"-v", false}, // len=2, single-dash flag — must NOT be intercepted
 		{"-h", false},
-		{"-+abc", true},  // starts with +, treated as reinforce attempt — will fail at DB lookup
+		{"-+abc", true},   // starts with +, treated as reinforce attempt — will fail at DB lookup
 		{"--help", false}, // double-dash — standard flag
 	}
 

@@ -28,15 +28,15 @@ type Table struct {
 
 // OpenClawChunk represents a row from the OpenClaw chunks table.
 type OpenClawChunk struct {
-	ID         string
-	Path       string
-	Source     string
-	StartLine  int
-	EndLine    int
-	Hash       string // content SHA-256
-	Model      string
-	Text       string
-	UpdatedAt  int64
+	ID        string
+	Path      string
+	Source    string
+	StartLine int
+	EndLine   int
+	Hash      string // content SHA-256
+	Model     string
+	Text      string
+	UpdatedAt int64
 }
 
 // RawMemory represents a staging entry in raw_memories.
@@ -220,17 +220,17 @@ func (dm *DatabaseManager) IngestFromAdapter(dbPath string, adapter SchemaAdapte
 				metadataJSON, _ := json.Marshal(meta)
 
 				raw := &RawMemory{
-					ID:           GenerateID(),
-					SourceID:     mem.ID,
-					SourceDB:     adapter.Name(),
-					ContentHash:  hex.EncodeToString(contentHash[:]),
-					Text:         mem.Content,
-					Metadata:     string(metadataJSON),
-					IngestedAt:   now,
-					Status:       "pending",
-					ImportBatch:  importBatch,
-					UpdatedAt:    now,
-					ExpiresAt:    now + (30 * 24 * 60 * 60),
+					ID:          GenerateID(),
+					SourceID:    mem.ID,
+					SourceDB:    adapter.Name(),
+					ContentHash: hex.EncodeToString(contentHash[:]),
+					Text:        mem.Content,
+					Metadata:    string(metadataJSON),
+					IngestedAt:  now,
+					Status:      "pending",
+					ImportBatch: importBatch,
+					UpdatedAt:   now,
+					ExpiresAt:   now + (30 * 24 * 60 * 60),
 				}
 				if err := dm.insertRawMemory(raw); err != nil {
 					return stats, fmt.Errorf("insert failed: %w", err)
@@ -272,7 +272,6 @@ func (dm *DatabaseManager) IngestOpenClaw(sourcePath string, batchSize int, impo
 	}
 	return dm.IngestFromAdapter(sourcePath, adapter, batchSize, importBatch, dryRun)
 }
-
 
 // insertRawMemory inserts a new raw_memory entry (status=pending).
 func (dm *DatabaseManager) insertRawMemory(raw *RawMemory) error {
@@ -413,8 +412,8 @@ func (dm *DatabaseManager) GetIngestStatus() (map[string]int, error) {
 func (dm *DatabaseManager) PromoteRawMemory(raw *RawMemory) error {
 	now := time.Now()
 	metadata := map[string]interface{}{
-		"source_db": raw.SourceDB,
-		"source_id": raw.SourceID,
+		"source_db":    raw.SourceDB,
+		"source_id":    raw.SourceID,
 		"import_batch": raw.ImportBatch,
 	}
 	metadataJSON, _ := json.Marshal(metadata)

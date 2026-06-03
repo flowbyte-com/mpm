@@ -59,15 +59,15 @@ func TestSortByLastAccessed(t *testing.T) {
 	// Create test data with known timestamps
 	memories := []map[string]interface{}{
 		{
-			"id":             "aaa",
+			"id":               "aaa",
 			"last_accessed_at": parseTime("2026-05-01T00:00:00Z"),
 		},
 		{
-			"id":             "bbb",
+			"id":               "bbb",
 			"last_accessed_at": parseTime("2026-05-10T00:00:00Z"),
 		},
 		{
-			"id":             "ccc",
+			"id":               "ccc",
 			"last_accessed_at": parseTime("2026-05-05T00:00:00Z"),
 		},
 	}

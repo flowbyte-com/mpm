@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"net/http"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,13 +208,13 @@ func main() {
 						os.Exit(0)
 					}
 					printSuccess("memory saved (id=%s)", mem.ID)
-				// Fire-and-forget auto-synthesis (same pattern as memory add handler)
-				go func(id, c string) {
-					synthDM, synthErr := mpminternal.NewDatabaseManager("")
-					if synthErr != nil {
-						slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
-						return
-					}
+					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
+					go func(id, c string) {
+						synthDM, synthErr := mpminternal.NewDatabaseManager("")
+						if synthErr != nil {
+							slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
+							return
+						}
 						defer synthDM.Close()
 						mpminternal.AutoSynthesize(context.Background(), synthDM, mpminternal.NewSynthClient(), id, c)
 					}(mem.ID, data)
@@ -948,7 +948,7 @@ func runDirectoryCheck(result *PreFlightResult) {
 
 	// Determine workspace and data directories
 	workspace := config.GetWorkspace()
-dirs := []string{
+	dirs := []string{
 		filepath.Join(workspace, "mode"),      // Mode configurations
 		config.GetPersonaPath(),               // Persona configurations (correct path: projects/mpm/persona)
 		filepath.Join(workspace, "src", "db"), // Database directory
@@ -1161,7 +1161,7 @@ func runPermissionsCheck(result *PreFlightResult) {
 	details := []string{}
 
 	// Critical paths that must be writable
-writablePaths := []string{
+	writablePaths := []string{
 		filepath.Join(config.GetWorkspace(), "src", "db"), // DB directory
 	}
 

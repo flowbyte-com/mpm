@@ -14,6 +14,10 @@ MPM provides long-term memory, behavioral modes, and persona management. Everyth
 - **Full-text search** via SQLite FTS5 — no external search service
 - **Inline importance chips** on recall results — reinforcement count, weight, LTM flag, last-accessed age, score (0–1)
 - **Auto-elevation on access** — frequently recalled memories grow stronger over time via per-session deduplication
+- **Weight system with feedback shortcuts** — `mpm +<id>` reinforces (+1, auto-clears challenge if contested); `mpm -<id>` weakens (-1, floor at 1 via SQL MAX). Flag collision guard protects `-v`, `-h`.
+- **Cognitive immune system** — on hybrid search, contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity; state collision (sim ≥ 0.85, one challenged) triggers async challenge log to `mirror.jsonl`; challenged memories surface with in-memory warning prepended — never written to DB.
+- **Ingestion overflow backpressure** — synthesis worker channel has 200-event buffer; overflow events beyond capacity are offloaded to `raw_memories` as `overflow_deferred` status, processed alongside normal DLQ entries with shared exponential backoff.
+- **Automatic decay & archival (heartbeat-wired)** — every 5 minutes on isolated DB connection: LTM memories decay exponentially via `MAX(weight - MAX(1, CAST(weight × DecayRate AS INTEGER)), 1)`; weight=1 memories past 30-day archive threshold are soft-deleted, terminal state captured in `memory_revisions` for `--as-of` time-travel.
 - **Spaced reinforcement review** — `mpm review --promoted` shows recently elevated; `mpm review --stale` surfaces forgotten LTM memories
 - **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
 - **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
@@ -206,6 +210,7 @@ Topics `theories` and `decisions` are auto-created on first use. Memories in the
 | Table | Purpose |
 | --- | --- |
 | `memories` | Core storage with FTS5-triggered embedding |
+| `memory_revisions` | Append-only version history for time-travel (`--as-of`) and archival audit |
 | `sessions` | Session metadata and transcripts |
 | `topics` | Topic definitions |
 | `topic_memberships` | Memory-to-topic links |
@@ -215,6 +220,8 @@ Topics `theories` and `decisions` are auto-created on first use. Memories in the
 | `system_config` | Configuration snapshots (hash-verified) |
 | `external_db_cursors` | Sync cursors for external DB polling |
 | `raw_memories` | Staging area for ingest workflow |
+| `synthesis_dlq` | Dead-letter queue for failed synthesis jobs |
+| `synthesis_raw` | Overflow deferred entries pending retry |
 
 ### Schema Registry (Adapter Pattern)
 

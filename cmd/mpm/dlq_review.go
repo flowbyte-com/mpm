@@ -98,7 +98,7 @@ func dlqReview(db *sql.DB) int {
 
 	fmt.Println()
 	fmt.Printf("   %-16s %-10s %-8s %-35s %s\n", "MEMORY_ID", "AGE", "ATTEMPT", "LAST_ERROR", "STATUS")
-	fmt.Println("   " + string('-' * 85))
+	fmt.Println("   " + string('-'*85))
 	for _, e := range all {
 		age := time.Since(e.CreatedAt).Round(time.Minute)
 		errStr := e.LastError

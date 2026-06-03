@@ -1000,11 +1000,11 @@ type DecayPolicy struct {
 // DefaultDecayPolicies maps collection names to their decay policies.
 // Collections not listed use the "default" policy.
 var DefaultDecayPolicies = map[string]DecayPolicy{
-	"default":   {DecayPercent: 2.0, Floor: 0},   // fast decay, can reach zero
-	"session":   {DecayPercent: 2.0, Floor: 0},   // session facts decay fast
-	"memories":  {DecayPercent: 1.0, Floor: 1},   // moderate decay, floor of 1
-	"theories":  {DecayPercent: 1.0, Floor: 1},   // pending theories stay visible
-	"decisions": {DecayPercent: 0, Floor: 0},      // zero decay — append-only audit trail
+	"default":   {DecayPercent: 2.0, Floor: 0}, // fast decay, can reach zero
+	"session":   {DecayPercent: 2.0, Floor: 0}, // session facts decay fast
+	"memories":  {DecayPercent: 1.0, Floor: 1}, // moderate decay, floor of 1
+	"theories":  {DecayPercent: 1.0, Floor: 1}, // pending theories stay visible
+	"decisions": {DecayPercent: 0, Floor: 0},   // zero decay — append-only audit trail
 }
 
 // DecayWeights applies per-collection weight decay policies.
@@ -1067,6 +1067,11 @@ type AutoPruneConfig struct {
 
 // AutoPrunePolicy applies the configured pruning policy.
 // Returns number of memories pruned and any error.
+//
+// Uses updated_at to determine staleness so recently-reinforced or recently-accessed
+// memories are never archived. Soft-deletes via SET deleted_at to preserve
+// append-only retrospectivity through the memories_rev_au trigger.
+// Bounded to LIMIT 100 per cycle per rule to prevent un-indexed full-table sweeps.
 func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
@@ -1092,12 +1097,17 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	// Prune never accessed older than threshold
 	if cfg.NeverAccessedMaxDays > 0 {
 		result, err := s.execTracked(`
-			DELETE FROM memories
-			WHERE deleted_at IS NULL
-			  AND last_accessed_at IS NULL
-			  AND reinforcement_count = 0
-			  AND is_long_term = 0
-			  AND created_at < datetime('now', '-' || ? || ' days')
+			UPDATE memories
+			SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			WHERE id IN (
+				SELECT id FROM memories
+				WHERE deleted_at IS NULL
+				  AND last_accessed_at IS NULL
+				  AND reinforcement_count = 0
+				  AND is_long_term = 0
+				  AND updated_at < DATETIME('now', '-' || ? || ' days')
+				LIMIT 100
+			)
 		`, 0, cfg.NeverAccessedMaxDays)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
@@ -1109,12 +1119,17 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	// Prune low weight (weight=1) older than threshold
 	if cfg.LowWeightMaxDays > 0 {
 		result, err := s.execTracked(`
-			DELETE FROM memories
-			WHERE deleted_at IS NULL
-			  AND weight = 1
-			  AND reinforcement_count = 0
-			  AND is_long_term = 0
-			  AND created_at < datetime('now', '-' || ? || ' days')
+			UPDATE memories
+			SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			WHERE id IN (
+				SELECT id FROM memories
+				WHERE deleted_at IS NULL
+				  AND weight = 1
+				  AND reinforcement_count = 0
+				  AND is_long_term = 0
+				  AND updated_at < DATETIME('now', '-' || ? || ' days')
+				LIMIT 100
+			)
 		`, cfg.LowWeightMaxDays)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {

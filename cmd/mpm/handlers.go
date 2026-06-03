@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"log/slog"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,7 +21,6 @@ import (
 
 	mpminternal "mpm/internal"
 )
-
 
 // Package-level singleton DatabaseManager — initialized once per process,
 // shared across all handler calls to avoid connection proliferation.
@@ -223,10 +222,10 @@ func handlePrimeDirectives() int {
 
 	if jsonOutput {
 		type directiveEntry struct {
-			ID        string `json:"id"`
+			ID         string `json:"id"`
 			Collection string `json:"collection"`
-			Content   string `json:"content"`
-			CreatedAt string `json:"created_at"`
+			Content    string `json:"content"`
+			CreatedAt  string `json:"created_at"`
 		}
 		directives := make([]directiveEntry, 0)
 		for rows.Next() {
@@ -238,7 +237,7 @@ func handlePrimeDirectives() int {
 				ID:         id,
 				Collection: collection,
 				Content:    content,
-				CreatedAt:   created,
+				CreatedAt:  created,
 			})
 		}
 		if len(directives) == 0 {
@@ -280,7 +279,6 @@ func handlePrimeDirectives() int {
 	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n")
 	return respond(output.String(), "", 0)
 }
-
 
 func handleMemoryAdd(args []string) int {
 	if len(args) == 0 {
@@ -432,19 +430,19 @@ func handleMemorySearch(args []string) int {
 
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("Found %d memories:\n\n", len(memories)))
-	
+
 	for _, mem := range memories {
 		snippet := mem.Content
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
-		
+
 		created := mem.Created
 		if len(created) > 10 {
 			created = created[:10]
 		}
-		
+
 		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, created))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
@@ -589,19 +587,19 @@ func handleMemoryList(args []string) int {
 
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("Recent %d memories:\n\n", len(memories)))
-	
+
 	for _, mem := range memories {
 		snippet := mem.Content
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
-		
+
 		created := mem.Created
 		if len(created) > 10 {
 			created = created[:10]
 		}
-		
+
 		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, created))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
@@ -629,19 +627,19 @@ func handleMemorySearchTerm(args []string) int {
 
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("Found %d memories matching '%s':\n\n", len(memories), term))
-	
+
 	for _, mem := range memories {
 		snippet := mem.Content
 		if len(snippet) > 500 {
 			snippet = snippet[:500] + "..."
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
-		
+
 		created := mem.Created
 		if len(created) > 10 {
 			created = created[:10]
 		}
-		
+
 		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, created))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
@@ -663,7 +661,7 @@ func handleMemoryWipe(args []string) int {
 	}
 
 	store := getMemoryStore()
-	
+
 	// Clear the mirror file
 	err := store.ClearMirror()
 	if err != nil {
@@ -683,7 +681,7 @@ func handleShred(args []string) int {
 	}
 
 	targetType := args[0]
-	
+
 	switch targetType {
 	case "sessions":
 		return handleShredSessions(args[1:])
@@ -1113,10 +1111,10 @@ func handleGC(args []string) int {
 	// Collect all computed weight changes for batch application (avoids N+1 SQL pattern).
 	// Structure: []struct{ id string, oldWeight int, newWeight float64, isLTM bool }
 	type weightDelta struct {
-		id       string
+		id        string
 		oldWeight int
 		newWeight float64
-		isLTM    bool
+		isLTM     bool
 	}
 	var deltas []weightDelta
 
@@ -1236,18 +1234,18 @@ func handleGC(args []string) int {
 	// Output
 	if jsonOutput {
 		type gcResult struct {
-			Scanned     int      `json:"scanned"`
-			Updated     int      `json:"updated"`
-			DeadCount   int      `json:"dead_count"`
+			Scanned      int                      `json:"scanned"`
+			Updated      int                      `json:"updated"`
+			DeadCount    int                      `json:"dead_count"`
 			DeadMemories []map[string]interface{} `json:"dead_memories,omitempty"`
-			DryRun      bool     `json:"dry_run"`
+			DryRun       bool                     `json:"dry_run"`
 		}
 		result := gcResult{
-			Scanned:     scanned,
-			Updated:     updated,
-			DeadCount:   len(deadMemories),
+			Scanned:      scanned,
+			Updated:      updated,
+			DeadCount:    len(deadMemories),
 			DeadMemories: deadMemories,
-			DryRun:      dryRun,
+			DryRun:       dryRun,
 		}
 		data, _ := json.Marshal(result)
 		fmt.Println(string(data))
@@ -1443,8 +1441,8 @@ func handleTopicAdd(args []string) int {
 	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
 			"success":     true,
-			"id":         id,
-			"name":       name,
+			"id":          id,
+			"name":        name,
 			"description": description,
 		})
 		fmt.Println(string(data))
@@ -1563,12 +1561,12 @@ func handleTopicShow(args []string) int {
 		}
 		chunkCount := len(memoryIDs)
 		data, _ := json.Marshal(map[string]interface{}{
-			"id":           id,
-			"name":         name,
-			"description":  description,
-			"created_at":   created,
-			"memory_ids":   memoryIDs,
-			"chunk_count":  chunkCount,
+			"id":          id,
+			"name":        name,
+			"description": description,
+			"created_at":  created,
+			"memory_ids":  memoryIDs,
+			"chunk_count": chunkCount,
 		})
 		fmt.Println(string(data))
 		return 0
@@ -1887,11 +1885,11 @@ func handleWake(args []string) int {
 		CreatedAt string `json:"created_at"`
 	}
 	type wakeResult struct {
-		SessionID      string       `json:"session_id"`
-		ActiveMode     string       `json:"active_mode"`
-		ActivePersona  string       `json:"active_persona"`
-		RecentTopics   []string     `json:"recent_topics"`
-		RecentMemories []memoryRef  `json:"recent_memories"`
+		SessionID      string      `json:"session_id"`
+		ActiveMode     string      `json:"active_mode"`
+		ActivePersona  string      `json:"active_persona"`
+		RecentTopics   []string    `json:"recent_topics"`
+		RecentMemories []memoryRef `json:"recent_memories"`
 	}
 
 	// Collect topics and build consolidated memory references
@@ -2841,8 +2839,8 @@ func handleLessonAdd(args []string) int {
 	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
 			"success":       true,
-			"id":           lesson.ID,
-			"type":         string(lesson.Type),
+			"id":            lesson.ID,
+			"type":          string(lesson.Type),
 			"reinforcement": lesson.ReinforcementCount,
 		})
 		fmt.Println(string(data))
@@ -3294,8 +3292,8 @@ func handleChallenge(args []string) int {
 
 	// Theory metadata with back-link to memory
 	theoryMeta := map[string]interface{}{
-		"status":     "pending",
-		"type":       "challenge",
+		"status":    "pending",
+		"type":      "challenge",
 		"memory_id": id,
 	}
 	theoryMetaJSON, _ := json.Marshal(theoryMeta)
@@ -3553,7 +3551,6 @@ func parseModeSelection(line string, modes []string) []string {
 // ============================================================================
 // Utility Functions
 // ============================================================================
-
 
 func getMemoryStore() *internal.MemoryStore {
 	if dbManager == nil {

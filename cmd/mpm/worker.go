@@ -9,42 +9,42 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"mpm/internal/config"
 	mpminternal "mpm/internal"
+	"mpm/internal/config"
 )
 
 // WatchEventType categorizes background events from the watcher or pollers.
 type WatchEventType int
 
 const (
-	EventMarkdownFile         WatchEventType = iota // .md file created/written
-	EventOrphanSweep                                // new session created → sweep for orphan .jsonl
-	EventSystemConfig                               // workspace.json/config.json changed
-	EventExternalDBPoll                             // external SQLite DB has new rows
-	EventStartupSweep                               // initial startup sweep
-	EventTopicClusterCheck                          // manual topic clustering trigger
-	EventReconciliationSweep                        // periodic sweep for files missed by fsnotify
+	EventMarkdownFile        WatchEventType = iota // .md file created/written
+	EventOrphanSweep                               // new session created → sweep for orphan .jsonl
+	EventSystemConfig                              // workspace.json/config.json changed
+	EventExternalDBPoll                            // external SQLite DB has new rows
+	EventStartupSweep                              // initial startup sweep
+	EventTopicClusterCheck                         // manual topic clustering trigger
+	EventReconciliationSweep                       // periodic sweep for files missed by fsnotify
 )
 
 // WatchEvent is a unit of work pushed into the job queue by the watcher goroutine
 // or external DB pollers. Workers process these events using the shared DB.
 type WatchEvent struct {
-	Type     WatchEventType
-	Path     string // file path for file-based events
-	Label    string // DB label for external DB events
-	DryRun   bool
-	Verbose  bool
+	Type    WatchEventType
+	Path    string // file path for file-based events
+	Label   string // DB label for external DB events
+	DryRun  bool
+	Verbose bool
 }
 
 // WorkerPool manages a fixed set of goroutines that process WatchEvents
 // from the job queue, sharing a single DatabaseManager.
 type WorkerPool struct {
-	dm        *mpminternal.DatabaseManager
-	jobQueue  chan WatchEvent
-	wg        sync.WaitGroup
-	quit      chan struct{}
-	active    atomic.Int64
-	processed atomic.Int64
+	dm         *mpminternal.DatabaseManager
+	jobQueue   chan WatchEvent
+	wg         sync.WaitGroup
+	quit       chan struct{}
+	active     atomic.Int64
+	processed  atomic.Int64
 	maxWorkers int
 }
 
@@ -182,11 +182,11 @@ func (wp *WorkerPool) processEvent(ev WatchEvent) {
 func processFileEvent(dm *mpminternal.DatabaseManager, ev WatchEvent) {
 	memory := mpminternal.NewMemoryStore("")
 	wd := &watcherDaemon{
-		db:           dm,
-		memory:       memory,
-		dryRun:       ev.DryRun,
-		verbose:      ev.Verbose,
-		synthWorker:  watchSynthWorker, // isolated synthesis pool
+		db:          dm,
+		memory:      memory,
+		dryRun:      ev.DryRun,
+		verbose:     ev.Verbose,
+		synthWorker: watchSynthWorker, // isolated synthesis pool
 	}
 	wd.processMarkdownFile(ev.Path, false)
 }
@@ -381,7 +381,7 @@ func isFileIngested(dm *mpminternal.DatabaseManager, filePath string) (bool, err
 			escaped = strings.ReplaceAll(escaped, `%`, `\%`)
 			escaped = strings.ReplaceAll(escaped, `_`, `\_`)
 			err = dm.SQLDB().QueryRow(
-				`SELECT COUNT(*) FROM memories WHERE metadata LIKE '%"source_path":"`+escaped+`"%'`,
+				`SELECT COUNT(*) FROM memories WHERE metadata LIKE '%"source_path":"` + escaped + `"%'`,
 			).Scan(&count)
 		}
 		if err != nil {

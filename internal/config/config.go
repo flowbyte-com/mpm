@@ -9,15 +9,15 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	Workspace      string `json:"workspace,omitempty"`
-	MemoryDir      string   `json:"memory_dir,omitempty"`      // Legacy singular — use MemoryDirs
-	MemoryDirs     []string `json:"memory_dirs,omitempty"`
-	SessionsDir    string   `json:"sessions_dir,omitempty"`    // Legacy singular — use SessionsDirs
-	SessionsDirs   []string `json:"sessions_dirs,omitempty"`
-	ExternalDbs    []ExternalDB `json:"external_dbs,omitempty"`
-	OpenClawDBPath string `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
-	WebToken       string `json:"web_token,omitempty"`         // Optional bearer token for web UI auth
-	Synth          *SynthConfig `json:"synth,omitempty"`
+	Workspace      string            `json:"workspace,omitempty"`
+	MemoryDir      string            `json:"memory_dir,omitempty"` // Legacy singular — use MemoryDirs
+	MemoryDirs     []string          `json:"memory_dirs,omitempty"`
+	SessionsDir    string            `json:"sessions_dir,omitempty"` // Legacy singular — use SessionsDirs
+	SessionsDirs   []string          `json:"sessions_dirs,omitempty"`
+	ExternalDbs    []ExternalDB      `json:"external_dbs,omitempty"`
+	OpenClawDBPath string            `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
+	WebToken       string            `json:"web_token,omitempty"`        // Optional bearer token for web UI auth
+	Synth          *SynthConfig      `json:"synth,omitempty"`
 	Aliases        map[string]string `json:"aliases,omitempty"` // CLI command aliases: "mem" → "recall --collection memories"
 }
 
@@ -63,15 +63,15 @@ type SynthVendor struct {
 	APIKey     string `json:"api_key"`     // vendor-specific key (overrides synth-level)
 	BaseURL    string `json:"base_url"`    // e.g. "https://api.minimax.io/anthropic/v1"
 	Model      string `json:"model"`       // model name for this vendor
-	TimeoutSec int    `json:"timeout_sec"`  // per-vendor timeout (0 = use default)
+	TimeoutSec int    `json:"timeout_sec"` // per-vendor timeout (0 = use default)
 }
 
 // SynthConfig holds LLM settings for the synth command.
 // Vendors field defines the ordered fallback chain. If empty, MiniMax is used alone.
 type SynthConfig struct {
-	Model        string        `json:"model"`          // e.g. "MiniMax-M2.7", "gpt-4o", "llama3"
-	APIKey      string        `json:"api_key"`        // primary API key
-	BaseURL     string        `json:"base_url"`       // e.g. "http://localhost:11434/v1"
+	Model       string        `json:"model"`    // e.g. "MiniMax-M2.7", "gpt-4o", "llama3"
+	APIKey      string        `json:"api_key"`  // primary API key
+	BaseURL     string        `json:"base_url"` // e.g. "http://localhost:11434/v1"
 	MaxTokens   int           `json:"max_tokens"`
 	TimeoutSecs int           `json:"timeout_seconds"`
 	Vendors     []SynthVendor `json:"vendors,omitempty"` // ordered fallback chain
@@ -95,7 +95,7 @@ func LoadConfig() (*Config, error) {
 		}
 		return nil, err
 	}
-	
+
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
@@ -125,17 +125,18 @@ const MPMDataDir = "mpm"
 // This enables portable installations - the same binary can work from any directory.
 // All MPM runtime data resides within workspace/flowbyte/mpm/ (src/, mode/, persona/)
 // Recommended structure:
-//   /workspace/         ← User-configurable (workspace root)
-//   └── symai/          ← Project folder
-//       └── projects/   ← MPM Go binary
-//           ├── src/db/         ← SQLite databases (mpm.db - consolidated)
-//           │   ├── mpm.db ← Main database
-//           │   ├── init.sql     ← Initialization script
-//           │   └── schema.sql   ← Database schema
-//           ├── mode/           ← Mode configurations (JSON files)
-//           ├── persona/        ← Persona configurations (JSON files)
-//           ├── toxicphrases.txt ← Cognitive firewall file
-//           └── src/            ← Source code (hidden from end users)
+//
+//	/workspace/         ← User-configurable (workspace root)
+//	└── symai/          ← Project folder
+//	    └── projects/   ← MPM Go binary
+//	        ├── src/db/         ← SQLite databases (mpm.db - consolidated)
+//	        │   ├── mpm.db ← Main database
+//	        │   ├── init.sql     ← Initialization script
+//	        │   └── schema.sql   ← Database schema
+//	        ├── mode/           ← Mode configurations (JSON files)
+//	        ├── persona/        ← Persona configurations (JSON files)
+//	        ├── toxicphrases.txt ← Cognitive firewall file
+//	        └── src/            ← Source code (hidden from end users)
 func GetWorkspace() string {
 	// 1. Check environment variable (CLI flag or env var)
 	if workspace := os.Getenv("MPM_WORKSPACE"); workspace != "" {
@@ -150,7 +151,7 @@ func GetWorkspace() string {
 
 		// Check if we're in a "bin/" directory (standard layout)
 		if filepath.Base(execDir) == "bin" {
-			parent := filepath.Dir(execDir)   // e.g. .../flowbyte/mpm or .../projects
+			parent := filepath.Dir(execDir) // e.g. .../flowbyte/mpm or .../projects
 			parentBase := filepath.Base(parent)
 			// If parent is projects/ or workspace/, workspace is the grandparent
 			if parentBase == "projects" || parentBase == "workspace" {
@@ -213,7 +214,8 @@ func GetWorkspace() string {
 // GetMemoryPath returns the memory directory path for MPM's internal database.
 // Priority: 1) Config file memory_dir(s), 2) MPM internal fallback (mpm/src/db)
 // NOTE: The memory_dir from config is for the WATCH DAEMON to process OpenClaw files.
-//       The MPM database (mpm.db) ALWAYS lives at mpm/src/db/mpm.db.
+//
+//	The MPM database (mpm.db) ALWAYS lives at mpm/src/db/mpm.db.
 func GetMemoryPath() string {
 	if config, err := LoadConfig(); err == nil && config.MemoryDir != "" {
 		return ResolveEnvPath(config.MemoryDir)
@@ -298,13 +300,13 @@ func ResolveEnvPath(path string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, path[2:])
 	}
-	
+
 	// Handle relative paths (no leading /)
 	if !filepath.IsAbs(path) {
 		// Resolve relative to workspace root
 		return filepath.Join(GetWorkspace(), path)
 	}
-	
+
 	// Absolute path - return as-is
 	return path
 }

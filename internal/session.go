@@ -68,11 +68,11 @@ func (ss *SessionStore) SaveSnapshot(sessionID string, content string, tags []st
 	}
 
 	return &Session{
-		ID:      id,
+		ID:        id,
 		SessionID: sessionID,
-		Content: content,
-		Type:    "cli_snapshot",
-		Created: time.Now().Format(time.RFC3339),
+		Content:   content,
+		Type:      "cli_snapshot",
+		Created:   time.Now().Format(time.RFC3339),
 	}, nil
 }
 

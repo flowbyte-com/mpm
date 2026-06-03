@@ -23,19 +23,19 @@ var skillNameRegexp = regexp.MustCompile(`<name>([\w-]+)</name>`)
 // Note: ansiBold, ansiReset, colorCyan, colorGreen, colorYellow, colorRed
 // are declared in main.go and shared within the main package.
 type DailyReviewReport struct {
-	Memories  []MemoryEntry  `json:"memories"`
-	Skills    []SkillEntry   `json:"skills"`
-	Runtime   RuntimeConfig  `json:"runtime"`
-	Generated string         `json:"generated_at"`
+	Memories  []MemoryEntry `json:"memories"`
+	Skills    []SkillEntry  `json:"skills"`
+	Runtime   RuntimeConfig `json:"runtime"`
+	Generated string        `json:"generated_at"`
 }
 
 // MemoryEntry represents a single memory row
 type MemoryEntry struct {
-	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"`
-	Content   string `json:"content"`
+	ID         string `json:"id"`
+	CreatedAt  string `json:"created_at"`
+	Content    string `json:"content"`
 	Collection string `json:"collection"`
-	Tags      string `json:"tags"`
+	Tags       string `json:"tags"`
 }
 
 // SkillEntry represents an installed skill
@@ -69,7 +69,6 @@ type RuntimeConfig struct {
 	CacheWrite     int      `json:"cache_write"`
 	EstCostUSD     int      `json:"est_cost_usd"`
 }
-
 
 func runDailyReviewCmd() {
 	hours := 72

@@ -126,7 +126,7 @@ func testRetrievalContradictionTrigger(t *testing.T) {
 	// in both memories. searchLike uses LIKE '%concise%' — direct substring match.
 	cfg := DefaultHybridConfig()
 	cfg.Limit = 10
-	cfg.VectorWeight = 0 // force LIKE-only, no vector dependency
+	cfg.VectorWeight = 0          // force LIKE-only, no vector dependency
 	cfg.RetrievalThreshold = -100 // accept all results
 
 	results, err := HybridSearch(db, "concise", "memories", cfg)

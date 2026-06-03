@@ -29,13 +29,13 @@ type NullProvider struct{}
 
 func (NullProvider) Embed(text string) ([]float32, error) { return nil, nil }
 func (NullProvider) Dimensions() int                      { return 0 }
-func (NullProvider) Name() string                        { return "null" }
+func (NullProvider) Name() string                         { return "null" }
 
 // OllamaProvider hits a local Ollama endpoint for embeddings.
 type OllamaProvider struct {
 	Endpoint string // e.g. "http://localhost:11434/api/embeddings"
-	Model string // e.g. "nomic-embed-text"
-	Timeout time.Duration
+	Model    string // e.g. "nomic-embed-text"
+	Timeout  time.Duration
 	client   *http.Client
 }
 
@@ -58,7 +58,7 @@ func NewOllamaProvider(endpoint, model string) *OllamaProvider {
 
 func (p *OllamaProvider) Embed(text string) ([]float32, error) {
 	payload := map[string]interface{}{
-		"model": p.Model,
+		"model":  p.Model,
 		"prompt": text,
 	}
 	body, err := json.Marshal(payload)
@@ -106,7 +106,7 @@ func (p *OllamaProvider) Name() string {
 
 // EmbeddingConfig holds global embedding configuration.
 type EmbeddingConfig struct {
-	Provider EmbeddingProvider
+	Provider     EmbeddingProvider
 	ProviderName string // "ollama", "openai", "null"
 }
 
@@ -114,7 +114,7 @@ type EmbeddingConfig struct {
 // Checks OLLAMA_ENDPOINT + OLLAMA_MODEL first, falls back to NullProvider.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
 	cfg := &EmbeddingConfig{
-		Provider: NullProvider{},
+		Provider:     NullProvider{},
 		ProviderName: "null",
 	}
 

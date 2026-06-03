@@ -143,13 +143,13 @@ func TestReferenceStoreIntegration(t *testing.T) {
 	// Test that the reference store works with SQLite
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "references.sqlite")
-	
+
 	store := NewReferenceDB(dbPath)
 	err := store.Init()
 	if err != nil {
 		t.Fatalf("Failed to init reference DB: %v", err)
 	}
-	
+
 	// Verify the database file was created
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		t.Error("Database file was not created")
@@ -199,13 +199,13 @@ func TestStripHTMLApi(t *testing.T) {
 func TestReferenceStoreInit(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")
-	
+
 	store := NewReferenceDB(dbPath)
 	err := store.Init()
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	
+
 	// Verify tables exist
 	var count int
 	err = store.db.QueryRow("SELECT COUNT(*) FROM reference_docs").Scan(&count)
@@ -218,37 +218,37 @@ func TestReferenceStoreInit(t *testing.T) {
 func TestReferenceStoreAddAndRetrieve(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")
-	
+
 	store := NewReferenceDB(dbPath)
 	err := store.Init()
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	
+
 	// Add a reference
 	doc := &ReferenceDoc{
-		ID:         "test-001",
-		Title:      "Test Document",
-		SourcePath: "/test/path.txt",
-		SourceType: "txt",
-		Tags:       []string{"test", "sample"},
+		ID:          "test-001",
+		Title:       "Test Document",
+		SourcePath:  "/test/path.txt",
+		SourceType:  "txt",
+		Tags:        []string{"test", "sample"},
 		TotalChunks: 1,
 	}
 	err = store.AddReference(doc)
 	if err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
-	
+
 	// Retrieve it
 	retrieved, err := store.GetReference("test-001")
 	if err != nil {
 		t.Fatalf("GetReference failed: %v", err)
 	}
-	
+
 	if retrieved.Title != "Test Document" {
 		t.Errorf("Expected 'Test Document', got: %s", retrieved.Title)
 	}
-	
+
 	// Add a chunk
 	chunk := &ReferenceChunk{
 		ID:         "chunk-001",
@@ -261,17 +261,17 @@ func TestReferenceStoreAddAndRetrieve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddChunk failed: %v", err)
 	}
-	
+
 	// Retrieve chunks
 	chunks, err := store.GetChunksByDocID("test-001")
 	if err != nil {
 		t.Fatalf("GetChunksByDocID failed: %v", err)
 	}
-	
+
 	if len(chunks) != 1 {
 		t.Errorf("Expected 1 chunk, got: %d", len(chunks))
 	}
-	
+
 	if chunks[0].Content != "This is a test chunk." {
 		t.Errorf("Expected 'This is a test chunk.', got: %s", chunks[0].Content)
 	}
@@ -281,13 +281,13 @@ func TestReferenceStoreAddAndRetrieve(t *testing.T) {
 func TestReferenceStoreListAndDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")
-	
+
 	store := NewReferenceDB(dbPath)
 	err := store.Init()
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	
+
 	// Add a reference
 	doc := &ReferenceDoc{
 		ID:         "test-002",
@@ -299,13 +299,13 @@ func TestReferenceStoreListAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
-	
+
 	// List references
 	docs, err := store.ListReferences()
 	if err != nil {
 		t.Fatalf("ListReferences failed: %v", err)
 	}
-	
+
 	found := false
 	for _, d := range docs {
 		if d.ID == "test-002" {
@@ -316,13 +316,13 @@ func TestReferenceStoreListAndDelete(t *testing.T) {
 	if !found {
 		t.Error("test-002 not found in list")
 	}
-	
+
 	// Delete reference
 	err = store.DeleteReference("test-002")
 	if err != nil {
 		t.Fatalf("DeleteReference failed: %v", err)
 	}
-	
+
 	// Verify it's gone
 	_, err = store.GetReference("test-002")
 	if err == nil {
@@ -334,26 +334,26 @@ func TestReferenceStoreListAndDelete(t *testing.T) {
 func TestReferenceStats(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.sqlite")
-	
+
 	store := NewReferenceDB(dbPath)
 	err := store.Init()
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	
+
 	// Get stats
 	stats, err := store.GetReferenceStats()
 	if err != nil {
 		t.Fatalf("GetReferenceStats failed: %v", err)
 	}
-	
+
 	if stats["total_documents"] != 0 {
 		t.Errorf("Expected 0 documents initially, got: %d", stats["total_documents"])
 	}
 	if stats["total_chunks"] != 0 {
 		t.Errorf("Expected 0 chunks initially, got: %d", stats["total_chunks"])
 	}
-	
+
 	// Add a document and verify stats update
 	doc := &ReferenceDoc{
 		ID:         "test-003",
@@ -365,12 +365,12 @@ func TestReferenceStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
-	
+
 	stats, err = store.GetReferenceStats()
 	if err != nil {
 		t.Fatalf("GetReferenceStats failed: %v", err)
 	}
-	
+
 	if stats["total_documents"] != 1 {
 		t.Errorf("Expected 1 document after add, got: %d", stats["total_documents"])
 	}

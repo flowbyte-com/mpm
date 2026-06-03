@@ -37,10 +37,11 @@ var BaseTables = []string{
 		id TEXT PRIMARY KEY, collection TEXT NOT NULL, content TEXT NOT NULL,
 		session_id TEXT, tags JSON, metadata JSON, embedding BLOB,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
 	);`,
 
-// System config table - stores system configuration snapshots
+	// System config table - stores system configuration snapshots
 	`CREATE TABLE IF NOT EXISTS system_config (
 		key TEXT PRIMARY KEY,
 		raw_json TEXT NOT NULL,
@@ -100,6 +101,22 @@ var BaseTables = []string{
 		section TEXT, content TEXT NOT NULL, source_path TEXT,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
+
+	// Memory revisions table - historical ledger for point-in-time reconstruction
+	`CREATE TABLE IF NOT EXISTS memory_revisions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		memory_id TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		content TEXT NOT NULL,
+		weight INTEGER NOT NULL,
+		collection TEXT NOT NULL,
+		is_long_term INTEGER NOT NULL DEFAULT 0,
+		is_challenged INTEGER NOT NULL DEFAULT 0,
+		challenged_theory_id TEXT,
+		created_at TEXT DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')),
+		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+		UNIQUE(memory_id, version)
+	);`,
 }
 
 // CommonIndexes contains indexes for fast lookups.
@@ -124,6 +141,7 @@ var CommonIndexes = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_doc_id ON reference_chunks(doc_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_section ON reference_chunks(section);`,
+	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
@@ -142,7 +160,10 @@ var SafeMigrations = [][3]string{
 	{"memories", "weight", "INTEGER DEFAULT 1"},
 	{"memories", "reinforcement_count", "INTEGER DEFAULT 0"},
 	{"memories", "last_accessed_at", "DATETIME"},
+	{"memories", "updated_at", "DATETIME"},
 	{"memories", "expires_at", "DATETIME"},
 	{"sessions", "embedding", "BLOB"},
 	{"sessions", "metadata", "TEXT"},
+	{"raw_memories", "next_retry", "TEXT"},
+	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
 }

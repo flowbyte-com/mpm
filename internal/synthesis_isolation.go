@@ -151,6 +151,7 @@ func (w *SynthesisWorker) run() {
 
 		case <-w.dlqTick:
 			go w.processDLQ()
+			go w.db.RunLifecycleDecayAndArchival(1.0, 30)
 		}
 	}
 }
