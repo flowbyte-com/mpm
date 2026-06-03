@@ -44,6 +44,9 @@ func init() {
 // buildVersion is set at compile time via -ldflags
 var buildVersion = "dev"
 
+// startTime is the wall-clock timestamp of process entry — used for uptime display
+var startTime = time.Now()
+
 // modeManager is the global mode manager instance (initialized at startup)
 var modeManager any
 
