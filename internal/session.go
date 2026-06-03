@@ -215,13 +215,13 @@ func (ss *SessionStore) getActiveModes() []string {
 	return valid
 }
 
-// GetSessionCount returns the number of sessions
+// GetSessionCount returns the number of active session memories.
 func (ss *SessionStore) GetSessionCount() (int, error) {
 	if ss.DB == nil {
 		return 0, fmt.Errorf("database not initialized")
 	}
 	var count int
-	err := ss.DB.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count)
+	err := ss.DB.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE collection = 'session' AND deleted_at IS NULL`).Scan(&count)
 	return count, err
 }
 
