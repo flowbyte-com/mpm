@@ -2028,11 +2028,35 @@ func handleSessionShow(args []string) int {
 }
 
 func handleSessionList(args []string) int {
-	store := getSessionStore()
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Failed to initialize memory store", 1)
+	}
 
-	sessions, err := store.GetRecentSessions(20)
+	rows, err := store.DB.Query(`
+		SELECT id, content, created_at
+		FROM memories
+		WHERE collection = 'session' AND deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 20
+	`)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to list sessions: %v", err), 1)
+	}
+	defer rows.Close()
+
+	type sessionItem struct {
+		ID      string
+		Content string
+		Created string
+	}
+	var sessions []sessionItem
+	for rows.Next() {
+		var s sessionItem
+		if err := rows.Scan(&s.ID, &s.Content, &s.Created); err != nil {
+			continue
+		}
+		sessions = append(sessions, s)
 	}
 
 	if len(sessions) == 0 {
