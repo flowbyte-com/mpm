@@ -85,7 +85,7 @@ mpm hint "token budget handling in the CLI"
 #    STATUS: resolved | CONCLUSION: confirmed...
 ```
 
-The MCP tool `proactive_recall_hint` is wired into the OpenClaw agent loop — 808 calls it after context shifts and surfaces the most relevant epistemology memory automatically.
+The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — 808 calls it after context shifts and surfaces the most relevant epistemology memory automatically.
 
 ### How It All Connects
 
@@ -326,7 +326,7 @@ Setting `mode` or `persona` to `"auto"` enables the XITL self-routing engine. Wh
 
 ## OpenClaw Plugin Integration
 
-MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 17 tools:
+MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 19 tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -347,8 +347,6 @@ MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calli
 | `propose_theory` | Log hypothesis before writing fix |
 | `resolve_theory` | Mark theory proven/disproven, patch metadata in-place |
 | `proactive_recall_hint` | Surface relevant decisions/theories from conversation context |
-| `assume_stance` | XITL: hot-swap existing persona when `auto` mode is active |
-| `synthesize_stance` | XITL: generate JIT ephemeral persona for novel edge cases |
 | `challenge_memory` | Challenge a memory — atomic transactional flag with linked theory; auto-resolves on restore; cascade-deletes on shred |
 
 See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
