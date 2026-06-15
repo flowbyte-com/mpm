@@ -102,3 +102,26 @@ def format_age(created_at: str) -> str:
         return f"{weeks}w ago"
     months = days // 30
     return f"{months}mo ago"
+
+
+def debug_log(message: str) -> None:
+    """Append a timestamped line to $MPM_DEBUG_LOG when DEBUG=1.
+
+    Default log path: $MPM_DEBUG_LOG or .claude/debug.log.
+    Never raises — best-effort observability only.
+    """
+    if os.environ.get("DEBUG") != "1":
+        return
+    log_path = os.environ.get("MPM_DEBUG_LOG", ".claude/debug.log")
+    timestamp = datetime.utcnow().isoformat(timespec="seconds")
+    line = f"{timestamp} {message}\n"
+    try:
+        # Append; create parent dir if missing.
+        parent = os.path.dirname(log_path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        # Observability must never crash the caller.
+        pass
