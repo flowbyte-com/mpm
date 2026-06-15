@@ -43,6 +43,25 @@ def _format_wake_context(data: dict) -> str:
     return "\n".join(lines) if lines else "(wake context is empty)"
 
 
+def _format_memory_results(data: dict) -> str:
+    """Format the long-term memory search response."""
+    memories = data.get("memories")
+    if isinstance(memories, list) and memories:
+        parts: list[str] = []
+        for mem in memories:
+            content = mem.get("content") if isinstance(mem.get("content"), str) else json.dumps(mem.get("content"))
+            xref = mem.get("cross_references") or {}
+            topics = xref.get("topics") or []
+            ref_doc = xref.get("reference_doc") or {}
+            topic_line = f"\nTopics: [{', '.join(t.get('name', '') for t in topics)}]" if topics else ""
+            ref_line = f"\nRef: {ref_doc.get('title', '')}" if ref_doc.get("title") else ""
+            parts.append(f"{content}{topic_line}{ref_line}")
+        return "\n\n---\n\n".join(parts)
+    if data.get("text"):
+        return data["text"]
+    return "(no matching memories found)"
+
+
 @mcp.tool(
     name="read_wake_context",
     description=(
@@ -68,8 +87,12 @@ async def read_wake_context(args: ReadWakeContextInput) -> str:
     ),
 )
 async def query_long_term_memory(args: QueryLongTermMemoryInput) -> str:
-    """Wired in Task 16."""
-    return "(not yet wired)"
+    payload = {"query": args.query, "limit": args.limit}
+    data = await call_mpm("query_long_term_memory", payload, args.timeout_override_ms)
+    debug_log(f"query_long_term_memory q={args.query!r} -> {list(data.keys())}")
+    if "error" in data:
+        return f"(memory query failed: {data.get('error', 'unknown')})"
+    return _format_memory_results(data)
 
 
 if __name__ == "__main__":
