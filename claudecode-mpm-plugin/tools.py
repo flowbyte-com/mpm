@@ -118,7 +118,7 @@ def debug_log(message: str) -> None:
     try:
         # Append; create parent dir if missing.
         parent = os.path.dirname(log_path)
-        if parent and not os.path.isdir(parent):
+        if parent:
             os.makedirs(parent, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line)
