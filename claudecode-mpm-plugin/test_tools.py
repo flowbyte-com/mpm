@@ -42,6 +42,14 @@ def test_parse_sqlite_busy_stderr_returns_locked_error():
     assert parsed["error"] == "database_locked"
 
 
+def test_parse_lowercase_sqlite_busy_stderr_returns_locked_error():
+    """Regression: stderr may arrive in any case; the check must be case-insensitive."""
+    result = MpmRunResult(exit_code=1, stdout="", stderr="sqlite_busy: table is locked")
+    parsed = parse_mpm_result(result)
+    assert parsed["error"] == "database_locked"
+    assert "locked" in parsed["message"].lower()
+
+
 def test_parse_generic_nonzero_exit_returns_exit_n_with_stderr():
     result = MpmRunResult(exit_code=2, stdout="", stderr="First line\nSecond line")
     parsed = parse_mpm_result(result)
