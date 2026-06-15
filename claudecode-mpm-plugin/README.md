@@ -16,7 +16,7 @@ this version: `read_wake_context` and `query_long_term_memory`. The remaining
 ```
 
 The installer:
-1. Resolves the `mpm` binary via a 5-step fallback chain (`$MPM_BINARY` → `which mpm` → `../bin/mpm` → `../mpm` symlink → fail).
+1. Resolves the `mpm` binary via a 4-step fallback chain (`$MPM_BINARY` → `which mpm` → `../bin/mpm` → `../mpm` symlink → fail).
 2. Creates a project-local venv at `claudecode-mpm-plugin/.venv` (skipped if present).
 3. Installs `mcp`, `pydantic`, `pytest`, `pytest-asyncio` into the venv.
 4. Symlinks (or copies) `server.py` and `skills/mpm/SKILL.md` into `.claude/`.
@@ -88,8 +88,12 @@ any override to 5 minutes.
 cd claudecode-mpm-plugin
 .venv/bin/pytest test_tools.py test_server.py -v
 
-# Run server directly for manual smoke testing
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ./.venv/bin/python3 server.py
+# Run server directly for manual smoke testing (MCP requires the full handshake)
+printf '%s\n%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | ./.venv/bin/python3 server.py
 
 # Add DEBUG logging
 DEBUG=1 ./.venv/bin/python3 server.py

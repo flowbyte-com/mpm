@@ -3,7 +3,7 @@
 #
 # Always creates a project-local venv at $SRC/.venv and points the installed
 # server at $SRC/.venv/bin/python3 so runtime deps are isolated.
-# Resolves the mpm binary at install time (5-step fallback chain) and
+# Resolves the mpm binary at install time (4-step fallback chain) and
 # renders .mcp.json with the absolute path.
 #
 # Flags:
