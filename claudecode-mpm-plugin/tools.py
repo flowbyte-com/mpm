@@ -31,6 +31,7 @@ def parse_mpm_result(result: MpmRunResult) -> dict:
     On error: structured error dict with semantic error codes.
     """
     stderr = result.stderr or ""
+    stderr_lc = stderr.lower()
 
     # Output-overflow: subprocess was killed because stdout exceeded MAX_BUFFER.
     if result.exit_code == 125 and "[output exceeded" in stderr:
@@ -40,7 +41,8 @@ def parse_mpm_result(result: MpmRunResult) -> dict:
         }
 
     # SQLite BUSY: contention on the mpm database. Retryable.
-    if "database is locked" in stderr.lower() or "SQLITE_BUSY" in stderr:
+    # Check lowercase to catch mixed-case variants ("SQLITE_BUSY", "sqlite_busy", "Sqlite_Busy", etc.).
+    if "database is locked" in stderr_lc or "sqlite_busy" in stderr_lc:
         return {
             "error": "database_locked",
             "message": "MPM database is locked — safe to retry.",
