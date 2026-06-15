@@ -501,3 +501,21 @@ func parseStringSliceAny(v interface{}) []string {
 	}
 	return nil
 }
+
+// ── Exported parse helpers (used by cmd/mpm/call.go and cmd/mpm-mcp/tools.go) ──
+//
+// The lowercase versions above are the canonical implementations. These
+// exported wrappers exist only to bridge to the cmd/* packages, which can't
+// see unexported identifiers. Keep behavior identical.
+
+func ParseStringOr(v interface{}, def string) string {
+	return parseStringDefault(v, def)
+}
+
+func ParseStringSliceOr(v interface{}) []string {
+	return parseStringSliceAny(v)
+}
+
+func ParseFloatOr(v interface{}, def float64) float64 {
+	return parseFloatDefault(v, def)
+}
