@@ -125,3 +125,63 @@ def debug_log(message: str) -> None:
     except OSError:
         # Observability must never crash the caller.
         pass
+
+
+async def run_mpm(
+    args: list[str],
+    timeout_ms: Optional[int] = None,
+) -> MpmRunResult:
+    """Spawn the mpm binary with the given args and return its output.
+
+    Clamps the effective timeout to MAX_TIMEOUT_MS (5 minutes) regardless
+    of the user-supplied timeout_override_ms, to prevent runaway LLM
+    synthesis from hanging the MCP session.
+
+    Drains stdout and stderr concurrently via proc.communicate() to
+    avoid the classic stderr-buffer deadlock.
+
+    Returns MpmRunResult with exit_code=124 on timeout and exit_code=1
+    with a clean stderr message on a missing binary.
+    """
+    effective_ms = min(MAX_TIMEOUT_MS, timeout_ms if timeout_ms is not None else DEFAULT_TIMEOUT_MS)
+    effective_seconds = effective_ms / 1000.0
+
+    mpm_bin = os.environ.get("MPM_BINARY", "mpm")
+    cmd = [mpm_bin, *args]
+    debug_log(f"run_mpm argv: {cmd} timeout_ms={effective_ms}")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        debug_log(f"run_mpm: binary not found: {mpm_bin}")
+        return MpmRunResult(
+            exit_code=1,
+            stdout="",
+            stderr=f"[spawn error] mpm binary not found: {mpm_bin}",
+        )
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=effective_seconds
+        )
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        debug_log(f"run_mpm: timeout after {effective_ms}ms")
+        return MpmRunResult(
+            exit_code=124,
+            stdout="",
+            stderr=f"Operation timed out after {effective_ms}ms",
+        )
+
+    return MpmRunResult(
+        exit_code=proc.returncode if proc.returncode is not None else 1,
+        stdout=stdout_bytes.decode("utf-8", errors="replace"),
+        stderr=stderr_bytes.decode("utf-8", errors="replace"),
+    )
