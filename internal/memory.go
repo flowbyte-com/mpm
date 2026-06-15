@@ -40,6 +40,7 @@ type Memory struct {
 	LastAccessedAt     string                 `json:"last_accessed_at,omitempty"`
 	ExpiresAt          string                 `json:"expires_at,omitempty"`
 	SuggestedTopics    interface{}            `json:"suggested_topics,omitempty"`
+	Score              float32                `json:"score,omitempty"`
 }
 
 // SearchResult represents a search result (used by SearchTopics)
@@ -952,6 +953,7 @@ func (s *MemoryStore) ExportMirror(path string) (string, error) {
 
 // scanMemoryRows scans sql.Rows into []*Memory with a score function.
 func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string) float64, query string) ([]*Memory, error) {
+	defer rows.Close()
 	var memories []*Memory
 	for rows.Next() {
 		var id, coll, content, tagsJSON, metadataJSON, createdAt string
@@ -980,9 +982,14 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 		if len(embeddingJSON) > 0 {
 			json.Unmarshal(embeddingJSON, &mem.Embedding)
 		}
+		// Actually execute the scoring function to clear the linter warning
+		if scoreFunc != nil {
+			// Note: Make sure your Memory struct has a Score field!
+			// If it's a float64 instead of float32, remove the cast.
+			mem.Score = float32(scoreFunc(content, query))
+		}
 		memories = append(memories, mem)
 	}
-
 	return memories, rows.Err()
 }
 
@@ -1054,7 +1061,7 @@ func (s *MemoryStore) DecayWeights(policies map[string]DecayPolicy, intervalDays
 			  AND weight > ?
 			  AND reinforcement_count = 0
 			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
-		`, 0, policy.Floor, policy.DecayPercent, collection, policy.Floor, intervalDays)
+		`, 3, policy.Floor, policy.DecayPercent, collection, policy.Floor, intervalDays)
 		if err != nil {
 			return total, fmt.Errorf("weight decay failed for collection %s: %w", collection, err)
 		}
@@ -1137,7 +1144,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 				  AND updated_at < DATETIME('now', '-' || ? || ' days')
 				LIMIT 100
 			)
-		`, cfg.LowWeightMaxDays)
+		`, 3, cfg.LowWeightMaxDays)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
 				totalPruned += int(rows)
@@ -1573,7 +1580,13 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 	var conditions []string
 	var args []interface{}
 
+	// Validate metadata keys — only allow alphanumeric, underscore, dot
+	var validKeyRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+
 	for key, value := range filters {
+		if !validKeyRE.MatchString(key) {
+			return nil, fmt.Errorf("invalid metadata filter key: %s", key)
+		}
 		switch v := value.(type) {
 		case string:
 			// String equality: json_extract(metadata, '$.key') = ?
@@ -1916,7 +1929,7 @@ func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, ta
 		"source_type": "topic",
 		"topic_id":    topicID,
 		"created":     time.Now().UTC().Format(time.RFC3339),
-		"timestamp":   time.Now().Unix(),
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	_, err = s.AddMemory(content, collection, tags, metadata, "", "topic")
@@ -2720,7 +2733,7 @@ func (s *MemoryStore) WeakenMemory(id string, delta int) error {
 	_, err := s.DB.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
-		    weight = MAX(weight - ?, 0)
+		    weight = MAX(weight - ?, 1)
 		WHERE id = ?
 	`, delta, weightLoss, id)
 	return err
@@ -2751,7 +2764,7 @@ func (s *MemoryStore) PruneExpired() (int, error) {
 	}
 
 	result, err := s.DB.Exec(`
-		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+		UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("prune expired failed: %w", err)

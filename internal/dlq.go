@@ -210,15 +210,16 @@ func OverflowResolve(db *sql.DB, id string) error {
 }
 
 // OverflowUpdateRetry updates attempt count and next_retry after a failed retry.
-func OverflowUpdateRetry(db *sql.DB, id string, attempt int, lastErr error) {
+func OverflowUpdateRetry(db *sql.DB, id string, attempt int, lastErr error) error {
 	delay := nextRetryDelay(attempt)
 	nextRetry := time.Now().Add(delay).UTC()
 	lastErrStr := ""
 	if lastErr != nil {
 		lastErrStr = lastErr.Error()
 	}
-	db.Exec(`UPDATE raw_memories SET attempt = ?, next_retry = ?, llm_notes = ? WHERE id = ?`,
+	_, err := db.Exec(`UPDATE raw_memories SET attempt = ?, next_retry = ?, llm_notes = ? WHERE id = ?`,
 		attempt, nextRetry.Format(time.RFC3339), lastErrStr, id)
+	return err
 }
 
 // DLQStats returns count and oldest entry age for status reporting.

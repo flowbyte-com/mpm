@@ -4,33 +4,16 @@
  * Architecture:
  *   - Plugins live in ~/.openclaw/workspace/projects/mpm-plugin/
  *   - Source is TypeScript; bundled at install time by OpenClaw's plugin pipeline
- *   - Go binary is called directly via child_process.spawn (no Python wrappers)
+ *   - Go binary is called via mpm call <tool> --payload <json> (universal router)
  *   - Tool schemas use plain JSON Schema (not TypeBox) — compatible with all runtimes
  *
- * Tool summary:
- *   Core memory:
- *     query_long_term_memory → mpm recall --json "<query>" <limit>
- *     save_to_memory         → mpm add --json "<fact>" [--tag <t>] [--weight <w>] [--ttl <ttl>]
- *   Lessons:
- *     save_lesson       → mpm lesson add <content> --type <type> --tags <tags> --json
- *     search_lessons    → mpm lesson search <query> --json
- *     list_lessons      → mpm lesson list [--type=<type>] --json
- *   Topics:
- *     create_topic      → mpm topic add <name> [description] --json
- *     search_topics     → mpm topic search <query> --json
- *   References:
- *     add_reference     → mpm reference add <file> [--title <title>] --json
- *     search_references → mpm reference search <query> [--limit <n>] --json
- *     list_references   → mpm reference ls --json
- *   Directives:
- *     read_directives   → mpm directives --json
- *
- * System prompt injection:
- *   OpenClaw plugin SDK has no generic prompt injection hook (no api.registerPrompt,
- *   no api.addSystemDirectives). The only prompt-building mechanism is
- *   registerMemoryCapability (memory-core specific). So MPM's mandatory recall/save
- *   directives live in AGENTS.md instead — it is loaded at startup and is the
- *   canonical place for persistent system-level guidance.
+ * Tool summary (all 18 tools use mpm call):
+ *   save_to_memory, query_long_term_memory, challenge_memory
+ *   propose_theory, resolve_theory, record_decision
+ *   save_lesson, search_lessons, list_lessons
+ *   create_topic, search_topics, link_topic
+ *   add_reference, search_references, list_references
+ *   read_wake_context, read_directives, proactive_recall_hint
  */
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry.js";
@@ -49,8 +32,6 @@ const MPM_BINARY =
 const MPM_WORKSPACE =
   process.env.MPM_WORKSPACE ?? "/home/v/workspace/projects/mpm";
 
-// Max buffer size to prevent unbounded stdout/stderr accumulation.
-// 10 MB is sufficient for any reasonable mpm output while preventing OOM.
 const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -64,8 +45,7 @@ const QUERY_LONG_TERM_MEMORY_SCHEMA = {
   properties: {
     query: {
       type: "string",
-      description:
-        "Natural language search query for long-term memory.",
+      description: "Natural language search query for long-term memory.",
     },
     limit: {
       type: "number",
@@ -82,14 +62,12 @@ const SAVE_TO_MEMORY_SCHEMA = {
   properties: {
     fact: {
       type: "string",
-      description:
-        "The fact, lesson, or decision to persist to long-term memory.",
+      description: "The fact, lesson, or decision to persist to long-term memory.",
     },
     tags: {
       type: "array",
       items: { type: "string" },
-      description:
-        "Optional tags for categorization and later retrieval.",
+      description: "Optional tags for categorization and later retrieval.",
       default: [],
     },
     weight: {
@@ -100,10 +78,32 @@ const SAVE_TO_MEMORY_SCHEMA = {
     ttl: {
       type: "string",
       description:
-        "Time-to-live as a duration string, e.g. '24h', '7d', '0' (default '0' = no expiry). Use '24h' for ephemeral session-scoped facts, '0' for permanent memories.",
+        "Optional TTL string: '24h' for session-scoped, '0' for permanent, or a Go duration like '72h'.",
+    },
+    collection: {
+      type: "string",
+      description: "Optional collection name (default: 'memories').",
+      default: "memories",
     },
   },
   required: ["fact"],
+  additionalProperties: false,
+} as const;
+
+const CHALLENGE_MEMORY_SCHEMA = {
+  type: "object",
+  properties: {
+    memoryId: {
+      type: "string",
+      description: "The MPM memory ID to challenge.",
+    },
+    evidence: {
+      type: "string",
+      description:
+        "Evidence that contradicts the memory. Be specific about what changed and why the memory is no longer accurate.",
+    },
+  },
+  required: ["memoryId", "evidence"],
   additionalProperties: false,
 } as const;
 
@@ -114,18 +114,18 @@ const SAVE_LESSON_SCHEMA = {
   properties: {
     fact: {
       type: "string",
-      description: "The lesson content — what was learned or observed.",
+      description: "The lesson content — what was learned, observed, or should be remembered.",
     },
     type: {
       type: "string",
       enum: ["warning", "practice", "insight"],
-      description: "Lesson type.",
+      description: "Lesson type: 'warning' (don't do X), 'practice' (do Y), 'insight' (X leads to Y).",
       default: "insight",
     },
     tags: {
       type: "array",
       items: { type: "string" },
-      description: "Optional tags for retrieval.",
+      description: "Optional tags for the lesson.",
       default: [],
     },
   },
@@ -138,7 +138,7 @@ const SEARCH_LESSONS_SCHEMA = {
   properties: {
     query: {
       type: "string",
-      description: "Search query for lessons.",
+      description: "Search query for lesson content.",
     },
   },
   required: ["query"],
@@ -151,7 +151,7 @@ const LIST_LESSONS_SCHEMA = {
     type: {
       type: "string",
       enum: ["warning", "practice", "insight"],
-      description: "Filter by lesson type (optional).",
+      description: "Filter lessons by type.",
     },
   },
   additionalProperties: false,
@@ -168,7 +168,7 @@ const CREATE_TOPIC_SCHEMA = {
     },
     description: {
       type: "string",
-      description: "Optional description.",
+      description: "Optional topic description.",
     },
   },
   required: ["name"],
@@ -182,8 +182,12 @@ const SEARCH_TOPICS_SCHEMA = {
       type: "string",
       description: "Search query for topics.",
     },
+    limit: {
+      type: "number",
+      description: "Maximum number of results (default: 20).",
+      default: 20,
+    },
   },
-  required: ["query"],
   additionalProperties: false,
 } as const;
 
@@ -192,11 +196,11 @@ const LINK_TOPIC_SCHEMA = {
   properties: {
     memory_id: {
       type: "string",
-      description: "ID of the memory to link to a topic.",
+      description: "The memory ID to link.",
     },
     topic_id: {
       type: "string",
-      description: "ID of the topic to link the memory to.",
+      description: "The topic ID to link to.",
     },
   },
   required: ["memory_id", "topic_id"],
@@ -210,11 +214,11 @@ const ADD_REFERENCE_SCHEMA = {
   properties: {
     filepath: {
       type: "string",
-      description: "Absolute path to the document to ingest.",
+      description: "Path to the file to ingest (.txt, .md, .html, .epub, .pdf).",
     },
     title: {
       type: "string",
-      description: "Optional title for the document.",
+      description: "Optional title override.",
     },
   },
   required: ["filepath"],
@@ -226,11 +230,11 @@ const SEARCH_REFERENCES_SCHEMA = {
   properties: {
     query: {
       type: "string",
-      description: "Search string for reference content.",
+      description: "Search query for reference content.",
     },
     limit: {
       type: "number",
-      description: "Max results (default: 5).",
+      description: "Maximum number of results (default: 5).",
       default: 5,
     },
   },
@@ -240,11 +244,22 @@ const SEARCH_REFERENCES_SCHEMA = {
 
 const LIST_REFERENCES_SCHEMA = {
   type: "object",
-  properties: {},
+  properties: {
+    limit: {
+      type: "number",
+      description: "Maximum number of results (default: 50).",
+      default: 50,
+    },
+    offset: {
+      type: "number",
+      description: "Pagination offset (default: 0).",
+      default: 0,
+    },
+  },
   additionalProperties: false,
 } as const;
 
-// ── Directives ───────────────────────────────────────────────────────────────
+// ── System ─────────────────────────────────────────────────────────────────
 
 const READ_WAKE_CONTEXT_SCHEMA = {
   type: "object",
@@ -258,43 +273,34 @@ const READ_DIRECTIVES_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-// ---------------------------------------------------------------------------
-// Epistemology Engine — Decision & Theory Tools
-// ---------------------------------------------------------------------------
-
-
 const RECORD_DECISION_SCHEMA = {
   type: "object",
   properties: {
     context: {
       type: "string",
-      description:
-        "The situation or problem that forced a choice between competing options.",
+      description: "The situation or problem that required a decision.",
     },
     choice: {
       type: "string",
-      description:
-        "What was decided — the specific path, approach, or action taken.",
+      description: "What was decided.",
     },
     rationale: {
       type: "string",
-      description:
-        "Why this choice won over the alternatives. What evidence or reasoning made it the right call.",
+      description: "Why this path was chosen over alternatives.",
     },
     outcome: {
       type: "string",
-      description:
-        "Optional: what actually happened when this decision was executed.",
+      description: "Optional: what actually happened when this decision was executed.",
     },
     tags: {
       type: "array",
       items: { type: "string" },
-      description: "Optional tags for retrieval.",
+      description: "Optional tags.",
       default: [],
     },
     weight: {
       type: "number",
-      description: "Importance weight 0–1 (default 0.5). Use 0.8+ for architectural decisions.",
+      description: "Decision weight (default: 0.5).",
       default: 0.5,
     },
   },
@@ -307,15 +313,12 @@ const PROPOSE_THEORY_SCHEMA = {
   properties: {
     hypothesis: {
       type: "string",
-      description:
-        "What you think is true — a causal assumption, a noticed pattern, or a gut feeling about why something is broken.",
+      description: "The hypothesis or assumption.",
     },
     validationCriteria: {
       type: "string",
       description:
-        "A specific, executable test or observation that would prove or disprove the hypothesis. " +
-        "Be concrete: 'run the benchmark with --json flag before positional arg and compare parse time' " +
-        "— not 'test it somehow'.",
+        "A specific, executable test or observation that would prove or disprove the hypothesis.",
     },
     tags: {
       type: "array",
@@ -328,46 +331,29 @@ const PROPOSE_THEORY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-
 const RESOLVE_THEORY_SCHEMA = {
   type: "object",
   properties: {
     theoryId: {
       type: "string",
-      description: "The MPM memory ID of the theory to resolve.",
+      description: "The theory ID to resolve.",
     },
     conclusion: {
       type: "string",
-      description: "What the test or observation actually found. Be specific about the result.",
+      description: "What was concluded after running the validation criteria.",
     },
     newStatus: {
       type: "string",
       enum: ["proven", "disproven"],
-      description: "proven if the hypothesis was confirmed; disproven if it was not.",
+      description: "Whether the hypothesis was proven or disproven.",
     },
   },
   required: ["theoryId", "conclusion", "newStatus"],
   additionalProperties: false,
 } as const;
 
-const CHALLENGE_MEMORY_SCHEMA = {
-  type: "object",
-  properties: {
-    memoryId: {
-      type: "string",
-      description: "The MPM memory ID to challenge.",
-    },
-    evidence: {
-      type: "string",
-      description: "Evidence that contradicts the memory. Be specific about what changed and why the memory is no longer accurate.",
-    },
-  },
-  required: ["memoryId", "evidence"],
-  additionalProperties: false,
-} as const;
-
 // ---------------------------------------------------------------------------
-// runMpm — robust child_process spawn to Go binary
+// MPM Runner
 // ---------------------------------------------------------------------------
 
 interface MpmRunResult {
@@ -380,18 +366,12 @@ interface MpmJsonResult {
   id?: string;
   success?: boolean;
   memories?: Array<{ id?: string; content?: string }>;
-  created_at?: string;  // directive timestamp for age calculation
+  created_at?: string;
   [key: string]: unknown;
 }
 
 /**
  * Spawn the MPM binary with the given args, capture stdout/stderr.
- *
- * Handles:
- *   - DB locked errors (returns graceful fallback, not a crash)
- *   - Binary not found / permission errors
- *   - Timeout (default 15s)
- *   - Non-zero exit codes
  */
 async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> {
   const { spawn } = await import("child_process");
@@ -402,7 +382,6 @@ async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> 
     let settled = false;
 
     const proc = spawn(MPM_BINARY, args, {
-      // Pass MPM_WORKSPACE so the binary knows where the DB is
       env: { ...process.env, MPM_WORKSPACE },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -435,7 +414,6 @@ async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> 
 
     proc.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length + chunk.length > MAX_BUFFER_SIZE) {
-        // Only truncate stderr, don't kill — mpm writes warnings there too
         stderr = (stderr + chunk.toString()).slice(-MAX_BUFFER_SIZE);
       } else {
         stderr += chunk.toString();
@@ -448,9 +426,7 @@ async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> 
         clearTimeout(timer);
         resolve({
           stdout: "",
-          stderr: `[spawn error] ${err.message}${
-            err.code ? ` (${err.code})` : ""
-          }`,
+          stderr: `[spawn error] ${err.message}${err.code ? ` (${err.code})` : ""}`,
           exitCode: 1,
         });
       }
@@ -467,15 +443,30 @@ async function runMpm(args: string[], timeoutMs = 15000): Promise<MpmRunResult> 
 }
 
 /**
+ * Call the universal router: mpm call <tool> --payload <json>
+ * Returns parsed JSON result.
+ */
+async function callMpmCall(
+  toolName: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 15000
+): Promise<MpmJsonResult> {
+  const result = await runMpm([
+    "call",
+    toolName,
+    "--payload",
+    JSON.stringify(payload),
+  ], timeoutMs);
+  return parseMpmResult(result);
+}
+
+/**
  * Parse JSON from mpm stdout. Handles DB locked, non-JSON, and error exits.
  */
 function parseMpmResult(result: MpmRunResult): MpmJsonResult {
   const { stdout, stderr, exitCode } = result;
 
   if (exitCode !== 0) {
-    // Buffer overflow — distinguish from genuinely missing wake context.
-    // SIGKILL on overflow produces exitCode 125 with stderr containing
-    // "[output exceeded N bytes]" rather than a normal error message.
     if (exitCode === 125 && stderr.includes("[output exceeded")) {
       return {
         id: "",
@@ -488,8 +479,7 @@ function parseMpmResult(result: MpmRunResult): MpmJsonResult {
     }
     if (
       stderr.includes("database is locked") ||
-      stderr.includes("SQLITE_BUSY") ||
-      stderr.includes("database is locked")
+      stderr.includes("SQLITE_BUSY")
     ) {
       return {
         id: "",
@@ -515,9 +505,35 @@ function parseMpmResult(result: MpmRunResult): MpmJsonResult {
   try {
     return JSON.parse(trimmed) as MpmJsonResult;
   } catch {
-    // Non-JSON output — treat as raw text
     return { id: "", success: true, text: trimmed };
   }
+}
+
+/** Format a created_at timestamp as a human-readable age string. */
+function formatAge(createdAt: string): string {
+  if (!createdAt) return "unknown age";
+  let created: Date;
+  try {
+    created = new Date(createdAt.replace(" ", "T"));
+    if (isNaN(created.getTime())) created = new Date(createdAt);
+  } catch {
+    return "unknown age";
+  }
+  if (isNaN(created.getTime())) return "unknown age";
+
+  const diffMs = Date.now() - created.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 30) return `${diffDays}d ago`;
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffWeeks < 12) return `${diffWeeks}w ago`;
+  const diffMonths = Math.floor(diffDays / 30);
+  return `${diffMonths}mo ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +541,7 @@ function parseMpmResult(result: MpmRunResult): MpmJsonResult {
 // ---------------------------------------------------------------------------
 
 function makeQueryLongTermMemoryTool(
-  ctx: OpenClawPluginToolContext
+  _ctx: OpenClawPluginToolContext
 ): AnyAgentTool {
   return {
     name: "query_long_term_memory",
@@ -542,31 +558,8 @@ function makeQueryLongTermMemoryTool(
         limit?: number;
       };
 
-      // Detect Telegram or other constrained channels from context.
-      // OpenClaw's plugin SDK exposes activeModel and channel in the tool
-      // context. If the channel is telegram, use a tighter token budget.
-      // Otherwise default to 16000 (generous for most channels).
-      let tokenBudget = 16000;
-      const ctxAny = ctx as Record<string, unknown>;
-      const channel = String(ctxAny.channel || ctxAny.activeModel || "").toLowerCase();
-      if (channel.includes("telegram") || process.env.TELEGRAM_TOKEN) {
-        tokenBudget = 1000;
-      }
+      const data = await callMpmCall("query_long_term_memory", { query, limit });
 
-      const args: string[] = [
-        "recall",
-        "--json",
-        "--token-budget",
-        String(tokenBudget),
-        "--",
-        query,
-        String(limit),
-      ];
-
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
-
-      // Format memories for the agent's tool result display
       let displayText: string;
       if (data.memories && Array.isArray(data.memories) && data.memories.length > 0) {
         displayText = data.memories.map((m) => {
@@ -578,9 +571,7 @@ function makeQueryLongTermMemoryTool(
           const topicLine = topics.length
             ? `\nTopics: [${topics.map((t: any) => t.name).join("] [")}]`
             : "";
-          const refLine = refDoc
-            ? `\nRef: ${refDoc.title}`
-            : "";
+          const refLine = refDoc ? `\nRef: ${refDoc.title}` : "";
 
           const content = typeof mem.content === "string" ? mem.content : JSON.stringify(mem);
           return `${content}${topicLine}${refLine}`;
@@ -621,11 +612,13 @@ function makeSaveToMemoryTool(
         tags = [],
         weight = 0.5,
         ttl,
+        collection,
       } = params as {
         fact: string;
         tags?: string[];
         weight?: number;
         ttl?: string;
+        collection?: string;
       };
 
       if (!fact.trim()) {
@@ -647,20 +640,11 @@ function makeSaveToMemoryTool(
         };
       }
 
-      // Build: mpm add --json -- "<fact>" [--tag <t>] [--weight <w>] [--ttl <t>]
-      const args = ["add", "--json", "--", fact];
-      for (const tag of tags) {
-        args.push("--tag", tag);
-      }
-      if (weight !== 0.5) {
-        args.push("--weight", String(weight));
-      }
-      if (ttl) {
-        args.push("--ttl", ttl);
-      }
+      const payload: Record<string, unknown> = { fact, tags, weight };
+      if (ttl) payload.ttl = ttl;
+      if (collection) payload.collection = collection;
 
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("save_to_memory", payload);
 
       return {
         toolCallId,
@@ -677,7 +661,7 @@ function makeSaveToMemoryTool(
   };
 }
 
-// ── Lessons ─────────────────────────────────────────────────────────────────────
+// ── Lessons ─────────────────────────────────────────────────────────────────
 
 function makeSaveLessonTool(
   _ctx: OpenClawPluginToolContext
@@ -720,16 +704,7 @@ function makeSaveLessonTool(
         };
       }
 
-      const args = [
-        "lesson", "add",
-        fact,
-        "--type", type,
-        "--tags", tags.join(","),
-        "--json",
-      ];
-
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("save_lesson", { fact, type, tags });
 
       return {
         toolCallId,
@@ -759,17 +734,15 @@ function makeSearchLessonsTool(
     execute: async (toolCallId, params) => {
       const { query = "" } = params as { query: string };
 
-      const result = await runMpm(["lesson", "search", query, "--json"]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("search_lessons", { query, limit: 10 });
 
-      // Format lessons for display
       let displayText: string;
       if (data.results && Array.isArray(data.results) && data.results.length > 0) {
         displayText = data.results
           .map((l: MpmJsonResult) => {
-            const type = l.type || "insight";
+            const lessonType = l.type || "insight";
             const content = typeof l.content === "string" ? l.content : JSON.stringify(l.content);
-            return `[${type}] ${content}`;
+            return `[${lessonType}] ${content}`;
           })
           .join("\n\n---\n\n");
       } else if (data.message) {
@@ -802,13 +775,11 @@ function makeListLessonsTool(
     execute: async (toolCallId, params) => {
       const { type } = params as { type?: "warning" | "practice" | "insight" };
 
-      const typeArg = type ? `--type=${type}` : "";
-      const args = ["lesson", "list", typeArg, "--json"].filter(Boolean);
+      const payload: Record<string, unknown> = {};
+      if (type) payload.type = type;
 
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("list_lessons", payload);
 
-      // Format lessons for display
       let displayText: string;
       if (data.lessons && Array.isArray(data.lessons) && data.lessons.length > 0) {
         displayText = data.lessons
@@ -876,13 +847,7 @@ function makeCreateTopicTool(
         };
       }
 
-      const result = await runMpm([
-        "topic", "add",
-        name,
-        description,
-        "--json",
-      ]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("create_topic", { name, description });
 
       return {
         toolCallId,
@@ -910,12 +875,10 @@ function makeSearchTopicsTool(
     parameters: SEARCH_TOPICS_SCHEMA,
     emoji_name: "magnifying_glass",
     execute: async (toolCallId, params) => {
-      const { query = "" } = params as { query: string };
+      const { query = "", limit = 20 } = params as { query: string; limit?: number };
 
-      const result = await runMpm(["topic", "search", query, "--json"]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("search_topics", { query, limit });
 
-      // Format topics for display
       let displayText: string;
       if (data.results && Array.isArray(data.results) && data.results.length > 0) {
         displayText = data.results
@@ -924,7 +887,6 @@ function makeSearchTopicsTool(
             const id = t.id ? ` [${t.id}]` : "";
             const desc = t.description ? `: ${t.description}` : "";
 
-            // If topic has top_memories, append inline preview
             const topMems = (t as any).top_memories || [];
             let memPreview = "";
             if (topMems.length > 0) {
@@ -1000,13 +962,7 @@ function makeLinkTopicTool(
         };
       }
 
-      const result = await runMpm([
-        "topic", "link",
-        topic_id,
-        memory_id,
-        "--json",
-      ]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("link_topic", { memory_id, topic_id });
 
       return {
         toolCallId,
@@ -1064,11 +1020,10 @@ function makeAddReferenceTool(
         };
       }
 
-      const titleArg = title ? ["--title", title] : [];
-      const args = ["reference", "add", filepath, ...titleArg, "--json"].filter(Boolean);
+      const payload: Record<string, unknown> = { filepath };
+      if (title) payload.title = title;
 
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("add_reference", payload);
 
       return {
         toolCallId,
@@ -1104,15 +1059,8 @@ function makeSearchReferencesTool(
         limit?: number;
       };
 
-      const result = await runMpm([
-        "reference", "search",
-        query,
-        String(limit),
-        "--json",
-      ]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("search_references", { query, limit });
 
-      // Format reference chunks for display
       let displayText: string;
       if (data.results && Array.isArray(data.results) && data.results.length > 0) {
         displayText = data.results
@@ -1150,11 +1098,11 @@ function makeListReferencesTool(
       "Shows document titles, chunk counts, and tags.",
     parameters: LIST_REFERENCES_SCHEMA,
     emoji_name: "books",
-    execute: async (toolCallId, _params) => {
-      const result = await runMpm(["reference", "ls", "--json"]);
-      const data = parseMpmResult(result);
+    execute: async (toolCallId, params) => {
+      const { limit = 50, offset = 0 } = params as { limit?: number; offset?: number };
 
-      // Format references for display
+      const data = await callMpmCall("list_references", { limit, offset });
+
       let displayText: string;
       if (data.references && Array.isArray(data.references) && data.references.length > 0) {
         displayText = data.references
@@ -1198,10 +1146,9 @@ function makeReadWakeContextTool(
     parameters: READ_WAKE_CONTEXT_SCHEMA,
     emoji_name: "sunrise",
     execute: async (toolCallId, _params) => {
-      const result = await runMpm(["wake", "--json"]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("read_wake_context", {});
 
-      if (!data) {
+      if (!data || !data.success) {
         return {
           toolCallId,
           result: {
@@ -1231,7 +1178,7 @@ function makeReadWakeContextTool(
       if (ctx.persona || ctx.active_persona) {
         lines.push(`\n  **Persona:** ${ctx.persona || ctx.active_persona}`);
       }
-      if (ctx.recent_topics && ctx.recent_topics.length > 0) {
+      if (Array.isArray(ctx.recent_topics) && ctx.recent_topics.length > 0) {
         lines.push(`\n  **Recent Topics:** ${(ctx.recent_topics as string[]).join(", ")}`);
       }
 
@@ -1239,9 +1186,7 @@ function makeReadWakeContextTool(
         lines.push(`\n  **Recent Memories:**`);
         for (const mem of ctx.recent_memories as Array<{ content?: string; created_at?: string }>) {
           const content = (mem.content || "").substring(0, 80);
-          const age = mem.created_at
-            ? ` (${formatAge(mem.created_at)})`
-            : "";
+          const age = mem.created_at ? ` (${formatAge(mem.created_at)})` : "";
           lines.push(`\n    \u2022 ${content}${age}`);
         }
       }
@@ -1265,37 +1210,6 @@ function makeReadDirectivesTool(
   _ctx: OpenClawPluginToolContext
 ): AnyAgentTool {
 
-  // ── helpers ────────────────────────────────────────────────────────────────
-
-  /** Format a directive's created_at timestamp as a human-readable age. */
-  function formatAge(createdAt: string): string {
-    if (!createdAt) return "unknown age";
-    let created: Date;
-    try {
-      // Try parsing ISO-8601 with fallback for space-separated datetime
-      created = new Date(createdAt.replace(" ", "T"));
-      if (isNaN(created.getTime())) created = new Date(createdAt);
-    } catch {
-      return "unknown age";
-    }
-    if (isNaN(created.getTime())) return "unknown age";
-
-    const diffMs = Date.now() - created.getTime();
-    const diffSec = Math.floor(diffMs / 1000);
-    if (diffSec < 60) return `${diffSec}s ago`;
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-    const diffDays = Math.floor(diffHr / 24);
-    if (diffDays < 30) return `${diffDays}d ago`;
-    const diffWeeks = Math.floor(diffDays / 7);
-    if (diffWeeks < 12) return `${diffWeeks}w ago`;
-    const diffMonths = Math.floor(diffDays / 30);
-    return `${diffMonths}mo ago`;
-  }
-
-  /** Group an array of directive objects by their collection label. */
   function groupByCollection(
     directives: Array<{ collection?: string; content?: string; created_at?: string; id?: string }>
   ): Map<string, Array<{ content: string; created_at: string; id: string }>> {
@@ -1320,8 +1234,7 @@ function makeReadDirectivesTool(
     parameters: READ_DIRECTIVES_SCHEMA,
     emoji_name: "scroll",
     execute: async (toolCallId, _params) => {
-      const result = await runMpm(["directives", "--json"]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("read_directives", {});
 
       if (!data.directives || !Array.isArray(data.directives) || data.directives.length === 0) {
         return {
@@ -1333,9 +1246,7 @@ function makeReadDirectivesTool(
                 content: [
                   {
                     type: "text" as const,
-                    text: data.message
-                      ? String(data.message)
-                      : "(no directives defined — run the session that defines them)",
+                    text: data.message ? String(data.message) : "(no directives defined)",
                   },
                 ],
               },
@@ -1377,8 +1288,7 @@ function makeReadDirectivesTool(
   };
 }
 
-// ── Epistemology Engine ─────────────────────────────────────────────────────────
-
+// ── Epistemology Engine ──────────────────────────────────────────────────────
 
 function makeRecordDecisionTool(
   _ctx: OpenClawPluginToolContext
@@ -1411,7 +1321,6 @@ function makeRecordDecisionTool(
         weight?: number;
       };
 
-
       if (!context.trim() || !choice.trim() || !rationale.trim()) {
         return {
           toolCallId,
@@ -1435,22 +1344,10 @@ function makeRecordDecisionTool(
         };
       }
 
-      const content = [
-        `CONTEXT: ${context}`,
-        `CHOICE: ${choice}`,
-        `RATIONALE: ${rationale}`,
-        outcome ? `OUTCOME: ${outcome}` : ``,
-      ]
-        .filter(line => line.length > `CONTEXT: `.length)
-        .join("\n");
+      const payload: Record<string, unknown> = { context, choice, rationale, tags, weight };
+      if (outcome) payload.outcome = outcome;
 
-
-      const args = ["add", "--json", "--collection", "decisions", "--", content];
-      for (const tag of tags) { args.push("--tag", tag); }
-      if (weight !== 0.5) { args.push("--weight", String(weight)); }
-
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("record_decision", payload);
 
       return {
         toolCallId,
@@ -1463,7 +1360,7 @@ function makeRecordDecisionTool(
   };
 }
 
-// ── Proactive Recall Hint ─────────────────────────────────────────────────────
+// ── Proactive Recall Hint ───────────────────────────────────────────────────
 
 const PROACTIVE_RECALL_HINT_SCHEMA = {
   type: "object",
@@ -1520,13 +1417,9 @@ function makeProactiveRecallHintTool(
         };
       }
 
-      const result = await runMpm([
-        "hint", "--json", "--max", String(max_hints), "--", conversation_text,
-      ]);
-      const data = JSON.parse(result.stdout || "[]");
+      const data = await callMpmCall("proactive_recall_hint", { conversation_text, max_hints, min_score });
 
-      // Format hints as structured RecallHint[] for the agent
-      const hints = (Array.isArray(data) ? data : []).map((m: any) => {
+      const hints = (Array.isArray(data.hints) ? data.hints : []).map((m: any) => {
         const content = m.content || "";
         const meta = m.metadata || {};
         let status = meta.status || "";
@@ -1536,7 +1429,6 @@ function makeProactiveRecallHintTool(
         let rationale = "";
         let hypothesis = "";
 
-        // Extract fields from content
         if (m.collection === "decisions") {
           const firstLine = content.split("\n")[0] || "";
           if (firstLine.toUpperCase().startsWith("CHOICE: ")) {
@@ -1545,9 +1437,7 @@ function makeProactiveRecallHintTool(
           const rLine = content.split("\n").find((l: string) =>
             l.toUpperCase().startsWith("RATIONALE:")
           );
-          if (rLine) {
-            rationale = rLine.slice(10).trim();
-          }
+          if (rLine) rationale = rLine.slice(10).trim();
         } else if (m.collection === "theories") {
           const firstLine = content.split("\n")[0] || "";
           if (firstLine.toUpperCase().startsWith("HYPOTHESIS: ")) {
@@ -1556,13 +1446,10 @@ function makeProactiveRecallHintTool(
         }
 
         if (!status) {
-          // Fallback: parse STATUS from content
           const sLine = content.split("\n").find((l: string) =>
             l.toUpperCase().startsWith("STATUS:")
           );
-          if (sLine) {
-            status = sLine.split(":")[1]?.trim() || "";
-          }
+          if (sLine) status = sLine.split(":")[1]?.trim() || "";
         }
 
         return {
@@ -1637,18 +1524,9 @@ function makeProposeTheoryTool(
         };
       }
 
-      const content = [
-        `HYPOTHESIS: ${hypothesis}`,
-        `VALIDATION_CRITERIA: ${validationCriteria}`,
-        `STATUS: pending`,
-      ].join("\n");
+      const payload: Record<string, unknown> = { hypothesis, validation_criteria: validationCriteria, tags };
 
-      const args = ["add", "--json", "--collection", "theories", "--", content];
-      for (const tag of tags) { args.push("--tag", tag); }
-      args.push("--tag", "theory");
-
-      const result = await runMpm(args);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("propose_theory", payload);
 
       return {
         toolCallId,
@@ -1731,38 +1609,13 @@ function makeResolveTheoryTool(
         };
       }
 
-      // Use UpdateMemoryMetadata via mpm patch-memory to update the theory's
-      // metadata in-place (no content change → no FTS re-index).
-      // Then insert a new resolved record for the conclusion.
-      const patchResult = await runMpm([
-        "patch-memory", theoryId,
-        JSON.stringify({ status: newStatus, conclusion }),
-      ]);
-      const patchData = parseMpmResult(patchResult);
-
-      // Add resolved record with traceability tag back to original theory.
-      const resolvedContent = [
-        `RESOLVED_THEORY_ID: ${theoryId}`,
-        `STATUS: ${newStatus}`,
-        `CONCLUSION: ${conclusion}`,
-      ].join("\n");
-
-      const addArgs = [
-        "add", "--json", "--collection", "theories",
-        "--tag", "resolved",
-        "--tag", `theories:${theoryId}`,
-        "--weight", "1",
-        "--", resolvedContent,
-      ];
-
-      const addResult = await runMpm(addArgs);
-      const addData = parseMpmResult(addResult);
+      const data = await callMpmCall("resolve_theory", { theoryId, conclusion, newStatus });
 
       return {
         toolCallId,
         result: {
           type: "ok" as const,
-          results: [{ content: [{ type: "text" as const, text: JSON.stringify({ patch: patchData, resolved: addData }) }] }],
+          results: [{ content: [{ type: "text" as const, text: JSON.stringify(data) }] }],
         },
       };
     },
@@ -1813,11 +1666,7 @@ function makeChallengeTool(
         };
       }
 
-      const result = await runMpm([
-        "challenge", memoryId, "--",
-        evidence,
-      ]);
-      const data = parseMpmResult(result);
+      const data = await callMpmCall("challenge_memory", { memoryId, evidence });
 
       return {
         toolCallId,
@@ -1871,7 +1720,7 @@ export default definePluginEntry({
       { names: ["list_lessons"], optional: false }
     );
 
-    // ── Topic Tools ──────────────────────────────────────────────────────
+    // ── Topic Tools ───────────────────────────────────────────────────────
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeCreateTopicTool(ctx),
       { names: ["create_topic"], optional: false }
@@ -1884,7 +1733,7 @@ export default definePluginEntry({
 
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeLinkTopicTool(ctx),
-      { names: ["link_topic"], optional: true }
+      { names: ["link_topic"], optional: false }
     );
 
     // ── Reference Tools ──────────────────────────────────────────────────
@@ -1903,30 +1752,28 @@ export default definePluginEntry({
       { names: ["list_references"], optional: false }
     );
 
-    // ── Session Wake Context ──────────────────────────────────────────────
+    // ── System Tools ─────────────────────────────────────────────────────
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeReadWakeContextTool(ctx),
       { names: ["read_wake_context"], optional: false }
     );
 
-    // ── Directive Tools ──────────────────────────────────────────────────
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeReadDirectivesTool(ctx),
       { names: ["read_directives"], optional: false }
     );
 
-    // ── Proactive Recall Hint ───────────────────────────────────────────
-    api.registerTool(
-      (_ctx: OpenClawPluginToolContext) => makeProactiveRecallHintTool(_ctx),
-      { names: ["proactive_recall_hint"], optional: true }
-    );
-
-    // ── Epistemology Engine ──────────────────────────────────────────────
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeRecordDecisionTool(ctx),
       { names: ["record_decision"], optional: false }
     );
 
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => makeProactiveRecallHintTool(ctx),
+      { names: ["proactive_recall_hint"], optional: false }
+    );
+
+    // ── Epistemology Tools ────────────────────────────────────────────────
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => makeProposeTheoryTool(ctx),
       { names: ["propose_theory"], optional: false }
@@ -1941,19 +1788,5 @@ export default definePluginEntry({
       (ctx: OpenClawPluginToolContext) => makeChallengeTool(ctx),
       { names: ["challenge_memory"], optional: false }
     );
-
-    // ── Memory Capability (prompt builder for recall guidance) ────────────
-    //
-    // MPM does not own the memory slot (that is memory-core), but we can
-    // register a lightweight memory capability that contributes prompt text.
-    // This fires on every agent turn — equivalent to memory-core's built-in
-    // "Before answering anything about prior work..." guidance.
-    //
-    // NOTE: If a full memory slot is later assigned to MPM (replacing
-    // memory-core), this pattern should be replaced with registerMemoryCapability
-    // using a proper flushPlanResolver.
-    //
-    // For now, the mandatory recall/save directives live in AGENTS.md
-    // (loaded at startup) as the system-prompt anchor.
   },
 });

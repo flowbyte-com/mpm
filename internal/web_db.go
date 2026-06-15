@@ -110,12 +110,11 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 	// Try FTS5 first
 	mems := []map[string]interface{}{}
 	found := false
-	testRows, _ := dm.db.Query(`SELECT 1 FROM memories_fts WHERE memories_fts MATCH ? LIMIT 1`, ftsQuery)
-	if testRows != nil {
+	if testRows, err := dm.db.Query(`SELECT 1 FROM memories_fts WHERE memories_fts MATCH ? LIMIT 1`, ftsQuery); err == nil && testRows != nil {
+		defer testRows.Close()
 		if testRows.Next() {
 			found = true
 		}
-		testRows.Close()
 	}
 
 	var query string
@@ -201,9 +200,9 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var weight int
 
 	err := dm.db.QueryRow(`
-		SELECT collection, content, session_id, tags, metadata, created_at, weight
+		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL
-	`, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &weight)
+	    `, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -722,12 +721,11 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 
 	// Try FTS5 on references table first, fallback to LIKE
 	found := false
-	testRows, _ := dm.db.Query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='references_fts'`)
-	if testRows != nil {
+	if testRows, err := dm.db.Query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='references_fts'`); err == nil && testRows != nil {
+		defer testRows.Close()
 		if testRows.Next() {
 			found = true
 		}
-		testRows.Close()
 	}
 
 	var refs []map[string]interface{}
@@ -774,12 +772,11 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 
 	// Try FTS5 on chunks first, fallback to LIKE
 	found := false
-	testRows, _ := dm.db.Query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_chunks_fts'`)
-	if testRows != nil {
+	if testRows, err := dm.db.Query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_chunks_fts'`); err == nil && testRows != nil {
+		defer testRows.Close()
 		if testRows.Next() {
 			found = true
 		}
-		testRows.Close()
 	}
 
 	var chunks []map[string]interface{}
@@ -816,14 +813,25 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 	return chunks, nil
 }
 
-// DeleteReference removes a reference doc and its chunks (cascade from FK)
+// DeleteReference removes a reference doc and its chunks (cascade from FK).
+// Both DELETEs run inside a single transaction so a crash mid-write cannot
+// leave orphan chunks behind (FK cascade would normally handle it, but only
+// if FKs are enabled on the connection).
 func (dm *DatabaseManager) DeleteReference(id string) error {
-	_, err := dm.db.Exec(`DELETE FROM reference_chunks WHERE doc_id = ?`, id)
+	tx, err := dm.db.Begin()
 	if err != nil {
+		return fmt.Errorf("DeleteReference: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM reference_chunks WHERE doc_id = ?`, id); err != nil {
 		return err
 	}
-	_, err = dm.db.Exec(`DELETE FROM reference_docs WHERE id = ?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM reference_docs WHERE id = ?`, id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // AddReference adds a reference document and its chunks in a transaction
@@ -866,12 +874,11 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 	ftsQuery := "\"" + escaped + "\"*"
 
 	found := false
-	testRows, _ := dm.db.Query(`SELECT 1 FROM topics_fts WHERE topics_fts MATCH ? LIMIT 1`, ftsQuery)
-	if testRows != nil {
+	if testRows, err := dm.db.Query(`SELECT 1 FROM topics_fts WHERE topics_fts MATCH ? LIMIT 1`, ftsQuery); err == nil && testRows != nil {
+		defer testRows.Close()
 		if testRows.Next() {
 			found = true
 		}
-		testRows.Close()
 	}
 
 	var query string

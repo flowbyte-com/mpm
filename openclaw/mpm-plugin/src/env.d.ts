@@ -1,4 +1,4 @@
-declare module "openclaw/plugin-sdk/plugin-entry" {
+declare module "openclaw/plugin-sdk/plugin-entry.js" {
   import type { OpenClawPluginApi } from "openclaw/plugin-sdk/index";
 
   type OpenClawPluginConfigSchema = {
@@ -26,7 +26,7 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
   export function definePluginEntry(options: DefinePluginEntryOptions): DefinedPluginEntry;
 }
 
-declare module "openclaw/plugin-sdk/index" {
+declare module "openclaw/plugin-sdk/index.js" {
   export interface OpenClawPluginApi {
     registerTool(
       factory: (ctx: OpenClawPluginToolContext) => AnyAgentTool,
