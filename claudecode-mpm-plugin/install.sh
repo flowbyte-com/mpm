@@ -9,7 +9,7 @@
 # Flags:
 #   --symlink   (default) Symlink files; edits in source propagate.
 #   --copy             Copy files; one-shot install, no link drift.
-#   --uninstall        Remove .claude/mcp.json, .claude/mpm-mcp/, .claude/skills/mpm/.
+#   --uninstall        Remove .mcp.json, .claude/mpm-mcp/, .claude/skills/mpm/.
 
 set -euo pipefail
 
@@ -40,7 +40,7 @@ resolve_mpm() {
 }
 
 uninstall() {
-    rm -f "$DST/mcp.json"
+    rm -f "$SRC/../.mcp.json"
     rm -rf "$DST/mpm-mcp" "$DST/skills/mpm"
     echo "✓ Uninstalled."
 }
@@ -85,8 +85,12 @@ link_or_copy() {
 link_or_copy "$SRC/server.py"               "$DST/mpm-mcp/server.py"
 link_or_copy "$SRC/skills/mpm/SKILL.md"     "$DST/skills/mpm/SKILL.md"
 
-# Render .mcp.json with the resolved mpm path (env block + absolute paths)
-sed "s|\${MPM_BINARY}|$MPM_PATH|g; s|\${PWD}|$SRC|g" "$SRC/.mcp.json" > "$DST/mcp.json"
+# Render .mcp.json with the resolved mpm path (env block + absolute paths).
+# Claude Code reads MCP servers from .mcp.json at the project root, NOT from
+# .claude/mcp.json — putting it in .claude/ makes it invisible to the loader.
+# Remove any stale .claude/mcp.json from older installs of this plugin.
+rm -f "$DST/mcp.json"
+sed "s|\${MPM_BINARY}|$MPM_PATH|g; s|\${PWD}|$SRC|g" "$SRC/.mcp.json" > "$SRC/../.mcp.json"
 
 echo "✓ Installed ($ACTION). Restart Claude Code to pick up MCP server."
 echo "  mpm binary: $MPM_PATH"
