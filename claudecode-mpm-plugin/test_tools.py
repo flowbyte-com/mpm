@@ -108,9 +108,10 @@ def test_debug_log_noop_when_debug_env_unset(tmp_path, monkeypatch):
 def test_debug_log_swallows_io_errors(tmp_path, monkeypatch):
     """debug_log must never raise — it's observability only."""
     monkeypatch.setenv("DEBUG", "1")
-    # Point at a path that cannot be written (a directory used as a file).
+    # Create a FILE where a directory is needed: makedirs(parent) will fail
+    # because the parent is a file, exercising the OSError swallow path.
     bad_path = tmp_path / "bad"
-    bad_path.mkdir()
-    monkeypatch.setenv("MPM_DEBUG_LOG", str(bad_path / "nonexistent" / "log"))
+    bad_path.touch()
+    monkeypatch.setenv("MPM_DEBUG_LOG", str(bad_path / "log"))
     # Should not raise.
     debug_log("test message")
