@@ -38,6 +38,7 @@ var BaseTables = []string{
 		session_id TEXT, tags JSON, metadata JSON, embedding BLOB,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		source_db TEXT, source_id TEXT, promoted_at REAL,
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
 	);`,
 
@@ -162,6 +163,9 @@ var SafeMigrations = [][3]string{
 	{"memories", "last_accessed_at", "DATETIME"},
 	{"memories", "updated_at", "DATETIME"},
 	{"memories", "expires_at", "DATETIME"},
+	{"memories", "source_db", "TEXT"},
+	{"memories", "source_id", "TEXT"},
+	{"memories", "promoted_at", "REAL"},
 	{"sessions", "embedding", "BLOB"},
 	{"sessions", "metadata", "TEXT"},
 	{"raw_memories", "next_retry", "TEXT"},
