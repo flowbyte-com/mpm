@@ -2,6 +2,8 @@
 import pytest
 
 from tools import parse_mpm_result, MpmRunResult
+from datetime import datetime
+from tools import format_age
 
 
 def test_parse_happy_path_returns_parsed_json():
@@ -55,3 +57,23 @@ def test_parse_generic_nonzero_exit_returns_exit_n_with_stderr():
     parsed = parse_mpm_result(result)
     assert parsed["error"] == "exit_2"
     assert parsed["message"] == "First line"
+
+
+def test_format_age_seconds_ago():
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    age = format_age(now)
+    assert age.endswith("s ago")
+
+
+def test_format_age_minutes_ago():
+    five_min_ago = (datetime.utcnow() - __import__("datetime").timedelta(minutes=5)).isoformat(timespec="seconds")
+    age = format_age(five_min_ago)
+    assert age.endswith("m ago")
+
+
+def test_format_age_empty_string_returns_unknown():
+    assert format_age("") == "unknown age"
+
+
+def test_format_age_invalid_string_returns_unknown():
+    assert format_age("not a date") == "unknown age"
