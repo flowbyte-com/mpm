@@ -5,7 +5,6 @@ Does NOT spawn a real mpm binary; the tool bodies are exercised separately
 via test_tools.py and the manual JSON-RPC smoke test in Task 23.
 """
 import pytest
-from mcp.server.fastmcp import FastMCP
 
 from server import mcp
 
