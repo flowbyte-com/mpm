@@ -5,7 +5,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from schemas import QueryLongTermMemoryInput, ReadWakeContextInput
-from tools import MpmRunResult, debug_log, parse_mpm_result, run_mpm
+from tools import debug_log, parse_mpm_result, run_mpm
 
 mcp = FastMCP("mpm-plugin")
 
