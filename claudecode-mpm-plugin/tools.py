@@ -62,3 +62,43 @@ def parse_mpm_result(result: MpmRunResult) -> dict:
         return json.loads(trimmed)
     except json.JSONDecodeError:
         return {"id": "", "success": True, "text": trimmed}
+
+
+def format_age(created_at: str) -> str:
+    """Return a human-readable age string for a timestamp.
+
+    Handles both ISO-8601 with 'T' separator and the mpm SQLite
+    'YYYY-MM-DD HH:MM:SS' format. Returns 'unknown age' for empty
+    or unparseable input.
+    """
+    if not created_at:
+        return "unknown age"
+    try:
+        # Try the SQLite format first (most common in mpm output).
+        created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            return "unknown age"
+
+    delta = datetime.utcnow() - created
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 30:
+        return f"{days}d ago"
+    weeks = days // 7
+    if weeks < 12:
+        return f"{weeks}w ago"
+    months = days // 30
+    return f"{months}mo ago"
