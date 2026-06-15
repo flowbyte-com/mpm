@@ -4,7 +4,6 @@ __pycache__/
 *.log
 
 # Compiled binaries
-mpm
 bin/
 mini-bot
 mpm-agent/mini-bot
