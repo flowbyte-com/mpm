@@ -180,6 +180,16 @@ async def run_mpm(
             stderr=f"Operation timed out after {effective_ms}ms",
         )
 
+    # Best-effort buffer cap: post-read check on stdout. True OOM prevention
+    # would require streaming reads with manual stderr drain, but the signal
+    # is sufficient for parse_mpm_result to flag wake_context_truncated.
+    if len(stdout_bytes) > MAX_BUFFER:
+        return MpmRunResult(
+            exit_code=125,
+            stdout="",
+            stderr=f"[output exceeded {MAX_BUFFER} bytes]",
+        )
+
     return MpmRunResult(
         exit_code=proc.returncode if proc.returncode is not None else 1,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
