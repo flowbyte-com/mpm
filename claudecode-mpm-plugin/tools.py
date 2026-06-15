@@ -28,12 +28,30 @@ def parse_mpm_result(result: MpmRunResult) -> dict:
     """Map an MpmRunResult to a structured dict.
 
     On success (exit 0): JSON.parse(stdout) with text fallback.
-    On error: structured error dict (added in Task 5).
+    On error: structured error dict with semantic error codes.
     """
-    if result.exit_code != 0:
-        # Error path implemented in Task 5.
-        return {"error": f"exit_{result.exit_code}", "message": result.stderr.split("\n")[0]}
+    stderr = result.stderr or ""
 
+    # Output-overflow: subprocess was killed because stdout exceeded MAX_BUFFER.
+    if result.exit_code == 125 and "[output exceeded" in stderr:
+        return {
+            "error": "wake_context_truncated",
+            "message": "Wake context exceeded buffer limit — session too large.",
+        }
+
+    # SQLite BUSY: contention on the mpm database. Retryable.
+    if "database is locked" in stderr.lower() or "SQLITE_BUSY" in stderr:
+        return {
+            "error": "database_locked",
+            "message": "MPM database is locked — safe to retry.",
+        }
+
+    # Generic non-zero exit.
+    if result.exit_code != 0:
+        first_line = stderr.split("\n")[0] if stderr else f"mpm exited with code {result.exit_code}"
+        return {"error": f"exit_{result.exit_code}", "message": first_line}
+
+    # Success: parse JSON with text fallback.
     trimmed = result.stdout.strip()
     if not trimmed:
         return {"id": "", "success": True, "count": 0}

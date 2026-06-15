@@ -20,3 +20,30 @@ def test_parse_invalid_json_returns_text_fallback():
     result = MpmRunResult(exit_code=0, stdout="not json", stderr="")
     parsed = parse_mpm_result(result)
     assert parsed == {"id": "", "success": True, "text": "not json"}
+
+
+def test_parse_exit_125_with_output_exceeded_returns_truncated():
+    result = MpmRunResult(exit_code=125, stdout="", stderr="[output exceeded 10485760 bytes]")
+    parsed = parse_mpm_result(result)
+    assert parsed["error"] == "wake_context_truncated"
+    assert "exceeded" in parsed["message"].lower()
+
+
+def test_parse_database_locked_stderr_returns_locked_error():
+    result = MpmRunResult(exit_code=1, stdout="", stderr="Error: database is locked")
+    parsed = parse_mpm_result(result)
+    assert parsed["error"] == "database_locked"
+    assert "locked" in parsed["message"].lower()
+
+
+def test_parse_sqlite_busy_stderr_returns_locked_error():
+    result = MpmRunResult(exit_code=1, stdout="", stderr="SQLITE_BUSY: table is locked")
+    parsed = parse_mpm_result(result)
+    assert parsed["error"] == "database_locked"
+
+
+def test_parse_generic_nonzero_exit_returns_exit_n_with_stderr():
+    result = MpmRunResult(exit_code=2, stdout="", stderr="First line\nSecond line")
+    parsed = parse_mpm_result(result)
+    assert parsed["error"] == "exit_2"
+    assert parsed["message"] == "First line"
