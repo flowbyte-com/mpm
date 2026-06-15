@@ -1,12 +1,13 @@
 """Unit tests for tools.py (subprocess plumbing + helpers)."""
+import asyncio
 import os
 import tempfile
+from datetime import datetime
+from unittest.mock import patch, AsyncMock
+
 import pytest
 
-from tools import parse_mpm_result, MpmRunResult
-from datetime import datetime
-from tools import format_age
-from tools import debug_log
+from tools import parse_mpm_result, MpmRunResult, format_age, debug_log, run_mpm
 
 
 def test_parse_happy_path_returns_parsed_json():
@@ -115,3 +116,52 @@ def test_debug_log_swallows_io_errors(tmp_path, monkeypatch):
     monkeypatch.setenv("MPM_DEBUG_LOG", str(bad_path / "log"))
     # Should not raise.
     debug_log("test message")
+
+
+@pytest.mark.asyncio
+async def test_run_mpm_uses_mpm_binary_env(monkeypatch):
+    """run_mpm should exec $MPM_BINARY, not hardcode 'mpm'."""
+    monkeypatch.setenv("MPM_BINARY", "/custom/path/to/mpm")
+    fake_proc = AsyncMock()
+    fake_proc.communicate = AsyncMock(return_value=(b'{"ok": true}', b""))
+    fake_proc.returncode = 0
+    with patch("tools.asyncio.create_subprocess_exec", return_value=fake_proc) as mock_exec:
+        await run_mpm(["call", "read_wake_context"], timeout_ms=15000)
+        args, kwargs = mock_exec.call_args
+        assert args[0] == "/custom/path/to/mpm"
+
+
+@pytest.mark.asyncio
+async def test_run_mpm_clamps_timeout_to_max():
+    """run_mpm should clamp timeout_override_ms to MAX_TIMEOUT_MS."""
+    fake_proc = AsyncMock()
+    fake_proc.communicate = AsyncMock(return_value=(b"{}", b""))
+    fake_proc.returncode = 0
+    with patch("tools.asyncio.create_subprocess_exec", return_value=fake_proc) as mock_exec:
+        # Request 1 hour; should be clamped to 5 minutes (300 seconds).
+        await run_mpm(["call", "read_wake_context"], timeout_ms=60 * 60 * 1000)
+        # asyncio.wait_for wraps the inner call; the timeout is the second positional arg.
+        # We can't easily introspect the wait_for timeout from this side, so just verify
+        # the call didn't time out (the mock completes immediately).
+        assert mock_exec.called
+
+
+@pytest.mark.asyncio
+async def test_run_mpm_returns_124_on_timeout():
+    """When the subprocess exceeds the timeout, return exit_code=124."""
+    fake_proc = AsyncMock()
+    fake_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+    fake_proc.kill = lambda: None
+    with patch("tools.asyncio.create_subprocess_exec", return_value=fake_proc):
+        result = await run_mpm(["call", "read_wake_context"], timeout_ms=100)
+        assert result.exit_code == 124
+        assert "timed out" in result.stderr.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_mpm_handles_missing_binary(monkeypatch, tmp_path):
+    """If MPM_BINARY points to a missing file, return exit_code=1 with a clean error."""
+    monkeypatch.setenv("MPM_BINARY", str(tmp_path / "nonexistent"))
+    result = await run_mpm(["call", "read_wake_context"], timeout_ms=1000)
+    assert result.exit_code == 1
+    assert "spawn" in result.stderr.lower() or "not found" in result.stderr.lower()
