@@ -77,3 +77,8 @@ def test_format_age_empty_string_returns_unknown():
 
 def test_format_age_invalid_string_returns_unknown():
     assert format_age("not a date") == "unknown age"
+
+
+def test_format_age_tz_aware_iso_returns_unknown():
+    """Regression: tz-aware timestamps must not crash on naive datetime.utcnow() subtraction."""
+    assert format_age("2026-06-15T12:34:56+00:00") == "unknown age"

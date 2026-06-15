@@ -75,14 +75,14 @@ def format_age(created_at: str) -> str:
         return "unknown age"
     try:
         # Try the SQLite format first (most common in mpm output).
-        created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
         try:
-            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            return "unknown age"
-
-    delta = datetime.utcnow() - created
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        # Subtract naive 'now' from parsed datetime; tz-aware input would TypeError here.
+        delta = datetime.utcnow() - created
+    except (ValueError, TypeError):
+        return "unknown age"
     seconds = int(delta.total_seconds())
     if seconds < 0:
         return "just now"
