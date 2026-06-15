@@ -20,7 +20,7 @@ The installer:
 2. Creates a project-local venv at `claudecode-mpm-plugin/.venv` (skipped if present).
 3. Installs `mcp`, `pydantic`, `pytest`, `pytest-asyncio` into the venv.
 4. Symlinks (or copies) `server.py` and `skills/mpm/SKILL.md` into `.claude/`.
-5. Renders `.claude/mcp.json` from the template with the absolute mpm path and the venv's python interpreter.
+5. Renders `.mcp.json` at the project root from the template, with the absolute mpm path and the venv's python interpreter. (Claude Code reads MCP server configs from `.mcp.json` at the project root, not from `.claude/mcp.json`.)
 
 Restart Claude Code to pick up the MCP server.
 
@@ -30,7 +30,7 @@ Restart Claude Code to pick up the MCP server.
 ./install.sh --uninstall
 ```
 
-Removes `.claude/mcp.json`, `.claude/mpm-mcp/`, `.claude/skills/mpm/`. The
+Removes `.mcp.json`, `.claude/mpm-mcp/`, `.claude/skills/mpm/`. The
 project-local venv is **not** removed.
 
 ## Tools (Phase 1 — 2 of 18)
@@ -72,7 +72,7 @@ The venv is missing or broken. Delete `claudecode-mpm-plugin/.venv/` and
 re-run `./install.sh --symlink`.
 
 **MCP server not visible in Claude Code**
-- Confirm `.claude/mcp.json` exists and is valid JSON.
+- Confirm `.mcp.json` exists at the project root (not `.claude/mcp.json` — that location is never read) and is valid JSON.
 - Restart Claude Code (the MCP registry loads at startup).
 - Check the Claude Code logs for stdio errors from the server.
 
