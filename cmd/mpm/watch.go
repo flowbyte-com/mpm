@@ -313,7 +313,7 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 
 	memoryStore := mpminternal.NewMemoryStore(projectRoot)
 
-	return &watcherDaemon{
+	d := &watcherDaemon{
 		watcher:          w,
 		dirs:             dirs,
 		db:               db,
@@ -327,6 +327,9 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 		lastEventAt:      time.Now(),
 		idleWorker:       mpminternal.NewIdleConsolidationWorker(db, 30*time.Minute),
 	}
+	d.synthWorker.Start()
+	d.idleWorker.Start()
+	return d
 }
 
 // IsReady returns true if the daemon is properly initialized
@@ -339,6 +342,12 @@ func (d *watcherDaemon) handleSignals(done chan bool) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
+	if d.synthWorker != nil {
+		d.synthWorker.Stop()
+	}
+	if d.idleWorker != nil {
+		d.idleWorker.Stop()
+	}
 	close(d.stopCh)
 	done <- true
 }

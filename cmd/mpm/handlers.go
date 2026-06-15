@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -1826,23 +1827,26 @@ func handleWake(args []string) int {
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var memID, collection, content, tagsJSON, metadataJSON, createdAt string
+			var memID, collection, content, createdAt string
+			var tagsJSON, metadataJSON sql.NullString
 			if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
 				slog.Warn("handleWake: rows.Scan failed", "error", err)
 				break
 			}
 			var tags []string
-			var metadata map[string]interface{}
-			json.Unmarshal([]byte(tagsJSON), &tags)
-			if metadataJSON != "" {
-				json.Unmarshal([]byte(metadataJSON), &metadata)
+			var memMeta map[string]interface{}
+			if tagsJSON.Valid {
+				json.Unmarshal([]byte(tagsJSON.String), &tags)
+			}
+			if metadataJSON.Valid {
+				json.Unmarshal([]byte(metadataJSON.String), &memMeta)
 			}
 			memories = append(memories, map[string]interface{}{
 				"id":         memID,
 				"collection": collection,
 				"content":    content,
 				"tags":       tags,
-				"metadata":   metadata,
+				"metadata":   memMeta,
 				"created_at": createdAt,
 			})
 		}
@@ -3615,8 +3619,9 @@ func getMemoryStore() *internal.MemoryStore {
 	// Set DM so that write-heavy paths (DecayWeights, DedupeMemories) route
 	// through DatabaseManager.ExecTracked for WAL-backoff observability.
 	return &internal.MemoryStore{
-		DB: &internal.SQLiteConnection{DB: dbManager.SQLDB()},
-		DM: dbManager,
+		DB:         &internal.SQLiteConnection{DB: dbManager.SQLDB()},
+		DM:         dbManager,
+		MirrorFile: filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl"),
 	}
 }
 

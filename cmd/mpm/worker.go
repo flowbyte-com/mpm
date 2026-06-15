@@ -77,6 +77,11 @@ func (wp *WorkerPool) Submit(ev WatchEvent) bool {
 	case wp.jobQueue <- ev:
 		return true
 	default:
+		// H3 FIX: log dropped events. Silent drops made on-call debugging
+		// of "missing fsnotify events" impossible — the reconciliation sweep
+		// would catch up eventually, but without this log there was no signal.
+		fmt.Fprintf(os.Stderr, "⚠️  WorkerPool queue full, dropping event type=%d path=%s queue_size=%d\n",
+			ev.Type, ev.Path, len(wp.jobQueue))
 		return false
 	}
 }
@@ -380,8 +385,10 @@ func isFileIngested(dm *mpminternal.DatabaseManager, filePath string) (bool, err
 			escaped := strings.ReplaceAll(absPath, `'`, `''`)
 			escaped = strings.ReplaceAll(escaped, `%`, `\%`)
 			escaped = strings.ReplaceAll(escaped, `_`, `\_`)
+			searchPattern := `%"source_path":"` + escaped + `"%`
 			err = dm.SQLDB().QueryRow(
-				`SELECT COUNT(*) FROM memories WHERE metadata LIKE '%"source_path":"` + escaped + `"%'`,
+				`SELECT COUNT(*) FROM memories WHERE metadata LIKE ? ESCAPE '\'`,
+				searchPattern,
 			).Scan(&count)
 		}
 		if err != nil {

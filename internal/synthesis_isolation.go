@@ -110,7 +110,13 @@ func (w *SynthesisWorker) Enqueue(event MemoryEvent) {
 		w.logger.Warn("synthesis_worker: event channel full, offloading to overflow",
 			"memory_id", event.ID,
 			"content_len", len(event.Content))
-		go w.db.DLQEnqueueOverflow(event)
+		go func() {
+			if err := w.db.DLQEnqueueOverflow(event); err != nil {
+				w.logger.Error("synthesis_worker: overflow enqueue failed",
+					"memory_id", event.ID,
+					"error", err)
+			}
+		}()
 	}
 }
 
@@ -157,6 +163,11 @@ func (w *SynthesisWorker) run() {
 }
 
 func (w *SynthesisWorker) processEvent(event MemoryEvent) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic recovered", "err", r)
+		}
+	}()
 	defer w.wg.Done()
 	defer func() { <-w.sem }() // release semaphore slot
 
@@ -259,6 +270,11 @@ func (w *SynthesisWorker) dlqEntriesForTest() ([]DLQEntry, error) {
 }
 
 func (w *SynthesisWorker) processDLQEntries(entries []DLQEntry) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic recovered", "err", r)
+		}
+	}()
 	for _, entry := range entries {
 		// Check if source memory was already synthesized (soft-deleted).
 		// This can happen when: (1) event goroutine succeeded but DLQ row not yet removed,
@@ -284,8 +300,14 @@ func (w *SynthesisWorker) processDLQEntries(entries []DLQEntry) {
 			if newAttempt >= 5 {
 				w.logger.Warn("synthesis_worker: dlq entry hard-stopped after 5 attempts",
 					"memory_id", entry.MemoryID, "last_error", err.Error())
+				DLQRemove(w.db.SQLDB(), entry.ID)
+				continue
 			}
-			DLQUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err)
+			if retryErr := DLQUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err); retryErr != nil {
+				w.logger.Error("synthesis_worker: dlq retry update failed",
+					"memory_id", entry.MemoryID, "error", retryErr.Error())
+				break
+			}
 		}
 	}
 }
@@ -313,7 +335,10 @@ func (w *SynthesisWorker) processOverflowEntries(entries []OverflowEntry) {
 				w.logger.Warn("synthesis_worker: overflow entry hard-stopped after 5 attempts",
 					"memory_id", entry.MemoryID, "last_error", err.Error())
 			}
-			OverflowUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err)
+			if retryErr := OverflowUpdateRetry(w.db.SQLDB(), entry.ID, newAttempt, err); retryErr != nil {
+				w.logger.Error("synthesis_worker: overflow retry update failed",
+					"memory_id", entry.MemoryID, "error", retryErr.Error())
+			}
 		}
 	}
 }
@@ -329,7 +354,7 @@ func (w *SynthesisWorker) drainAndExit() {
 		select {
 		case event, ok := <-w.events:
 			if !ok {
-				break
+				return
 			}
 			drainWg.Add(1)
 			w.sem <- struct{}{}
@@ -435,7 +460,16 @@ func getSynthVendorChain() []SynthVendor {
 
 // persistSynthesizedMemory saves a successful synthesis result and soft-deletes
 // the source memory. Used by the isolated synthesis worker.
-func persistSynthesizedMemory(dm *DatabaseManager, sourceID, sourceContent, synthesizedContent string, tags []string, vendor SynthVendor) {
+//
+// All three writes run inside a single transaction so a crash mid-write cannot
+// leave "zombie" source memories (new memory inserted, source not soft-deleted)
+// or orphaned topic links (source soft-deleted before its topics were copied).
+//
+// Ordering inside the tx: INSERT new memory → soft-delete source → copy topic
+// links. The topic-copy query intentionally omits the `m.deleted_at IS NULL`
+// filter that the previous version had: the source is now soft-deleted by
+// design, and we still need to copy its topic memberships forward.
+func persistSynthesizedMemory(dm *DatabaseManager, sourceID, _ string, synthesizedContent string, tags []string, vendor SynthVendor) {
 	metadata := map[string]interface{}{
 		"synthesized":    true,
 		"source_id":      sourceID,
@@ -450,22 +484,63 @@ func persistSynthesizedMemory(dm *DatabaseManager, sourceID, sourceContent, synt
 	allTags = append(allTags, "synthesized", "ltm")
 
 	embedding := EmbedText(synthesizedContent)
+	if embedding == nil {
+		// EmbedText may return nil; persist as NULL in SQLite.
+		embedding = []float32{}
+	}
 
-	newID, err := dm.SaveMemory("memories", synthesizedContent, "", allTags, metadata, embedding, true, 10)
+	tagsJSON, _ := json.Marshal(allTags)
+	metadataJSON, _ := json.Marshal(metadata)
+	embeddingJSON := "null"
+	if len(embedding) > 0 {
+		if b, err := json.Marshal(embedding); err == nil {
+			embeddingJSON = string(b)
+		}
+	}
+	newID := GenerateID()
+
+	tx, err := dm.SQLDB().Begin()
 	if err != nil {
-		slog.Error("synthesis_isolation: persist failed", "error", err.Error(), "source_id", sourceID)
+		slog.Error("synthesis_isolation: persist begin failed", "error", err.Error(), "source_id", sourceID)
+		return
+	}
+	defer tx.Rollback()
+
+	// 1. INSERT the synthesized memory in-place (joining the transaction).
+	// We can't use SaveMemory here because it opens its own connection.
+	if _, err := tx.Exec(`
+		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight)
+		VALUES (?, 'memories', ?, NULL, ?, ?, ?, 1, 10)
+	`, newID, synthesizedContent, string(tagsJSON), string(metadataJSON), embeddingJSON); err != nil {
+		slog.Error("synthesis_isolation: persist insert failed", "error", err.Error(), "source_id", sourceID)
 		return
 	}
 
-	dm.SQLDB().Exec(
+	// 2. Soft-delete the source. The `WHERE deleted_at IS NULL` guard ensures
+	// we only soft-delete a memory that is still live — a double-persist from
+	// a retried DLQ entry is a no-op rather than a tombstone overwrite.
+	if _, err := tx.Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, sourceID); err != nil {
+		slog.Error("synthesis_isolation: persist soft-delete failed", "error", err.Error(), "source_id", sourceID)
+		return
+	}
+
+	// 3. Copy topic memberships forward. The `m.deleted_at IS NULL` filter is
+	// intentionally dropped: we are the path that just soft-deleted the source.
+	if _, err := tx.Exec(
 		`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, role, created_at)
 		 SELECT ?, topic_id, role, created_at
-		 FROM topic_memberships
-		 WHERE memory_id = ?`,
+		 FROM topic_memberships tm
+		 WHERE tm.memory_id = ?`,
 		newID, sourceID,
-	)
+	); err != nil {
+		slog.Error("synthesis_isolation: persist topic copy failed", "error", err.Error(), "source_id", sourceID)
+		return
+	}
 
-	dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, sourceID)
+	if err := tx.Commit(); err != nil {
+		slog.Error("synthesis_isolation: persist commit failed", "error", err.Error(), "source_id", sourceID)
+		return
+	}
 
 	slog.Info("synthesis_isolation: synthesized", "source_id", sourceID, "new_id", newID, "vendor", vendor.Name)
 }

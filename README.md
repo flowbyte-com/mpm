@@ -1,42 +1,73 @@
 # MPM — Memory Persistence Module
 
-SQLite-native agent state management for AI agents. Single binary, zero external dependencies.
+> **⚡ MPM mpm mpm-std** — SQLite-native agent state management for AI agents.
 
-MPM provides long-term memory, behavioral modes, and persona management. Everything is stored in a single SQLite database with FTS5 full-text search — no server, no socket IPC, no complexity.
+MPM is a single binary that provides long-term memory, behavioral modes, persona management, and an epistemology engine — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
+
+MPM is the memory and reasoning layer for AI agents (OpenClaw + Hermes). It tracks not just *what* the agent knows, but *why* it decided to act and *what it believes but hasn't proven yet*.
 
 ---
 
-## Overview
+## What MPM Is NOT
 
-### Key Features
+- **Not a daemon** — every command is a single binary invocation. The optional watcher runs as a background goroutine, not a separate process.
+- **Not generic storage** — built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
+- **Not a human dashboard** — machine-to-machine interface is primary; CLI is a convenience layer.
 
-- **Unified SQLite database** with WAL mode for concurrent reads/writes
-- **Full-text search** via SQLite FTS5 — no external search service
-- **Inline importance chips** on recall results — reinforcement count, weight, LTM flag, last-accessed age, score (0–1)
-- **Auto-elevation on access** — frequently recalled memories grow stronger over time via per-session deduplication
-- **Weight system with feedback shortcuts** — `mpm +<id>` reinforces (+1, auto-clears challenge if contested); `mpm -<id>` weakens (-1, floor at 1 via SQL MAX). Flag collision guard protects `-v`, `-h`.
-- **Cognitive immune system** — on hybrid search, contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity; state collision (sim ≥ 0.85, one challenged) triggers async challenge log to `mirror.jsonl`; challenged memories surface with in-memory warning prepended — never written to DB.
-- **Ingestion overflow backpressure** — synthesis worker channel has 200-event buffer; overflow events beyond capacity are offloaded to `raw_memories` as `overflow_deferred` status, processed alongside normal DLQ entries with shared exponential backoff.
-- **Automatic decay & archival (heartbeat-wired)** — every 5 minutes on isolated DB connection: LTM memories decay exponentially via `MAX(weight - MAX(1, CAST(weight × DecayRate AS INTEGER)), 1)`; weight=1 memories past 30-day archive threshold are soft-deleted, terminal state captured in `memory_revisions` for `--as-of` time-travel.
-- **Spaced reinforcement review** — `mpm review --promoted` shows recently elevated; `mpm review --stale` surfaces forgotten LTM memories
-- **Topic auto-suggestion** — on save, system suggests linking to semantically related existing topics
-- **Stale memory flagging** — memories not accessed in N days flagged inline in recall results
-- **Epistemological pruning loop** — `mpm challenge <id>` flags a memory as challenged, creates a linked pending theory, and injects a warning into LLM recall; `mpm challenge restore <id>` resolves the theory and clears the flag; `mpm shred <id>` cascade-deletes both memory and theory. Fully closed loop, zero manual cleanup.
-- **Epistemic provenance stamping** — every memory tracks its origin: client (`mpm_cli`, `mpm_watch`), mode (`native`, `watch`), and persona (`operator`, `watch-daemon`). Stamped at write time in the metadata JSON under `$.provenance`.
-- **Multi-dimensional ISR telemetry** — `mpm ops stats` surfaces a nested Client → Model → Persona survival rate matrix, showing per-provenance active/total/decayed counts and Idea Survival Rate (ISR %).
-- **Reference library** — PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking
-- **Reference chunking control** — `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding
-- **Cross-reference linking** — bounded bidirectional Memory↔Topic↔Reference cross-refs on recall and topic show
-- **Session memory context** — `mpm wake` surfaces last session's mode, persona, topics, and recent memories
-- **Security scanning** — 20 regex patterns for API keys, tokens, secrets
-- **XITL Routing Engine** — `assume_stance`, `synthesize_stance`, `mpm ops promote` — hot-swap or generate personas with automatic mode-driven retrieval depth
-- **Mode-Driven Context Retrieval** — each mode specifies `retrieval_limit` and `retrieval_threshold` controlling how many FTS5 chunks the proactive hint engine pulls. Debugging mode: tunnel vision (3 chunks, strict threshold). Research mode: wide gather (20 chunks, loose threshold). The LLM sees its own retrieval parameters as operating instructions.
-- **Invisible CLI** — `cat idea.md | mpm` pipes stdin to add; bare `mpm token budget` defaults to recall; 7-command daily surface with everything else under `mpm ops`
-- **Proactive recall hints** — `mpm hint "conversation text"` and the `proactive_recall_hint` plugin tool surface relevant decisions and theories during conversation based on FTS5 keyword overlap
+---
 
-### What MPM Is NOT
+## Core Concepts
 
-MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch start`) is a single binary invocation. The watcher runs as a background goroutine within the same process, or as a detached child with `--bg` for systemd integration.
+### The JSON Boundary (`mpm call`)
+
+All MPM operations are accessible via a universal machine interface. Both OpenClaw (TypeScript) and Hermes (Python) agents call MPM using the same JSON protocol — no CLI flag parsing, no split-brain architecture.
+
+```bash
+# Universal machine interface — all MPM operations via JSON
+mpm call <tool> --payload JSON
+
+# Examples:
+mpm call save_to_memory --payload '{"fact": "Germany leads Group E with +6 GD", "tags": ["wc2026"]}'
+mpm call query_long_term_memory --payload '{"query": "World Cup prediction"}'
+mpm call propose_theory --payload '{"hypothesis": "Germany wins", "validationCriteria": "semi-final minimum"}'
+mpm call resolve_theory --payload '{"theoryId": "abc123", "conclusion": "confirmed", "newStatus": "proven"}'
+mpm call challenge_memory --payload '{"memoryId": "abc123", "evidence": "recent data contradicts this"}'
+```
+
+This is the **machine-to-machine interface**. The human-facing CLI (documented below) calls the same handlers internally.
+
+### Collections
+
+| Collection | Purpose | Default Weight |
+|---|---|---|
+| `memories` | General facts, synthesized insights | 1 |
+| `session` | Operational facts (CWD, model changes) | 1 |
+| `decisions` | Architectural choices with rationale | 1 |
+| `theories` | Hypothesis + validation criteria | 1 |
+| `lessons` | Insights, warnings, best practices | 1 |
+
+### Weight & Reinforcement
+
+Every memory has a `weight` (default 1.0). FTS5 BM25 score, reinforcement count, and recency all factor into relevance. LTM (long-term memory) threshold is weight ≥ 10.
+
+**Feedback-Driven Weight Adjustment:** `mpm +<id>` reinforces (+1, auto-clears challenge if contested); `mpm -<id>` weakens (-1, floor at 1 via SQL MAX). Flag collision guard protects `-v`, `-h`.
+
+```bash
+mpm +<id>    # Reinforce (+1, auto-clears challenge if contested)
+mpm -<id>    # Weaken (-1, floor at 1)
+mpm snooze <id>   # Bump relevance without LTM promotion
+mpm promote <id>  # Elevate to LTM (weight=10)
+mpm ops gc --shred-negative  # Shred memories with weight<0 AND proven theory exists
+```
+
+### Provenance & ISR Telemetry
+
+Every memory stamps its origin at write time:
+- `client` — `mpm_cli` or `mpm_call`
+- `mpm_mode` — `native` or `watch`
+- `mpm_persona` — `operator` or `watch-daemon`
+
+`mpm ops stats` surfaces a nested Client → Model → Persona matrix with Idea Survival Rate (ISR %) per cell — the percentage of memories with weight > 1 (not decayed to floor).
 
 ---
 
@@ -44,9 +75,9 @@ MPM is **not** a daemon. Every command (`mpm add`, `mpm recall`, `mpm watch star
 
 MPM tracks not just *what* it knows, but *why* it knows it, *how* it decided to act, and *what it believes but hasn't proven yet*. The Epistemology Engine extends the memory model into genuine agency — reasoning that can be examined, revised, and rendered obsolete.
 
-The core problem it solves: AI agents retrieve facts but lose the chain of reasoning behind them. Weeks later, 808 might redo work it already discarded, re-evaluate a decision that was already made, or miss that a hypothesis it formed was already tested and resolved. The Epistemology Engine makes reasoning explicit and persistent.
+**The core problem it solves:** AI agents retrieve facts but lose the chain of reasoning behind them. Weeks later, 808 might redo work it already discarded, re-evaluate a decision that was already made, or miss that a hypothesis it formed was already tested and resolved. The Epistemology Engine makes reasoning explicit and persistent.
 
-### Decision Ledger (`mpm record_decision`)
+### Decision Ledger
 
 An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, 808 can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
 
@@ -58,7 +89,7 @@ RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() 
 mpm decisions                   # Formatted decision ledger
 ```
 
-### Theory Tracker (`mpm propose_theory` / `mpm resolve_theory`)
+### Theory Tracker
 
 A hypothesis ledger for debugging and design. When 808 forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
 
@@ -73,21 +104,49 @@ mpm theories pending           # Filter to pending only
 mpm resolve_theory abc123 "confirmed: flag order matters, --json consumed before positional processing"
 ```
 
-### Proactive Recall Hints (`mpm hint`)
+### Proactive Recall Hints
 
 During a conversation, 808 can surface relevant decisions and theories before you know you need them. FTS5 keyword extraction detects semantic overlap with your current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content.
 
 ```bash
-mpm hint "discussing the CSS injection approach for the widget system"
+mpm kb hint "discussing the CSS injection approach for the widget system"
 # → 💡 [Recall] You decided: Route all widget CSS through agentshell_register_widget...
 #    RATIONALE: WordPress strips <style> blocks from post content...
 
-mpm hint "token budget handling in the CLI"
+mpm kb hint "token budget handling in the CLI"
 # → 💡 [Recall] Hypothesis: passing --json before the positional arg...
 #    STATUS: resolved | CONCLUSION: confirmed...
 ```
 
 The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — 808 calls it after context shifts and surfaces the most relevant epistemology memory automatically.
+
+### Challenge Lifecycle (Autonomous Pruning)
+
+The challenge system is a closed-loop immune response for memory integrity — the mechanism by which 808 actively questions and overturns its own outdated knowledge:
+
+```
+challenge ──────────────────────────────────────────────────────▶ [pending theory]
+    │
+    ├── challenge restore ──────────────────────────▶ [theory: disproven]
+    │
+    └── shred ──────────────────────────────────────▶ [theory: deleted]
+```
+
+**`mpm challenge <id> "<evidence>"`** — Atomic transaction:
+1. Patch memory metadata: `{"status":"challenged","challenged_theory_id":"<theory_id>"}`
+2. Create theory with back-link: `{"status":"pending","type":"challenge","memory_id":"<memory_id>"}`
+3. Weaken memory weight by 3
+
+**`mpm challenge restore <id>`** — Atomic transaction:
+1. Resolve theory: `status → disproven`, clear `memory_id`
+2. Clear memory metadata flags (RFC 7396 JSON patch)
+
+**`mpm shred <id>`** — Atomic transaction:
+1. DELETE topic_memberships WHERE memory_id = ?
+2. DELETE theory (if exists)
+3. DELETE memory
+
+**`mpm ops gc --shred-negative`** — Shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
 ### How It All Connects
 
@@ -110,87 +169,375 @@ The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop �
 | `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
 | `theories` (challenge) | `HYPOTHESIS: Memory <id> is obsolete.\nRATIONALE: <evidence>\nSTATUS: pending` |
 
-### Challenge Lifecycle (v1.2+)
+---
 
-The challenge system is a closed-loop immune response for memory integrity:
+## Quick Start
 
-```
-challenge ──────────────────────────────────────────────────────▶ [pending theory]
-    │
-    ├── challenge restore ──────────────────────────▶ [theory: disproven]
-    │
-    └── shred ──────────────────────────────────────▶ [theory: deleted]
-```
+```bash
+# Search memories (default — bare string → recall)
+mpm World Cup prediction
 
-**`mpm challenge <id> "<evidence>"`** — Atomic transaction:
-1. Patch memory metadata: `{"status":"challenged","challenged_theory_id":"<theory_id>"}`
-2. Create theory with back-link: `{"status":"pending","type":"challenge","memory_id":"<memory_id>"}`
-3. Weaken memory weight by 3
+# Add a fact
+mpm add Germany leads Group E with +6 goal differential
 
-**`mpm challenge restore <id>`** — Atomic transaction:
-1. Resolve theory: `status → disproven`, clear `memory_id`
-2. Clear memory metadata: `status + challenged_theory_id` set to `null` (key removal, RFC 7396)
+# Interactive add
+mpm add -i
 
-**`mpm shred <id>`** — Atomic transaction:
-1. DELETE topic_memberships WHERE memory_id = ?
-2. DELETE theory (if exists)
-3. DELETE memory
+# System status
+mpm status
+mpm ops stats
 
-**Recall warning:** Challenged memories surface with `[Note: This memory is challenged — treat as unverified]` prepended to LLM content. Human output shows `[CHALLENGED]` chip.
+# Session bootstrap (last session context)
+mpm wake
 
-### Provenance Stamping & ISR Telemetry
+# Knowledge base
+mpm kb memory list
+mpm kb theories pending
+mpm kb decisions
+mpm kb hint "discussing the CSS approach"
 
-Every memory carries a provenance block in its JSON metadata, stamped at write time. Three fields identify the origin:
-
-| Field | Meaning | CLI Value | Watch Value |
-| --- | --- | --- | --- |
-| `client` | Ingress point | `mpm_cli` | `mpm_watch` |
-| `mpm_mode` | Operating mode at write time | `native` | `watch` |
-| `mpm_persona` | Active persona at write time | `operator` | `watch-daemon` |
-
-The provenance block sits under `$.provenance` alongside `source`, `model`, and `compute`, and is entirely transparent to the decay engine (decay targets `$.provenance.compute` — new fields are co-located but ignored by the decay multiplier).
-
-**ISR Telemetry** (`mpm ops stats`):
-
-The epistemic provenance registry groups memories by their origin into a nested client → model → persona matrix, computing Idea Survival Rate (ISR) as the percentage of memories in each cell with weight > 1 (i.e., not decayed to floor):
-
-```
-== Epistemic Provenance Registry (Client → Model → Persona) ==
-
-  Client: mpm_cli
-  ├─ Model: direct (Compute: absolute)
-  │  └─ Persona: operator
-  │     Total: 42 | Active: 38 | Decayed: 4 | ISR: 90.5%
-
-  Client: mpm_watch
-  └─ Model: direct (Compute: absolute)
-     └─ Persona: watch-daemon
-        Total: 15 | Active: 12 | Decayed: 3 | ISR: 80.0%
+# Engine room
+mpm ops doctor
+mpm ops gc
+mpm ops maintain
 ```
 
-Legacy memories without provenance fields produce `"unknown"` values and appear in their own group, ensuring zero breakage on upgrade.
+---
 
-### Epistemology CLI Commands
+## CLI Reference
 
-| Command | Purpose |
-| --- | --- |
-| `mpm record_decision <text>` | Log a decision with context, choice, rationale |
-| `mpm decisions` | Formatted decision ledger |
-| `mpm propose_theory <text>` | Record a hypothesis with validation criteria |
-| `mpm theories [pending\|resolved\|all]` | List theories with status chips |
-| `mpm resolve_theory <id> <conclusion>` | Mark theory resolved, bump weight |
-| `mpm challenge <id> "<evidence>"` | Flag memory as challenged, create linked pending theory (atomic tx) |
-| `mpm challenge restore <id>` | Resolve linked theory (status → disproven), clear challenged flag (atomic tx) |
-| `mpm shred <id>` | Cascade-delete memory and linked theory (atomic tx) |
-| `mpm hint <text> [--max <n>] [--json]` | Proactive recall from conversation context |
+### Daily Commands (root level)
 
-Topics `theories` and `decisions` are auto-created on first use. Memories in these collections are auto-linked to their topic via `topic_memberships`. The watcher auto-detects `HYPOTHESIS:` and `CHOICE:` prefixes in `.md` files and routes them to the correct collection.
+```bash
+mpm <query>        # FTS5 search (default when called with a bare string)
+mpm add <text>     # Add a new memory
+mpm add -i         # Interactive add — opens $EDITOR
+mpm snooze <id>    # Bump a memory's relevance (no LTM promotion)
+mpm ls             # List recent memories
+mpm show <id>      # Show one memory
+mpm rm <id>        # Soft delete
+mpm wake           # Last session context (mode, persona, topics, recent memories)
+mpm call <tool>    # Universal machine interface (JSON payload)
+mpm status         # System status dashboard
+mpm web            # Start web UI server
+mpm version        # Version info
+mpm help           # Full help
+```
+
+### `kb` — Knowledge Base
+
+Entity-centric interface to all MPM collections.
+
+```bash
+# Memory
+mpm kb memory list
+mpm kb memory search <query>
+mpm kb memory show <id>
+mpm kb memory add <content>
+mpm kb memory shred <id>
+
+# Topic
+mpm kb topic list
+mpm kb topic add <name> [description]
+mpm kb topic search <query>
+mpm kb topic show <id>
+mpm kb topic shred <id>
+mpm kb topic link <topicId> <linkTopicId>
+
+# Lesson
+mpm kb lesson list
+mpm kb lesson list --type warning
+mpm kb lesson add <content> [--type warning|practice|insight]
+mpm kb lesson search <query>
+mpm kb lesson get <id>
+mpm kb lesson shred <id>
+mpm kb lesson stats
+
+# Session
+mpm kb session list
+mpm kb session search <query>
+mpm kb session show <id>
+mpm kb session shred <id>
+
+# Reference library (PDF, EPUB, MD, TXT, HTML)
+mpm kb reference add <file> [--tag tags]
+mpm kb reference list
+mpm kb reference search <query>
+mpm kb reference show <id>
+mpm kb reference shred <id>
+
+# Epistemology
+mpm kb theories [pending|resolved|all]
+mpm kb decisions
+mpm kb propose_theory <theoryId>       # Interactive hypothesis + criteria
+mpm kb resolve_theory <theoryId> <status>
+mpm kb record_decision <decisionId>     # Interactive context/choice/rationale
+mpm kb hint <topic>                    # Proactive recall from conversation context
+```
+
+### `ops` — Engine Room
+
+Maintenance, diagnostics, synthesis, and power tools.
+
+```bash
+# Core engine
+mpm ops doctor [--explain]          # Diagnostics (--explain shows FTS5 query plan)
+mpm ops maintain                     # Self-maintenance: decay, consolidate, prune
+mpm ops synthesize [--dry-run]       # LLM synthesis on all memories
+mpm ops gc [--dry-run|--review|--purge|--shred-negative]  # Decay sweep
+mpm ops backfill-embeddings [--batch-size|--collection|--dry-run]  # Embedding pipeline
+mpm ops dlq:review [review|clear|retry]  # Dead letter queue — failed synth events
+
+# Watcher
+mpm ops watch start [--bg]|stop|status   # Watcher daemon (goroutine-based)
+
+# UI
+mpm ops web [--port <n>]            # Web UI server + SSE telemetry at /api/stream
+mpm ops review [--promoted|--stale]  # Spaced reinforcement review
+
+# Diagnostics
+mpm ops stats                       # Memory statistics + ISR telemetry
+mpm ops status                      # System dashboard (memory counts, daemon, synthesis)
+mpm ops prune [--older-than <n>d]   # Prune expired memories
+
+# Data
+mpm ops export [--jsonl]            # Export to JSON
+mpm ops backup [path]               # Database backup (.sql dump)
+mpm ops restore-db <path>           # Restore from .sql dump
+mpm ops ingest <path>               # Import from external SQLite
+
+# Context
+mpm ops switch                      # Interactive persona/mode switcher
+mpm ops directives                  # Show behavioral directives
+mpm ops wake                        # Show last session context
+
+# Mode & Persona
+mpm ops mode [list|active|remove|clear]
+mpm ops persona [list|active|set|clear]
+
+# XITL Stance (runtime persona hot-swap — no restart required)
+mpm ops stance assume <mode> <persona> <rationale>
+mpm ops stance synthesize <name> [flags]
+mpm ops stance promote              # Flush ephemeral persona to permanent disk file
+
+# Entity ops
+mpm ops topic|lesson|session|reference|memory|wake|gateway
+```
+
+### `debug` — Low-Level Inspection
+
+```bash
+mpm debug history <memoryId>         # Version history for a memory
+mpm debug diff <memoryId> <v1> <v2> # Unified diff between two versions
+mpm debug diff-lines <text1> <text2>  # Compute diff of two text blocks
+mpm debug patch-memory <id> <json>   # Patch metadata in-place (FTS untouched)
+mpm debug shred <id>                # Secure cascade-delete memory + linked theory
+mpm debug show <id>                 # Show memory details
+mpm debug gc [--dry-run]            # Decay sweep (dry-run for inspection)
+```
+
+---
+
+## Full Feature Reference
+
+### Hybrid Semantic Search
+
+BM25 full-text search combined with cosine similarity from `nomic-embed-text` embeddings (768d). BM25 unbounded scores are sigmoid-normalized. Use `--semantic` flag to enable pure embedding search.
+
+```bash
+mpm recall --semantic "为什么德国队表现这么好"
+```
+
+### Embedding Pipeline
+
+- Auto-embed on `mpm add` and all watcher ingest paths
+- `mpm ops backfill-embeddings` — batched, resume-safe backfill for existing memories
+- tiktoken (cl100k_base) for token-aware chunking
+
+### Cognitive Immune System
+
+On hybrid search, contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity. State collision (sim ≥ 0.85, one challenged) triggers async challenge log to `mirror.jsonl`. Challenged memories surface with in-memory warning prepended — **never written to DB**.
+
+### SSE Live Telemetry Stream
+
+The web UI server includes a live Server-Sent Events (SSE) stream at `GET /api/stream` — no polling, no refresh. Every state-changing operation across both the agent/CLI path and the human/web UI path fans out the same event to all connected browser tabs simultaneously.
+
+**Architecture:**
+- `SSEBroker` — package-level singleton in `cmd/mpm/stream.go`, distinct from any HTTP server instance, so it can be called from `main()` with no server handle
+- 50-slot **ring buffer** — last 50 events cached for replay on browser reconnect via `Last-Event-ID` header
+- Dual injection paths:
+  - **Agent/CLI path** (`call.go`): `handleCall` POSTs to `/api/internal/broadcast` relay endpoint after every tool completes. The relay is synchronous (completes before `mpm call` exits) so no events are lost to goroutine preemption.
+  - **Human/web UI path** (`handlers.go`): `Broker().Broadcast()` called directly in each handler
+- 15s **heartbeat ping** — prevents proxy idle-kill on long-lived SSE connections
+- 256-buffered client channels — slow consumers skip events (non-blocking send), never blocking broadcast
+- Deferred `unregister` on `r.Context().Done()` — goroutine leak prevention on browser disconnect
+
+**Broadcast events:**
+
+| Event | Trigger | Payload |
+|---|---|---|
+| `tool_exec` | Any `mpm call` completion | `tool`, `result` |
+| `memory_saved` | `save_to_memory` / web UI add | `id`, `content`, `collection`, `tags`, `provenance` |
+| `immune_slash` | `challenge_memory` | `memory_id`, `theory_id`, `action`, `theory_status` |
+| `theory_proposed` | `propose_theory` | `id`, `hypothesis`, `status` |
+| `theory_resolved` | `resolve_theory` | `id`, `status`, `conclusion`, `resolved_at` |
+| `lesson_saved` | `save_lesson` | `id`, `type`, `fact` |
+| `ping` | 15s heartbeat | `{}` |
+
+
+**Browser client (`app.js`):**
+- `EventSource('/api/stream')` with `Last-Event-ID` replay — on reconnect, browser sends `Last-Event-ID` and server replays all buffered events with ID > lastSeen
+- `localStorage.setItem('mpm_sse_id', lastEventId)` — persisted across page reloads
+- Connection status dot: orange (connecting) → green (live) → red (disconnected)
+- DOM mutators: `prependMemoryCard`, `prependLessonCard`, `flashMatrixCell` — no second GET round-trip
+- `refreshStats()` on theory events — silent re-fetch of `/api/status`
+
+
+**CSS animations (`style.css`):**
+- `@keyframes fadeSlideIn` — memory/lesson cards slide in from top on arrival
+- `.slashed` — `text-decoration: line-through` + `opacity: 0.5` for challenged memories
+- `[data-isr-cell]` flash transition for theory resolve/propose
+
+**Web port discovery:** The web server writes its active port to `~/.mpm/web.port` on startup (and removes it on exit). `mpm call` reads this file to find the relay endpoint — no environment variable inheritance required between separate process invocations.
+
+### Watcher / Synth Isolation + DLQ
+
+Watcher and synthesis run on isolated SQLite read connections (WAL readers are thread-safe). Synthesis events pass through a typed channel with a **200-event buffer**. **Overflow backpressure:** events beyond capacity are offloaded to `raw_memories` as `overflow_deferred`, processed alongside normal DLQ entries with shared exponential backoff. Failed synthesis events route to `synthesis_dlq` — **never dropped, never blocking**.
+
+Multi-vendor fallback chain: **MiniMax → OpenAI → Ollama (local)**. Each vendor has independent timeout (10s). All vendors fail → DLQ enqueue. Periodic retry tick processes DLQ when vendors recover.
+
+```bash
+mpm ops dlq:review review    # Inspect DLQ
+mpm ops dlq:review retry     # Process pending retries
+mpm ops dlq:review clear    # Clear resolved DLQ entries
+```
+
+### Deadlock Observability
+
+`DatabaseManager` watchdog writes to `watchdog.jsonl` (separate from `mirror.jsonl`). Slow query threshold: 100ms. Exponential backoff on lock contention. `ExecTracked`, `QueryTracked`, `QueryRowTracked` methods log all DB operations.
+
+### Automatic Decay & Archive
+
+Every 5 minutes: LTM memories decay exponentially via `MAX(weight - MAX(1, CAST(weight × DecayRate AS INTEGER)), 1)`. Weight=1 memories past 30-day archive threshold are soft-deleted, terminal state captured in `memory_revisions` for `--as-of` time-travel.
+
+### Memory Versioning
+
+Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions.
+
+```bash
+mpm debug history abc123
+mpm debug diff abc123 v1 v2
+```
+
+### Topic Auto-Suggestion
+
+On `mpm add`, the system automatically suggests linking to semantically related existing topics. Topics are also auto-created for epistemology collections (`decisions`, `theories`).
+
+### Cross-Reference Linking
+
+Bounded bidirectional Memory↔Topic↔Reference cross-refs. Links are created on save and surfaced on recall. `mpm kb topic link <topicId> <linkTopicId>` creates cross-links manually.
+
+### Challenge Lifecycle
+
+See **Epistemology Engine → Challenge Lifecycle** for the full explanation, atomic transactions, and workflow diagram.
+
+### Proactive Hint Engine
+
+FTS5-triggered recall hints via `mpm hint` and `proactive_recall_hint` plugin tool. Extracts conversation keywords (tiktoken, stopword filter), finds epistemology overlaps via BM25, surfaces STATUS and RATIONALE inline — not just the content.
+
+Quality rules: one hint per turn, score >= -3.0, 10-turn suppression window, FTS5 keyword overlap detection.
+
+```bash
+mpm kb hint "discussing the CSS injection approach"
+# → 💡 [Recall] You decided: Route all widget CSS through...
+#    RATIONALE: WordPress strips <style> blocks from post content...
+```
+
+### Synthesis Deduplication
+
+Context-aware deduplication: synthesis deletes the triggering memory after LTM save, preserves oldest `created_at`, transfers topic_memberships, excludes epistemology collections, quality gate requires ≥2 candidates.
+
+### Reference Library
+
+PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking. `--chunk-size` flag (64–2048 tokens, default 512) via tiktoken batch encoding. Source tracking with `[Source: ...]` inline chips. Cross-reference linking on recall.
+
+### Session Memory Context (`wake`)
+
+`mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
+
+### XITL Stance Hot-Swap
+
+`mpm ops stance assume <mode> <persona> <rationale>` switches mode/persona at runtime with no restart. The new directive prints to stdout — OpenClaw captures it and injects into session chat history, so the agent reads and adopts it on the very next turn.
+
+`mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt, stored in `system_config`. `mpm ops stance promote` flushes it to a permanent `.md` disk file.
+
+### Modes & Personas (File-Based)
+
+Modes and personas are `.md` files with YAML frontmatter. **No database, no compile step.** Filename is the identity.
+
+```bash
+mode/       # mode/*.md files
+persona/    # persona/*.md files
+active.json # active mode/persona state
+```
+
+Each mode specifies retrieval parameters governing the proactive hint engine:
+
+| Mode | retrieval_limit | retrieval_threshold |
+|---|---|---|
+| `debugging` | 3 | -2.5 |
+| `research` | 20 | -1.0 |
+| `architect` | 10 | -1.5 |
+| `programming` | 5 | -2.0 |
+| `standard` | 7 | -1.5 |
+
+JIT ephemeral personas can override `retrieval_limit` in their JSON blob. A 50-chunk window for a massive codebase migration is valid — the Go backend respects whatever limit the ephemeral persona specifies.
+
+### Security Scanning
+
+Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but **never reaches the database**.
+
+### Fsnotify Reconciliation
+
+30s startup delay + 10-min periodic sweep (25 file/sweep cap) reconciles the filesystem state. `source_path` metadata check prevents re-ingestion of already-processed files.
+
+### Spaced Reinforcement Review
+
+```bash
+mpm ops review --promoted   # Show recently elevated LTM memories
+mpm ops review --stale      # Surface forgotten LTM memories
+```
+
+---
+
+## OpenClaw Agent Integration
+
+MPM is installed as an OpenClaw plugin (`openclaw/mpm-plugin/`), giving the agent **native function-calling access** to 19 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
+
+**Available tools:**
+
+```
+query_long_term_memory   save_to_memory            save_lesson
+search_lessons           list_lessons              create_topic
+search_topics            link_topic                add_reference
+search_references        list_references           read_directives
+read_wake_context        record_decision           propose_theory
+resolve_theory           proactive_recall_hint     challenge_memory
+```
+
+Setup and config: see [`openclaw/OPENCLAW.md`](openclaw/OPENCLAW.md).
+
+---
+
+## Hermes Agent Integration
+
+MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Both agents use the **same Go backend** — identical behavior, identical database, same `mpm call` JSON boundary. The Hermes plugin uses Python `subprocess` for the JSON boundary; the OpenClaw plugin uses Node `child_process`.
+
+Setup: see [`hermes-mpm-plugin/install.md`](hermes-mpm-plugin/install.md).
 
 ---
 
 ## Architecture
-
-### Single-Process, Shared-Database Model
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -207,248 +554,72 @@ Topics `theories` and `decisions` are auto-created on first use. Memories in the
 │  │         └──────────┬─────────┘              │        │ │
 │  │                    ▼                        │        │ │
 │  │         ┌─────────────────────┐             │        │ │
-│  │         │  Shared DBManager    │             │        │ │
-│  │         │  (SQLite + WAL)      │             │        │ │
+│  │         │  Shared DBManager   │             │        │ │
+│  │         │  (SQLite + WAL)     │             │        │ │
 │  │         └──────────┬────────────┘             │        │ │
 │  └────────────────────┼────────────────────────┘        │ │
 │                        ▼                                  │ │
 │              ┌─────────────────┐                         │ │
-│              │   mpm.db         │  (unified database)    │ │
+│              │    mpm.db       │  (unified database)     │ │
 │              └─────────────────┘                         │ │
+│                                                            │ │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │              SSEBroker (stream.go)                  │    │
+│  │  • Package-level singleton                         │    │
+│  │  • 50-slot ring buffer (replay on reconnect)       │    │
+│  │  • 15s heartbeat ticker                            │    │
+│  │  • Fan-out to 256-buffered client channels         │    │
+│  │  • /api/stream  +  /api/internal/broadcast         │    │
+│  └──────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Key points:**
-
-1. **No socket IPC** — Commands execute in the same process
-2. **No separate watcher process** — `mpm watch start` runs a background goroutine; `--bg` spawns a detached child for systemd
-3. **Unified WAL pool** — All access through one `DatabaseManager` with SQLite WAL mode
-4. **Worker pool** — Fixed 3-goroutine pool processes watcher events concurrently
-5. **PID file** — When detached, watcher writes PID to `watch.pid` for `stop`/`status` commands
-
-### Memory Model
-
-| Collection | Purpose | Default Weight | Notes |
-| --- | --- | --- | --- |
-| `memories` | General facts, LLM-synthesized insights | 1 | Tagged for auto-topic clustering |
-| `session` | Operational facts (CWD, model changes) | 1 | State-change dedup, 24h TTL |
-| `decisions` | Architectural choices with rationale | 1 | Append-only audit trail |
-| `theories` | Hypothesis + validation criteria | 1 | Has lifecycle: pending → proven/disproven |
-
-**Long-term memory (LTM):** any memory with `weight >= 10`. Promoted by `mpm promote <id>` or auto-ingested `.md` files from the watcher.
-
-**Relevance scoring:** `score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
+- No socket IPC — commands execute in the same process
+- Watcher = background goroutine (not separate process); `--bg` spawns detached child for systemd
+- Synthesis = isolated goroutine with independent panic recovery and deadline propagation
+- DLQ = SQLite table; failed synth events retried every 5min via ticker
+- Multi-vendor failover: MiniMax → OpenAI → Ollama → DLQ
+- SSEBroker is a package-level singleton — callable from `main()` with no HTTP server handle; agent/CLI path relays via `POST /api/internal/broadcast`
 
 ### Database Schema
 
 | Table | Purpose |
-| --- | --- |
-| `memories` | Core storage with FTS5-triggered embedding |
-| `memory_revisions` | Append-only version history for time-travel (`--as-of`) and archival audit |
+|---|---|
+| `memories` | Core storage with FTS5 full-text search + embeddings |
+| `memory_revisions` | Append-only version history for `--as-of` time-travel |
 | `sessions` | Session metadata and transcripts |
 | `topics` | Topic definitions |
 | `topic_memberships` | Memory-to-topic links |
 | `lessons` | Learned lessons (insight/warning/practice) |
 | `reference_docs` | Reference document metadata |
 | `reference_chunks` | Smart Fence chunks from ingested documents |
-| `system_config` | Configuration snapshots (hash-verified) |
-| `external_db_cursors` | Sync cursors for external DB polling |
+| `system_config` | Configuration snapshots, ephemeral personas |
 | `raw_memories` | Staging area for ingest workflow |
 | `synthesis_dlq` | Dead-letter queue for failed synthesis jobs |
 | `synthesis_raw` | Overflow deferred entries pending retry |
-
-### Schema Registry (Adapter Pattern)
-
-MPM uses a **Schema Registry** with the Adapter pattern to support multiple external database schemas.
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      AdapterRegistry                              │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-│  │ OpenClawAdapter │  │   MPMAdapter    │  │ FutureAdapter   │ │
-│  │   (chunks)      │  │   (memories)    │  │  (obsidian...)  │ │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘ │
-└───────────┼────────────────────┼────────────────────┼───────────┘
-            ▼                    ▼                    ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  SchemaAdapter Interface                                          │
-│  ├── Name() string              → "openclaw", "mpm", etc.       │
-│  ├── Detect(*sql.DB) bool      → Does this DB match?            │
-│  └── FetchNew(*sql.DB, cursor) ([]Memory, string, error)          │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**Adding a new adapter:** create struct implementing `SchemaAdapter`, register in `NewAdapterRegistry()`.
-
-### Security
-
-Content is scanned against **20 regex patterns** before any database write — API keys, JWTs, SSH keys, connection strings, password patterns. Blocked content goes to `mirror.jsonl` but never reaches the database.
-
----
-
-## Modes & Personas (File-Based)
-
-Modes and personas are `.md` files with YAML frontmatter. **No database, no compile step.** Filename is the identity.
-
-```
-mode/                    # mode/*.md files
-persona/                 # persona/*.md files
-active.json              # active mode/persona state (only JSON needed)
-```
-
-**Format:**
-
-```markdown
----
-name: programming
-title: Programming Mode
-version: 1.0
-status: active
-purpose: Systematic, precise, architectural
-description: Write clean, type-safe code
----
-
-# Programming Mode
-
-## Purpose
-Systematic, precise, architectural. Thinks in code structures and abstraction boundaries.
-
-## Patterns
-- Always check types before suggesting implementations
-- Prefer pure functions over stateful logic
-
-## Anti-Patterns
-- Premature abstraction
-- Silent error handling
-```
-
-**Mode-Driven Retrieval Parameters**
-
-Each mode file specifies two YAML fields that govern the proactive recall engine:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `retrieval_limit` | int | Max FTS5 chunks to pull per hint query |
-| `retrieval_threshold` | float64 | Min BM25 score to be considered relevant (lower = stricter) |
-
-Defaults: `retrieval_limit: 5`, `retrieval_threshold: -1.0` when mode lacks the fields.
-
-| Mode | limit | threshold | Behavior |
-|---|---|---|---|
-| `debugging` | 3 | -2.5 | Tunnel vision — only the most highly weighted, directly relevant facts |
-| `research` | 20 | -1.0 | Wide gather — build the full picture from scattered fragments |
-| `architect` | 10 | -1.5 | Structural depth — trades breadth for clarity of component edges |
-| `programming` | 5 | -2.0 | Precision — clean, minimal, high-signal only |
-| `standard` | 7 | -1.5 | Balanced — neither turbocharged nor constrained |
-
-These parameters apply only to the **proactive hint engine** and are exposed to the LLM in `GetSystemPrompt()` as operating instructions. Explicit `mpm recall` is **untouched** — human commands always override.
-
-JIT ephemeral personas can set custom `retrieval_limit` in their JSON blob. A 50-chunk window for a massive codebase migration is valid — the Go backend respects whatever limit the ephemeral persona specifies.
-
-**Active state** (`active.json`):
-```json
-{
-  "persona": "auto",
-  "modes": ["auto"],
-  "updated": "2026-05-20T11:00:00Z"
-}
-```
-
-Setting `mode` or `persona` to `"auto"` enables the XITL self-routing engine. When auto is active, 808 can invoke `assume_stance` to hot-swap an existing persona, or `synthesize_stance` to generate a JIT ephemeral persona stored in `system_config`. The new directive is printed to stdout — OpenClaw captures it and injects into the session chat history, so 808 reads and adopts it on the very next turn. No restart, no polling, no core changes. Only `mpm ops promote` writes a new `.md` file to disk — no disk bloat from experimental personas.
-
----
-
-## OpenClaw Plugin Integration
-
-MPM ships as an OpenClaw plugin, giving any OpenClaw agent native function-calling access to the MPM memory layer. The plugin exposes 19 tools:
-
-| Tool | Purpose |
-| --- | --- |
-| `query_long_term_memory` | Semantic recall across all collections |
-| `save_to_memory` | Persist facts, lessons, decisions |
-| `save_lesson` | Record learned patterns (warning/practice/insight) |
-| `search_lessons` | Search lesson store |
-| `list_lessons` | List all lessons |
-| `create_topic` | Create topic definitions |
-| `search_topics` | Search topics |
-| `link_topic` | Associate memory with topic |
-| `add_reference` | Ingest documents to reference library |
-| `search_references` | Search reference chunks |
-| `list_references` | List reference documents |
-| `read_directives` | Read prime directives |
-| `read_wake_context` | Read last session's context (mode, persona, topics, memories) |
-| `record_decision` | Log architectural choices with rationale |
-| `propose_theory` | Log hypothesis before writing fix |
-| `resolve_theory` | Mark theory proven/disproven, patch metadata in-place |
-| `proactive_recall_hint` | Surface relevant decisions/theories from conversation context |
-| `challenge_memory` | Challenge a memory — atomic transactional flag with linked theory; auto-resolves on restore; cascade-deletes on shred |
-
-See [`docs/OPENCLAW.md`](docs/OPENCLAW.md) for the full integration guide including plugin setup, config, verification, and troubleshooting.
-
----
-
-## Installation
-
-### Build from Source
-
-**Requirements:**
-- Go 1.18+
-- C compiler (for `mattn/go-sqlite3`)
-- SQLite with FTS5 support
-
-**Build:**
-```bash
-cd /home/v/workspace/projects/mpm
-make build
-```
-
-**Install:**
-```bash
-sudo cp bin/mpm /usr/local/bin/mpm
-```
-
-> **Important:** Use `make build` (passes `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5=1"`). Plain `go build` silently fails FTS5 indexing, breaking `mpm recall`.
-
-### Systemd Service
-
-```bash
-sudo cp /home/v/workspace/projects/mpm/contrib/systemd/mpm.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable mpm
-sudo systemctl start mpm
-systemctl status mpm
-journalctl -u mpm -f
-```
-
-The service runs `mpm watch start` (goroutine-based watcher, not detached). Systemd manages lifecycle — no `--bg` needed.
 
 ---
 
 ## Configuration
 
-MPM reads `mpm_config.json` from the workspace root.
-
-**Example:**
 ```json
 {
   "aliases": {
     "s": "recall",
-    "in": "add -i",
-    "mem": "recall --collection memories"
+    "in": "add -i"
   },
-  "memory_dirs": ["/home/user/.openclaw/workspace/memory"],
-  "sessions_dirs": ["/home/user/.openclaw/agents/main/sessions"],
+  "memory_dirs": ["./memory"],
+  "sessions_dirs": ["./sessions"],
   "external_dbs": [
     {
-      "path": "/home/user/.openclaw/memory/main.sqlite",
+      "path": "~/.openclaw/memory/main.sqlite",
       "label": "openclaw",
       "interval_seconds": 30
     }
   ],
-  "web_token": "your-secret-token",
   "synth": {
     "model": "MiniMax-M2.7",
-    "api_key": "YOUR_API_KEY",
+    "api_key": "***",
     "base_url": "https://api.minimax.io/anthropic",
     "max_tokens": 1024,
     "timeout_seconds": 300
@@ -456,209 +627,88 @@ MPM reads `mpm_config.json` from the workspace root.
 }
 ```
 
-### Path Resolution
+### Default File Locations
 
-| Path | Resolution |
-| --- | --- |
-| `MPM_WORKSPACE` env var | Explicit override |
-| `mpm_config.json` (`sessions_dirs`, `memory_dirs`) | Explicit configuration |
-| `~/.mpm/` | Standard home fallback |
-
-| Data | Default Location |
-| --- | --- |
+| Data | Path |
+|---|---|
 | Database | `~/.mpm/mpm.db` |
-| Sessions | Configured via `sessions_dirs` |
-| Mirror log | `~/.mpm/mirror.jsonl` |
 | Modes | `~/.mpm/mode/` |
 | Personas | `~/.mpm/persona/` |
+| Mirror log | `~/.mpm/mirror.jsonl` |
+| Watchdog log | `~/.mpm/watchdog.jsonl` |
 
----
-
-## Usage & Commands
-
-### Daily Commands (7 total — everything else is `mpm ops`)
-
-```bash
-mpm <query>       Search memories (default-to-recall for bare string)
-mpm add <text>    Add a new memory
-mpm add -i        Interactive add — opens $EDITOR
-mpm snooze <id>   Bump a memory's relevance (no LTM promotion)
-mpm ls            List memories
-mpm show <id>     Show memory details
-mpm rm <id>       Delete a memory
-mpm ops           Engine room — maintenance, diagnostics, synthesis
-mpm help          Full help
-```
-
-### Pipe & Aliases
-
-```bash
-cat idea.md | mpm       Pipe stdin to add (shows preview, confirms before save)
-mpm s "query"          User alias for recall (defined in mpm_config.json)
-mpm in                 User alias for add -i
-```
-
-### Epistemology Engine
-
-```bash
-mpm propose_theory "HYPOTHESIS: ...\nVALIDATION_CRITERIA: ..."
-mpm theories           List all theories with status chips
-mpm theories pending  Filter to pending only
-mpm resolve_theory <id> <conclusion>
-mpm record_decision "CONTEXT: ...\nCHOICE: ...\nRATIONALE: ..."
-mpm decisions          Show formatted decision ledger
-```
-
-### Engine Room (`mpm ops <command>`)
-
-All maintenance, diagnostics, and rare commands. `mpm ops help` lists them all. All commands below also work at root level (backwards compatible).
-
-```bash
-mpm ops doctor [--fix]       Diagnostics + auto-repair
-mpm ops maintain            Self-maintenance (decay, consolidate, prune)
-mpm ops synthesize          LLM synthesis on all memories
-mpm ops gc [--dry-run]       Memory decay sweep
-mpm ops review              Spaced reinforcement review
-mpm ops watch start [--bg]  Watcher daemon (start/stop/status)
-mpm ops web                 Start web UI
-mpm ops stats                Memory statistics
-mpm ops status               System dashboard (memory counts, daemon, synthesis stats)
-mpm ops prune                Prune expired memories
-mpm ops export               Export all to JSON
-mpm ops backup [path]        Database backup
-mpm ops restore-db <path>    Restore from .sql dump
-mpm ops ingest <path>        Import from external SQLite
-mpm ops stance assume <mode> <persona> <rationale>  XITL: hot-swap existing persona (auto required)
-mpm ops stance synthesize <name> [flags]          XITL: generate JIT ephemeral persona
-mpm ops promote                                   XITL: flush ephemeral persona to disk
-mpm ops mode | persona       Mode and persona operations
-mpm ops topic | lesson       Topic and lesson operations
-mpm ops session | memory     Session and memory operations
-mpm ops reference             Reference library
-mpm ops wake                  Show last session context
-mpm ops gateway               Gateway control
-```
-
-### Aliases Configuration
-
-User-defined shortcuts in `mpm_config.json`. The DWIM layer is entirely user-controlled.
-
-```json
-{
-  "aliases": {
-    "s": "recall",
-    "in": "add -i",
-    "mem": "recall --collection memories"
-  }
-}
-```
-
-Chain expansion: `mpm s foo bar` → `mpm recall foo bar`. `--version`, `-v`, `help` bypass alias resolution.
-
-### All Commands (Full Reference)
-
-| Command | Notes |
-| --- | --- |
-| **Daily** | |
-| `mpm add <text> [--tag <tag>] [--weight <n>]` | Add memory |
-| `mpm add -i` | Interactive add via $EDITOR |
-| `mpm recall <query>` | FTS5 search (or bare `mpm <query>`) |
-| `mpm snooze <id>` | Bump relevance |
-| `mpm ls [--collection <c>] [--tag <t>] [--since <date>] [--limit <n>]` | List memories |
-| `mpm show <id>` | Show one memory |
-| `mpm rm <id>` | Soft delete |
-| **Epistemology** | |
-| `mpm propose_theory <text>` | Record hypothesis + validation criteria |
-| `mpm theories [pending\|resolved\|all]` | List theories with status chips |
-| `mpm resolve_theory <id> <conclusion>` | Mark resolved, bump weight |
-| `mpm record_decision <text>` | Log decision (context + choice + rationale) |
-| `mpm decisions` | Formatted decision ledger |
-| **Memory lifecycle** | |
-| `mpm promote <id>` | Elevate to LTM (weight=10) |
-| `mpm reinforce <id> [n]` | +N reinforcement |
-| `mpm weaken <id>` | -1 reinforcement |
-| `mpm set-weight <id> <n>` | Set weight directly |
-| `mpm patch-memory <id> '<json>'` | Patch metadata in-place (FTS untouched) |
-| `mpm shred <id>` | Cascade-delete memory + linked theory (atomic) |
-| **Engine room (`ops`)** | |
-| `mpm ops doctor [--fix]` | Diagnostics |
-| `mpm ops maintain [--days <n>]` | Decay + consolidate + prune |
-| `mpm ops synthesize [--dry-run]` | LLM synthesis |
-| `mpm ops gc [--dry-run\|--review\|--purge]` | Decay sweep |
-| `mpm ops review [--promoted\|--stale]` | Spaced reinforcement |
-| `mpm hint <text> [--max <n>] [--json]` | Proactive recall hint from conversation context |
-| `mpm ops watch start [--bg]\|stop\|status` | Watcher daemon |
-| `mpm ops web [--port <n>]` | Web UI |
-| `mpm ops stats` | Memory statistics |
-| `mpm ops status` | System dashboard with memory counts, daemon status, synthesis stats |
-| `mpm ops prune [--older-than <n>d]` | Prune old memories |
-| `mpm ops export [--jsonl]` | Export |
-| `mpm ops backup [path]` | Database backup |
-| `mpm ops restore-db <path>` | Restore .sql dump |
-| `mpm ops ingest <path>` | Import from external SQLite |
-| `mpm ops switch` | Interactive mode/persona switcher |
-| **Modes & Personas** | |
-| `mpm mode` | Interactive mode picker |
-| `mpm mode list\|active\|remove\|clear` | Direct mode management |
-| `mpm persona` | Interactive persona picker |
-| `mpm persona list\|active\|set\|clear` | Direct persona management |
-| `mpm prime-directives` | Display 808 rules |
-| **Topics, References, Sessions, Lessons** | |
-| `mpm topic create\|add\|remove\|list\|show\|promote` | Topic operations |
-| `mpm reference add\|list\|search\|show\|shred [--chunk-size <n>]` | Reference library |
-| `mpm session list\|search\|show` | Session operations |
-| `mpm lesson add\|list\|search\|get\|shred\|stats` | Lesson operations |
-| `mpm wake [--json]` | Last session context |
-| **System** | |
-| `mpm version\|help\|--version\|-h` | Info |
-| `mpm gateway <sub>` | OpenClaw gateway control |
-| `mpm ingest list-schemas` | Available import schemas |
-| `mpm shred sessions\|memories\|topics\|database [-f]` | Destructive ops |
-
----
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Purpose |
-| --- | --- |
+|---|---|
 | `MPM_WORKSPACE` | Override workspace directory |
 | `MPM_FORCE` | Skip confirmation prompts |
 | `MPM_INTERACTIVE` | Force interactive mode |
-| `MINIMAX_API_KEY` | LLM API key (synth fallback) |
-| `MINIMAX_BASE_URL` | LLM base URL (synth fallback) |
+| `MINIMAX_API_KEY` | LLM API key (synthesis fallback) |
+| `MINIMAX_BASE_URL` | LLM base URL (synthesis fallback) |
 
 ---
 
-## Build Requirements
+## Build & Install
 
 ```bash
-# Ubuntu/Debian
-sudo apt install build-essential golang sqlite3 libsqlite3-dev
+# Build (requires CGO with FTS5)
+cd /home/v/.openclaw/workspace/projects/mpm
+make build    # Produces: bin/mpm
 
-# macOS
-brew install go sqlite
+# Install binary
+sudo cp bin/mpm /usr/local/bin/mpm
 
-make build    # Requires CGO with FTS5
-make test     # Run tests
-make install  # Install to /usr/local/bin/mpm
+# Systemd service
+sudo cp contrib/systemd/mpm.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable mpm
+sudo systemctl start mpm
+```
+
+> **Important:** Use `make build` (passes `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5=1"`). Plain `go build` silently fails FTS5 indexing, breaking recall.
+
+---
+
+## Directory Structure
+
+```
+projects/mpm/
+├── bin/mpm                          # Built binary
+├── src/db/mpm.db                    # SQLite database (WAL mode)
+├── mode/                            # Mode .md files (debugging, research, etc.)
+├── persona/                         # Persona .md files
+├── active.json                      # Active mode/persona state
+├── docs/
+│   ├── OPENCLAW.md                  # OpenClaw plugin integration guide
+│   ├── MPM_WISHLIST.md              # Roadmap / wishlist
+│   ├── archive_v1/                  # Historical specs and designs (reference)
+│   │   ├── epistemology-engine-spec.md
+│   │   ├── MPM_PRUNING.md
+│   │   ├── MPM_PROACTIVE_REVIEW_HOOK.md
+│   │   ├── MPM_SYNTHESIS_DEDUP.md
+│   │   ├── BREAK_90.md              # Feature scoring + roadmap
+│   │   └── ...
+│   └── superpowers/                 # Deep-dive specs
+├── hermes-mpm-plugin/              # Hermes Python agent plugin
+│   └── install.md
+├── openclaw/                        # OpenClaw plugin
+│   ├── mpm-plugin/
+│   └── OPENCLAW.md
+└── contrib/systemd/
+    └── mpm.service
 ```
 
 ---
 
-## File Locations
+## Roadmap / Wishlist
 
-```
-~/.mpm/                         # Default workspace (MPM_DIR)
-├── mpm.db                      # Unified SQLite database (WAL mode)
-├── mpm.db-wal                  # WAL journal
-├── mpm.db-shm                  # Shared memory
-├── mirror.jsonl                # Security audit log
-├── mode/                       # Mode .md files
-├── persona/                    # Persona .md files
-├── active.json                 # Active mode/persona state
-├── watch.pid                   # Watcher PID (when detached)
-└── mpm_config.json             # Configuration
-```
+See [`docs/MPM_WISHLIST.md`](docs/MPM_WISHLIST.md) for the full running wishlist. Notable upcoming items:
+
+- **Concept Drift Detection** — detect when older reinforced memories are being challenged by new patterns, auto-flag epoch shifts
+- **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents
+- **Native Event-Driven Hooks** — UNIX drop-in hooks for `on_theory_resolved`, `on_memory_synthesized`, etc.
+- **Memory Encryption at Rest** — SQLCipher AES-256 for enterprise-grade at-rest encryption
 
 ---
 

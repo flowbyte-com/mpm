@@ -474,7 +474,7 @@ func checkSynthDedup(key string) bool {
 	synthSeenMu.Lock()
 	defer synthSeenMu.Unlock()
 	_, exists := synthSeen[key]
-	return exists
+	return !exists
 }
 
 func markSynthDedup(key string) {

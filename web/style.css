@@ -417,6 +417,26 @@ select:focus-visible {
   to { transform: translateY(0); opacity: 1; }
 }
 
+/* Provenance badges */
+.tag.compute-absolute { background: rgba(88,166,255,0.2); color: var(--accent); }
+.tag.compute-high { background: rgba(210,153,34,0.2); color: var(--warning); }
+.tag.compute-ephemeral { background: rgba(139,148,158,0.2); color: var(--text-muted); }
+.tag.client-badge { border: 1px solid var(--border); }
+.card.slashed { opacity: 0.55; border-color: var(--danger); background: rgba(248,81,73,0.06); }
+
+/* Telemetry */
+.telemetry-agent { margin-bottom: 1rem; border-left: 3px solid var(--accent); padding-left: 1rem; }
+.telemetry-agent-name { font-size: 0.9rem; font-weight: 700; color: var(--accent); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.telemetry-model { margin: 0.5rem 0 0.5rem 1rem; border-left: 2px solid var(--border); padding-left: 0.75rem; }
+.telemetry-model-name { font-size: 0.85rem; font-weight: 600; color: var(--text); margin-bottom: 0.3rem; }
+.telemetry-persona { display: flex; gap: 1rem; align-items: baseline; padding: 0.4rem 0.5rem; margin: 0.25rem 0; background: var(--surface); border-radius: 4px; font-size: 0.85rem; flex-wrap: wrap; }
+.telemetry-persona-name { font-weight: 600; color: var(--text); min-width: 8rem; }
+.telemetry-stat { color: var(--text-muted); }
+.telemetry-stat strong { color: var(--text); }
+.telemetry-stat.isr { font-weight: 600; }
+.telemetry-stat.isr-high strong { color: var(--success); }
+.telemetry-stat.isr-low strong { color: var(--danger); }
+
 /* Highlight snippet */
 .hlft { color: var(--accent); font-weight: 600; }
 

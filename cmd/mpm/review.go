@@ -121,8 +121,8 @@ func handleReview(args []string) int {
 			result = append(result, memoryEntry{
 				ID:                 shortID(m["id"].(string)),
 				Content:            m["content"].(string),
-				Weight:             int(m["weight"].(int64)),
-				ReinforcementCount: int(m["reinforcement_count"].(int64)),
+				Weight:             toInt(m["weight"]),
+				ReinforcementCount: toInt(m["reinforcement_count"]),
 				LastAccessedAt:     lastAccess,
 				Collection:         m["collection"].(string),
 			})
@@ -157,9 +157,9 @@ func handleReview(args []string) int {
 
 	for i, m := range memories {
 		id := shortID(m["id"].(string))
-		rc := int(m["reinforcement_count"].(int64))
-		weight := int(m["weight"].(int64))
-		lastAccess := m["last_accessed_at"].(time.Time)
+		rc := toInt(m["reinforcement_count"])
+		weight := toInt(m["weight"])
+		lastAccess := toTime(m["last_accessed_at"])
 		content := m["content"].(string)
 
 		age := formatAge(lastAccess)
@@ -207,6 +207,33 @@ func sortByLastAccessed(memories []map[string]interface{}) {
 				memories[i], memories[j] = memories[j], memories[i]
 			}
 		}
+	}
+}
+
+// toInt safely extracts an int from interface{} handling both int and int64.
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+// toTime safely extracts a time.Time from interface{}, handling time.Time and string.
+func toTime(v interface{}) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case string:
+		parsed, _ := time.Parse(time.RFC3339, t)
+		return parsed
+	default:
+		return time.Time{}
 	}
 }
 

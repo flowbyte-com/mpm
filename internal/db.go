@@ -195,9 +195,9 @@ func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
 	if err != nil {
 		return
 	}
+	defer f.Close()
 	f.Write(data)
 	f.Write([]byte("\n"))
-	f.Close()
 }
 
 // logWatchdogRaw appends raw JSON bytes to watchdog.jsonl under the dm mutex.
@@ -400,7 +400,11 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Migration: add new columns to existing databases (no-op if already present)
 	// Use SafeMigrations from schema.go to ensure ALL column additions are covered
 	for _, m := range SafeMigrations {
-		_, _ = dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]))
+		if _, err := dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2])); err != nil {
+			if !isDuplicateColumnError(err) {
+				fmt.Fprintf(os.Stderr, "Warning: migration failed for %s.%s: %v\n", m[0], m[1], err)
+			}
+		}
 	}
 
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
@@ -468,6 +472,37 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	return nil
 }
 
+// dropFTS5Triggers removes all FTS5 triggers from the database.
+// Called when FTS5 is not available in the current build, preventing
+// leftover triggers (from a build compiled with FTS5) from firing on INSERT
+// and causing "no such module: fts5" errors.
+func (dm *DatabaseManager) dropFTS5Triggers() {
+	triggers := []string{
+		"DROP TRIGGER IF EXISTS sessions_ai",
+		"DROP TRIGGER IF EXISTS sessions_ad",
+		"DROP TRIGGER IF EXISTS sessions_au",
+		"DROP TRIGGER IF EXISTS memories_ai",
+		"DROP TRIGGER IF EXISTS memories_ad",
+		"DROP TRIGGER IF EXISTS memories_au",
+		"DROP TRIGGER IF EXISTS memories_au_content",
+		"DROP TRIGGER IF EXISTS lessons_ai",
+		"DROP TRIGGER IF EXISTS lessons_ad",
+		"DROP TRIGGER IF EXISTS lessons_au",
+		"DROP TRIGGER IF EXISTS topics_ai",
+		"DROP TRIGGER IF EXISTS topics_ad",
+		"DROP TRIGGER IF EXISTS topics_au",
+		"DROP TRIGGER IF EXISTS references_ai",
+		"DROP TRIGGER IF EXISTS references_ad",
+		"DROP TRIGGER IF EXISTS references_au",
+		"DROP TRIGGER IF EXISTS reference_chunks_ai",
+		"DROP TRIGGER IF EXISTS reference_chunks_ad",
+		"DROP TRIGGER IF EXISTS reference_chunks_au",
+	}
+	for _, t := range triggers {
+		dm.db.Exec(t) // ignore errors — we're cleaning up, not enforcing
+	}
+}
+
 func (dm *DatabaseManager) initFTSTables() error {
 	// Robust FTS5 availability check
 	var available int
@@ -476,12 +511,14 @@ func (dm *DatabaseManager) initFTSTables() error {
 		// Fallback test: try creating a real FTS5 table in-memory
 		testDB, err := sql.Open("sqlite3", ":memory:")
 		if err != nil {
-			return nil // fail silently, search will use LIKE fallback
+			dm.dropFTS5Triggers() // clean up any leftover triggers from a build that had FTS5
+			return nil            // fail silently, search will use LIKE fallback
 		}
+		defer testDB.Close()
 		_, err = testDB.Exec("CREATE VIRTUAL TABLE test_fts USING fts5(content, tokenize='porter unicode61');")
-		testDB.Close()
 		if err != nil {
-			return nil // fail silently, search will use LIKE fallback
+			dm.dropFTS5Triggers() // clean up any leftover triggers from a build that had FTS5
+			return nil            // fail silently, search will use LIKE fallback
 		}
 	}
 
@@ -754,10 +791,36 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 // Uses SQLite's json_patch() to merge the patch into existing metadata in-place.
 // Does NOT touch content — FTS index is not affected.
 // Returns error if the memory ID does not exist.
+//
+// The UPDATE and the FTS sync statements run inside a single transaction so
+// a crash mid-write cannot leave the FTS index out of sync with the canonical
+// content. FTS sync errors are checked and returned (previously swallowed).
 func (dm *DatabaseManager) UpdateMemoryMetadata(id string, patchJSON string) error {
+	if !json.Valid([]byte(patchJSON)) {
+		return fmt.Errorf("UpdateMemoryMetadata: invalid JSON patch: %s", patchJSON)
+	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("UpdateMemoryMetadata: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := updateMemoryMetadataTx(tx, id, patchJSON); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// updateMemoryMetadataTx is the transactional body of UpdateMemoryMetadata.
+// It runs the metadata UPDATE, the FTS DELETE, and the FTS INSERT against the
+// supplied transaction. Exposed as a helper so callers that already own a
+// transaction (e.g., ChallengeMemory) can join it without opening a second one.
+func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
 	// json_patch(NULL, '{}') returns NULL in SQLite, so COALESCE to {} is required.
 	// This ensures a NULL metadata field doesn't cause the patch to fail.
-	result, err := dm.db.Exec(`
+	result, err := tx.Exec(`
 		UPDATE memories
 		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
 			last_accessed_at = CURRENT_TIMESTAMP
@@ -774,6 +837,26 @@ func (dm *DatabaseManager) UpdateMemoryMetadata(id string, patchJSON string) err
 	if rowsAffected == 0 {
 		return fmt.Errorf("memory not found or deleted: %s", id)
 	}
+
+	// Metadata-only changes bypass the FTS trigger — manually sync FTS
+	// for the updated row so the search index stays current. Errors are
+	// checked and returned; a silent failure here would leave FTS stale
+	// while the caller believes the update succeeded.
+	if _, err := tx.Exec(`
+		DELETE FROM memories_fts WHERE rowid = (
+			SELECT rowid FROM memories WHERE id = ?
+		)
+	`, id); err != nil {
+		return fmt.Errorf("UpdateMemoryMetadata: fts delete: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+		SELECT rowid, content, collection, COALESCE(session_id,''), COALESCE(tags,'[]')
+		FROM memories WHERE id = ? AND deleted_at IS NULL
+	`, id); err != nil {
+		return fmt.Errorf("UpdateMemoryMetadata: fts insert: %w", err)
+	}
+
 	return nil
 }
 
@@ -901,17 +984,27 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 	for rows.Next() {
 		var id, content, embeddingJSON string
 		var createdAt time.Time
-		if err := rows.Scan(&id, &content, &embeddingJSON, &createdAt); err != nil {
-			continue
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("VectorSearch: panic in rows loop: %v", r)
+				}
+			}()
+			if err := rows.Scan(&id, &content, &embeddingJSON, &createdAt); err != nil {
+				return
+			}
 
-		var dbEmbedding []float32
-		if err := json.Unmarshal([]byte(embeddingJSON), &dbEmbedding); err != nil || len(dbEmbedding) != len(queryEmbedding) {
-			continue
-		}
+			var dbEmbedding []float32
+			if err := json.Unmarshal([]byte(embeddingJSON), &dbEmbedding); err != nil || len(dbEmbedding) != len(queryEmbedding) {
+				return
+			}
 
-		sim := cosineSimilarity(queryEmbedding, dbEmbedding)
-		results = append(results, searchResult{id, content, createdAt, sim})
+			sim := cosineSimilarity(queryEmbedding, dbEmbedding)
+			results = append(results, searchResult{id, content, createdAt, sim})
+		}()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -936,20 +1029,36 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 
 // ==================== SHRED PROTOCOL ====================
 
-// WipeRecord performs a hard delete (on DatabaseManager)
+// WipeRecord performs a hard delete (on DatabaseManager).
+//
+// For the "topics" tier, the membership rows in topic_memberships and the
+// parent row in topics are deleted in a single transaction so a crash mid-write
+// cannot leave orphan memberships behind (the FK cascade would normally catch
+// them, but only if FKs are enabled on the connection — a SQLite WAL crash can
+// leave FK enforcement off until the next connection).
 func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 	tableName := WipeTableNames[tier]
 	if tableName == "" {
 		return fmt.Errorf("cannot wipe from tier: %s", tier)
 	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("WipeRecord: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Clean up topic_memberships when deleting a topic
 	if tier == "topics" {
-		if _, err := dm.db.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
+		if _, err := tx.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
 			return err
 		}
 	}
-	_, err := dm.db.Exec("DELETE FROM "+tableName+" WHERE id = ?", id)
-	return err
+	if _, err := tx.Exec("DELETE FROM "+tableName+" WHERE id = ?", id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // ShredMemory performs a hard delete on memories table
@@ -974,22 +1083,41 @@ func DeleteByID(db *sql.DB, table, id string) error {
 	return err
 }
 
-// ShredTopic performs a hard delete on topics table
-// Also deletes associated topic_memberships entries first
+// ShredTopic performs a hard delete on topics table.
+// The membership rows in topic_memberships and the parent row in topics are
+// deleted in a single transaction so a crash mid-write cannot leave orphan
+// memberships behind.
 func ShredTopic(db *sql.DB, id string) error {
-	_, err := db.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id)
+	tx, err := db.Begin()
 	if err != nil {
+		return fmt.Errorf("ShredTopic: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
 		return err
 	}
-	_, err = db.Exec("DELETE FROM topics WHERE id = ?", id)
-	return err
+	if _, err := tx.Exec("DELETE FROM topics WHERE id = ?", id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // ==================== HELPERS ====================
 
+var (
+	idMu      sync.Mutex
+	idCounter int64
+)
+
 func GenerateID() string {
-	timestamp := time.Now().UnixNano()
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
+	idMu.Lock()
+	idCounter++
+	ts := time.Now().UnixNano()
+	input := fmt.Sprintf("%d-%d", ts, idCounter)
+	idMu.Unlock()
+	hash := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(hash[:])[:16]
 }
 
@@ -1158,19 +1286,20 @@ func (dm *DatabaseManager) GetTopicMemories(topicID string) ([]map[string]interf
 			WHERE created_at >= ? AND created_at <= ? AND deleted_at IS NULL
 			ORDER BY created_at DESC LIMIT 50
 		`, fromDate+"T00:00:00Z", to+"T23:59:59Z")
-		if err == nil {
-			defer autoRows.Close()
-			for autoRows.Next() {
-				var memID, content, sessionID, tags, createdAt string
-				if err := autoRows.Scan(&memID, &content, &sessionID, &tags, &createdAt); err != nil {
-					continue
-				}
-				if !seen[memID] {
-					seen[memID] = true
-					memories = append(memories, map[string]interface{}{
-						"id": memID, "content": content, "session_id": sessionID, "tags": tags, "created_at": createdAt, "role": "auto",
-					})
-				}
+		if err != nil {
+			return memories, err
+		}
+		defer autoRows.Close()
+		for autoRows.Next() {
+			var memID, content, sessionID, tags, createdAt string
+			if err := autoRows.Scan(&memID, &content, &sessionID, &tags, &createdAt); err != nil {
+				continue
+			}
+			if !seen[memID] {
+				seen[memID] = true
+				memories = append(memories, map[string]interface{}{
+					"id": memID, "content": content, "session_id": sessionID, "tags": tags, "created_at": createdAt, "role": "auto",
+				})
 			}
 		}
 	}
@@ -1194,14 +1323,28 @@ func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) error
 	return err
 }
 
-// DeleteTopic soft-deletes a topic (memories are NOT deleted)
+// DeleteTopic soft-deletes a topic (memories are NOT deleted).
+//
+// Both writes run inside a single transaction with the soft-delete UPDATE
+// happening first: if a caller lists "active topics" between operations, the
+// deactivated topic will not appear even before the membership cleanup runs.
+// Previously, the membership DELETE ran first, so a failed UPDATE left an
+// active topic with no members — a confusing state for any UI listing.
 func (dm *DatabaseManager) DeleteTopic(topicID string) error {
-	_, err := dm.db.Exec(`DELETE FROM topic_memberships WHERE topic_id = ?`, topicID)
+	tx, err := dm.db.Begin()
 	if err != nil {
+		return fmt.Errorf("DeleteTopic: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE topics SET is_active = 0 WHERE id = ?`, topicID); err != nil {
 		return err
 	}
-	_, err = dm.db.Exec(`UPDATE topics SET is_active = 0 WHERE id = ?`, topicID)
-	return err
+	if _, err := tx.Exec(`DELETE FROM topic_memberships WHERE topic_id = ?`, topicID); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // ==================== Lesson Operations ====================
@@ -1594,27 +1737,57 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		}
 		line, _ := json.Marshal(entry)
+		dm.watchdogMu.Lock()
 		f.WriteString(string(line) + "\n")
+		dm.watchdogMu.Unlock()
 	}()
 }
 
 // ChallengeMemory applies provenance-based contradiction resolution:
 // slashes the loser's weight and sets challenged status in the DB.
 // The slashAmount is the weight reduction (positive integer).
+//
+// All four operations (pre-check, metadata patch with FTS sync, weight update,
+// async log) are wrapped in a single transaction. A concurrent ReinforceMemory
+// cannot interleave between the metadata patch and the weight decrement, so
+// the challenged memory is always observed in a consistent state.
 func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evidence string) error {
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("ChallengeMemory: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Verify the memory exists and is not hard-deleted inside the transaction
+	// so a concurrent soft-delete between the check and the writes is caught
+	// by the WHERE-deleted_at-IS-NULL clause on each subsequent UPDATE.
+	var exists bool
+	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM memories WHERE id = ? AND deleted_at IS NULL)`, memoryID).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("ChallengeMemory: select check: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("ChallengeMemory: memory not found or deleted: %s", memoryID)
+	}
+
 	patch := map[string]interface{}{
 		"status":               "challenged",
 		"challenged_theory_id": evidence,
 	}
 	patchJSON, _ := json.Marshal(patch)
-	if err := dm.UpdateMemoryMetadata(memoryID, string(patchJSON)); err != nil {
+	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
 		return err
 	}
-	_, err := dm.db.Exec(`UPDATE memories SET weight = weight - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID)
-	if err != nil {
-		return err
+	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
+		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
 	}
-	// Also log async
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("ChallengeMemory: commit: %w", err)
+	}
+
+	// Async watchdog log is fire-and-forget and runs only after a successful
+	// commit, so a logged entry always reflects a committed state.
 	dm.ChallengeMemoryAsync(memoryID, evidence)
 	return nil
 }
@@ -1721,22 +1894,8 @@ func (dm *DatabaseManager) ArchiveStaleMemories(archiveDays int) (int, error) {
 // connection to avoid hot-path WAL contention with the fsnotify ingestion thread.
 // Metrics are logged to mirror.jsonl as a structured [lifecycle] token line.
 func (dm *DatabaseManager) RunLifecycleDecayAndArchival(decayRate float64, archiveDays int) error {
-	if dm.dbPath == "" {
-		// No file path available (in-memory/test DB) — run inline
-		return dm.runLifecycleInline(decayRate, archiveDays)
-	}
-	// Open an isolated connection — zero hot path contention
-	isoDB, err := sql.Open("sqlite3", dm.dbPath)
-	if err != nil {
-		return fmt.Errorf("lifecycle: isolated connection: %w", err)
-	}
-	defer isoDB.Close()
-	isoDB.Exec("PRAGMA journal_mode = WAL")
-	isoDB.Exec("PRAGMA busy_timeout = 5000")
-	isoDB.Exec("PRAGMA synchronous = NORMAL")
-
-	isoDM := NewDatabaseManagerForDB(isoDB)
-	return isoDM.runLifecycleInline(decayRate, archiveDays)
+	// Reuse the existing DB connection pool to avoid WAL exhaustion
+	return dm.runLifecycleInline(decayRate, archiveDays)
 }
 
 // runLifecycleInline executes the decay + archival pass on the current

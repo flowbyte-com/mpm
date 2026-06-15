@@ -6,10 +6,12 @@
   "contracts": {
     "tools": [
       "add_reference",
+      "challenge_memory",
       "create_topic",
       "link_topic",
       "list_lessons",
       "list_references",
+      "proactive_recall_hint",
       "propose_theory",
       "query_long_term_memory",
       "read_directives",

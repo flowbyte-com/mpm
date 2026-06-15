@@ -77,6 +77,7 @@ function showView(name) {
   else if (name === 'topics') loadTopics();
   else if (name === 'lessons') loadLessons();
   else if (name === 'directives') loadDirectives();
+  else if (name === 'telemetry') loadTelemetry();
   else if (name === 'search') {
     document.getElementById('search-input')?.focus();
   }
@@ -158,6 +159,7 @@ function handleKeyboard(e) {
       case 't': showView('topics'); break;
       case 'l': showView('lessons'); break;
       case 'd': showView('directives'); break;
+      case 'e': showView('telemetry'); break;
       case 's': showView('search'); document.getElementById('search-input')?.focus(); break;
     }
     return;
@@ -272,16 +274,24 @@ function renderMemories(items, el) {
 
 function renderMemoryCard(m, showActions) {
   const tags = parseTags(m.tags);
-  const isPrime = tags.includes('is_prime_directive') || (m.metadata && m.metadata.includes('is_prime_directive'));
+  const meta = parseJSON(m.metadata, {});
+  const provenance = meta.provenance || {};
+  const isPrime = tags.includes('is_prime_directive') || meta.is_prime_directive === true || (typeof m.metadata === 'string' && m.metadata.includes('is_prime_directive'));
+  const slashed = meta.slashed === true || (meta.weight != null && meta.weight <= 1);
+  const client = provenance.client;
+  const compute = provenance.compute;
   const tagHtml = tags.filter(t => t && t !== 'is_prime_directive').map(t => '<span class="tag">' + esc(t) + '</span>').join('');
   const primeHtml = isPrime ? '<span class="tag directive">prime</span>' : '';
   const content = m.content ? esc(m.content.slice(0, 300) + (m.content.length > 300 ? '…' : '')) : '';
-  let html = '<div class="card">';
+  let provHtml = '';
+  if (client) provHtml += '<span class="tag client-badge">' + esc(client) + '</span>';
+  if (compute) provHtml += '<span class="tag compute-' + esc(compute) + '">' + esc(compute) + '</span>';
+  let html = '<div class="card' + (slashed ? ' slashed' : '') + '">';
   html += '<div class="card-header">';
   html += '<div>';
   if (m.collection && m.collection !== 'memories') html += '<span class="tag" style="margin-bottom:0.3rem">' + esc(m.collection) + '</span><br>';
   html += content.split('\n').map(l => l).join('<br>');
-  if (tagHtml || primeHtml) html += '<div style="margin-top:0.5rem">' + primeHtml + tagHtml + '</div>';
+  if (tagHtml || primeHtml || provHtml) html += '<div style="margin-top:0.5rem">' + primeHtml + provHtml + tagHtml + '</div>';
   html += '</div>';
   if (showActions) {
     html += '<div class="card-actions">';
@@ -583,6 +593,46 @@ async function loadDirectives() {
   } catch (err) {
     el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + err.message + '</p></div>';
   }
+}
+
+// ==================== Telemetry ====================
+
+async function loadTelemetry() {
+  const el = document.getElementById('telemetry-dashboard');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div>Loading telemetry...</div>';
+  try {
+    const data = await apiFetch('/stats');
+    if (!data) return;
+    renderTelemetry(data, el);
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state"><p>Failed to load telemetry: ' + err.message + '</p></div>';
+  }
+}
+
+function renderTelemetry(data, container) {
+  let html = '';
+  for (const [agent, models] of Object.entries(data)) {
+    html += '<div class="telemetry-agent"><div class="telemetry-agent-name">' + esc(agent) + '</div>';
+    for (const [model, personas] of Object.entries(models)) {
+      html += '<div class="telemetry-model"><div class="telemetry-model-name">' + esc(model) + '</div>';
+      for (const [persona, stats] of Object.entries(personas)) {
+        const active = stats.active || 0;
+        const decayed = stats.decayed || 0;
+        const total = active + decayed;
+        const isr = total > 0 ? ((active / total) * 100).toFixed(1) : 0;
+        const isrClass = isr > 80 ? 'isr-high' : (isr < 40 ? 'isr-low' : '');
+        html += '<div class="telemetry-persona">';
+        html += '<span class="telemetry-persona-name">' + esc(persona) + '</span>';
+        html += '<span class="telemetry-stat">Active: <strong>' + active + '</strong></span>';
+        html += '<span class="telemetry-stat">Decayed: <strong>' + decayed + '</strong></span>';
+        html += '<span class="telemetry-stat isr ' + isrClass + '">ISR: <strong>' + isr + '%</strong></span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  container.innerHTML = html || '<div class="empty-state"><p>No telemetry data available</p></div>';
 }
 
 // ==================== Utilities ====================

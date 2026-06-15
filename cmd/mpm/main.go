@@ -1322,10 +1322,14 @@ func printHelp() {
 		{"<query>", "Search memories (default when called with a bare string)", false},
 		{"add <text>", "Add a new memory", false},
 		{"add -i", "Interactive add — opens $EDITOR", false},
-		{"snooze <id>", "Bump a memory's relevance (no LTM promotion)", false},
 		{"ls", "List memories", false},
 		{"show <id>", "Show memory details", false},
 		{"rm <id>", "Delete a memory", false},
+		{"call <tool>", "Universal machine interface", false},
+		{"wake", "Show last session context", false},
+		{"status", "System status dashboard", false},
+		{"web", "Start web UI server", false},
+		{"version", "Show version info", false},
 		{"help", "Show this help", false},
 	})
 
@@ -1333,16 +1337,24 @@ func printHelp() {
 		{"ops", "Maintenance, diagnostics, synthesis, and more", true},
 	})
 
+	kbSection := buildHelpSection("Knowledge Base (kb)", []helpCmd{
+		{"kb", "Entity-centric memory interface (memory|topic|lesson|session|reference)", true},
+	})
+
+	debugSection := buildHelpSection("Debug", []helpCmd{
+		{"debug", "Low-level inspection tools (history|diff|patch-memory|shred)", true},
+	})
+
 	alsoSection := buildHelpSection("Also available via ops", []helpCmd{
-		{"mode | persona | topic", "", false},
-		{"lesson | session | reference", "", false},
+		{"mode | persona", "", false},
 		{"wake | directives | switch | status", "", false},
-		{"doctor | maintain | gc", "", false},
+		{"doctor | maintain | gc | prune", "", false},
 		{"watch | web | review", "", false},
-		{"stats | prune | export", "", false},
+		{"stats | export | synthesize", "", false},
 		{"backup | restore-db | ingest", "", false},
+		{"dlq:review | backfill-embeddings", "", false},
 		{"gateway", "", false},
-		{"hint", "Proactive epistemology recall", false},
+		{"hint | theories | decisions", "", false},
 	})
 
 	mainStyle := lipgloss.NewStyle().
@@ -1365,6 +1377,8 @@ func printHelp() {
 	content := "\n" + titleStyle + "\n" + subtitleStyle + "\n\n" +
 		dailyCmds + "\n" +
 		opsSection + "\n" +
+		kbSection + "\n" +
+		debugSection + "\n" +
 		alsoSection + "\n"
 
 	fmt.Println(mainStyle.Render(content))
