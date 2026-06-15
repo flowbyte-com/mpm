@@ -133,17 +133,23 @@ async def test_run_mpm_uses_mpm_binary_env(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_mpm_clamps_timeout_to_max():
-    """run_mpm should clamp timeout_override_ms to MAX_TIMEOUT_MS."""
+    """run_mpm should pass a clamped timeout (in seconds) to asyncio.wait_for."""
     fake_proc = AsyncMock()
     fake_proc.communicate = AsyncMock(return_value=(b"{}", b""))
     fake_proc.returncode = 0
-    with patch("tools.asyncio.create_subprocess_exec", return_value=fake_proc) as mock_exec:
-        # Request 1 hour; should be clamped to 5 minutes (300 seconds).
+    captured: dict = {}
+    real_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(awaitable, timeout):
+        captured["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout=None)  # no real wait; coroutine resolves immediately
+
+    with patch("tools.asyncio.create_subprocess_exec", return_value=fake_proc), \
+         patch("tools.asyncio.wait_for", side_effect=fake_wait_for):
         await run_mpm(["call", "read_wake_context"], timeout_ms=60 * 60 * 1000)
-        # asyncio.wait_for wraps the inner call; the timeout is the second positional arg.
-        # We can't easily introspect the wait_for timeout from this side, so just verify
-        # the call didn't time out (the mock completes immediately).
-        assert mock_exec.called
+    # 1 hour requested (3600s); should be clamped to MAX_TIMEOUT_MS / 1000 = 300s.
+    from tools import MAX_TIMEOUT_MS
+    assert captured["timeout"] == MAX_TIMEOUT_MS / 1000
 
 
 @pytest.mark.asyncio
