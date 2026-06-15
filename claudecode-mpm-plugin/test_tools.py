@@ -1,9 +1,12 @@
 """Unit tests for tools.py (subprocess plumbing + helpers)."""
+import os
+import tempfile
 import pytest
 
 from tools import parse_mpm_result, MpmRunResult
 from datetime import datetime
 from tools import format_age
+from tools import debug_log
 
 
 def test_parse_happy_path_returns_parsed_json():
@@ -82,3 +85,32 @@ def test_format_age_invalid_string_returns_unknown():
 def test_format_age_tz_aware_iso_returns_unknown():
     """Regression: tz-aware timestamps must not crash on naive datetime.utcnow() subtraction."""
     assert format_age("2026-06-15T12:34:56+00:00") == "unknown age"
+
+
+def test_debug_log_writes_when_debug_env_set(tmp_path, monkeypatch):
+    log_path = tmp_path / "debug.log"
+    monkeypatch.setenv("DEBUG", "1")
+    monkeypatch.setenv("MPM_DEBUG_LOG", str(log_path))
+    debug_log("test message")
+    assert log_path.exists()
+    content = log_path.read_text()
+    assert "test message" in content
+
+
+def test_debug_log_noop_when_debug_env_unset(tmp_path, monkeypatch):
+    log_path = tmp_path / "debug.log"
+    monkeypatch.delenv("DEBUG", raising=False)
+    monkeypatch.setenv("MPM_DEBUG_LOG", str(log_path))
+    debug_log("test message")
+    assert not log_path.exists()
+
+
+def test_debug_log_swallows_io_errors(tmp_path, monkeypatch):
+    """debug_log must never raise — it's observability only."""
+    monkeypatch.setenv("DEBUG", "1")
+    # Point at a path that cannot be written (a directory used as a file).
+    bad_path = tmp_path / "bad"
+    bad_path.mkdir()
+    monkeypatch.setenv("MPM_DEBUG_LOG", str(bad_path / "nonexistent" / "log"))
+    # Should not raise.
+    debug_log("test message")
