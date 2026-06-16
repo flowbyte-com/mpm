@@ -88,6 +88,7 @@ func NewRouter() *CommandRouter {
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
 		"call":            {Name: "call", Description: "Universal machine interface: mpm call <tool> [--payload <json>]", MinArgs: 1},
+		"evidence":        {Name: "evidence", Description: "Evidence operations (add|list) — confidence/evidence foundation", MinArgs: 0},
 
 		// Knowledge Base — entity-centric namespace (reads + writes)
 		"kb":   {Name: "kb", Description: "Knowledge base: memory, topic, lesson, session, reference", MinArgs: 0},
@@ -255,6 +256,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleDebug(args)
 	case "call":
 		return handleCall(args[1:])
+	case "evidence":
+		return handleEvidence(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
