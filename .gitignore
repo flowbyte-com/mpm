@@ -30,3 +30,7 @@ mpm-backup-*.sql
 
 # Local config (contains secrets — always private)
 mpm_config.jsonsrc/db/mirror.jsonl
+src/db/mpm.db
+src/db/*.jsonl
+cmd/mpm/src/db/
+cmd/mpm/src/db/

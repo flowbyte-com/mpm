@@ -29,10 +29,13 @@ const emptyWakeContext = "Wake context is empty. Ready for context."
 
 // RegisterAllTools registers all 18 MPM tools on the given MCP server.
 // dm must be a long-lived DatabaseManager (the caller owns its Close).
-func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager) {
+// ac carries the active mode/persona read from MPM_ACTIVE_MODE /
+// MPM_ACTIVE_PERSONA env vars; write handlers thread it into provenance
+// metadata so every persisted row is attributable to the agent context.
+func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac internal.ActiveContext) {
 	s.AddTool(toolReadWakeContext(), handleReadWakeContext(dm))
 	s.AddTool(toolQueryLongTermMemory(), handleQueryLongTermMemory(dm))
-	s.AddTool(toolSaveToMemory(), handleSaveToMemory(dm))
+	s.AddTool(toolSaveToMemory(), handleSaveToMemory(dm, ac))
 	s.AddTool(toolChallengeMemory(), handleChallengeMemory(dm))
 	s.AddTool(toolSaveLesson(), handleSaveLesson(dm))
 	s.AddTool(toolSearchLessons(), handleSearchLessons(dm))
@@ -46,7 +49,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager) {
 	s.AddTool(toolReadDirectives(), handleReadDirectives(dm))
 	s.AddTool(toolProposeTheory(), handleProposeTheory(dm))
 	s.AddTool(toolResolveTheory(), handleResolveTheory(dm))
-	s.AddTool(toolRecordDecision(), handleRecordDecision(dm))
+	s.AddTool(toolRecordDecision(), handleRecordDecision(dm, ac))
 	s.AddTool(toolProactiveRecallHint(), handleProactiveRecallHint(dm))
 }
 
@@ -395,7 +398,7 @@ func handleQueryLongTermMemory(dm *internal.DatabaseManager) server.ToolHandlerF
 	}
 }
 
-func handleSaveToMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+func handleSaveToMemory(dm *internal.DatabaseManager, ac internal.ActiveContext) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		fact, _ := args["fact"].(string)
@@ -408,7 +411,7 @@ func handleSaveToMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 			parseStringSliceArg(args["tags"]),
 			parseNum(args["weight"], 0.5),
 			stringArg(args["ttl"]),
-			internal.ActiveContext{}, // MCP has no active-context injection yet
+			ac,
 		)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("save_to_memory failed", err), nil
@@ -707,7 +710,7 @@ func handleResolveTheory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 	}
 }
 
-func handleRecordDecision(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+func handleRecordDecision(dm *internal.DatabaseManager, ac internal.ActiveContext) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		choice, _ := args["choice"].(string)
@@ -724,6 +727,7 @@ func handleRecordDecision(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 			stringArg(args["rationale"]),
 			stringArg(args["outcome"]),
 			tags,
+			ac,
 		)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("record_decision failed", err), nil

@@ -1,0 +1,27 @@
+{
+  "memory_dirs": [
+    "~/.openclaw/memory"
+  ],
+  "sessions_dirs": [
+    "~/.openclaw/agents/main/sessions"
+  ],
+  "external_dbs": [
+    {
+      "path": "",
+      "label": "",
+      "interval_seconds": 30
+    }
+  ],
+  "openclaw_db_path": "~/.openclaw/memory/main.sqlite",
+  "synth": {
+    "model": "",
+    "api_key": "",
+    "base_url": "",
+    "max_tokens": 1024,
+    "timeout_seconds": 300
+  },
+  "aliases": {
+    "mem": "recall --collection memories",
+    "sess": "recall --collection session"
+  }
+}

@@ -334,6 +334,8 @@ func callRecordDecision(p map[string]interface{}) (interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
+	injectActiveContext()
+	defer clearActiveContext()
 
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
@@ -347,6 +349,7 @@ func callRecordDecision(p map[string]interface{}) (interface{}, error) {
 		internal.ParseStringOr(p["rationale"], ""),
 		internal.ParseStringOr(p["outcome"], ""),
 		tags,
+		internal.ActiveContext{Mode: activeMode, Persona: activePersona},
 	)
 }
 
