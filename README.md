@@ -1,10 +1,66 @@
 # MPM — Memory Persistence Module
 
-> **⚡ MPM mpm mpm-std** — SQLite-native agent state management for AI agents.
+> **SQLite-native memory and reasoning infrastructure for autonomous AI agents.**
 
-MPM is a single binary that provides long-term memory, behavioral modes, persona management, and an epistemology engine — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
+MPM is a single binary that provides long-term memory, behavioral modes, persona management, and an **epistemology engine** — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
 
-MPM is the memory and reasoning layer for AI agents (OpenClaw + Hermes). It tracks not just *what* the agent knows, but *why* it decided to act and *what it believes but hasn't proven yet*.
+MPM is the memory and reasoning layer for AI agents (OpenClaw + Hermes). It tracks not just *what* the agent knows, but *why* it decided to act, *how* it chose to act, and *what it believes but hasn't proven yet*.
+
+---
+
+## The Problem
+
+Most AI memory systems focus on retrieval. An agent stores information, retrieves information, and continues operating. The problem is that real cognition involves more than facts.
+
+Consider a software engineering agent:
+
+- **Fact:** WordPress strips inline style tags.
+- **Decision:** Store widget CSS in `wp_options`.
+- **Hypothesis:** The CLI parser fails when `--json` appears before positional arguments.
+- **Evidence:** Unit tests confirm the parser bug.
+- **Conclusion:** Flag ordering caused the issue.
+
+Most memory systems flatten these into generic notes. Months later the agent remembers the conclusion but not the reasoning. The result: repeated investigations, reopened decisions, contradictory conclusions, lost institutional knowledge.
+
+## The Solution
+
+MPM is a persistent memory and reasoning layer for AI agents. It provides:
+
+- Long-term memory
+- Decision tracking
+- Hypothesis management
+- Proactive recall
+- Behavioral modes
+- Persona management
+- Knowledge self-correction
+
+Everything is stored in a unified SQLite database. No vector database. No daemon. No external services. No distributed infrastructure. Just one binary.
+
+## Why MPM Is Different
+
+Most memory systems store facts. MPM stores reasoning.
+
+| Capability | Traditional Memory | MPM |
+|---|---|---|
+| Fact Storage | ✓ | ✓ |
+| Long-Term Recall | ✓ | ✓ |
+| Semantic Search | ✓ | ✓ |
+| Decision Tracking | ✗ | ✓ |
+| Hypothesis Management | ✗ | ✓ |
+| Evidence Chains | ✗ | ✓ |
+| Knowledge Challenges | ✗ | ✓ |
+| Proactive Recall | Partial | ✓ |
+| Reasoning Persistence | ✗ | ✓ |
+
+The goal is not simply remembering information. The goal is **preserving intellectual progress**.
+
+## Vision
+
+Most AI memory systems answer: *What does the agent remember?*
+
+MPM attempts to answer: *What does the agent know, why does it believe it, and what evidence could prove it wrong?*
+
+That distinction transforms memory from passive storage into persistent reasoning.
 
 ---
 
@@ -18,23 +74,45 @@ MPM is the memory and reasoning layer for AI agents (OpenClaw + Hermes). It trac
 
 ## Core Concepts
 
-### The JSON Boundary (`mpm call`)
+### Memories
 
-All MPM operations are accessible via a universal machine interface. Both OpenClaw (TypeScript) and Hermes (Python) agents call MPM using the same JSON protocol — no CLI flag parsing, no split-brain architecture.
+General facts, observations, and synthesized insights.
 
-```bash
-# Universal machine interface — all MPM operations via JSON
-mpm call <tool> --payload JSON
+> Germany leads Group E with +6 goal differential.
 
-# Examples:
-mpm call save_to_memory --payload '{"fact": "Germany leads Group E with +6 GD", "tags": ["wc2026"]}'
-mpm call query_long_term_memory --payload '{"query": "World Cup prediction"}'
-mpm call propose_theory --payload '{"hypothesis": "Germany wins", "validationCriteria": "semi-final minimum"}'
-mpm call resolve_theory --payload '{"theoryId": "abc123", "conclusion": "confirmed", "newStatus": "proven"}'
-mpm call challenge_memory --payload '{"memoryId": "abc123", "evidence": "recent data contradicts this"}'
+Memories are weighted, searchable, reinforced, challenged, and eventually archived.
+
+### Decisions
+
+Choices captured together with context and rationale.
+
+```
+CONTEXT: Need CSS injection that survives wp_kses filtering.
+CHOICE: Store widget CSS in wp_options.
+RATIONALE: WordPress strips inline style tags.
 ```
 
-This is the **machine-to-machine interface**. The human-facing CLI (documented below) calls the same handlers internally.
+This allows agents to reconstruct previous reasoning instead of re-evaluating the same problems repeatedly.
+
+### Theories
+
+Hypotheses that have not yet been proven.
+
+```
+HYPOTHESIS: Flag ordering causes parser failure.
+VALIDATION: Run parser tests with positional-first and flag-first inputs.
+STATUS: pending
+```
+
+Theories create a structured workflow for experimentation and debugging.
+
+### Lessons
+
+Reusable knowledge that survives across tasks — best practices, warnings, patterns, and insights.
+
+### Sessions
+
+Operational context (current project, active model, working directory, runtime state) so agents can resume work after interruptions.
 
 ### Collections
 
@@ -53,10 +131,10 @@ Every memory has a `weight` (default 1.0). FTS5 BM25 score, reinforcement count,
 **Feedback-Driven Weight Adjustment:** `mpm +<id>` reinforces (+1, auto-clears challenge if contested); `mpm -<id>` weakens (-1, floor at 1 via SQL MAX). Flag collision guard protects `-v`, `-h`.
 
 ```bash
-mpm +<id>    # Reinforce (+1, auto-clears challenge if contested)
-mpm -<id>    # Weaken (-1, floor at 1)
-mpm snooze <id>   # Bump relevance without LTM promotion
-mpm promote <id>  # Elevate to LTM (weight=10)
+mpm +<id>             # Reinforce (+1, auto-clears challenge if contested)
+mpm -<id>             # Weaken (-1, floor at 1)
+mpm snooze <id>       # Bump relevance without LTM promotion
+mpm promote <id>      # Elevate to LTM (weight=10)
 mpm ops gc --shred-negative  # Shred memories with weight<0 AND proven theory exists
 ```
 
@@ -67,19 +145,24 @@ Every memory stamps its origin at write time:
 - `mpm_mode` — `native` or `watch`
 - `mpm_persona` — `operator` or `watch-daemon`
 
-`mpm ops stats` surfaces a nested Client → Model → Persona matrix with Idea Survival Rate (ISR %) per cell — the percentage of memories with weight > 1 (not decayed to floor).
+`mpm ops stats` surfaces a nested Client → Model → Persona matrix with **Idea Survival Rate (ISR %)** per cell — the percentage of memories with weight > 1 (not decayed to floor).
 
 ---
 
-## Epistemology Engine
+## The Epistemology Engine
 
 MPM tracks not just *what* it knows, but *why* it knows it, *how* it decided to act, and *what it believes but hasn't proven yet*. The Epistemology Engine extends the memory model into genuine agency — reasoning that can be examined, revised, and rendered obsolete.
 
-**The core problem it solves:** AI agents retrieve facts but lose the chain of reasoning behind them. Weeks later, 808 might redo work it already discarded, re-evaluate a decision that was already made, or miss that a hypothesis it formed was already tested and resolved. The Epistemology Engine makes reasoning explicit and persistent.
+It answers questions that traditional memory systems cannot:
+
+- Not: *What does the agent know?*
+- But: *Why does the agent believe it?*
+- And: *Has that belief been tested?*
+- And: *What evidence could invalidate it?*
 
 ### Decision Ledger
 
-An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, 808 can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
+An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, the agent can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
 
 ```bash
 mpm record_decision "CONTEXT: We needed a CSS injection mechanism that survives wp_kses filtering
@@ -91,7 +174,7 @@ mpm decisions                   # Formatted decision ledger
 
 ### Theory Tracker
 
-A hypothesis ledger for debugging and design. When 808 forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
+A hypothesis ledger for debugging and design. When the agent forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
 
 ```bash
 mpm propose_theory "HYPOTHESIS: passing --json before the positional arg causes the parse bug
@@ -104,25 +187,25 @@ mpm theories pending           # Filter to pending only
 mpm resolve_theory abc123 "confirmed: flag order matters, --json consumed before positional processing"
 ```
 
-### Proactive Recall Hints
+### Cognitive Immune System (Challenge Lifecycle)
 
-During a conversation, 808 can surface relevant decisions and theories before you know you need them. FTS5 keyword extraction detects semantic overlap with your current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content.
+Knowledge becomes obsolete. Most memory systems never address this problem. MPM introduces a challenge workflow:
 
-```bash
-mpm kb hint "discussing the CSS injection approach for the widget system"
-# → 💡 [Recall] You decided: Route all widget CSS through agentshell_register_widget...
-#    RATIONALE: WordPress strips <style> blocks from post content...
-
-mpm kb hint "token budget handling in the CLI"
-# → 💡 [Recall] Hypothesis: passing --json before the positional arg...
-#    STATUS: resolved | CONCLUSION: confirmed...
+```
+Memory
+    ↓
+Challenge
+    ↓
+Theory
+    ↓
+Evidence Collection
+    ↓
+Confirmed / Disproven
 ```
 
-The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — 808 calls it after context shifts and surfaces the most relevant epistemology memory automatically.
+When new evidence appears, a memory is challenged, a theory is created, evidence is gathered, the theory is resolved, and knowledge is updated. This is the mechanism by which the agent actively questions and overturns its own outdated knowledge.
 
-### Challenge Lifecycle (Autonomous Pruning)
-
-The challenge system is a closed-loop immune response for memory integrity — the mechanism by which 808 actively questions and overturns its own outdated knowledge:
+**Challenge lifecycle (atomic transactions):**
 
 ```
 challenge ──────────────────────────────────────────────────────▶ [pending theory]
@@ -132,21 +215,33 @@ challenge ───────────────────────�
     └── shred ──────────────────────────────────────▶ [theory: deleted]
 ```
 
-**`mpm challenge <id> "<evidence>"`** — Atomic transaction:
+**`mpm challenge <id> "<evidence>"`** — atomic:
 1. Patch memory metadata: `{"status":"challenged","challenged_theory_id":"<theory_id>"}`
 2. Create theory with back-link: `{"status":"pending","type":"challenge","memory_id":"<memory_id>"}`
 3. Weaken memory weight by 3
 
-**`mpm challenge restore <id>`** — Atomic transaction:
+**`mpm challenge restore <id>`** — atomic:
 1. Resolve theory: `status → disproven`, clear `memory_id`
 2. Clear memory metadata flags (RFC 7396 JSON patch)
 
-**`mpm shred <id>`** — Atomic transaction:
-1. DELETE topic_memberships WHERE memory_id = ?
-2. DELETE theory (if exists)
-3. DELETE memory
+**`mpm shred <id>`** — atomic:
+1. `DELETE topic_memberships WHERE memory_id = ?`
+2. `DELETE theory` (if exists)
+3. `DELETE memory`
 
-**`mpm ops gc --shred-negative`** — Shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
+**`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
+
+### Proactive Recall
+
+Traditional memory systems wait for a search query. MPM actively surfaces relevant knowledge before it is requested.
+
+```bash
+mpm kb hint "discussing the CSS injection approach for the widget system"
+# → 💡 [Recall] You decided: Route all widget CSS through agentshell_register_widget...
+#    RATIONALE: WordPress strips <style> blocks from post content...
+```
+
+FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — it surfaces the most relevant epistemology memory automatically after context shifts.
 
 ### How It All Connects
 
@@ -168,6 +263,57 @@ challenge ───────────────────────�
 | `decisions` | `CONTEXT:\nCHOICE:\nRATIONALE:\n[OUTCOME:]` |
 | `theories` | `HYPOTHESIS:\nVALIDATION_CRITERIA:\nSTATUS:` |
 | `theories` (challenge) | `HYPOTHESIS: Memory <id> is obsolete.\nRATIONALE: <evidence>\nSTATUS: pending` |
+
+---
+
+## The JSON Boundary (`mpm call`)
+
+All MPM operations are accessible via a universal machine interface. Both OpenClaw (TypeScript) and Hermes (Python) agents call MPM using the same JSON protocol — no CLI flag parsing, no split-brain architecture.
+
+```bash
+# Universal machine interface — all MPM operations via JSON
+mpm call <tool> --payload JSON
+
+# Examples:
+mpm call save_to_memory --payload '{"fact": "Germany leads Group E with +6 GD", "tags": ["wc2026"]}'
+mpm call query_long_term_memory --payload '{"query": "World Cup prediction"}'
+mpm call propose_theory --payload '{"hypothesis": "Germany wins", "validationCriteria": "semi-final minimum"}'
+mpm call resolve_theory --payload '{"theoryId": "abc123", "conclusion": "confirmed", "newStatus": "proven"}'
+mpm call challenge_memory --payload '{"memoryId": "abc123", "evidence": "recent data contradicts this"}'
+```
+
+This is the **machine-to-machine interface**. The human-facing CLI (documented below) calls the same handlers internally.
+
+---
+
+## Retrieval Architecture
+
+MPM combines:
+
+- SQLite FTS5 (BM25 ranking)
+- Semantic embeddings (cosine similarity, 768d via `nomic-embed-text`)
+- Reinforcement history
+- Recency scoring
+
+This enables both:
+
+```bash
+mpm "world cup prediction"
+mpm recall --semantic "为什么德国队表现这么好"
+```
+
+to retrieve relevant knowledge.
+
+**Hybrid scoring** (in `internal/hybrid_search.go`):
+`score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
+
+BM25 unbounded scores are sigmoid-normalized. Use `--semantic` flag to enable pure embedding search.
+
+**LTM promotion:** `weight ≥ 10` OR explicit `mpm promote` OR auto-ingested `.md` file.
+
+### Cognitive Immune System (Hybrid Search)
+
+On hybrid search, a contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity. State collision (sim ≥ 0.85, one challenged) triggers an async challenge log to `mirror.jsonl`. Challenged memories surface with an in-memory warning prepended — **never written to DB**.
 
 ---
 
@@ -338,25 +484,13 @@ mpm debug gc [--dry-run]            # Decay sweep (dry-run for inspection)
 
 ---
 
-## Full Feature Reference
-
-### Hybrid Semantic Search
-
-BM25 full-text search combined with cosine similarity from `nomic-embed-text` embeddings (768d). BM25 unbounded scores are sigmoid-normalized. Use `--semantic` flag to enable pure embedding search.
-
-```bash
-mpm recall --semantic "为什么德国队表现这么好"
-```
+## Feature Reference
 
 ### Embedding Pipeline
 
 - Auto-embed on `mpm add` and all watcher ingest paths
 - `mpm ops backfill-embeddings` — batched, resume-safe backfill for existing memories
-- tiktoken (cl100k_base) for token-aware chunking
-
-### Cognitive Immune System
-
-On hybrid search, contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity. State collision (sim ≥ 0.85, one challenged) triggers async challenge log to `mirror.jsonl`. Challenged memories surface with in-memory warning prepended — **never written to DB**.
+- tiktoken (`cl100k_base`) for token-aware chunking
 
 ### SSE Live Telemetry Stream
 
@@ -384,14 +518,12 @@ The web UI server includes a live Server-Sent Events (SSE) stream at `GET /api/s
 | `lesson_saved` | `save_lesson` | `id`, `type`, `fact` |
 | `ping` | 15s heartbeat | `{}` |
 
-
 **Browser client (`app.js`):**
 - `EventSource('/api/stream')` with `Last-Event-ID` replay — on reconnect, browser sends `Last-Event-ID` and server replays all buffered events with ID > lastSeen
 - `localStorage.setItem('mpm_sse_id', lastEventId)` — persisted across page reloads
 - Connection status dot: orange (connecting) → green (live) → red (disconnected)
 - DOM mutators: `prependMemoryCard`, `prependLessonCard`, `flashMatrixCell` — no second GET round-trip
 - `refreshStats()` on theory events — silent re-fetch of `/api/status`
-
 
 **CSS animations (`style.css`):**
 - `@keyframes fadeSlideIn` — memory/lesson cards slide in from top on arrival
@@ -437,21 +569,11 @@ On `mpm add`, the system automatically suggests linking to semantically related 
 
 Bounded bidirectional Memory↔Topic↔Reference cross-refs. Links are created on save and surfaced on recall. `mpm kb topic link <topicId> <linkTopicId>` creates cross-links manually.
 
-### Challenge Lifecycle
-
-See **Epistemology Engine → Challenge Lifecycle** for the full explanation, atomic transactions, and workflow diagram.
-
 ### Proactive Hint Engine
 
 FTS5-triggered recall hints via `mpm hint` and `proactive_recall_hint` plugin tool. Extracts conversation keywords (tiktoken, stopword filter), finds epistemology overlaps via BM25, surfaces STATUS and RATIONALE inline — not just the content.
 
 Quality rules: one hint per turn, score >= -3.0, 10-turn suppression window, FTS5 keyword overlap detection.
-
-```bash
-mpm kb hint "discussing the CSS injection approach"
-# → 💡 [Recall] You decided: Route all widget CSS through...
-#    RATIONALE: WordPress strips <style> blocks from post content...
-```
 
 ### Synthesis Deduplication
 
@@ -493,6 +615,45 @@ Each mode specifies retrieval parameters governing the proactive hint engine:
 
 JIT ephemeral personas can override `retrieval_limit` in their JSON blob. A 50-chunk window for a massive codebase migration is valid — the Go backend respects whatever limit the ephemeral persona specifies.
 
+#### Auto-Selection (`route` tool)
+
+MPM includes a zero-latency heuristic router accessible via the `route` MCP tool. It scores incoming prompts against all loaded modes and personas and returns the best-matching ones — without any LLM call, network latency, or external dependency.
+
+```bash
+mpm call route --payload '{"prompt": "I need to draft a whitepaper about our Q3 architecture"}'
+```
+
+Returns:
+```json
+{
+  "selected_modes": ["architect", "research", "write"],
+  "selected_persona": "whiterabbit",
+  "scores": {
+    "write":     { "score": 4, "triggers": ["draft", "whitepaper"] },
+    "architect": { "score": 1, "triggers": ["architecture"] },
+    "research":  { "score": 1, "triggers": ["need"] }
+  }
+}
+```
+
+**Scoring rules:**
+
+| | Modes | Personas |
+|---|---|---|
+| Selection logic | Threshold filter — any score ≥1 activates (multi-select) | Max-pooling — highest score wins if ≥1 (single-select) |
+| Explicit frontmatter `patterns:` | +2 per match | +2 per match |
+| Body-text implicit patterns | +1 per match | +1 per match |
+| Frontmatter `anti_patterns:` | -1 per match | -1 per match |
+
+**Pattern sources** (in order of weight):
+1. **`patterns:` field** in YAML frontmatter — explicit author intent, highest weight
+2. **Body text** — non-stop-word content words extracted at load time, lower weight
+3. **`anti_patterns:` field** — penalizes false positives (e.g., "quick and dirty" suppresses "write" mode triggered by the word "write")
+
+**Hot reload:** The router monitors `mode/` and `persona/` directory mtimes. Any file added or edited is re-parsed and regex recompiled automatically on the next `route` call — no server restart needed.
+
+**Calling systems** (OpenClaw, Claude Code, etc.) receive the JSON and inject `MPM_ACTIVE_MODE` / `MPM_ACTIVE_PERSONA` into the environment before the main generation call. The routing is completely stateless — no file locking, no write collisions.
+
 ### Security Scanning
 
 Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but **never reaches the database**.
@@ -510,11 +671,39 @@ mpm ops review --stale      # Surface forgotten LTM memories
 
 ---
 
-## OpenClaw Agent Integration
+## Reliability
+
+MPM is designed for long-running autonomous operation:
+
+- SQLite WAL mode
+- Dead-letter queues
+- Synthesis isolation
+- Retry pipelines
+- Event replay buffers
+- Watchdog telemetry
+- Overflow protection
+
+The goal is predictable behavior under sustained workloads.
+
+---
+
+## Use Cases
+
+- **Software Engineering Agents** — preserve debugging investigations, architectural decisions, and implementation rationale.
+- **Research Agents** — track hypotheses, evidence, and conclusions across long-running investigations.
+- **Enterprise Knowledge Retention** — capture institutional reasoning that would otherwise disappear into chat logs.
+- **Multi-Agent Systems** — provide a shared cognitive substrate across multiple autonomous agents.
+- **Autonomous Operations** — maintain continuity across long-running workflows.
+
+---
+
+## Agent Integration
+
+MPM integrates directly with AI agents. Both OpenClaw and Hermes share the same Go backend — identical behavior, identical database, the same `mpm call` JSON boundary. The Hermes plugin uses Python `subprocess`; the OpenClaw plugin uses Node `child_process`.
+
+### OpenClaw
 
 MPM is installed as an OpenClaw plugin (`openclaw/mpm-plugin/`), giving the agent **native function-calling access** to 19 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
-
-**Available tools:**
 
 ```
 query_long_term_memory   save_to_memory            save_lesson
@@ -523,17 +712,14 @@ search_topics            link_topic                add_reference
 search_references        list_references           read_directives
 read_wake_context        record_decision           propose_theory
 resolve_theory           proactive_recall_hint     challenge_memory
+route
 ```
 
 Setup and config: see [`openclaw/OPENCLAW.md`](openclaw/OPENCLAW.md).
 
----
+### Hermes
 
-## Hermes Agent Integration
-
-MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Both agents use the **same Go backend** — identical behavior, identical database, same `mpm call` JSON boundary. The Hermes plugin uses Python `subprocess` for the JSON boundary; the OpenClaw plugin uses Node `child_process`.
-
-Setup: see [`hermes-mpm-plugin/install.md`](hermes-mpm-plugin/install.md).
+MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Setup: see [`hermes-mpm-plugin/install.md`](hermes-mpm-plugin/install.md).
 
 ---
 
@@ -556,7 +742,7 @@ Setup: see [`hermes-mpm-plugin/install.md`](hermes-mpm-plugin/install.md).
 │  │         ┌─────────────────────┐             │        │ │
 │  │         │  Shared DBManager   │             │        │ │
 │  │         │  (SQLite + WAL)     │             │        │ │
-│  │         └──────────┬────────────┘             │        │ │
+│  │         └──────────┬────────────┐             │        │ │
 │  └────────────────────┼────────────────────────┘        │ │
 │                        ▼                                  │ │
 │              ┌─────────────────┐                         │ │
@@ -709,6 +895,8 @@ See [`docs/MPM_WISHLIST.md`](docs/MPM_WISHLIST.md) for the full running wishlist
 - **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents
 - **Native Event-Driven Hooks** — UNIX drop-in hooks for `on_theory_resolved`, `on_memory_synthesized`, etc.
 - **Memory Encryption at Rest** — SQLCipher AES-256 for enterprise-grade at-rest encryption
+- **Advanced Cognitive Analytics**
+- **Governance and Compliance Extensions**
 
 ---
 
