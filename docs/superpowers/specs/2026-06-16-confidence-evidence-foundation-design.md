@@ -14,7 +14,7 @@ Introduce an explicit confidence layer to MPM that is independent of artifact co
 - Make confidence an independently-modifiable property of an artifact, not a side-effect of weight
 - Make `weight = truth` impossible to encode by retiring the field and exposing a compatibility view during migration
 - Make evidence a typed, time-bounded, source-tracked first-class entity
-- Make confidence structurally impossible to set manually (generated column)
+- Make confidence a derived property maintained by triggers + a worker, with no direct write path from application code
 - Preserve historical state so confidence updates never erase the past
 - Enable future work: calibration tracking, challenge refactor, hindsight annotations, forgetting log
 
@@ -47,6 +47,14 @@ Every schema decision, every evidence type, every decay function in this spec is
 
 > **Confidence is the system's *current* estimate of truth derived from *current* evidence. The artifact is historical fact. These are independent: confidence is a snapshot, the artifact is a record.**
 
+### Invariant: Confidence Only Rises With Evidence
+
+**Confidence is allowed to decrease automatically. Confidence is never allowed to increase without evidence.**
+
+This single rule prevents a class of pathological behavior: if confidence could rise from time passage alone, the system would slowly forget which artifacts are well-supported and which are not. Decay, by contrast, is the system *forgetting its prior certainty in proportion to silence* — that is the system's way of saying "no new information has arrived." Confidence can drop on its own; it can only rise when new evidence lands.
+
+The schema, the trigger chain, and the `idle_dream` worker all enforce this. There is no code path that raises `confidence` without inserting evidence first.
+
 ## Core Decisions
 
 ### 1. Retire `weight` as a first-class field
@@ -62,7 +70,7 @@ Future:
 ```
 retrieval_priority   -- how often this should surface in retrieval
 importance           -- how much does this matter to the project/domain
-confidence           -- derived from current evidence (GENERATED column)
+confidence           -- derived from current evidence (regular column, maintained by triggers + idle_dream)
 ```
 
 Migration: `legacy_weight = max(0.01, (retrieval_priority + importance) / 2)` exposed as a compatibility view during v2. The function is monotonic and conservative (never returns 0) so old commands behave predictably. In v3, the compatibility view is removed entirely.
@@ -99,22 +107,19 @@ Evidence is no longer inferred from reinforcement counts. It's a real table, wit
 
 ### Existing tables (memories / theories / decisions / lessons)
 
-For v1 of this foundation, the artifact table is a logical view over the existing four tables. Each existing table gains three new columns: `retrieval_priority`, `importance`, and `confidence` (the last as a generated column). The unified `artifacts` view is a `UNION ALL` of the four tables with the new columns.
+For v1 of this foundation, the artifact table is a logical view over the existing four tables. Each existing table gains three new columns: `retrieval_priority`, `importance`, and `confidence` (the last as a regular column maintained by triggers and `idle_dream`). The unified `artifacts` view is a `UNION ALL` of the four tables with the new columns.
 
 This avoids a destructive schema migration. A future v2 may unify the four tables into a single `artifacts` table with a `type` discriminator — but that's a separate, larger migration with its own trade-offs.
 
 ```sql
 ALTER TABLE memories  ADD COLUMN retrieval_priority REAL NOT NULL DEFAULT 0.5;
 ALTER TABLE memories  ADD COLUMN importance         REAL NOT NULL DEFAULT 0.5;
-ALTER TABLE memories  ADD COLUMN confidence         REAL GENERATED ALWAYS AS (
-    -- computed from current evidence; see Confidence Calculation below
-    confidence_from_evidence(memories.id, 'memory')
-) STORED;
+ALTER TABLE memories  ADD COLUMN confidence         REAL NOT NULL DEFAULT 0.8;  -- see Initial Confidence table
 
--- (same ALTER statements for theories, decisions, lessons)
+-- (same ALTER statements for theories, decisions, lessons, with their own default — see Initial Confidence table)
 ```
 
-The generated column expression calls a function (`confidence_from_evidence`) that reads the current evidence set for the artifact and returns the computed confidence. SQLite recomputes the column on every evidence insert / update / expire.
+`confidence` is a regular REAL column, not a GENERATED column. The schema-enforced purity of a generated column is appealing but operationally fragile: the expression would have to call a function that reads another table, which is poorly supported across SQLite versions and makes decay (a time-dependent computation) impossible to encode in a deterministic expression. The trigger/worker pattern below updates `confidence` from the evidence set, and the invariant above guarantees no write path raises it without inserting evidence first.
 
 ### `evidence` table (new)
 
@@ -127,6 +132,7 @@ CREATE TABLE evidence (
     source_group        TEXT NOT NULL,           -- groups correlated evidence (e.g., "log-server-01")
     strength            REAL NOT NULL,           -- raw strength in [-1, 1] (negative for challenge)
     independence_factor REAL NOT NULL DEFAULT 1.0,
+    created_by          TEXT NOT NULL,           -- who/what recorded the evidence (agent, model, human, system)
     created_at          INTEGER NOT NULL,        -- unix seconds
     expires_at          INTEGER,                 -- NULL = no expiry
     notes               TEXT                     -- human-readable context
@@ -135,8 +141,11 @@ CREATE TABLE evidence (
 CREATE INDEX idx_evidence_artifact ON evidence(artifact_id, artifact_type);
 CREATE INDEX idx_evidence_type     ON evidence(type);
 CREATE INDEX idx_evidence_source   ON evidence(source_group);
+CREATE INDEX idx_evidence_creator  ON evidence(created_by);
 CREATE INDEX idx_evidence_expires  ON evidence(expires_at);
 ```
+
+`created_by` is the provenance of the evidence row — which agent, model, human, or system recorded it. Calibration will eventually ask "which evidence sources produce durable confidence?" and the answer lives in this column. A row added by `gpt-5.5` is observably different from a row added by a human reviewer, even if the strength is identical; that difference is captured here.
 
 ### `confidence_history` table (new)
 
@@ -156,6 +165,8 @@ CREATE INDEX idx_conf_history_artifact ON confidence_history(artifact_id, artifa
 
 This is the historical state preservation from the design principle. The `confidence` field on the artifact is the *current* value; the `confidence_history` table preserves every prior value. A confidence update inserts a new row here; it never overwrites.
 
+> **Do not optimize this table away.** It is the most valuable table in the design, not because of confidence, but because of *trends*: a 0.9 → 0.8 → 0.7 → 0.6 → 0.4 trajectory is belief collapse; a 0.3 → 0.4 → 0.6 → 0.8 → 0.9 trajectory is belief formation. Both are auditable, debuggable, and calibrate-able from the timeline. Trend analysis, ISR (Incremental Self-Rewriting), and historical auditing all depend on this table. It is append-only, never pruned by the forgetting log (the log prunes *artifacts*, not the history of what was believed about them).
+
 ### `artifacts` view (new)
 
 ```sql
@@ -170,6 +181,19 @@ CREATE VIEW artifacts AS
 ```
 
 Future queries that need to reason about "all artifacts uniformly" use this view.
+
+### Initial Confidence by Type
+
+Different artifact types start at different confidence levels. The starting point is not a claim that the artifact is true — it's the *epistemic stance* the system takes toward new artifacts of that type. A memory that "I observed a parser error" is not 50% likely to have happened; it happened, and the system treats it as such. A theory that "the parser error is caused by X" is genuinely uncertain until evidence accumulates.
+
+| Artifact type | Initial confidence | Rationale |
+|---|---|---|
+| `memory` | 0.8 | The event occurred; uncertainty is in details, not existence |
+| `theory` | 0.5 | A hypothesis is uncertain by definition until validated |
+| `decision` | 0.6 | Architectural choices have prior support (context, alternatives considered) |
+| `lesson` | 0.7 | Lessons are extracted from confirmed experience, not speculation |
+
+These are starting points, not truths. New evidence shifts confidence up or down per the calculation below. The `idle_dream` worker enforces the invariant: an artifact sitting with no evidence at all decays toward its initial value, never below (within one decay half-life). A 0.5 theory with no evidence for two months is still 0.5 — not 0.0 — because the absence of evidence is not the same as evidence of absence.
 
 ## The Six Evidence Types (v1)
 
@@ -188,6 +212,8 @@ Strengths are starting points; the implementation allows per-evidence override. 
 
 A type registry (in `internal/evidence.go`) is the single source of truth for default strengths, validation, and any future type-specific logic. Adding a seventh type means adding a row to the registry, not editing multiple files.
 
+> **Note on Challenge vs. Negative Evidence.** `challenge` here models *evidence against the artifact* — data that contradicts it. That is distinct from the *Challenge* workflow concept, which is a structured event ("this artifact may be incomplete", "this artifact deserves re-examination") that may or may not carry contradictory data. A Challenge can land without negative evidence (it just raises a flag); negative evidence lands without a Challenge (a `test` row that fails is negative evidence but not a workflow event). For v1 the distinction is collapsed into one evidence type. The Challenge refactor spec (separate) will split them: Challenge becomes a first-class object referencing the artifact, with its own edges and metadata, and `challenge` evidence rows remain purely "data that contradicts." Collapsing them in v1 is acceptable because the difference is workflow-level, not schema-level, and the data is the same shape.
+
 ## Independence Factor
 
 `source_group` clusters evidence by origin. The scoring function multiplies strength by an independence factor:
@@ -203,9 +229,25 @@ Effective evidence contribution: `effective = strength × independence_factor ×
 
 `source_group` is the only knob needed for this — the implementation can infer or suggest an `independence_factor` from how many distinct groups have contributed, but the field is explicit so humans can override.
 
+## Known Future Dimensions
+
+The two-axis split (`retrieval_priority` + `importance`) is sufficient for v1, but the model is intentionally open to a third axis when the workload demands it. The candidate is `urgency` — how time-critical is this artifact right now, distinct from how important it is long-term.
+
+| Dimension | Question it answers | Example |
+|---|---|---|
+| `importance` | How much does this matter to the project/domain? | "Always use the error wrapper from `internal/errors`" |
+| `retrieval_priority` | How often should this surface in retrieval? | A frequently-referenced lesson |
+| `urgency` (future) | How time-critical is this *right now*? | "Production DB is on fire" — low long-term importance, extreme present-moment urgency |
+
+A production incident has low long-term importance (we don't want it dominating retrieval forever) but extreme urgency (it must be highly retrievable for the next 24 hours). The current two-axis model would force a choice: bump `importance` to make it surface (and it stays important forever) or leave it low (and it gets buried when it's most needed). A separate `urgency` field with its own decay — fast half-life, independent of `importance` — solves this.
+
+Not in v1. Documented here so the schema work doesn't paint us into a corner. If `urgency` lands, it is a new column on the same four tables, with its own decay function, and the `artifacts` view picks it up automatically. The confidence calculation is unaffected (urgency is retrieval-side, not epistemic-side).
+
 ## Confidence Calculation
 
-Confidence is a **generated column** in SQLite, not a user-editable field. This is the structural enforcement of "confidence is not stored truth" — there is no SQL path to set it directly.
+Confidence is a **regular column** updated by a trigger chain and recomputed periodically. The schema-enforced purity of a generated column was considered and rejected: the expression would have to call a function that reads another table, which is poorly supported across SQLite versions, and the function would have to be deterministic, which means time-dependent decay cannot live inside it. The trigger/worker pattern below is more debuggable, migrates cleanly, and lets us tune the recompute schedule independently.
+
+The structural enforcement of "confidence is not stored truth" comes from the **invariant** above and the **code-path discipline** below — there is no `confidence = ?` write anywhere in the application. Triggers and `idle_dream` are the only writers.
 
 ```
 confidence(artifact) = sigmoid( log_odds(artifact) )
@@ -223,28 +265,31 @@ decay(artifact) = λ(collection) × t_since_last_positive_evidence(artifact)
 
 The base odds and sigmoid bound confidence to (0, 1). Negative `challenge` evidence subtracts from log-odds, naturally reducing confidence. Per-collection λ enforces the decay rates from the table above. Recency weight gives recent evidence more weight than stale evidence (independent of the collection-level decay).
 
-**Implementation:** the generated column expression calls a registered SQL function (`confidence_from_evidence`) that reads the current evidence set and returns the computed confidence. SQLite recomputes the column on every evidence insert / update / expire. The historical state is recorded in `confidence_history` via a trigger:
+**The trigger chain.** Every evidence write fires a trigger that:
+
+1. Recomputes `confidence` on the artifact from the current evidence set
+2. Inserts a row in `confidence_history` capturing the new value, the evidence count, and the trigger cause
 
 ```sql
 CREATE TRIGGER trg_evidence_added
 AFTER INSERT ON evidence
 BEGIN
+    UPDATE memories    SET confidence = :new_conf WHERE id = NEW.artifact_id AND NEW.artifact_type = 'memory';
+    UPDATE theories    SET confidence = :new_conf WHERE id = NEW.artifact_id AND NEW.artifact_type = 'theory';
+    UPDATE decisions   SET confidence = :new_conf WHERE id = NEW.artifact_id AND NEW.artifact_type = 'decision';
+    UPDATE lessons     SET confidence = :new_conf WHERE id = NEW.artifact_id AND NEW.artifact_type = 'lesson';
     INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
-    VALUES (
-        gen_ulid(),
-        NEW.artifact_id,
-        NEW.artifact_type,
-        confidence_from_evidence(NEW.artifact_id, NEW.artifact_type),
-        unixepoch(),
-        (SELECT count(*) FROM evidence WHERE artifact_id = NEW.artifact_id AND artifact_type = NEW.artifact_type),
-        'evidence_added'
-    );
+    VALUES (gen_ulid(), NEW.artifact_id, NEW.artifact_type, :new_conf, unixepoch(),
+            (SELECT count(*) FROM evidence WHERE artifact_id = NEW.artifact_id AND artifact_type = NEW.artifact_type),
+            'evidence_added');
 END;
 ```
 
-(Similar triggers for `evidence_expired`, `decay_tick` scheduled from `idle_dream`, and `manual_recompute` for diagnostic use.)
+(Similar triggers for `evidence_expired`, `evidence_deleted`, and `manual_recompute` for diagnostic use. The `:new_conf` placeholder is filled in by the Go-side handler that registers the trigger with a real SQL function call — the actual computation lives in `internal/confidence.go`, not in the trigger body, to keep the function testable and portable.)
 
-**Why generated, not application-level:** application-level derivation can be bypassed by direct SQL writes. Generated columns cannot. This is the same principle as "schema should make the wrong thing difficult."
+**The `idle_dream` recompute.** Decay is time-dependent and cannot be triggered by an evidence event. The `idle_dream` background worker walks artifacts whose last-positive-evidence timestamp is older than the collection's decay half-life and recomputes their `confidence` with the current `t_since_last_positive_evidence`. Each recompute writes a `confidence_history` row with `trigger = 'decay_tick'`. The schedule is configurable; the default is once per day.
+
+**Why trigger + worker, not application-level:** application-level derivation can be bypassed by direct SQL writes, but the same is true of the trigger chain if someone drops triggers. The real defense is the invariant: every code path that raises `confidence` is a `INSERT INTO evidence` call. A reviewer can grep for `UPDATE memories SET confidence` and find zero matches. That's a stronger guarantee than a generated column, which is a one-time schema feature that says nothing about the *chain* of writes that maintain it.
 
 ## Historical State Preservation
 
@@ -253,7 +298,7 @@ Every confidence change produces a row in `confidence_history`. The current `con
 Queries:
 
 ```sql
--- Current confidence (matches the generated column)
+-- Current confidence (matches the value maintained by the latest trigger/worker run)
 SELECT confidence FROM artifacts WHERE id = ?;
 
 -- Confidence as of a specific time
@@ -275,7 +320,7 @@ ORDER BY computed_at;
 ### v2: Add the new fields and table, deprecate `weight`
 
 1. Add `retrieval_priority`, `importance` columns to `memories` / `theories` / `decisions` / `lessons` (default 0.5)
-2. Add `confidence` as a generated column to the same four tables, calling `confidence_from_evidence`
+2. Add `confidence` as a regular column to the same four tables, with default values from the Initial Confidence by Type table; create the trigger chain on `evidence` insert/update/delete; create the `idle_dream` recompute schedule
 3. Create the `evidence` table
 4. Create the `confidence_history` table
 5. Create the `artifacts` view (`UNION ALL` over the four tables)
@@ -298,7 +343,7 @@ The "long enough" criterion is tracked separately; the v3 cutover is its own dec
 |---|---|
 | `internal/schema.go` | Add new columns to `BaseTables`; add `evidence` and `confidence_history` table definitions |
 | `internal/evidence.go` (new) | Evidence type registry, default strengths, validation |
-| `internal/confidence.go` (new) | Confidence calculation: log-odds, decay, recency weight, generated column expression function |
+| `internal/confidence.go` (new) | Confidence calculation: log-odds, decay, recency weight, the SQL function called by the trigger chain |
 | `internal/db.go` | Add the new tables to init; add the `confidence_from_evidence` SQL function registration; add the history triggers |
 | `internal/memory.go` | Update `Memory` struct with new fields; update `AddMemory` to set initial `retrieval_priority` and `importance` (default 0.5) |
 | `internal/theory.go` (or wherever theories live) | Update `Theory` struct with new fields |
@@ -313,18 +358,18 @@ The "long enough" criterion is tracked separately; the v3 cutover is its own dec
 
 ### Trade-offs accepted
 
-- **Application-level confidence derivation is now schema-enforced.** This is the right call for an epistemology engine; the alternative (convention-based derivation) always erodes.
+- **Confidence is a regular column, not a generated column.** We lose the schema-enforced purity of "you cannot write confidence directly" and replace it with the invariant + code-path discipline (no `UPDATE ... SET confidence` anywhere except inside the trigger function). The trade is operational simplicity: trigger chain is debuggable, migrates cleanly, supports time-dependent decay, and works across SQLite versions. Reviewers will grep for direct confidence writes; the invariant above is the structural claim.
 - **Historical state requires a write on every confidence change.** A 10x increase in writes to the artifact table. This is acceptable for v1; if it becomes a hot path, batch the history writes in the `idle_dream` worker.
 - **The `evidence` table will grow large over time.** It's not pruned by default. The forgetting log (future spec) prunes it alongside the artifact.
-- **Generated columns in SQLite cannot reference user-defined functions in all versions.** The implementation must verify that the deployed SQLite supports this; if not, the function is registered as a built-in extension.
+- **Initial-confidence defaults are by-type, not global.** A one-size-fits-all 0.5 was rejected because epistemic starting points differ by artifact type (see Initial Confidence by Type).
 
 ### Open questions for v1
 
-- **Initial `confidence` for new artifacts:** what value? A default of 0.5 (the neutral point) is reasonable. New artifacts start uncertain until evidence arrives.
 - **Evidence type for `inference`:** the model often infers things from other knowledge without direct observation. Is `observation` (with low strength) the right home, or do we need a seventh type? Defer to v2.
 - **Recency weight μ:** the global `μ` for the per-evidence recency decay isn't pinned down. Defer to a v1.1 tuning pass.
 - **Confidence interval:** the spec gives a point estimate. Do we also need a confidence *interval* (variance)? Calibration needs it. Defer to the calibration spec.
 - **Per-collection confidence override:** can an artifact have a `confidence_override` field for human-judgment cases (e.g., "I know this is true regardless of evidence")? Defer; current spec treats all confidence as derived.
+- **Recompute schedule for `idle_dream`:** daily? Hourly? Triggered by some evidence-count threshold? The default in this spec is daily; tune against real decay patterns.
 
 ## What's Missing From This Spec
 
