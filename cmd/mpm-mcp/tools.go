@@ -27,12 +27,13 @@ import (
 
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
-// RegisterAllTools registers all 18 MPM tools on the given MCP server.
+// RegisterAllTools registers all 19 MPM tools on the given MCP server.
 // dm must be a long-lived DatabaseManager (the caller owns its Close).
 // ac carries the active mode/persona read from MPM_ACTIVE_MODE /
 // MPM_ACTIVE_PERSONA env vars; write handlers thread it into provenance
 // metadata so every persisted row is attributable to the agent context.
-func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac internal.ActiveContext) {
+// router provides zero-latency heuristic routing for the route tool.
+func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac internal.ActiveContext, router *internal.Router) {
 	s.AddTool(toolReadWakeContext(), handleReadWakeContext(dm))
 	s.AddTool(toolQueryLongTermMemory(), handleQueryLongTermMemory(dm))
 	s.AddTool(toolSaveToMemory(), handleSaveToMemory(dm, ac))
@@ -51,6 +52,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolResolveTheory(), handleResolveTheory(dm))
 	s.AddTool(toolRecordDecision(), handleRecordDecision(dm, ac))
 	s.AddTool(toolProactiveRecallHint(), handleProactiveRecallHint(dm))
+	s.AddTool(toolRoute(), handleRoute(router))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -334,6 +336,37 @@ func toolRecordDecision() mcp.Tool {
 		),
 	)
 }
+
+// ── route ─────────────────────────────────────────────────────────────────────
+
+func toolRoute() mcp.Tool {
+	return mcp.NewTool("route",
+		mcp.WithDescription(
+			"Evaluate a user prompt and auto-select the best-matching MPM mode(s) "+
+				"and persona. Modes use threshold filtering (multiple can activate); "+
+				"personas use max-pooling (only the highest scorer wins, if any beats threshold 1). "+
+				"Patterns are pre-compiled at server boot. Anti-patterns penalize false positives. "+
+				"Returns a full diagnostic report with scores and triggers per component."),
+		mcp.WithString("prompt",
+			mcp.Required(),
+			mcp.Description("The user prompt or message to route."),
+		),
+	)
+}
+
+func handleRoute(router *internal.Router) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		prompt, _ := args["prompt"].(string)
+		if prompt == "" {
+			return mcp.NewToolResultError("prompt is required"), nil
+		}
+		report := router.Evaluate(prompt)
+		return jsonResult(report), nil
+	}
+}
+
+// ── proactive_recall_hint ────────────────────────────────────────────────────
 
 func toolProactiveRecallHint() mcp.Tool {
 	return mcp.NewTool("proactive_recall_hint",
