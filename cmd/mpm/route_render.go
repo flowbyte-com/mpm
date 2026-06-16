@@ -52,3 +52,26 @@ func extractRoutePrompt(args []string, stdin io.Reader) string {
 	}
 	return s
 }
+
+// shouldSkipRoute returns (true, reason) if the prompt should bypass routing.
+// Reason is one of: "empty", "noroute", "env". Reason is "" when skip=false.
+//
+// Checked in this order (first match wins):
+//  1. Empty or whitespace-only prompt → "empty"
+//  2. Prompt contains "/noroute" anywhere → "noroute"
+//  3. MPM_ROUTE=off env var → "env"
+//
+// The envLookup indirection lets tests simulate the env var without
+// mutating process state.
+func shouldSkipRoute(prompt string, envLookup func(string) string) (bool, string) {
+	if strings.TrimSpace(prompt) == "" {
+		return true, "empty"
+	}
+	if strings.Contains(prompt, "/noroute") {
+		return true, "noroute"
+	}
+	if envLookup("MPM_ROUTE") == "off" {
+		return true, "env"
+	}
+	return false, ""
+}
