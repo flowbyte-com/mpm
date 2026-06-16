@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -71,6 +72,106 @@ func TestRenderRoute_EmptyWorkspace(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("renderRoute() with empty workspace should return empty, got %q", got)
+	}
+}
+
+// TestRenderRoute_LongBodyTruncatesPersona exercises the persona-priority
+// truncation path end-to-end. A regression caused renderRoute to pass an empty
+// string as the persona to applyRouteLengthCap, so the persona branch was
+// dead code and bodies in the 9,500-10,000 char range slipped past the cap.
+// This test builds a synthetic workspace with a short mode and long persona,
+// fires a prompt that routes to both, and asserts the persona is dropped with
+// the short marker appended to mode.
+func TestRenderRoute_LongBodyTruncatesPersona(t *testing.T) {
+	workspace := t.TempDir()
+	mustMkdir(t, filepath.Join(workspace, "mode"))
+	mustMkdir(t, filepath.Join(workspace, "persona"))
+
+	// Short mode — content well under 9,000 chars.
+	shortModeBody := "## Bigmode\n\nShort mode body."
+	mustWriteFile(t, filepath.Join(workspace, "mode", "bigmode.md"),
+		"---\nname: bigmode\npatterns: bigmode\n---\n\n"+shortModeBody+"\n")
+
+	// Long persona — pads with whitespace and a unique sentinel word to push
+	// the total rendered body into the 9,500-10,000 range. The sentinel word
+	// is the same one used in the prompt, so the persona will be selected.
+	const sentinel = "persona-sentinel-truncatetest"
+	// Persona label + 50 padding lines of ~150 chars each = ~7500 chars of
+	// persona body, combined with the mode body this lands us in the
+	// 9,500-10,000 range where the persona-priority branch should fire.
+	padding := strings.Repeat(sentinel+" ", 20) + "\n"
+	var personaBody strings.Builder
+	personaBody.WriteString("## Bigpersona\n\n")
+	for i := 0; i < 60; i++ {
+		personaBody.WriteString(padding)
+	}
+	mustWriteFile(t, filepath.Join(workspace, "persona", "bigpersona.md"),
+		"---\nname: bigpersona\npatterns: "+sentinel+"\n---\n\n"+personaBody.String())
+
+	prompt := "design with bigmode and " + sentinel
+	got, err := renderRoute(workspace, prompt)
+	if err != nil {
+		t.Fatalf("renderRoute: %v", err)
+	}
+	if got == "" {
+		t.Fatalf("renderRoute returned empty — synthetic workspace didn't route the prompt as expected")
+	}
+
+	// The persona-priority truncation marker MUST appear in the rendered output.
+	// The markers include a leading newline so they sit on their own line in
+	// the rendered body — match the literals used in applyRouteLengthCap.
+	shortMarker := "\n[...truncated, see mode/<name>.md for full content]"
+	longMarker := "\n[...truncated]"
+	if !strings.Contains(got, shortMarker) {
+		t.Errorf("renderRoute() missing persona-priority truncation marker %q\nGot (%d chars):\n%s", shortMarker, len(got), got)
+	}
+	// The long (mode-truncation) marker must NOT appear on its own — the
+	// persona-priority path should drop the persona and preserve the mode,
+	// not truncate the mode. This assertion distinguishes the fixed behavior
+	// from the buggy old one, which would have routed the whole concatenated
+	// body to the long path (since the old call site passed the combined
+	// body in the first slot and an empty string in the second, making the
+	// persona-priority branch dead code).
+	//
+	// We can't just check strings.Contains for the bare long marker text —
+	// `[...truncated]` is a substring of the short marker. So we look for the
+	// long marker as it actually appears in the output: the short marker ends
+	// with `]` and the long marker would need to appear after a non-`,` char.
+	if strings.Contains(got, longMarker) && !strings.Contains(got, shortMarker) {
+		t.Errorf("renderRoute() emitted the long (mode-truncation) marker without the short one — persona-priority path was bypassed\nGot: %s", got)
+	}
+	// The persona body content should NOT survive in the rendered output.
+	// The persona label `persona=bigpersona` is also dropped, since the
+	// persona was truncated entirely.
+	if strings.Contains(got, "persona=bigpersona") {
+		t.Errorf("renderRoute() should have dropped the persona section, but `persona=bigpersona` label is present\nGot: %s", got)
+	}
+	// The mode section must be preserved.
+	if !strings.Contains(got, "mode=bigmode") {
+		t.Errorf("renderRoute() should preserve the mode section, but `mode=bigmode` is missing\nGot: %s", got)
+	}
+	if !strings.Contains(got, shortModeBody) {
+		t.Errorf("renderRoute() should preserve the mode body content\nGot: %s", got)
+	}
+	// Total output (including the system-reminder wrapper) must stay under
+	// the 10,000-char Claude Code hook limit.
+	if len(got) >= 10000 {
+		t.Errorf("renderRoute() output = %d chars, must be < 10,000 to stay under hook limit", len(got))
+	}
+	t.Logf("renderRoute output length: %d chars (cap = 9,500 body, < 10,000 hook limit)", len(got))
+}
+
+func mustMkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -163,54 +264,91 @@ func TestExtractRoutePrompt(t *testing.T) {
 }
 
 func TestApplyRouteLengthCap(t *testing.T) {
-	shortMarker := "[...truncated, see mode/<name>.md for full content]"
-	longMarker := "[...truncated]"
+	// Marker strings must match the literals in applyRouteLengthCap exactly —
+	// they begin with a newline so they sit on their own line in the rendered
+	// output. Length arithmetic in the test cases uses len(shortMarker) and
+	// len(longMarker), so changing the marker text requires updating both.
+	shortMarker := "\n[...truncated, see mode/<name>.md for full content]"
+	longMarker := "\n[...truncated]"
 
 	tests := []struct {
 		name        string
 		modeText    string
 		personaText string
-		wantMarker  string // "" = expect no marker
-		wantMode    string // expected substring in mode position
+		// Expected return values. wantModeLen/wantPersonaLen of -1 means
+		// "exact equality with the input" — used for short inputs where we
+		// want to assert identity rather than a length.
+		wantModeLen    int
+		wantPersonaLen int
+		wantMarker     string // "" = expect no marker; otherwise must appear in truncatedMode
 	}{
 		{
-			name:        "under cap no truncation",
-			modeText:    "MODE-CONTENT",
-			personaText: "PERSONA-CONTENT",
-			wantMode:    "MODE-CONTENT",
+			name:           "under cap no truncation",
+			modeText:       "MODE-CONTENT",
+			personaText:    "PERSONA-CONTENT",
+			wantModeLen:    -1, // exact match
+			wantPersonaLen: -1, // exact match
 		},
 		{
-			name:        "persona truncated when combined exceeds cap",
-			modeText:    strings.Repeat("m", 5000),
-			personaText: strings.Repeat("p", 5000),
-			wantMarker:  shortMarker,
-			wantMode:    strings.Repeat("m", 5000),
+			name:           "persona truncated when combined exceeds cap",
+			modeText:       strings.Repeat("m", 5000),
+			personaText:    strings.Repeat("p", 5000),
+			wantModeLen:    5000 + len(shortMarker), // mode preserved + marker
+			wantPersonaLen: 0,                       // persona dropped
+			wantMarker:     shortMarker,
 		},
 		{
-			name:        "mode truncated when even persona removal not enough",
-			modeText:    strings.Repeat("M", 10000),
-			personaText: strings.Repeat("p", 100),
-			wantMarker:  longMarker,
+			name:           "mode truncated when even persona removal not enough",
+			modeText:       strings.Repeat("M", 10000),
+			personaText:    strings.Repeat("p", 100),
+			wantModeLen:    routeModeHardCap + len(longMarker), // truncated to 9000 + marker
+			wantPersonaLen: 0,                                  // persona dropped
+			wantMarker:     longMarker,
 		},
 		{
-			name:        "empty persona no truncation",
-			modeText:    strings.Repeat("m", 1000),
-			personaText: "",
-			wantMode:    strings.Repeat("m", 1000),
+			name:           "empty persona no truncation",
+			modeText:       strings.Repeat("m", 1000),
+			personaText:    "",
+			wantModeLen:    -1, // exact match
+			wantPersonaLen: -1, // exact match (empty)
+		},
+		{
+			name:           "persona dropped but mode preserved (the bug class)",
+			// This is the regression case the renderer used to miss: a body
+			// in the 9,500-10,000 range with a long persona and short mode.
+			// The persona-priority branch should drop the persona and append
+			// the short marker to mode.
+			modeText:       strings.Repeat("m", 3000),
+			personaText:    strings.Repeat("p", 7000),
+			wantModeLen:    3000 + len(shortMarker),
+			wantPersonaLen: 0,
+			wantMarker:     shortMarker,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyRouteLengthCap(tt.modeText, tt.personaText)
-			if tt.wantMode != "" && !strings.Contains(got, tt.wantMode) {
-				t.Errorf("applyRouteLengthCap() missing expected mode content")
+			gotMode, gotPersona := applyRouteLengthCap(tt.modeText, tt.personaText)
+			if tt.wantModeLen == -1 {
+				if gotMode != tt.modeText {
+					t.Errorf("applyRouteLengthCap() mode = %q, want unchanged %q", gotMode, tt.modeText)
+				}
+			} else if len(gotMode) != tt.wantModeLen {
+				t.Errorf("applyRouteLengthCap() mode length = %d, want %d\nGot: %s", len(gotMode), tt.wantModeLen, gotMode)
 			}
-			if tt.wantMarker != "" && !strings.Contains(got, tt.wantMarker) {
-				t.Errorf("applyRouteLengthCap() missing expected marker %q\nGot: %s", tt.wantMarker, got)
+			if tt.wantPersonaLen == -1 {
+				if gotPersona != tt.personaText {
+					t.Errorf("applyRouteLengthCap() persona = %q, want unchanged %q", gotPersona, tt.personaText)
+				}
+			} else if len(gotPersona) != tt.wantPersonaLen {
+				t.Errorf("applyRouteLengthCap() persona length = %d, want %d\nGot: %s", len(gotPersona), tt.wantPersonaLen, gotPersona)
 			}
-			if tt.wantMarker == "" && strings.Contains(got, "truncated") {
-				t.Errorf("applyRouteLengthCap() unexpected truncation: %s", got)
+			if tt.wantMarker != "" {
+				if !strings.Contains(gotMode, tt.wantMarker) {
+					t.Errorf("applyRouteLengthCap() mode missing expected marker %q\nGot mode: %s", tt.wantMarker, gotMode)
+				}
+			} else if strings.Contains(gotMode, "truncated") {
+				t.Errorf("applyRouteLengthCap() unexpected truncation marker in mode: %s", gotMode)
 			}
 		})
 	}
