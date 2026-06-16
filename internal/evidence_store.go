@@ -60,6 +60,9 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if in.ArtifactType == "" {
 		return fmt.Errorf("artifact_type required")
 	}
+	if in.SourceGroup == "" {
+		return fmt.Errorf("source_group required")
+	}
 	if in.CreatedBy == "" {
 		return fmt.Errorf("created_by required")
 	}
