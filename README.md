@@ -723,6 +723,71 @@ MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Se
 
 ---
 
+## Claude Code integration
+
+MPM can auto-route every Claude Code prompt to the appropriate mode + persona
+*before* the LLM sees it. This is implemented as a `UserPromptSubmit` hook
+that runs `mpm route` synchronously; the rendered mode+persona is injected
+into the LLM's context as a `<system-reminder>` block. For the JSON-RPC
+surface and the `mpm call route` example, see [Auto-Selection (route tool)](#auto-selection-route-tool).
+
+### Install
+
+Add the following to `~/.claude/settings.json`:
+
+    {
+      "hooks": {
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "mpm route",
+                "timeout": 1,
+                "statusMessage": "MPM routing…"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+Requirements:
+- `mpm` must be on your `PATH` (run `which mpm` to verify). If it's not,
+  Claude Code will show a non-blocking hook error in the transcript.
+- `MPM_ROUTE_WORKSPACE` env var (optional) — if unset, `mpm route` uses
+  the current working directory as the MPM workspace base.
+
+### Opt-out
+
+- Type `/noroute` anywhere in your prompt → routing is skipped for that turn
+- Set `MPM_ROUTE=off` in your shell env → routing is skipped for the session
+- A low-signal prompt (e.g. "hi") that doesn't match any mode or persona
+  produces no injected context — the LLM responds natively
+
+### Verify it works
+
+```bash
+# Should print a <system-reminder> block
+echo "review this code for security issues" | mpm route
+
+# Should print nothing (no mode matched)
+echo "hi" | mpm route
+
+# Should print nothing (opt-out)
+echo "/noroute explain quantum computing" | mpm route
+```
+
+### Truncation
+
+Rendered output is capped at 9,500 characters (under Claude Code's 10,000-char
+hook stdout limit). If a mode + persona combination would exceed the cap,
+the persona (voice/tone) is truncated first and a marker is appended
+referencing the on-disk file. Operational rules are never truncated unless
+they alone exceed 9,000 characters.
+
+---
+
 ## Architecture
 
 ```
