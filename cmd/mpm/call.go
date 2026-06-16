@@ -49,6 +49,7 @@ var toolRegistry = map[string]ToolHandler{
 	"read_wake_context":     callReadWakeContext,
 	"read_directives":       callReadDirectives,
 	"proactive_recall_hint": callProactiveRecallHint,
+	"route":                 callRoute,
 }
 
 // handleCall is the main entry point for `mpm call <tool> [--payload <json>]`.
@@ -678,5 +679,31 @@ func callProactiveRecallHint(p map[string]interface{}) (interface{}, error) {
 		"success": true,
 		"hints":   overlaps,
 		"count":   len(overlaps),
+	}, nil
+}
+
+// callRoute evaluates a prompt against the workspace's mode+persona
+// configuration and returns a RoutingReport. This is the JSON-RPC path
+// for OpenClaw and Hermes — pure JSON, no text rendering.
+//
+// Unlike mpm route (text), this handler returns errors instead of silently
+// producing empty output. Callers are machines and can handle failures.
+func callRoute(p map[string]interface{}) (interface{}, error) {
+	prompt, _ := p["prompt"].(string)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+
+	workspace := resolveRouteWorkspace()
+	router, err := internal.NewRouter(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("router init: %w", err)
+	}
+
+	report := router.Evaluate(prompt)
+	return map[string]interface{}{
+		"selected_modes":   report.SelectedModes,
+		"selected_persona": report.SelectedPersona,
+		"scores":           report.Scores,
 	}, nil
 }
