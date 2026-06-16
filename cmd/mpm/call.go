@@ -697,13 +697,8 @@ func callRoute(p map[string]interface{}) (interface{}, error) {
 	workspace := resolveRouteWorkspace()
 	router, err := internal.NewRouter(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("router init: %w", err)
+		return nil, fmt.Errorf("new router: %w", err)
 	}
 
-	report := router.Evaluate(prompt)
-	return map[string]interface{}{
-		"selected_modes":   report.SelectedModes,
-		"selected_persona": report.SelectedPersona,
-		"scores":           report.Scores,
-	}, nil
+	return router.Evaluate(prompt), nil
 }
