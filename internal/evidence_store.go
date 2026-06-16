@@ -66,6 +66,17 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if in.CreatedBy == "" {
 		return fmt.Errorf("created_by required")
 	}
+	// Scan notes (and the user-supplied identifying fields) for secrets and
+	// poison phrases. The `notes` field is the only free-form text on an
+	// evidence row, but `SourceGroup`/`CreatedBy` can also smuggle content
+	// in practice. The 20-pattern scanner is the same one used by
+	// MemoryStore.AddMemory; bypass here would be a known audit finding.
+	if isSensitive, reason := isSensitiveContent(in.Notes); isSensitive {
+		return fmt.Errorf("sensitive content in evidence notes: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(in.Notes); isPoisoned {
+		return fmt.Errorf("poison content in evidence notes: %s", reason)
+	}
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
 	}
