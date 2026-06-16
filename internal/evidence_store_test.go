@@ -116,6 +116,31 @@ func TestEvidenceStore_RecomputeManual(t *testing.T) {
 	assert.GreaterOrEqual(t, manualCount, 1)
 }
 
+func TestEvidenceStore_AddEvidence_BlocksSensitiveNotes(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES ('m1', 'memories', 'x')`, 0)
+	require.NoError(t, err)
+
+	// The 20-pattern scanner matches API key prefixes; "sk-" + 20+ chars
+	// is the canary pattern that the scanner is supposed to catch.
+	err = AddEvidence(dm, EvidenceInput{
+		ArtifactID:   "m1",
+		ArtifactType: "memory",
+		Type:         "observation",
+		SourceGroup:  "test",
+		Strength:     0.4,
+		CreatedBy:    "test",
+		Notes:        "found api key sk-abcdefghijklmnopqrstuv in the logs",
+	})
+	require.Error(t, err, "scanner should block evidence with API key in notes")
+	assert.Contains(t, err.Error(), "sensitive content")
+
+	// Verify nothing was persisted.
+	var count int
+	require.NoError(t, dm.QueryRowTracked(`SELECT COUNT(*) FROM evidence WHERE artifact_id = 'm1'`).Scan(&count))
+	assert.Equal(t, 0, count, "no evidence row should be persisted when scanner blocks")
+}
+
 // newTestDM creates a DatabaseManager on a temp DB and returns it. The
 // DatabaseManager is closed via t.Cleanup. Follows the freshDB pattern from
 // isolation_test.go so we don't write to the real workspace DB.
