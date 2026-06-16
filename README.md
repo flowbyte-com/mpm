@@ -727,8 +727,11 @@ MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Se
 
 MPM can auto-route every Claude Code prompt to the appropriate mode + persona
 *before* the LLM sees it. This is implemented as a `UserPromptSubmit` hook
-that runs `mpm route` synchronously; the rendered mode+persona is injected
-into the LLM's context as a `<system-reminder>` block. For the JSON-RPC
+that runs `mpm route` synchronously. Plain stdout from a `UserPromptSubmit` hook is injected
+directly into the LLM's context per the
+[Claude Code hook protocol](https://code.claude.com/docs/en/hooks), so the
+rendered mode+persona (wrapped in a `<system-reminder>` block) reaches
+the model without any JSON envelope. For the JSON-RPC
 surface and the `mpm call route` example, see [Auto-Selection (route tool)](#auto-selection-route-tool).
 
 ### Install
@@ -782,9 +785,10 @@ echo "/noroute explain quantum computing" | mpm route
 
 Rendered output is capped at 9,500 characters (under Claude Code's 10,000-char
 hook stdout limit). If a mode + persona combination would exceed the cap,
-the persona (voice/tone) is truncated first and a marker is appended
-referencing the on-disk file. Operational rules are never truncated unless
-they alone exceed 9,000 characters.
+the persona (voice/tone) is truncated first and a marker
+(`[...truncated, see mode/<name>.md for full content]`) is appended. If a
+single mode file alone exceeds 9,000 characters, it is truncated with a
+plain `[...truncated]` marker.
 
 ---
 
