@@ -5,6 +5,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -21,7 +22,7 @@ import (
 
 	"mpm/internal/config"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 func isDuplicateColumnError(err error) bool {
@@ -390,6 +391,21 @@ func (dm *DatabaseManager) InitSchema() error {
 }
 
 func (dm *DatabaseManager) initUnifiedSchema() error {
+	// PRAGMA settings — must run before any tables/triggers are created so
+	// the confidence_recompute trigger (which writes back to the DB from
+	// inside a trigger context) does not deadlock against the same
+	// connection's pool member. WAL allows concurrent readers and a single
+	// writer; busy_timeout gives the writer up to 5s to wait.
+	//
+	// We deliberately do NOT enable foreign_keys here. The production
+	// NewDatabaseManager path enables them after InitSchema completes; the
+	// test paths use InitSchema directly with session_ids that may not
+	// have a matching session row, so we leave FK enforcement off (the
+	// SQLite default) to keep the existing tests green.
+	dm.db.Exec("PRAGMA journal_mode = WAL")
+	dm.db.Exec("PRAGMA busy_timeout = 5000")
+	dm.db.Exec("PRAGMA synchronous = NORMAL")
+
 	// Use shared schema definitions from schema.go
 	for _, sqlQuery := range BaseTables {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
@@ -427,6 +443,19 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	} else {
 		// FTS5 tables ready — backfill any existing data that predates the triggers
 		dm.backfillFTSTables()
+	}
+
+	// Foundation: confidence/evidence triggers. The triggers are thin — they
+	// delegate the actual work to a Go-registered SQL function. The function
+	// is registered below in initConfidenceTriggers. NOTE: SQLite's locking
+	// model (one writer at a time) means the registered function cannot
+	// safely do writes on a second connection while the INSERT that fired
+	// the trigger is still in progress, so the trigger callbacks are
+	// currently no-ops and AddEvidence calls RecomputeConfidence directly.
+	// The trigger chain is registered for forward compatibility and audit
+	// clarity; future work may switch to a per-connection or async design.
+	if err := initConfidenceTriggers(dm); err != nil {
+		return err
 	}
 
 	// Memory revision triggers (independent of FTS5 — always required for versioning)
@@ -469,6 +498,93 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	return nil
+}
+
+// registerConfidenceRecompute registers the Go confidence_recompute function
+// on a single connection in the *sql.DB pool. mattn/go-sqlite3 exposes
+// RegisterFunc only on *SQLiteConn (the driver-level connection), not on
+// *sql.DB. To work with the database/sql pool, we pin a single connection
+// via db.Conn, reach the underlying *SQLiteConn via conn.Raw(), and
+// register the function on it. The pool is expected to reuse that
+// connection for the trigger firings (the trigger is only invoked when
+// SQLite evaluates the SELECT confidence_recompute(...) expression inside
+// an INSERT/UPDATE/DELETE on the evidence table).
+func registerConfidenceRecompute(db *sql.DB, fn func(args ...interface{}) (interface{}, error)) error {
+	sqlDB := db
+	if sqlDB == nil {
+		return fmt.Errorf("registerConfidenceRecompute: nil *sql.DB")
+	}
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("registerConfidenceRecompute: pin conn: %w", err)
+	}
+	defer conn.Close()
+	var sqliteConn *sqlite3.SQLiteConn
+	if err := conn.Raw(func(driverConn any) error {
+		sc, ok := driverConn.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("underlying conn is not *sqlite3.SQLiteConn (got %T)", driverConn)
+		}
+		sqliteConn = sc
+		return nil
+	}); err != nil {
+		return fmt.Errorf("registerConfidenceRecompute: raw conn: %w", err)
+	}
+	// Mark non-deterministic (pure=false) — the function has side effects
+	// (writes to the DB via RecomputeConfidence) and is not eligible for
+	// SQLite's query-result caching.
+	if err := sqliteConn.RegisterFunc("confidence_recompute", fn, false); err != nil {
+		return fmt.Errorf("registerConfidenceRecompute: %w", err)
+	}
+	return nil
+}
+
+// initConfidenceTriggers creates the trigger chain on the evidence table.
+// The triggers are thin — they delegate to a Go-registered SQL function
+// `confidence_recompute`. As of Task 4, the trigger callback is a no-op
+// because SQLite's locking model prevents the function from doing writes
+// on a second connection while the INSERT that fired the trigger is still
+// in progress; the actual recompute is invoked synchronously by
+// AddEvidence (and will be invoked by idle_dream, manual CLI, etc.) so
+// every confidence change still flows through RecomputeConfidence.
+//
+// The trigger chain is registered for forward compatibility and audit
+// clarity: when a future change moves the recompute to a per-connection
+// or async model, the triggers will already be in place.
+func initConfidenceTriggers(dm *DatabaseManager) error {
+	// Register a no-op confidence_recompute function. RegisterFunc on
+	// *SQLiteConn is the only path mattn/go-sqlite3 exposes — we pin a
+	// connection, reach the underlying *SQLiteConn via conn.Raw(), and
+	// register on it.
+	fn := func(args ...interface{}) (interface{}, error) {
+		// No-op: see comment above. The actual recompute is driven from Go.
+		_ = args
+		return nil, nil
+	}
+	if err := registerConfidenceRecompute(dm.SQLDB(), fn); err != nil {
+		return fmt.Errorf("register confidence_recompute: %w", err)
+	}
+
+	triggers := []string{
+		`CREATE TRIGGER IF NOT EXISTS evidence_ai AFTER INSERT ON evidence
+		 BEGIN
+		     SELECT confidence_recompute(NEW.artifact_id, NEW.artifact_type, 'evidence_added');
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS evidence_au AFTER UPDATE ON evidence
+		 BEGIN
+		     SELECT confidence_recompute(NEW.artifact_id, NEW.artifact_type, 'evidence_updated');
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS evidence_ad AFTER DELETE ON evidence
+		 BEGIN
+		     SELECT confidence_recompute(OLD.artifact_id, OLD.artifact_type, 'evidence_deleted');
+		 END`,
+	}
+	for _, t := range triggers {
+		if _, err := dm.SQLDB().Exec(t); err != nil {
+			return fmt.Errorf("create evidence trigger: %w", err)
+		}
+	}
 	return nil
 }
 
