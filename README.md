@@ -769,15 +769,7 @@ it were always there — the way a writer sits down with a particular
 genre's rules already internalized rather than re-reading them
 mid-sentence.
 
-### Consumers
-
-| Surface | Caller | Output |
-|---|---|---|
-| `mpm route` | Claude Code `UserPromptSubmit` hook | `<system-reminder>` block on stdout |
-| `mpm call route` | OpenClaw / Hermes (JSON-RPC) | `RoutingReport` JSON |
-| `route` MCP tool | Any MCP client | MCP-protocol response |
-
-All three share the same `internal.Router` engine. See
+All three invocation paths share the same `internal.Router` engine. See
 [Auto-Selection (`route` tool)](#auto-selection-route-tool) for the full
 scoring rules, anti-pattern handling, and hot-reload behavior.
 
@@ -789,72 +781,73 @@ restart, no rebuild, no deploy.
 
 ---
 
-## Claude Code integration
+## Integration Patterns
 
-MPM can auto-route every Claude Code prompt to the appropriate mode + persona
-*before* the LLM sees it. This is implemented as a `UserPromptSubmit` hook
-that runs `mpm route` synchronously. Plain stdout from a `UserPromptSubmit` hook is injected
-directly into the LLM's context per the
-[Claude Code hook protocol](https://code.claude.com/docs/en/hooks), so the
-rendered mode+persona (wrapped in a `<system-reminder>` block) reaches
-the model without any JSON envelope. For the JSON-RPC
-surface and the `mpm call route` example, see [Auto-Selection (route tool)](#auto-selection-route-tool).
+The Reflex Engine is output-format-agnostic. The same `mpm route` call produces different output depending on how it's invoked:
 
-### Install
+| Invocation | Environment | Output format |
+|---|---|---|
+| Claude Code hook | Hook stdin/stdout | `<system-reminder>` block (plain text) |
+| `mpm call route` (JSON-RPC) | OpenClaw / Hermes | `RoutingReport` JSON |
+| `route` MCP tool | Any MCP client | MCP-protocol response |
+| `mpm route` (CLI) | Shell pipeline | Plain text or empty |
 
-Add the following to `~/.claude/settings.json`:
+### Hook-based integration
 
-    {
-      "hooks": {
-        "UserPromptSubmit": [
+Any agent surface that supports a pre-prompt command hook can use `mpm route` to inject mode/persona context before the LLM generates. The hook runs synchronously; its stdout is injected into the LLM's context directly — no JSON envelope, no MCP overhead.
+
+**Claude Code example** — add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
           {
-            "hooks": [
-              {
-                "type": "command",
-                "command": "mpm route",
-                "timeout": 1,
-                "statusMessage": "MPM routing…"
-              }
-            ]
+            "type": "command",
+            "command": "mpm route",
+            "timeout": 1,
+            "statusMessage": "MPM routing…"
           }
         ]
       }
-    }
+    ]
+  }
+}
+```
 
 Requirements:
 - `mpm` must be on your `PATH` (run `which mpm` to verify). If it's not,
-  Claude Code will show a non-blocking hook error in the transcript.
-- `MPM_ROUTE_WORKSPACE` env var (optional) — if unset, `mpm route` uses
-  the current working directory as the MPM workspace base.
+  the hook logs a non-blocking error and proceeds without routing.
+- `MPM_ROUTE_WORKSPACE` env var (optional) — if unset, uses the current
+  working directory as the MPM workspace base.
+
+> **Note:** Claude Code hooks have a 10,000-character stdout limit. If a
+> mode + persona combination would exceed the cap, the persona is
+> truncated first with a marker (`[...truncated, see mode/<name>.md for
+> full content]`). A single mode file exceeding 9,000 characters is
+> truncated with a plain `[...truncated]` marker.
 
 ### Opt-out
 
-- Type `/noroute` anywhere in your prompt → routing is skipped for that turn
-- Set `MPM_ROUTE=off` in your shell env → routing is skipped for the session
-- A low-signal prompt (e.g. "hi") that doesn't match any mode or persona
+- Type `/noroute` anywhere in the prompt → routing skipped for that turn
+- Set `MPM_ROUTE=off` in shell env → routing skipped for the session
+- A low-signal prompt (e.g. "hi") that matches no mode or persona
   produces no injected context — the LLM responds natively
 
 ### Verify it works
 
 ```bash
 # Should print a <system-reminder> block
-echo "review this code for security issues" | mpm route
+mpm route < "review this code for security issues"
 
 # Should print nothing (no mode matched)
-echo "hi" | mpm route
+mpm route < "hi"
 
 # Should print nothing (opt-out)
-echo "/noroute explain quantum computing" | mpm route
+mpm route < "/noroute explain quantum computing"
 ```
-
-### Truncation
-
-Rendered output is capped at 9,500 characters (under Claude Code's 10,000-char
-hook stdout limit). If a mode + persona combination would exceed the cap,
-the persona (voice/tone) is truncated first and a marker
-(`[...truncated, see mode/<name>.md for full content]`) is appended. If a
-single mode file alone exceeds 9,000 characters, it is truncated with a
-plain `[...truncated]` marker.
 
 ---
 
