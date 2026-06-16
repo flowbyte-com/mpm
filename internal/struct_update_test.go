@@ -92,3 +92,58 @@ func AddLessonViaDM(dm *DatabaseManager, content, lessonType string, tags []stri
 	}
 	return &Lesson{ID: id, Type: LessonType(lessonType), Content: content, Confidence: conf}, nil
 }
+
+// TestMemoryStore_AddMemory_PersistsInitialConfidence closes the production-path
+// coverage gap: TestAddMemory_SetsInitialConfidenceByCollection above exercises
+// only the AddMemoryViaDM helper, not MemoryStore.AddMemory itself. A regression
+// in the producer (e.g. dropping the InitialConfidence assignment) would not be
+// caught by the helper test. This test routes through the real producer and
+// reads the confidence column back from SQLite.
+func TestMemoryStore_AddMemory_PersistsInitialConfidence(t *testing.T) {
+	dm := newTestDM(t)
+	store := &MemoryStore{DM: dm, DB: &SQLiteConnection{DB: dm.SQLDB()}}
+
+	cases := []struct {
+		collection string
+		wantConf   float64
+	}{
+		{"memories", 0.8},
+		{"theories", 0.5},
+		{"decisions", 0.6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.collection, func(t *testing.T) {
+			mem, err := store.AddMemory("content "+tc.collection, tc.collection, nil, nil, "", "test")
+			require.NoError(t, err)
+			require.NotNil(t, mem)
+			assert.InDelta(t, tc.wantConf, mem.Confidence, 1e-9,
+				"struct field should hold InitialConfidence for %s", tc.collection)
+
+			var got float64
+			err = dm.QueryRowTracked(
+				`SELECT confidence FROM memories WHERE id = ?`, mem.ID,
+			).Scan(&got)
+			require.NoError(t, err)
+			assert.InDelta(t, tc.wantConf, got, 1e-9,
+				"persisted confidence should be %v for %s", tc.wantConf, tc.collection)
+		})
+	}
+}
+
+// TestDatabaseManager_AddLesson_PersistsInitialConfidence is the production-path
+// counterpart to TestAddLesson_SetsInitialConfidence above. Routes through the
+// real DatabaseManager.AddLesson and reads the confidence column back.
+func TestDatabaseManager_AddLesson_PersistsInitialConfidence(t *testing.T) {
+	dm := newTestDM(t)
+	l, err := dm.AddLesson("lesson content for prod-path test", LessonTypeInsight, nil, "")
+	require.NoError(t, err)
+	require.NotNil(t, l)
+	assert.InDelta(t, 0.7, l.Confidence, 1e-9)
+
+	var got float64
+	err = dm.QueryRowTracked(
+		`SELECT confidence FROM lessons WHERE id = ?`, l.ID,
+	).Scan(&got)
+	require.NoError(t, err)
+	assert.InDelta(t, 0.7, got, 1e-9)
+}
