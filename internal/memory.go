@@ -37,6 +37,9 @@ type Memory struct {
 	ReferenceID        string                 `json:"reference_id,omitempty"`
 	ReinforcementCount int                    `json:"reinforcement_count,omitempty"`
 	Weight             int                    `json:"weight,omitempty"`
+	RetrievalPriority  float64                `json:"retrieval_priority,omitempty"`
+	Importance         float64                `json:"importance,omitempty"`
+	Confidence         float64                `json:"confidence,omitempty"`
 	LastAccessedAt     string                 `json:"last_accessed_at,omitempty"`
 	ExpiresAt          string                 `json:"expires_at,omitempty"`
 	SuggestedTopics    interface{}            `json:"suggested_topics,omitempty"`
@@ -326,6 +329,9 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		Embedding:  embedding,
 		Collection: collection, // Add collection for JSONL mirror
 		SessionID:  sessionID,
+		RetrievalPriority: 0.5,
+		Importance:        0.5,
+		Confidence:        InitialConfidence(artifactTypeFromCollection(collection)),
 	}
 
 	// Add metadata fields for filtering
@@ -353,9 +359,10 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	}
 
 	_, err := s.DB.Exec(`
-		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID)
+		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID,
+		mem.RetrievalPriority, mem.Importance, mem.Confidence)
 	if err != nil {
 		return nil, err
 	}
