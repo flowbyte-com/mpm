@@ -230,3 +230,56 @@ func parseTime(s string) (time.Time, error) {
 	}
 	return time.Time{}, fmt.Errorf("unrecognized time format: %q", s)
 }
+
+// Evidence is the DB-read view of an evidence row.
+type Evidence struct {
+	ID                 string
+	ArtifactID         string
+	ArtifactType       string
+	Type               string
+	SourceGroup        string
+	Strength           float64
+	IndependenceFactor float64
+	CreatedBy          string
+	CreatedAt          time.Time
+	ExpiresAt          *time.Time
+	Notes              string
+}
+
+// ListEvidenceForArtifact returns all non-expired evidence rows for an
+// artifact, ordered by created_at ascending.
+func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType string) ([]Evidence, error) {
+	rows, err := dm.QueryTracked(`
+		SELECT id, artifact_id, artifact_type, type, source_group,
+		       strength, independence_factor, created_by, created_at, expires_at, notes
+		FROM evidence
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY created_at ASC
+	`, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("list evidence: %w", err)
+	}
+	defer rows.Close()
+
+	now := time.Now().Unix()
+	var out []Evidence
+	for rows.Next() {
+		var e Evidence
+		var createdAt int64
+		var expiresAt sql.NullInt64
+		if err := rows.Scan(&e.ID, &e.ArtifactID, &e.ArtifactType, &e.Type, &e.SourceGroup,
+			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &e.Notes); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		e.CreatedAt = time.Unix(createdAt, 0)
+		if expiresAt.Valid {
+			if expiresAt.Int64 < now {
+				continue // skip expired
+			}
+			exp := time.Unix(expiresAt.Int64, 0)
+			e.ExpiresAt = &exp
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
