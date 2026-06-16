@@ -243,6 +243,50 @@ mpm kb hint "discussing the CSS injection approach for the widget system"
 
 FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — it surfaces the most relevant epistemology memory automatically after context shifts.
 
+### Confidence and Evidence
+
+Memories, theories, decisions, and lessons each carry a `confidence` value
+that's derived from the evidence supporting them. The system tracks what
+the artifact is, what evidence has accumulated, and how that evidence
+decays over time — the three are decoupled so confidence can move without
+modifying the artifact content.
+
+#### Key concepts
+
+- **Knowledge and confidence are independent.** Adding contradicting
+  evidence changes confidence but leaves the artifact content untouched.
+  A hindsight annotation can change what the artifact says without
+  retroactively changing what was believed about the original.
+- **Confidence is the system's *current* estimate of truth** derived from
+  *current* evidence. The artifact is historical fact.
+- **Confidence only rises with new evidence.** It is allowed to decrease
+  automatically as time passes without reinforcement.
+
+#### Commands
+
+| Command | Description |
+|---|---|
+| `mpm evidence add --artifact <id> --type <t> --source <s> --by <who>` | Add a piece of evidence to an artifact |
+| `mpm evidence list --artifact <id>` | List all evidence for an artifact |
+| `mpm ops confidence show --artifact <id>` | Show current confidence + history |
+| `mpm ops confidence recompute --artifact <id>` | Trigger a manual recompute |
+
+Evidence types: `observation` (0.4), `test` (0.7), `reproduction` (0.85),
+`challenge` (-0.6), `decision_outcome` (0.95), `external_reference` (0.6).
+Strength defaults to the type's registry value; override with `--strength`.
+
+#### Initial confidence by type
+
+| Artifact type | Initial confidence |
+|---|---|
+| memory | 0.8 |
+| theory | 0.5 |
+| decision | 0.6 |
+| lesson | 0.7 |
+
+See `docs/superpowers/specs/2026-06-16-confidence-evidence-foundation-design.md`
+for the full design rationale.
+
 ### How It All Connects
 
 | Component | Role |
