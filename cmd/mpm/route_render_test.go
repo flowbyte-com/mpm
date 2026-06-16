@@ -93,3 +93,42 @@ func TestExtractRoutePrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldSkipRoute(t *testing.T) {
+	tests := []struct {
+		name       string
+		prompt     string
+		envValue   string
+		envSet     bool
+		wantSkip   bool
+		wantReason string
+	}{
+		{name: "empty prompt", prompt: "", wantSkip: true, wantReason: "empty"},
+		{name: "whitespace only", prompt: "   \t\n", wantSkip: true, wantReason: "empty"},
+		{name: "noroute prefix", prompt: "/noroute do something", wantSkip: true, wantReason: "noroute"},
+		{name: "noroute prefix mid prompt still triggers", prompt: "explain /noroute", wantSkip: true, wantReason: "noroute"},
+		{name: "MPM_ROUTE=off env", prompt: "do something", envValue: "off", envSet: true, wantSkip: true, wantReason: "env"},
+		{name: "MPM_ROUTE=anything-else env does not skip", prompt: "do something", envValue: "on", envSet: true, wantSkip: false},
+		{name: "MPM_ROUTE=off with empty prompt", prompt: "", envValue: "off", envSet: true, wantSkip: true, wantReason: "empty"},
+		{name: "normal prompt no skip", prompt: "review this code", wantSkip: false},
+		{name: "noroute is case-sensitive (NOROUTE not matched)", prompt: "NOROUTE this", wantSkip: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envLookup := func(key string) string {
+				if key == "MPM_ROUTE" && tt.envSet {
+					return tt.envValue
+				}
+				return ""
+			}
+			got, reason := shouldSkipRoute(tt.prompt, envLookup)
+			if got != tt.wantSkip {
+				t.Errorf("shouldSkipRoute() skip = %v, want %v", got, tt.wantSkip)
+			}
+			if tt.wantReason != "" && reason != tt.wantReason {
+				t.Errorf("shouldSkipRoute() reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
