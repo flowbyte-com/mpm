@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"os"
 	"regexp"
 	"strings"
 )
@@ -42,39 +43,114 @@ type ScoreEntry struct {
 }
 
 // Router evaluates prompts against pre-loaded mode and persona definitions.
+// It tracks the mtime of the mode and persona directories and re-loads
+// from disk automatically if any file has changed since the last load.
 type Router struct {
-	modes     []*Component
-	personas  []*Component
-	modeThreshold int // minimum net score to activate a mode
+	basePath       string
+	modes          []*Component
+	personas       []*Component
+	modeThreshold  int // minimum net score to activate a mode
+	modeDirMtime   int64
+	personaDirMtime int64
 }
 
 // NewRouter loads all mode/*.md and persona/*.md files from basePath,
 // compiles their patterns into regex, and returns a ready-to-evaluate Router.
 func NewRouter(basePath string) (*Router, error) {
-	modeDir := join(basePath, "mode")
-	personaDir := join(basePath, "persona")
+	r := &Router{
+		basePath:      basePath,
+		modeThreshold: 1, // Any positive match activates the mode; caller decides whether to act.
+	}
+	if err := r.reload(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// reload re-reads mode and persona directories from disk, recompiles all
+// regex, and updates tracked mtimes. Called automatically by Evaluate() if
+// it detects a file changed since last load. Can also be called explicitly.
+func (r *Router) reload() error {
+	modeDir := join(r.basePath, "mode")
+	personaDir := join(r.basePath, "persona")
 
 	modes, err := loadComponents(modeDir, KindMode)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	personas, err := loadComponents(personaDir, KindPersona)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &Router{
-		modes:         modes,
-		personas:      personas,
-		modeThreshold: 1, // Any positive match activates the mode; caller decides whether to act.
-	}, nil
+	modeMtime, _ := dirMtime(modeDir)
+	personaMtime, _ := dirMtime(personaDir)
+
+	r.modes = modes
+	r.personas = personas
+	r.modeDirMtime = modeMtime
+	r.personaDirMtime = personaMtime
+	return nil
+}
+
+// dirMtime returns the max mtime among all files in dir, or 0 if dir doesn't exist.
+func dirMtime(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var max int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if mt := info.ModTime().UnixNano(); mt > max {
+			max = mt
+		}
+	}
+	return max, nil
+}
+
+// Modes returns the current loaded mode components (exposed for testing).
+func (r *Router) Modes() []*Component { return r.modes }
+
+// Personas returns the current loaded persona components (exposed for testing).
+func (r *Router) Personas() []*Component { return r.personas }
+
+// maybeReload checks whether any mode or persona file has changed on disk
+// and reloads if so. Safe to call on every Evaluate() — the stat cost is
+// microseconds and reload only happens when a file actually changed.
+func (r *Router) maybeReload() {
+	modeDir := join(r.basePath, "mode")
+	personaDir := join(r.basePath, "persona")
+
+	currentModeMtime, err := dirMtime(modeDir)
+	if err == nil && currentModeMtime != r.modeDirMtime {
+		r.reload()
+		return
+	}
+	currentPersonaMtime, err := dirMtime(personaDir)
+	if err == nil && currentPersonaMtime != r.personaDirMtime {
+		r.reload()
+	}
 }
 
 // Evaluate scores an input string against all loaded modes and personas.
 // Modes use threshold filtering (all components scoring >= threshold activate).
 // Personas use max-pooling (only the highest-scoring persona wins, if score >= 1).
 // Returns a RoutingReport with selected modes, selected persona, and full diagnostics.
+//
+// If any mode or persona file has changed on disk since the last load (detected
+// via directory mtime), Evaluate() reloads automatically before scoring. This
+// means new modes and personas are picked up without restarting mpm-mcp.
 func (r *Router) Evaluate(input string) RoutingReport {
+	// Hot reload: check if any file changed since last load.
+	r.maybeReload()
+
 	lower := strings.ToLower(input)
 	scores := make(map[string]ScoreEntry)
 
