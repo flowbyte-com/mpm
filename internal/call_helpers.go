@@ -338,7 +338,9 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 }
 
 // RecordDecision logs an architectural decision. Mirrors callRecordDecision.
-func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcome string, tags []string) (map[string]interface{}, error) {
+// ac injects provenance + active mode/persona into meta so downstream
+// consumers can attribute the decision to the agent's runtime context.
+func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcome string, tags []string, ac ActiveContext) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -352,7 +354,7 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 	if outcome != "" {
 		content += "\nOUTCOME: " + outcome
 	}
-	meta := map[string]interface{}{}
+	meta := ac.withActiveContextMeta(nil)
 	if contextText != "" {
 		meta["context"] = contextText
 	}
