@@ -26,6 +26,10 @@ import (
 	"mpm/internal"
 )
 
+// router is initialised once at server boot — patterns and anti-patterns
+// from all mode/*.md and persona/*.md files are compiled to regex at that
+// point, so Evaluate() is pure string matching with zero parsing overhead.
+
 func main() {
 	workspace := os.Getenv("MPM_WORKSPACE")
 	if workspace == "" {
@@ -43,8 +47,14 @@ func main() {
 		Persona: os.Getenv("MPM_ACTIVE_PERSONA"),
 	}
 
+	// Build the router once — pre-compiles all mode/persona patterns at boot.
+	router, err := internal.NewRouter(workspace)
+	if err != nil {
+		log.Fatalf("mpm-mcp: build router: %v", err)
+	}
+
 	s := server.NewMCPServer("mpm-mcp", "0.1.0")
-	RegisterAllTools(s, dm, ac)
+	RegisterAllTools(s, dm, ac, router)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("mpm-mcp: serve stdio: %v", err)

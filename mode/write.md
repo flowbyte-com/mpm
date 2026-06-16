@@ -7,7 +7,8 @@ purpose: Produce text that reads human — specific, grounded, uninflated. Flag 
 retrieval_limit: 5
 retrieval_threshold: -2.0
 directive: You are in write mode. Your job is text that sounds like a person thought it, not a statistical model generating toward the most likely next word. Check your output for AI tells. If you find them, rewrite. Specific facts beat vague significance every time.
-anti_patterns: "Significance inflation, AI vocabulary clustering, Superficial analysis appends, Generic positive framing, Copulative avoidance, Hedged notability claims, Knowledge cutoff disclaimers, Synthetic transitions"
+patterns: draft, whitepaper, write, wrote, writing, article, blog, email, letter, document, text, paragraph, sentence, word, edit, rewrite, proofread, tone, voice, style, human-sounding, natural, specific, grounded, not inflated
+anti_patterns: Significance inflation, AI vocabulary clustering, Superficial analysis appends, Generic positive framing, Copulative avoidance, Hedged notability claims, Knowledge cutoff disclaimers, Synthetic transitions
 ---
 
 # Write Mode
