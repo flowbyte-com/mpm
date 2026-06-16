@@ -83,29 +83,42 @@ func shouldSkipRoute(prompt string, envLookup func(string) string) (bool, string
 const routeOutputCap = 9500 // under Claude Code's 10,000-char hook stdout limit
 const routeModeHardCap = 9000
 
-// applyRouteLengthCap returns the rendered <system-reminder> body given
-// pre-extracted mode and persona text. Priority: preserve mode (operational
+// applyRouteLengthCap returns (truncatedMode, truncatedPersona) such that the
+// total rendered body stays under routeOutputCap (9,500 chars) — under Claude
+// Code's 10,000-char hook stdout limit. Priority: preserve mode (operational
 // rules) over persona (voice/tone).
 //
 // Rules:
 //   - Combined length ≤ routeOutputCap: return both unchanged
-//   - Combined length > cap with persona present: truncate persona, append marker
-//   - Mode alone exceeds routeModeHardCap: truncate mode, append marker
-func applyRouteLengthCap(modeText, personaText string) string {
+//   - Combined length > cap with persona present: drop persona, return mode with shortMarker suffix
+//   - Mode alone exceeds routeModeHardCap: truncate mode, append longMarker
+//
+// Returning the two components separately (rather than a pre-joined string) lets
+// renderRoute rebuild the labeled body after truncation, so the labels and `---`
+// separators can be re-emitted around the truncated content. The persona-priority
+// semantic must be enforced at the *cap* layer — not by the renderer — otherwise
+// the renderer would need to know which sub-strings to keep, which it cannot do
+// without the priority logic living somewhere. Hence this function returns the
+// pieces, and the renderer reassembles.
+func applyRouteLengthCap(modeText, personaText string) (string, string) {
 	shortMarker := "\n[...truncated, see mode/<name>.md for full content]"
 	longMarker := "\n[...truncated]"
 
 	combined := modeText + personaText
 	if len(combined) <= routeOutputCap {
-		return modeText + personaText
+		return modeText, personaText
 	}
 	if len(modeText) > routeModeHardCap {
-		return modeText[:routeModeHardCap] + longMarker
+		// Mode alone exceeds the hard cap — must truncate it regardless of persona
+		return modeText[:routeModeHardCap] + longMarker, ""
 	}
 	if personaText != "" {
-		return modeText + shortMarker
+		// Persona gets dropped; append marker to mode to preserve the signal
+		return modeText + shortMarker, ""
 	}
-	return modeText + longMarker
+	// Both empty after combined > cap is unusual (modeText > 0, personaText == "", combined > cap)
+	// — only happens if modeText itself is between 9,000 and 9,500
+	return modeText + longMarker, ""
 }
 
 // renderRoute evaluates prompt against the workspace's mode+persona files
@@ -136,13 +149,17 @@ func renderRoute(workspace, prompt string) (string, error) {
 		return "", nil
 	}
 
-	// Build the body: label sections with `mode=` and `persona=` so the LLM
-	// knows which is which. Mode comes first (operational rules are load-bearing),
-	// persona second (voice/tone).
-	var body strings.Builder
+	// Build the mode and persona sections as separate labeled strings. We track
+	// them independently so applyRouteLengthCap can enforce persona-priority
+	// truncation against the actual labeled content (what the LLM sees). Labels
+	// and `---` separators are part of the accumulated strings — they count
+	// toward the cap, which is what we want, because they're part of the
+	// rendered output.
+	var modeText, personaText string
 	if len(report.SelectedModes) > 0 {
 		// Take the first selected mode's file. If multiple, concatenate with
 		// separators so the LLM sees all of them.
+		var modeBuilder strings.Builder
 		for i, modeName := range report.SelectedModes {
 			content, err := os.ReadFile(filepath.Join(workspace, "mode", modeName+".md"))
 			if err != nil {
@@ -150,25 +167,42 @@ func renderRoute(workspace, prompt string) (string, error) {
 				return "", nil
 			}
 			if i == 0 {
-				fmt.Fprintf(&body, "mode=%s\n\n%s", modeName, string(content))
+				fmt.Fprintf(&modeBuilder, "mode=%s\n\n%s", modeName, string(content))
 			} else {
-				fmt.Fprintf(&body, "\n\n---\n\nmode=%s\n\n%s", modeName, string(content))
+				fmt.Fprintf(&modeBuilder, "\n\n---\n\nmode=%s\n\n%s", modeName, string(content))
 			}
 		}
+		modeText = modeBuilder.String()
 	}
 
 	if report.SelectedPersona != "" {
 		content, err := os.ReadFile(filepath.Join(workspace, "persona", report.SelectedPersona+".md"))
 		if err != nil {
 			// Persona missing — render mode only, append marker
-			return wrapReminder(body.String()) + "\n\n[persona " + report.SelectedPersona + " not found on disk]", nil
+			return wrapReminder(modeText) + "\n\n[persona " + report.SelectedPersona + " not found on disk]", nil
 		}
-		fmt.Fprintf(&body, "\n\n---\n\npersona=%s\n\n%s", report.SelectedPersona, string(content))
+		// Persona label is included in personaText so it counts toward the cap.
+		var personaBuilder strings.Builder
+		fmt.Fprintf(&personaBuilder, "persona=%s\n\n%s", report.SelectedPersona, string(content))
+		personaText = personaBuilder.String()
 	}
 
-	// Length cap operates on the final body (after labels + section content).
-	capped := applyRouteLengthCap(body.String(), "")
-	return wrapReminder(capped), nil
+	// Length cap operates on the labeled components. Returns the (possibly
+	// truncated) pieces — we rebuild the final body from them so the `---`
+	// separator between mode and persona is only emitted if both survived.
+	truncatedMode, truncatedPersona := applyRouteLengthCap(modeText, personaText)
+
+	var body strings.Builder
+	if truncatedMode != "" {
+		body.WriteString(truncatedMode)
+	}
+	if truncatedPersona != "" {
+		if body.Len() > 0 {
+			body.WriteString("\n\n---\n\n")
+		}
+		body.WriteString(truncatedPersona)
+	}
+	return wrapReminder(body.String()), nil
 }
 
 // wrapReminder wraps body in a <system-reminder> block with the auto-route header.
