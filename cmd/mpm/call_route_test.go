@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestCallRoute_RequiresPrompt(t *testing.T) {
 	_, err := callRoute(map[string]interface{}{})
@@ -21,12 +24,26 @@ func TestCallRoute_ReturnsReport(t *testing.T) {
 		t.Fatalf("callRoute: %v", err)
 	}
 
-	report, ok := result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("callRoute result is not a map: %T", result)
+	// Round-trip through JSON to verify the wire shape — the actual contract.
+	// The in-memory return type is internal.RoutingReport; the JSON envelope
+	// at call.go:91 handles serialization via struct tags.
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	modes, ok := report["selected_modes"].([]string)
+	var report map[string]interface{}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	modes, ok := report["selected_modes"].([]interface{})
 	if !ok || len(modes) == 0 {
-		t.Errorf("callRoute result missing or empty selected_modes: %v", report["selected_modes"])
+		t.Errorf("callRoute JSON missing or empty selected_modes: %v", report["selected_modes"])
+	}
+	if _, ok := report["selected_persona"].(string); !ok {
+		t.Errorf("callRoute JSON missing selected_persona: %v", report["selected_persona"])
+	}
+	if _, ok := report["scores"].(map[string]interface{}); !ok {
+		t.Errorf("callRoute JSON missing scores: %v", report["scores"])
 	}
 }
