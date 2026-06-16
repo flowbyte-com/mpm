@@ -147,3 +147,33 @@ func TestDatabaseManager_AddLesson_PersistsInitialConfidence(t *testing.T) {
 	require.NoError(t, err)
 	assert.InDelta(t, 0.7, got, 1e-9)
 }
+
+// TestRecordDecision_SetsInitialConfidence locks the production contract:
+// RecordDecision inserts into the decisions collection, which routes through
+// MemoryStore.AddMemory → InitialConfidence("decision") = 0.6.
+func TestRecordDecision_SetsInitialConfidence(t *testing.T) {
+	dm := newTestDM(t)
+	res, err := dm.RecordDecision("ctx", "chose X over Y", "because", "", nil, ActiveContext{})
+	require.NoError(t, err)
+	id, _ := res["id"].(string)
+	require.NotEmpty(t, id)
+
+	var conf float64
+	require.NoError(t, dm.QueryRowTracked(`SELECT confidence FROM memories WHERE id = ?`, id).Scan(&conf))
+	assert.InDelta(t, 0.6, conf, 1e-9, "decision initial confidence should be 0.6")
+}
+
+// TestProposeTheory_SetsInitialConfidence locks the production contract:
+// ProposeTheory inserts into the theories collection, which routes through
+// MemoryStore.AddMemory → InitialConfidence("theory") = 0.5.
+func TestProposeTheory_SetsInitialConfidence(t *testing.T) {
+	dm := newTestDM(t)
+	res, err := dm.ProposeTheory("theory hypothesis", "criteria", nil)
+	require.NoError(t, err)
+	id, _ := res["id"].(string)
+	require.NotEmpty(t, id)
+
+	var conf float64
+	require.NoError(t, dm.QueryRowTracked(`SELECT confidence FROM memories WHERE id = ?`, id).Scan(&conf))
+	assert.InDelta(t, 0.5, conf, 1e-9, "theory initial confidence should be 0.5")
+}
