@@ -118,6 +118,69 @@ var BaseTables = []string{
 		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
 		UNIQUE(memory_id, version)
 	);`,
+
+	// Evidence table — typed, source-grouped evidence for confidence calculation.
+	`CREATE TABLE IF NOT EXISTS evidence (
+		id                  TEXT PRIMARY KEY,
+		artifact_id         TEXT NOT NULL,
+		artifact_type       TEXT NOT NULL CHECK (artifact_type IN ('memory','theory','decision','lesson')),
+		type                TEXT NOT NULL,
+		source_group        TEXT NOT NULL,
+		strength            REAL NOT NULL CHECK (strength >= -1.0 AND strength <= 1.0),
+		independence_factor REAL NOT NULL DEFAULT 1.0,
+		created_by          TEXT NOT NULL,
+		created_at          INTEGER NOT NULL,
+		expires_at          INTEGER,
+		notes               TEXT
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_evidence_artifact ON evidence(artifact_id, artifact_type);`,
+	`CREATE INDEX IF NOT EXISTS idx_evidence_type ON evidence(type);`,
+	`CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source_group);`,
+	`CREATE INDEX IF NOT EXISTS idx_evidence_creator ON evidence(created_by);`,
+	`CREATE INDEX IF NOT EXISTS idx_evidence_expires ON evidence(expires_at);`,
+
+	// Confidence history — append-only ledger of every confidence value ever computed.
+	`CREATE TABLE IF NOT EXISTS confidence_history (
+		id              TEXT PRIMARY KEY,
+		artifact_id     TEXT NOT NULL,
+		artifact_type   TEXT NOT NULL,
+		confidence      REAL NOT NULL,
+		computed_at     INTEGER NOT NULL,
+		evidence_count  INTEGER NOT NULL,
+		trigger         TEXT NOT NULL CHECK (trigger IN ('evidence_added','evidence_updated','evidence_deleted','evidence_expired','decay_tick','manual_recompute'))
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_conf_history_artifact ON confidence_history(artifact_id, artifact_type, computed_at);`,
+
+	// artifacts view — union of memories (filtered by collection) and lessons,
+	// with the `type` column distinguishing the four artifact kinds. The 0.5
+	// confidence default matches the spec's neutral point; the application sets
+	// the per-type initial value at insert time. Lessons carries its own `type`
+	// column (the lesson type taxonomy), so we shadow it with the artifact
+	// discriminator via a subquery; lessons also lacks `collection` and
+	// `created_at`, so we supply literals and a CAST.
+	`CREATE VIEW IF NOT EXISTS artifacts AS
+		SELECT 'memory'   AS type, id, collection, retrieval_priority, importance, confidence, created_at
+		FROM memories WHERE collection IN ('memories','') OR collection IS NULL
+		UNION ALL
+		SELECT 'theory'   AS type, id, collection, retrieval_priority, importance, confidence, created_at
+		FROM memories WHERE collection = 'theories'
+		UNION ALL
+		SELECT 'decision' AS type, id, collection, retrieval_priority, importance, confidence, created_at
+		FROM memories WHERE collection = 'decisions'
+		UNION ALL
+		SELECT 'lesson'   AS type, id, 'lessons' AS collection, retrieval_priority, importance, confidence, CAST(created AS DATETIME) AS created_at
+		FROM lessons;`,
+
+	// legacy_weight view — compatibility shim for v2. Maps the new fields back
+	// to a single number. The floor of 0.01 keeps old commands from seeing zero.
+	`CREATE VIEW IF NOT EXISTS legacy_weight AS
+		SELECT id, collection, MAX(0.01, (retrieval_priority + importance) / 2.0) AS legacy_weight
+		FROM memories
+		UNION ALL
+		SELECT id, 'lessons' AS collection, MAX(0.01, (retrieval_priority + importance) / 2.0) AS legacy_weight
+		FROM lessons;`,
 }
 
 // CommonIndexes contains indexes for fast lookups.
@@ -143,6 +206,10 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_doc_id ON reference_chunks(doc_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_section ON reference_chunks(section);`,
 	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_retrieval_priority ON memories(retrieval_priority);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);`,
+	`CREATE INDEX IF NOT EXISTS idx_lessons_retrieval_priority ON lessons(retrieval_priority);`,
+	`CREATE INDEX IF NOT EXISTS idx_lessons_importance ON lessons(importance);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
@@ -170,4 +237,10 @@ var SafeMigrations = [][3]string{
 	{"sessions", "metadata", "TEXT"},
 	{"raw_memories", "next_retry", "TEXT"},
 	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
+	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
+	{"memories", "importance",         "REAL NOT NULL DEFAULT 0.5"},
+	{"memories", "confidence",         "REAL NOT NULL DEFAULT 0.8"},
+	{"lessons",  "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
+	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
+	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
 }
