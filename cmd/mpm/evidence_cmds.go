@@ -101,8 +101,8 @@ func handleEvidenceAdd(args []string) int {
 	return 0
 }
 
-// handleEvidence dispatches `mpm evidence ...` to subcommands. Task 8 will
-// add the `list` subcommand.
+// handleEvidence dispatches `mpm evidence ...` to subcommands. Task 8 adds
+// the `list` subcommand.
 func handleEvidence(args []string) int {
 	if len(args) < 1 {
 		printError("usage: mpm evidence <add|list> ...")
@@ -111,8 +111,50 @@ func handleEvidence(args []string) int {
 	switch args[0] {
 	case "add":
 		return handleEvidenceAdd(args[1:])
+	case "list":
+		return handleEvidenceList(args[1:])
 	default:
 		printError("unknown evidence subcommand: %s", args[0])
 		return 1
 	}
+}
+
+func parseEvidenceListArgs(args []string) (map[string]interface{}, error) {
+	fs := flag.NewFlagSet("evidence-list", flag.ContinueOnError)
+	artifactID := fs.String("artifact", "", "artifact id (required)")
+	artifactType := fs.String("artifact-type", "memory", "artifact type")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if *artifactID == "" {
+		return nil, fmt.Errorf("--artifact is required")
+	}
+	return map[string]interface{}{
+		"artifact_id":   *artifactID,
+		"artifact_type": *artifactType,
+	}, nil
+}
+
+func handleEvidenceList(args []string) int {
+	payload, err := parseEvidenceListArgs(args)
+	if err != nil {
+		printError("%v", err)
+		return 1
+	}
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		printError("open database: %v", err)
+		return 1
+	}
+	defer dm.Close()
+	rows, err := mpminternal.ListEvidenceForArtifact(dm, artifactID, artifactType)
+	if err != nil {
+		printError("list evidence: %v", err)
+		return 1
+	}
+	out, _ := json.Marshal(rows)
+	respond(string(out), "", 0)
+	return 0
 }
