@@ -94,6 +94,60 @@ func TestExtractRoutePrompt(t *testing.T) {
 	}
 }
 
+func TestApplyRouteLengthCap(t *testing.T) {
+	shortMarker := "[...truncated, see mode/<name>.md for full content]"
+	longMarker := "[...truncated]"
+
+	tests := []struct {
+		name        string
+		modeText    string
+		personaText string
+		wantMarker  string // "" = expect no marker
+		wantMode    string // expected substring in mode position
+	}{
+		{
+			name:        "under cap no truncation",
+			modeText:    "MODE-CONTENT",
+			personaText: "PERSONA-CONTENT",
+			wantMode:    "MODE-CONTENT",
+		},
+		{
+			name:        "persona truncated when combined exceeds cap",
+			modeText:    strings.Repeat("m", 5000),
+			personaText: strings.Repeat("p", 5000),
+			wantMarker:  shortMarker,
+			wantMode:    strings.Repeat("m", 5000),
+		},
+		{
+			name:        "mode truncated when even persona removal not enough",
+			modeText:    strings.Repeat("M", 10000),
+			personaText: strings.Repeat("p", 100),
+			wantMarker:  longMarker,
+		},
+		{
+			name:        "empty persona no truncation",
+			modeText:    strings.Repeat("m", 1000),
+			personaText: "",
+			wantMode:    strings.Repeat("m", 1000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyRouteLengthCap(tt.modeText, tt.personaText)
+			if tt.wantMode != "" && !strings.Contains(got, tt.wantMode) {
+				t.Errorf("applyRouteLengthCap() missing expected mode content")
+			}
+			if tt.wantMarker != "" && !strings.Contains(got, tt.wantMarker) {
+				t.Errorf("applyRouteLengthCap() missing expected marker %q\nGot: %s", tt.wantMarker, got)
+			}
+			if tt.wantMarker == "" && strings.Contains(got, "truncated") {
+				t.Errorf("applyRouteLengthCap() unexpected truncation: %s", got)
+			}
+		})
+	}
+}
+
 func TestShouldSkipRoute(t *testing.T) {
 	tests := []struct {
 		name       string
