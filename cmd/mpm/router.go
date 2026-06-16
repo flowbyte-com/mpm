@@ -79,6 +79,7 @@ func NewRouter() *CommandRouter {
 
 		// Proactive Recall Hint
 		"hint": {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
+		"route": {Name: "route", Description: "Render mode+persona for a prompt (Claude Code hook input)", MinArgs: 0, MaxArgs: 1},
 
 		// Epistemology Engine
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
@@ -222,6 +223,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleEntityDeprecation("lesson", args)
 	case "hint":
 		return handleHint(args[1:])
+	case "route":
+		return r.handleRoute(args[1:])
 	case "propose_theory":
 		return handleProposeTheory(args[1:])
 	case "resolve_theory":
@@ -781,3 +784,46 @@ func ExtractFlags(args []string, removeFlags map[string]bool) (map[string]bool, 
 	}
 	return found, cleaned
 }
+
+// handleRoute reads prompt from positional arg or stdin, evaluates against
+// the workspace's mode+persona files, and prints a <system-reminder> block
+// to stdout. Designed for the Claude Code UserPromptSubmit hook — never
+// blocks the user on errors (any failure → exit 0, no output).
+//
+// Usage:
+//   mpm route "review this code"        # positional arg
+//   echo "review this" | mpm route      # stdin literal
+//   mpm route < hook-stdin.json         # stdin JSON (Claude Code format)
+func (r *CommandRouter) handleRoute(args []string) int {
+	prompt := extractRoutePrompt(args, os.Stdin)
+	skip, _ := shouldSkipRoute(prompt, os.Getenv)
+	if skip {
+		return 0
+	}
+
+	workspace := resolveRouteWorkspace()
+	rendered, err := renderRoute(workspace, prompt)
+	if err != nil {
+		// Programmer-level error. Only surface on TTY (interactive) — never
+		// when invoked from a hook (would corrupt hook output).
+		if isatty(os.Stdout) {
+			fmt.Fprintf(os.Stderr, "mpm route: %v\n", err)
+		}
+		return 0
+	}
+
+	if rendered != "" {
+		fmt.Println(rendered)
+	}
+	return 0
+}
+
+// isatty returns true if f is a terminal. Used to gate stderr noise.
+func isatty(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
