@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"mpm/internal"
 	"mpm/internal/config"
@@ -44,6 +45,13 @@ var toolRegistry = map[string]ToolHandler{
 	"add_reference":     callAddReference,
 	"search_references": callSearchReferences,
 	"list_references":   callListReferences,
+
+	// Evidence / Confidence
+	"add_evidence":             callAddEvidence,
+	"list_evidence":            callListEvidence,
+	"query_confidence_history": callQueryConfidenceHistory,
+	"show_confidence":          callShowConfidence,
+	"recompute_confidence":     callRecomputeConfidence,
 
 	// System
 	"read_wake_context":     callReadWakeContext,
@@ -701,4 +709,240 @@ func callRoute(p map[string]interface{}) (interface{}, error) {
 	}
 
 	return router.Evaluate(prompt), nil
+}
+
+// ── Evidence / Confidence ───────────────────────────────────────────────────
+//
+// These handlers expose the v1 confidence/evidence foundation over the
+// universal `mpm call` machine interface so OpenClaw agents can add
+// evidence, list it, and inspect the confidence timeline. The recompute
+// is synchronous (in v1 the SQLite trigger is a no-op due to a documented
+// connection-locking issue, so internal.AddEvidence calls RecomputeConfidence
+// directly).
+
+// callAddEvidence inserts a new evidence row and returns the resulting
+// confidence for the artifact.
+func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	evType, _ := payload["type"].(string)
+	source, _ := payload["source_group"].(string)
+	createdBy, _ := payload["created_by"].(string)
+	if artifactID == "" || evType == "" || source == "" || createdBy == "" {
+		return nil, fmt.Errorf("artifact_id, type, source_group, created_by are required")
+	}
+	if !internal.IsValidEvidenceType(evType) {
+		return nil, fmt.Errorf("invalid evidence type: %q", evType)
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	var strength float64
+	if s, ok := payload["strength"].(float64); ok {
+		strength = s
+	} else {
+		strength, _ = internal.DefaultStrength(evType)
+	}
+	var independence float64 = 1.0
+	if i, ok := payload["independence_factor"].(float64); ok {
+		independence = i
+	}
+	notes, _ := payload["notes"].(string)
+
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	defer dm.Close()
+
+	if err := internal.AddEvidence(dm, internal.EvidenceInput{
+		ArtifactID:         artifactID,
+		ArtifactType:       artifactType,
+		Type:               evType,
+		SourceGroup:        source,
+		Strength:           strength,
+		IndependenceFactor: independence,
+		CreatedBy:          createdBy,
+		CreatedAt:          time.Now(),
+		Notes:              notes,
+	}); err != nil {
+		return nil, err
+	}
+
+	// Read back the new confidence.
+	var conf float64
+	if err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, artifactTable(artifactType)),
+		artifactID,
+	).Scan(&conf); err != nil {
+		return nil, fmt.Errorf("read confidence: %w", err)
+	}
+	return map[string]interface{}{
+		"success":    true,
+		"confidence": conf,
+	}, nil
+}
+
+// callListEvidence returns all evidence rows for an artifact.
+func callListEvidence(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	defer dm.Close()
+
+	rows, err := dm.QueryTracked(`
+		SELECT id, type, source_group, strength, independence_factor, created_by, created_at, notes
+		FROM evidence
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY created_at DESC
+	`, artifactID, artifactType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]interface{}
+	for rows.Next() {
+		var id, t, src, by, notes string
+		var strength, ind float64
+		var createdAt int64
+		if err := rows.Scan(&id, &t, &src, &strength, &ind, &by, &createdAt, &notes); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"id": id, "type": t, "source_group": src, "strength": strength,
+			"independence_factor": ind, "created_by": by, "created_at": createdAt, "notes": notes,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"evidence": out}, nil
+}
+
+// callQueryConfidenceHistory returns the confidence timeline for an artifact.
+func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	limit := 50
+	if l, ok := payload["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	defer dm.Close()
+
+	rows, err := dm.QueryTracked(`
+		SELECT computed_at, confidence, evidence_count, trigger
+		FROM confidence_history
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY computed_at DESC
+		LIMIT ?
+	`, artifactID, artifactType, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]interface{}
+	for rows.Next() {
+		var computedAt int64
+		var conf float64
+		var evidenceCount int
+		var trigger string
+		if err := rows.Scan(&computedAt, &conf, &evidenceCount, &trigger); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"computed_at": computedAt, "confidence": conf,
+			"evidence_count": evidenceCount, "trigger": trigger,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"history": out}, nil
+}
+
+// callShowConfidence returns the current confidence and history for an artifact.
+func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	defer dm.Close()
+
+	var conf float64
+	if err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, artifactTable(artifactType)),
+		artifactID,
+	).Scan(&conf); err != nil {
+		return nil, fmt.Errorf("read confidence: %w", err)
+	}
+	hist, err := callQueryConfidenceHistory(payload)
+	if err != nil {
+		return nil, err
+	}
+	histMap, _ := hist.(map[string]interface{})
+	return map[string]interface{}{
+		"current": conf,
+		"history": histMap,
+	}, nil
+}
+
+// callRecomputeConfidence forces a manual recompute and returns the snapshot.
+func callRecomputeConfidence(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("db: %w", err)
+	}
+	defer dm.Close()
+
+	if err := internal.RecomputeConfidence(dm, artifactID, artifactType, internal.RecomputeReasonManual); err != nil {
+		return nil, err
+	}
+	return callShowConfidence(payload)
+}
+
+// artifactTable maps an artifact type to its underlying SQLite table name.
+func artifactTable(artifactType string) string {
+	if artifactType == "lesson" {
+		return "lessons"
+	}
+	return "memories"
 }
