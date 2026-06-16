@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"mpm/internal"
 )
 
 // resolveRouteWorkspace returns the MPM workspace path for `mpm route`.
@@ -102,4 +106,73 @@ func applyRouteLengthCap(modeText, personaText string) string {
 		return modeText + shortMarker
 	}
 	return modeText + longMarker
+}
+
+// renderRoute evaluates prompt against the workspace's mode+persona files
+// and returns a <system-reminder> block for the LLM. Returns ("", nil) when
+// no mode or persona matched (low-signal prompt) or when the workspace is
+// unusable. Returns error only for unexpected internal failures.
+//
+// Behavior matches the spec (Component 2):
+//   - Empty/low-signal prompt → "", nil
+//   - Missing/unusable workspace → "", nil
+//   - Mode file missing for selected mode → "", nil (operational rules are load-bearing)
+//   - Persona file missing → render mode only, append marker
+//   - Combined output > 9500 chars → applyRouteLengthCap
+func renderRoute(workspace, prompt string) (string, error) {
+	if workspace == "" {
+		return "", nil
+	}
+
+	router, err := internal.NewRouter(workspace)
+	if err != nil {
+		// Workspace unusable (missing mode/persona dirs etc.) — graceful exit
+		return "", nil
+	}
+
+	report := router.Evaluate(prompt)
+	if len(report.SelectedModes) == 0 && report.SelectedPersona == "" {
+		// No mode and no persona matched — don't inject anything
+		return "", nil
+	}
+
+	// Build the body: label sections with `mode=` and `persona=` so the LLM
+	// knows which is which. Mode comes first (operational rules are load-bearing),
+	// persona second (voice/tone).
+	var body strings.Builder
+	if len(report.SelectedModes) > 0 {
+		// Take the first selected mode's file. If multiple, concatenate with
+		// separators so the LLM sees all of them.
+		for i, modeName := range report.SelectedModes {
+			content, err := os.ReadFile(filepath.Join(workspace, "mode", modeName+".md"))
+			if err != nil {
+				// Mode file missing — refuse to inject partial operational rules
+				return "", nil
+			}
+			if i == 0 {
+				fmt.Fprintf(&body, "mode=%s\n\n%s", modeName, string(content))
+			} else {
+				fmt.Fprintf(&body, "\n\n---\n\nmode=%s\n\n%s", modeName, string(content))
+			}
+		}
+	}
+
+	if report.SelectedPersona != "" {
+		content, err := os.ReadFile(filepath.Join(workspace, "persona", report.SelectedPersona+".md"))
+		if err != nil {
+			// Persona missing — render mode only, append marker
+			return wrapReminder(body.String()) + "\n\n[persona " + report.SelectedPersona + " not found on disk]", nil
+		}
+		fmt.Fprintf(&body, "\n\n---\n\npersona=%s\n\n%s", report.SelectedPersona, string(content))
+	}
+
+	// Length cap operates on the final body (after labels + section content).
+	capped := applyRouteLengthCap(body.String(), "")
+	return wrapReminder(capped), nil
+}
+
+// wrapReminder wraps body in a <system-reminder> block with the auto-route header.
+// Format: <system-reminder> + "MPM auto-route active" header + body + </system-reminder>
+func wrapReminder(body string) string {
+	return fmt.Sprintf("<system-reminder>\nMPM auto-route active\n\n%s\n</system-reminder>", body)
 }
