@@ -66,17 +66,17 @@ func TestInitialConfidence_UnknownTypeDefaultsToPointFive(t *testing.T) {
 	assert.InDelta(t, 0.5, got, 1e-9)
 }
 
-func TestDecayLambda_ByCollection(t *testing.T) {
+func TestDecayLambda_ByArtifactType(t *testing.T) {
 	// Per spec: decisions 0.001, lessons 0.003, memories 0.01, theories 0.02
 	cases := map[string]float64{
-		"decisions": 0.001,
-		"lessons":   0.003,
-		"memories":  0.01,
-		"theories":  0.02,
+		"decision": 0.001,
+		"lesson":   0.003,
+		"memory":   0.01,
+		"theory":   0.02,
 	}
-	for coll, want := range cases {
-		t.Run(coll, func(t *testing.T) {
-			got := decayLambda(coll)
+	for typ, want := range cases {
+		t.Run(typ, func(t *testing.T) {
+			got := decayLambda(typ)
 			assert.InDelta(t, want, got, 1e-9)
 		})
 	}
