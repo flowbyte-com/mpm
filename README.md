@@ -755,6 +755,40 @@ MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Se
 
 ---
 
+## The Reflex Engine
+
+The Reflex Engine is MPM's zero-latency pre-prompt router. It evaluates
+each user prompt against the workspace's mode and persona files and
+returns the best match *before* the LLM sees anything — compiled Go
+regex, microseconds, no LLM call, no network round-trip, no daemon.
+
+The name is deliberate: a reflex is what runs *before* deliberation. The
+engine picks the mode (operational rules) and persona (voice/tone) in a
+fraction of a millisecond, so the LLM receives the right context as if
+it were always there — the way a writer sits down with a particular
+genre's rules already internalized rather than re-reading them
+mid-sentence.
+
+### Consumers
+
+| Surface | Caller | Output |
+|---|---|---|
+| `mpm route` | Claude Code `UserPromptSubmit` hook | `<system-reminder>` block on stdout |
+| `mpm call route` | OpenClaw / Hermes (JSON-RPC) | `RoutingReport` JSON |
+| `route` MCP tool | Any MCP client | MCP-protocol response |
+
+All three share the same `internal.Router` engine. See
+[Auto-Selection (`route` tool)](#auto-selection-route-tool) for the full
+scoring rules, anti-pattern handling, and hot-reload behavior.
+
+### Hot reload
+
+The engine monitors `mode/` and `persona/` directory mtimes. Edit a mode
+file, save it, and the next `route` call picks it up — no server
+restart, no rebuild, no deploy.
+
+---
+
 ## Claude Code integration
 
 MPM can auto-route every Claude Code prompt to the appropriate mode + persona
