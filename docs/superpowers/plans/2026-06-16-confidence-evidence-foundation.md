@@ -2757,3 +2757,38 @@ Expected:
   is fine for the expected data scale (tens to thousands of evidence
   rows per artifact). If a workload needs more, the trigger chain can
   batch via `idle_dream`.
+
+---
+
+## Task 14 (Follow-up, v2): Real Trigger-Driven Recompute
+
+**Status: v1 ships with the trigger registered as a no-op and recompute driven from Go. This task designs and implements the v2 path that makes the trigger do real work.**
+
+**Why:** The v1 design was forced to keep the trigger as a no-op because SQLite's connection-locking model deadlocks when a trigger callback tries to issue writes on the same connection (or wait on another connection that is waiting for the trigger). The user explicitly chose to ship v1 as-is and design v2 as a follow-up.
+
+**Goal:** Make `confidence_recompute` actually do the recompute, so direct Go calls (from `AddEvidence`, from `idle_dream`, from manual CLI) become redundant and the trigger becomes the true entry point.
+
+**Design options to evaluate:**
+
+1. **Per-connection registration.** The current code pins one connection via `db.Conn()` and registers on the underlying `*SQLiteConn`. Production code uses a single shared `*sql.DB` (single connection effectively), so this might be sufficient — but it breaks the moment someone opens a second connection. Investigate whether `mattn/go-sqlite3` has a connection-init hook (it doesn't, as of the v1 implementation).
+
+2. **Async dispatch via worker queue.** The trigger callback enqueues a recompute request onto a channel; a worker goroutine drains it and calls `RecomputeConfidence`. Trades synchronous-update guarantees for trigger-as-entry-point. Requires new lifecycle wiring (worker start/stop, queue overflow handling, DLQ for dropped recomputes).
+
+3. **Bypass the trigger entirely.** Document that Go is the entry point and the trigger DDL is a forward-compat hook. Drop the no-op `confidence_recompute` function and the three triggers. Simplest, but loses the "trigger fires the work" semantic that the user originally wanted.
+
+**Files (to be determined by the chosen design):**
+- `internal/db.go` — replace `initConfidenceTriggers` with the v2 implementation
+- `internal/evidence_store.go` — possibly remove the direct `RecomputeConfidence` call from `AddEvidence` if option 1 or 2 is chosen
+- New: a worker queue / DLQ if option 2 is chosen
+- `cmd/mpm/main.go` or `cmd/mpm/router.go` — worker lifecycle if option 2 is chosen
+- Tests: end-to-end trigger → recompute → confidence/history update
+
+**Acceptance criteria:**
+- Inserting into `evidence` causes the artifact's `confidence` column to be updated via the trigger, not via a direct Go call.
+- The `confidence_history` table records the change with `trigger = 'evidence_added'` for the trigger path.
+- Concurrent inserts on different artifacts do not deadlock.
+- Concurrent inserts on the same artifact are safe (history is append-only; the last write wins on the artifact's confidence column).
+- The existing 4 `TestEvidenceStore_*` tests still pass with the trigger now doing real work (or are updated to assert the trigger path specifically).
+- No regression in the rest of the `internal/` test suite.
+
+**Why this is a separate task, not part of Task 4:** v1 is shippable and tested. v2 is a real design effort that the user wants done deliberately, not as a hotfix.
