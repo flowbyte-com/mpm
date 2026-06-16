@@ -45,17 +45,18 @@ func artifactTypeFromCollection(collection string) string {
 	}
 }
 
-// decayLambda returns the per-collection exponential decay rate (per day).
+// decayLambda returns the per-artifact-type exponential decay rate (per day).
 // See "Exponential confidence decay with per-collection λ" in the spec.
-func decayLambda(collection string) float64 {
-	switch collection {
-	case "decisions":
+// Per spec: decisions 0.001, lessons 0.003, memories 0.01, theories 0.02.
+func decayLambda(artifactType string) float64 {
+	switch artifactType {
+	case "decision":
 		return 0.001
-	case "lessons":
+	case "lesson":
 		return 0.003
-	case "memories", "":
+	case "memory", "":
 		return 0.01
-	case "theories":
+	case "theory":
 		return 0.02
 	default:
 		return 0.01
