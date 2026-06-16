@@ -283,3 +283,70 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 	}
 	return out, rows.Err()
 }
+
+// ConfidenceSnapshot is a point-in-time view of an artifact's confidence state.
+type ConfidenceSnapshot struct {
+	ArtifactID   string                `json:"artifact_id"`
+	ArtifactType string                `json:"artifact_type"`
+	Confidence   float64               `json:"confidence"`
+	HistoryCount int                   `json:"history_count"`
+	History      []ConfidenceHistoryRow `json:"history"`
+}
+
+// ConfidenceHistoryRow is one row of the confidence_history table.
+type ConfidenceHistoryRow struct {
+	Confidence    float64   `json:"confidence"`
+	ComputedAt    time.Time `json:"computed_at"`
+	EvidenceCount int       `json:"evidence_count"`
+	Trigger       string    `json:"trigger"`
+}
+
+// GetConfidenceForArtifact returns the current confidence and the last `limit`
+// history rows for an artifact, ordered by computed_at DESC.
+func GetConfidenceForArtifact(dm *DatabaseManager, artifactID, artifactType string, limit int) (*ConfidenceSnapshot, error) {
+	table := "memories"
+	if artifactType == "lesson" {
+		table = "lessons"
+	}
+	var conf float64
+	err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, table),
+		artifactID,
+	).Scan(&conf)
+	if err != nil {
+		return nil, fmt.Errorf("read confidence: %w", err)
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := dm.QueryTracked(`
+		SELECT confidence, computed_at, evidence_count, trigger
+		FROM confidence_history
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY computed_at DESC
+		LIMIT ?
+	`, artifactID, artifactType, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read history: %w", err)
+	}
+	defer rows.Close()
+
+	snap := &ConfidenceSnapshot{
+		ArtifactID:   artifactID,
+		ArtifactType: artifactType,
+		Confidence:   conf,
+		History:      []ConfidenceHistoryRow{},
+	}
+	for rows.Next() {
+		var h ConfidenceHistoryRow
+		var computedAt int64
+		if err := rows.Scan(&h.Confidence, &computedAt, &h.EvidenceCount, &h.Trigger); err != nil {
+			return nil, fmt.Errorf("scan history: %w", err)
+		}
+		h.ComputedAt = time.Unix(computedAt, 0)
+		snap.History = append(snap.History, h)
+	}
+	snap.HistoryCount = len(snap.History)
+	return snap, rows.Err()
+}
