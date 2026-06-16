@@ -475,6 +475,9 @@ func handleOps(args []string) int {
 	case "promote":
 		return handleOpsPromote()
 
+	case "confidence":
+		return handleOpsConfidence(subArgs)
+
 	case "status":
 		return handleStatus()
 
@@ -524,6 +527,7 @@ var opsSubcommandDescs = []struct {
 	{"stance assume <mode> <persona> <rationale>", "XITL: hot-swap existing persona when auto active"},
 	{"stance synthesize <name> [flags]", "XITL: generate JIT persona for novel edge cases"},
 	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
+	{"confidence show|recompute", "Confidence/evidence engine: snapshot or trigger recompute"},
 	{"help", "Show this help"},
 }
 
