@@ -153,12 +153,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
-	case "backup":
-		return handleBackup(args)
 	case "restore":
 		return handleRestore(args)
-	case "restore-db":
-		return handleRestoreDB(args)
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":
@@ -434,10 +430,6 @@ func handleOps(args []string) int {
 		return handleExport(append([]string{"export"}, subArgs...))
 
 	// — Backup & Restore & Ingest —
-	case "backup":
-		return handleBackup(append([]string{"backup"}, subArgs...))
-	case "restore-db":
-		return handleRestoreDB(append([]string{"restore-db"}, subArgs...))
 	case "ingest":
 		return handleIngest(append([]string{"ingest"}, subArgs...))
 
