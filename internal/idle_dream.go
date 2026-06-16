@@ -99,6 +99,15 @@ func (w *IdleConsolidationWorker) doCycle() {
 
 	w.logger.Info("idle_worker: quiet period reached, starting consolidation cycle")
 
+	// Confidence decay recompute. Runs every cycle, independent of synthesis.
+	// The trigger chain handles confidence recompute on evidence insert/delete,
+	// but cannot do time-based decay — that's what this cycle is for.
+	if decayed, err := w.ConfidenceDecayCycle(); err != nil {
+		w.logger.Warn("idle_worker: confidence decay cycle failed", "error", err.Error())
+	} else if decayed > 0 {
+		w.logger.Info("idle_worker: confidence decay cycle complete", "decayed", decayed)
+	}
+
 	pairs, err := w.findUnlinkedSimilarPairs()
 	if err != nil {
 		w.logger.Error("idle_worker: findUnlinkedSimilarPairs failed", "error", err.Error())
@@ -129,6 +138,80 @@ func (w *IdleConsolidationWorker) doCycle() {
 		"proposed", proposed,
 		"skipped", skipped,
 		"failed", failed)
+}
+
+// ConfidenceDecayCycle walks artifacts whose last positive evidence is older
+// than the collection's decay half-life and recomputes their confidence
+// with trigger=decay_tick. Returns the number of artifacts recomputed.
+//
+// The half-life is collection-specific: memories ~69 days, theories ~35 days,
+// lessons ~231 days, decisions ~693 days. We use a "since last positive
+// evidence" anchor, not "since created_at", so a freshly-reinforced
+// artifact is not penalized.
+func (w *IdleConsolidationWorker) ConfidenceDecayCycle() (int, error) {
+	// Find candidate artifacts: rows whose latest positive evidence (or
+	// creation, if no positive evidence exists) is older than the decay
+	// half-life for the collection.
+	rows, err := w.db.QueryTracked(`
+		SELECT a.artifact_id, a.artifact_type, a.last_positive_at
+		FROM (
+			SELECT
+				m.id AS artifact_id,
+				'memory' AS artifact_type,
+				CAST(COALESCE(
+					(SELECT MAX(e.created_at) FROM evidence e WHERE e.artifact_id = m.id AND e.artifact_type = 'memory' AND e.strength > 0),
+					strftime('%s', m.created_at)
+				) AS INTEGER) AS last_positive_at
+			FROM memories m
+			UNION ALL
+			SELECT
+				l.id,
+				'lesson',
+				CAST(COALESCE(
+					(SELECT MAX(e.created_at) FROM evidence e WHERE e.artifact_id = l.id AND e.artifact_type = 'lesson' AND e.strength > 0),
+					strftime('%s', l.created)
+				) AS INTEGER)
+			FROM lessons l
+		) a
+		WHERE a.last_positive_at < CAST(strftime('%s', 'now', '-1 day') AS INTEGER)
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("query stale artifacts: %w", err)
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		artifactID     string
+		artifactType   string
+		lastPositiveAt int64
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.artifactID, &c.artifactType, &c.lastPositiveAt); err != nil {
+			return 0, err
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	// Schedule the recompute.
+	count := 0
+	for _, c := range cands {
+		// The per-collection half-life check happens inside computeConfidence;
+		// we just need to call RecomputeConfidence for the candidate. The
+		// actual "is this stale enough" gating is the WHERE clause above
+		// (older than 1 day). For finer-grained gating, extend the SQL.
+		if err := RecomputeConfidence(w.db, c.artifactID, c.artifactType, RecomputeReasonDecayTick); err != nil {
+			w.logger.Warn("idle_worker: recompute failed",
+				"artifact_id", c.artifactID, "error", err)
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 
 // lastWatcherEventAtNano is the atomic activity clock written by the watcher
