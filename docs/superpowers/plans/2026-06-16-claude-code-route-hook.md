@@ -474,11 +474,12 @@ func applyRouteLengthCap(modeText, personaText string) string {
 	if len(combined) <= routeOutputCap {
 		return modeText + personaText
 	}
+	if len(modeText) > routeModeHardCap {
+		// Mode alone exceeds the hard cap — must truncate it regardless of persona
+		return modeText[:routeModeHardCap] + longMarker
+	}
 	if personaText != "" {
 		return modeText + shortMarker
-	}
-	if len(modeText) > routeModeHardCap {
-		return modeText[:routeModeHardCap] + longMarker
 	}
 	return modeText + longMarker
 }
