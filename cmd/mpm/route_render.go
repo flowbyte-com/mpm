@@ -75,3 +75,31 @@ func shouldSkipRoute(prompt string, envLookup func(string) string) (bool, string
 	}
 	return false, ""
 }
+
+const routeOutputCap = 9500 // under Claude Code's 10,000-char hook stdout limit
+const routeModeHardCap = 9000
+
+// applyRouteLengthCap returns the rendered <system-reminder> body given
+// pre-extracted mode and persona text. Priority: preserve mode (operational
+// rules) over persona (voice/tone).
+//
+// Rules:
+//   - Combined length ≤ routeOutputCap: return both unchanged
+//   - Combined length > cap with persona present: truncate persona, append marker
+//   - Mode alone exceeds routeModeHardCap: truncate mode, append marker
+func applyRouteLengthCap(modeText, personaText string) string {
+	shortMarker := "\n[...truncated, see mode/<name>.md for full content]"
+	longMarker := "\n[...truncated]"
+
+	combined := modeText + personaText
+	if len(combined) <= routeOutputCap {
+		return modeText + personaText
+	}
+	if len(modeText) > routeModeHardCap {
+		return modeText[:routeModeHardCap] + longMarker
+	}
+	if personaText != "" {
+		return modeText + shortMarker
+	}
+	return modeText + longMarker
+}
