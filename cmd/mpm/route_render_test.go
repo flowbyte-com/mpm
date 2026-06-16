@@ -6,6 +6,74 @@ import (
 	"testing"
 )
 
+func TestRenderRoute(t *testing.T) {
+	// Use the live workspace — it has known mode/persona files and matches
+	// the pattern in internal/router_test.go. This is integration-level.
+	workspace := "/home/v/workspace/projects/mpm"
+
+	tests := []struct {
+		name         string
+		prompt       string
+		wantEmpty    bool
+		wantContains []string
+	}{
+		{
+			name:      "low-signal prompt produces no output",
+			prompt:    "hi",
+			wantEmpty: true,
+		},
+		{
+			name:      "architect mode triggered by architecture keyword",
+			prompt:    "Design the system architecture for our new API gateway",
+			wantContains: []string{
+				"<system-reminder>",
+				"mode=",
+				"persona=",
+				"</system-reminder>",
+			},
+		},
+		{
+			name:      "code-review-flavored prompt also routes",
+			prompt:    "Implement the user authentication flow in Go with proper security",
+			wantContains: []string{
+				"<system-reminder>",
+				"MPM auto-route active",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := renderRoute(workspace, tt.prompt)
+			if err != nil {
+				t.Fatalf("renderRoute: %v", err)
+			}
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("renderRoute() = %q, want empty (low-signal prompt should not inject context)", got)
+				}
+				return
+			}
+			for _, sub := range tt.wantContains {
+				if !strings.Contains(got, sub) {
+					t.Errorf("renderRoute() missing substring %q\nGot: %s", sub, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderRoute_EmptyWorkspace(t *testing.T) {
+	// Empty workspace should return empty output, not error
+	got, err := renderRoute("", "review this code for security")
+	if err != nil {
+		t.Fatalf("renderRoute with empty workspace: %v", err)
+	}
+	if got != "" {
+		t.Errorf("renderRoute() with empty workspace should return empty, got %q", got)
+	}
+}
+
 func TestResolveRouteWorkspace(t *testing.T) {
 	tests := []struct {
 		name     string
