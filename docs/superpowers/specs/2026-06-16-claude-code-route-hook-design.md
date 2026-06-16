@@ -135,11 +135,13 @@ mpm call route --payload '{"prompt": "<user text>"}'
 <system-reminder>
 MPM auto-route active: mode=<name> persona=<name>
 
-<verbatim content of mode/<name>.json>
+<verbatim content of mode/<name>.md>
 
 <verbatim content of persona/<name>.md>
 </system-reminder>
 ```
+
+Both mode and persona files are Markdown with YAML frontmatter (`mode/<name>.md`, `persona/<name>.md` — verified against the working `mode/architect.md` and `persona/default.md`). The renderer dumps the file contents verbatim; the LLM parses the frontmatter.
 
 **Truncation rules** (length cap = 9,500 chars to stay under Claude Code's 10K hook stdout limit):
 | Combined length | Action |
