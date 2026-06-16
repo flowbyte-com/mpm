@@ -1483,6 +1483,9 @@ type Lesson struct {
 	ReinforcementCount int        `json:"reinforcement_count"`
 	SourceSessionID    string     `json:"source_session_id,omitempty"`
 	Created            string     `json:"created"`
+	RetrievalPriority  float64    `json:"retrieval_priority,omitempty"`
+	Importance         float64    `json:"importance,omitempty"`
+	Confidence         float64    `json:"confidence,omitempty"`
 }
 
 // AddLesson adds a new lesson, checking for duplicates by content hash
@@ -1515,9 +1518,9 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	now := time.Now().Format(time.RFC3339)
 
 	_, err = dm.db.Exec(`
-		INSERT INTO lessons (id, type, content, tags, reinforcement_count, source_session_id, created, content_hash)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?)
-	`, id, lessonType, content, tagsJSON, sourceSessionID, now, contentHash)
+		INSERT INTO lessons (id, type, content, tags, reinforcement_count, source_session_id, created, content_hash, retrieval_priority, importance, confidence)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0.5, 0.5, ?)
+	`, id, lessonType, content, tagsJSON, sourceSessionID, now, contentHash, InitialConfidence("lesson"))
 	if err != nil {
 		return nil, err
 	}
@@ -1530,6 +1533,9 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		ReinforcementCount: 1,
 		SourceSessionID:    sourceSessionID,
 		Created:            now,
+		RetrievalPriority:  0.5,
+		Importance:         0.5,
+		Confidence:         InitialConfidence("lesson"),
 	}, nil
 }
 
