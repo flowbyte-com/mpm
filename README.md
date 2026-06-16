@@ -593,6 +593,38 @@ PDF, EPUB, HTML, Markdown ingestion with Smart Fence chunking. `--chunk-size` fl
 
 `mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt, stored in `system_config`. `mpm ops stance promote` flushes it to a permanent `.md` disk file.
 
+### Directives (Prime Operating Principles)
+
+Directives are the agent's **prime directives** — non-negotiable behavioral principles that govern how it operates. Unlike modes (which govern retrieval parameters) and personas (which govern tone), directives are the hard rules: the things the agent must and must not do on every turn.
+
+Examples of directive content:
+
+```
+On every session start, call read_wake_context before responding to the user.
+MPM is the single source of truth for agent state.
+Never exfiltrate private data.
+When in doubt, ask.
+```
+
+**Storage:** Directives live in the SQLite database as memories with `is_prime_directive = 1`. Any memory can be elevated to directive status via the `is_prime_directive` flag. Unlike mode/persona files which are plain markdown, directives are database-persisted — enabling synthesis, reinforcement, and challenge workflows.
+
+**Access:**
+
+```bash
+mpm ops directives          # CLI — reads from ~/.mpm/src/db/mpm.db
+mpm call read_directives    # MCP tool — reads from MPM_WORKSPACE/src/db/mpm.db
+```
+
+**Important path note:** `mpm ops directives` and the MCP `read_directives` tool read from different databases. The CLI reads the canonical `~/.mpm/` install. The MCP tool reads from `MPM_WORKSPACE` (defaults to current directory). When OpenClaw runs MPM with `MPM_WORKSPACE=~/.mpm`, both paths converge on the same database.
+
+**Elevation:** Any memory can become a directive:
+
+```bash
+mpm call save_to_memory --payload '{"fact": "Always verify before acting", "collection": "directives", "is_prime_directive": true}'
+```
+
+Directives with `is_prime_directive=1` are surfaced by `read_directives` and injected into the system prompt context on every bootstrap. The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
+
 ### Modes & Personas (File-Based)
 
 Modes and personas are `.md` files with YAML frontmatter. **No database, no compile step.** Filename is the identity.
@@ -971,6 +1003,6 @@ See [`docs/MPM_WISHLIST.md`](docs/MPM_WISHLIST.md) for the full running wishlist
 
 ## License
 
-GNU AGPL v3. Part of the OpenClaw agent ecosystem.
+GNU AGPL v3
 
 Created by v (human) + 808 (AI).
