@@ -51,7 +51,7 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 	}
 
 	if primeOnly {
-		query += " AND (metadata LIKE '%is_prime_directive%' OR tags LIKE '%is_prime_directive%')"
+		query += " AND (metadata LIKE '%is_prime_directive%' OR tags LIKE '%is_prime_directive%' OR collection = 'directives')"
 	}
 
 	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -139,9 +139,9 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 
 	if primeOnly {
 		if found {
-			query += " AND (m.metadata LIKE '%is_prime_directive%' OR m.tags LIKE '%is_prime_directive%')"
+			query += " AND (m.metadata LIKE '%is_prime_directive%' OR m.tags LIKE '%is_prime_directive%' OR m.collection = 'directives')"
 		} else {
-			query += " AND (metadata LIKE '%is_prime_directive%' OR tags LIKE '%is_prime_directive%')"
+			query += " AND (metadata LIKE '%is_prime_directive%' OR tags LIKE '%is_prime_directive%' OR collection = 'directives')"
 		}
 	}
 
