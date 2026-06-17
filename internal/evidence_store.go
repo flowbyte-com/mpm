@@ -86,36 +86,44 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 		expiresAt = &exp
 	}
 
-	_, err := dm.ExecTracked(`
-		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
-		                     strength, independence_factor, created_by, created_at, expires_at, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
-		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes)
-	if err != nil {
-		return fmt.Errorf("insert evidence: %w", err)
-	}
-	// Trigger recompute synchronously. (In v2 this will run inside the same
-	// transaction as the INSERT above via the DBNode interface, so a failed
-	// recompute rolls back the evidence row.)
-	return RecomputeConfidence(dm, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded)
+	// Wrap INSERT + recompute in a single transaction so a recompute failure
+	// rolls back the evidence row. Without this, an orphan evidence row would
+	// remain if the process dies between the INSERT and the recompute, or if
+	// the recompute itself fails (e.g., CHECK constraint violation).
+	return dm.WithTx(func(node DBNode) error {
+		if _, err := node.ExecTracked(`
+			INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
+			                     strength, independence_factor, created_by, created_at, expires_at, notes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
+			in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes); err != nil {
+			return fmt.Errorf("insert evidence: %w", err)
+		}
+		if err := RecomputeConfidence(node, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded); err != nil {
+			return fmt.Errorf("recompute confidence: %w", err)
+		}
+		return nil
+	})
 }
 
 // RecomputeConfidence is the single authoritative entry point. It loads the
 // current evidence set for the artifact, runs the math, and writes both
 // the new confidence on the artifact and a new row in confidence_history.
 //
+// Accepts a DBNode so callers can run the recompute inside an active
+// transaction (e.g., AddEvidence wraps insert + recompute in one Tx) or
+// standalone (e.g., idle_dream's per-cycle decay recompute).
+//
 // Called by:
-//   - Go application layer during AddEvidence (synchronously; v2 will wrap
-//     the insert + recompute in a single transaction)
+//   - Go application layer during AddEvidence (transactionally)
 //   - idle_dream (for decay_tick recompute)
 //   - Manual CLI (`mpm ops confidence recompute`)
 //   - Future calibration/challenge code
-func RecomputeConfidence(dm *DatabaseManager, artifactID, artifactType string, reason RecomputeReason) error {
+func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason RecomputeReason) error {
 	now := time.Now()
 
 	// Load the evidence set.
-	ev, lastPositiveAt, err := loadEvidenceForRecompute(dm, artifactID, artifactType, now)
+	ev, lastPositiveAt, err := loadEvidenceForRecompute(node, artifactID, artifactType, now)
 	if err != nil {
 		return fmt.Errorf("load evidence: %w", err)
 	}
@@ -124,13 +132,13 @@ func RecomputeConfidence(dm *DatabaseManager, artifactID, artifactType string, r
 	conf := computeConfidence(artifactType, ev, now, lastPositiveAt, 0.005)
 
 	// Update the artifact's confidence column.
-	if err := writeArtifactConfidence(dm, artifactID, artifactType, conf); err != nil {
+	if err := writeArtifactConfidence(node, artifactID, artifactType, conf); err != nil {
 		return fmt.Errorf("write artifact confidence: %w", err)
 	}
 
 	// Append the history row.
 	historyID := GenerateID()
-	_, err = dm.ExecTracked(`
+	_, err = node.ExecTracked(`
 		INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, 0, historyID, artifactID, artifactType, conf, now.Unix(), len(ev), string(reason))
@@ -142,8 +150,8 @@ func RecomputeConfidence(dm *DatabaseManager, artifactID, artifactType string, r
 
 // loadEvidenceForRecompute returns the evidence set and the most recent
 // positive-evidence timestamp (for decay anchoring).
-func loadEvidenceForRecompute(dm *DatabaseManager, artifactID, artifactType string, now time.Time) ([]evidenceInput, time.Time, error) {
-	rows, err := dm.QueryTracked(`
+func loadEvidenceForRecompute(node DBNode, artifactID, artifactType string, now time.Time) ([]evidenceInput, time.Time, error) {
+	rows, err := node.QueryTracked(`
 		SELECT strength, independence_factor, created_at, expires_at
 		FROM evidence
 		WHERE artifact_id = ? AND artifact_type = ?
@@ -181,14 +189,14 @@ func loadEvidenceForRecompute(dm *DatabaseManager, artifactID, artifactType stri
 		// so it decays from "now" rather than from 1970. Falls back to
 		// epoch if even that isn't available.
 		lastPositiveAt = now
-		if createdAt, ok := readArtifactCreatedAt(dm, artifactID, artifactType); ok {
+		if createdAt, ok := readArtifactCreatedAt(node, artifactID, artifactType); ok {
 			lastPositiveAt = createdAt
 		}
 	}
 	return out, lastPositiveAt, rows.Err()
 }
 
-func readArtifactCreatedAt(dm *DatabaseManager, artifactID, artifactType string) (time.Time, bool) {
+func readArtifactCreatedAt(node DBNode, artifactID, artifactType string) (time.Time, bool) {
 	var table string
 	switch artifactType {
 	case "lesson":
@@ -197,7 +205,7 @@ func readArtifactCreatedAt(dm *DatabaseManager, artifactID, artifactType string)
 		table = "memories"
 	}
 	var createdAt string
-	err := dm.QueryRowTracked(fmt.Sprintf(`SELECT created_at FROM %s WHERE id = ?`, table), artifactID).Scan(&createdAt)
+	err := node.QueryRowTracked(fmt.Sprintf(`SELECT created_at FROM %s WHERE id = ?`, table), artifactID).Scan(&createdAt)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -210,7 +218,7 @@ func readArtifactCreatedAt(dm *DatabaseManager, artifactID, artifactType string)
 
 // writeArtifactConfidence updates the confidence column on the artifact
 // table. The table is derived from the artifact type.
-func writeArtifactConfidence(dm *DatabaseManager, artifactID, artifactType string, conf float64) error {
+func writeArtifactConfidence(node DBNode, artifactID, artifactType string, conf float64) error {
 	var table string
 	switch artifactType {
 	case "lesson":
@@ -218,7 +226,7 @@ func writeArtifactConfidence(dm *DatabaseManager, artifactID, artifactType strin
 	default:
 		table = "memories"
 	}
-	_, err := dm.ExecTracked(
+	_, err := node.ExecTracked(
 		fmt.Sprintf(`UPDATE %s SET confidence = ? WHERE id = ?`, table),
 		0, conf, artifactID,
 	)
