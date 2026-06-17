@@ -197,14 +197,18 @@ func (w *IdleConsolidationWorker) ConfidenceDecayCycle() (int, error) {
 		return 0, err
 	}
 
-	// Schedule the recompute.
+	// Schedule the recompute. Each candidate runs in its own transaction so
+	// a partial write (confidence updated but history row missing, or vice
+	// versa) can't leave the artifact and its audit trail desynced.
 	count := 0
 	for _, c := range cands {
 		// The per-collection half-life check happens inside computeConfidence;
 		// we just need to call RecomputeConfidence for the candidate. The
 		// actual "is this stale enough" gating is the WHERE clause above
 		// (older than 1 day). For finer-grained gating, extend the SQL.
-		if err := RecomputeConfidence(w.db, c.artifactID, c.artifactType, RecomputeReasonDecayTick); err != nil {
+		if err := w.db.WithTx(func(node DBNode) error {
+			return RecomputeConfidence(node, c.artifactID, c.artifactType, RecomputeReasonDecayTick)
+		}); err != nil {
 			w.logger.Warn("idle_worker: recompute failed",
 				"artifact_id", c.artifactID, "error", err)
 			continue
