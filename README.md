@@ -680,14 +680,13 @@ Mode Directives are contextual rules injected by the runtime when the
 agent's mode matches — they never appear in the system prompt unless the
 mode is active.
 
-**Storage:** Directives are SQLite rows with `collection = 'directives'`.
-The `memories.is_prime_directive` column is a parallel marker used by the
-web UI and the `mpm ops directives` CLI; the MCP `read_directives` tool
-keys off the collection. The two paths currently cover overlapping but
-disjoint sets — `save_to_memory` sets the collection but not the column,
-so a directive ingested via the MCP tool is visible to `read_directives`
-but not to `mpm ops directives`. To see a directive from both paths,
-also set `is_prime_directive = 1` (e.g. via direct SQL update).
+**Storage:** Directives are SQLite rows identified by either
+`collection = 'directives'` (set by `save_to_memory`) or
+`is_prime_directive = 1` (legacy column, set by direct SQL or older
+code paths). Both read paths — the MCP `read_directives` tool and the
+`mpm ops directives` CLI — query `WHERE (collection = 'directives' OR
+is_prime_directive = 1) AND deleted_at IS NULL`, so a directive is
+visible from every consumer regardless of which identifier was set.
 
 **Access:**
 
