@@ -264,16 +264,28 @@ modifying the artifact content.
 
 #### Commands
 
-| Command | Description |
-|---|---|
-| `mpm evidence add --artifact <id> --type <t> --source <s> --by <who>` | Add a piece of evidence to an artifact |
-| `mpm evidence list --artifact <id>` | List all evidence for an artifact |
-| `mpm ops confidence show --artifact <id>` | Show current confidence + history |
-| `mpm ops confidence recompute --artifact <id>` | Trigger a manual recompute |
+| Command | MCP tool | Description |
+|---|---|---|
+| `mpm evidence add --artifact <id> --type <t> --source <s> --by <who>` | `add_evidence` | Add a piece of evidence to an artifact |
+| `mpm evidence list --artifact <id>` | `list_evidence` | List all evidence for an artifact |
+| `mpm ops confidence show --artifact <id>` | `query_confidence_history` | Show current confidence + history |
+| `mpm ops confidence recompute --artifact <id>` | (manual CLI only) | Trigger a manual recompute |
 
 Evidence types: `observation` (0.4), `test` (0.7), `reproduction` (0.85),
 `challenge` (-0.6), `decision_outcome` (0.95), `external_reference` (0.6).
 Strength defaults to the type's registry value; override with `--strength`.
+
+Artifact types: `memory`, `theory`, `decision`, `lesson`. The MCP tools
+enforce these as a strict enum so the LLM cannot invent categories.
+
+#### Atomicity guarantee
+
+`add_evidence` and `query_confidence_history`-triggered recomputes run
+inside a single SQLite transaction (`WithTx` over `DBNode`). If the
+recompute fails (e.g. CHECK constraint violation on
+`confidence_history.trigger`), the evidence INSERT rolls back with it —
+no orphan evidence rows, no confidence column updated without a matching
+history row.
 
 #### Initial confidence by type
 
@@ -324,6 +336,9 @@ mpm call query_long_term_memory --payload '{"query": "World Cup prediction"}'
 mpm call propose_theory --payload '{"hypothesis": "Germany wins", "validationCriteria": "semi-final minimum"}'
 mpm call resolve_theory --payload '{"theoryId": "abc123", "conclusion": "confirmed", "newStatus": "proven"}'
 mpm call challenge_memory --payload '{"memoryId": "abc123", "evidence": "recent data contradicts this"}'
+mpm call add_evidence --payload '{"artifact_id":"abc123","artifact_type":"memory","type":"test","source_group":"unit_test_suite","strength":0.7,"created_by":"openclaw-agent","notes":"parser fix verified"}'
+mpm call list_evidence --payload '{"artifact_id":"abc123","artifact_type":"memory"}'
+mpm call query_confidence_history --payload '{"artifact_id":"abc123","artifact_type":"memory","limit":10}'
 ```
 
 This is the **machine-to-machine interface**. The human-facing CLI (documented below) calls the same handlers internally.
@@ -650,7 +665,29 @@ Never exfiltrate private data.
 When in doubt, ask.
 ```
 
-**Storage:** Directives live in the SQLite database as memories with `is_prime_directive = 1`. Any memory can be elevated to directive status via the `is_prime_directive` flag. Unlike mode/persona files which are plain markdown, directives are database-persisted — enabling synthesis, reinforcement, and challenge workflows.
+#### Reflex Engine — two-tier behavioral rules
+
+MPM splits behavioral rules across two tiers to avoid crowding the system
+prompt with rules that only matter in specific contexts:
+
+| Tier | Lives in | Loaded | Examples |
+|---|---|---|---|
+| **Prime Directives** | SQLite `collection='directives'` | Always, via `read_directives` | "Always log contradictions as challenge evidence, never overwrite" |
+| **Mode Directives** | `mode/*.md` files (e.g. `debugging.md`, `research.md`) | Only when the agent is in that mode | "Query confidence history on suspicious memories before debugging" |
+
+Prime Directives are universal rules the agent must follow on every turn.
+Mode Directives are contextual rules injected by the runtime when the
+agent's mode matches — they never appear in the system prompt unless the
+mode is active.
+
+**Storage:** Directives are SQLite rows with `collection = 'directives'`.
+The `memories.is_prime_directive` column is a parallel marker used by the
+web UI and the `mpm ops directives` CLI; the MCP `read_directives` tool
+keys off the collection. The two paths currently cover overlapping but
+disjoint sets — `save_to_memory` sets the collection but not the column,
+so a directive ingested via the MCP tool is visible to `read_directives`
+but not to `mpm ops directives`. To see a directive from both paths,
+also set `is_prime_directive = 1` (e.g. via direct SQL update).
 
 **Access:**
 
@@ -661,13 +698,16 @@ mpm call read_directives    # MCP tool — reads from MPM_WORKSPACE/src/db/mpm.d
 
 **Important path note:** `mpm ops directives` and the MCP `read_directives` tool read from different databases. The CLI reads the canonical `~/.mpm/` install. The MCP tool reads from `MPM_WORKSPACE` (defaults to current directory). When OpenClaw runs MPM with `MPM_WORKSPACE=~/.mpm`, both paths converge on the same database.
 
-**Elevation:** Any memory can become a directive:
+**Elevation:** Save into the `directives` collection. The MCP
+`save_to_memory` tool ignores any `is_prime_directive` field — set
+`collection: "directives"` instead, and the row will be returned by
+`read_directives` automatically.
 
 ```bash
-mpm call save_to_memory --payload '{"fact": "Always verify before acting", "collection": "directives", "is_prime_directive": true}'
+mpm call save_to_memory --payload '{"fact": "Always verify before acting", "collection": "directives", "tags": ["prime_directive"]}'
 ```
 
-Directives with `is_prime_directive=1` are surfaced by `read_directives` and injected into the system prompt context on every bootstrap. The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
+The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
 
 ### Modes & Personas (File-Based)
 
