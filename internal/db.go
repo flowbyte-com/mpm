@@ -218,6 +218,118 @@ func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
 	f.Write([]byte("\n"))
 }
 
+// DBNode abstracts the query execution environment so functions can run
+// either standalone (against *DatabaseManager) or inside an active
+// transaction (against *txNode). RecomputeConfidence and its helpers take
+// a DBNode so callers can choose to wrap multi-statement atomic operations
+// in a transaction via DatabaseManager.WithTx.
+type DBNode interface {
+	ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error)
+	QueryTracked(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowTracked(query string, args ...interface{}) *sql.Row
+}
+
+// Compile-time assertion that DatabaseManager satisfies DBNode.
+var _ DBNode = (*DatabaseManager)(nil)
+
+// txNode wraps an *sql.Tx so it satisfies DBNode. Telemetry mirrors
+// DatabaseManager.ExecTracked/QueryTracked so watchdog.jsonl entries from
+// inside a transaction look the same as standalone queries.
+type txNode struct {
+	tx *sql.Tx
+	dm *DatabaseManager
+}
+
+func (t *txNode) ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error) {
+	start := time.Now()
+	attempts := 0
+	backoff := 100 * time.Millisecond
+	maxBackoff := 5 * time.Second
+	for {
+		attempts++
+		result, err := t.tx.Exec(query, args...)
+		elapsed := time.Since(start)
+		if err != nil && isBusyError(err) && attempts <= retries {
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
+		}
+		entry := watchdogOp{
+			Timestamp:  start.UTC().Format(time.RFC3339Nano),
+			Operation:  "exec",
+			DurationMs: elapsed.Milliseconds(),
+			Query:      truncateQuery(query),
+			Retries:    attempts - 1,
+			Slow:       elapsed > slowQueryThreshold,
+		}
+		if err != nil {
+			entry.Error = err.Error()
+		}
+		t.dm.logWatchdog(entry)
+		return result, err
+	}
+}
+
+func (t *txNode) QueryTracked(query string, args ...interface{}) (*sql.Rows, error) {
+	start := time.Now()
+	rows, err := t.tx.Query(query, args...)
+	elapsed := time.Since(start)
+	entry := watchdogOp{
+		Timestamp:  start.UTC().Format(time.RFC3339Nano),
+		Operation:  "query",
+		DurationMs: elapsed.Milliseconds(),
+		Query:      truncateQuery(query),
+		Slow:       elapsed > slowQueryThreshold,
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	}
+	t.dm.logWatchdog(entry)
+	return rows, err
+}
+
+func (t *txNode) QueryRowTracked(query string, args ...interface{}) *sql.Row {
+	start := time.Now()
+	row := t.tx.QueryRow(query, args...)
+	elapsed := time.Since(start)
+	entry := watchdogOp{
+		Timestamp:  start.UTC().Format(time.RFC3339Nano),
+		Operation:  "query_row",
+		DurationMs: elapsed.Milliseconds(),
+		Query:      truncateQuery(query),
+		Slow:       elapsed > slowQueryThreshold,
+	}
+	t.dm.logWatchdog(entry)
+	return row
+}
+
+// WithTx executes fn inside a transaction. The transaction commits when fn
+// returns nil and rolls back on any error or panic. The panic is re-raised
+// after rollback so callers can recover up the stack. fn receives a DBNode
+// that delegates to the active transaction; passing it to RecomputeConfidence
+// (or any DBNode-accepting function) makes the multi-statement operation
+// atomic — a failure in any statement rolls back every preceding statement.
+func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
+		} else {
+			err = tx.Commit()
+		}
+	}()
+	err = fn(&txNode{tx: tx, dm: dm})
+	return err
+}
+
 // ExecTracked runs db.Exec with timing and optional retry-backoff.
 // If retries > 0 the query is re-attempted on SQLITE_BUSY with exponential
 // backoff (100ms, 200ms, 400ms, … capped at 5s).
