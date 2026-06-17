@@ -42,17 +42,12 @@ type EvidenceInput struct {
 
 // AddEvidence inserts an evidence row and triggers a confidence recompute.
 //
-// The DB trigger on the evidence table is registered in db.go and would
-// fire the registered confidence_recompute function on INSERT/UPDATE/DELETE.
-// In practice we call RecomputeConfidence directly here: SQLite's locking
-// model (a single writer at a time) means the trigger callback cannot
-// safely issue writes on a second connection while the INSERT that fired
-// the trigger is still in progress, and using the trigger's own connection
-// is not exposed by mattn/go-sqlite3's RegisterFunc API. Doing the
-// recompute from Go here keeps the chain synchronous and matches the
-// "single authoritative entry point" design — every confidence change still
-// flows through RecomputeConfidence, just without going through the
-// trigger indirection.
+// The evidence table intentionally has no AFTER INSERT/UPDATE/DELETE
+// triggers; recompute is driven from Go (SQLite's connection-locking model
+// deadlocks when a RegisterFunc callback attempts further writes). The
+// recompute is invoked synchronously here so every confidence change still
+// flows through RecomputeConfidence, matching the "single authoritative
+// entry point" design.
 func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if !IsValidEvidenceType(in.Type) {
 		return fmt.Errorf("invalid evidence type: %q", in.Type)
@@ -100,10 +95,9 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if err != nil {
 		return fmt.Errorf("insert evidence: %w", err)
 	}
-	// The trigger may have fired confidence_recompute as well; we don't
-	// depend on it because of the SQLite locking issue described above.
-	// Call RecomputeConfidence directly so the confidence is updated
-	// synchronously and history rows are appended.
+	// Trigger recompute synchronously. (In v2 this will run inside the same
+	// transaction as the INSERT above via the DBNode interface, so a failed
+	// recompute rolls back the evidence row.)
 	return RecomputeConfidence(dm, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded)
 }
 
@@ -112,7 +106,8 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 // the new confidence on the artifact and a new row in confidence_history.
 //
 // Called by:
-//   - The SQLite triggers (via the registered SQL function)
+//   - Go application layer during AddEvidence (synchronously; v2 will wrap
+//     the insert + recompute in a single transaction)
 //   - idle_dream (for decay_tick recompute)
 //   - Manual CLI (`mpm ops confidence recompute`)
 //   - Future calibration/challenge code
