@@ -286,6 +286,80 @@ const RESOLVE_THEORY_SCHEMA = {
     required: ["theoryId", "conclusion", "newStatus"],
     additionalProperties: false,
 };
+const ADD_EVIDENCE_SCHEMA = {
+    type: "object",
+    properties: {
+        artifact_id: {
+            type: "string",
+            description: "The ID of the target artifact (memory, theory, decision, or lesson).",
+        },
+        artifact_type: {
+            type: "string",
+            enum: ["memory", "theory", "decision", "lesson"],
+            description: "The category of the target artifact.",
+        },
+        type: {
+            type: "string",
+            enum: ["observation", "test", "reproduction", "challenge", "decision_outcome", "external_reference"],
+            description: "The specific classification of the evidence. Critical: Use 'challenge' for any evidence that contradicts the artifact.",
+        },
+        source_group: {
+            type: "string",
+            description: "A short descriptor of where this evidence originated (e.g., 'unit_test_suite', 'terminal_stderr', 'user_prompt', 'linter_output').",
+        },
+        strength: {
+            type: "number",
+            description: "Optional. A value between -1.0 and 1.0. Omit this to use the engine's calibrated default strength for the evidence type.",
+        },
+        created_by: {
+            type: "string",
+            description: "The identity of the agent logging the evidence (e.g., 'openclaw-agent').",
+        },
+        notes: {
+            type: "string",
+            description: "Optional. A brief, human-readable summary of what the evidence actually is (e.g., 'Test coverage dropped by 4% after implementing the new caching layer').",
+        },
+    },
+    required: ["artifact_id", "artifact_type", "type", "source_group", "created_by"],
+    additionalProperties: false,
+};
+const LIST_EVIDENCE_SCHEMA = {
+    type: "object",
+    properties: {
+        artifact_id: {
+            type: "string",
+            description: "The ID of the target artifact.",
+        },
+        artifact_type: {
+            type: "string",
+            enum: ["memory", "theory", "decision", "lesson"],
+            description: "The category of the target artifact.",
+        },
+    },
+    required: ["artifact_id", "artifact_type"],
+    additionalProperties: false,
+};
+const QUERY_CONFIDENCE_HISTORY_SCHEMA = {
+    type: "object",
+    properties: {
+        artifact_id: {
+            type: "string",
+            description: "The ID of the target artifact.",
+        },
+        artifact_type: {
+            type: "string",
+            enum: ["memory", "theory", "decision", "lesson"],
+            description: "The category of the target artifact.",
+        },
+        limit: {
+            type: "number",
+            description: "Optional. The maximum number of history records to return. Defaults to 10.",
+            default: 10,
+        },
+    },
+    required: ["artifact_id", "artifact_type"],
+    additionalProperties: false,
+};
 async function runMpm(args, timeoutMs = 15000) {
     const { spawn } = await import("child_process");
     return new Promise((resolve) => {
@@ -1323,6 +1397,151 @@ function makeChallengeTool(_ctx) {
         },
     };
 }
+function makeAddEvidenceTool(_ctx) {
+    return {
+        name: "add_evidence",
+        description: "Records new evidence supporting or challenging an existing memory, theory, decision, or lesson. " +
+            "Use this when you observe system behavior, run unit tests, or receive user feedback that " +
+            "validates or contradicts existing knowledge. The system will automatically recompute its " +
+            "confidence in the artifact based on this evidence.",
+        parameters: ADD_EVIDENCE_SCHEMA,
+        emoji_name: "test_tube",
+        execute: async (toolCallId, params) => {
+            const { artifact_id = "", artifact_type = "memory", type = "", source_group = "", strength, created_by = "", notes = "", } = params;
+            if (!artifact_id.trim() || !type.trim() || !source_group.trim() || !created_by.trim()) {
+                return {
+                    toolCallId,
+                    result: {
+                        type: "ok",
+                        results: [
+                            {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: JSON.stringify({
+                                            success: false,
+                                            error: "missing_required_field",
+                                            message: "artifact_id, type, source_group, and created_by are all required.",
+                                        }),
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                };
+            }
+            const payload = {
+                artifact_id,
+                artifact_type,
+                type,
+                source_group,
+                created_by,
+            };
+            if (typeof strength === "number")
+                payload.strength = strength;
+            if (notes)
+                payload.notes = notes;
+            const data = await callMpmCall("add_evidence", payload);
+            return {
+                toolCallId,
+                result: {
+                    type: "ok",
+                    results: [{ content: [{ type: "text", text: JSON.stringify(data) }] }],
+                },
+            };
+        },
+    };
+}
+function makeListEvidenceTool(_ctx) {
+    return {
+        name: "list_evidence",
+        description: "Retrieves the complete chronological ledger of evidence supporting or challenging a specific " +
+            "artifact. Use this to understand the specific observations and tests that form the foundation " +
+            "of the system's current confidence level.",
+        parameters: LIST_EVIDENCE_SCHEMA,
+        emoji_name: "clipboard",
+        execute: async (toolCallId, params) => {
+            const { artifact_id = "", artifact_type = "memory", } = params;
+            if (!artifact_id.trim()) {
+                return {
+                    toolCallId,
+                    result: {
+                        type: "ok",
+                        results: [
+                            {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: JSON.stringify({
+                                            success: false,
+                                            error: "missing_required_field",
+                                            message: "artifact_id is required.",
+                                        }),
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                };
+            }
+            const data = await callMpmCall("list_evidence", { artifact_id, artifact_type });
+            return {
+                toolCallId,
+                result: {
+                    type: "ok",
+                    results: [{ content: [{ type: "text", text: JSON.stringify(data) }] }],
+                },
+            };
+        },
+    };
+}
+function makeQueryConfidenceHistoryTool(_ctx) {
+    return {
+        name: "query_confidence_history",
+        description: "Retrieves the historical timeline of confidence score changes for a specific artifact. " +
+            "Use this to see the trajectory of an artifact's reliability — whether it is trending up " +
+            "(proven over time), trending down (recently challenged), or slowly decaying due to age.",
+        parameters: QUERY_CONFIDENCE_HISTORY_SCHEMA,
+        emoji_name: "chart_with_upwards_trend",
+        execute: async (toolCallId, params) => {
+            const { artifact_id = "", artifact_type = "memory", limit = 10, } = params;
+            if (!artifact_id.trim()) {
+                return {
+                    toolCallId,
+                    result: {
+                        type: "ok",
+                        results: [
+                            {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: JSON.stringify({
+                                            success: false,
+                                            error: "missing_required_field",
+                                            message: "artifact_id is required.",
+                                        }),
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                };
+            }
+            const data = await callMpmCall("query_confidence_history", {
+                artifact_id,
+                artifact_type,
+                limit,
+            });
+            return {
+                toolCallId,
+                result: {
+                    type: "ok",
+                    results: [{ content: [{ type: "text", text: JSON.stringify(data) }] }],
+                },
+            };
+        },
+    };
+}
 export default definePluginEntry({
     id: "mpm",
     name: "MPM (Memory Persistence Module)",
@@ -1349,5 +1568,8 @@ export default definePluginEntry({
         api.registerTool((ctx) => makeProposeTheoryTool(ctx), { names: ["propose_theory"], optional: false });
         api.registerTool((ctx) => makeResolveTheoryTool(ctx), { names: ["resolve_theory"], optional: false });
         api.registerTool((ctx) => makeChallengeTool(ctx), { names: ["challenge_memory"], optional: false });
+        api.registerTool((ctx) => makeAddEvidenceTool(ctx), { names: ["add_evidence"], optional: false });
+        api.registerTool((ctx) => makeListEvidenceTool(ctx), { names: ["list_evidence"], optional: false });
+        api.registerTool((ctx) => makeQueryConfidenceHistoryTool(ctx), { names: ["query_confidence_history"], optional: false });
     },
 });
