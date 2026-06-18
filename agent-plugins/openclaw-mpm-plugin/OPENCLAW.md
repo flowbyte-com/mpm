@@ -8,9 +8,9 @@ MPM (Memory Persistence Module) integrates with OpenClaw as a plugin, exposing t
 
 | File | Location |
 |------|----------|
-| Plugin source | `/home/v/workspace/projects/mpm/openclaw/mpm-plugin/src/` |
-| Bundled entry | `/home/v/workspace/projects/mpm/openclaw/mpm-plugin/dist/index.js` |
-| Plugin config | `/home/v/workspace/projects/mpm/openclaw/mpm-plugin/openclaw.plugin.json` |
+| Plugin source | `/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin/src/` |
+| Bundled entry | `/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin/dist/index.js` |
+| Plugin config | `/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin/openclaw.plugin.json` |
 
 ---
 
@@ -39,7 +39,7 @@ cp /home/v/workspace/projects/mpm/bin/mpm /usr/local/bin/mpm
 
 ## Step 2 — Install the Plugin
 
-The plugin lives at `/home/v/workspace/projects/mpm/openclaw/mpm-plugin/`. It is already configured; no manual creation needed.
+The plugin lives at `/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin/`. It is already configured; no manual creation needed.
 
 ### `openclaw.plugin.json` (already configured — 21 tools registered)
 
@@ -100,7 +100,7 @@ Add to `plugins.entries` and `plugins.load.paths`:
     },
     "load": {
       "paths": [
-        "/home/v/workspace/projects/mpm/openclaw/mpm-plugin"
+        "/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin"
       ]
     }
   },
