@@ -628,7 +628,7 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 	if limit <= 0 {
 		limit = 50
 	}
-	query := `SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, title, file_path, source_type, tags, import_reason, total_chunks, last_indexed, created_at FROM reference_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := dm.db.Query(query, limit, offset)
 	if err != nil {
 		return nil, err
@@ -637,20 +637,21 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 
 	refs := []map[string]interface{}{}
 	for rows.Next() {
-		var id, title, filePath, sourceType, tags, lastIndexed, createdAt string
+		var id, title, filePath, sourceType, tags, importReason, lastIndexed, createdAt string
 		var totalChunks int
-		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt); err != nil {
+		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &importReason, &totalChunks, &lastIndexed, &createdAt); err != nil {
 			continue
 		}
 		refs = append(refs, map[string]interface{}{
-			"id":           id,
-			"title":        title,
-			"file_path":    filePath,
-			"source_type":  sourceType,
-			"tags":         tags,
-			"total_chunks": totalChunks,
-			"last_indexed": lastIndexed,
-			"created_at":   createdAt,
+			"id":            id,
+			"title":         title,
+			"file_path":     filePath,
+			"source_type":   sourceType,
+			"tags":          tags,
+			"import_reason": importReason,
+			"total_chunks":  totalChunks,
+			"last_indexed":  lastIndexed,
+			"created_at":    createdAt,
 		})
 	}
 	return refs, nil
@@ -658,25 +659,26 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 
 // GetReference returns a reference document with its chunks
 func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, error) {
-	var id, title, filePath, sourceType, tags, lastIndexed, createdAt string
+	var id, title, filePath, sourceType, tags, lastIndexed, createdAt, importReason string
 	var totalChunks int
 	err := dm.db.QueryRow(`
-		SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at
+		SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at, import_reason
 		FROM reference_docs WHERE id = ?
-	`, refID).Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt)
+	`, refID).Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt, &importReason)
 	if err != nil {
 		return nil, err
 	}
 
 	ref := map[string]interface{}{
-		"id":           id,
-		"title":        title,
-		"file_path":    filePath,
-		"source_type":  sourceType,
-		"tags":         tags,
-		"total_chunks": totalChunks,
-		"last_indexed": lastIndexed,
-		"created_at":   createdAt,
+		"id":            id,
+		"title":         title,
+		"file_path":     filePath,
+		"source_type":   sourceType,
+		"tags":          tags,
+		"import_reason": importReason,
+		"total_chunks":  totalChunks,
+		"last_indexed":  lastIndexed,
+		"created_at":    createdAt,
 	}
 
 	// Get chunks
@@ -833,9 +835,9 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 
 	tagsJSON, _ := MarshalJSON(doc.Tags)
 	_, err = tx.Exec(`
-		INSERT INTO reference_docs (id, title, file_path, source_type, tags, content, content_hash, total_chunks, last_indexed, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.Content, doc.ContentHash, doc.TotalChunks, doc.LastIndexed, doc.Created)
+		INSERT INTO reference_docs (id, title, file_path, source_type, tags, content, content_hash, import_reason, total_chunks, last_indexed, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.Content, doc.ContentHash, doc.ImportReason, doc.TotalChunks, doc.LastIndexed, doc.Created)
 	if err != nil {
 		return err
 	}
