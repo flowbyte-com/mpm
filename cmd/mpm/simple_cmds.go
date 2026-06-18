@@ -1160,6 +1160,139 @@ func handleRefShred(args []string) int {
 	return 0
 }
 
+// handleRefInteractions prints recent reference retrieval events. The
+// audit trail for the admission function (Phase 3) — without it, the
+// reference-to-memory path is not observable.
+func handleRefInteractions(args []string) int {
+	fs := flag.NewFlagSet("reference interactions", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	limit := fs.Int("limit", 30, "Max interactions to show")
+	docID := fs.String("doc", "", "Filter to a single reference doc id")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	*jsonOutput, _ = ExtractJSONFlag(args[1:])
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	var rows []map[string]interface{}
+	if *docID != "" {
+		rows, err = dm.GetInteractionsForDoc(*docID, *limit)
+	} else {
+		rows, err = dm.GetRecentInteractions(*limit)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	if *jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{"interactions": rows})
+		fmt.Println(string(data))
+		return 0
+	}
+	fmt.Printf("\nRecent reference interactions (%d):\n", len(rows))
+	for _, r := range rows {
+		rank := 0
+		if v, ok := r["rank"].(int); ok {
+			rank = v
+		}
+		score := 0.0
+		if v, ok := r["score"].(float64); ok {
+			score = v
+		}
+		created := ""
+		if v, ok := r["created_at"].(string); ok {
+			created = v
+			if len(created) > 19 {
+				created = created[:19]
+			}
+		}
+		title := ""
+		if v, ok := r["doc_title"].(string); ok {
+			title = v
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+		}
+		q, _ := r["query"].(string)
+		kind, _ := r["search_kind"].(string)
+		docIDStr, _ := r["doc_id"].(string)
+		if docIDStr == "" {
+			if v, ok := r["id"].(string); ok {
+				docIDStr = v
+			}
+		}
+		fmt.Printf("  %s | %-12s | rank=%-2d score=%6.2f | %s\n", created, kind, rank, score, title)
+		fmt.Printf("    query: %q\n", q)
+		if docIDStr != "" {
+			fmt.Printf("    doc:   %s\n", docIDStr)
+		}
+	}
+	return 0
+}
+
+// handleRefUsed prints the most-retrieved references, ranked by interaction
+// count. Helps identify which references the system is leaning on, and
+// which are dormant.
+func handleRefUsed(args []string) int {
+	fs := flag.NewFlagSet("reference used", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	limit := fs.Int("limit", 20, "Max references to show")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	*jsonOutput, _ = ExtractJSONFlag(args[1:])
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	rows, err := dm.GetMostUsedReferences(*limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	if *jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{"used": rows})
+		fmt.Println(string(data))
+		return 0
+	}
+	fmt.Printf("\nMost-used references (by interaction count):\n")
+	for _, r := range rows {
+		hits := 0
+		if v, ok := r["hits"].(int64); ok {
+			hits = int(v)
+		} else if v, ok := r["hits"].(int); ok {
+			hits = v
+		}
+		dq := 0
+		if v, ok := r["distinct_queries"].(int64); ok {
+			dq = int(v)
+		} else if v, ok := r["distinct_queries"].(int); ok {
+			dq = v
+		}
+		title := ""
+		if v, ok := r["title"].(string); ok {
+			title = v
+			if len(title) > 50 {
+				title = title[:47] + "..."
+			}
+		}
+		fmt.Printf("  %4d hits (%2d queries) | %s\n", hits, dq, title)
+	}
+	return 0
+}
+
 // handleRef routes reference subcommands
 func handleRef(args []string) int {
 	if len(args) < 2 {
@@ -1179,6 +1312,10 @@ func handleRef(args []string) int {
 		return handleRefSearch(args[1:])
 	case "shred", "rm":
 		return handleRefShred(args[1:])
+	case "interactions":
+		return handleRefInteractions(args[1:])
+	case "used":
+		return handleRefUsed(args[1:])
 	default:
 		printRefHelp()
 		return 1
@@ -1192,6 +1329,8 @@ Usage:
   mpm reference ls                          List all references
   mpm reference show <id>                   Show reference with chunks
   mpm reference search <query>              Search reference content
+  mpm reference used                        Show most-retrieved references
+  mpm reference interactions                Show recent retrieval events
   mpm reference shred <id>                   Delete a reference
 
 Supported formats: .txt, .md, .html, .epub, .pdf`)

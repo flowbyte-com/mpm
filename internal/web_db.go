@@ -773,11 +773,12 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 	var chunks []map[string]interface{}
 	var rows *sql.Rows
 	var err error
-
+	searchKind := "chunk_like"
 	if found {
+		searchKind = "chunk_fts"
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`WITH scores AS (SELECT rowid, bm25(reference_chunks_fts) as s FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN scores ON rc.rowid = scores.rowid JOIN reference_docs r ON rc.doc_id = r.id ORDER BY scores.s LIMIT ?`, ftsQuery, limit)
+		rows, err = dm.db.Query(`WITH scores AS (SELECT rowid, bm25(reference_chunks_fts) as s FROM reference_chunks_fts WHERE reference_chunks_fts MATCH ?) SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title, scores.s FROM reference_chunks rc JOIN scores ON rc.rowid = scores.rowid JOIN reference_docs r ON rc.doc_id = r.id ORDER BY scores.s LIMIT ?`, ftsQuery, limit)
 	} else {
 		rows, err = dm.db.Query(`SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content, r.title FROM reference_chunks rc JOIN reference_docs r ON rc.doc_id = r.id WHERE rc.content LIKE ? ORDER BY rc.chunk_index LIMIT ?`, "%"+q+"%", limit)
 	}
@@ -787,21 +788,177 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 	}
 	defer rows.Close()
 
+	rank := 0
 	for rows.Next() {
+		rank++
 		var id, docID, section, content, title string
 		var chunkIndex int
-		if rows.Scan(&id, &docID, &chunkIndex, &section, &content, &title) == nil {
-			chunks = append(chunks, map[string]interface{}{
-				"id":          id,
-				"doc_id":      docID,
-				"chunk_index": chunkIndex,
-				"section":     section,
-				"content":     content,
-				"doc_title":   title,
-			})
+		var score sql.NullFloat64
+		if found {
+			if err := rows.Scan(&id, &docID, &chunkIndex, &section, &content, &title, &score); err != nil {
+				continue
+			}
+		} else {
+			if err := rows.Scan(&id, &docID, &chunkIndex, &section, &content, &title); err != nil {
+				continue
+			}
+		}
+		chunks = append(chunks, map[string]interface{}{
+			"id":          id,
+			"doc_id":      docID,
+			"chunk_index": chunkIndex,
+			"section":     section,
+			"content":     content,
+			"doc_title":   title,
+		})
+		// Record the interaction (audit trail for admission function).
+		// Skip very short queries — they are likely exploratory clicks and would
+		// pollute the audit table with noise.
+		if len(strings.TrimSpace(q)) >= 3 {
+			dm.recordReferenceInteraction(docID, &id, q, searchKind, rank, score)
 		}
 	}
 	return chunks, nil
+}
+
+// recordReferenceInteraction writes one row to reference_interactions.
+// Errors are swallowed: a failure to record an interaction must not break
+// the search results, and the audit table is not on the critical path.
+func (dm *DatabaseManager) recordReferenceInteraction(docID string, chunkID *string, query, searchKind string, rank int, score sql.NullFloat64) {
+	_, _ = dm.db.Exec(`
+		INSERT INTO reference_interactions (id, doc_id, chunk_id, query, search_kind, rank, score, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().UTC().Format(time.RFC3339))
+}
+
+// GetRecentInteractions returns the N most recent reference interactions.
+// Used by the admission function (Phase 3) to surface what is being retrieved
+// and how often. Cheap to query: the created_at index isn't needed for LIMIT N
+// on the natural insert order, but if usage grows, add `created_at` to the index.
+func (dm *DatabaseManager) GetRecentInteractions(limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := dm.db.Query(`
+		SELECT i.id, i.doc_id, i.chunk_id, i.query, i.search_kind, i.rank, i.score, i.created_at,
+		       r.title, r.import_reason
+		FROM reference_interactions i
+		LEFT JOIN reference_docs r ON r.id = i.doc_id
+		ORDER BY i.created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, docID, query, searchKind, createdAt, title string
+		var chunkID, importReason sql.NullString
+		var rank int
+		var score sql.NullFloat64
+		if err := rows.Scan(&id, &docID, &chunkID, &query, &searchKind, &rank, &score, &createdAt, &title, &importReason); err != nil {
+			continue
+		}
+		entry := map[string]interface{}{
+			"id":            id,
+			"doc_id":        docID,
+			"query":         query,
+			"search_kind":   searchKind,
+			"rank":          rank,
+			"score":         score.Float64,
+			"created_at":    createdAt,
+			"doc_title":     title,
+			"import_reason": importReason.String,
+		}
+		if chunkID.Valid {
+			entry["chunk_id"] = chunkID.String
+		}
+		out = append(out, entry)
+	}
+	return out, rows.Err()
+}
+
+// GetInteractionsForDoc returns all interactions for a single reference doc,
+// in reverse chronological order. Used by the admission function to evaluate
+// whether a reference has been actively used, and in what context.
+func (dm *DatabaseManager) GetInteractionsForDoc(docID string, limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := dm.db.Query(`
+		SELECT id, chunk_id, query, search_kind, rank, score, created_at
+		FROM reference_interactions
+		WHERE doc_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, docID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, query, searchKind, createdAt string
+		var chunkID sql.NullString
+		var rank int
+		var score sql.NullFloat64
+		if err := rows.Scan(&id, &chunkID, &query, &searchKind, &rank, &score, &createdAt); err != nil {
+			continue
+		}
+		entry := map[string]interface{}{
+			"id":          id,
+			"query":       query,
+			"search_kind": searchKind,
+			"rank":        rank,
+			"score":       score.Float64,
+			"created_at":  createdAt,
+		}
+		if chunkID.Valid {
+			entry["chunk_id"] = chunkID.String
+		}
+		out = append(out, entry)
+	}
+	return out, rows.Err()
+}
+
+// GetMostUsedReferences returns the references that have been retrieved most
+// often, in descending order of interaction count. The admission function
+// uses this to prioritize which references are candidates for memory
+// extraction (a reference used 50 times is more likely to yield useful
+// memories than one used once).
+func (dm *DatabaseManager) GetMostUsedReferences(limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := dm.db.Query(`
+		SELECT r.id, r.title, r.import_reason, count(i.id) as hits, count(DISTINCT i.query) as distinct_queries
+		FROM reference_docs r
+		JOIN reference_interactions i ON i.doc_id = r.id
+		GROUP BY r.id
+		ORDER BY hits DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, title, importReason string
+		var hits, distinctQueries int
+		if err := rows.Scan(&id, &title, &importReason, &hits, &distinctQueries); err != nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"id":                id,
+			"title":             title,
+			"import_reason":     importReason,
+			"hits":              hits,
+			"distinct_queries":  distinctQueries,
+		})
+	}
+	return out, rows.Err()
 }
 
 // DeleteReference removes a reference doc and its chunks (cascade from FK).
