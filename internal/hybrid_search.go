@@ -135,7 +135,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			continue
 		}
 
-		if combinedScore < cfg.RetrievalThreshold {
+		// RetrievalThreshold is calibrated for hybrid (FTS5+vector) combined
+		// scores, which land in roughly 0–1 range. BM25 is naturally unbounded
+		// negative, so for FTS5-only matches the same threshold would filter
+		// out nearly everything useful. Trust the BM25 ordering for FTS5-only
+		// paths; only apply the threshold to true hybrid scores.
+		if ftsOK && vecOK && combinedScore < cfg.RetrievalThreshold {
 			continue
 		}
 
