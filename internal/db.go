@@ -160,6 +160,13 @@ func (dm *DatabaseManager) SQLDB() *sql.DB {
 	return dm.db
 }
 
+// DBPath returns the filesystem path to the SQLite database file. Useful for
+// tools that need to shell out (sqlite3 CLI, external dumpers) while the
+// DatabaseManager has the canonical path resolved.
+func (dm *DatabaseManager) DBPath() string {
+	return dm.dbPath
+}
+
 // IsOpen returns true if the database connection is non-nil.
 func (dm *DatabaseManager) IsOpen() bool {
 	return dm.db != nil
