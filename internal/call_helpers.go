@@ -20,15 +20,28 @@ import (
 type ActiveContext struct {
 	Mode    string
 	Persona string
+	// Model is the name of the model that produced this memory. Used for
+	// provenance attribution. Empty falls back to the "call" default.
+	Model string
+	// Agent overrides the default "mpm_call" agent name in provenance.
+	Agent string
 }
 
 func (ac ActiveContext) provenanceMeta() map[string]interface{} {
+	model := ac.Model
+	if model == "" {
+		model = "call"
+	}
+	agent := ac.Agent
+	if agent == "" {
+		agent = "mpm_call"
+	}
 	return map[string]interface{}{
 		"provenance": map[string]interface{}{
 			"source":  "agent",
-			"model":   "call",
+			"model":   model,
 			"compute": "relative",
-			"agent":   "mpm_call",
+			"agent":   agent,
 		},
 	}
 }
