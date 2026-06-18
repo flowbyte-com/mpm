@@ -24,16 +24,17 @@ import (
 
 // ReferenceDoc represents a reference document in the database
 type ReferenceDoc struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	SourcePath  string   `json:"source_path"`
-	SourceType  string   `json:"source_type"`
-	Tags        []string `json:"tags"`
-	Content     string   `json:"content"`
-	ContentHash string   `json:"content_hash"`
-	TotalChunks int      `json:"total_chunks"`
-	LastIndexed string   `json:"last_indexed"`
-	Created     string   `json:"created"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	SourcePath   string   `json:"source_path"`
+	SourceType   string   `json:"source_type"`
+	Tags         []string `json:"tags"`
+	ImportReason string   `json:"import_reason"`
+	Content      string   `json:"content"`
+	ContentHash  string   `json:"content_hash"`
+	TotalChunks  int      `json:"total_chunks"`
+	LastIndexed  string   `json:"last_indexed"`
+	Created      string   `json:"created"`
 }
 
 // ReferenceChunk represents a chunk of a reference document
@@ -83,6 +84,7 @@ func (db *ReferenceDB) Init() error {
 			source_path TEXT NOT NULL,
 			source_type TEXT,
 			tags TEXT,
+			import_reason TEXT,
 			total_chunks INTEGER DEFAULT 0,
 			last_indexed TEXT,
 			created TEXT NOT NULL
@@ -126,10 +128,10 @@ func (db *ReferenceDB) AddReference(doc *ReferenceDoc) error {
 	}
 	tagsJSON, _ := MarshalJSON(doc.Tags)
 	_, err := db.db.Exec(`
-		INSERT OR REPLACE INTO reference_docs 
-		(id, title, source_path, source_type, tags, total_chunks, last_indexed, created)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.TotalChunks, doc.LastIndexed, doc.Created)
+		INSERT OR REPLACE INTO reference_docs
+		(id, title, source_path, source_type, tags, import_reason, total_chunks, last_indexed, created)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.ImportReason, doc.TotalChunks, doc.LastIndexed, doc.Created)
 	if err != nil {
 		return err
 	}
