@@ -104,6 +104,27 @@ var BaseTables = []string{
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 
+	// Reference interactions table - audit trail of retrieval events.
+	// Written whenever SearchReferenceChunks surfaces a chunk (or doc) for a query.
+	// This is the substrate the admission function reads to know which references
+	// have been used, in what context, and how often. Per decision 4f1c1fbc41a7a765
+	// and b90e4fe54507c3b9: interaction is the third primitive; without it, the
+	// reference-to-memory path is not observable.
+	`CREATE TABLE IF NOT EXISTS reference_interactions (
+		id TEXT PRIMARY KEY,
+		doc_id TEXT NOT NULL,
+		chunk_id TEXT,
+		query TEXT NOT NULL,
+		search_kind TEXT,
+		rank INTEGER,
+		score REAL,
+		created_at TEXT NOT NULL,
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_doc ON reference_interactions(doc_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_chunk ON reference_interactions(chunk_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_query ON reference_interactions(query);`,
+
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
