@@ -874,7 +874,7 @@ Setup and config: see [`openclaw/OPENCLAW.md`](openclaw/OPENCLAW.md).
 
 ### Hermes
 
-MPM is also installed as a Hermes Agent Python plugin (`hermes-mpm-plugin/`). Setup: see [`hermes-mpm-plugin/install.md`](hermes-mpm-plugin/install.md).
+MPM is also installed as a Hermes Agent Python plugin (`agent-plugins/hermes-mpm-plugin/`). Setup: see [`agent-plugins/hermes-mpm-plugin/install.md`](agent-plugins/hermes-mpm-plugin/install.md).
 
 ---
 
@@ -1127,8 +1127,10 @@ projects/mpm/
 │   │   ├── BREAK_90.md              # Feature scoring + roadmap
 │   │   └── ...
 │   └── superpowers/                 # Deep-dive specs
-├── hermes-mpm-plugin/              # Hermes Python agent plugin
-│   └── install.md
+├── agent-plugins/                 # All MPM agent integrations live here
+│   ├── hermes-mpm-plugin/          # Hermes Python agent plugin
+│   │   └── install.md
+│   └── opencode-mpm-plugin/        # OpenCode TypeScript agent plugin
 ├── openclaw/                        # OpenClaw plugin
 │   ├── mpm-plugin/
 │   └── OPENCLAW.md
