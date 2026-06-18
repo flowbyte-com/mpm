@@ -213,7 +213,7 @@ func handleRecall(args []string) int {
 	for rows.Next() {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
-		var reinforcementCount, weight int64
+		var reinforcementCount, weight float64
 		var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
 
 		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
@@ -238,7 +238,7 @@ func handleRecall(args []string) int {
 			sessionID:          sessionID,
 			tags:               nullableTags.String,
 			reinforcementCount: int(reinforcementCount),
-			weight:             int(weight),
+			weight:             int(weight + 0.5), // round to nearest int for display
 			referenceID:        refID,
 		}
 		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
