@@ -857,7 +857,7 @@ MPM integrates directly with AI agents. Both OpenClaw and Hermes share the same 
 
 ### OpenClaw
 
-MPM is installed as an OpenClaw plugin (`openclaw/mpm-plugin/`), giving the agent **native function-calling access** to 21 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
+MPM is installed as an OpenClaw plugin (`agent-plugins/openclaw-mpm-plugin/mpm-plugin/`), giving the agent **native function-calling access** to 21 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
 
 ```
 read_wake_context        query_long_term_memory    save_to_memory
@@ -870,7 +870,7 @@ add_evidence             list_evidence            query_confidence_history
 explain_confidence       query_confidence_changes query_confidence_trend  query_memory_quality  route
 ```
 
-Setup and config: see [`openclaw/OPENCLAW.md`](openclaw/OPENCLAW.md).
+Setup and config: see [`agent-plugins/openclaw-mpm-plugin/OPENCLAW.md`](agent-plugins/openclaw-mpm-plugin/OPENCLAW.md).
 
 ### Hermes
 
@@ -1130,10 +1130,10 @@ projects/mpm/
 ├── agent-plugins/                 # All MPM agent integrations live here
 │   ├── hermes-mpm-plugin/          # Hermes Python agent plugin
 │   │   └── install.md
+│   ├── openclaw-mpm-plugin/        # OpenClaw TypeScript agent plugin
+│   │   ├── mpm-plugin/
+│   │   └── OPENCLAW.md
 │   └── opencode-mpm-plugin/        # OpenCode TypeScript agent plugin
-├── openclaw/                        # OpenClaw plugin
-│   ├── mpm-plugin/
-│   └── OPENCLAW.md
 └── contrib/systemd/
     └── mpm.service
 ```

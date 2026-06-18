@@ -135,4 +135,4 @@ The shim needs to add the hermes-agent root to `sys.path`. The shim created in s
 - The plugin uses **functional** `registry.register()` calls, not class decorators. Hermes Agent's tool registry expects `registry.register(name, toolset, schema, handler)`.
 - Each tool module (`memory_tools.py`, `lesson_tools.py`, etc.) calls `registry.register()` at import time. The `__init__.py` imports all modules to trigger registration.
 - Tool handlers (`_handle_*` functions) receive `(args, **kw)` and call `run_mpm()` in `base.py`, which wraps `subprocess.run()` with JSON I/O.
-- The OpenClaw version of this plugin (in `openclaw/mpm-plugin/`) uses TypeScript class decorators — a different SDK. The Hermes Agent version here is a separate, compatible implementation.
+- The OpenClaw version of this plugin (in `agent-plugins/openclaw-mpm-plugin/mpm-plugin/`) uses TypeScript class decorators — a different SDK. The Hermes Agent version here is a separate, compatible implementation.
