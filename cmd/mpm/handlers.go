@@ -2522,8 +2522,21 @@ func handleModeAdd(args []string) int {
 	name := args[0]
 	mm := internal.NewModeManager("")
 
-	err := mm.AddMode(name)
-	if err != nil {
+	// Validate the mode exists on disk before adding to the active list.
+	if !mm.Validate(name) {
+		return respond("", fmt.Sprintf("Unknown mode: %s\n", name), 1)
+	}
+
+	// Read current active list, append, write back. SetActive() also
+	// mirrors the first real mode to config/current_mode for memory injection.
+	active, _ := mm.GetActive()
+	for _, m := range active {
+		if m == name {
+			return respond(fmt.Sprintf("Mode already active: %s\n", name), "", 0)
+		}
+	}
+	active = append(active, name)
+	if err := mm.SetActive(active); err != nil {
 		return respond("", fmt.Sprintf("Failed to add mode: %v", err), 1)
 	}
 	return respond(fmt.Sprintf("Mode added: %s\n", name), "", 0)
@@ -2537,11 +2550,25 @@ func handleModeRemove(args []string) int {
 	name := args[0]
 	mm := internal.NewModeManager("")
 
-	err := mm.RemoveMode(name)
-	if err != nil {
+	// Read current active list, drop the named one, write back. Does NOT
+	// delete the .md file — manage those on the file system. SetActive()
+	// also mirrors the next real mode to config/current_mode.
+	active, _ := mm.GetActive()
+	out := active[:0]
+	found := false
+	for _, m := range active {
+		if m == name {
+			found = true
+			continue
+		}
+		out = append(out, m)
+	}
+	if !found {
+		return respond("", fmt.Sprintf("Mode not active: %s\n", name), 1)
+	}
+	if err := mm.SetActive(out); err != nil {
 		return respond("", fmt.Sprintf("Failed to remove mode: %v", err), 1)
 	}
-
 	return respond(fmt.Sprintf("Mode removed: %s\n", name), "", 0)
 }
 
