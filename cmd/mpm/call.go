@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"mpm/internal"
@@ -17,6 +18,45 @@ import (
 // ToolHandler is the signature for a call-able tool.
 // It receives the parsed payload map and returns (result, error).
 type ToolHandler func(payload map[string]interface{}) (interface{}, error)
+
+// testDMOverride lets tests inject a DatabaseManager into call handlers
+// without going through the workspace DB. When non-nil, every call handler
+// that would otherwise call NewDatabaseManager("") uses this instead.
+//
+// Production callers (the `mpm call <tool>` CLI path) never set this —
+// they go through handleCall → handler() → NewDatabaseManager("") as
+// before. Tests that exercise call handlers can override to a fresh temp
+// DB and reset at the end with t.Cleanup.
+var testDMOverride struct {
+	sync.Mutex
+	dm *internal.DatabaseManager
+}
+
+func setTestDMOverride(dm *internal.DatabaseManager) {
+	testDMOverride.Lock()
+	defer testDMOverride.Unlock()
+	testDMOverride.dm = dm
+}
+
+// openCallDM returns the DM to use for a call handler. If a test has set
+// an override, that DM is used (without defer-Close — the test owns its
+// lifecycle). Otherwise the workspace DM is opened, deferred-closed, and
+// returned. Centralizing this avoids the workspace-DB pollution that
+// occurs when tests round-trip through call* handlers.
+func openCallDM() (*internal.DatabaseManager, func(), error) {
+	testDMOverride.Lock()
+	override := testDMOverride.dm
+	testDMOverride.Unlock()
+	if override != nil {
+		// Test-owned DM — caller is responsible for closing.
+		return override, func() {}, nil
+	}
+	dm, err := internal.NewDatabaseManager("")
+	if err != nil {
+		return nil, nil, fmt.Errorf("db: %w", err)
+	}
+	return dm, func() { dm.Close() }, nil
+}
 
 // toolRegistry maps OpenClaw plugin tool names to their handlers.
 // This is the single universal router — add new tools here.
@@ -50,8 +90,12 @@ var toolRegistry = map[string]ToolHandler{
 	"add_evidence":             callAddEvidence,
 	"list_evidence":            callListEvidence,
 	"query_confidence_history": callQueryConfidenceHistory,
+	"query_confidence_changes": callQueryConfidenceChanges,
+	"query_confidence_trend":   callQueryConfidenceTrend,
+	"query_memory_quality":     callQueryMemoryQuality,
 	"show_confidence":          callShowConfidence,
 	"recompute_confidence":     callRecomputeConfidence,
+	"explain_confidence":       callExplainConfidence,
 
 	// System
 	"read_wake_context":     callReadWakeContext,
@@ -209,11 +253,11 @@ func callSaveToMemory(p map[string]interface{}) (interface{}, error) {
 	injectActiveContext()
 	defer clearActiveContext()
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	out, mem, err := dm.SaveMemoryWithContext(
 		fact,
@@ -254,11 +298,11 @@ func callQueryLongTermMemory(p map[string]interface{}) (interface{}, error) {
 	}
 	collection, _ := p["collection"].(string)
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	items, err := dm.HybridSearchMemories(query, collection, limit)
 	if err != nil {
@@ -279,11 +323,11 @@ func callChallengeMemory(p map[string]interface{}) (interface{}, error) {
 	}
 	evidence, _ := p["evidence"].(string)
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	return dm.ChallengeMemoryWithTheory(memoryID, evidence)
 }
@@ -300,11 +344,11 @@ func callProposeTheory(p map[string]interface{}) (interface{}, error) {
 		tags = []string{}
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	return dm.ProposeTheory(hypothesis, validationCriteria, tags)
 }
@@ -324,11 +368,11 @@ func callResolveTheory(p map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	return dm.ResolveTheory(theoryID, conclusion, newStatus)
 }
@@ -346,11 +390,11 @@ func callRecordDecision(p map[string]interface{}) (interface{}, error) {
 	injectActiveContext()
 	defer clearActiveContext()
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	return dm.RecordDecision(
 		internal.ParseStringOr(p["context"], ""),
@@ -371,11 +415,11 @@ func callSaveLesson(p map[string]interface{}) (interface{}, error) {
 	lessonType := internal.ParseStringOr(p["type"], "insight")
 	tags := internal.ParseStringSliceOr(p["tags"])
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	out, lesson, err := dm.SaveLesson(fact, lessonType, tags)
 	if err != nil {
@@ -401,11 +445,11 @@ func callSearchLessons(p map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	items, err := dm.SearchLessonsLimited(query)
 	if err != nil {
@@ -422,11 +466,11 @@ func callSearchLessons(p map[string]interface{}) (interface{}, error) {
 func callListLessons(p map[string]interface{}) (interface{}, error) {
 	lessonType := internal.ParseStringOr(p["type"], "")
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	items, err := dm.ListLessonsFiltered(lessonType)
 	if err != nil {
@@ -447,11 +491,11 @@ func callCreateTopic(p map[string]interface{}) (interface{}, error) {
 	}
 	description := internal.ParseStringOr(p["description"], "")
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	topicID, err := dm.CreateTopicWithDescription(name, description)
 	if err != nil {
@@ -472,11 +516,11 @@ func callSearchTopics(p map[string]interface{}) (interface{}, error) {
 		limit = 20
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	items, err := dm.SearchTopicsByQuery(query, limit)
 	if err != nil {
@@ -500,11 +544,11 @@ func callLinkTopic(p map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("topic_id is required")
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	if err := dm.AddMemoryToTopic(memoryID, topicID, "manual"); err != nil {
 		return nil, fmt.Errorf("link topic: %w", err)
@@ -524,11 +568,11 @@ func callAddReference(p map[string]interface{}) (interface{}, error) {
 	}
 	title := internal.ParseStringOr(p["title"], "")
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	return dm.AddReferenceFromFile(filepath, title)
 }
@@ -544,11 +588,11 @@ func callSearchReferences(p map[string]interface{}) (interface{}, error) {
 		limit = 5
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	results, err := dm.SearchReferenceChunks(query, limit)
 	if err != nil {
@@ -581,11 +625,11 @@ func callListReferences(p map[string]interface{}) (interface{}, error) {
 		offset = 0
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	refs, err := dm.ListReferences(limit, offset)
 	if err != nil {
@@ -602,11 +646,11 @@ func callListReferences(p map[string]interface{}) (interface{}, error) {
 // delegated to internal.ReadWakeContext (single source of truth shared with
 // the Go MCP server).
 func callReadWakeContext(_ map[string]interface{}) (interface{}, error) {
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	data, err := dm.GatherWakeContext()
 	if err != nil {
@@ -645,11 +689,11 @@ func callReadWakeContext(_ map[string]interface{}) (interface{}, error) {
 
 // callReadDirectives returns prime directives.
 func callReadDirectives(_ map[string]interface{}) (interface{}, error) {
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	directives, err := dm.ReadDirectives()
 	if err != nil {
@@ -673,11 +717,11 @@ func callProactiveRecallHint(p map[string]interface{}) (interface{}, error) {
 		maxHints = 3
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	overlaps, err := dm.ProactiveRecallHint(conversationText, maxHints, internal.ParseFloatOr(p["min_score"], -3.0))
 	if err != nil {
@@ -749,11 +793,11 @@ func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
 	}
 	notes, _ := payload["notes"].(string)
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	if err := internal.AddEvidence(dm, internal.EvidenceInput{
 		ArtifactID:         artifactID,
@@ -794,11 +838,11 @@ func callListEvidence(payload map[string]interface{}) (interface{}, error) {
 		artifactType = "memory"
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	rows, err := dm.QueryTracked(`
 		SELECT id, type, source_group, strength, independence_factor, created_by, created_at, notes
@@ -844,11 +888,11 @@ func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, er
 		artifactType = "memory"
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	rows, err := dm.QueryTracked(`
 		SELECT computed_at, confidence, evidence_count, trigger
@@ -881,6 +925,115 @@ func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, er
 	return map[string]interface{}{"history": out}, nil
 }
 
+// callQueryConfidenceChanges returns recent confidence-altering events with
+// delta and trigger. Distinct from query_confidence_history (full timeline):
+// this answers "what moved, by how much, and why, since when?"
+//
+// Optional payload fields:
+//   since: Unix timestamp (default: last 24h)
+//   since_seconds_ago: alternative to `since`, seconds before now
+//   limit: max rows (default: 50)
+//   artifact_id: if set, only return changes for this artifact
+//   artifact_type: filter by type (e.g., "memory", "lesson")
+func callQueryConfidenceChanges(payload map[string]interface{}) (interface{}, error) {
+	var filter internal.ConfidenceChangesFilter
+
+	// since_seconds_ago takes precedence over since for convenience.
+	if secs, ok := payload["since_seconds_ago"].(float64); ok && secs > 0 {
+		filter.Since = time.Now().Add(-time.Duration(secs) * time.Second)
+	} else if sinceF, ok := payload["since"].(float64); ok && sinceF > 0 {
+		filter.Since = time.Unix(int64(sinceF), 0)
+	}
+
+	if l, ok := payload["limit"].(float64); ok && l > 0 {
+		filter.Limit = int(l)
+	}
+	if v, ok := payload["artifact_id"].(string); ok {
+		filter.ArtifactID = v
+	}
+	if v, ok := payload["artifact_type"].(string); ok {
+		filter.ArtifactType = v
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	changes, err := internal.QueryConfidenceChanges(dm, filter)
+	if err != nil {
+		return nil, fmt.Errorf("query confidence changes: %w", err)
+	}
+	return map[string]interface{}{
+		"changes": changes,
+		"count":   len(changes),
+	}, nil
+}
+
+// callQueryConfidenceTrend returns the trajectory projection of confidence
+// over a time window. Completes the orthogonal set:
+//   state  → explain_confidence       (current reasoning trace)
+//   cause  → query_confidence_changes (recent events with delta)
+//   history → query_confidence_history (full timeline)
+//   direction → query_confidence_trend (this: trajectory, velocity)
+//
+// velocity is the raw signal; trend is the human-readable label.
+// Agents reason better from velocity than from labels.
+//
+// Optional payload: window_days (default 30).
+func callQueryConfidenceTrend(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	windowDays := 30
+	if w, ok := payload["window_days"].(float64); ok && w > 0 {
+		windowDays = int(w)
+	}
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	trend, err := internal.QueryConfidenceTrend(dm, artifactID, artifactType, windowDays)
+	if err != nil {
+		return nil, fmt.Errorf("query confidence trend: %w", err)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"trend":   trend,
+	}, nil
+}
+
+// callQueryMemoryQuality returns per-creator memory statistics. Surfaces
+// which models/agents produce memories that survive. Driven by
+// memory_source_evidence_ai trigger that auto-attributes each new memory
+// to its writer via metadata.provenance.model.
+func callQueryMemoryQuality(payload map[string]interface{}) (interface{}, error) {
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	stats, err := internal.QueryMemoryQualityBySource(dm)
+	if err != nil {
+		return nil, fmt.Errorf("query memory quality: %w", err)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"sources": stats,
+		"count":   len(stats),
+	}, nil
+}
+
 // callShowConfidence returns the current confidence and history for an artifact.
 func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
 	artifactID, _ := payload["artifact_id"].(string)
@@ -892,11 +1045,11 @@ func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
 		artifactType = "memory"
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	var conf float64
 	if err := dm.QueryRowTracked(
@@ -927,16 +1080,45 @@ func callRecomputeConfidence(payload map[string]interface{}) (interface{}, error
 		artifactType = "memory"
 	}
 
-	dm, err := internal.NewDatabaseManager("")
+	dm, closeDM, err := openCallDM()
 	if err != nil {
-		return nil, fmt.Errorf("db: %w", err)
+		return nil, err
 	}
-	defer dm.Close()
+	defer closeDM()
 
 	if err := internal.RecomputeConfidence(dm, artifactID, artifactType, internal.RecomputeReasonManual); err != nil {
 		return nil, err
 	}
 	return callShowConfidence(payload)
+}
+
+// callExplainConfidence returns the reasoning trace for an artifact's confidence:
+// the full component breakdown of f(evidence, decay). Distinct from
+// query_confidence_history (audit trail) — this answers "why did I get this number?"
+func callExplainConfidence(payload map[string]interface{}) (interface{}, error) {
+	artifactID, _ := payload["artifact_id"].(string)
+	artifactType, _ := payload["artifact_type"].(string)
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	exp, err := internal.ExplainConfidence(dm, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("explain confidence: %w", err)
+	}
+	return map[string]interface{}{
+		"success":       true,
+		"explanation":   exp,
+	}, nil
 }
 
 // artifactTable maps an artifact type to its underlying SQLite table name.

@@ -364,15 +364,6 @@ func (dm *DatabaseManager) GetRawMemoriesByStatus(status string, limit int) ([]*
 	return results, nil
 }
 
-// UpdateRawMemoryVerdict updates the LLM verdict for a raw_memory entry.
-func (dm *DatabaseManager) UpdateRawMemoryVerdict(id, verdict, notes string) error {
-	_, err := dm.db.Exec(`
-		UPDATE raw_memories SET llm_verdict = ?, llm_notes = ?, status = ?, updated_at = ?
-		WHERE id = ?
-	`, verdict, notes, verdict, float64(time.Now().Unix()), id)
-	return err
-}
-
 // ResetStaleReviewing resets stuck 'reviewing' entries back to 'pending'.
 func (dm *DatabaseManager) ResetStaleReviewing() (int, error) {
 	staleThreshold := float64(time.Now().Unix()) - 3600 // 1 hour
@@ -406,23 +397,6 @@ func (dm *DatabaseManager) GetIngestStatus() (map[string]int, error) {
 		}
 	}
 	return counts, nil
-}
-
-// PromoteRawMemory moves an approved raw_memory entry to the memories table.
-func (dm *DatabaseManager) PromoteRawMemory(raw *RawMemory) error {
-	now := time.Now()
-	metadata := map[string]interface{}{
-		"source_db":    raw.SourceDB,
-		"source_id":    raw.SourceID,
-		"import_batch": raw.ImportBatch,
-	}
-	metadataJSON, _ := json.Marshal(metadata)
-
-	_, err := dm.db.Exec(`
-		INSERT INTO memories (id, collection, content, tags, metadata, created_at, source_db, source_id, promoted_at)
-		VALUES (?, 'memories', ?, '[]', ?, ?, ?, ?, ?)
-	`, GenerateID(), raw.Text, string(metadataJSON), now.Format(time.RFC3339), raw.SourceDB, raw.SourceID, float64(now.Unix()))
-	return err
 }
 
 // ListIngestBatches returns distinct import batches with counts.
@@ -473,12 +447,4 @@ func (dm *DatabaseManager) GetExternalDBCursor(label string) (string, error) {
 	return cursor, err
 }
 
-// SetExternalDBCursor persists the cursor for a given external DB label.
-// Uses INSERT OR REPLACE so restarts don't lose cursor.
-func (dm *DatabaseManager) SetExternalDBCursor(label, cursor string) error {
-	_, err := dm.db.Exec(`
-		INSERT OR REPLACE INTO external_db_cursors (db_label, last_cursor, updated_at)
-		VALUES (?, ?, CURRENT_TIMESTAMP)`,
-		label, cursor)
-	return err
-}
+

@@ -151,7 +151,11 @@ Every memory stamps its origin at write time:
 
 ## The Epistemology Engine
 
-MPM tracks not just *what* it knows, but *why* it knows it, *how* it decided to act, and *what it believes but hasn't proven yet*. The Epistemology Engine extends the memory model into genuine agency — reasoning that can be examined, revised, and rendered obsolete.
+MPM does not attempt to determine truth. MPM maintains a continuously updated estimate of confidence based on available evidence.
+
+Truth is external. Confidence is internal. MPM manages the latter. Reality adjudicates the former.
+
+This distinction protects the architecture from scope creep — it is a confidence estimation engine, not a truth determination engine. The Epistemology Engine extends the memory model into genuine agency: reasoning that can be examined, revised, and rendered obsolete.
 
 It answers questions that traditional memory systems cannot:
 
@@ -261,6 +265,13 @@ modifying the artifact content.
   *current* evidence. The artifact is historical fact.
 - **Confidence only rises with new evidence.** It is allowed to decrease
   automatically as time passes without reinforcement.
+- **Confidence column is a performance cache, not the source of truth.**
+  The stored `confidence REAL` value is a performance optimization — every
+  confidence score is always `f(evidence, decay_rules)`. If the stored value
+  ever disagrees with the result of `f(evidence, decay)`, that is a bug.
+  The `query_confidence_history` tool is the audit trail; `explain_confidence`
+  (planned) is the reasoning trace. Both derive from evidence, not from the
+  stored column.
 
 #### Commands
 
@@ -269,6 +280,10 @@ modifying the artifact content.
 | `mpm evidence add --artifact <id> --type <t> --source <s> --by <who>` | `add_evidence` | Add a piece of evidence to an artifact |
 | `mpm evidence list --artifact <id>` | `list_evidence` | List all evidence for an artifact |
 | `mpm ops confidence show --artifact <id>` | `query_confidence_history` | Show current confidence + history |
+| `mpm ops confidence changes --artifact <id>` | `query_confidence_changes` | Recent confidence-altering events with delta and trigger — answers "what moved and why?" (default: last 24h) |
+| `mpm ops confidence trend --artifact <id>` | `query_confidence_trend` | Trajectory over window: velocity (slope/day), delta_window, trend label — answers "where is this going?" (default 30d) |
+| `mpm call query_memory_quality` | `query_memory_quality` | Per-source memory statistics: volume, avg confidence, challenge rate, survival rate — answers "which models produce memories that survive?" |
+| `mpm ops confidence explain --artifact <id>` | `explain_confidence` | Component breakdown: evidence strength, effective weight, decay penalty, initial odds, top contributors — the reasoning trace (distinct from history audit trail) |
 | `mpm ops confidence recompute --artifact <id>` | (manual CLI only) | Trigger a manual recompute |
 
 Evidence types: `observation` (0.4), `test` (0.7), `reproduction` (0.85),
@@ -372,7 +387,31 @@ BM25 unbounded scores are sigmoid-normalized. Use `--semantic` flag to enable pu
 
 ### Cognitive Immune System (Hybrid Search)
 
-On hybrid search, a contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity. State collision (sim ≥ 0.85, one challenged) triggers an async challenge log to `mirror.jsonl`. Challenged memories surface with an in-memory warning prepended — **never written to DB**.
+On hybrid search, a contradiction scan evaluates top-15 candidates (≤105 pairs) via cosine similarity.
+
+**Two-tier warning banner system (Phase 5):** Challenged or drifting memories surface with dedicated, in-memory warning banners prepended to the text content during retrieval — the underlying historical database records are never modified:
+- **Manual challenges** (`status == "challenged"`): prepends `[Note: This memory is challenged — treat as unverified]`
+- **Concept drift** (`concept_drift: true` in metadata): prepends `[SYSTEM WARNING: This knowledge is under active Concept Drift investigation — treat as potentially obsolete]`
+
+**Synchronous state collision resolution (Phase 4):** State collisions (cosine similarity ≥ 0.85 between a challenged memory and an unchallenged candidate) trigger a **synchronous database patch** via `ChallengeMemory()`, which instantly degrades the unchallenged candidate's weight, logs an evidence chain, and atomically flips its status to `challenged` in a single transaction. This eliminates the async ghost loop — state transitions commit atomically on the first collision turn. Equal-tier fall-throughs are bounded to avoid double-challenging an already-resolved target.
+
+### Concept Drift Detection (`idle_dream.go`)
+
+The engine autonomously identifies paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence. Every 6 hours, a low-priority background ticker runs a SQLite CTE audit loop checking for this specific drift signature:
+
+| Signal | Threshold |
+|---|---|
+| **Baseline** | Artifact achieved high status historically (`peak_confidence >= 0.85`) |
+| **Velocity** | ≥ 2 recent challenges or negative-strength observations within the last 7 days |
+| **Delta** | Confidence has dropped ≥ 0.25 and sits below the distrust threshold (`< 0.60`) |
+| **Lifetime** | ≥ 3 total lifetime negative evidence pieces (prevents one-off flukes) |
+
+When a drifting memory triggers this signature, the engine:
+1. **Quarantines** the memory — sets `concept_drift: true` in metadata
+2. **Proposes** a pending theory in the theories collection (`trigger='concept_drift'`) to alert the agent
+3. **Survives restarts** — SQLite-native dedup check prevents duplicate theory generation across process restarts
+
+The cycle runs on its own 6-hour ticker, independent of the idle consolidation ticker — drift detection is purely SQLite math with no filesystem dependency.
 
 ---
 
@@ -818,7 +857,7 @@ MPM integrates directly with AI agents. Both OpenClaw and Hermes share the same 
 
 ### OpenClaw
 
-MPM is installed as an OpenClaw plugin (`openclaw/mpm-plugin/`), giving the agent **native function-calling access** to 19 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
+MPM is installed as an OpenClaw plugin (`openclaw/mpm-plugin/`), giving the agent **native function-calling access** to 21 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
 
 ```
 read_wake_context        query_long_term_memory    save_to_memory
@@ -826,8 +865,9 @@ challenge_memory         save_lesson               search_lessons
 list_lessons             create_topic              search_topics
 link_topic               add_reference             search_references
 list_references          read_directives           propose_theory
-resolve_theory           record_decision           route
-proactive_recall_hint
+resolve_theory           record_decision           proactive_recall_hint
+add_evidence             list_evidence            query_confidence_history
+explain_confidence       query_confidence_changes query_confidence_trend  query_memory_quality  route
 ```
 
 Setup and config: see [`openclaw/OPENCLAW.md`](openclaw/OPENCLAW.md).
@@ -1102,7 +1142,6 @@ projects/mpm/
 
 See [`docs/MPM_WISHLIST.md`](docs/MPM_WISHLIST.md) for the full running wishlist. Notable upcoming items:
 
-- **Concept Drift Detection** — detect when older reinforced memories are being challenged by new patterns, auto-flag epoch shifts
 - **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents
 - **Native Event-Driven Hooks** — UNIX drop-in hooks for `on_theory_resolved`, `on_memory_synthesized`, etc.
 - **Memory Encryption at Rest** — SQLCipher AES-256 for enterprise-grade at-rest encryption

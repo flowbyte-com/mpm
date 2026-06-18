@@ -1,0 +1,24 @@
+{
+  "name": "opencode-mpm-plugin",
+  "version": "1.0.0",
+  "description": "MPM (Memory Persistence Module) tools for opencode",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.4.9",
+    "@types/node": "^25.9.3",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.4.9"
+  }
+}

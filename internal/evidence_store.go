@@ -9,6 +9,8 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"math"
+	"sort"
 	"time"
 )
 
@@ -22,6 +24,7 @@ const (
 	RecomputeReasonEvidenceDeleted RecomputeReason = "evidence_deleted"
 	RecomputeReasonEvidenceExpired RecomputeReason = "evidence_expired"
 	RecomputeReasonDecayTick       RecomputeReason = "decay_tick"
+	RecomputeReasonConceptDrift    RecomputeReason = "concept_drift"
 	RecomputeReasonManual          RecomputeReason = "manual_recompute"
 )
 
@@ -61,22 +64,51 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if in.CreatedBy == "" {
 		return fmt.Errorf("created_by required")
 	}
-	// Scan notes (and the user-supplied identifying fields) for secrets and
-	// poison phrases. The `notes` field is the only free-form text on an
-	// evidence row, but `SourceGroup`/`CreatedBy` can also smuggle content
-	// in practice. The 20-pattern scanner is the same one used by
-	// MemoryStore.AddMemory; bypass here would be a known audit finding.
+	// Scan every user-supplied text field for secrets and poison phrases
+	// BEFORE any DB work. The `notes` field is the obvious target, but
+	// `SourceGroup` and `CreatedBy` can also smuggle content (the prior
+	// comment claimed this was checked but only notes was). The
+	// 20-pattern scanner is the same one used by MemoryStore.AddMemory.
 	if isSensitive, reason := isSensitiveContent(in.Notes); isSensitive {
 		return fmt.Errorf("sensitive content in evidence notes: %s", reason)
 	}
+	if isSensitive, reason := isSensitiveContent(in.SourceGroup); isSensitive {
+		return fmt.Errorf("sensitive content in evidence source_group: %s", reason)
+	}
+	if isSensitive, reason := isSensitiveContent(in.CreatedBy); isSensitive {
+		return fmt.Errorf("sensitive content in evidence created_by: %s", reason)
+	}
 	if isPoisoned, reason := isPoisoned(in.Notes); isPoisoned {
 		return fmt.Errorf("poison content in evidence notes: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(in.SourceGroup); isPoisoned {
+		return fmt.Errorf("poison content in evidence source_group: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(in.CreatedBy); isPoisoned {
+		return fmt.Errorf("poison content in evidence created_by: %s", reason)
 	}
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
 	}
 	if in.IndependenceFactor == 0 {
 		in.IndependenceFactor = 1.0
+	}
+
+	// Reject evidence for nonexistent artifacts BEFORE inserting anything.
+	// The evidence table has no FK to memories/lessons (intentional, to
+	// preserve evidence history even after artifact deletion in v2), so
+	// without this check the row would land orphaned, RecomputeConfidence
+	// would silently produce an unanchored value (lastPositiveAt=now →
+	// no decay), and confidence_history would gain an audit row for an
+	// artifact that doesn't exist. That drift is the canonical
+	// "confidence diverges from evidence state" failure mode the
+	// documentation warns about.
+	exists, err := artifactExists(dm, in.ArtifactID, in.ArtifactType)
+	if err != nil {
+		return fmt.Errorf("artifact existence check: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("artifact %s/%s does not exist", in.ArtifactType, in.ArtifactID)
 	}
 
 	id := GenerateID()
@@ -120,6 +152,22 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 //   - Manual CLI (`mpm ops confidence recompute`)
 //   - Future calibration/challenge code
 func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason RecomputeReason) error {
+	// Validate artifact existence. Without this, a recompute against a
+	// nonexistent artifact silently succeeds: loadEvidenceForRecompute
+	// anchors lastPositiveAt to now (no decay), computeConfidence returns
+	// the initial value, writeArtifactConfidence matches zero rows, and
+	// the history INSERT still fires — polluting the audit trail with a
+	// confidence record for an artifact that doesn't exist. That is the
+	// exact "confidence diverges from evidence state" failure mode the
+	// documentation warns against, so we surface a clear error instead.
+	exists, err := artifactExists(node, artifactID, artifactType)
+	if err != nil {
+		return fmt.Errorf("artifact existence check: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("artifact %s/%s does not exist", artifactType, artifactID)
+	}
+
 	now := time.Now()
 
 	// Load the evidence set.
@@ -150,6 +198,10 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 
 // loadEvidenceForRecompute returns the evidence set and the most recent
 // positive-evidence timestamp (for decay anchoring).
+//
+// Requires that the artifact exists — callers (AddEvidence,
+// RecomputeConfidence) validate this beforehand so the no-positive-evidence
+// fallback below only ever anchors against a real artifact's created_at.
 func loadEvidenceForRecompute(node DBNode, artifactID, artifactType string, now time.Time) ([]evidenceInput, time.Time, error) {
 	rows, err := node.QueryTracked(`
 		SELECT strength, independence_factor, created_at, expires_at
@@ -186,8 +238,7 @@ func loadEvidenceForRecompute(node DBNode, artifactID, artifactType string, now 
 	}
 	if lastPositiveAt.IsZero() {
 		// No positive evidence — anchor decay to the artifact's creation time
-		// so it decays from "now" rather than from 1970. Falls back to
-		// epoch if even that isn't available.
+		// so a brand-new artifact doesn't decay from the unix epoch.
 		lastPositiveAt = now
 		if createdAt, ok := readArtifactCreatedAt(node, artifactID, artifactType); ok {
 			lastPositiveAt = createdAt
@@ -216,6 +267,43 @@ func readArtifactCreatedAt(node DBNode, artifactID, artifactType string) (time.T
 	return t, true
 }
 
+// artifactExists returns whether a row exists for the given (artifactID,
+// artifactType) pair. The artifact table is derived from artifactType:
+// lesson → lessons, everything else (memory/theory/decision) → memories.
+// Returns false (not an error) when the row is missing or soft-deleted.
+//
+// This is the single chokepoint for "does the artifact this evidence
+// refers to still exist?" Both AddEvidence and RecomputeConfidence
+// call it before writing anything; without it, both could silently
+// insert rows that drift from the canonical artifact state.
+func artifactExists(node DBNode, artifactID, artifactType string) (bool, error) {
+	var table, deletedClause string
+	switch artifactType {
+	case "lesson":
+		table = "lessons"
+		// lessons has a `deleted` column in some schemas; the lessons view
+		// hides it. We use `deleted IS NULL OR deleted = 0` to be safe
+		// across both shapes — for the current view shape, `deleted` is
+		// not exposed, so this clause is benign.
+		deletedClause = ""
+	default:
+		table = "memories"
+		deletedClause = " AND deleted_at IS NULL"
+	}
+	var found int
+	err := node.QueryRowTracked(
+		fmt.Sprintf(`SELECT 1 FROM %s WHERE id = ?%s`, table, deletedClause),
+		artifactID,
+	).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // writeArtifactConfidence updates the confidence column on the artifact
 // table. The table is derived from the artifact type.
 func writeArtifactConfidence(node DBNode, artifactID, artifactType string, conf float64) error {
@@ -231,6 +319,224 @@ func writeArtifactConfidence(node DBNode, artifactID, artifactType string, conf 
 		0, conf, artifactID,
 	)
 	return err
+}
+
+// EvidenceComponent is one piece of evidence with its computed contribution.
+type EvidenceComponent struct {
+	ID                string    `json:"id,omitempty"`
+	Type              string    `json:"type"`
+	SourceGroup       string    `json:"source_group"`
+	CreatedBy         string    `json:"created_by"`
+	Strength          float64   `json:"strength"`
+	Independence      float64   `json:"independence"`
+	AgeDays           float64   `json:"age_days"`
+	RecencyWeight     float64   `json:"recency_weight"`
+	EffectiveStrength float64   `json:"effective_strength"`
+	CreatedAt         time.Time `json:"created_at,omitempty"`
+}
+
+// DecayComponent breaks down the time-based confidence penalty.
+type DecayComponent struct {
+	Lambda       float64   `json:"lambda"`
+	TDays       float64   `json:"t_days"`
+	Penalty     float64   `json:"penalty"`
+	LastPositiveAt time.Time `json:"last_positive_at"`
+}
+
+// ConfidenceExplanation is the full intermediate breakdown of f(evidence, decay).
+// Unlike query_confidence_history (audit trail), this is the reasoning trace:
+// "if I recomputed confidence right now, why did I get this number?"
+type ConfidenceExplanation struct {
+	ArtifactID      string              `json:"artifact_id"`
+	ArtifactType    string              `json:"artifact_type"`
+	Confidence      float64             `json:"confidence"`
+	Initial         float64             `json:"initial_confidence"`
+	InitialOdds     float64             `json:"initial_odds"`
+	Positive        []EvidenceComponent `json:"positive_evidence"`
+	Negative        []EvidenceComponent `json:"negative_evidence"`
+	Decay           DecayComponent      `json:"decay"`
+	TopContributors []TopContributor    `json:"top_contributors"`
+}
+
+// TopContributor is an evidence piece ranked by absolute impact on confidence.
+// This answers "what's driving this belief?" without scrolling through all rows.
+type TopContributor struct {
+	EvidenceID string  `json:"evidence_id"`
+	Type       string  `json:"type"`
+	SourceGroup string `json:"source_group"`
+	Impact     float64 `json:"impact"` // effective_strength; sign encodes direction
+	Rank       int     `json:"rank"`
+}
+
+// ExplainConfidence returns the full component breakdown of f(evidence, decay)
+// for an artifact. This is the reasoning trace — distinct from query_confidence_history
+// which is the audit trail.
+func ExplainConfidence(dm *DatabaseManager, artifactID, artifactType string) (*ConfidenceExplanation, error) {
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	// Validate artifact existence. Without this, an explanation for a
+	// nonexistent artifact would still produce a breakdown: lastPositiveAt
+	// would default to now (no decay), confidence would be the initial
+	// value, and the operator would see a fabricated "everything is fine"
+	// trace for an artifact that doesn't exist. Same root cause as the
+	// RecomputeConfidence fix — surface the error instead.
+	exists, err := artifactExists(dm, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("artifact existence check: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("artifact %s/%s does not exist", artifactType, artifactID)
+	}
+
+	// Load all non-expired evidence rows.
+	now := time.Now()
+	rows, err := dm.QueryTracked(`
+		SELECT id, type, source_group, created_by, strength, independence_factor, created_at, expires_at
+		FROM evidence
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY created_at ASC
+	`, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("load evidence: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		allEvidence    []EvidenceComponent
+		lastPositiveAt time.Time
+	)
+	for rows.Next() {
+		var id, evType, source, by string
+		var strength, independence float64
+		var createdAt int64
+		var expiresAt sql.NullInt64
+		if err := rows.Scan(&id, &evType, &source, &by, &strength, &independence, &createdAt, &expiresAt); err != nil {
+			return nil, err
+		}
+		ts := time.Unix(createdAt, 0)
+		// Skip expired.
+		if expiresAt.Valid && expiresAt.Int64 < now.Unix() {
+			continue
+		}
+		// No independence normalization here — loadEvidenceForRecompute
+		// passes the raw value through. The explanation must agree with
+		// the computation: if a row has independence=0 in the DB, the
+		// explanation reflects the same effective=0 the recompute would
+		// produce. AddEvidence normalizes 0 → 1.0 at insert time, so
+		// well-formed rows never have this; rows inserted via direct SQL
+		// with independence=0 are treated as fully redundant by both
+		// paths. Mixing normalization in only one path would silently
+		// split the system: the recompute writes 0-contribution while
+		// the explanation claims full contribution.
+		ageDays := now.Sub(ts).Hours() / 24.0
+		recency := math.Exp(-0.005 * ageDays)
+		effective := strength * independence * recency
+
+		c := EvidenceComponent{
+			ID:                id,
+			Type:              evType,
+			SourceGroup:       source,
+			CreatedBy:         by,
+			Strength:          strength,
+			Independence:      independence,
+			AgeDays:           ageDays,
+			RecencyWeight:     recency,
+			EffectiveStrength: effective,
+			CreatedAt:         ts,
+		}
+		allEvidence = append(allEvidence, c)
+
+		if strength > 0 && ts.After(lastPositiveAt) {
+			lastPositiveAt = ts
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Anchor decay to artifact creation if no positive evidence exists.
+	if lastPositiveAt.IsZero() {
+		lastPositiveAt = now
+		if cat, ok := readArtifactCreatedAt(dm, artifactID, artifactType); ok {
+			lastPositiveAt = cat
+		}
+	}
+
+	initial := InitialConfidence(artifactType)
+	initialOdds := initial / (1.0 - initial)
+	lambda := decayLambda(artifactType)
+	tDays := now.Sub(lastPositiveAt).Hours() / 24.0
+	if tDays < 0 {
+		tDays = 0
+	}
+	decayPenalty := lambda * tDays
+
+	// Compute confidence using the pure formula.
+	conf := computeConfidence(artifactType, toEvidenceInputs(allEvidence), now, lastPositiveAt, 0.005)
+
+	// Split into positive/negative for the explanation.
+	var pos, neg []EvidenceComponent
+	for _, e := range allEvidence {
+		if e.Strength >= 0 {
+			pos = append(pos, e)
+		} else {
+			neg = append(neg, e)
+		}
+	}
+
+	// Rank evidence by absolute impact; top 5 answer "what's driving this?"
+	sorted := make([]EvidenceComponent, len(allEvidence))
+	copy(sorted, allEvidence)
+	sort.Slice(sorted, func(i, j int) bool {
+		return math.Abs(sorted[i].EffectiveStrength) > math.Abs(sorted[j].EffectiveStrength)
+	})
+	topN := 5
+	if topN > len(sorted) {
+		topN = len(sorted)
+	}
+	var topContributors []TopContributor
+	for i := 0; i < topN; i++ {
+		topContributors = append(topContributors, TopContributor{
+			EvidenceID:  sorted[i].ID,
+			Type:       sorted[i].Type,
+			SourceGroup: sorted[i].SourceGroup,
+			Impact:     sorted[i].EffectiveStrength,
+			Rank:       i + 1,
+		})
+	}
+
+	return &ConfidenceExplanation{
+		ArtifactID:    artifactID,
+		ArtifactType:  artifactType,
+		Confidence:    conf,
+		Initial:       initial,
+		InitialOdds:   initialOdds,
+		Positive:      pos,
+		Negative:      neg,
+		Decay: DecayComponent{
+			Lambda:         lambda,
+			TDays:         tDays,
+			Penalty:       decayPenalty,
+			LastPositiveAt: lastPositiveAt,
+		},
+		TopContributors: topContributors,
+	}, nil
+}
+
+// toEvidenceInputs converts EvidenceComponent slices to the plain inputs needed
+// by computeConfidence (which uses the internal evidenceInput struct).
+func toEvidenceInputs(comps []EvidenceComponent) []evidenceInput {
+	out := make([]evidenceInput, len(comps))
+	for i, c := range comps {
+		out[i] = evidenceInput{
+			Strength:    c.Strength,
+			Independence: c.Independence,
+			CreatedAt:   c.CreatedAt,
+		}
+	}
+	return out
 }
 
 // parseTime accepts RFC3339 or SQLite "YYYY-MM-DD HH:MM:SS" formats and
@@ -363,4 +669,392 @@ func GetConfidenceForArtifact(dm *DatabaseManager, artifactID, artifactType stri
 	}
 	snap.HistoryCount = len(snap.History)
 	return snap, rows.Err()
+}
+
+// ConfidenceChange is one confidence-altering event: the new value plus the
+// previous value (from which delta is computed). Distinct from
+// query_confidence_history (full timeline, no delta) — this answers
+// "what moved, by how much, and why, since when?"
+type ConfidenceChange struct {
+	ArtifactID    string    `json:"artifact_id"`
+	ArtifactType  string    `json:"artifact_type"`
+	NewConfidence float64   `json:"new_confidence"`
+	OldConfidence float64   `json:"old_confidence"`
+	Delta         float64   `json:"delta"`
+	Trigger       string    `json:"trigger"`
+	EvidenceCount int       `json:"evidence_count"`
+	ComputedAt    time.Time `json:"computed_at"`
+}
+
+// ConfidenceChangesFilter narrows the result set for QueryConfidenceChanges.
+// Zero-value fields use sensible defaults.
+type ConfidenceChangesFilter struct {
+	// Since: only return changes with computed_at > Since. Zero = last 24h.
+	Since time.Time
+	// Limit: max rows. Zero = 50.
+	Limit int
+	// ArtifactID: if non-empty, only return changes for this artifact.
+	ArtifactID string
+	// ArtifactType: if non-empty, only return changes for this artifact type.
+	ArtifactType string
+}
+
+// QueryConfidenceChanges returns recent confidence-altering events with the
+// delta and trigger included. This is event detection — what moved and why —
+// distinct from query_confidence_history (full timeline).
+//
+// Implementation: SQLite window function LAG() partitions history by artifact
+// and pulls the previous confidence per row in O(n). The WHERE clause filters
+// to rows that have a predecessor (initial writes have no delta).
+func QueryConfidenceChanges(dm *DatabaseManager, filter ConfidenceChangesFilter) ([]ConfidenceChange, error) {
+	since := filter.Since
+	if since.IsZero() {
+		since = time.Now().Add(-24 * time.Hour)
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Build SQL dynamically — filter conditions compose.
+	conds := []string{"prev_confidence IS NOT NULL", "ranked.computed_at > ?"}
+	args := []interface{}{since.Unix()}
+
+	if filter.ArtifactID != "" {
+		conds = append(conds, "ranked.artifact_id = ?")
+		args = append(args, filter.ArtifactID)
+	}
+	if filter.ArtifactType != "" {
+		conds = append(conds, "ranked.artifact_type = ?")
+		args = append(args, filter.ArtifactType)
+	}
+	args = append(args, limit)
+
+	whereClause := ""
+	for i, c := range conds {
+		if i == 0 {
+			whereClause = "WHERE " + c
+		} else {
+			whereClause += " AND " + c
+		}
+	}
+
+	query := fmt.Sprintf(`
+		WITH ranked AS (
+		  SELECT
+		    artifact_id, artifact_type, confidence, trigger,
+		    evidence_count, computed_at,
+		    LAG(confidence) OVER (
+		      PARTITION BY artifact_id, artifact_type
+		      ORDER BY computed_at
+		    ) AS prev_confidence
+		  FROM confidence_history
+		)
+		SELECT artifact_id, artifact_type, confidence, prev_confidence,
+		       confidence - prev_confidence, trigger, evidence_count, computed_at
+		FROM ranked
+		%s
+		ORDER BY ranked.computed_at DESC
+		LIMIT ?
+	`, whereClause)
+
+	rows, err := dm.QueryTracked(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query confidence changes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ConfidenceChange
+	for rows.Next() {
+		var c ConfidenceChange
+		var computedAt int64
+		if err := rows.Scan(&c.ArtifactID, &c.ArtifactType, &c.NewConfidence,
+			&c.OldConfidence, &c.Delta, &c.Trigger, &c.EvidenceCount, &computedAt); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		c.ComputedAt = time.Unix(computedAt, 0)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ConfidenceTrend is the trajectory projection of f(evidence, decay) over time.
+// Four orthogonal observation directions: state (explain_confidence), cause
+// (query_confidence_changes), history (query_confidence_history), direction
+// (query_confidence_trend). Trend completes the set.
+//
+// velocity = slope_per_day is the raw signal; trend is the human-readable label.
+// Agents reason better from velocity than from labels.
+type ConfidenceTrend struct {
+	ArtifactID        string  `json:"artifact_id"`
+	ArtifactType      string  `json:"artifact_type"`
+	CurrentConfidence float64 `json:"current_confidence"`
+	WindowDays        int     `json:"window_days"`
+	OldestInWindow    float64 `json:"confidence_at_window_start"`
+	DeltaWindow       float64 `json:"delta_window"`
+	SlopePerDay       float64 `json:"velocity"` // velocity: raw signal
+	Trend             string  `json:"trend"`    // "rising" | "falling" | "stable" | "insufficient_data"
+	SampleCount       int     `json:"sample_count"`
+}
+
+// QueryConfidenceTrend returns the trajectory of confidence over a time
+// window. Uses ordinary least-squares regression on (t_days, confidence)
+// samples from confidence_history. Requires >=2 samples; returns
+// Trend="insufficient_data" otherwise.
+//
+// Default window: 30 days. Threshold for stable: |slope_per_day| < 0.005.
+func QueryConfidenceTrend(dm *DatabaseManager, artifactID, artifactType string, windowDays int) (*ConfidenceTrend, error) {
+	if windowDays <= 0 {
+		windowDays = 30
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+
+	now := time.Now()
+	windowStart := now.Add(-time.Duration(windowDays) * 24 * time.Hour)
+
+	// Read current confidence from the artifact's underlying table.
+	var table string
+	switch artifactType {
+	case "lesson":
+		table = "lessons"
+	default:
+		table = "memories"
+	}
+	var currentConf float64
+	if err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, table),
+		artifactID,
+	).Scan(&currentConf); err != nil {
+		return nil, fmt.Errorf("read current confidence: %w", err)
+	}
+
+	// Pull all history rows in the window, ordered oldest-first.
+	rows, err := dm.QueryTracked(`
+		SELECT confidence, computed_at
+		FROM confidence_history
+		WHERE artifact_id = ? AND artifact_type = ?
+		  AND computed_at > ?
+		ORDER BY computed_at ASC
+	`, artifactID, artifactType, windowStart.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("read history: %w", err)
+	}
+	defer rows.Close()
+
+	type sample struct {
+		tDays float64
+		conf  float64
+	}
+	var samples []sample
+	for rows.Next() {
+		var conf float64
+		var computedAt int64
+		if err := rows.Scan(&conf, &computedAt); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		tDays := float64(computedAt-windowStart.Unix()) / 86400.0
+		samples = append(samples, sample{tDays: tDays, conf: conf})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(samples) < 2 {
+		var oldest float64
+		if len(samples) == 1 {
+			oldest = samples[0].conf
+		}
+		return &ConfidenceTrend{
+			ArtifactID:        artifactID,
+			ArtifactType:      artifactType,
+			CurrentConfidence: currentConf,
+			WindowDays:        windowDays,
+			OldestInWindow:    oldest,
+			DeltaWindow:       currentConf - oldest,
+			SampleCount:       len(samples),
+			Trend:             "insufficient_data",
+		}, nil
+	}
+
+	// Ordinary least squares: slope = covariance(t,c) / variance(t).
+	var sumT, sumC, sumTC, sumTT float64
+	n := float64(len(samples))
+	for _, s := range samples {
+		sumT += s.tDays
+		sumC += s.conf
+		sumTC += s.tDays * s.conf
+		sumTT += s.tDays * s.tDays
+	}
+	meanT := sumT / n
+	meanC := sumC / n
+	denom := sumTT - n*meanT*meanT
+	var slope float64
+	if denom != 0 {
+		slope = (sumTC - n*meanT*meanC) / denom
+	}
+
+	oldest := samples[0].conf
+	trend := "stable"
+	switch {
+	case slope > 0.005:
+		trend = "rising"
+	case slope < -0.005:
+		trend = "falling"
+	}
+
+	return &ConfidenceTrend{
+		ArtifactID:        artifactID,
+		ArtifactType:      artifactType,
+		CurrentConfidence: currentConf,
+		WindowDays:        windowDays,
+		OldestInWindow:    oldest,
+		DeltaWindow:       currentConf - oldest,
+		SlopePerDay:       slope,
+		Trend:             trend,
+		SampleCount:       len(samples),
+	}, nil
+}
+
+// MemoryQualityBySource aggregates per-creator memory statistics. Surfaces
+// which models/agents produce memories that survive — measured by confidence
+// trajectory, challenge rate, and net delta. Driven by auto-capture evidence
+// from memory_source_evidence_ai trigger (created_by = provenance.model).
+//
+// All inputs are existing primitives: memories, evidence, confidence_history.
+// No new schema.
+type MemoryQualityBySource struct {
+	Source              string  `json:"source"`
+	MemoryCount         int     `json:"memory_count"`
+	AvgCurrentConfidence float64 `json:"avg_current_confidence"`
+	AvgConfidenceDelta  float64 `json:"avg_confidence_delta"`
+	TotalEvidence       int     `json:"total_evidence"`
+	PositiveEvidence    int     `json:"positive_evidence"`
+	NegativeEvidence    int     `json:"negative_evidence"`
+	ChallengeCount      int     `json:"challenge_count"`
+	ChallengeRate       float64 `json:"challenge_rate"`
+	SurvivalRate        float64 `json:"survival_rate"` // memories with confidence >= 0.5 / total
+}
+
+// QueryMemoryQualityBySource returns per-source memory statistics, sorted by
+// memory_count descending. Joins memories → auto_capture evidence →
+// confidence_history to compute the four orthogonal axes (volume, state,
+// challenge, trajectory) per creator.
+func QueryMemoryQualityBySource(dm *DatabaseManager) ([]MemoryQualityBySource, error) {
+	// First pass: discover distinct sources from auto_capture evidence.
+	rows, err := dm.QueryTracked(`
+		SELECT e.created_by, COUNT(DISTINCT e.artifact_id)
+		FROM evidence e
+		WHERE e.source_group = 'auto_capture' AND e.artifact_type = 'memory'
+		GROUP BY e.created_by
+		ORDER BY COUNT(DISTINCT e.artifact_id) DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query sources: %w", err)
+	}
+	var sources []string
+	for rows.Next() {
+		var s string
+		var n int
+		if err := rows.Scan(&s, &n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sources = append(sources, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]MemoryQualityBySource, 0, len(sources))
+	for _, source := range sources {
+		// Memory count + positive/negative evidence breakdown.
+		var mc, pe, ne, te int
+		err := dm.QueryRowTracked(`
+			SELECT
+				COUNT(DISTINCT e.artifact_id),
+				SUM(CASE WHEN e.strength > 0 THEN 1 ELSE 0 END),
+				SUM(CASE WHEN e.strength < 0 THEN 1 ELSE 0 END),
+				COUNT(e.id)
+			FROM evidence e
+			WHERE e.source_group = 'auto_capture' AND e.artifact_type = 'memory'
+			  AND e.created_by = ?
+		`, source).Scan(&mc, &pe, &ne, &te)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate evidence: %w", err)
+		}
+
+		// Avg current confidence + avg delta (current - earliest history.confidence)
+		// + count of memories that survived (confidence >= 0.5).
+		//
+		// Compute AVG and survived over DISTINCT memory rows to avoid the
+		// join-multiplication bug: if memory m1 has 3 evidence rows, a naive
+		// AVG(m.confidence) is still correct (same value repeated), but
+		// SUM(CASE WHEN m.confidence >= 0.5 THEN 1 ELSE 0 END) would
+		// return 3 instead of 1. The fix is to aggregate over a per-memory
+		// row first (subquery) so each memory counts exactly once for
+		// survived and contributes one value to the AVG.
+		var avgConf, avgDelta float64
+		var survived int
+		err = dm.QueryRowTracked(`
+			SELECT
+				COALESCE(AVG(mc.confidence), 0),
+				COALESCE(AVG(
+					mc.confidence - COALESCE(
+						(SELECT h.confidence FROM confidence_history h
+						 WHERE h.artifact_id = mc.id AND h.artifact_type = 'memory'
+						 ORDER BY h.computed_at ASC LIMIT 1),
+						mc.confidence
+					)
+				), 0),
+				COALESCE(SUM(CASE WHEN mc.confidence >= 0.5 THEN 1 ELSE 0 END), 0)
+			FROM (
+				SELECT DISTINCT m.id, m.confidence
+				FROM memories m
+				JOIN evidence e ON e.artifact_id = m.id
+					AND e.artifact_type = 'memory' AND e.source_group = 'auto_capture'
+				WHERE e.created_by = ?
+			) mc
+		`, source).Scan(&avgConf, &avgDelta, &survived)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate confidence: %w", err)
+		}
+
+		// Challenge count.
+		var challenges int
+		err = dm.QueryRowTracked(`
+			SELECT COUNT(DISTINCT e.artifact_id)
+			FROM evidence e
+			WHERE e.artifact_type = 'memory' AND e.type = 'challenge'
+			  AND e.artifact_id IN (
+			    SELECT artifact_id FROM evidence
+			    WHERE source_group = 'auto_capture' AND created_by = ?
+			  )
+		`, source).Scan(&challenges)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate challenges: %w", err)
+		}
+
+		var challengeRate, survivalRate float64
+		if mc > 0 {
+			challengeRate = float64(challenges) / float64(mc)
+			survivalRate = float64(survived) / float64(mc)
+		}
+
+		out = append(out, MemoryQualityBySource{
+			Source:               source,
+			MemoryCount:          mc,
+			AvgCurrentConfidence: avgConf,
+			AvgConfidenceDelta:   avgDelta,
+			TotalEvidence:        te,
+			PositiveEvidence:     pe,
+			NegativeEvidence:     ne,
+			ChallengeCount:       challenges,
+			ChallengeRate:        challengeRate,
+			SurvivalRate:         survivalRate,
+		})
+	}
+	return out, nil
 }

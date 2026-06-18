@@ -23,6 +23,7 @@ type IdleConsolidationWorker struct {
 	db          *DatabaseManager
 	quietPeriod time.Duration // e.g. 30 minutes
 	checkEvery  time.Duration // poll interval for idle check
+	driftCheckEvery time.Duration // poll interval for concept drift detection
 
 	shutdown  chan struct{}
 	startedAt time.Time
@@ -40,12 +41,13 @@ func NewIdleConsolidationWorker(db *DatabaseManager, quietPeriod time.Duration) 
 		quietPeriod = 30 * time.Minute
 	}
 	return &IdleConsolidationWorker{
-		db:          db,
-		quietPeriod: quietPeriod,
-		checkEvery:  5 * time.Minute,
-		shutdown:    make(chan struct{}),
-		synthClient: NewSynthClient(),
-		logger:      slog.Default(),
+		db:             db,
+		quietPeriod:    quietPeriod,
+		checkEvery:     5 * time.Minute,
+		driftCheckEvery: 6 * time.Hour,
+		shutdown:       make(chan struct{}),
+		synthClient:    NewSynthClient(),
+		logger:         slog.Default(),
 	}
 }
 
@@ -72,6 +74,9 @@ func (w *IdleConsolidationWorker) run() {
 	firstCycle := time.NewTimer(2 * time.Minute)
 	defer firstCycle.Stop()
 
+	driftTicker := time.NewTicker(w.driftCheckEvery)
+	defer driftTicker.Stop()
+
 	w.logger.Info("idle_worker: started",
 		"quiet_period", w.quietPeriod.String(),
 		"check_every", w.checkEvery.String())
@@ -87,6 +92,9 @@ func (w *IdleConsolidationWorker) run() {
 
 		case <-ticker.C:
 			w.doCycle()
+
+		case <-driftTicker.C:
+			w.DetectConceptDriftCycle()
 		}
 	}
 }
@@ -152,14 +160,35 @@ func (w *IdleConsolidationWorker) ConfidenceDecayCycle() (int, error) {
 	// Find candidate artifacts: rows whose latest positive evidence (or
 	// creation, if no positive evidence exists) is older than the decay
 	// half-life for the collection.
+	//
+	// Artifact-type mapping is critical: the `evidence` table is keyed on
+	// (artifact_id, artifact_type). Hardcoding 'memory' for every row in
+	// the `memories` table would silently strip evidence from theories
+	// and decisions — loadEvidenceForRecompute would see zero evidence
+	// rows, lastPositiveAt would anchor to created_at, and the recompute
+	// would land at the initial value with full decay from creation. The
+	// epistemic violation: a theory with 0.85-strength reproduction
+	// evidence would have its confidence reset on every decay tick. Use
+	// the `collection` discriminator to pick the right artifact_type.
 	rows, err := w.db.QueryTracked(`
 		SELECT a.artifact_id, a.artifact_type, a.last_positive_at
 		FROM (
 			SELECT
 				m.id AS artifact_id,
-				'memory' AS artifact_type,
+				CASE m.collection
+					WHEN 'theories'  THEN 'theory'
+					WHEN 'decisions' THEN 'decision'
+					ELSE 'memory'
+				END AS artifact_type,
 				CAST(COALESCE(
-					(SELECT MAX(e.created_at) FROM evidence e WHERE e.artifact_id = m.id AND e.artifact_type = 'memory' AND e.strength > 0),
+					(SELECT MAX(e.created_at) FROM evidence e
+					 WHERE e.artifact_id = m.id
+					   AND e.artifact_type = CASE m.collection
+					       WHEN 'theories'  THEN 'theory'
+					       WHEN 'decisions' THEN 'decision'
+					       ELSE 'memory'
+					   END
+					   AND e.strength > 0),
 					strftime('%s', m.created_at)
 				) AS INTEGER) AS last_positive_at
 			FROM memories m
@@ -222,6 +251,12 @@ func (w *IdleConsolidationWorker) ConfidenceDecayCycle() (int, error) {
 // goroutine and read by the idle worker. Storing UnixNano avoids data races
 // on time.Time without adding mutex overhead to the hot watcher path.
 var lastWatcherEventAtNano atomic.Int64
+
+// driftSeen maps artifact_id → time when drift was last raised.
+// Kept in-process only; concept drift is low-frequency enough that
+// a restart-tolerating SQLite-native dedup runs alongside as a safety net.
+var driftSeen     = map[string]time.Time{}
+var driftSeenMu   sync.Mutex
 
 // UpdateLastWatcherEvent is called by the watcher event loop on every fsnotify event.
 func UpdateLastWatcherEvent() {
@@ -568,4 +603,237 @@ func markSynthDedup(key string) {
 	synthSeenMu.Lock()
 	defer synthSeenMu.Unlock()
 	synthSeen[key] = time.Now()
+}
+
+// ---------------------------------------------------------------------------
+// Concept Drift Detection
+// ---------------------------------------------------------------------------
+
+// driftResult holds the parsed output of one drift-detection query row.
+type driftResult struct {
+	id            string
+	content       string
+	currentConf   float64
+	maxConf       float64
+	confDelta     float64
+	challengeCnt  int
+	lifetimeCnt   int
+}
+
+// DetectConceptDriftCycle runs the drift-detection SQL query and proposes a
+// pending theory for each artifact that exhibits the concept-drift signature:
+//   - Was highly trusted (peak confidence ≥ 0.85)
+//   - Has since fallen below 0.60
+//   - Has dropped at least 0.25 from its peak
+//   - Has received ≥ 2 negative challenges in the last 7 days
+//   - Has ≥ 3 lifetime challenges (not a one-off fluke)
+//
+// The cycle is NOT gated by isQuiet() — drift detection is purely SQLite math
+// with no filesystem dependency, so it runs on its own 6-hour ticker
+// regardless of watcher activity.
+func (w *IdleConsolidationWorker) DetectConceptDriftCycle() {
+	w.logger.Info("idle_worker: starting concept drift detection cycle")
+
+	// Cleanup stale entries from driftSeen (older than one drift interval).
+	cleanDriftSeen()
+
+	rows, err := w.db.QueryTracked(driftQuery)
+	if err != nil {
+		w.logger.Error("idle_worker: concept drift query failed", "error", err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var proposed, skipped int
+	for rows.Next() {
+		var d driftResult
+		if err := rows.Scan(&d.id, &d.content, &d.currentConf, &d.maxConf, &d.confDelta, &d.challengeCnt, &d.lifetimeCnt); err != nil {
+			w.logger.Warn("idle_worker: scan drift row failed", "error", err.Error())
+			continue
+		}
+
+		// SQLite-native dedup: check if a concept-drift theory for this artifact
+		// was already proposed recently (within one driftCheckEvery window).
+		// This survives process restarts unlike the in-memory driftSeen map.
+		if hasRecentDriftTheory(w.db, d.id) {
+			w.logger.Debug("idle_worker: skipping drift — recent theory exists", "artifact_id", d.id)
+			skipped++
+			continue
+		}
+
+		// In-process dedup as secondary safety.
+		if !checkDriftDedup(d.id) {
+			w.logger.Debug("idle_worker: skipping drift — in-process dedup", "artifact_id", d.id)
+			skipped++
+			continue
+		}
+		markDriftDedup(d.id)
+
+		w.proposeConceptDriftTheory(d)
+		proposed++
+	}
+
+	if err := rows.Err(); err != nil {
+		w.logger.Error("idle_worker: drift row iteration error", "error", err.Error())
+	}
+
+	w.logger.Info("idle_worker: concept drift cycle complete",
+		"proposed", proposed, "skipped", skipped)
+}
+
+// driftQuery is the SQLite CTE that identifies concept-drift signatures.
+// Reviewed against schema.go — artifact_id/source_group field names and
+// INTEGER Unix-seconds created_at are the canonical shapes in this codebase.
+const driftQuery = `
+WITH PeakConfidence AS (
+	-- Use COALESCE so artifacts without a confidence_history row fall back
+	-- to their current confidence as the peak (handles pre-migration rows).
+	SELECT
+		m.id AS artifact_id,
+		COALESCE(MAX(ch.confidence), m.confidence) AS max_conf
+	FROM memories m
+	LEFT JOIN confidence_history ch ON m.id = ch.artifact_id
+	WHERE m.deleted_at IS NULL
+	GROUP BY m.id
+),
+RecentChallenges AS (
+	-- Negative evidence in the last 7 days: explicit challenges OR any row
+	-- with negative strength (observation/test/reproduction logged with a
+	-- negative sign by the caller).
+	SELECT artifact_id, COUNT(*) AS challenge_count
+	FROM evidence
+	WHERE (type = 'challenge' OR strength < 0)
+	  AND created_at > (strftime('%s', 'now') - 604800)
+	GROUP BY artifact_id
+),
+LifetimeChallenges AS (
+	-- All-time negative evidence count; guards against burst-only false positives.
+	SELECT artifact_id, COUNT(*) AS lifetime_count
+	FROM evidence
+	WHERE type = 'challenge' OR strength < 0
+	GROUP BY artifact_id
+)
+SELECT
+	m.id,
+	m.content,
+	m.confidence AS current_conf,
+	p.max_conf,
+	(p.max_conf - m.confidence) AS conf_delta,
+	r.challenge_count,
+	l.lifetime_count
+FROM memories m
+JOIN PeakConfidence p ON m.id = p.artifact_id
+JOIN RecentChallenges r ON m.id = r.artifact_id
+JOIN LifetimeChallenges l ON m.id = l.artifact_id
+WHERE
+	m.confidence < 0.60
+	AND p.max_conf >= 0.85
+	AND (p.max_conf - m.confidence) >= 0.25
+	AND r.challenge_count >= 2
+	AND l.lifetime_count >= 3
+`
+
+// proposeConceptDriftTheory saves a pending theory for a drifted artifact.
+func (w *IdleConsolidationWorker) proposeConceptDriftTheory(d driftResult) {
+	// Content snippet for the theory — truncate at 200 chars for readability.
+	snippet := d.content
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "…"
+	}
+
+	hypothesis := fmt.Sprintf(
+		"Concept drift detected. The memory %q (id: %s) has fallen from a peak "+
+			"confidence of %.2f down to %.2f — a drop of %.2f — driven by %d recent "+
+			"challenges (%d lifetime). This paradigm may be obsolete or have been "+
+			"superseded by new evidence.",
+		snippet, d.id, d.maxConf, d.currentConf, d.confDelta, d.challengeCnt, d.lifetimeCnt,
+	)
+
+	metadata := map[string]interface{}{
+		"auto_generated":    true,
+		"concept_drift":     true,
+		"source_artifact":   d.id,
+		"peak_confidence":   d.maxConf,
+		"current_confidence": d.currentConf,
+		"confidence_delta":  d.confDelta,
+		"recent_challenges": d.challengeCnt,
+		"lifetime_challenges": d.lifetimeCnt,
+		"status":            "pending",
+	}
+
+	tags := []string{"concept-drift", "auto-generated", "idle-dream"}
+
+	embedding := EmbedText(hypothesis)
+
+	id, err := w.db.SaveMemory("theories", hypothesis, "", tags, metadata, embedding, true, 5)
+	if err != nil {
+		w.logger.Error("idle_worker: failed to save concept-drift theory",
+			"artifact_id", d.id, "error", err.Error())
+		return
+	}
+
+	// Patch the source memory so retrieval detects the concept-drift flag.
+	// This is the hook that causes HybridSearch to prepend the quarantine banner.
+	patch := fmt.Sprintf(`{"concept_drift":true,"drift_theory_id":"%s","drift_detected_at":%d}`, id, time.Now().Unix())
+	if err := w.db.UpdateMemoryMetadata(d.id, patch); err != nil {
+		w.logger.Warn("idle_worker: failed to patch source memory with concept_drift flag",
+			"memory_id", d.id, "error", err.Error())
+	}
+
+	w.logger.Info("idle_worker: proposed concept-drift theory",
+		"theory_id", id[:12],
+		"source_artifact", d.id,
+		"peak", d.maxConf,
+		"current", d.currentConf,
+		"delta", d.confDelta)
+}
+
+// ---------------------------------------------------------------------------
+// Drift dedup helpers
+// ---------------------------------------------------------------------------
+
+func checkDriftDedup(id string) bool {
+	driftSeenMu.Lock()
+	defer driftSeenMu.Unlock()
+	_, exists := driftSeen[id]
+	return !exists
+}
+
+func markDriftDedup(id string) {
+	driftSeenMu.Lock()
+	defer driftSeenMu.Unlock()
+	driftSeen[id] = time.Now()
+}
+
+// cleanDriftSeen removes entries older than one drift-check interval.
+func cleanDriftSeen() {
+	driftSeenMu.Lock()
+	defer driftSeenMu.Unlock()
+	cutoff := time.Now().Add(-6 * time.Hour)
+	for k, v := range driftSeen {
+		if v.Before(cutoff) {
+			delete(driftSeen, k)
+		}
+	}
+}
+
+// hasRecentDriftTheory checks SQLite for a recently proposed concept-drift
+// theory for the same source artifact. This is the persistent dedup layer
+// that survives process restarts.
+func hasRecentDriftTheory(db *DatabaseManager, sourceArtifactID string) bool {
+	// Look for a theories collection memory whose metadata references this
+	// source_artifact and was created within the last drift interval.
+	var count int
+	err := db.QueryRowTracked(`
+		SELECT COUNT(*)
+		FROM memories
+		WHERE collection = 'theories'
+		  AND deleted_at IS NULL
+		  AND metadata LIKE ?
+		  AND created_at > datetime('now', '-6 hours')
+	`, "%"+sourceArtifactID+"%").Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -522,8 +523,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 
 	// Migration: add new columns to existing databases (no-op if already present)
-	// Use SafeMigrations from schema.go to ensure ALL column additions are covered
+	// Use SafeMigrations from schema.go to ensure ALL column additions are covered.
+	// Skip lessons entirely — it is either a table (columns added by migrateLessonsToView
+	// before the rename) or a view (column adds would fail anyway).
 	for _, m := range SafeMigrations {
+		if m[0] == "lessons" {
+			continue // lessons: handled by migrateLessonsToView before rename; skip here
+		}
 		if _, err := dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2])); err != nil {
 			if !isDuplicateColumnError(err) {
 				fmt.Fprintf(os.Stderr, "Warning: migration failed for %s.%s: %v\n", m[0], m[1], err)
@@ -534,16 +540,22 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
 
-	// Use shared index definitions
-	var indexErrs []error
+	// Use shared index definitions. Skip any index that targets a view — SQLite
+	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
 	for _, sql := range CommonIndexes {
+		if strings.Contains(sql, " ON lessons(") || strings.HasSuffix(sql, " ON lessons") {
+			continue // lessons is a view; its FTS is handled by migrateLessonsToView
+		}
 		if _, err := dm.db.Exec(sql); err != nil {
-			indexErrs = append(indexErrs, err)
+			fmt.Fprintf(os.Stderr, "Warning: index creation error (may be benign on re-run): %v\n", err)
 		}
 	}
-	if len(indexErrs) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %d index creation errors (may be benign on re-run): %v\n", len(indexErrs), indexErrs)
-	}
+
+	// Migration: convert lessons table to lessons_base + lessons view.
+	// This replaces the buggy AFTER-INSERT FTS trigger with an INSTEAD-OF trigger
+	// on the view, so failed lessons inserts can never leave orphaned FTS rows.
+	// Safe to call on every startup — idempotent if lessons_base already exists.
+	dm.migrateLessonsToView()
 
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
 	if err := dm.initFTSTables(); err != nil {
@@ -643,6 +655,124 @@ func (dm *DatabaseManager) dropFTS5Triggers() {
 	}
 }
 
+// migrateLessonsToView converts the lessons table to a lessons_base table + lessons view
+// with INSTEAD OF INSERT/UPDATE/DELETE triggers. This fixes the FTS orphan-row bug:
+// the old AFTER-INSERT trigger committed its FTS write before the lessons insert could
+// roll back, leaving orphaned lessons_fts entries on failed save_lesson calls.
+// Idempotent — safe to call on every startup.
+func (dm *DatabaseManager) migrateLessonsToView() {
+	var baseExists int
+	dm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists)
+
+	// If lessons_base exists, the rename already happened. Still need to drop any
+	// leftover AFTER triggers on lessons_base (from a prior partial migration) so
+	// they don't fire alongside the INSTEAD OF triggers and cause duplicate FTS inserts.
+	if baseExists != 0 {
+		for _, old := range []string{"lessons_ai", "lessons_ad", "lessons_au"} {
+			dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old))
+		}
+		return
+	}
+
+	// Step 1: add missing columns to lessons table BEFORE renaming.
+	// SafeMigrations already tried adding retrieval_priority/importance/confidence
+	// to the lessons VIEW (after our prior rename), so we add them to the TABLE
+	// now while lessons is still a table. SafeMigrations errors are silenced by
+	// isDuplicateColumnError, so this is safe on re-runs.
+	for _, col := range []struct {
+		name, def string
+	}{
+		{"retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
+		{"importance",         "REAL NOT NULL DEFAULT 0.5"},
+		{"confidence",          "REAL NOT NULL DEFAULT 0.7"},
+	} {
+		dm.db.Exec(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def))
+	}
+
+	// Step 2: rename lessons → lessons_base
+	if _, err := dm.db.Exec(`ALTER TABLE lessons RENAME TO lessons_base`); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: rename lessons→lessons_base failed: %v\n", err)
+		return
+	}
+
+	// Step 2: create lessons view that exposes all columns
+	viewSQL := `
+	CREATE VIEW IF NOT EXISTS lessons AS
+	SELECT rowid, id, type, content, tags, reinforcement_count,
+	       source_session_id, created, content_hash,
+	       retrieval_priority, importance, confidence
+	FROM lessons_base`
+	if _, err := dm.db.Exec(viewSQL); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create lessons view failed: %v\n", err)
+		return
+	}
+
+	// Step 3: INSTEAD OF INSERT — atomically writes to base table + lessons_fts
+	// The trigger body is a single transaction; if lessons_fts insert fails, the
+	// entire INSERT is rolled back — no orphan possible.
+	//
+	// COALESCE on retrieval_priority/importance/confidence: the lessons_base
+	// columns are NOT NULL DEFAULT 0.5/0.5/0.7, but the trigger reads NEW.*,
+	// which is NULL when the caller omits the column on the view. Without
+	// COALESCE, an INSERT that doesn't supply every column fails with a
+	// NOT NULL constraint violation. COALESCE matches the table default so
+	// partial inserts work the same as full inserts.
+	if _, err := dm.db.Exec(`
+		CREATE TRIGGER lessons_instead_of_insert
+		INSTEAD OF INSERT ON lessons
+		BEGIN
+			INSERT INTO lessons_base(rowid, id, type, content, tags, reinforcement_count,
+			                       source_session_id, created, content_hash,
+			                       retrieval_priority, importance, confidence)
+			VALUES (NEW.rowid, NEW.id, NEW.type, NEW.content, NEW.tags,
+			        COALESCE(NEW.reinforcement_count, 1),
+			        NEW.source_session_id, NEW.created, NEW.content_hash,
+			        COALESCE(NEW.retrieval_priority, 0.5),
+			        COALESCE(NEW.importance, 0.5),
+			        COALESCE(NEW.confidence, 0.7));
+			INSERT INTO lessons_fts(rowid, content, tags)
+			VALUES (NEW.rowid, NEW.content, NEW.tags);
+		END`); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF INSERT trigger failed: %v\n", err)
+	}
+
+	// Step 4: INSTEAD OF UPDATE — same COALESCE treatment so partial
+	// UPDATEs that don't touch retrieval_priority/importance/confidence
+	// don't accidentally NULL those columns out and violate NOT NULL.
+	if _, err := dm.db.Exec(`
+		CREATE TRIGGER lessons_instead_of_update
+		INSTEAD OF UPDATE ON lessons
+		BEGIN
+			UPDATE lessons_base SET rowid=NEW.rowid, id=NEW.id, type=NEW.type,
+			       content=NEW.content, tags=NEW.tags,
+			       reinforcement_count=COALESCE(NEW.reinforcement_count, reinforcement_count),
+			       source_session_id=NEW.source_session_id, created=NEW.created,
+			       content_hash=NEW.content_hash,
+			       retrieval_priority=COALESCE(NEW.retrieval_priority, retrieval_priority),
+			       importance=COALESCE(NEW.importance, importance),
+			       confidence=COALESCE(NEW.confidence, confidence)
+			WHERE rowid=OLD.rowid;
+			DELETE FROM lessons_fts WHERE rowid=OLD.rowid;
+			INSERT INTO lessons_fts(rowid, content, tags)
+			VALUES (NEW.rowid, NEW.content, NEW.tags);
+		END`); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF UPDATE trigger failed: %v\n", err)
+	}
+
+	// Step 5: INSTEAD OF DELETE
+	if _, err := dm.db.Exec(`
+		CREATE TRIGGER lessons_instead_of_delete
+		INSTEAD OF DELETE ON lessons
+		BEGIN
+			DELETE FROM lessons_base WHERE rowid=OLD.rowid;
+			DELETE FROM lessons_fts WHERE rowid=OLD.rowid;
+		END`); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF DELETE trigger failed: %v\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "migrateLessonsToView: lessons→lessons_base+migrated\n")
+}
+
 func (dm *DatabaseManager) initFTSTables() error {
 	// Robust FTS5 availability check
 	var available int
@@ -680,9 +810,47 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_au_content AFTER UPDATE ON memories WHEN NOT (old.deleted_at IS NULL AND new.deleted_at IS NOT NULL) BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
 
-		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
-		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END;`,
-		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END;`,
+		// memory_source_evidence_ai: when a memory is written, capture an
+		// automatic observation evidence row attributed to the writer.
+		// Prefers metadata.provenance.model (set by SaveMemoryWithContext)
+		// over metadata.source. This makes "which model created which memory"
+		// queryable through the existing evidence infrastructure without
+		// adding any schema. No-op if neither field is present.
+		//
+		// Malformed JSON guard: json_extract raises "malformed JSON" when
+		// NEW.metadata is not valid JSON, which would abort the parent
+		// INSERT and roll back the memory write. We wrap each json_extract
+		// in a CASE that checks json_valid() first and yields NULL on bad
+		// input so the trigger degrades to a no-op instead of failing the
+		// user's memory write.
+		`CREATE TRIGGER IF NOT EXISTS memory_source_evidence_ai AFTER INSERT ON memories
+			WHEN COALESCE(
+				NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.provenance.model') END, ''),
+				NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.source') END, '')
+			) IS NOT NULL
+		BEGIN
+			INSERT INTO evidence (
+				id, artifact_id, artifact_type, type,
+				source_group, strength, independence_factor,
+				created_by, created_at
+			) VALUES (
+				'auto-' || lower(hex(randomblob(8))) || '-' || substr(NEW.id, 1, 16),
+				NEW.id,
+				'memory',
+				'observation',
+				'auto_capture',
+				0.5,
+				1.0,
+				COALESCE(
+					NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.provenance.model') END, ''),
+					NULLIF(CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.source') END, '')
+				),
+				unixepoch()
+			);
+		END;`,
+
+		// lessons uses INSTEAD OF triggers on the lessons view (created by migrateLessonsToView)
+		// — not AFTER triggers on the base table. The old AFTER triggers are replaced there.
 
 		`CREATE TRIGGER IF NOT EXISTS topics_ai AFTER INSERT ON topics BEGIN INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END;`,
 		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END;`,
@@ -894,6 +1062,20 @@ func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]ma
 }
 
 func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error) {
+	// Scrub content for secrets and poison phrases BEFORE any DB work.
+	// SaveMemory is a low-level write path used by synthesis/idle_dream
+	// paths that bypass MemoryStore.AddMemory. Without this scrub, an
+	// LLM response that picked up a prompt-injection could persist
+	// sensitive content directly to the memories table. The 20-pattern
+	// scanner is the same one MemoryStore.AddMemory uses; running it
+	// here closes the only remaining write path that bypassed it.
+	if isSensitive, reason := isSensitiveContent(content); isSensitive {
+		return "", fmt.Errorf("sensitive content detected and blocked in SaveMemory: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+		return "", fmt.Errorf("poison content detected and blocked in SaveMemory: %s", reason)
+	}
+
 	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
@@ -922,8 +1104,18 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 		expiresAtStr = expiresAt[0].UTC().Format(time.RFC3339)
 	}
 
-	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr)
+	// Set the initial confidence to the per-collection initial value. The
+	// memories table default is 0.8 (the memory initial), but theories and
+	// decisions have lower starts (0.5 / 0.6). Without this, callers that
+	// pass collection="theories" or "decisions" would get a row with the
+	// memory default confidence — silently violating the spec's epistemic
+	// model. The single source of truth for initial values is
+	// InitialConfidence() (confidence.go); MemoryStore.AddMemory uses the
+	// same function so both write paths agree.
+	initialConf := InitialConfidence(artifactTypeFromCollection(collection))
+
+	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf)
 	return id, err
 }
 
@@ -979,22 +1171,27 @@ func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
 	}
 
 	// Metadata-only changes bypass the FTS trigger — manually sync FTS
-	// for the updated row so the search index stays current. Errors are
-	// checked and returned; a silent failure here would leave FTS stale
-	// while the caller believes the update succeeded.
-	if _, err := tx.Exec(`
-		DELETE FROM memories_fts WHERE rowid = (
-			SELECT rowid FROM memories WHERE id = ?
-		)
-	`, id); err != nil {
-		return fmt.Errorf("UpdateMemoryMetadata: fts delete: %w", err)
-	}
-	if _, err := tx.Exec(`
-		INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
-		SELECT rowid, content, collection, COALESCE(session_id,''), COALESCE(tags,'[]')
-		FROM memories WHERE id = ? AND deleted_at IS NULL
-	`, id); err != nil {
-		return fmt.Errorf("UpdateMemoryMetadata: fts insert: %w", err)
+	// for the updated row so the search index stays current.
+	// FTS tables may not exist in all environments (e.g. test temp DBs
+	// built without FTS5). The sync is best-effort — primary metadata update
+	// always succeeds regardless of FTS state.
+	if _, err := tx.Exec(`SELECT 1 FROM memories_fts LIMIT 1`); err == nil {
+		// FTS table exists — sync the updated row
+		if _, err := tx.Exec(`
+			DELETE FROM memories_fts WHERE rowid = (
+				SELECT rowid FROM memories WHERE id = ?
+			)
+		`, id); err != nil {
+			// Log but don't fail — primary update already succeeded
+			slog.Warn("UpdateMemoryMetadata: fts delete failed (non-fatal)", "error", err.Error())
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+			SELECT rowid, content, collection, COALESCE(session_id,''), COALESCE(tags,'[]')
+			FROM memories WHERE id = ? AND deleted_at IS NULL
+		`, id); err != nil {
+			slog.Warn("UpdateMemoryMetadata: fts insert failed (non-fatal)", "error", err.Error())
+		}
 	}
 
 	return nil
@@ -1514,9 +1711,16 @@ type Lesson struct {
 
 // AddLesson adds a new lesson, checking for duplicates by content hash
 func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
-	// Check for sensitive content before storing
+	// Check for sensitive content before storing. AddLesson was already
+	// gating on the 20-pattern sensitive-content scanner, but was missing
+	// the poison-phrase check that MemoryStore.AddMemory runs. Without it,
+	// a prompt-injection payload could land in the lessons table via the
+	// mpm call save_lesson path; the audit noted this asymmetry.
 	if isSensitive, name := isSensitiveContent(content); isSensitive {
 		return nil, fmt.Errorf("lesson content blocked: %s detected", name)
+	}
+	if poisoned, reason := isPoisoned(content); poisoned {
+		return nil, fmt.Errorf("lesson content blocked: poison phrase detected: %s", reason)
 	}
 
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
