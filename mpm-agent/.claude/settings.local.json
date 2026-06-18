@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(make build:*)",
-      "Bash(CGO_CFLAGS=\"-DSQLITE_ENABLE_FTS5\" CGO_LDFLAGS=\"-lm\" go test:*)",
-      "Bash(go vet:*)"
-    ]
-  }
-}
