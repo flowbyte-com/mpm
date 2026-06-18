@@ -575,17 +575,6 @@ func (dm *DatabaseManager) ShredMemory(id string) error {
 	return ShredMemory(dm.db, id)
 }
 
-// UpdateMemoryWeight adjusts a memory's weight by delta (positive or negative)
-// without the reinforcement_count side effects of WeakenMemory/ReinforceMemory.
-// Allows weight to go negative for challenge/immune-system tracking.
-func (dm *DatabaseManager) UpdateMemoryWeight(id string, delta int) error {
-	_, err := dm.db.Exec(`
-		UPDATE memories SET weight = weight + ?, last_accessed_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND deleted_at IS NULL
-	`, delta, id)
-	return err
-}
-
 // GetNegativeWeightMemories returns all non-deleted memories with weight < 0.
 func (dm *DatabaseManager) GetNegativeWeightMemories() ([]map[string]interface{}, error) {
 	rows, err := dm.db.Query(`

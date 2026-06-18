@@ -17,9 +17,6 @@ type EmbeddingProvider interface {
 	// Returns the vector as float32s and an error.
 	Embed(text string) ([]float32, error)
 
-	// Dimensions returns the dimensionality of vectors produced by this provider.
-	Dimensions() int
-
 	// Name returns a human-readable name for this provider.
 	Name() string
 }
@@ -28,7 +25,6 @@ type EmbeddingProvider interface {
 type NullProvider struct{}
 
 func (NullProvider) Embed(text string) ([]float32, error) { return nil, nil }
-func (NullProvider) Dimensions() int                      { return 0 }
 func (NullProvider) Name() string                         { return "null" }
 
 // OllamaProvider hits a local Ollama endpoint for embeddings.
@@ -91,13 +87,6 @@ func (p *OllamaProvider) Embed(text string) ([]float32, error) {
 	}
 
 	return result.Embedding, nil
-}
-
-func (p *OllamaProvider) Dimensions() int {
-	// Probe Ollama for dimensions if needed
-	// For nomic-embed-text: 768
-	// For other models: query /api/tags and inspect
-	return 768 // default; probe at init for accuracy
 }
 
 func (p *OllamaProvider) Name() string {

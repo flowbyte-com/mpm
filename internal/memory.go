@@ -157,13 +157,6 @@ func NewMemoryStore(_ string) *MemoryStore {
 	}
 }
 
-// InitCollections ensures all collections exist
-// No-op for SQLite-only mode
-func (s *MemoryStore) InitCollections() {
-	// SQLite mode - no collections to initialize
-	_ = s.Collections
-}
-
 var validTableNames = map[string]bool{
 	"sessions":            true,
 	"topics":              true,
@@ -277,9 +270,8 @@ func (s *MemoryStore) InitSQLite() error {
 		`CREATE TRIGGER IF NOT EXISTS topics_ai AFTER INSERT ON topics BEGIN INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END`,
 		`CREATE TRIGGER IF NOT EXISTS topics_ad AFTER DELETE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; END`,
 		`CREATE TRIGGER IF NOT EXISTS topics_au AFTER UPDATE ON topics BEGIN DELETE FROM topics_fts WHERE rowid = old.rowid; INSERT INTO topics_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description); END`,
-		`CREATE TRIGGER IF NOT EXISTS lessons_ai AFTER INSERT ON lessons BEGIN INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
-		`CREATE TRIGGER IF NOT EXISTS lessons_ad AFTER DELETE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; END`,
-		`CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN DELETE FROM lessons_fts WHERE rowid = old.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags); END`,
+		// lessons uses INSTEAD OF triggers on the lessons view (db.go migrateLessonsToView)
+		// — not AFTER triggers on the base table.
 	}
 	for _, sql := range triggers {
 		if _, err := s.DB.Exec(sql); err != nil {
@@ -367,6 +359,12 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		return nil, err
 	}
 
+	// Reflect actual stored weight back on the struct so callers get a
+	// truthful weight in their response (DB default 1, not Go zero 0).
+	if existing, getErr := s.getStoredWeight(mem.ID); getErr == nil {
+		mem.Weight = existing
+	}
+
 	// Append to mirror file (human-readable)
 	if err := s.appendToMirror(mem); err != nil {
 		// Log but don't fail
@@ -374,6 +372,105 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	}
 
 	return mem, nil
+}
+
+// AddMemoryWithWeight persists a memory with an explicit caller-supplied
+// weight (float64, 0.0-1.0). Same shape as AddMemory but writes the weight
+// column instead of relying on the schema default. The float is encoded as
+// int(weight*10) clamped to [1, 100], matching the existing weight scale used
+// by ReinforceMemory/WeakenMemory and the metadata.weight_intent convention.
+func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string, weight float64) (*Memory, error) {
+	if collection == "" {
+		collection = "memories"
+	}
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+	if isSensitive, reason := isSensitiveContent(content); isSensitive {
+		s.logSensitiveAttempt(content, reason)
+		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+		s.logPoisonAttempt(content, reason)
+		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
+	}
+
+	// Encode weight: float [0,1] -> int [1,100]. Floor at 1 so rows survive
+	// the weight=1 pruning threshold unless the caller explicitly opts in.
+	if weight <= 0 {
+		weight = 0.5
+	}
+	if weight > 1.0 {
+		weight = 1.0
+	}
+	intWeight := int(weight * 10)
+	if intWeight < 1 {
+		intWeight = 1
+	}
+	if intWeight > 100 {
+		intWeight = 100
+	}
+
+	embedding := EmbedText(content)
+	mem := &Memory{
+		ID:                GenerateID(),
+		Content:           content,
+		Metadata:          metadata,
+		Tags:              tags,
+		Created:           time.Now().UTC().Format(time.RFC3339),
+		Source:            source,
+		Embedding:         embedding,
+		Collection:        collection,
+		SessionID:         sessionID,
+		RetrievalPriority: 0.5,
+		Importance:        0.5,
+		Confidence:        InitialConfidence(artifactTypeFromCollection(collection)),
+		Weight:            intWeight,
+	}
+
+	fullMetadata := map[string]interface{}{
+		"source":    source,
+		"created":   mem.Created,
+		"tags":      strings.Join(tags, ","),
+		"timestamp": time.Now().Unix(),
+	}
+	for k, v := range metadata {
+		fullMetadata[k] = v
+	}
+
+	embeddingJSON, _ := json.Marshal(embedding)
+	metadataJSON, _ := json.Marshal(fullMetadata)
+	tagsJSON, _ := json.Marshal(tags)
+
+	var sessID interface{} = nil
+	if sessionID != "" {
+		sessID = sessionID
+	}
+
+	_, err := s.DB.Exec(`
+		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID,
+		mem.RetrievalPriority, mem.Importance, mem.Confidence, mem.Weight)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.appendToMirror(mem); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write to mirror: %v\n", err)
+	}
+	return mem, nil
+}
+
+// getStoredWeight returns the persisted weight for an existing memory id.
+// Used to reflect actual DB state back onto the returned struct after writes
+// that don't include weight in their INSERT (e.g. legacy AddMemory callers).
+func (s *MemoryStore) getStoredWeight(id string) (int, error) {
+	var w int
+	err := s.DB.QueryRow(`SELECT weight FROM memories WHERE id = ?`, id).Scan(&w)
+	return w, err
 }
 
 // poisonPhraseCache holds loaded poison phrases in memory
@@ -682,13 +779,6 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 	return memories, rows.Err()
 }
 
-// GetByTag retrieves memories with a specific tag
-func (s *MemoryStore) GetByTag(tag string, collection string) ([]*Memory, error) {
-	// For simplicity, query all and filter by tag
-	// In production, use SQLite FTS5 filter
-	return s.QueryMemory("*", collection, 100, []string{tag})
-}
-
 // GetByID retrieves a memory by ID from SQLite
 func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	if s.DB == nil {
@@ -938,24 +1028,6 @@ func splitLines(text string) []string {
 		lines = append(lines, text[start:])
 	}
 	return lines
-}
-
-// ExportMirror creates a backup of the mirror file
-func (s *MemoryStore) ExportMirror(path string) (string, error) {
-	if path == "" {
-		path = fmt.Sprintf("symai_memories_%s.jsonl", time.Now().Format("20060102"))
-	}
-
-	data, err := os.ReadFile(s.MirrorFile)
-	if err != nil {
-		return "", err
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return "", err
-	}
-
-	return path, nil
 }
 
 // scanMemoryRows scans sql.Rows into []*Memory with a score function.
@@ -2743,21 +2815,6 @@ func (s *MemoryStore) WeakenMemory(id string, delta int) error {
 		    weight = MAX(weight - ?, 1)
 		WHERE id = ?
 	`, delta, weightLoss, id)
-	return err
-}
-
-// AccessMemory updates last_accessed_at timestamp.
-// Called whenever a memory is retrieved to track recency.
-func (s *MemoryStore) AccessMemory(id string) error {
-	if s.DB == nil {
-		if err := s.InitSQLite(); err != nil {
-			return fmt.Errorf("failed to init db: %w", err)
-		}
-	}
-
-	_, err := s.DB.Exec(`
-		UPDATE memories SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?
-	`, id)
 	return err
 }
 

@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-const challengeWarning = "[Note: This memory is challenged — treat as unverified]"
+const challengeWarning     = "[Note: This memory is challenged — treat as unverified]"
+const conceptDriftWarning = "[SYSTEM WARNING: This knowledge is under active Concept Drift investigation — treat as potentially obsolete]"
 
 // HybridConfig controls how FTS5 and vector scores are blended.
 type HybridConfig struct {
@@ -52,6 +53,7 @@ type HybridResult struct {
 	CombinedScore      float64 // weighted blend
 	Source             string  // "fts5", "vector", "hybrid"
 	IsChallenged       bool
+	IsConceptDrift     bool
 	ChallengedTheoryID string
 }
 
@@ -138,10 +140,17 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		}
 
 		isChallenged := false
+		isConceptDrift := false
 		challengedTheoryID := ""
 		if fts.Metadata != "" {
 			var meta map[string]interface{}
 			if json.Unmarshal([]byte(fts.Metadata), &meta) == nil {
+				// concept_drift: true from the idle-dream drift detector
+				if cd, _ := meta["concept_drift"].(bool); cd {
+					isConceptDrift = true
+					isChallenged = true
+				}
+				// status == "challenged" from manual challenge_memory calls
 				if status, _ := meta["status"].(string); status == "challenged" {
 					isChallenged = true
 				}
@@ -167,6 +176,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			CombinedScore:      combinedScore,
 			Source:             source,
 			IsChallenged:       isChallenged,
+			IsConceptDrift:     isConceptDrift,
 			ChallengedTheoryID: challengedTheoryID,
 		})
 	}
@@ -248,7 +258,9 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			ciTier := provenanceTier(ciCompute)
 			cjTier := provenanceTier(cjCompute)
 
-			// State collision: one challenged, one not (legacy path)
+			// State collision: one challenged, one not — challenge the unchallenged one.
+			// Previously used ChallengeMemoryAsync (fire-and-forget, no DB write). Fixed:
+			// uses synchronous ChallengeMemory so the DB is actually updated.
 			if ci.isChallenged != cj.isChallenged {
 				var challengedID, unchallengedID string
 				if ci.isChallenged {
@@ -261,7 +273,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 				evidence := fmt.Sprintf(
 					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
 					sim, challengedID, unchallengedID)
-				dm.ChallengeMemoryAsync(unchallengedID, evidence)
+				dm.ChallengeMemory(unchallengedID, 1, evidence)
 				continue
 			}
 
@@ -290,12 +302,17 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — resolved in favor of %s",
 					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
 				dm.ChallengeMemory(loserID, slashAmount, evidence)
-			} else {
-				// Equal tier — log as pending theory to mirror.jsonl
+				continue
+			}
+
+			// Equal tier — both memories have equal provenance weight and neither is
+			// challenged. Mark the first as challenged to signal unresolved dispute.
+			// (scanSet[i] is the earlier-in-list member of the unordered pair since j > i.)
+			if !cj.isChallenged {
 				evidence := fmt.Sprintf(
 					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
 					sim, scanSet[i].ID, scanSet[j].ID)
-				dm.ChallengeMemoryAsync(scanSet[i].ID, evidence)
+				dm.ChallengeMemory(scanSet[i].ID, 1, evidence)
 			}
 		}
 	}
@@ -305,7 +322,9 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		if preamble := ProvenancePreamble(combined[i].Metadata); preamble != "" {
 			combined[i].Content = preamble + "\n" + combined[i].Content
 		}
-		if combined[i].IsChallenged {
+		if combined[i].IsConceptDrift {
+			combined[i].Content = conceptDriftWarning + "\n" + combined[i].Content
+		} else if combined[i].IsChallenged {
 			combined[i].Content = challengeWarning + "\n" + combined[i].Content
 		}
 	}
