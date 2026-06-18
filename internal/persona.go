@@ -135,6 +135,9 @@ func (pm *PersonaManager) GetActive() (string, error) {
 
 // SetActive updates the active persona
 // If the name is not a valid persona, it is set to empty string (system falls back to default).
+// Also writes config/current_persona so detectActiveContext() (cmd/mpm/handlers.go)
+// injects the same value into memory metadata. The "auto" sentinel is skipped —
+// it's a feature flag, not a real persona.
 func (pm *PersonaManager) SetActive(personaName string) error {
 	data, err := os.ReadFile(pm.ActiveFile)
 	if err != nil {
@@ -163,7 +166,21 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(pm.ActiveFile, newData, 0644)
+	if err := os.WriteFile(pm.ActiveFile, newData, 0644); err != nil {
+		return err
+	}
+
+	// Mirror to config/current_persona so memory metadata injection sees the
+	// same value the user just selected. Skip the "auto" sentinel.
+	if active.Persona != "" && active.Persona != "auto" {
+		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")
+		_ = os.MkdirAll(filepath.Dir(path), 0755)
+		_ = os.WriteFile(path, []byte(active.Persona), 0644)
+	} else {
+		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")
+		_ = os.Remove(path)
+	}
+	return nil
 }
 
 // GetActivePersona returns the active persona name (alias for GetActive)

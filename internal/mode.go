@@ -143,6 +143,8 @@ func (mm *ModeManager) GetActive() ([]string, error) {
 
 // SetActive updates the active modes
 // Invalid mode names are silently removed from the list.
+// Also writes the first real mode to config/current_mode so that
+// detectActiveContext() (cmd/mpm/handlers.go) injects it into memory metadata.
 func (mm *ModeManager) SetActive(modes []string) error {
 	data, err := os.ReadFile(mm.ActiveFile)
 	if err != nil {
@@ -173,7 +175,32 @@ func (mm *ModeManager) SetActive(modes []string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(mm.ActiveFile, newData, 0644)
+	if err := os.WriteFile(mm.ActiveFile, newData, 0644); err != nil {
+		return err
+	}
+
+	// Mirror the first non-"auto" mode to config/current_mode so the memory
+	// metadata injection sees the same value the user just selected.
+	writeConfigCurrentMode(mm.ActiveFile, valid)
+	return nil
+}
+
+// writeConfigCurrentMode writes the first real mode name to
+// <mpm-dir>/config/current_mode. The "auto" sentinel is skipped — it's a
+// feature flag, not a real mode, and shouldn't be injected as the active mode.
+func writeConfigCurrentMode(activeJSONPath string, modes []string) {
+	mpmDir := filepath.Dir(activeJSONPath)
+	for _, m := range modes {
+		if m != "" && m != "auto" {
+			path := filepath.Join(mpmDir, "config", "current_mode")
+			_ = os.MkdirAll(filepath.Dir(path), 0755)
+			_ = os.WriteFile(path, []byte(m), 0644)
+			return
+		}
+	}
+	// No real mode selected — clear the file.
+	path := filepath.Join(mpmDir, "config", "current_mode")
+	_ = os.Remove(path)
 }
 
 // GetActiveModes returns the active modes (alias for GetActive)
