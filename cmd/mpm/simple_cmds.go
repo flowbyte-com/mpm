@@ -633,7 +633,8 @@ func handleShredMem(args []string) int {
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--chunk-size <tokens>] [--json]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]\n")
+		fmt.Fprintf(os.Stderr, "  --reason: import reason (why this is being added; seed of the admission justification chain)\n")
 		fmt.Fprintf(os.Stderr, "  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)\n")
 		return 1
 	}
@@ -646,6 +647,7 @@ func handleRefAdd(args []string) int {
 
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
 	tag := fs.String("tag", "", "Tags for the reference")
+	reason := fs.String("reason", "", "Import reason (why this is being added)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
 	if err := fs.Parse(args[2:]); err != nil {
@@ -748,16 +750,17 @@ func handleRefAdd(args []string) int {
 	}
 
 	doc := &mpminternal.ReferenceDoc{
-		ID:          mpminternal.GenerateID(),
-		Title:       title,
-		SourcePath:  filePath,
-		SourceType:  sourceType,
-		Tags:        tags,
-		Content:     content,
-		ContentHash: contentHash,
-		TotalChunks: len(chunks),
-		LastIndexed: time.Now().UTC().Format(time.RFC3339),
-		Created:     time.Now().UTC().Format(time.RFC3339),
+		ID:           mpminternal.GenerateID(),
+		Title:        title,
+		SourcePath:   filePath,
+		SourceType:   sourceType,
+		Tags:         tags,
+		ImportReason: *reason,
+		Content:      content,
+		ContentHash:  contentHash,
+		TotalChunks:  len(chunks),
+		LastIndexed:  time.Now().UTC().Format(time.RFC3339),
+		Created:      time.Now().UTC().Format(time.RFC3339),
 	}
 
 	for i := range refChunks {
@@ -773,15 +776,20 @@ func handleRefAdd(args []string) int {
 	if *jsonOutput {
 		tagsStr := strings.Join(tags, ",")
 		data, _ := json.Marshal(map[string]interface{}{
-			"success":      true,
-			"id":           doc.ID,
-			"title":        doc.Title,
-			"total_chunks": doc.TotalChunks,
-			"tags":         tagsStr,
+			"success":       true,
+			"id":            doc.ID,
+			"title":         doc.Title,
+			"total_chunks":  doc.TotalChunks,
+			"tags":          tagsStr,
+			"import_reason": doc.ImportReason,
 		})
 		fmt.Println(string(data))
 	} else {
-		fmt.Printf("Added reference: %s (%d chunks)\n", title, len(chunks))
+		if doc.ImportReason != "" {
+			fmt.Printf("Added reference: %s (%d chunks)\n  reason: %s\n", title, len(chunks), doc.ImportReason)
+		} else {
+			fmt.Printf("Added reference: %s (%d chunks)\n", title, len(chunks))
+		}
 	}
 	return 0
 }
@@ -819,11 +827,12 @@ func handleRefList(args []string) int {
 
 	if *jsonOutput {
 		type refEntry struct {
-			ID          string `json:"id"`
-			Title       string `json:"title"`
-			TotalChunks int    `json:"total_chunks"`
-			Tags        string `json:"tags"`
-			CreatedAt   string `json:"created_at"`
+			ID           string `json:"id"`
+			Title        string `json:"title"`
+			TotalChunks  int    `json:"total_chunks"`
+			Tags         string `json:"tags"`
+			ImportReason string `json:"import_reason"`
+			CreatedAt    string `json:"created_at"`
 		}
 		result := make([]refEntry, 0, len(refs))
 		for _, r := range refs {
@@ -844,14 +853,19 @@ func handleRefList(args []string) int {
 			if t, ok := r["tags"].(string); ok {
 				tags = t
 			}
+			reason := ""
+			if rr, ok := r["import_reason"].(string); ok {
+				reason = rr
+			}
 			refID, _ := r["id"].(string)
 			refTitle, _ := r["title"].(string)
 			result = append(result, refEntry{
-				ID:          refID,
-				Title:       refTitle,
-				TotalChunks: chunks,
-				Tags:        tags,
-				CreatedAt:   created,
+				ID:           refID,
+				Title:        refTitle,
+				TotalChunks:  chunks,
+				Tags:         tags,
+				ImportReason: reason,
+				CreatedAt:    created,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{"references": result})
@@ -880,13 +894,23 @@ func handleRefList(args []string) int {
 		}
 		refID, _ := r["id"].(string)
 		refTitle, _ := r["title"].(string)
+		reason := ""
+		if rr, ok := r["import_reason"].(string); ok && rr != "" {
+			r := rr
+			if len(r) > 100 {
+				r = r[:97] + "..."
+			}
+			reason = fmt.Sprintf("\n       reason: %s", r)
+		}
 		fmt.Printf("  %s | %s | %d chunks |%s\n",
 			refID[:min(len(refID), 16)],
 			refTitle,
 			chunks,
 			tags)
 		if created != "" {
-			fmt.Printf("       created: %s\n", created)
+			fmt.Printf("       created: %s%s\n", created, reason)
+		} else if reason != "" {
+			fmt.Printf("       %s\n", reason[1:]) // strip leading newline
 		}
 	}
 	return 0

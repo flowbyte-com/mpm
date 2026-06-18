@@ -92,6 +92,7 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS reference_docs (
 		id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
 		source_type TEXT, tags TEXT, content TEXT NOT NULL, content_hash TEXT,
+		import_reason TEXT,
 		total_chunks INTEGER DEFAULT 0, last_indexed TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
@@ -243,4 +244,5 @@ var SafeMigrations = [][3]string{
 	{"lessons",  "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
+	{"reference_docs", "import_reason", "TEXT"},
 }
