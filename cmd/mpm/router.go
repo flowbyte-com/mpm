@@ -155,8 +155,12 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
+	case "backup":
+		return handleBackup(args)
 	case "restore":
 		return handleRestore(args)
+	case "restore-db":
+		return handleRestoreDB(args)
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":

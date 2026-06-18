@@ -1337,6 +1337,9 @@ func handleRestore(args []string) int {
 		id,
 	).Scan(&currentIsLTM, &currentWeight)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
