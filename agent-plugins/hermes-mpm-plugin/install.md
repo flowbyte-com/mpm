@@ -64,7 +64,7 @@ Symlink the plugin into Hermes's tool discovery directory:
 
 ```bash
 HERMES_ROOT=${HERMES_ROOT:-~/.hermes/hermes-agent}
-PLUGIN_SRC=/home/v/workspace/projects/mpm/hermes-mpm-plugin  # ← adjust to your path
+PLUGIN_SRC=/home/v/workspace/projects/mpm/agent-plugins/hermes-mpm-plugin  # ← adjust to your path
 
 ln -sf "$PLUGIN_SRC" "$HERMES_ROOT/tools/mpm_plugin"
 ```
