@@ -4,105 +4,163 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **MPM** monorepo — Memory Persistence Module — Agent-owned SQLite brain. No server, no daemon, just persistence.:
+**MPM** (Memory Persistence Module) is a SQLite-native memory and reasoning infrastructure for autonomous AI agents. It persists not just facts, but the *reasoning* behind them — decisions, theories, evidence, and lessons — so agents can continue building on prior knowledge rather than re-discovering conclusions.
 
-| Directory | Language | Description |
-|-----------|----------|-------------|
-| `mpm/` | Go | SQLite-native agent state management (memory layer) |
-| `mpm/mpm-agent/` | Go | Self-improving AI agent (CLI REPL, Telegram bot, MCP server) |
+Core capabilities (the "Epistemology Engine"):
+- **Memories** — weighted, searchable facts with reinforcement and decay
+- **Decisions** — architectural choices with context, choice, and rationale
+- **Theories** — hypotheses with explicit validation status (pending/confirmed/disproven)
+- **Lessons** — reusable knowledge that survives across tasks
+- **Sessions** — operational context for resuming work
+- **Challenges** — workflow for self-correcting stale knowledge
 
-## Building & Testing
+Everything lives in a single SQLite database (`src/db/mpm.db`) — no server, no daemon, no external services. The binary is the database.
 
-**MPM (primary):**
+## Build & Test
+
 ```bash
-cd /home/v/workspace/projects/mpm
-make build    # Build to bin/mpm
-make test     # Run tests
-make install  # Install to /usr/local/bin/mpm
+make build                          # Build to bin/mpm
+make test                           # Run all Go tests (verbose, race-detector on)
+make install BIN=mpm                # Install to /usr/local/bin/mpm
 ```
 
-**Single test:** `go test -v ./internal/... -run TestFunctionName`
+**Build requirements:** CGO with FTS5 enabled. The Makefile sets `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1` and uses `-tags fts5` for `mattn/go-sqlite3`. If invoking `go` directly, mirror those flags or FTS5 queries fail silently.
 
-**mpm-agent:**
+**Single test:**
 ```bash
-cd /home/v/workspace/projects/mpm/mpm-agent
-make build BIN=bin/mini-bot        # Build specific binary
-make build                         # Build all 3 binaries
-CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go test ./core/...
+go test -tags fts5 -v ./internal/... -run TestFunctionName
 ```
 
-FTS5 must be enabled via `CGO_CFLAGS="-DSQLITE_ENABLE_FTS5"`.
-
-## MPM Architecture
-
-**Single-process, shared-database model.** No socket IPC, no separate daemon. Commands execute directly in the same process. File watching runs as a background goroutine within the binary (detached with `mpm watch start --bg`).
-
-```
-┌─────────────────────────────────────────────┐
-│                   mpm binary                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐ │
-│  │   CLI    │──▶│  Router  │──▶│ Handlers │ │
-│  └──────────┘   └──────────┘   └────┬─────┘ │
-│                                      │       │
-│  Background: goroutine pool + fsnotify │
-│                  watcher             │       │
-│                         ┌────────────▼────┐ │
-│                         │  DBManager      │ │
-│                         │  (SQLite + WAL) │ │
-│                         └────────────┬────┘ │
-│              ┌───────────────────────┘      │
-│              ▼                               │
-│         src/db/mpm.db                        │
-└─────────────────────────────────────────────┘
+**Watch daemon test suite (slow):**
+```bash
+go test -tags fts5 -v ./cmd/mpm/... -run TestWatch
 ```
 
-**Key architectural points:**
-- All access via one `DatabaseManager` instance sharing a single SQLite connection with WAL mode
-- Background goroutines process file watcher events (fsnotify) concurrently
-- PID file (`watch.pid`) for inter-process communication with detached mode
+## Repository Layout
 
-**Memory model:** Everything is a **memory**. Collections distinguish types:
-- `memories` — general facts/knowledge
-- `session` — session-derived facts
-- LTM (long-term memory) = weight ≥ 10, promoted via `mpm promote` or auto-ingested `.md` files
+```
+mpm/
+├── cmd/mpm/                  # CLI entry, command router, handlers
+│   ├── main.go               # Entry point; caps GOMAXPROCS at 32
+│   ├── router.go             # Command → handler registry (~80 commands)
+│   ├── handlers*.go          # Per-command handler implementations
+│   ├── call.go               # `mpm call <tool> --payload <json>` universal machine interface
+│   ├── web.go / web_handlers.go   # HTTP server + REST API
+│   ├── stream.go             # SSE broker (live telemetry)
+│   ├── watch.go              # fsnotify-based file ingestion daemon
+│   ├── synthesize_cmds.go    # Memory dedup via LLM synthesis
+│   ├── handlers_backup.go    # backup/restore-db (⚠ see Security section)
+│   └── web/                  # Static frontend (app.js, index.html, style.css)
+├── internal/                 # Core packages (no external consumers)
+│   ├── db.go                 # DatabaseManager — single shared SQLite conn (WAL)
+│   ├── memory.go             # MemoryStore, Memory struct, secret/poison scanner
+│   ├── schema.go             # BaseTables, CommonIndexes, SafeMigrations
+│   ├── search.go             # FTS5 query interface
+│   ├── hybrid_search.go      # BM25 + semantic + reinforcement scoring
+│   ├── synthesis_isolation.go  # SynthesisWorker — goroutine pool, DLQ
+│   ├── dlq.go                # Dead-letter queue for failed synth attempts
+│   ├── ingest.go             # External-Source → raw_memories pipeline
+│   ├── idle_dream.go         # Background consolidation worker
+│   ├── lessons.go            # Lesson CRUD
+│   ├── reference_new.go      # Reference docs (PDF/EPUB/MD parsing)
+│   ├── embeddings.go         # Embedding provider abstraction
+│   ├── versioning.go         # Memory revisions (point-in-time reconstruction)
+│   └── web_db.go             # Web-API-specific query helpers
+├── src/db/mpm.db             # Single canonical database (WAL mode)
+├── mode/ persona/            # JSON / Markdown configs for behavioral modes
+├── mpm-agent/                # Subproject: mpm-agent (CLI REPL, Telegram bot, MCP)
+└── docs/                     # security-review, SSE_TELEMETRY, MPM_WISHLIST
+```
 
-**Relevance scoring:** `score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
+The `mpm-agent/` subproject is a separate Go module with its own `go.mod`, `mini-bot.db`, and three binaries (`mini-bot`, `mini-bot-telegram`, `mini-bot-mcp`). Build separately; it is *not* part of the main `mpm` binary.
 
-**Path resolution:** `MPM_WORKSPACE` env var → `~/.mpm/` → current working directory
+## Core Architecture
 
-## mpm-agent Architecture
+**Single-process, shared-database model.** No socket IPC, no separate daemon. Commands execute in the same process as the file watcher. Background goroutines (synthesis, idle dream, lifecycle decay) share the single `DatabaseManager` connection.
 
-Three entry points: `mini-bot` (CLI REPL), `mini-bot-telegram` (Telegram daemon), `mini-bot-mcp` (MCP server).
+```
+┌─────────────────────────────────────────────────┐
+│                    mpm binary                   │
+│  CLI ──▶ router ──▶ handler ──┐                 │
+│                               │                 │
+│  background goroutines:       │                 │
+│    • fsnotify watch           ▼                 │
+│    • SynthesisWorker ──▶ DatabaseManager        │
+│    • idle_dream        (single SQLite conn,     │
+│    • lifecycle decay    WAL, FTS5, busy_timeout)│
+│                               │                 │
+│  web server (:18792)  ───────┘                 │
+└─────────────────────────────┬───────────────────┘
+                              ▼
+                       src/db/mpm.db
+```
 
-**Identity-first system prompt** (`BuildSystemPromptWithIdentity` in `core/agent.go`):
-Priority: IDENTITY.md → anchored memories → memories → directives → references
+**Key types:**
+- `DatabaseManager` (`internal/db.go`) — the *only* connection pool. All writes go through it (often via `ExecTracked` for watchdog visibility). Enforces 5s `busy_timeout`, WAL, foreign keys.
+- `MemoryStore` (`internal/memory.go`) — higher-level wrapper. **This is the only code path that runs the 20-pattern secret/poison regex check.** Lower-level `DatabaseManager.SaveMemory` skips it.
+- `SynthesisWorker` (`internal/synthesis_isolation.go`) — isolated goroutine pool (`maxWorkers=3`) with its own event channel, semaphore, and DLQ for failed LLM synth attempts.
+- `SSEBroker` (`cmd/mpm/stream.go`) — singleton; `call.go`, `handlers.go`, `watch.go` all broadcast to it. 50-event ring buffer for `Last-Event-ID` reconnect.
 
-**Toolkit lazy-loading:**
-- Tool profiles (`standard`, `coding`) define base tools
-- Toolkits (`files`, `web`, `mpm`, `shell`, etc.) load dynamically via `load_toolkit()`
-- Four base tools always registered: `list_toolkits`, `load_toolkit`, `unload_toolkit`, `execute_mpm_command`
+**Relevance scoring** (in `hybrid_search.go`):
+`score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
 
-**Self-improvement system** (`core/selfimprove.go`):
-1. Memory anchoring — user messages >50 chars anchor as high-priority context
-2. Lesson extraction — exchanges create lessons with reinforcement tracking
-3. Identity patching — bot proposes changes to `IDENTITY_PATCH.md`, human approves
+**LTM promotion:** `weight ≥ 10` OR explicit `mpm promote` OR auto-ingested `.md` file.
 
-**Identity branching** (`core/identity_fork.go`): Full fork/promote system for identity versions.
+## Database Schema
 
-## Database
+All tables are defined in `internal/schema.go` as `BaseTables` (DDL), `CommonIndexes` (indexes), and `SafeMigrations` (column additions for upgrade-in-place). The split exists so tests can construct an in-memory DB with just `BaseTables + CommonIndexes`.
 
-**MPM:** Single `src/db/mpm.db` (WAL mode). Tables: `memories`, `sessions`, `topics`, `modes`, `personas`, `lessons`, `reference_docs`, `reference_chunks`.
+Tables: `memories`, `sessions`, `topics`, `topic_memberships`, `lessons`, `system_config`, `raw_memories`, `external_db_cursors`, `reference_docs`, `reference_chunks`, `memory_revisions`.
 
-**mpm-agent:** `mini-bot.db` shared by session manager and agent. Schema defined in both `core/db.go:InitMiniBotDB` and `cmd/telegram/session.go:initSessionDB` (must remain in sync).
+FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they reference the `memories` table.
 
-## Security
+## Security — Read This Before Touching Write Paths
 
-All content scanned against 20 regex patterns (API keys, JWTs, SSH keys, `password=`, etc.) before database writes. Blocked content logged to `mirror.jsonl`, never the database.
+The 20-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned` in `internal/memory.go`) is **only invoked from `MemoryStore.AddMemory`**. Most other write paths call `DatabaseManager.SaveMemory` directly and **bypass the scan entirely**. See `docs/security-review-2026-06-15.md` for the full audit (24 findings).
+
+**Before adding a new write path, route it through `MemoryStore.AddMemory`, or push the scanner down into `DatabaseManager.SaveMemory`.** The known bypass call sites:
+- `cmd/mpm/watch.go:863, 889, 958` (watch daemon ingest)
+- `cmd/mpm/web_handlers.go:97` (web `POST /api/memories`)
+- `cmd/mpm/simple_cmds.go:97` (`mpm remember`)
+- `cmd/mpm/handlers.go:4633` (`record_decision`)
+- `internal/idle_dream.go:456`, `internal/synthesis_isolation.go:463`, `internal/synthesize.go:631`
+
+**Other known-bad patterns to avoid:**
+- `authValid()` in `cmd/mpm/stream.go:160` and `withAuth()` in `cmd/mpm/web.go:132` **fail open** when `web_token` is empty (the default). Combined with the bypass above, default `mpm web` on a LAN is fully unauthenticated. Fix in flight per the audit remediation plan.
+- `mpm call add_reference --payload '{"filepath":"…"}'` reads any file the mpm user can read with no allow-list or size cap (`cmd/mpm/call.go:694-721`).
+- `mpm restore-db` pipes a dump to `sqlite3` via stdin — a tampered `.sql` with a leading `.shell` line gets executed as a shell command. Use `mattn/go-sqlite3` `db.Exec(string(content))` instead (`cmd/mpm/handlers_backup.go:166-180`).
+- HTTP server has no timeouts, no body size cap, no security headers, CORS `*` on SSE. See audit items #4, #14, #15, #16.
+- `cmd/mpm/web/app.js` builds HTML via string concat; some `onclick=` interpolations of `m.id` skip the `q()` escape. Future caller-controlled IDs become stored XSS.
+
+## Configuration
+
+`mpm_config.json` in the workspace root. Loaded by `internal/config/config.go`. Contains:
+- `memory_dirs`, `sessions_dirs` — watched paths
+- `synth.{model, api_key, base_url, max_tokens, timeout_seconds}` — LLM config for synthesis
+- `web_token` — bearer token for the web/SSE API (optional in current code → unauthenticated default)
+
+The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775` and a real `synth.api_key`. **Never commit a populated `mpm_config.json`.** Only `mpm_config.json.example` (template) is safe in git.
+
+## Path Resolution
+
+`MPM_WORKSPACE` env var → `$HOME/.openclaw/workspace/projects/mpm` (compile-time default in `main.go:40`) → CWD fallback. No hardcoded paths.
+
+## Threading & Resource Limits
+
+`main.go:36` caps `runtime.GOMAXPROCS(32)` at process init. This is deliberate — the default (unlimited) can spawn hundreds of OS threads on a many-core machine and OOM the host. Don't lower it without measuring; don't raise it.
+
+## Testing Notes
+
+- `internal/*_test.go` — fast, table-driven, mostly in-memory. Use these for unit changes.
+- `cmd/mpm/*_test.go` — integration tests against a temp database. Slower; some (e.g. `watch_lifecycle_test.go`, `recall_test.go`) spawn real goroutines.
+- `reliability_sprint_test.go`, `lifecycle_decay_test.go`, `synthesis_isolation_test.go` — exercise the failure paths (DLQ overflow, SQLite BUSY races, weight-floor split-brain). Read these when changing concurrency or persistence semantics.
+- Tests assume FTS5 is compiled in. CI must export `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5` or tests will panic.
 
 ## Gotchas
 
-- `mpm watch start --bg` spawns a detached child — parent exits immediately; child blocks on `select{}` until signaled
-- `cleanResponse()` in Telegram handler strips thinking blocks (`<thinking>`, `《》`, `（）》`) — other entry points see raw blocks
-- `selfImprove()` in Telegram handler opens its own db connection (goroutine, runs after response)
-- `mini-bot.db` is opened independently by session manager and agent — SQLite handles concurrent reads; writes retry with exponential backoff
-- Both `core/db.go` and `cmd/telegram/session.go` define the full schema — must stay in sync
+- **Single shared connection.** All goroutines go through one `*sql.DB` with `SetMaxOpenConns(1)`-ish behavior. Don't `sql.Open` new connections inside hot paths — use `DatabaseManager`. The hostile audit (memory: `mpm-hostile-audit-2026-06-03`) had a bug from `RunLifecycleDecayAndArchival` opening a new connection per tick and exhausting the WAL pool.
+- **Watch daemon** is detached: `mpm watch start --bg` spawns a child that `select{}`s on signals. Parent exits immediately. PID file is `watch.pid` in the workspace.
+- **SSE broker** is a package-level singleton. To broadcast a new event type, add a `Broadcast(...)` helper in `stream.go` — don't instantiate your own broker.
+- **Frontend (`cmd/mpm/web/app.js`)** uses inline `onclick=` attributes and string-concat HTML rendering. If you add new entity types (cards/menus), prefer `addEventListener` + `textContent` from the start; the audit flagged this as a future-XSS hazard.
+- **Memory scoring uses `reinforcement_count` and `weight` independently** — bumping one doesn't bump the other. `mpm reinforce` and `mpm set-weight` are separate commands for a reason.
+- **`call.go`** is the universal machine interface. Adding a new tool? Register it in `call.go` so other processes (mpm-agent, OpenClaw) can invoke it via `mpm call <name> --payload <json>`.

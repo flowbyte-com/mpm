@@ -5,11 +5,44 @@ from .base import run_mpm_call
 MPM_TOOLSET = "mpm"
 
 
+CONCEPT_DRIFT_BANNER = "[SYSTEM WARNING: This knowledge is under active Concept Drift investigation — treat as potentially obsolete]"
+CHALLENGED_BANNER = "[Note: This memory is challenged — treat as unverified]"
+
+
 def _handle_query_long_term_memory(args, **kw):
-    return run_mpm_call("query_long_term_memory", {
+    result = run_mpm_call("query_long_term_memory", {
         "query": args.get("query", ""),
         "limit": args.get("limit", 5),
     })
+
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return result
+
+    memories = result.get("memories", [])
+    if not memories:
+        return result
+
+    # Format memories as readable text, surfacing drift/challenge banners
+    lines = []
+    for i, mem in enumerate(memories, 1):
+        banner = mem.get("banner", "")
+        content = mem.get("content", "")
+        weight = mem.get("weight", 0)
+        tags = mem.get("tags", "")
+        collection = mem.get("collection", "")
+
+        block = []
+        if banner:
+            block.append(banner)
+        block.append(f"[{i}] {content}")
+        block.append(f"    weight={weight} | tags={tags} | collection={collection}")
+        lines.append("\n".join(block))
+
+    return {
+        "success": True,
+        "count": len(memories),
+        "results": "\n\n".join(lines),
+    }
 
 
 def _handle_save_to_memory(args, **kw):

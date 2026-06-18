@@ -77,7 +77,9 @@ func (dm *DatabaseManager) SaveMemoryWithContext(
 		meta["weight_intent"] = int(weight * 10)
 	}
 
-	mem, err := store.AddMemory(fact, collection, tags, meta, "", "call")
+	// Use AddMemoryWithWeight so the caller's weight actually reaches the
+	// weight column instead of falling back to the DB default (or Go zero).
+	mem, err := store.AddMemoryWithWeight(fact, collection, tags, meta, "", "call", weight)
 	if err != nil {
 		return nil, nil, fmt.Errorf("add memory: %w", err)
 	}
@@ -103,25 +105,49 @@ func (dm *DatabaseManager) HybridSearchMemories(query, collection string, limit 
 	if limit <= 0 {
 		limit = 5
 	}
-	store, err := dm.getSharedStore()
+	cfg := DefaultHybridConfig()
+	cfg.Limit = limit
+	mems, err := HybridSearch(dm, query, collection, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("get memory store: %w", err)
-	}
-	mems, err := store.HybridSearch(query, collection, limit)
-	if err != nil {
-		mems, err = store.FullTextSearch(query, collection, limit)
-		if err != nil {
-			return nil, fmt.Errorf("search: %w", err)
+		// Fallback: try FullTextSearch alone (no vector, no quarantine)
+		store, storeErr := dm.getSharedStore()
+		if storeErr != nil {
+			return nil, fmt.Errorf("hybrid search: %w; fallback store: %v", err, storeErr)
+		}
+		fallback, fallbackErr := store.FullTextSearch(query, collection, limit)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("hybrid search: %w; fulltext fallback: %v", err, fallbackErr)
+		}
+		mems = nil // signal fallback mode
+		for _, m := range fallback {
+			mems = append(mems, HybridResult{
+				ID:         m.ID,
+				Content:    m.Content,
+				Collection: m.Collection,
+				Tags:       strings.Join(m.Tags, ","),
+				Weight:     m.Weight,
+			})
 		}
 	}
 	items := make([]map[string]interface{}, 0, len(mems))
 	for _, m := range mems {
+		// Extract banner from content if present (banner is prepended in Phase 5)
+		var banner string
+		if m.IsConceptDrift {
+			banner = conceptDriftWarning
+		} else if m.IsChallenged {
+			banner = challengeWarning
+		}
 		items = append(items, map[string]interface{}{
-			"id":         m.ID,
-			"content":    m.Content,
-			"weight":     m.Weight,
-			"tags":       m.Tags,
-			"collection": m.Collection,
+			"id":                  m.ID,
+			"content":             m.Content,
+			"weight":              m.Weight,
+			"tags":                m.Tags,
+			"collection":          m.Collection,
+			"banner":              banner,
+			"is_concept_drift":    m.IsConceptDrift,
+			"is_challenged":       m.IsChallenged,
+			"challenged_theory_id": m.ChallengedTheoryID,
 		})
 	}
 	return items, nil

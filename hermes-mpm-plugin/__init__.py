@@ -15,6 +15,7 @@ from . import recall_tools        # noqa: F401 — registers recall tools
 from . import reference_tools     # noqa: F401 — registers reference tools
 from . import session_tools       # noqa: F401 — registers session tools
 from . import topic_tools         # noqa: F401 — registers topic tools
+from . import evidence_tools      # noqa: F401 — registers evidence and confidence tools
 
 __all__ = [
     "epistemology_tools",
@@ -24,4 +25,5 @@ __all__ = [
     "reference_tools",
     "session_tools",
     "topic_tools",
+    "evidence_tools",
 ]
