@@ -3,11 +3,13 @@ __pycache__/
 .vscode/
 *.log
 
-# Compiled binaries
+# Compiled binaries (mpm itself)
 bin/
-mini-bot
-mpm-agent/mini-bot
-mpm-agent/bin/
+
+# mpm-agent is a sibling project at ../mpm-agent, not a subdir.
+# Its build artifacts live in its own .gitignore. Defensive rule
+# below in case the dir is ever recreated inside mpm/.
+mpm-agent/
 
 # Runtime state (never commit these)
 src/db/mpm.db
