@@ -1,0 +1,18 @@
+# Build / dependency artifacts for any plugin under this folder.
+# Each plugin keeps its own source; everything else is noise.
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/env/
+
+**/node_modules/
+**/dist/
+**/build/
+**/.tsbuildinfo
+**/*.tsbuildinfo
+
+**/.mcp.json

@@ -6,7 +6,7 @@
 // server and the `mpm call <tool>` CLI (cmd/mpm/call.go).
 //
 // Descriptions and arg schemas are copied from
-// opencode-mpm-plugin/src/index.ts (the OpenClaw plugin's tool surface).
+// agent-plugins/opencode-mpm-plugin/src/index.ts (the OpenClaw plugin's tool surface).
 // The Python plugin in .claude/mpm-mcp/server.py has a smaller subset
 // (read_wake_context, read_directives, propose_theory, resolve_theory,
 // record_decision, proactive_recall_hint) which is fully covered here.
