@@ -961,6 +961,120 @@ func (dm *DatabaseManager) GetMostUsedReferences(limit int) ([]map[string]interf
 	return out, rows.Err()
 }
 
+// FindAdmissionCandidates returns chunks that have been retrieved enough
+// times to be worth evaluating as memory candidates. The trigger is
+// "3+ hits across 2+ distinct queries" per chunk — frequent enough to
+// suggest real value, varied enough to suggest the chunk carries a
+// pattern that survives different framings.
+//
+// For each candidate, also returns:
+//   - the import_reason of the parent reference (so the LLM sees the seed)
+//   - the recent queries that surfaced it (so the LLM sees the framings)
+//   - the chunk content (so the LLM can extract the pattern)
+//
+// Excludes chunks from references that already produced an admitted
+// memory in the last 7 days for the same chunk — repeated admission is
+// wasteful and the existing memory's reinforcement is the right signal.
+func (dm *DatabaseManager) FindAdmissionCandidates(limit int) ([]*AdmissionCandidate, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := dm.db.Query(`
+		SELECT
+			i.chunk_id,
+			r.id,
+			r.title,
+			r.import_reason,
+			rc.content,
+			count(i.id) as hits,
+			count(DISTINCT i.query) as distinct_queries
+		FROM reference_interactions i
+		JOIN reference_docs r ON r.id = i.doc_id
+		JOIN reference_chunks rc ON rc.id = i.chunk_id
+		WHERE i.chunk_id IS NOT NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM memory_revisions mr
+		    JOIN memories m ON m.id = mr.memory_id
+		    WHERE mr.content LIKE '%' || substr(rc.content, 1, 80) || '%'
+		      AND mr.created_at > datetime('now', '-7 days')
+		  )
+		GROUP BY i.chunk_id
+		HAVING count(i.id) >= 3 AND count(DISTINCT i.query) >= 2
+		ORDER BY count(i.id) DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*AdmissionCandidate{}
+	for rows.Next() {
+		var chunkID, docID, title, importReason, content string
+		var hits, distinctQueries int
+		if err := rows.Scan(&chunkID, &docID, &title, &importReason, &content, &hits, &distinctQueries); err != nil {
+			continue
+		}
+		candidate := &AdmissionCandidate{
+			DocID:           docID,
+			DocTitle:        title,
+			ChunkID:         chunkID,
+			ChunkContent:    content,
+			ImportReason:    importReason,
+			HitCount:        hits,
+			DistinctQueries: distinctQueries,
+		}
+		// Pull recent queries that surfaced this chunk.
+		qRows, err := dm.db.Query(`
+			SELECT DISTINCT query FROM reference_interactions
+			WHERE chunk_id = ?
+			ORDER BY created_at DESC
+			LIMIT 10
+		`, chunkID)
+		if err == nil {
+			for qRows.Next() {
+				var q string
+				if err := qRows.Scan(&q); err == nil {
+					candidate.RecentQueries = append(candidate.RecentQueries, q)
+				}
+			}
+			qRows.Close()
+		}
+		out = append(out, candidate)
+	}
+	return out, rows.Err()
+}
+
+// RecordAdmissionOutcome writes the result of an admission evaluation to
+// the audit trail. On admit, the caller is expected to have already
+// written the memory; this records the chain. On reject, this is the
+// only record that the candidate was evaluated.
+//
+// Stored in a sibling table `admission_log` so it does not pollute
+// reference_interactions (which is the retrieval audit, not the
+// admission audit). The two have different semantics and different
+// consumers.
+func (dm *DatabaseManager) RecordAdmissionOutcome(candidate *AdmissionCandidate, result *admitResult, admissionModel string) error {
+	chainJSON, _ := json.Marshal(result.Justification)
+	_, err := dm.db.Exec(`
+		INSERT INTO admission_log (
+			id, doc_id, chunk_id, admit, content, confidence, reason,
+			justification, admission_model, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		GenerateID(),
+		candidate.DocID,
+		candidate.ChunkID,
+		result.Admit,
+		result.Content,
+		result.Confidence,
+		result.Reason,
+		string(chainJSON),
+		admissionModel,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
 // DeleteReference removes a reference doc and its chunks (cascade from FK).
 // Both DELETEs run inside a single transaction so a crash mid-write cannot
 // leave orphan chunks behind (FK cascade would normally handle it, but only

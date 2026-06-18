@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1293,6 +1294,246 @@ func handleRefUsed(args []string) int {
 	return 0
 }
 
+// handleRefAdmit runs the admission function: finds chunks that have been
+// retrieved 3+ times across 2+ distinct queries, sends each to the LLM
+// for evaluation, and writes admitted memories (or rejected audit rows).
+//
+// Per decision 9aa0ee2c6de8492a: LLM-based, autonomous, single-model per
+// call. The admitting model produces both the admit/reject and the chain.
+// v is not in the loop; the audit trail (admission_log + memory metadata)
+// is the surface v reviews when v chooses to.
+func handleRefAdmit(args []string) int {
+	fs := flag.NewFlagSet("reference admit", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	limit := fs.Int("limit", 5, "Max candidates to evaluate per run")
+	dryRun := fs.Bool("dry-run", false, "Find candidates but do not call the LLM or write anything")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+	*jsonOutput, _ = ExtractJSONFlag(args[1:])
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	defer dm.Close()
+
+	candidates, err := dm.FindAdmissionCandidates(*limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding candidates: %v\n", err)
+		return 1
+	}
+	if len(candidates) == 0 {
+		if *jsonOutput {
+			fmt.Println(`{"admitted":0,"rejected":0,"candidates":0}`)
+		} else {
+			fmt.Println("No admission candidates (need 3+ hits across 2+ distinct queries per chunk).")
+		}
+		return 0
+	}
+
+	if *dryRun {
+		if *jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{
+				"dry_run":    true,
+				"candidates": len(candidates),
+				"items":      candidates,
+			})
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("Found %d admission candidates (dry-run, not evaluated):\n", len(candidates))
+			for i, c := range candidates {
+				title := c.DocTitle
+				if len(title) > 50 {
+					title = title[:47] + "..."
+				}
+				fmt.Printf("  %d. %s (chunk %s) — %d hits, %d distinct queries\n",
+					i+1, title, c.ChunkID[:min(len(c.ChunkID), 12)], c.HitCount, c.DistinctQueries)
+			}
+		}
+		return 0
+	}
+
+	client := mpminternal.NewSynthClient()
+	if client.APIKey == "" {
+		fmt.Fprintf(os.Stderr, "Error: no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)\n")
+		return 1
+	}
+
+	// Read active context for memory provenance.
+	active := loadActiveForAdmission()
+	results := []map[string]interface{}{}
+	admitted := 0
+	rejected := 0
+	errs := 0
+	for _, candidate := range candidates {
+		// Enrich candidate with active context.
+		activeProject, nearestTheories := enrichCandidate(dm, active)
+		candidate.ActiveProject = activeProject
+		candidate.NearestTheories = nearestTheories
+
+		ctx, cancel := context.WithTimeout(context.Background(), client.Timeout)
+		result, err := client.EvaluateCandidate(ctx, candidate)
+		cancel()
+		if err != nil {
+			errs++
+			if *jsonOutput {
+				results = append(results, map[string]interface{}{
+					"chunk_id": candidate.ChunkID,
+					"doc_id":   candidate.DocID,
+					"error":    err.Error(),
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "  err on %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+			}
+			continue
+		}
+
+		// Record the outcome to admission_log regardless of admit/reject.
+		if err := dm.RecordAdmissionOutcome(candidate, result, client.Model); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: failed to record admission outcome for %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+		}
+
+		if !result.Admit {
+			rejected++
+			if *jsonOutput {
+				results = append(results, map[string]interface{}{
+					"chunk_id": candidate.ChunkID,
+					"doc_id":   candidate.DocID,
+					"admit":    false,
+					"reason":   result.Reason,
+				})
+			} else {
+				title := candidate.DocTitle
+				if len(title) > 50 {
+					title = title[:47] + "..."
+				}
+				fmt.Printf("  reject: %s — %s\n", title, result.Reason)
+			}
+			continue
+		}
+
+		// Admit: write memory via SaveMemoryWithContext. The ActiveContext
+		// carries the admission model name so it lands in metadata.provenance.model
+		// and the memory_source_evidence_ai trigger attributes the memory to
+		// the admission model.
+		admissionAC := mpminternal.ActiveContext{
+			Mode:    active.Mode,
+			Persona: active.Persona,
+			Model:   client.Model,
+			Agent:   "mpm_admission",
+		}
+		// Merge LLM tags with provenance tags.
+		tags := append([]string{"admission", "auto"}, result.Tags...)
+		resp, _, err := dm.SaveMemoryWithContext(
+			result.Content,
+			"memories",
+			tags,
+			result.Confidence,
+			"",
+			admissionAC,
+		)
+		if err != nil {
+			errs++
+			fmt.Fprintf(os.Stderr, "  err writing memory for %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+			continue
+		}
+		admitted++
+		if *jsonOutput {
+			results = append(results, map[string]interface{}{
+				"chunk_id":  candidate.ChunkID,
+				"doc_id":    candidate.DocID,
+				"admit":     true,
+				"memory_id": resp["id"],
+				"content":   result.Content,
+				"confidence": result.Confidence,
+				"tags":      result.Tags,
+				"justification": result.Justification,
+			})
+		} else {
+			title := candidate.DocTitle
+			if len(title) > 50 {
+				title = title[:47] + "..."
+			}
+			fmt.Printf("  admit: [%s] %.2f | %s\n", resp["id"], result.Confidence, title)
+			fmt.Printf("    content: %s\n", truncate(result.Content, 200))
+		}
+	}
+
+	if *jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"admitted":   admitted,
+			"rejected":   rejected,
+			"errors":     errs,
+			"candidates": len(candidates),
+			"results":    results,
+		})
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("\nAdmission run complete: %d admitted, %d rejected, %d errors (of %d candidates)\n",
+			admitted, rejected, errs, len(candidates))
+	}
+	return 0
+}
+
+// activeAdmission holds the active mode/persona for memory provenance.
+type activeAdmission struct {
+	Mode    string
+	Persona string
+}
+
+func loadActiveForAdmission() activeAdmission {
+	out := activeAdmission{}
+	data, err := os.ReadFile(activeJSONPath())
+	if err != nil {
+		return out
+	}
+	var st ActiveState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return out
+	}
+	if len(st.Modes) > 0 {
+		out.Mode = st.Modes[0]
+	}
+	out.Persona = st.Persona
+	return out
+}
+
+// enrichCandidate pulls the active project and nearest existing theories
+// for the LLM to evaluate connection. Cheap queries: active project is
+// read from active.json, nearest theories is the top-3 highest-weight
+// memories with at least one tag overlap with the candidate.
+func enrichCandidate(dm *mpminternal.DatabaseManager, active activeAdmission) (string, []string) {
+	// Active project: read from active.json's first mode. If the mode is
+	// "programming" or "debugging", we don't have a project name in MPM
+	// today; leave it blank and let the LLM evaluate without it.
+	activeProject := ""
+	switch active.Mode {
+	case "programming", "debugging", "architect":
+		activeProject = "MPM development (mode: " + active.Mode + ")"
+	case "research", "write":
+		activeProject = "research/writing session"
+	}
+
+	// Nearest theories: top 3 memories with weight > 5.0. Cheap proxy
+	// for "things v cares about" without running another LLM call.
+	theories, _ := dm.SQLDB().Query(`
+		SELECT id, substr(content, 1, 80) FROM memories
+		WHERE deleted_at IS NULL AND weight > 5.0
+		ORDER BY weight DESC LIMIT 3
+	`)
+	defer theories.Close()
+	out := []string{}
+	for theories.Next() {
+		var id, content string
+		if err := theories.Scan(&id, &content); err == nil {
+			out = append(out, content)
+		}
+	}
+	return activeProject, out
+}
+
 // handleRef routes reference subcommands
 func handleRef(args []string) int {
 	if len(args) < 2 {
@@ -1316,6 +1557,8 @@ func handleRef(args []string) int {
 		return handleRefInteractions(args[1:])
 	case "used":
 		return handleRefUsed(args[1:])
+	case "admit":
+		return handleRefAdmit(args[1:])
 	default:
 		printRefHelp()
 		return 1
@@ -1331,6 +1574,7 @@ Usage:
   mpm reference search <query>              Search reference content
   mpm reference used                        Show most-retrieved references
   mpm reference interactions                Show recent retrieval events
+  mpm reference admit [--limit N] [--dry-run]   Run admission function on candidates
   mpm reference shred <id>                   Delete a reference
 
 Supported formats: .txt, .md, .html, .epub, .pdf`)

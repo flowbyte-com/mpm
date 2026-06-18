@@ -125,6 +125,27 @@ var BaseTables = []string{
 	`CREATE INDEX IF NOT EXISTS idx_interactions_chunk ON reference_interactions(chunk_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_interactions_query ON reference_interactions(query);`,
 
+	// Admission log - audit trail for the admission function (Phase 3).
+	// One row per evaluation. Different semantics from reference_interactions
+	// (which is retrieval audit); this is admission audit. The two are kept
+	// separate so each can be queried and analyzed on its own.
+	`CREATE TABLE IF NOT EXISTS admission_log (
+		id TEXT PRIMARY KEY,
+		doc_id TEXT NOT NULL,
+		chunk_id TEXT,
+		admit INTEGER NOT NULL,
+		content TEXT,
+		confidence REAL,
+		reason TEXT,
+		justification TEXT,
+		admission_model TEXT,
+		created_at TEXT NOT NULL,
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_doc ON admission_log(doc_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_admit ON admission_log(admit);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_created ON admission_log(created_at);`,
+
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

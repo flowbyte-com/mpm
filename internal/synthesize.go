@@ -296,6 +296,7 @@ func (sc *SynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVen
 func (sc *SynthClient) parseResponseBody(body []byte, vendor string) ([]byte, error) {
 	wrapper := struct {
 		Content []struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}{}
@@ -305,11 +306,31 @@ func (sc *SynthClient) parseResponseBody(body []byte, vendor string) ([]byte, er
 	if len(wrapper.Content) == 0 {
 		return nil, fmt.Errorf("vendor %s: API returned empty content", vendor)
 	}
-	raw := strings.TrimSpace(wrapper.Content[0].Text)
+	// Find the first content block of type "text". Anthropic-style responses
+	// may include a "thinking" block before the "text" block; using
+	// content[0] would pick up the thinking block which has no Text field.
+	var raw string
+	for _, c := range wrapper.Content {
+		if c.Type == "text" && c.Text != "" {
+			raw = strings.TrimSpace(c.Text)
+			break
+		}
+	}
 	if raw == "" {
-		return nil, fmt.Errorf("vendor %s: LLM returned empty response text", vendor)
+		return nil, fmt.Errorf("vendor %s: LLM returned empty response text (content types: %v)", vendor, contentTypes(wrapper.Content))
 	}
 	return []byte(raw), nil
+}
+
+func contentTypes(blocks []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) []string {
+	out := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		out = append(out, b.Type)
+	}
+	return out
 }
 
 // nearMissCandidate represents a single FTS5 match that is semantically close
