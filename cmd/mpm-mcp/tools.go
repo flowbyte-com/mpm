@@ -69,6 +69,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolQueryMemoryQuality(), handleQueryMemoryQuality(dm))
 	s.AddTool(toolShowConfidence(), handleShowConfidence(dm))
 	s.AddTool(toolRecomputeConfidence(), handleRecomputeConfidence(dm))
+	s.AddTool(toolExplainConfidence(), handleExplainConfidence(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1204,6 +1205,34 @@ func handleRecomputeConfidence(dm *internal.DatabaseManager) server.ToolHandlerF
 		out, err := dm.RecomputeConfidence(artifactID, artifactType)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("recompute_confidence failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── explain_confidence ───────────────────────────────────────────────
+
+func toolExplainConfidence() mcp.Tool {
+	return mcp.NewTool("explain_confidence",
+		mcp.WithDescription("Return the reasoning trace for an artifact's confidence: "+
+			"the full component breakdown of f(evidence, decay). Distinct from "+
+			"query_confidence_history (audit trail) — this answers 'why did I get this number?'"),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to explain.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+	)
+}
+
+func handleExplainConfidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		out, err := dm.ExplainConfidence(artifactID, artifactType)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("explain_confidence failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

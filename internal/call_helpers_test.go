@@ -247,3 +247,24 @@ func TestCallHelpers_RecomputeConfidence_RequiresArtifactID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "artifact_id")
 }
+
+func TestCallHelpers_ExplainConfidence_ComponentBreakdown(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "g", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
+
+	out, err := dm.ExplainConfidence("mem-1", "memory")
+	require.NoError(t, err)
+	assert.Equal(t, true, out["success"])
+	assert.Contains(t, out, "explanation")
+	_, isMap := out["explanation"].(map[string]interface{})
+	assert.True(t, isMap, "explanation must be a map (ConfidenceExplanation JSON shape)")
+}
+
+func TestCallHelpers_ExplainConfidence_RequiresArtifactID(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExplainConfidence("", "memory")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact_id")
+}

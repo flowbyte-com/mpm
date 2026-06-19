@@ -1011,3 +1011,46 @@ func (dm *DatabaseManager) RecomputeConfidence(artifactID, artifactType string) 
 	}
 	return dm.ShowConfidence(artifactID, artifactType)
 }
+
+// ExplainConfidence returns the reasoning trace for an artifact's
+// confidence: the full component breakdown of f(evidence, decay).
+// Distinct from query_confidence_history (audit trail) — this answers
+// "why did I get this number?"
+//
+// Both `mpm call explain_confidence` and the `explain_confidence`
+// MCP tool route through this method, so neither surface can drift
+// in the required-arg check, the artifact-type default, or the
+// wrap shape.
+//
+// Returns: {"success": true, "explanation": <ConfidenceExplanation>}
+// (the explanation is exposed as a generic map matching its JSON shape
+// so callers can read `result.explanation.artifact_id` directly).
+// Required: artifact_id. Optional: artifact_type (default "memory").
+func (dm *DatabaseManager) ExplainConfidence(artifactID, artifactType string) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	exp, err := ExplainConfidence(dm, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("explain confidence: %w", err)
+	}
+	// Expose the explanation as a generic map (its JSON shape) so both
+	// surfaces can index into it by field name without needing to import
+	// the internal type. JSON round-trip is the cheapest, drift-proof way
+	// to keep the wire shape authoritative.
+	expJSON, err := json.Marshal(exp)
+	if err != nil {
+		return nil, fmt.Errorf("encode explanation: %w", err)
+	}
+	var expMap map[string]interface{}
+	if err := json.Unmarshal(expJSON, &expMap); err != nil {
+		return nil, fmt.Errorf("decode explanation: %w", err)
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"explanation": expMap,
+	}, nil
+}
