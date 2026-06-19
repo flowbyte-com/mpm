@@ -38,7 +38,7 @@ go build -tags fts5 ./cmd/mpm-mcp
 
 **Output-shape rule.** Each dm method returns the exact map the existing `call*` handler returns today. Both CLI and MCP pass it through. Existing CLI callers see byte-identical output. New MCP clients see the same shape.
 
-**Validation rule.** `dm.AddEvidence` does required-arg preflight (art_id, type, source_group, created_by) and reads back confidence. Deeper validation (sensitive content, evidence type registry) lives in `internal.AddEvidence`. The dm method is the single entry point for both surfaces, so they cannot diverge.
+**Validation rule.** `dm.AddEvidence` is the validation boundary. It runs the four required-arg checks (art_id, type, source_group, created_by), calls `internal.IsValidEvidenceType` to reject unknown types, fills `Strength` from `internal.DefaultStrength` when zero, and defaults `IndependenceFactor` to 1.0. The deeper checks (sensitive-content scan, type registry lookup) live in `internal.AddEvidence`, which `dm.AddEvidence` then calls — defense-in-depth so a future caller of `internal.AddEvidence` directly still gets validated. The dm method is the single CLI/MCP entry point, so neither surface can bypass validation.
 
 ---
 
