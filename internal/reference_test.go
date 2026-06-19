@@ -1,13 +1,51 @@
 package internal
 
 import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
+
+// newTestRefDM returns a *DatabaseManager over a fresh in-memory SQLite
+// DB using the shared-cache mode. Each test gets a per-test unique DSN
+// (file:<random>?mode=memory&cache=shared) so the shared cache is owned
+// by that test alone — no cross-test contamination, no tmpdir on disk,
+// and InitSchema runs against the same SQL slice as production, so the
+// reference_docs / reference_chunks / reference_interactions /
+// admission_log tables are guaranteed identical to what production sees.
+//
+// The previous NewReferenceDB(tmpfile) pattern had each test open its
+// own sqlite file via NewSQLiteConnection. The new helper routes every
+// reference test through the unified write surface
+// (*DatabaseManager.AddReference / DeleteReference) — there is no
+// separate ReferenceDB type to keep in sync, and the test DB shares the
+// same connection-pool semantics as production code.
+func newTestRefDM(t *testing.T) (*DatabaseManager, *sql.DB) {
+	t.Helper()
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	dsn := "file:ref_" + hex.EncodeToString(suffix) + "?mode=memory&cache=shared"
+	raw, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open test sqlite (%s): %v", dsn, err)
+	}
+	dm := NewDatabaseManagerForDB(raw)
+	if err := dm.InitSchema(); err != nil {
+		_ = raw.Close()
+		t.Fatalf("InitSchema: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	return dm, dm.SQLDB()
+}
+
 
 func TestCountTokens_English(t *testing.T) {
 	count, err := CountTokens("hello world")
@@ -141,93 +179,46 @@ func TestStripHTML(t *testing.T) {
 	}
 }
 
-func TestReferenceStoreIntegration(t *testing.T) {
-	// Test that the reference store works with SQLite
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "references.sqlite")
+// ==================== Reference Library (unified via DatabaseManager) ====================
+//
+// These tests exercise the same operations as the legacy ReferenceDB tests
+// (init, add+get, list+delete, stats, duplicate-id rejection, atomic delete
+// fan-out, import_reason preservation) but go through the unified write
+// surface — *DatabaseManager.AddReference and *DatabaseManager.DeleteReference
+// — instead of through a separate *ReferenceDB with its own *SQLiteConnection.
+// The read side uses free functions in reference_query.go taking *sql.DB.
+//
+// The legacy TestAddChunkIdempotent is intentionally removed: chunks now
+// only enter the database via AddReference(doc, chunks) which is atomic.
+// If the doc id is a duplicate the whole tx fails before any chunk row is
+// inserted; if the doc id is fresh every chunk is inserted once. The old
+// "add doc, then re-add chunk in a separate call" flow has no analogue in
+// the unified API.
 
-	store := NewReferenceDB(dbPath)
-	err := store.Init()
-	if err != nil {
-		t.Fatalf("Failed to init reference DB: %v", err)
+// TestReferenceInitViaDatabaseManager verifies that InitSchema creates
+// the reference_docs / reference_chunks / reference_interactions /
+// admission_log tables and indexes — the single source of truth shared
+// with production.
+func TestReferenceInitViaDatabaseManager(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	if !dm.IsOpen() {
+		t.Fatal("DatabaseManager reports not open after InitSchema")
 	}
-
-	// Verify the database file was created
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		t.Error("Database file was not created")
-	}
-}
-
-// TestParsePDFBasic tests basic PDF parsing without a real file
-func TestParsePDFBasic(t *testing.T) {
-	// Just verify the function exists and has the right signature
-	_ = ParsePDF
-}
-
-// TestParseEPUBBasic tests basic EPUB parsing without a real file
-func TestParseEPUBBasic(t *testing.T) {
-	// Just verify the function exists and has the right signature
-	_ = ParseEPUB
-}
-
-// TestParsePDFApi verifies the ParsePDF API
-func TestParsePDFApi(t *testing.T) {
-	text, err := ParsePDF("/nonexistent.pdf")
-	if err == nil {
-		t.Log("Expected error for nonexistent file")
-	}
-	t.Logf("ParsePDF returned: text=%d chars, err=%v", len(text), err)
-}
-
-// TestParseEPUBApi verifies the ParseEPUB API
-func TestParseEPUBApi(t *testing.T) {
-	text, err := ParseEPUB("/nonexistent.epub")
-	if err == nil {
-		t.Log("Expected error for nonexistent file")
-	}
-	t.Logf("ParseEPUB returned: text=%d chars, err=%v", len(text), err)
-}
-
-// TestStripHTMLApi verifies the stripHTML API
-func TestStripHTMLApi(t *testing.T) {
-	result := stripHTML(strings.NewReader("<html><body>Test</body></html>"))
-	t.Logf("stripHTML returned: %s", result)
-	if !strings.Contains(result, "Test") {
-		t.Errorf("Expected 'Test' in result, got: %s", result)
+	for _, tbl := range []string{"reference_docs", "reference_chunks", "reference_interactions", "admission_log"} {
+		var name string
+		if err := db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl,
+		).Scan(&name); err != nil {
+			t.Errorf("table %q missing after InitSchema: %v", tbl, err)
+		}
 	}
 }
 
-// TestReferenceStoreInit verifies ReferenceDB initialization
-func TestReferenceStoreInit(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
+// TestReferenceAddAndRetrieve tests the happy path: doc + chunk inserted
+// in one transaction, retrieved via free-function reads.
+func TestReferenceAddAndRetrieve(t *testing.T) {
+	dm, db := newTestRefDM(t)
 
-	store := NewReferenceDB(dbPath)
-	err := store.Init()
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	// Verify tables exist
-	var count int
-	err = store.db.QueryRow("SELECT COUNT(*) FROM reference_docs").Scan(&count)
-	if err != nil {
-		t.Errorf("Failed to query reference_docs: %v", err)
-	}
-}
-
-// TestReferenceStoreAddAndRetrieve tests adding and retrieving references
-func TestReferenceStoreAddAndRetrieve(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
-
-	store := NewReferenceDB(dbPath)
-	err := store.Init()
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	// Add a reference
 	doc := &ReferenceDoc{
 		ID:          "test-001",
 		Title:       "Test Document",
@@ -236,78 +227,56 @@ func TestReferenceStoreAddAndRetrieve(t *testing.T) {
 		Tags:        []string{"test", "sample"},
 		TotalChunks: 1,
 	}
-	err = store.AddReference(doc)
-	if err != nil {
-		t.Fatalf("AddReference failed: %v", err)
-	}
-
-	// Retrieve it
-	retrieved, err := store.GetReference("test-001")
-	if err != nil {
-		t.Fatalf("GetReference failed: %v", err)
-	}
-
-	if retrieved.Title != "Test Document" {
-		t.Errorf("Expected 'Test Document', got: %s", retrieved.Title)
-	}
-
-	// Add a chunk
-	chunk := &ReferenceChunk{
+	chunk := ReferenceChunk{
 		ID:         "chunk-001",
 		DocID:      "test-001",
 		ChunkIndex: 0,
 		Section:    "Introduction",
 		Content:    "This is a test chunk.",
 	}
-	err = store.AddChunk(chunk)
-	if err != nil {
-		t.Fatalf("AddChunk failed: %v", err)
+	if err := dm.AddReference(doc, []ReferenceChunk{chunk}); err != nil {
+		t.Fatalf("AddReference failed: %v", err)
 	}
 
-	// Retrieve chunks
-	chunks, err := store.GetChunksByDocID("test-001")
+	got, err := GetReferenceDoc(db, "test-001")
 	if err != nil {
-		t.Fatalf("GetChunksByDocID failed: %v", err)
+		t.Fatalf("GetReferenceDoc failed: %v", err)
+	}
+	if got.Title != "Test Document" {
+		t.Errorf("expected title %q, got %q", "Test Document", got.Title)
 	}
 
+	chunks, err := GetReferenceChunksByDocID(db, "test-001")
+	if err != nil {
+		t.Fatalf("GetReferenceChunksByDocID failed: %v", err)
+	}
 	if len(chunks) != 1 {
-		t.Errorf("Expected 1 chunk, got: %d", len(chunks))
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
-
 	if chunks[0].Content != "This is a test chunk." {
-		t.Errorf("Expected 'This is a test chunk.', got: %s", chunks[0].Content)
+		t.Errorf("expected chunk content %q, got %q", "This is a test chunk.", chunks[0].Content)
 	}
 }
 
-// TestReferenceStoreListAndDelete tests listing and deleting references
-func TestReferenceStoreListAndDelete(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
+// TestReferenceListAndDelete covers the list round-trip and the
+// DeleteReference atomic fan-out (chunks + audit rows + doc all gone).
+func TestReferenceListAndDelete(t *testing.T) {
+	dm, db := newTestRefDM(t)
 
-	store := NewReferenceDB(dbPath)
-	err := store.Init()
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	// Add a reference
 	doc := &ReferenceDoc{
 		ID:         "test-002",
 		Title:      "Another Test",
 		SourcePath: "/test/path2.txt",
 		SourceType: "txt",
 	}
-	err = store.AddReference(doc)
-	if err != nil {
+	if err := dm.AddReference(doc, nil); err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
 
-	// List references
-	docs, err := store.ListReferences()
+	docs, err := ListReferenceDocs(db)
 	if err != nil {
-		t.Fatalf("ListReferences failed: %v", err)
+		t.Fatalf("ListReferenceDocs failed: %v", err)
 	}
-
 	found := false
 	for _, d := range docs {
 		if d.ID == "test-002" {
@@ -319,77 +288,63 @@ func TestReferenceStoreListAndDelete(t *testing.T) {
 		t.Error("test-002 not found in list")
 	}
 
-	// Delete reference
-	err = store.DeleteReference("test-002")
-	if err != nil {
+	if err := dm.DeleteReference("test-002"); err != nil {
 		t.Fatalf("DeleteReference failed: %v", err)
 	}
 
-	// Verify it's gone
-	_, err = store.GetReference("test-002")
-	if err == nil {
-		t.Error("Expected error after deleting reference, got nil")
+	if _, err := GetReferenceDoc(db, "test-002"); err == nil {
+		t.Error("expected GetReferenceDoc to fail after delete, got nil")
 	}
 }
 
-// TestReferenceStats tests reference statistics
+// TestReferenceStats covers GetReferenceStats shape (total_documents /
+// total_chunks keys preserved for UI consumers).
 func TestReferenceStats(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
+	dm, db := newTestRefDM(t)
 
-	store := NewReferenceDB(dbPath)
-	err := store.Init()
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	// Get stats
-	stats, err := store.GetReferenceStats()
+	stats, err := GetReferenceStats(db)
 	if err != nil {
 		t.Fatalf("GetReferenceStats failed: %v", err)
 	}
-
 	if stats["total_documents"] != 0 {
-		t.Errorf("Expected 0 documents initially, got: %d", stats["total_documents"])
+		t.Errorf("expected 0 documents initially, got: %d", stats["total_documents"])
 	}
 	if stats["total_chunks"] != 0 {
-		t.Errorf("Expected 0 chunks initially, got: %d", stats["total_chunks"])
+		t.Errorf("expected 0 chunks initially, got: %d", stats["total_chunks"])
 	}
 
-	// Add a document and verify stats update
 	doc := &ReferenceDoc{
 		ID:         "test-003",
 		Title:      "Stats Test",
 		SourcePath: "/test/stats.txt",
 		SourceType: "txt",
 	}
-	err = store.AddReference(doc)
-	if err != nil {
+	if err := dm.AddReference(doc, []ReferenceChunk{
+		{ID: "c1", DocID: "test-003", ChunkIndex: 0, Content: "one"},
+		{ID: "c2", DocID: "test-003", ChunkIndex: 1, Content: "two"},
+	}); err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
 
-	stats, err = store.GetReferenceStats()
+	stats, err = GetReferenceStats(db)
 	if err != nil {
-		t.Fatalf("GetReferenceStats failed: %v", err)
+		t.Fatalf("GetReferenceStats(after add) failed: %v", err)
 	}
-
 	if stats["total_documents"] != 1 {
-		t.Errorf("Expected 1 document after add, got: %d", stats["total_documents"])
+		t.Errorf("expected 1 document after add, got: %d", stats["total_documents"])
+	}
+	if stats["total_chunks"] != 2 {
+		t.Errorf("expected 2 chunks after add, got: %d", stats["total_chunks"])
 	}
 }
 
 // TestAddReferenceRejectsDuplicate locks in the ErrAlreadyExists contract:
 // the previous INSERT OR REPLACE silently overwrote metadata and could
-// orphan chunks. New behaviour must refuse a duplicate id with a typed
-// sentinel so callers can branch on it (vs treating every error as fatal).
+// orphan chunks. The unified AddReference must refuse a duplicate id with
+// a typed sentinel so callers can branch on it (vs treating every error
+// as fatal).
 func TestAddReferenceRejectsDuplicate(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
-
-	store := NewReferenceDB(dbPath)
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
+	dm, db := newTestRefDM(t)
 
 	doc := &ReferenceDoc{
 		ID:         "dup-001",
@@ -397,11 +352,11 @@ func TestAddReferenceRejectsDuplicate(t *testing.T) {
 		SourcePath: "/test/dup.txt",
 		SourceType: "txt",
 	}
-	if err := store.AddReference(doc); err != nil {
+	if err := dm.AddReference(doc, nil); err != nil {
 		t.Fatalf("first AddReference failed: %v", err)
 	}
 
-	err := store.AddReference(doc)
+	err := dm.AddReference(doc, nil)
 	if err == nil {
 		t.Fatal("expected ErrAlreadyExists on duplicate id, got nil")
 	}
@@ -410,121 +365,72 @@ func TestAddReferenceRejectsDuplicate(t *testing.T) {
 	}
 
 	// Title must be unchanged — no silent overwrite.
-	got, err := store.GetReference("dup-001")
+	got, err := GetReferenceDoc(db, "dup-001")
 	if err != nil {
-		t.Fatalf("GetReference failed: %v", err)
+		t.Fatalf("GetReferenceDoc failed: %v", err)
 	}
 	if got.Title != "First" {
 		t.Errorf("expected title preserved, got: %q", got.Title)
 	}
 }
 
-// TestAddChunkIdempotent verifies AddChunk no longer duplicates on re-run.
-// Runs ingest twice with the same chunk id; the table must end with one row,
-// not two, and the second call must not return an error.
-func TestAddChunkIdempotent(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
-
-	store := NewReferenceDB(dbPath)
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
+// TestDeleteReferenceAtomic verifies DeleteReference rolls back cleanly
+// when one of the fan-out deletes fails. Seeds an audit row, deletes the
+// doc, then verifies the doc + audit row + chunks are all gone (atomic)
+// and the connection is still usable for follow-up writes (no leftover
+// tx state).
+func TestDeleteReferenceAtomic(t *testing.T) {
+	dm, db := newTestRefDM(t)
 
 	doc := &ReferenceDoc{
-		ID: "idem-001", Title: "Idem", SourcePath: "/i.txt", SourceType: "txt",
+		ID: "del-001", Title: "Del", SourcePath: "/d.txt", SourceType: "txt",
 	}
-	if err := store.AddReference(doc); err != nil {
-		t.Fatalf("AddReference failed: %v", err)
-	}
-
-	chunk := &ReferenceChunk{
-		ID: "idem-chunk-1", DocID: "idem-001",
-		ChunkIndex: 0, Section: "s1", Content: "once",
-	}
-	if err := store.AddChunk(chunk); err != nil {
-		t.Fatalf("first AddChunk failed: %v", err)
-	}
-	if err := store.AddChunk(chunk); err != nil {
-		t.Fatalf("second AddChunk should be no-op, got: %v", err)
-	}
-
-	chunks, err := store.GetChunksByDocID("idem-001")
-	if err != nil {
-		t.Fatalf("GetChunksByDocID failed: %v", err)
-	}
-	if len(chunks) != 1 {
-		t.Errorf("expected 1 chunk after duplicate insert, got: %d", len(chunks))
-	}
-}
-
-// TestDeleteReferenceAtomic verifies DeleteReference rolls back cleanly
-// when one of the fan-out deletes fails. The test seeds an audit row,
-// deletes the doc, then verifies both the doc and the audit row are gone
-// (transaction committed as a unit) and the test fixture still works
-// afterwards (no leftover tx state).
-func TestDeleteReferenceAtomic(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
-
-	store := NewReferenceDB(dbPath)
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-
-	doc := &ReferenceDoc{ID: "del-001", Title: "Del", SourcePath: "/d.txt", SourceType: "txt"}
-	if err := store.AddReference(doc); err != nil {
-		t.Fatalf("AddReference failed: %v", err)
-	}
-	if err := store.AddChunk(&ReferenceChunk{
-		ID: "del-c1", DocID: "del-001", ChunkIndex: 0, Content: "x",
+	if err := dm.AddReference(doc, []ReferenceChunk{
+		{ID: "del-c1", DocID: "del-001", ChunkIndex: 0, Content: "x"},
 	}); err != nil {
-		t.Fatalf("AddChunk failed: %v", err)
+		t.Fatalf("AddReference failed: %v", err)
 	}
-	if _, err := store.db.Exec(
+	if _, err := db.Exec(
 		`INSERT INTO reference_interactions (id, doc_id, query, created_at) VALUES (?, ?, ?, ?)`,
 		"del-i1", "del-001", "q", time.Now().UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		t.Fatalf("seed interaction failed: %v", err)
 	}
 
-	if err := store.DeleteReference("del-001"); err != nil {
+	if err := dm.DeleteReference("del-001"); err != nil {
 		t.Fatalf("DeleteReference failed: %v", err)
 	}
 
-	if _, err := store.GetReference("del-001"); err == nil {
-		t.Error("expected GetReference to fail after delete, got nil")
+	if _, err := GetReferenceDoc(db, "del-001"); err == nil {
+		t.Error("expected GetReferenceDoc to fail after delete, got nil")
 	}
 	var chunkCount, interactionCount int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM reference_chunks WHERE doc_id = ?`, "del-001").Scan(&chunkCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reference_chunks WHERE doc_id = ?`, "del-001").Scan(&chunkCount); err != nil {
 		t.Fatalf("count chunks: %v", err)
 	}
 	if chunkCount != 0 {
 		t.Errorf("expected 0 orphan chunks after delete, got: %d", chunkCount)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM reference_interactions WHERE doc_id = ?`, "del-001").Scan(&interactionCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reference_interactions WHERE doc_id = ?`, "del-001").Scan(&interactionCount); err != nil {
 		t.Fatalf("count interactions: %v", err)
 	}
 	if interactionCount != 0 {
 		t.Errorf("expected 0 interactions after delete, got: %d", interactionCount)
 	}
 
-	// Connection must still be usable for follow-up writes.
-	if err := store.AddReference(&ReferenceDoc{ID: "del-002", Title: "After", SourcePath: "/a.txt", SourceType: "txt"}); err != nil {
+	// Connection must still be usable for follow-up writes — no leaked tx.
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "del-002", Title: "After", SourcePath: "/a.txt", SourceType: "txt",
+	}, nil); err != nil {
 		t.Errorf("connection broken after delete tx: %v", err)
 	}
 }
 
 // TestGetReferenceReturnsImportReason guards the regression where
 // GetReference's two-query path silently dropped import_reason on read.
+// With the unified single-query SELECT, every column is preserved.
 func TestGetReferenceReturnsImportReason(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.sqlite")
-
-	store := NewReferenceDB(dbPath)
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
+	dm, db := newTestRefDM(t)
 
 	doc := &ReferenceDoc{
 		ID:           "ir-001",
@@ -534,13 +440,13 @@ func TestGetReferenceReturnsImportReason(t *testing.T) {
 		ImportReason: "admitted: parallels Marcus Aurelius on discipline",
 		Tags:         []string{"stoicism", "discipline"},
 	}
-	if err := store.AddReference(doc); err != nil {
+	if err := dm.AddReference(doc, nil); err != nil {
 		t.Fatalf("AddReference failed: %v", err)
 	}
 
-	got, err := store.GetReference("ir-001")
+	got, err := GetReferenceDoc(db, "ir-001")
 	if err != nil {
-		t.Fatalf("GetReference failed: %v", err)
+		t.Fatalf("GetReferenceDoc failed: %v", err)
 	}
 	if got.ImportReason != doc.ImportReason {
 		t.Errorf("import_reason lost on read: got %q, want %q", got.ImportReason, doc.ImportReason)

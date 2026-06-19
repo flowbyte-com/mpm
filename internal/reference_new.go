@@ -4,12 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,24 +18,16 @@ import (
 	"github.com/ledongthuc/pdf"
 	"github.com/pkoukk/tiktoken-go"
 	"golang.org/x/net/html"
-
-	"mpm/internal/config"
 )
 
-// isUniqueConstraintError reports whether err is a SQLite UNIQUE/PRIMARY KEY
-// constraint violation. The modernc.org/sqlite driver returns these errors
-// with the message "constraint failed: UNIQUE constraint failed: <col>" or
-// "constraint failed: PRIMARY KEY constraint failed: <col>". A substring
-// match is sufficient — we only need to distinguish "already exists" from
-// other write failures for the AddReference error path.
-func isUniqueConstraintError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "PRIMARY KEY constraint failed")
-}
+// ==================== Reference Library: Types ====================
+//
+// Write surface: methods on *DatabaseManager (AddReference, DeleteReference).
+// Read surface: free functions in reference_query.go taking *sql.DB.
+// Schema: schema.ReferenceTables / schema.ReferenceIndexes, run by
+// DatabaseManager.InitSchema(). There is no separate ReferenceDB struct
+// — every reference write goes through the unified connection so two
+// surfaces can never diverge.
 
 // ReferenceDoc represents a reference document in the database
 type ReferenceDoc struct {
@@ -64,300 +54,14 @@ type ReferenceChunk struct {
 	SourcePath string `json:"source_path"`
 }
 
-// ErrAlreadyExists is returned by AddReference when a document with the
-// same primary-key id is already present. Callers who want update semantics
-// should use UpdateReference explicitly — silent overwrite via INSERT OR
-// REPLACE was the previous default and produced orphan chunks under the
-// inline-Init() schema and confused audit history.
+// ErrAlreadyExists is returned by DatabaseManager.AddReference when a
+// document with the same primary-key id is already present. Callers who
+// want update semantics must delete and re-insert. The previous
+// INSERT OR REPLACE default silently overwrote metadata and could orphan
+// chunks under the old non-cascading schema.
 var ErrAlreadyExists = errors.New("reference document already exists")
 
-// ReferenceDB manages reference documents and chunks in SQLite
-type ReferenceDB struct {
-	DatabasePath string
-	db           *SQLiteConnection
-}
-
-// NewReferenceDB creates a new reference database
-// Updated for new path structure: flowbyte/mpm/src/db/mpm.db (consolidated)
-func NewReferenceDB(dbPath string) *ReferenceDB {
-	if dbPath == "" {
-		// Use the correct MPM database path
-		dbPath = filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
-	}
-	return &ReferenceDB{DatabasePath: dbPath}
-}
-
-// Init opens the connection and ensures the reference library schema exists.
-// The CREATE TABLE statements come from schema.ReferenceTables and
-// schema.ReferenceIndexes — the single source of truth also run by
-// DatabaseManager.initUnifiedSchema() in production. Keeping both startup
-// paths pointed at the same SQL slice eliminates the previous drift where
-// ReferenceDB had a stale, schema-divergent inline subset (missing
-// reference_interactions, no CASCADE on chunks, no content column).
-func (db *ReferenceDB) Init() error {
-	if err := os.MkdirAll(filepath.Dir(db.DatabasePath), 0755); err != nil {
-		return err
-	}
-	conn, err := NewSQLiteConnection(db.DatabasePath)
-	if err != nil {
-		return err
-	}
-	db.db = conn
-	for _, q := range ReferenceTables {
-		if _, err := db.db.Exec(q); err != nil {
-			return fmt.Errorf("reference schema failed: %w\nSQL: %s", err, q)
-		}
-	}
-	for _, q := range ReferenceIndexes {
-		if _, err := db.db.Exec(q); err != nil {
-			return fmt.Errorf("reference index failed: %w\nSQL: %s", err, q)
-		}
-	}
-	return nil
-}
-
-// AddReference inserts a new reference document. Returns ErrAlreadyExists
-// if a document with the same id is already present — callers wanting
-// update semantics must use UpdateReference explicitly. Plain INSERT
-// replaces the previous INSERT OR REPLACE, which silently overwrote
-// metadata and could orphan chunks under the old non-cascading schema.
-//
-// Writes into file_path (the schema column name) from doc.SourcePath
-// (the struct field name). Both are kept; do not rename without a
-// migration — legacy code reads SourcePath from the struct.
-func (db *ReferenceDB) AddReference(doc *ReferenceDoc) error {
-	if db == nil || db.db == nil {
-		return fmt.Errorf("database not initialized")
-	}
-	if doc == nil {
-		return fmt.Errorf("nil reference doc")
-	}
-	tagsJSON, _ := MarshalJSON(doc.Tags)
-	res, err := db.db.Exec(`
-		INSERT INTO reference_docs
-		(id, title, file_path, source_path, source_type, tags, content, content_hash,
-		 import_reason, total_chunks, last_indexed, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
-	`,
-		doc.ID, doc.Title, doc.SourcePath, doc.SourcePath, doc.SourceType,
-		tagsJSON, doc.Content, doc.ContentHash, doc.ImportReason,
-		doc.TotalChunks, doc.LastIndexed, doc.Created)
-	if err != nil {
-		if isUniqueConstraintError(err) {
-			return fmt.Errorf("add reference %q: %w", doc.ID, ErrAlreadyExists)
-		}
-		return fmt.Errorf("add reference %q: %w", doc.ID, err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		// Defensive: some drivers return 0 rows on INSERT-OR-IGNORE-style
-		// conflicts. With plain INSERT this should not happen, but guard
-		// against driver quirks so we never lie about persistence.
-		return fmt.Errorf("add reference %q: %w", doc.ID, ErrAlreadyExists)
-	}
-	return nil
-}
-
-// AddChunk inserts a chunk for a reference document. ON CONFLICT(id) DO
-// NOTHING makes the operation idempotent: re-running an ingest pipeline
-// against a partially-populated chunk table no longer duplicates rows or
-// fails on the primary-key constraint.
-func (db *ReferenceDB) AddChunk(chunk *ReferenceChunk) error {
-	if db == nil || db.db == nil {
-		return fmt.Errorf("database not initialized")
-	}
-	if chunk == nil {
-		return fmt.Errorf("nil chunk")
-	}
-	_, err := db.db.Exec(`
-		INSERT INTO reference_chunks
-		(id, doc_id, chunk_index, section, content, source_path)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO NOTHING
-	`, chunk.ID, chunk.DocID, chunk.ChunkIndex, chunk.Section, chunk.Content, chunk.SourcePath)
-	return err
-}
-
-// GetReference retrieves a reference by ID or file_path in a single query.
-// The previous implementation made two round trips (one for the row, one
-// for tags) and silently dropped the import_reason column. Selecting every
-// column we need in one SELECT — including the tags JSON string and
-// import_reason — fixes both: one round trip, no field loss.
-//
-// tags lives in the same row (stored as a JSON-encoded string in TEXT), so
-// no join or aggregation is required. json_group_array would wrap the
-// stored JSON in another array, double-escaping the inner quotes; a plain
-// SELECT avoids that tax entirely.
-func (db *ReferenceDB) GetReference(idOrPath string) (*ReferenceDoc, error) {
-	if db == nil || db.db == nil {
-		return nil, fmt.Errorf("database not initialized")
-	}
-	var doc ReferenceDoc
-	var tagsJSON sql.NullString
-	err := db.db.QueryRow(`
-		SELECT id, title, file_path, source_type, tags,
-		       content, content_hash, import_reason,
-		       total_chunks, last_indexed, created_at
-		FROM reference_docs
-		WHERE id = ? OR file_path = ?
-		LIMIT 1
-	`, idOrPath, idOrPath).Scan(
-		&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
-		&doc.Content, &doc.ContentHash, &doc.ImportReason,
-		&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
-	)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("reference not found: %s", idOrPath)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get reference %q: %w", idOrPath, err)
-	}
-	if tagsJSON.Valid && strings.TrimSpace(tagsJSON.String) != "" && tagsJSON.String != "null" {
-		_ = UnmarshalJSON(tagsJSON.String, &doc.Tags)
-	}
-	return &doc, nil
-}
-
-// GetChunksByDocID retrieves all chunks for a document
-func (db *ReferenceDB) GetChunksByDocID(docID string) ([]*ReferenceChunk, error) {
-	rows, err := db.db.Query(`
-		SELECT id, doc_id, chunk_index, section, content, source_path
-		FROM reference_chunks 
-		WHERE doc_id = ?
-		ORDER BY chunk_index
-	`, docID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var chunks []*ReferenceChunk
-	for rows.Next() {
-		var chunk ReferenceChunk
-		err := rows.Scan(&chunk.ID, &chunk.DocID, &chunk.ChunkIndex, &chunk.Section, &chunk.Content, &chunk.SourcePath)
-		if err != nil {
-			return nil, err
-		}
-		chunks = append(chunks, &chunk)
-	}
-
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return chunks, nil
-}
-
-// ListReferences lists all reference documents
-func (db *ReferenceDB) ListReferences() ([]*ReferenceDoc, error) {
-	if db == nil {
-		return nil, fmt.Errorf("database not initialized")
-	}
-	if db.db == nil {
-		if err := db.Init(); err != nil {
-			return nil, err
-		}
-	}
-
-	rows, err := db.db.Query(`
-		SELECT id, title, file_path, source_type, tags, content, content_hash,
-		       import_reason, total_chunks, last_indexed, created_at
-		FROM reference_docs
-		ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var docs []*ReferenceDoc
-	for rows.Next() {
-		var doc ReferenceDoc
-		var tagsJSON string
-		err := rows.Scan(
-			&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
-			&doc.Content, &doc.ContentHash, &doc.ImportReason,
-			&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if tagsJSON != "" {
-			_ = UnmarshalJSON(tagsJSON, &doc.Tags)
-		}
-		docs = append(docs, &doc)
-	}
-
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return docs, nil
-}
-
-// DeleteReference removes a reference, its chunks, and its audit rows
-// (reference_interactions, admission_log) in a single transaction. Without
-// the transaction, a failure between the chunk delete and the doc delete
-// would leave orphan chunks pointing at a missing parent row — even with
-// ON DELETE CASCADE in the schema, the two deletes here span tables that
-// are NOT linked by FK to one another (interactions and admission_log are
-// not children of reference_chunks). Wrapping in a tx makes the whole
-// fan-out atomic.
-func (db *ReferenceDB) DeleteReference(id string) error {
-	if db == nil || db.db == nil {
-		return fmt.Errorf("database not initialized")
-	}
-	tx, err := db.db.Begin()
-	if err != nil {
-		return fmt.Errorf("delete reference: begin tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	if _, err := tx.Exec(`DELETE FROM reference_chunks WHERE doc_id = ?`, id); err != nil {
-		return fmt.Errorf("delete reference chunks: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM reference_interactions WHERE doc_id = ?`, id); err != nil {
-		return fmt.Errorf("delete reference interactions: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM admission_log WHERE doc_id = ?`, id); err != nil {
-		return fmt.Errorf("delete admission log: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM reference_docs WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("delete reference doc: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("delete reference commit: %w", err)
-	}
-	committed = true
-	return nil
-}
-
-// GetReferenceStats returns statistics about the reference library
-func (db *ReferenceDB) GetReferenceStats() (map[string]interface{}, error) {
-	stats := map[string]interface{}{
-		"total_documents": 0,
-		"total_chunks":    0,
-	}
-
-	var docCount, chunkCount int
-	err := db.db.QueryRow(`SELECT COUNT(*) FROM reference_docs`).Scan(&docCount)
-	if err != nil {
-		return stats, err
-	}
-	err = db.db.QueryRow(`SELECT COUNT(*) FROM reference_chunks`).Scan(&chunkCount)
-	if err != nil {
-		return stats, err
-	}
-
-	stats["total_documents"] = docCount
-	stats["total_chunks"] = chunkCount
-
-	return stats, nil
-}
+// ==================== Reference Library: File Parsers ====================
 
 // ParsePDF extracts raw text from a PDF file using a pure Go implementation.
 // Eliminates the need for the external python pdfplumber dependency.
@@ -440,17 +144,26 @@ func stripHTML(r io.Reader) string {
 	}
 }
 
-// Section represents a markdown section
-type Section struct {
-	Section string
-	Content string
-}
+// StripHTML removes HTML tags from content
+func StripHTML(htmlContent string) string {
+	r := strings.NewReader(htmlContent)
+	z := html.NewTokenizer(r)
+	var text strings.Builder
 
-// Chunk represents a text chunk
-type Chunk struct {
-	Index   int
-	Section string
-	Content string
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken:
+			return text.String()
+		case html.TextToken:
+			t := z.Token()
+			cleanText := strings.TrimSpace(t.Data)
+			if len(cleanText) > 0 {
+				text.WriteString(cleanText)
+				text.WriteString(" ")
+			}
+		}
+	}
 }
 
 // DetectSourceType detects the file type based on extension
@@ -474,11 +187,32 @@ func DetectSourceType(filePath string) string {
 	}
 }
 
-// GenerateReferenceID generates a unique reference ID
+// GenerateReferenceID generates a unique reference ID.
 func GenerateReferenceID() string {
 	timestamp := time.Now().UnixNano()
-	hash := sha256.Sum256([]byte(fmt.Sprintf("ref-%d-%d", timestamp, time.Now().UnixNano())))
-	return hex.EncodeToString(hash[:])[:12]
+	h := sha256.Sum256([]byte(fmt.Sprintf("ref-%d-%d", timestamp, time.Now().UnixNano())))
+	return hex.EncodeToString(h[:])[:12]
+}
+
+// HashContent generates a SHA256 hash of content for deduplication
+func HashContent(content string) string {
+	h := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(h[:])
+}
+
+// ==================== Reference Library: Chunking ====================
+
+// Section represents a markdown section
+type Section struct {
+	Section string
+	Content string
+}
+
+// Chunk represents a text chunk
+type Chunk struct {
+	Index   int
+	Section string
+	Content string
 }
 
 // ParseMarkdownSections parses markdown content into sections
@@ -669,50 +403,4 @@ func ChunkByTokens(content string, chunkSize int) ([]Chunk, error) {
 	}
 
 	return chunks, nil
-}
-
-// GetReferenceCount returns the number of reference documents
-func (rdb *ReferenceDB) GetReferenceCount() (int, error) {
-	if rdb.db == nil {
-		return 0, fmt.Errorf("database not initialized")
-	}
-	var count int
-	err := rdb.db.QueryRow(`SELECT COUNT(*) FROM reference_docs`).Scan(&count)
-	return count, err
-}
-
-// GetReferenceCount returns the number of reference documents via ReferenceStore
-func (rs *ReferenceStore) GetReferenceCount() (int, error) {
-	if rs.MetadataDB == nil {
-		return 0, fmt.Errorf("database not initialized")
-	}
-	return rs.MetadataDB.GetReferenceCount()
-}
-
-// HashContent generates a SHA256 hash of content for deduplication
-func HashContent(content string) string {
-	hash := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(hash[:])
-}
-
-// StripHTML removes HTML tags from content
-func StripHTML(htmlContent string) string {
-	r := strings.NewReader(htmlContent)
-	z := html.NewTokenizer(r)
-	var text strings.Builder
-
-	for {
-		tt := z.Next()
-		switch tt {
-		case html.ErrorToken:
-			return text.String()
-		case html.TextToken:
-			t := z.Token()
-			cleanText := strings.TrimSpace(t.Data)
-			if len(cleanText) > 0 {
-				text.WriteString(cleanText)
-				text.WriteString(" ")
-			}
-		}
-	}
 }

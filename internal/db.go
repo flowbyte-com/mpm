@@ -530,8 +530,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 
 	// Reference library tables — single source of truth lives in
-	// schema.ReferenceTables. Same slice is run by ReferenceDB.Init() on
-	// isolated test DBs, so production and tests cannot diverge.
+	// schema.ReferenceTables. Tests reach the same slice via InitSchema
+	// on a DatabaseManager wrapping a tmpfile; there is no separate
+	// ReferenceDB type or connection to keep in sync.
 	for _, sqlQuery := range ReferenceTables {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
 			return fmt.Errorf("failed to execute reference schema: %w\nSQL: %s", err, sqlQuery)
