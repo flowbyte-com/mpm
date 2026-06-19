@@ -987,3 +987,27 @@ func (dm *DatabaseManager) ShowConfidence(artifactID, artifactType string) (map[
 		"history": hist,
 	}, nil
 }
+
+// RecomputeConfidence forces a manual confidence recompute for an
+// artifact and returns the new snapshot. Returns the same shape as
+// dm.ShowConfidence so callers can read `result.current` and
+// `result.history.history` consistently.
+//
+// Both `mpm call recompute_confidence` and the `recompute_confidence`
+// MCP tool route through this method, so neither surface can drift
+// in the required-arg check, the artifact-type default, or the
+// recompute-then-snapshot ordering.
+//
+// Required: artifact_id. Optional: artifact_type (default "memory").
+func (dm *DatabaseManager) RecomputeConfidence(artifactID, artifactType string) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	if err := RecomputeConfidence(dm, artifactID, artifactType, RecomputeReasonManual); err != nil {
+		return nil, err
+	}
+	return dm.ShowConfidence(artifactID, artifactType)
+}

@@ -225,3 +225,25 @@ func TestCallHelpers_QueryMemoryQuality_ReturnsPerSource(t *testing.T) {
 	assert.Contains(t, out, "sources")
 	assert.Contains(t, out, "count")
 }
+
+func TestCallHelpers_RecomputeConfidence_TriggersRecompute(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "g", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
+
+	out, err := dm.RecomputeConfidence("mem-1", "memory")
+	require.NoError(t, err)
+	// Returns the same shape as ShowConfidence.
+	_, hasCurrent := out["current"].(float64)
+	assert.True(t, hasCurrent)
+	_, hasHist := out["history"].(map[string]interface{})
+	assert.True(t, hasHist)
+}
+
+func TestCallHelpers_RecomputeConfidence_RequiresArtifactID(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.RecomputeConfidence("", "memory")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact_id")
+}
