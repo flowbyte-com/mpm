@@ -1537,7 +1537,7 @@ func enrichCandidate(dm *mpminternal.DatabaseManager, active activeAdmission) (s
 // handleRef routes reference subcommands
 func handleRef(args []string) int {
 	if len(args) < 2 {
-		printRefHelp()
+		_ = printRefHelp()
 		return 1
 	}
 
@@ -1560,12 +1560,12 @@ func handleRef(args []string) int {
 	case "admit":
 		return handleRefAdmit(args[1:])
 	default:
-		printRefHelp()
+		_ = printRefHelp()
 		return 1
 	}
 }
 
-func printRefHelp() {
+func printRefHelp() int {
 	fmt.Println(`mpm reference - Reference library
 Usage:
   mpm reference add <file> [--tag tags]    Ingest a document
@@ -1578,6 +1578,7 @@ Usage:
   mpm reference shred <id>                   Delete a reference
 
 Supported formats: .txt, .md, .html, .epub, .pdf`)
+	return 0
 }
 
 // =============================================================================
