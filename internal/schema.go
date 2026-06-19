@@ -88,64 +88,6 @@ var BaseTables = []string{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
 
-	// Reference documents table - aligned with ReferenceDB in reference_new.go
-	`CREATE TABLE IF NOT EXISTS reference_docs (
-		id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
-		source_type TEXT, tags TEXT, content TEXT NOT NULL, content_hash TEXT,
-		import_reason TEXT,
-		total_chunks INTEGER DEFAULT 0, last_indexed TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`,
-
-	// Reference chunks table - stores chunked content of reference documents
-	`CREATE TABLE IF NOT EXISTS reference_chunks (
-		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
-		section TEXT, content TEXT NOT NULL, source_path TEXT,
-		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
-	);`,
-
-	// Reference interactions table - audit trail of retrieval events.
-	// Written whenever SearchReferenceChunks surfaces a chunk (or doc) for a query.
-	// This is the substrate the admission function reads to know which references
-	// have been used, in what context, and how often. Per decision 4f1c1fbc41a7a765
-	// and b90e4fe54507c3b9: interaction is the third primitive; without it, the
-	// reference-to-memory path is not observable.
-	`CREATE TABLE IF NOT EXISTS reference_interactions (
-		id TEXT PRIMARY KEY,
-		doc_id TEXT NOT NULL,
-		chunk_id TEXT,
-		query TEXT NOT NULL,
-		search_kind TEXT,
-		rank INTEGER,
-		score REAL,
-		created_at TEXT NOT NULL,
-		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
-	);`,
-	`CREATE INDEX IF NOT EXISTS idx_interactions_doc ON reference_interactions(doc_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_interactions_chunk ON reference_interactions(chunk_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_interactions_query ON reference_interactions(query);`,
-
-	// Admission log - audit trail for the admission function (Phase 3).
-	// One row per evaluation. Different semantics from reference_interactions
-	// (which is retrieval audit); this is admission audit. The two are kept
-	// separate so each can be queried and analyzed on its own.
-	`CREATE TABLE IF NOT EXISTS admission_log (
-		id TEXT PRIMARY KEY,
-		doc_id TEXT NOT NULL,
-		chunk_id TEXT,
-		admit INTEGER NOT NULL,
-		content TEXT,
-		confidence REAL,
-		reason TEXT,
-		justification TEXT,
-		admission_model TEXT,
-		created_at TEXT NOT NULL,
-		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
-	);`,
-	`CREATE INDEX IF NOT EXISTS idx_admission_log_doc ON admission_log(doc_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_admission_log_admit ON admission_log(admit);`,
-	`CREATE INDEX IF NOT EXISTS idx_admission_log_created ON admission_log(created_at);`,
-
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +168,93 @@ var BaseTables = []string{
 		FROM lessons;`,
 }
 
+// ReferenceTables contains the reference-library table creation statements.
+// Kept separate from BaseTables so that ReferenceDB.Init() (used by tests
+// against an isolated sqlite file) and the unified DatabaseManager schema
+// startup both run the *same* CREATE TABLE statements — eliminating the
+// previous drift where ReferenceDB carried its own inline, schema-divergent
+// subset. Single source of truth lives here; production startup runs it
+// from DatabaseManager.initUnifiedSchema() right after BaseTables; isolated
+// reference DBs run it from ReferenceDB.Init().
+//
+// content uses TEXT NOT NULL DEFAULT '' so callers that do not store the
+// full source text (the common case for streaming ingest) don't have to
+// supply it explicitly. Older AddReference paths that wrote nothing into
+// content would otherwise fail on the NOT NULL column.
+var ReferenceTables = []string{
+	// Reference documents table - single row per imported document.
+	// file_path vs source_path: schema uses file_path; ReferenceDB struct
+	// uses SourcePath. AddReference writes SourcePath into file_path.
+	`CREATE TABLE IF NOT EXISTS reference_docs (
+		id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
+		source_path TEXT, source_type TEXT, tags TEXT,
+		content TEXT NOT NULL DEFAULT '', content_hash TEXT,
+		import_reason TEXT,
+		total_chunks INTEGER DEFAULT 0, last_indexed TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+
+	// Reference chunks table - stores chunked content of reference documents.
+	// ON DELETE CASCADE ensures chunks do not orphan when their parent doc
+	// is removed (DeleteReference relies on this).
+	`CREATE TABLE IF NOT EXISTS reference_chunks (
+		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+		section TEXT, content TEXT NOT NULL, source_path TEXT,
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
+	);`,
+
+	// Reference interactions table - audit trail of retrieval events.
+	// Written whenever SearchReferenceChunks surfaces a chunk (or doc) for a query.
+	// This is the substrate the admission function reads to know which references
+	// have been used, in what context, and how often. Per decision 4f1c1fbc41a7a765
+	// and b90e4fe54507c3b9: interaction is the third primitive; without it, the
+	// reference-to-memory path is not observable.
+	`CREATE TABLE IF NOT EXISTS reference_interactions (
+		id TEXT PRIMARY KEY,
+		doc_id TEXT NOT NULL,
+		chunk_id TEXT,
+		query TEXT NOT NULL,
+		search_kind TEXT,
+		rank INTEGER,
+		score REAL,
+		created_at TEXT NOT NULL,
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
+	);`,
+
+	// Admission log - audit trail for the admission function (Phase 3).
+	// One row per evaluation. Different semantics from reference_interactions
+	// (which is retrieval audit); this is admission audit. The two are kept
+	// separate so each can be queried and analyzed on its own.
+	`CREATE TABLE IF NOT EXISTS admission_log (
+		id TEXT PRIMARY KEY,
+		doc_id TEXT NOT NULL,
+		chunk_id TEXT,
+		admit INTEGER NOT NULL,
+		content TEXT,
+		confidence REAL,
+		reason TEXT,
+		justification TEXT,
+		admission_model TEXT,
+		created_at TEXT NOT NULL,
+		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
+	);`,
+}
+
+// ReferenceIndexes contains the indexes that support the reference tables.
+// Separate from CommonIndexes so isolated reference DBs (test fixtures)
+// get the matching indexes too — without them, queries against the audit
+// tables degenerate to full scans.
+var ReferenceIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_doc_id ON reference_chunks(doc_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_section ON reference_chunks(section);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_doc ON reference_interactions(doc_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_chunk ON reference_interactions(chunk_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_interactions_query ON reference_interactions(query);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_doc ON admission_log(doc_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_admit ON admission_log(admit);`,
+	`CREATE INDEX IF NOT EXISTS idx_admission_log_created ON admission_log(created_at);`,
+}
+
 // CommonIndexes contains indexes for fast lookups.
 var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_topic_memberships_topic ON topic_memberships(topic_id);`,
@@ -246,8 +275,6 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_expires ON raw_memories(expires_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_import_batch ON raw_memories(import_batch);`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_doc_id ON reference_chunks(doc_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_reference_chunks_section ON reference_chunks(section);`,
 	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_retrieval_priority ON memories(retrieval_priority);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);`,

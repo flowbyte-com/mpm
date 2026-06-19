@@ -529,6 +529,20 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Reference library tables — single source of truth lives in
+	// schema.ReferenceTables. Same slice is run by ReferenceDB.Init() on
+	// isolated test DBs, so production and tests cannot diverge.
+	for _, sqlQuery := range ReferenceTables {
+		if _, err := dm.db.Exec(sqlQuery); err != nil {
+			return fmt.Errorf("failed to execute reference schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+	for _, sqlQuery := range ReferenceIndexes {
+		if _, err := dm.db.Exec(sqlQuery); err != nil {
+			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	// Migration: add new columns to existing databases (no-op if already present)
 	// Use SafeMigrations from schema.go to ensure ALL column additions are covered.
 	// Skip lessons entirely — it is either a table (columns added by migrateLessonsToView
