@@ -67,22 +67,28 @@ func handleOpsChangelog(args []string) int {
 	// check the first arg for that alias too. If the user asked for
 	// help (or supplied nothing), show the build flag help and exit.
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		// We have to set up the flag set first because the help
+		// text uses fs.PrintDefaults() so adding a new flag auto-
+		// appears in the help without manually updating this list.
+		helpFS := flag.NewFlagSet("ops changelog build help", flag.ContinueOnError)
+		helpFS.String("since", "", "Lower bound: tag, sha, or date (default: latest tag)")
+		helpFS.String("until", "", "Upper bound: tag, sha, or date (default: HEAD)")
+		helpFS.String("release-version", "", "Version string (default: minor bump of --since)")
+		helpFS.String("date", "", "Release date (default: today UTC)")
+		helpFS.String("output", "CHANGELOG.md", "Markdown output path (default: CHANGELOG.md)")
+		helpFS.String("json", "changelog.json", "JSON sibling output path (default: changelog.json)")
+		helpFS.String("project", "MPM", "Project name in changelog header (default: MPM)")
+		helpFS.Bool("legacy", false, "Emit pre-since commits as a Legacy Backfill section")
+		helpFS.String("repo", "", "Git repo directory (default: cwd)")
+		helpFS.Bool("dry-run", false, "Print Markdown to stdout; do not write files")
+		helpFS.String("release-notes", "", "Path to a file of hand-written highlights (blockquote at top of release)")
+		helpFS.Bool("with-synthesis", false, "Join git-sourced entries with agent-written #changelog memories; merged prose renders as blockquote under each commit bullet; orphans surface in a dedicated section + terminal warning")
 		fmt.Println("Usage: mpm ops changelog build [flags]")
 		fmt.Println()
 		fmt.Println("Generates CHANGELOG.md + changelog.json from the git log.")
 		fmt.Println()
 		fmt.Println("Flags:")
-		fmt.Println("  --since <ref>          Lower bound: tag, sha, or date (default: latest tag)")
-		fmt.Println("  --until <ref>          Upper bound: tag, sha, or date (default: HEAD)")
-		fmt.Println("  --release-version <v>  Version string (default: minor bump of --since)")
-		fmt.Println("  --date <YYYY-MM-DD>    Release date (default: today UTC)")
-		fmt.Println("  --output <path>        Markdown output path (default: CHANGELOG.md)")
-		fmt.Println("  --json <path>          JSON sibling output path (default: changelog.json)")
-		fmt.Println("  --project <name>       Project name in changelog header (default: MPM)")
-		fmt.Println("  --legacy               Emit pre-since commits as a Legacy Backfill section")
-		fmt.Println("  --repo <path>          Git repo directory (default: cwd)")
-		fmt.Println("  --dry-run              Print Markdown to stdout; do not write files")
-		fmt.Println("  --release-notes <path> File of hand-written highlights; rendered as blockquote at top of release")
+		helpFS.PrintDefaults()
 		return 0
 	}
 
@@ -98,6 +104,7 @@ func handleOpsChangelog(args []string) int {
 	repoDir := fs.String("repo", "", "Git repo directory (default: cwd)")
 	dryRun := fs.Bool("dry-run", false, "Print Markdown to stdout; do not write files")
 	notesFile := fs.String("release-notes", "", "Path to a file containing hand-written release highlights (rendered as blockquote at the top of the release)")
+	withSynthesis := fs.Bool("with-synthesis", false, "Join git-sourced entries with agent-written #changelog memories; merged prose renders as blockquote under each commit bullet, orphans surface in a dedicated section + terminal warning")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm ops changelog build [flags]")
@@ -106,9 +113,6 @@ func handleOpsChangelog(args []string) int {
 		fmt.Println()
 		fmt.Println("Flags:")
 		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return 1
 	}
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -197,6 +201,36 @@ func handleOpsChangelog(args []string) int {
 
 	markdown := doc.RenderMarkdown()
 
+	// Optional synthesis pass: join agent-written #changelog
+	// memories with the git-sourced entries. When the flag is set
+	// we open the MPM database, run the synthesis, and re-render
+	// the document. The output is the same shape as the un-
+	// synthesized form, with Body fields populated from the
+	// memories and orphan memories surfaced in a dedicated
+	// section at the bottom of the file.
+	if *withSynthesis {
+		synResult, synErr := runSynthesis(doc)
+		if synErr != nil {
+			fmt.Fprintf(os.Stderr, "changelog: synthesis: %v\n", synErr)
+			return 1
+		}
+		doc = synResult.Document
+		markdown = doc.RenderMarkdown()
+		// Terminal warning so the operator sees orphan count
+		// immediately, even when the changelog is generated
+		// non-interactively (e.g., in CI). The orphan section
+		// inside the file is the persistent signal.
+		if len(synResult.Orphans) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"WARN: Found %d changelog memories with unmatched commit hashes.\n"+
+					"      These are surfaced in the 'Orphan Changelog Memories' section at the end of %s.\n"+
+					"      Common causes: agent hallucinated a hash, commit was squashed, or branch was abandoned.\n",
+				len(synResult.Orphans), *output)
+		}
+		fmt.Printf("changelog: synthesis: %d matched, %d unmatched, %d orphans\n",
+			synResult.Matched, synResult.Unmatched, len(synResult.Orphans))
+	}
+
 	if *dryRun {
 		fmt.Print(markdown)
 		return 0
@@ -272,4 +306,52 @@ func headOrDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// runSynthesis opens the MPM database and joins the document with
+// agent-written changelog memories. The database is opened with
+// the same path resolution as other CLI commands (workspace DB
+// from mpm_config.json, defaulting to ~/.mpm/).
+//
+// Orphan memories are attached to the SYNTHESIZED document (the
+// working copy returned by SynthesizeChangelog, not the input)
+// as a synthetic release so the renderer can emit them at the
+// bottom of the file in their own ## [orphans] block. We use a
+// separate release-like struct for the orphan section rather
+// than reusing the Legacy field because the orphans are not
+// 'legacy backfill' in any sense — they are present-day memories
+// whose join failed.
+func runSynthesis(doc *mpminternal.ChangelogDocument) (*mpminternal.ChangelogSynthesisResult, error) {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return nil, fmt.Errorf("open dm: %w", err)
+	}
+	defer dm.Close()
+	res, err := mpminternal.SynthesizeChangelog(doc, dm.SQLDB())
+	if err != nil {
+		return nil, err
+	}
+	// Attach orphans as a synthetic release on the synthesized
+	// document (not the input). This is the working copy that
+	// the caller will use from here on.
+	if len(res.Orphans) > 0 {
+		orphanEntries := make([]mpminternal.ChangelogEntry, 0, len(res.Orphans))
+		for _, m := range res.Orphans {
+			e := mpminternal.ChangelogEntry{
+				Version:      "orphans",
+				Date:         mpminternal.Today(),
+				Author:       "agent (unmatched commit)",
+				Summary:      fmt.Sprintf("orphan memory id=%s", m.ID),
+				Body:         fmt.Sprintf("commit hash claimed: %s\n\n%s", m.CommitHash, m.Content),
+				MPMMemoryIDs: []string{m.ID},
+			}
+			orphanEntries = append(orphanEntries, e)
+		}
+		res.Document.Releases = append(res.Document.Releases, mpminternal.ChangelogRelease{
+			Version: "orphans",
+			Date:    mpminternal.Today(),
+			Entries: orphanEntries,
+		})
+	}
+	return res, nil
 }
