@@ -10,6 +10,21 @@ import (
 	"time"
 )
 
+// isUniqueConstraintError reports whether err is a SQLite UNIQUE/PRIMARY KEY
+// constraint violation. The modernc.org/sqlite driver returns these errors
+// with the message "constraint failed: UNIQUE constraint failed: <col>" or
+// "constraint failed: PRIMARY KEY constraint failed: <col>". A substring
+// match is sufficient — we only need to distinguish "already exists" from
+// other write failures for the AddReference error path.
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "PRIMARY KEY constraint failed")
+}
+
 // ==================== Lightweight reference types for cross-ref display ====================
 
 // TopicRef is a lightweight topic reference for cross-reference display
@@ -1075,56 +1090,10 @@ func (dm *DatabaseManager) RecordAdmissionOutcome(candidate *AdmissionCandidate,
 	return err
 }
 
-// DeleteReference removes a reference doc and its chunks (cascade from FK).
-// Both DELETEs run inside a single transaction so a crash mid-write cannot
-// leave orphan chunks behind (FK cascade would normally handle it, but only
-// if FKs are enabled on the connection).
-func (dm *DatabaseManager) DeleteReference(id string) error {
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return fmt.Errorf("DeleteReference: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`DELETE FROM reference_chunks WHERE doc_id = ?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM reference_docs WHERE id = ?`, id); err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
-// AddReference adds a reference document and its chunks in a transaction
-func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChunk) error {
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	tagsJSON, _ := MarshalJSON(doc.Tags)
-	_, err = tx.Exec(`
-		INSERT INTO reference_docs (id, title, file_path, source_type, tags, content, content_hash, import_reason, total_chunks, last_indexed, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON, doc.Content, doc.ContentHash, doc.ImportReason, doc.TotalChunks, doc.LastIndexed, doc.Created)
-	if err != nil {
-		return err
-	}
-
-	for _, chunk := range chunks {
-		_, err = tx.Exec(`
-			INSERT INTO reference_chunks (id, doc_id, chunk_index, section, content, source_path)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, chunk.ID, chunk.DocID, chunk.ChunkIndex, chunk.Section, chunk.Content, chunk.SourcePath)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
+// DeleteReference and AddReference now live in reference_db.go — moved
+// there so the reference-library write surface sits in one file and so
+// they can use dm.WithTx (with watchdog telemetry + panic recovery)
+// instead of the hand-rolled tx.Begin/Commit pattern they had here.
 
 // SearchTopics searches topics using FTS5 or LIKE fallback
 func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]interface{}, error) {

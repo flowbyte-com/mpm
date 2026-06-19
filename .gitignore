@@ -15,6 +15,7 @@ mpm-agent/
 src/db/mpm.db
 src/db/mpm.db.old
 src/db/mirror.jsonl
+src/db/watchdog.jsonl
 config/
 
 # Backup files

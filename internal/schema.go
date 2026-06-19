@@ -169,13 +169,11 @@ var BaseTables = []string{
 }
 
 // ReferenceTables contains the reference-library table creation statements.
-// Kept separate from BaseTables so that ReferenceDB.Init() (used by tests
-// against an isolated sqlite file) and the unified DatabaseManager schema
-// startup both run the *same* CREATE TABLE statements — eliminating the
-// previous drift where ReferenceDB carried its own inline, schema-divergent
-// subset. Single source of truth lives here; production startup runs it
-// from DatabaseManager.initUnifiedSchema() right after BaseTables; isolated
-// reference DBs run it from ReferenceDB.Init().
+// Single source of truth for the reference schema — run by
+// DatabaseManager.initUnifiedSchema() in production and by InitSchema in
+// tests. There is no longer a separate ReferenceDB type with its own
+// connection: every reference write goes through *DatabaseManager, which
+// holds the unified *sql.DB shared with the rest of MPM.
 //
 // content uses TEXT NOT NULL DEFAULT '' so callers that do not store the
 // full source text (the common case for streaming ingest) don't have to
@@ -183,8 +181,8 @@ var BaseTables = []string{
 // content would otherwise fail on the NOT NULL column.
 var ReferenceTables = []string{
 	// Reference documents table - single row per imported document.
-	// file_path vs source_path: schema uses file_path; ReferenceDB struct
-	// uses SourcePath. AddReference writes SourcePath into file_path.
+	// file_path vs source_path: schema uses file_path; ReferenceDoc
+	// struct uses SourcePath. AddReference writes SourcePath into file_path.
 	`CREATE TABLE IF NOT EXISTS reference_docs (
 		id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT,
 		source_path TEXT, source_type TEXT, tags TEXT,

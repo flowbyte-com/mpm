@@ -3379,32 +3379,6 @@ func getSessionStore() *internal.SessionStore {
 	return internal.NewSessionStore(paths.SessionSavePath)
 }
 
-func getReferenceStore() *internal.ReferenceStore {
-	paths := internal.DefaultMemoryPaths()
-	return internal.NewReferenceStore(paths.MemoryPath)
-}
-
-// getStatusCounts returns memory, session, topic, and reference counts
-func getStatusCounts() (memories int, sessions int, topics int, references int) {
-	memStore := getMemoryStore()
-	sessStore := getSessionStore()
-	refStore := getReferenceStore()
-
-	if m, err := memStore.GetMemoryCount(); err == nil {
-		memories = m
-	}
-	if s, err := sessStore.GetSessionCount(); err == nil {
-		sessions = s
-	}
-	if t, err := memStore.GetTopicCount(); err == nil {
-		topics = t
-	}
-	if r, err := refStore.GetReferenceCount(); err == nil {
-		references = r
-	}
-	return
-}
-
 func datePrefix(s string) string {
 	if len(s) >= 10 {
 		return s[:10]

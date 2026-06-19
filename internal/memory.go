@@ -1799,9 +1799,33 @@ func (s *MemoryStore) ClearMirror() error {
 	return os.Remove(s.MirrorFile)
 }
 
-// ============ Reference Library ============
+// ============ Reference Library: Legacy JSON Store ============
+//
+// ReferenceStore is the legacy in-memory + on-disk JSON reference store.
+// After the unification of the SQLite write surface
+// (*DatabaseManager.AddReference / DeleteReference), the SQLite side of
+// reference storage has only one connection — the one DatabaseManager
+// owns. The JSON store remains as a transitional fallback / migration
+// surface: existing references.json files still parse and load, and the
+// in-memory CRUD methods (Add / Search / List / GetByID / Remove /
+// Stats / Load / Save) still operate on the JSON view.
+//
+// What is gone: the MetadataDB field that pointed ReferenceStore at a
+// separate *ReferenceDB-backed sqlite file. That second write surface
+// was the trapdoor behind the legacy-JSON-vs-chunked-SQLite divergence;
+// removing the field severs the path without deleting the JSON methods
+// (which may still be useful for migration tooling that wants to read
+// the JSON view without going through SQLite).
+//
+// What is also gone: ReferenceStore.GetReferenceCount. It only existed
+// to delegate to MetadataDB.GetReferenceCount; with the field removed
+// there is no SQLite-backed source for the count via this struct. The
+// unified equivalent is internal.CountReferences(*sql.DB) — callers
+// that need the SQLite count should go through there.
 
-// Reference represents a single reference document
+// Reference represents a single reference document in the legacy JSON
+// store. The SQLite-side struct is ReferenceDoc (different field set —
+// Reference has no import_reason, content_hash, or chunk_index).
 type Reference struct {
 	ID       string            `json:"id"`
 	Title    string            `json:"title"`
@@ -1813,29 +1837,26 @@ type Reference struct {
 	Version  int               `json:"version"`
 }
 
-// ReferenceStore manages reference documents
-// Uses SQLite for storage
+// ReferenceStore is the legacy in-memory + JSON-file reference store.
+// No SQLite access — that lives on *DatabaseManager now.
 type ReferenceStore struct {
-	basePath   string
-	refs       []Reference // Legacy in-memory store
-	MetadataDB *ReferenceDB
-	RefDir     string
+	basePath string
+	refs     []Reference
+	RefDir   string
 }
 
-// NewReferenceStore creates a new reference store
+// NewReferenceStore constructs a ReferenceStore rooted at basePath.
+// If basePath is empty the JSON file is never read or written; the
+// returned store has an empty in-memory list and Save is a no-op.
 func NewReferenceStore(basePath string) *ReferenceStore {
 	store := &ReferenceStore{
 		basePath: basePath,
 		refs:     []Reference{},
 	}
 	if basePath != "" {
-		store.MetadataDB = NewReferenceDB(filepath.Join(basePath, "reference", "references.sqlite"))
 		store.RefDir = filepath.Join(basePath, "reference")
-	} else {
-		store.MetadataDB = NewReferenceDB("")
-		store.RefDir = ""
 	}
-	store.Load() // Load legacy references if they exist
+	_ = store.Load() // ignore missing-file; Load is a no-op then
 	return store
 }
 
@@ -1843,8 +1864,13 @@ func (s *ReferenceStore) getRefPath() string {
 	return filepath.Join(s.basePath, "reference", "references.json")
 }
 
-// Load loads references from disk
+// Load reads references.json into the in-memory list. A missing file is
+// not an error — the store starts empty. Other read errors (corrupt JSON,
+// permission denied) propagate so the caller can decide.
 func (s *ReferenceStore) Load() error {
+	if s.basePath == "" {
+		return nil
+	}
 	path := s.getRefPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
@@ -1858,29 +1884,29 @@ func (s *ReferenceStore) Load() error {
 	if err := json.Unmarshal(data, &s.refs); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-// Save saves references to disk
+// Save writes the in-memory list to references.json with indentation.
+// Creates the parent directory if it doesn't exist.
 func (s *ReferenceStore) Save() error {
+	if s.basePath == "" {
+		return nil
+	}
 	path := s.getRefPath()
-
-	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-
 	data, err := json.MarshalIndent(s.refs, "", "  ")
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(path, data, 0644)
 }
 
-// Add adds a new reference to the store
+// Add appends a new Reference to the in-memory list and persists to disk.
+// Returns the stored reference so callers can see the generated id.
 func (s *ReferenceStore) Add(title, filePath string, tags []string, content string) (*Reference, error) {
 	ref := Reference{
 		ID:       GenerateID(),
@@ -1892,63 +1918,54 @@ func (s *ReferenceStore) Add(title, filePath string, tags []string, content stri
 		Created:  time.Now().UTC().Format(time.RFC3339),
 		Version:  1,
 	}
-
 	s.refs = append(s.refs, ref)
-
 	if err := s.Save(); err != nil {
 		return nil, err
 	}
-
 	return &ref, nil
 }
 
-// Search searches references by query
+// Search performs a case-insensitive substring match against title,
+// tags, and content. Returns every match in list order.
 func (s *ReferenceStore) Search(query string) []Reference {
 	query = strings.ToLower(query)
 	results := []Reference{}
-
 	for _, ref := range s.refs {
-		// Check title
 		if strings.Contains(strings.ToLower(ref.Title), query) {
 			results = append(results, ref)
 			continue
 		}
-
-		// Check tags
 		for _, tag := range ref.Tags {
 			if strings.Contains(strings.ToLower(tag), query) {
 				results = append(results, ref)
 				break
 			}
 		}
-
-		// Check content (basic substring)
 		if strings.Contains(strings.ToLower(ref.Content), query) {
 			results = append(results, ref)
 		}
 	}
-
 	return results
 }
 
-// List returns all references
+// List returns the in-memory list (copy-free slice header; callers must
+// not mutate the underlying array).
 func (s *ReferenceStore) List() []Reference {
 	return s.refs
 }
 
-// Stats returns reference count and total size
+// Stats returns (count, total_content_bytes) for the in-memory list.
 func (s *ReferenceStore) Stats() (int, int64) {
 	total := len(s.refs)
-	size := int64(0)
-
+	var size int64
 	for _, ref := range s.refs {
 		size += int64(len(ref.Content))
 	}
-
 	return total, size
 }
 
-// GetByID retrieves a reference by ID
+// GetByID returns the reference with the given id, or an error if no
+// match is found.
 func (s *ReferenceStore) GetByID(id string) (*Reference, error) {
 	for _, ref := range s.refs {
 		if ref.ID == id {
@@ -1958,7 +1975,8 @@ func (s *ReferenceStore) GetByID(id string) (*Reference, error) {
 	return nil, fmt.Errorf("reference not found: %s", id)
 }
 
-// Remove removes a reference by ID
+// Remove deletes the reference with the given id from the in-memory
+// list and persists the change. Returns an error if no match.
 func (s *ReferenceStore) Remove(id string) error {
 	for i, ref := range s.refs {
 		if ref.ID == id {
