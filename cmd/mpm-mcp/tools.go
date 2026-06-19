@@ -27,7 +27,7 @@ import (
 
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
-// RegisterAllTools registers all 19 MPM tools on the given MCP server.
+// RegisterAllTools registers all 20 MPM tools on the given MCP server.
 // dm must be a long-lived DatabaseManager (the caller owns its Close).
 // ac carries the active mode/persona read from MPM_ACTIVE_MODE /
 // MPM_ACTIVE_PERSONA env vars; write handlers thread it into provenance
@@ -53,6 +53,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolRecordDecision(), handleRecordDecision(dm, ac))
 	s.AddTool(toolProactiveRecallHint(), handleProactiveRecallHint(dm))
 	s.AddTool(toolRoute(), handleRoute(router))
+	s.AddTool(toolLogToChangelog(), handleLogToChangelog(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -857,4 +858,71 @@ func parseStringSliceArg(v interface{}) []string {
 		return t
 	}
 	return nil
+}
+
+// log_to_changelog — agent self-reporting primitive.
+//
+// Call this when an agent finishes a feature arc and wants its
+// work captured in the changelog as a first-class memory. The
+// synthesis engine (built next) reconciles these memories with the
+// git log to produce a human-facing CHANGELOG.md that includes
+// both the commit-level facts and the agent's prose narrative.
+//
+// Strict retrospective contract: commit_hash is REQUIRED. The tool
+// will reject a call without one. This is by design — the schema
+// join (commit_hash, mpm_memory_id) is one-to-one, and orphan
+// entries would silently break the synthesis engine's join. Run
+// `git rev-parse HEAD` (or equivalent) to get the canonical 40-char
+// SHA-1; short hashes and refs are rejected.
+func toolLogToChangelog() mcp.Tool {
+	return mcp.NewTool("log_to_changelog",
+		mcp.WithDescription(
+			"Log a changelog entry tied to a specific git commit. Use after finishing a "+
+				"feature arc to record the 'why this matters' prose that the git log "+
+				"cannot provide. The fact, commit_hash, and tags are persisted as a "+
+				"memory row tagged #changelog and #commit:<hash>. The synthesis engine "+
+				"reconciles these memories with the git log to produce a unified "+
+				"CHANGELOG.md. Required: commit_hash (full 40-char SHA-1)."),
+		mcp.WithString("fact",
+			mcp.Required(),
+			mcp.Description("The 'why this matters' prose for the changelog entry. Can be multi-line; Markdown is preserved."),
+		),
+		mcp.WithString("commit_hash",
+			mcp.Required(),
+			mcp.Description("Full 40-character git SHA-1 this entry corresponds to. Get via `git rev-parse HEAD`."),
+		),
+		mcp.WithString("tags",
+			mcp.Description("Comma-separated extra tags for retrieval. The #changelog and #commit:<hash> tags are auto-injected."),
+		),
+	)
+}
+
+func handleLogToChangelog(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+
+		fact, _ := args["fact"].(string)
+		if strings.TrimSpace(fact) == "" {
+			return mcp.NewToolResultError("fact is required"), nil
+		}
+		commitHash, _ := args["commit_hash"].(string)
+		if strings.TrimSpace(commitHash) == "" {
+			return mcp.NewToolResultError(
+				"commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit). " +
+					"Run `git rev-parse HEAD` to get the canonical 40-char SHA-1."), nil
+		}
+		extraTags := parseStringSliceArg(args["tags"])
+
+		id, err := dm.LogChangelogEntry(fact, commitHash, extraTags)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("log_to_changelog failed", err), nil
+		}
+		return jsonResult(map[string]interface{}{
+			"success":     true,
+			"id":          id,
+			"commit_hash": commitHash,
+			"tags":        []string{internal.ChangelogTag, internal.CommitTagPrefix + strings.ToLower(commitHash)},
+			"collection":  "changelog",
+		}), nil
+	}
 }
