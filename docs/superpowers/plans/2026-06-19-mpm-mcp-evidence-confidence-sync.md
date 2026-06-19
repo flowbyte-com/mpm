@@ -193,23 +193,26 @@ Add at the bottom of `internal/call_helpers.go`:
 
 ```go
 // AddEvidence inserts an evidence row and returns the resulting confidence
-// for the artifact. Wraps internal.AddEvidence (which performs the
-// sensitive-content scan and evidence-type validation) so both the
-// `mpm call add_evidence` CLI and the `add_evidence` MCP tool share one
-// validation + write path.
+// for the artifact. Validation boundary: required-arg preflight +
+// IsValidEvidenceType + strength default. internal.AddEvidence runs the
+// deeper checks (sensitive-content scan, type registry, recompute).
+//
+// Both `mpm call add_evidence` and the `add_evidence` MCP tool route
+// through this method, so neither surface can bypass validation.
 //
 // Returns the same map the previous callAddEvidence returned:
 //   {"success": true, "confidence": <float>}
 //
-// Required fields: artifact_id, type, source_group, created_by. Returns
-// an error if any are missing; underlying evidence type / content
-// validation is enforced by internal.AddEvidence.
+// Required fields: artifact_id, type, source_group, created_by.
 func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}, error) {
 	if in.ArtifactID == "" {
 		return nil, fmt.Errorf("artifact_id is required")
 	}
 	if in.Type == "" {
 		return nil, fmt.Errorf("type is required")
+	}
+	if !IsValidEvidenceType(in.Type) {
+		return nil, fmt.Errorf("invalid evidence type: %q", in.Type)
 	}
 	if in.SourceGroup == "" {
 		return nil, fmt.Errorf("source_group is required")
