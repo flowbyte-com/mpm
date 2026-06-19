@@ -222,6 +222,18 @@ func (s *MemoryStore) InitSQLite() error {
 		}
 	}
 
+	// Reference library tables + indexes (same source as DatabaseManager startup).
+	for _, sql := range ReferenceTables {
+		if _, err := s.DB.Exec(sql); err != nil {
+			return fmt.Errorf("failed to create reference table: %w", err)
+		}
+	}
+	for _, sql := range ReferenceIndexes {
+		if _, err := s.DB.Exec(sql); err != nil {
+			return fmt.Errorf("failed to create reference index: %w", err)
+		}
+	}
+
 	// Use shared index definitions
 	for _, sql := range CommonIndexes {
 		s.DB.Exec(sql)
