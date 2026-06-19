@@ -908,33 +908,14 @@ func callRecomputeConfidence(payload map[string]interface{}) (interface{}, error
 	return dm.RecomputeConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 
-// callExplainConfidence returns the reasoning trace for an artifact's confidence:
-// the full component breakdown of f(evidence, decay). Distinct from
-// query_confidence_history (audit trail) — this answers "why did I get this number?"
+// callExplainConfidence returns the reasoning trace for an artifact's confidence.
 func callExplainConfidence(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	exp, err := internal.ExplainConfidence(dm, artifactID, artifactType)
-	if err != nil {
-		return nil, fmt.Errorf("explain confidence: %w", err)
-	}
-	return map[string]interface{}{
-		"success":       true,
-		"explanation":   exp,
-	}, nil
+	return dm.ExplainConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 
 // ── Release / Changelog ──────────────────────────────────────────────
