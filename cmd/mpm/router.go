@@ -482,6 +482,9 @@ func handleOps(args []string) int {
 	case "confidence":
 		return handleOpsConfidence(subArgs)
 
+	case "changelog":
+		return handleOpsChangelogRoute(subArgs)
+
 	case "status":
 		return handleStatus()
 
@@ -532,6 +535,7 @@ var opsSubcommandDescs = []struct {
 	{"stance synthesize <name> [flags]", "XITL: generate JIT persona for novel edge cases"},
 	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
 	{"confidence show|recompute", "Confidence/evidence engine: snapshot or trigger recompute"},
+	{"changelog build [--since/--until/--version/--legacy/--dry-run]", "Generate CHANGELOG.md + changelog.json from git log"},
 	{"help", "Show this help"},
 }
 
