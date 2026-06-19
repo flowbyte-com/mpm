@@ -67,6 +67,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolQueryConfidenceChanges(), handleQueryConfidenceChanges(dm))
 	s.AddTool(toolQueryConfidenceTrend(), handleQueryConfidenceTrend(dm))
 	s.AddTool(toolQueryMemoryQuality(), handleQueryMemoryQuality(dm))
+	s.AddTool(toolShowConfidence(), handleShowConfidence(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1148,6 +1149,33 @@ func handleQueryMemoryQuality(dm *internal.DatabaseManager) server.ToolHandlerFu
 		out, err := dm.QueryMemoryQuality()
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("query_memory_quality failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── show_confidence ───────────────────────────────────────────────────────
+
+func toolShowConfidence() mcp.Tool {
+	return mcp.NewTool("show_confidence",
+		mcp.WithDescription("Return the current confidence and history for an artifact. "+
+			"Result shape: {current: <float>, history: {history: [...]}}."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to inspect.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+	)
+}
+
+func handleShowConfidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		out, err := dm.ShowConfidence(artifactID, artifactType)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("show_confidence failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

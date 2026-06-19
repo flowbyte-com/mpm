@@ -950,3 +950,40 @@ func (dm *DatabaseManager) QueryMemoryQuality() (map[string]interface{}, error) 
 		"count":   len(stats),
 	}, nil
 }
+
+// ShowConfidence returns the current confidence and history for an artifact.
+//
+// The result shape is {"current": <float>, "history": {"history": [...]}} —
+// the nested "history" map is the result of QueryConfidenceHistory, which
+// is itself wrapped in a {"history": rows} map. This double-nesting is
+// load-bearing: existing CLI callers and tests parse `result.history.history`.
+// Do not flatten it.
+//
+// Both `mpm call show_confidence` and the `show_confidence` MCP tool route
+// through this method, so neither surface can drift in the required-arg
+// check, the artifact-type default, or the nested shape contract.
+//
+// Required: artifact_id. Optional: artifact_type (default "memory").
+func (dm *DatabaseManager) ShowConfidence(artifactID, artifactType string) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	var conf float64
+	if err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, ArtifactTable(artifactType)),
+		artifactID,
+	).Scan(&conf); err != nil {
+		return nil, fmt.Errorf("read confidence: %w", err)
+	}
+	hist, err := dm.QueryConfidenceHistory(artifactID, artifactType, 50)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"current": conf,
+		"history": hist,
+	}, nil
+}

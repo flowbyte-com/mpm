@@ -197,6 +197,24 @@ func TestCallHelpers_QueryConfidenceTrend_RequiresArtifactID(t *testing.T) {
 	assert.Contains(t, err.Error(), "artifact_id")
 }
 
+func TestCallHelpers_ShowConfidence_NestedHistoryShape(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO confidence_history (artifact_id, artifact_type, computed_at, confidence, evidence_count, trigger) VALUES (?, 'memory', 1700000000, 0.5, 0, 'manual_recompute')`, 0, "mem-1")
+	require.NoError(t, err)
+
+	out, err := dm.ShowConfidence("mem-1", "memory")
+	require.NoError(t, err)
+	assert.Contains(t, out, "current")
+	_, hasCurrent := out["current"].(float64)
+	assert.True(t, hasCurrent, "current must be a float64")
+	hist, hasHist := out["history"].(map[string]interface{})
+	assert.True(t, hasHist, "history must be a nested map (NOT a slice)")
+	_, hasInnerHist := hist["history"].([]map[string]interface{})
+	assert.True(t, hasInnerHist, "history.history must be the rows slice")
+}
+
 func TestCallHelpers_QueryMemoryQuality_ReturnsPerSource(t *testing.T) {
 	dm := newTestDM(t)
 	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, metadata) VALUES (?, 'memories', 'x', ?)`, 0, "mem-1", `{"provenance":{"model":"gpt-4o"}}`)

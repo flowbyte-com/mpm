@@ -890,37 +890,12 @@ func callQueryMemoryQuality(payload map[string]interface{}) (interface{}, error)
 
 // callShowConfidence returns the current confidence and history for an artifact.
 func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	var conf float64
-	if err := dm.QueryRowTracked(
-		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, internal.ArtifactTable(artifactType)),
-		artifactID,
-	).Scan(&conf); err != nil {
-		return nil, fmt.Errorf("read confidence: %w", err)
-	}
-	hist, err := callQueryConfidenceHistory(payload)
-	if err != nil {
-		return nil, err
-	}
-	histMap, _ := hist.(map[string]interface{})
-	return map[string]interface{}{
-		"current": conf,
-		"history": histMap,
-	}, nil
+	return dm.ShowConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 
 // callRecomputeConfidence forces a manual recompute and returns the snapshot.
