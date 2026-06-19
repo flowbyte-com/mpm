@@ -41,7 +41,7 @@ cp /home/v/workspace/projects/mpm/bin/mpm /usr/local/bin/mpm
 
 The plugin lives at `/home/v/workspace/projects/mpm/agent-plugins/openclaw-mpm-plugin/mpm-plugin/`. It is already configured; no manual creation needed.
 
-### `openclaw.plugin.json` (already configured — 21 tools registered)
+### `openclaw.plugin.json` (already configured — see `cmd/mpm-mcp/tools.go` RegisterAllTools for the canonical tool list)
 
 ```json
 {
@@ -136,17 +136,14 @@ print('Activated:', p.get('activated'))
 "
 ```
 
-Expected output — all 21 tools:
+Expected output:
 ```
-Tool names: ['query_long_term_memory', 'save_to_memory', 'save_lesson', 'search_lessons',
-             'list_lessons', 'create_topic', 'search_topics', 'link_topic',
-             'add_reference', 'search_references', 'list_references',
-             'read_wake_context', 'read_directives', 'record_decision',
-             'proactive_recall_hint', 'propose_theory', 'resolve_theory',
-             'challenge_memory', 'add_evidence', 'list_evidence', 'query_confidence_history']
+Tool names: [<full list — see `cmd/mpm-mcp/tools.go` RegisterAllTools for the canonical set>]
 Status: loaded
 Activated: True
 ```
+
+The full tool list is intentionally not duplicated here — `cmd/mpm-mcp/tools.go` is the single source of truth and any inline enumeration will drift on the next tool add.
 
 ### Restart Gateway
 
@@ -157,9 +154,9 @@ openclaw gateway restart
 
 ---
 
-## Tool Reference (21 tools total)
+## Tool Reference
 
-### Core Memory (3 tools)
+### Core Memory
 
 **`query_long_term_memory`**
 ```
@@ -182,7 +179,7 @@ memoryId: "memory ID to challenge"
 evidence: "Be specific about what changed and why the memory is no longer accurate"
 ```
 
-### Lessons (3 tools)
+### Lessons
 
 **`save_lesson`** — Store a learned insight, warning, or practice
 ```
@@ -201,7 +198,7 @@ query: "search string"
 type: "warning" | "practice" | "insight"  (optional filter)
 ```
 
-### Topics (3 tools)
+### Topics
 
 **`create_topic`** — Create a named memory cluster
 ```
@@ -221,7 +218,7 @@ memory_id: "memory ID"
 topic_id: "topic ID"
 ```
 
-### References (3 tools)
+### References
 
 **`add_reference`** — Ingest a document (PDF, EPUB, MD, TXT, HTML)
 ```
@@ -241,7 +238,7 @@ limit: 50  (optional, default 50)
 offset: 0  (optional)
 ```
 
-### System (2 tools)
+### System
 
 **`read_wake_context`** — Session bootstrap: mode, persona, recent topics, recent memories. Call immediately on session start.
 ```
@@ -253,7 +250,7 @@ offset: 0  (optional)
 {}  (no parameters)
 ```
 
-### Epistemology Engine (3 tools)
+### Epistemology Engine
 
 **`propose_theory`** — Log a hypothesis before writing a fix. Forces confrontation with whether the assumption is actually testable.
 ```
@@ -288,7 +285,7 @@ max_hints: 3  (optional, default 3)
 min_score: -3.0  (optional, lower = stronger match)
 ```
 
-### Evidence & Confidence (3 tools)
+### Evidence & Confidence
 
 **`add_evidence`** — Record evidence supporting or challenging an artifact. The system recomputes confidence automatically.
 ```

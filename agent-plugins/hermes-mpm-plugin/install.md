@@ -1,6 +1,6 @@
 # MPM Plugin for Hermes Agent
 
-A Hermes Agent tool plugin that exposes [MPM (Memory Protocol Manager)](https://github.com/v4alpha/mpm) as native agent tools. 19 tools across memory, lessons, topics, references, session context, recall hints, and epistemology.
+A Hermes Agent tool plugin that exposes [MPM (Memory Protocol Manager)](https://github.com/v4alpha/mpm) as native agent tools — see the tool list below for the full surface (memory, lessons, topics, references, session context, recall hints, and epistemology).
 
 ## Prerequisites
 
@@ -84,7 +84,7 @@ export MPM_BINARY=$MPM_WORKSPACE/bin/mpm              # or leave unset if mpm is
 hermes tools list
 ```
 
-You should see `mpm` listed with 19 tools:
+You should see `mpm` listed with the full tool set:
 
 ```
 mpm

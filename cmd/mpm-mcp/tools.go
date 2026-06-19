@@ -1,9 +1,11 @@
 // tools.go — Single source of truth for the MCP tool surface.
 //
-// 18 tools, one spec + one handler each. All handlers are thin shims:
-// extract args via type assertion, call a dm method, wrap the result.
-// The dm methods live in internal/call_helpers.go and back both this MCP
-// server and the `mpm call <tool>` CLI (cmd/mpm/call.go).
+// One tool spec + one handler per tool, registered via RegisterAllTools
+// below. The list of s.AddTool(...) calls is the canonical count — any
+// prose claim about "N tools" is decoration and will drift. All handlers
+// are thin shims: extract args via type assertion, call a dm method,
+// wrap the result. The dm methods live in internal/call_helpers.go and
+// back both this MCP server and the `mpm call <tool>` CLI (cmd/mpm/call.go).
 //
 // Descriptions and arg schemas are copied from
 // agent-plugins/opencode-mpm-plugin/src/index.ts (the OpenClaw plugin's tool surface).
@@ -27,7 +29,11 @@ import (
 
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
-// RegisterAllTools registers all 20 MPM tools on the given MCP server.
+// RegisterAllTools registers every MPM tool on the given MCP server.
+// The list of s.AddTool(...) calls inside is the canonical count of
+// the MCP tool surface — do not duplicate that count in prose, it
+// will drift on the next tool add.
+//
 // dm must be a long-lived DatabaseManager (the caller owns its Close).
 // ac carries the active mode/persona read from MPM_ACTIVE_MODE /
 // MPM_ACTIVE_PERSONA env vars; write handlers thread it into provenance
