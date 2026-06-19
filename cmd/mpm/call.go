@@ -819,7 +819,7 @@ func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
 	// Read back the new confidence.
 	var conf float64
 	if err := dm.QueryRowTracked(
-		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, artifactTable(artifactType)),
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, internal.ArtifactTable(artifactType)),
 		artifactID,
 	).Scan(&conf); err != nil {
 		return nil, fmt.Errorf("read confidence: %w", err)
@@ -1056,7 +1056,7 @@ func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
 
 	var conf float64
 	if err := dm.QueryRowTracked(
-		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, artifactTable(artifactType)),
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, internal.ArtifactTable(artifactType)),
 		artifactID,
 	).Scan(&conf); err != nil {
 		return nil, fmt.Errorf("read confidence: %w", err)
@@ -1122,14 +1122,6 @@ func callExplainConfidence(payload map[string]interface{}) (interface{}, error) 
 		"success":       true,
 		"explanation":   exp,
 	}, nil
-}
-
-// artifactTable maps an artifact type to its underlying SQLite table name.
-func artifactTable(artifactType string) string {
-	if artifactType == "lesson" {
-		return "lessons"
-	}
-	return "memories"
 }
 
 // ── Release / Changelog ──────────────────────────────────────────────
