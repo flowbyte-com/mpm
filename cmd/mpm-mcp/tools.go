@@ -64,6 +64,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolAddEvidence(), handleAddEvidence(dm))
 	s.AddTool(toolListEvidence(), handleListEvidence(dm))
 	s.AddTool(toolQueryConfidenceHistory(), handleQueryConfidenceHistory(dm))
+	s.AddTool(toolQueryConfidenceChanges(), handleQueryConfidenceChanges(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1055,6 +1056,46 @@ func handleQueryConfidenceHistory(dm *internal.DatabaseManager) server.ToolHandl
 		out, err := dm.QueryConfidenceHistory(artifactID, artifactType, limit)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("query_confidence_history failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── query_confidence_changes ──────────────────────────────────────────────
+
+func toolQueryConfidenceChanges() mcp.Tool {
+	return mcp.NewTool("query_confidence_changes",
+		mcp.WithDescription("Return recent confidence-altering events with delta and trigger. "+
+			"Distinct from query_confidence_history (full timeline): this answers 'what moved, by how much, and why, since when?'"),
+		mcp.WithNumber("since_seconds_ago", mcp.Description("Look back N seconds. Alternative to `since`.")),
+		mcp.WithNumber("since", mcp.Description("Unix timestamp cutoff. Default: last 24h.")),
+		mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max rows. Default 50.")),
+		mcp.WithString("artifact_id", mcp.Description("Filter to a single artifact.")),
+		mcp.WithString("artifact_type", mcp.Description("Filter to a single artifact type.")),
+	)
+}
+
+func handleQueryConfidenceChanges(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		var filter internal.ConfidenceChangesFilter
+		if secs, ok := args["since_seconds_ago"].(float64); ok && secs > 0 {
+			filter.Since = time.Now().Add(-time.Duration(secs) * time.Second)
+		} else if sinceF, ok := args["since"].(float64); ok && sinceF > 0 {
+			filter.Since = time.Unix(int64(sinceF), 0)
+		}
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			filter.Limit = int(l)
+		}
+		if v, ok := args["artifact_id"].(string); ok {
+			filter.ArtifactID = v
+		}
+		if v, ok := args["artifact_type"].(string); ok {
+			filter.ArtifactType = v
+		}
+		out, err := dm.QueryConfidenceChanges(filter)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("query_confidence_changes failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

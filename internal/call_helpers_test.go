@@ -140,3 +140,31 @@ func TestCallHelpers_QueryConfidenceHistory_RequiresArtifactID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "artifact_id")
 }
+
+func TestCallHelpers_QueryConfidenceChanges_SinceSecondsAgo(t *testing.T) {
+	dm := newTestDM(t)
+	out, err := dm.QueryConfidenceChanges(ConfidenceChangesFilter{
+		Since: time.Now().Add(-1 * time.Hour),
+		Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "changes")
+	assert.Contains(t, out, "count")
+}
+
+func TestCallHelpers_QueryConfidenceChanges_FilterByArtifact(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+
+	out, err := dm.QueryConfidenceChanges(ConfidenceChangesFilter{
+		ArtifactID:   "mem-1",
+		ArtifactType: "memory",
+		Limit:        10,
+	})
+	require.NoError(t, err)
+	changes, _ := out["changes"].([]map[string]interface{})
+	for _, c := range changes {
+		assert.Equal(t, "mem-1", c["artifact_id"])
+	}
+}

@@ -880,3 +880,21 @@ func (dm *DatabaseManager) QueryConfidenceHistory(artifactID, artifactType strin
 	}
 	return map[string]interface{}{"history": out}, nil
 }
+
+// QueryConfidenceChanges returns recent confidence-altering events with
+// delta and trigger. Wraps internal.QueryConfidenceChanges. Thin shim — both
+// `mpm call query_confidence_changes` and the `query_confidence_changes`
+// MCP tool route through this method.
+//
+// Returns: {"changes": [...], "count": N} — same shape as the previous
+// callQueryConfidenceChanges.
+func (dm *DatabaseManager) QueryConfidenceChanges(filter ConfidenceChangesFilter) (map[string]interface{}, error) {
+	changes, err := QueryConfidenceChanges(dm, filter)
+	if err != nil {
+		return nil, fmt.Errorf("query confidence changes: %w", err)
+	}
+	return map[string]interface{}{
+		"changes": changes,
+		"count":   len(changes),
+	}, nil
+}

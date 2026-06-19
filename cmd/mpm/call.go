@@ -827,26 +827,15 @@ func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, er
 	return dm.QueryConfidenceHistory(getString(payload, "artifact_id"), getString(payload, "artifact_type"), limit)
 }
 
-// callQueryConfidenceChanges returns recent confidence-altering events with
-// delta and trigger. Distinct from query_confidence_history (full timeline):
-// this answers "what moved, by how much, and why, since when?"
-//
-// Optional payload fields:
-//   since: Unix timestamp (default: last 24h)
-//   since_seconds_ago: alternative to `since`, seconds before now
-//   limit: max rows (default: 50)
-//   artifact_id: if set, only return changes for this artifact
-//   artifact_type: filter by type (e.g., "memory", "lesson")
+// callQueryConfidenceChanges returns recent confidence-altering events
+// with delta and trigger.
 func callQueryConfidenceChanges(payload map[string]interface{}) (interface{}, error) {
 	var filter internal.ConfidenceChangesFilter
-
-	// since_seconds_ago takes precedence over since for convenience.
 	if secs, ok := payload["since_seconds_ago"].(float64); ok && secs > 0 {
 		filter.Since = time.Now().Add(-time.Duration(secs) * time.Second)
 	} else if sinceF, ok := payload["since"].(float64); ok && sinceF > 0 {
 		filter.Since = time.Unix(int64(sinceF), 0)
 	}
-
 	if l, ok := payload["limit"].(float64); ok && l > 0 {
 		filter.Limit = int(l)
 	}
@@ -862,15 +851,7 @@ func callQueryConfidenceChanges(payload map[string]interface{}) (interface{}, er
 		return nil, err
 	}
 	defer closeDM()
-
-	changes, err := internal.QueryConfidenceChanges(dm, filter)
-	if err != nil {
-		return nil, fmt.Errorf("query confidence changes: %w", err)
-	}
-	return map[string]interface{}{
-		"changes": changes,
-		"count":   len(changes),
-	}, nil
+	return dm.QueryConfidenceChanges(filter)
 }
 
 // callQueryConfidenceTrend returns the trajectory projection of confidence
