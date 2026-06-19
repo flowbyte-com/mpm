@@ -929,3 +929,24 @@ func (dm *DatabaseManager) QueryConfidenceTrend(artifactID, artifactType string,
 		"trend":   trend,
 	}, nil
 }
+
+// QueryMemoryQuality returns per-creator memory statistics. Surfaces
+// which models/agents produce memories that survive.
+//
+// Both `mpm call query_memory_quality` and the `query_memory_quality`
+// MCP tool route through this method, so neither surface can drift in
+// the wire format or bypass the underlying QueryMemoryQualityBySource
+// pipeline that joins memories → auto_capture evidence → confidence_history.
+//
+// Returns: {"success": true, "sources": [...], "count": N}.
+func (dm *DatabaseManager) QueryMemoryQuality() (map[string]interface{}, error) {
+	stats, err := QueryMemoryQualityBySource(dm)
+	if err != nil {
+		return nil, fmt.Errorf("query memory quality: %w", err)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"sources": stats,
+		"count":   len(stats),
+	}, nil
+}
