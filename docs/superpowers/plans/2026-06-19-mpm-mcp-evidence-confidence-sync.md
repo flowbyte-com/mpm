@@ -40,6 +40,8 @@ go build -tags fts5 ./cmd/mpm-mcp
 
 **Validation rule.** `dm.AddEvidence` is the validation boundary. It runs the four required-arg checks (art_id, type, source_group, created_by), calls `internal.IsValidEvidenceType` to reject unknown types, fills `Strength` from `internal.DefaultStrength` when zero, and defaults `IndependenceFactor` to 1.0. The deeper checks (sensitive-content scan, type registry lookup) live in `internal.AddEvidence`, which `dm.AddEvidence` then calls — defense-in-depth so a future caller of `internal.AddEvidence` directly still gets validated. The dm method is the single CLI/MCP entry point, so neither surface can bypass validation.
 
+**Doc-comment rule.** Every new dm method gets a doc comment with two parts: (1) what it does + return shape, (2) a one-line note that both `mpm call <tool>` and the `<tool>` MCP tool route through this method. The "both surfaces route through this method" line is the contract that prevents drift — keep it consistent across all 9 dm methods even when the method is a thin shim (e.g., `ListEvidence`, `ShowConfidence`).
+
 ---
 
 ## Task 1: Move `artifactTable` to `internal/`
