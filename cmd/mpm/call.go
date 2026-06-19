@@ -878,26 +878,14 @@ func callQueryConfidenceTrend(payload map[string]interface{}) (interface{}, erro
 	return dm.QueryConfidenceTrend(getString(payload, "artifact_id"), getString(payload, "artifact_type"), windowDays)
 }
 
-// callQueryMemoryQuality returns per-creator memory statistics. Surfaces
-// which models/agents produce memories that survive. Driven by
-// memory_source_evidence_ai trigger that auto-attributes each new memory
-// to its writer via metadata.provenance.model.
+// callQueryMemoryQuality returns per-creator memory statistics.
 func callQueryMemoryQuality(payload map[string]interface{}) (interface{}, error) {
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	stats, err := internal.QueryMemoryQualityBySource(dm)
-	if err != nil {
-		return nil, fmt.Errorf("query memory quality: %w", err)
-	}
-	return map[string]interface{}{
-		"success": true,
-		"sources": stats,
-		"count":   len(stats),
-	}, nil
+	return dm.QueryMemoryQuality()
 }
 
 // callShowConfidence returns the current confidence and history for an artifact.
