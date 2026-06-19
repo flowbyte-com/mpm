@@ -23,6 +23,10 @@ mpm-backup-*.sql
 # SQLite WAL and shared memory files (runtime artifacts)
 *.db-wal
 *.db-shm
+# SQLite WAL rollover files (kept after a checkpoint as a safety net;
+# regenerated automatically — never commit them)
+*.db.old-wal
+*.db.old-shm
 
 # Worktrees
 /.worktrees
