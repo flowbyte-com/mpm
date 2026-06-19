@@ -339,7 +339,7 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "lesson":
 		helpFunc = handleLessonHelp
 	case "reference":
-		helpFunc = handleReferenceHelp
+		helpFunc = printRefHelp
 	case "memory":
 		helpFunc = handleMemoryHelp
 	case "gateway":
