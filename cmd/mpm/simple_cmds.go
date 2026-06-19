@@ -803,6 +803,13 @@ func handleRefAdd(args []string) int {
 		return 1
 	}
 
+	// Embed chunks in a separate phase after the chunk-insert tx
+	// commits. Embedding failures are best-effort: chunk rows are
+	// already durable, and embedding can be retried via a separate
+	// pass. We surface the count so the operator sees what was
+	// embedded without failing the ingest.
+	embedded, _, _ := dm.EmbedReferenceChunks(context.Background(), doc.ID)
+
 	if *jsonOutput {
 		tagsStr := strings.Join(tags, ",")
 		data, _ := json.Marshal(map[string]interface{}{
@@ -810,15 +817,16 @@ func handleRefAdd(args []string) int {
 			"id":            doc.ID,
 			"title":         doc.Title,
 			"total_chunks":  doc.TotalChunks,
+			"embedded":      embedded,
 			"tags":          tagsStr,
 			"import_reason": doc.ImportReason,
 		})
 		fmt.Println(string(data))
 	} else {
 		if doc.ImportReason != "" {
-			fmt.Printf("Added reference: %s (%d chunks)\n  reason: %s\n", title, len(chunks), doc.ImportReason)
+			fmt.Printf("Added reference: %s (%d chunks, %d embedded)\n  reason: %s\n", title, len(chunks), embedded, doc.ImportReason)
 		} else {
-			fmt.Printf("Added reference: %s (%d chunks)\n", title, len(chunks))
+			fmt.Printf("Added reference: %s (%d chunks, %d embedded)\n", title, len(chunks), embedded)
 		}
 	}
 	return 0

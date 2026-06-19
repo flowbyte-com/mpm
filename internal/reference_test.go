@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -749,4 +750,252 @@ func TestFindReferenceBySourcePath(t *testing.T) {
 		t.Errorf("expected nil for missing source, got %+v", missing)
 	}
 }
+
+// ==================== Embedding ====================
+
+// readChunkEmbedding returns the raw JSON bytes of a chunk's embedding
+// column. Empty bytes + nil error means the chunk has no embedding.
+func readChunkEmbedding(t *testing.T, db *sql.DB, chunkID string) []byte {
+	t.Helper()
+	var raw sql.NullString
+	err := db.QueryRow(`SELECT embedding FROM reference_chunks WHERE id = ?`, chunkID).Scan(&raw)
+	if err != nil {
+		t.Fatalf("read embedding for %q: %v", chunkID, err)
+	}
+	if !raw.Valid {
+		return nil
+	}
+	return []byte(raw.String)
+}
+
+// TestEmbedReferenceChunksFreshIngest: chunks inserted by AddReference
+// have NULL embedding. EmbedReferenceChunks fills them in. Idempotent:
+// second call is a no-op because every chunk already has an embedding.
+func TestEmbedReferenceChunksFreshIngest(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	ctx := context.Background()
+
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-fresh", Title: "Fresh", SourcePath: "/emb-fresh.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "ef-c1", DocID: "emb-fresh", ChunkIndex: 0, Content: "alpha text"},
+		{ID: "ef-c2", DocID: "emb-fresh", ChunkIndex: 1, Content: "beta text"},
+	}); err != nil {
+		t.Fatalf("AddReference failed: %v", err)
+	}
+
+	// Embeddings are NULL right after AddReference — chunk-insert tx
+	// does not embed (keeps the tx small and fast).
+	for _, id := range []string{"ef-c1", "ef-c2"} {
+		if got := readChunkEmbedding(t, db, id); got != nil {
+			t.Errorf("chunk %s should have NULL embedding after AddReference, got %d bytes", id, len(got))
+		}
+	}
+
+	// Embedding pass.
+	embedded, failed, err := dm.EmbedReferenceChunks(ctx, "emb-fresh")
+	if err != nil {
+		t.Fatalf("EmbedReferenceChunks: %v", err)
+	}
+	if embedded != 2 {
+		t.Errorf("expected 2 embedded, got %d", embedded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed, got %d", failed)
+	}
+	for _, id := range []string{"ef-c1", "ef-c2"} {
+		if got := readChunkEmbedding(t, db, id); got == nil {
+			t.Errorf("chunk %s should have embedding after EmbedReferenceChunks, got NULL", id)
+		}
+	}
+
+	// Idempotent: second pass embeds nothing new.
+	embedded2, _, err := dm.EmbedReferenceChunks(ctx, "emb-fresh")
+	if err != nil {
+		t.Fatalf("EmbedReferenceChunks (idempotent): %v", err)
+	}
+	if embedded2 != 0 {
+		t.Errorf("expected 0 embedded on second pass, got %d", embedded2)
+	}
+}
+
+// TestEmbedReferenceChunksReIngestSameContent: re-ingesting a doc with
+// unchanged chunks must NOT re-embed anything. This is the load-bearing
+// win of the chunk_hash diff + embedding split: a 1000-chunk manual
+// that hasn't changed costs zero embedding work on re-ingest.
+func TestEmbedReferenceChunksReIngestSameContent(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	ctx := context.Background()
+
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-same", Title: "Same", SourcePath: "/same.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "es-c1", DocID: "emb-same", ChunkIndex: 0, Content: "stable text"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, _, err := dm.EmbedReferenceChunks(ctx, "emb-same"); err != nil {
+		t.Fatalf("first embed: %v", err)
+	}
+	originalEmbedding := readChunkEmbedding(t, db, "es-c1")
+	if originalEmbedding == nil {
+		t.Fatal("expected embedding to be populated after first pass")
+	}
+
+	// Re-ingest same content, same deterministic id.
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-same", Title: "Same", SourcePath: "/same.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "es-c1", DocID: "emb-same", ChunkIndex: 0, Content: "stable text"},
+	}); err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+
+	// Re-embed pass: 0 chunks need embedding because nothing changed.
+	embedded, _, err := dm.EmbedReferenceChunks(ctx, "emb-same")
+	if err != nil {
+		t.Fatalf("re-embed: %v", err)
+	}
+	if embedded != 0 {
+		t.Errorf("expected 0 embedded (unchanged content), got %d", embedded)
+	}
+	// Embedding bytes must be byte-for-byte unchanged — proof we did
+	// not regenerate the vector.
+	afterEmbedding := readChunkEmbedding(t, db, "es-c1")
+	if string(originalEmbedding) != string(afterEmbedding) {
+		t.Errorf("embedding regenerated despite unchanged content (re-ingest should be no-op)")
+	}
+}
+
+// TestEmbedReferenceChunksReIngestUpdatedContent: when content changes,
+// AddReference's Updated branch clears embedding to NULL so the next
+// EmbedReferenceChunks pass picks it up. Stale vectors would misroute
+// semantic search.
+func TestEmbedReferenceChunksReIngestUpdatedContent(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	ctx := context.Background()
+
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-upd", Title: "Upd", SourcePath: "/upd.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "eu-c1", DocID: "emb-upd", ChunkIndex: 0, Content: "first version"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, _, err := dm.EmbedReferenceChunks(ctx, "emb-upd"); err != nil {
+		t.Fatalf("first embed: %v", err)
+	}
+	originalEmbedding := readChunkEmbedding(t, db, "eu-c1")
+	if originalEmbedding == nil {
+		t.Fatal("expected embedding populated after first pass")
+	}
+
+	// Re-ingest with NEW content for the same chunk id. AddReference
+	// should clear the stale embedding via ON CONFLICT(id) DO UPDATE.
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-upd", Title: "Upd", SourcePath: "/upd.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "eu-c1", DocID: "emb-upd", ChunkIndex: 0, Content: "second version — different"},
+	}); err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+	if got := readChunkEmbedding(t, db, "eu-c1"); got != nil {
+		t.Errorf("expected embedding cleared on Updated branch, got %d bytes", len(got))
+	}
+
+	// Re-embed pass picks it up.
+	embedded, _, err := dm.EmbedReferenceChunks(ctx, "emb-upd")
+	if err != nil {
+		t.Fatalf("re-embed: %v", err)
+	}
+	if embedded != 1 {
+		t.Errorf("expected 1 embedded (cleared by Updated), got %d", embedded)
+	}
+	newEmbedding := readChunkEmbedding(t, db, "eu-c1")
+	if newEmbedding == nil {
+		t.Fatal("expected embedding repopulated after re-embed")
+	}
+	if string(originalEmbedding) == string(newEmbedding) {
+		t.Errorf("embedding should differ for different content (proves it was regenerated, not stale-cached)")
+	}
+}
+
+// TestEmbedReferenceChunksOrphanDropsEmbedding: when a chunk is removed
+// from a doc via re-ingest (orphan), the chunk row is deleted and its
+// embedding column goes with it via the same statement — no stale
+// vectors hanging around.
+func TestEmbedReferenceChunksOrphanDropsEmbedding(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	ctx := context.Background()
+
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-orphan", Title: "Orphan", SourcePath: "/orphan.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "eo-c1", DocID: "emb-orphan", ChunkIndex: 0, Content: "keep"},
+		{ID: "eo-c2", DocID: "emb-orphan", ChunkIndex: 1, Content: "will vanish"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, _, err := dm.EmbedReferenceChunks(ctx, "emb-orphan"); err != nil {
+		t.Fatalf("first embed: %v", err)
+	}
+
+	// Confirm both chunks have embeddings before orphaning.
+	for _, id := range []string{"eo-c1", "eo-c2"} {
+		if got := readChunkEmbedding(t, db, id); got == nil {
+			t.Fatalf("chunk %s missing embedding before re-ingest", id)
+		}
+	}
+
+	// Re-ingest with eo-c2 dropped — diff sees eo-c2 as Deleted.
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "emb-orphan", Title: "Orphan", SourcePath: "/orphan.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "eo-c1", DocID: "emb-orphan", ChunkIndex: 0, Content: "keep"},
+	}); err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+
+	// eo-c2 row is gone entirely — embedding column went with it
+	// because the row was DELETEd, not because the column was cleared.
+	var exists int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reference_chunks WHERE id = ?`, "eo-c2").Scan(&exists); err != nil {
+		t.Fatalf("count eo-c2: %v", err)
+	}
+	if exists != 0 {
+		t.Errorf("expected eo-c2 row to be deleted, found %d", exists)
+	}
+
+	// eo-c1 keeps its embedding from the first pass — no re-embed needed.
+	keptEmbedding := readChunkEmbedding(t, db, "eo-c1")
+	if keptEmbedding == nil {
+		t.Errorf("expected eo-c1 embedding to survive re-ingest (content unchanged)")
+	}
+
+	// Re-embed pass: nothing to do.
+	embedded, _, err := dm.EmbedReferenceChunks(ctx, "emb-orphan")
+	if err != nil {
+		t.Fatalf("re-embed: %v", err)
+	}
+	if embedded != 0 {
+		t.Errorf("expected 0 embedded after orphan cleanup, got %d", embedded)
+	}
+}
+
+// TestEmbedReferenceChunksEmptyDocID: defensive — empty docID rejected.
+func TestEmbedReferenceChunksEmptyDocID(t *testing.T) {
+	dm, _ := newTestRefDM(t)
+	if _, _, err := dm.EmbedReferenceChunks(context.Background(), ""); err == nil {
+		t.Error("expected error for empty docID, got nil")
+	}
+}
+
+// TestEmbedReferenceChunksNilDM: defensive — nil DatabaseManager rejected.
+func TestEmbedReferenceChunksNilDM(t *testing.T) {
+	var dm *DatabaseManager
+	if _, _, err := dm.EmbedReferenceChunks(context.Background(), "any"); err == nil {
+		t.Error("expected error for nil DatabaseManager, got nil")
+	}
+}
+
 
