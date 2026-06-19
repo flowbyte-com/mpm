@@ -195,9 +195,13 @@ var ReferenceTables = []string{
 	// Reference chunks table - stores chunked content of reference documents.
 	// ON DELETE CASCADE ensures chunks do not orphan when their parent doc
 	// is removed (DeleteReference relies on this).
+	// content_hash stores sha256(content) so AddReference can diff against
+	// existing rows without re-reading chunk content — chunk_hash diff
+	// ingest reuses unchanged chunks and deletes orphans atomically.
 	`CREATE TABLE IF NOT EXISTS reference_chunks (
 		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
 		section TEXT, content TEXT NOT NULL, source_path TEXT,
+		content_hash TEXT,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 
@@ -312,4 +316,5 @@ var SafeMigrations = [][3]string{
 	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
 	{"reference_docs", "import_reason", "TEXT"},
+	{"reference_chunks", "content_hash", "TEXT"},
 }
