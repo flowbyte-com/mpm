@@ -83,9 +83,28 @@ Claude Code  ──┐
 
 `ListEvidence`, `QueryConfidenceHistory` carry over the exact SQL already in `call.go` (lines 850–856 and 900–906 respectively) — no query changes. `ShowConfidence` is composed from `QueryConfidenceHistory` plus a single-row `SELECT confidence` against `artifactTable(artifactType)`.
 
+`AddEvidence` is the validation boundary: it calls `internal.IsValidEvidenceType` (rejects unknown types) and `internal.DefaultStrength` (fills the strength default from the type). Both CLI and MCP callers see the same validation outcome. Validation does not run in the handler — it runs once, in the dm method, so the two surfaces cannot drift.
+
+`EvidenceInput` is a re-export of `internal.EvidenceInput`. `internal.ConfidenceChangesFilter` is already exported.
+
+**1a. `internal/db.go` (or new `internal/artifact_table.go`) — move `artifactTable`**
+
+The `artifactTable(artifactType string) string` helper currently lives in `cmd/mpm/call.go` at line 1128:
+
+```go
+func artifactTable(artifactType string) string {
+    if artifactType == "lesson" {
+        return "lessons"
+    }
+    return "memories"
+}
+```
+
+It maps `artifact_type` → SQLite table name. Both `dm.AddEvidence`, `dm.ShowConfidence`, and `dm.RecomputeConfidence` need it, and the new MCP handlers will too. It moves to `internal/` (either `db.go` next to other small helpers, or a new file) so both surfaces can import it. No behavior change.
+
 **2. `cmd/mpm/call.go` — 9 handler refactors**
 
-Each `call*` handler is reduced to: open dm, call dm method, return result. The `artifactTable(artifactType)` helper at line 1128 stays in `call.go` if MCP needs it (or moves to `internal` — see open question below). The `internal.IsValidEvidenceType` / `DefaultStrength` checks in `callAddEvidence` (lines 781–796) move into the dm method so the same validation runs from both surfaces.
+Each `call*` handler is reduced to: open dm, call dm method, return result. The `artifactTable(artifactType)` helper moves to `internal/` (see section 1a). The `internal.IsValidEvidenceType` / `DefaultStrength` checks in `callAddEvidence` (lines 781–796) move into the dm method so the same validation runs from both surfaces.
 
 Net diff: `call.go` drops ~250 lines of inline SQL, replaces with one-line dispatches. The `toolRegistry` map and the `callX` symbol names are unchanged.
 
@@ -147,14 +166,11 @@ go test -tags fts5 ./internal/... -run TestCallHelpers
 
 **Smoke test:** run `bin/mpm-mcp` with a `tools/list` JSON-RPC request, confirm 29 tool names returned.
 
-### Open Questions
-
-- Should `artifactTable(artifactType)` move to `internal/` so both `call.go` and `tools.go` can import it? Currently lives in `call.go` at line 1128. Recommend: yes, move it (it's a one-liner, no behavioral impact).
-
 ## Risks
 
-- **Behavior drift in `callAddEvidence`'s validation** (lines 781–796) — `internal.IsValidEvidenceType` and `internal.DefaultStrength` checks currently run in the handler, not in `internal.AddEvidence`. Moving the validation into `dm.AddEvidence` is the right boundary, but verify the new dm method returns the same errors the old handler did.
-- **Result-shape stability for `ShowConfidence`** — current `callShowConfidence` returns `{current, history:{history:[…]}}` (nested `history` key). The MCP version must return the same shape, or any MCP client that flattens it will break.
+- **Behavior drift in `callAddEvidence`'s validation** (lines 781–796) — `internal.IsValidEvidenceType` and `internal.DefaultStrength` checks currently run in the handler. They move into the new `dm.AddEvidence` method (the single validation boundary for both surfaces), not into `internal.AddEvidence`. Verify the new dm method returns the same errors the old handler did.
+- **Result-shape stability for `ShowConfidence`** — current `callShowConfidence` returns `{current, history:{history:[…]}}` (nested `history` key). The new dm method and both CLI/MCP handlers must preserve this exact shape, or any downstream agent or test that flattens it will break. The `call_helpers_test.go` test asserts this shape.
+- **`artifactTable` move** — moving the helper from `cmd/mpm/call.go` to `internal/` touches one import path (`call.go`) and adds two (`call_helpers.go`, `tools.go`). Low risk but worth flagging as a small, focused diff.
 - **Tests for the existing 9 `call*` handlers** — none exist in the repo today. The new `internal/call_helpers_test.go` is the first test coverage for this code path; it should not be deferred.
 
 ## Out of Scope (Follow-Up)
