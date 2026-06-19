@@ -781,3 +781,52 @@ func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}
 		"confidence": conf,
 	}, nil
 }
+
+// ListEvidence returns all evidence rows for an artifact, newest first.
+// Returns the rows under the "evidence" key — same shape as the
+// previous callListEvidence.
+//
+// Required: artifact_id. Optional: artifact_type (default "memory").
+func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	rows, err := dm.QueryTracked(`
+		SELECT id, artifact_id, artifact_type, type, source_group, strength,
+		       independence_factor, created_by, created_at, expires_at, notes
+		FROM evidence
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY created_at DESC
+	`, artifactID, artifactType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, aid, atype, t, src, by, notes string
+		var strength, ind float64
+		var createdAt int64
+		var expiresAt *int64
+		if err := rows.Scan(&id, &aid, &atype, &t, &src, &strength, &ind, &by, &createdAt, &expiresAt, &notes); err != nil {
+			return nil, err
+		}
+		row := map[string]interface{}{
+			"id": id, "artifact_id": aid, "artifact_type": atype,
+			"type": t, "source_group": src, "strength": strength,
+			"independence_factor": ind, "created_by": by,
+			"created_at": createdAt, "notes": notes,
+		}
+		if expiresAt != nil {
+			row["expires_at"] = *expiresAt
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"evidence": out}, nil
+}

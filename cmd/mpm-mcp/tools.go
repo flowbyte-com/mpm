@@ -62,6 +62,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolRoute(), handleRoute(router))
 	s.AddTool(toolLogToChangelog(), handleLogToChangelog(dm))
 	s.AddTool(toolAddEvidence(), handleAddEvidence(dm))
+	s.AddTool(toolListEvidence(), handleListEvidence(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -999,6 +1000,32 @@ func handleAddEvidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("add_evidence failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── list_evidence ─────────────────────────────────────────────────────────
+
+func toolListEvidence() mcp.Tool {
+	return mcp.NewTool("list_evidence",
+		mcp.WithDescription("List all evidence rows for an artifact, newest first."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to list evidence for.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+	)
+}
+
+func handleListEvidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		out, err := dm.ListEvidence(artifactID, artifactType)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("list_evidence failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

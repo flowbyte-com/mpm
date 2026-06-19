@@ -802,50 +802,15 @@ func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
 	})
 }
 
-// callListEvidence returns all evidence rows for an artifact.
+// callListEvidence returns all evidence rows for an artifact. Thin shim
+// over dm.ListEvidence.
 func callListEvidence(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	rows, err := dm.QueryTracked(`
-		SELECT id, type, source_group, strength, independence_factor, created_by, created_at, notes
-		FROM evidence
-		WHERE artifact_id = ? AND artifact_type = ?
-		ORDER BY created_at DESC
-	`, artifactID, artifactType)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []map[string]interface{}
-	for rows.Next() {
-		var id, t, src, by, notes string
-		var strength, ind float64
-		var createdAt int64
-		if err := rows.Scan(&id, &t, &src, &strength, &ind, &by, &createdAt, &notes); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]interface{}{
-			"id": id, "type": t, "source_group": src, "strength": strength,
-			"independence_factor": ind, "created_by": by, "created_at": createdAt, "notes": notes,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"evidence": out}, nil
+	return dm.ListEvidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callQueryConfidenceHistory returns the confidence timeline for an artifact.
