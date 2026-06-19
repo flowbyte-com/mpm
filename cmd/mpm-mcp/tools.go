@@ -63,6 +63,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolLogToChangelog(), handleLogToChangelog(dm))
 	s.AddTool(toolAddEvidence(), handleAddEvidence(dm))
 	s.AddTool(toolListEvidence(), handleListEvidence(dm))
+	s.AddTool(toolQueryConfidenceHistory(), handleQueryConfidenceHistory(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1026,6 +1027,34 @@ func handleListEvidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 		out, err := dm.ListEvidence(artifactID, artifactType)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("list_evidence failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── query_confidence_history ──────────────────────────────────────────────
+
+func toolQueryConfidenceHistory() mcp.Tool {
+	return mcp.NewTool("query_confidence_history",
+		mcp.WithDescription("Return the confidence timeline for an artifact, newest first."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to query.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+		mcp.WithNumber("limit", mcp.DefaultNumber(50), mcp.Description("Max rows to return. Default 50.")),
+	)
+}
+
+func handleQueryConfidenceHistory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		limit := int(parseNum(args["limit"], 50))
+		out, err := dm.QueryConfidenceHistory(artifactID, artifactType, limit)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("query_confidence_history failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

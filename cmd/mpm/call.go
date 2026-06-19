@@ -815,54 +815,16 @@ func callListEvidence(payload map[string]interface{}) (interface{}, error) {
 
 // callQueryConfidenceHistory returns the confidence timeline for an artifact.
 func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
 	limit := 50
 	if l, ok := payload["limit"].(float64); ok && l > 0 {
 		limit = int(l)
 	}
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	rows, err := dm.QueryTracked(`
-		SELECT computed_at, confidence, evidence_count, trigger
-		FROM confidence_history
-		WHERE artifact_id = ? AND artifact_type = ?
-		ORDER BY computed_at DESC
-		LIMIT ?
-	`, artifactID, artifactType, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []map[string]interface{}
-	for rows.Next() {
-		var computedAt int64
-		var conf float64
-		var evidenceCount int
-		var trigger string
-		if err := rows.Scan(&computedAt, &conf, &evidenceCount, &trigger); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]interface{}{
-			"computed_at": computedAt, "confidence": conf,
-			"evidence_count": evidenceCount, "trigger": trigger,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{"history": out}, nil
+	return dm.QueryConfidenceHistory(getString(payload, "artifact_id"), getString(payload, "artifact_type"), limit)
 }
 
 // callQueryConfidenceChanges returns recent confidence-altering events with
