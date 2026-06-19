@@ -290,15 +290,15 @@ func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
 	defer closeDM()
 
 	return dm.AddEvidence(EvidenceInput{
-		ArtifactID:         stringArg(payload["artifact_id"]),
+		ArtifactID:         getString(payload,"artifact_id"),
 		ArtifactType:       artifactType,
-		Type:               stringArg(payload["type"]),
-		SourceGroup:        stringArg(payload["source_group"]),
+		Type:               getString(payload,"type"),
+		SourceGroup:        getString(payload,"source_group"),
 		Strength:           strength,
 		IndependenceFactor: independence,
-		CreatedBy:          stringArg(payload["created_by"]),
+		CreatedBy:          getString(payload,"created_by"),
 		CreatedAt:          time.Now(),
-		Notes:              stringArg(payload["notes"]),
+		Notes:              getString(payload,"notes"),
 	})
 }
 ```
@@ -460,7 +460,7 @@ func TestCallHelpers_ListEvidence_FiltersByType(t *testing.T) {
 	memItems, err := dm.ListEvidence("mem-1", "memory")
 	require.NoError(t, err)
 	assert.Len(t, memItems, 1)
-	assert.Equal(t, "mem-1", memItems[0]["artifact_id"])
+	assert.Equal(t, "mem-1", memItems[0]["artifact_id")
 }
 
 func TestCallHelpers_ListEvidence_RequiresArtifactID(t *testing.T) {
@@ -554,7 +554,7 @@ func callListEvidence(payload map[string]interface{}) (interface{}, error) {
 		return nil, err
 	}
 	defer closeDM()
-	return dm.ListEvidence(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]))
+	return dm.ListEvidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 ```
 
@@ -754,7 +754,7 @@ func callQueryConfidenceHistory(payload map[string]interface{}) (interface{}, er
 		return nil, err
 	}
 	defer closeDM()
-	return dm.QueryConfidenceHistory(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]), limit)
+	return dm.QueryConfidenceHistory(getString(payload,"artifact_id"), getString(payload,"artifact_type"), limit)
 }
 ```
 
@@ -855,7 +855,7 @@ func TestCallHelpers_QueryConfidenceChanges_FilterByArtifact(t *testing.T) {
 	require.NoError(t, err)
 	changes, _ := out["changes"].([]map[string]interface{})
 	for _, c := range changes {
-		assert.Equal(t, "mem-1", c["artifact_id"])
+		assert.Equal(t, "mem-1", c["artifact_id")
 	}
 }
 ```
@@ -1102,7 +1102,7 @@ func callQueryConfidenceTrend(payload map[string]interface{}) (interface{}, erro
 	if w, ok := payload["window_days"].(float64); ok && w > 0 {
 		windowDays = int(w)
 	}
-	return dm.QueryConfidenceTrend(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]), windowDays)
+	return dm.QueryConfidenceTrend(getString(payload,"artifact_id"), getString(payload,"artifact_type"), windowDays)
 }
 ```
 
@@ -1390,7 +1390,7 @@ func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
 		return nil, err
 	}
 	defer closeDM()
-	return dm.ShowConfidence(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]))
+	return dm.ShowConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 ```
 
@@ -1539,7 +1539,7 @@ func callRecomputeConfidence(payload map[string]interface{}) (interface{}, error
 		return nil, err
 	}
 	defer closeDM()
-	return dm.RecomputeConfidence(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]))
+	return dm.RecomputeConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 ```
 
@@ -1690,7 +1690,7 @@ func callExplainConfidence(payload map[string]interface{}) (interface{}, error) 
 		return nil, err
 	}
 	defer closeDM()
-	return dm.ExplainConfidence(stringArg(payload["artifact_id"]), stringArg(payload["artifact_type"]))
+	return dm.ExplainConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 ```
 
