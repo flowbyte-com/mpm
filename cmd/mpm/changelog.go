@@ -4,7 +4,7 @@ package main
 // scaffolding for MPM's release notes. The subcommand reads the git
 // log since the previous tag (or a custom boundary), groups commits
 // by conventional-commit prefix, and emits both CHANGELOG.md (human)
-// and changelog.json (machine, for the future synthesis engine).
+// and changelog.json (machine, input to the --with-synthesis join).
 //
 // Flags:
 //   --since <ref>      Lower bound (tag, sha, or date). Default: latest tag.
