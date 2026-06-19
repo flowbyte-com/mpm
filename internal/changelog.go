@@ -365,6 +365,18 @@ func renderEntry(b *strings.Builder, e ChangelogEntry) {
 		sha = fmt.Sprintf(" ([%s](https://github.com/example/mpm/commit/%s))", short, e.CommitHash)
 	}
 	fmt.Fprintf(b, "- %s%s%s\n", scope, e.Summary, sha)
+	// Body, if present, renders as a blockquote directly beneath
+	// the bullet. This is the synthesis engine's prose channel:
+	// git-sourced entries have empty Body, so the bullet stands
+	// alone; entries that were matched against a #changelog
+	// memory get the agent's prose rendered as blockquoted text.
+	// Each line of Body is prefixed with "> " so multi-line
+	// prose stacks correctly.
+	if e.Body != "" {
+		for _, line := range strings.Split(e.Body, "\n") {
+			fmt.Fprintf(b, "  > %s\n", line)
+		}
+	}
 }
 
 func renderLegacy(b *strings.Builder, rel ChangelogRelease) {
