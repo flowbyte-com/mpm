@@ -415,27 +415,148 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 	}, nil
 }
 
-// AddReferenceFromFile reads a file and ingests it as a reference.
+// AddReferenceFromFile reads a file from disk, parses it by extension,
+// chunks the content, and inserts the resulting document + chunks into
+// the unified SQLite store. This is the same pipeline the CLI uses
+// (mpm kb reference add) — routing both surfaces through one code path
+// fixes the prior bug where the MCP add path wrote to the legacy JSON
+// store while search read from the chunked SQLite store, leaving MCP
+// additions invisible to MCP searches.
+//
+// Supports: .pdf, .epub, .html/.xhtml, .txt, .md. Unknown extensions are
+// treated as plain text. Parse failures short-circuit with a wrapped error.
+//
+// tags and reason are optional. chunkSize is clamped to the same 64–2048
+// range ChunkByTokens enforces internally; 0 or negative falls back to
+// the 512 default.
 func (dm *DatabaseManager) AddReferenceFromFile(filepath, title string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(filepath)
+	return dm.AddReferenceFromFileWith(filepath, title, nil, "", 0)
+}
+
+// AddReferenceFromFileWith is the extended entry point. Use this when
+// callers want to attach tags, an import_reason, or a non-default chunk
+// size. The two-argument AddReferenceFromFile delegates here with zero
+// values so existing callers (MCP) stay byte-compatible.
+func (dm *DatabaseManager) AddReferenceFromFileWith(filepath, title string, tags []string, reason string, chunkSize int) (map[string]interface{}, error) {
+	content, err := parseReferenceFile(filepath)
 	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
+		return nil, err
 	}
-	content := string(data)
 	if title == "" {
-		parts := strings.Split(filepath, "/")
-		title = parts[len(parts)-1]
+		title = filepathBase(filepath)
 	}
-	store := NewReferenceStore(DefaultMemoryPaths().MemoryPath)
-	ref, err := store.Add(title, filepath, nil, content)
+
+	chunks, err := ChunkByTokens(content, chunkSize)
 	if err != nil {
+		return nil, fmt.Errorf("chunk reference: %w", err)
+	}
+
+	refChunks := make([]ReferenceChunk, len(chunks))
+	for i, c := range chunks {
+		refChunks[i] = ReferenceChunk{
+			ID:         GenerateID(),
+			ChunkIndex: c.Index,
+			Section:    c.Section,
+			Content:    c.Content,
+			SourcePath: filepath,
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	doc := &ReferenceDoc{
+		ID:           GenerateID(),
+		Title:        title,
+		SourcePath:   filepath,
+		SourceType:   DetectSourceType(filepath),
+		Tags:         tags,
+		ImportReason: reason,
+		Content:      content,
+		ContentHash:  HashContent(content),
+		TotalChunks:  len(chunks),
+		LastIndexed:  now,
+		Created:      now,
+	}
+	for i := range refChunks {
+		refChunks[i].DocID = doc.ID
+	}
+
+	if err := dm.AddReference(doc, refChunks); err != nil {
 		return nil, fmt.Errorf("add reference: %w", err)
 	}
+
 	return map[string]interface{}{
-		"success": true,
-		"id":      ref.ID,
-		"title":   ref.Title,
+		"success":      true,
+		"id":           doc.ID,
+		"title":        doc.Title,
+		"total_chunks": doc.TotalChunks,
 	}, nil
+}
+
+// parseReferenceFile reads a file and returns its extracted text content.
+// Dispatches by extension: PDF/EPUB use the dedicated parsers, HTML is
+// stripped to text, everything else is read as bytes. Errors from the
+// underlying parsers are wrapped so callers see a clear failure path.
+//
+// Mirrors the dispatch logic in cmd/mpm/simple_cmds.go handleRefAdd;
+// both surfaces must agree on what counts as supported content. Keep
+// them in sync — if a new extension is added here, add it there too.
+func parseReferenceFile(filepath string) (string, error) {
+	ext := strings.ToLower(filepathExt(filepath))
+	switch ext {
+	case ".pdf":
+		text, err := ParsePDF(filepath)
+		if err != nil {
+			return "", fmt.Errorf("parse pdf %q: %w", filepath, err)
+		}
+		return text, nil
+	case ".epub":
+		text, err := ParseEPUB(filepath)
+		if err != nil {
+			return "", fmt.Errorf("parse epub %q: %w", filepath, err)
+		}
+		return text, nil
+	case ".html", ".xhtml":
+		data, err := os.ReadFile(filepath)
+		if err != nil {
+			return "", fmt.Errorf("read %q: %w", filepath, err)
+		}
+		return StripHTML(string(data)), nil
+	case ".txt", ".md":
+		data, err := os.ReadFile(filepath)
+		if err != nil {
+			return "", fmt.Errorf("read %q: %w", filepath, err)
+		}
+		return string(data), nil
+	default:
+		// Best-effort: read as bytes. Reject obvious binary noise by
+		// surfacing the read error; otherwise accept the raw text.
+		data, err := os.ReadFile(filepath)
+		if err != nil {
+			return "", fmt.Errorf("unsupported file type %q: %w", ext, err)
+		}
+		return string(data), nil
+	}
+}
+
+// filepathExt is filepath.Ext without the filepath import — keeps this
+// file's imports tight. Trivial wrapper; not worth a separate package.
+func filepathExt(p string) string {
+	for i := len(p) - 1; i >= 0 && p[i] != '/'; i-- {
+		if p[i] == '.' {
+			return p[i:]
+		}
+	}
+	return ""
+}
+
+// filepathBase is filepath.Base without the filepath import.
+func filepathBase(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[i+1:]
+		}
+	}
+	return p
 }
 
 // ReadDirectives returns all memories that are prime directives.
