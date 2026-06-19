@@ -830,3 +830,53 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	}
 	return map[string]interface{}{"evidence": out}, nil
 }
+
+// QueryConfidenceHistory returns the confidence timeline for an artifact,
+// newest first. limit <= 0 defaults to 50. Thin shim — both
+// `mpm call query_confidence_history` and the `query_confidence_history`
+// MCP tool route through this method.
+//
+// Returns the rows under the "history" key — same shape as the
+// previous callQueryConfidenceHistory.
+//
+// Required: artifact_id. Optional: artifact_type (default "memory").
+func (dm *DatabaseManager) QueryConfidenceHistory(artifactID, artifactType string, limit int) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := dm.QueryTracked(`
+		SELECT computed_at, confidence, evidence_count, trigger
+		FROM confidence_history
+		WHERE artifact_id = ? AND artifact_type = ?
+		ORDER BY computed_at DESC
+		LIMIT ?
+	`, artifactID, artifactType, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var computedAt int64
+		var conf float64
+		var evidenceCount int
+		var trigger string
+		if err := rows.Scan(&computedAt, &conf, &evidenceCount, &trigger); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"computed_at": computedAt, "confidence": conf,
+			"evidence_count": evidenceCount, "trigger": trigger,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"history": out}, nil
+}
