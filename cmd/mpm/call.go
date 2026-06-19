@@ -102,6 +102,9 @@ var toolRegistry = map[string]ToolHandler{
 	"read_directives":       callReadDirectives,
 	"proactive_recall_hint": callProactiveRecallHint,
 	"route":                 callRoute,
+
+	// Release
+	"log_to_changelog": callLogToChangelog,
 }
 
 // handleCall is the main entry point for `mpm call <tool> [--payload <json>]`.
@@ -1127,4 +1130,42 @@ func artifactTable(artifactType string) string {
 		return "lessons"
 	}
 	return "memories"
+}
+
+// ── Release / Changelog ──────────────────────────────────────────────
+//
+// callLogToChangelog writes a changelog memory tied to a specific
+// git commit. Mirrors the MCP log_to_changelog tool exactly — the
+// CLI/mcp parity is enforced by routing both through
+// DatabaseManager.LogChangelogEntry, which holds the strict
+// retrospective contract (full 40-char SHA-1 required). When the
+// synthesis engine lands, both the MCP tool and this CLI handler
+// will be joined with the git log via the (commit_hash,
+// mpm_memory_id) key in changelog.json.
+func callLogToChangelog(p map[string]interface{}) (interface{}, error) {
+	fact, _ := p["fact"].(string)
+	commitHash, _ := p["commit_hash"].(string)
+	if fact == "" {
+		return nil, fmt.Errorf("fact is required")
+	}
+	if commitHash == "" {
+		return nil, fmt.Errorf("commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit). Run `git rev-parse HEAD` to get the canonical 40-char SHA-1")
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	id, err := dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"id":          id,
+		"commit_hash": commitHash,
+		"collection":  "changelog",
+	}, nil
 }

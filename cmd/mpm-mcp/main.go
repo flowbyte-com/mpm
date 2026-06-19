@@ -5,9 +5,10 @@
 // runs in-process against the MPM database — no subprocess, no shell, no
 // Python interpreter startup cost.
 //
-// All 18 tools are registered in tools.go via RegisterAllTools, which both
+// Tools are registered in tools.go via RegisterAllTools, which both
 // this server and the `mpm call <tool>` CLI share through the dm methods
-// in internal/call_helpers.go.
+// in internal/call_helpers.go. The list of s.AddTool(...) calls in
+// tools.go is the canonical count of the MCP tool surface.
 //
 // Provenance: the MCP host (Claude Code, OpenClaw) populates child stdio
 // env from the `env` block in `.mcp.json`. We read MPM_ACTIVE_MODE /
