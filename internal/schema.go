@@ -198,10 +198,16 @@ var ReferenceTables = []string{
 	// content_hash stores sha256(content) so AddReference can diff against
 	// existing rows without re-reading chunk content — chunk_hash diff
 	// ingest reuses unchanged chunks and deletes orphans atomically.
+	// embedding stores a JSON-marshalled []float32 (matches the
+	// memories.embedding column convention) for semantic search. NULL
+	// means "not yet embedded" — EmbedReferenceChunks fills it in a
+	// separate phase after AddReference. The embedding column is cleared
+	// by AddReference's ON CONFLICT(id) DO UPDATE branch whenever a
+	// chunk's content changes, so re-embedding is forced.
 	`CREATE TABLE IF NOT EXISTS reference_chunks (
 		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
 		section TEXT, content TEXT NOT NULL, source_path TEXT,
-		content_hash TEXT,
+		content_hash TEXT, embedding BLOB,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 
@@ -317,4 +323,5 @@ var SafeMigrations = [][3]string{
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
 	{"reference_docs", "import_reason", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
+	{"reference_chunks", "embedding",     "BLOB"},
 }
