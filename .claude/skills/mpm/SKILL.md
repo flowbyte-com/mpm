@@ -1,1 +1,0 @@
-/home/v/workspace/projects/mpm/claudecode-mpm-plugin/skills/mpm/SKILL.md
