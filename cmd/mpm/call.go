@@ -866,33 +866,16 @@ func callQueryConfidenceChanges(payload map[string]interface{}) (interface{}, er
 //
 // Optional payload: window_days (default 30).
 func callQueryConfidenceTrend(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
-	windowDays := 30
-	if w, ok := payload["window_days"].(float64); ok && w > 0 {
-		windowDays = int(w)
-	}
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	trend, err := internal.QueryConfidenceTrend(dm, artifactID, artifactType, windowDays)
-	if err != nil {
-		return nil, fmt.Errorf("query confidence trend: %w", err)
+	windowDays := 30
+	if w, ok := payload["window_days"].(float64); ok && w > 0 {
+		windowDays = int(w)
 	}
-	return map[string]interface{}{
-		"success": true,
-		"trend":   trend,
-	}, nil
+	return dm.QueryConfidenceTrend(getString(payload, "artifact_id"), getString(payload, "artifact_type"), windowDays)
 }
 
 // callQueryMemoryQuality returns per-creator memory statistics. Surfaces

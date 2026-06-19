@@ -65,6 +65,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolListEvidence(), handleListEvidence(dm))
 	s.AddTool(toolQueryConfidenceHistory(), handleQueryConfidenceHistory(dm))
 	s.AddTool(toolQueryConfidenceChanges(), handleQueryConfidenceChanges(dm))
+	s.AddTool(toolQueryConfidenceTrend(), handleQueryConfidenceTrend(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1096,6 +1097,36 @@ func handleQueryConfidenceChanges(dm *internal.DatabaseManager) server.ToolHandl
 		out, err := dm.QueryConfidenceChanges(filter)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("query_confidence_changes failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── query_confidence_trend ────────────────────────────────────────────────
+
+func toolQueryConfidenceTrend() mcp.Tool {
+	return mcp.NewTool("query_confidence_trend",
+		mcp.WithDescription("Return the trajectory projection of confidence over a time window "+
+			"(velocity + trend label). Complements query_confidence_history and "+
+			"query_confidence_changes."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to query.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+		mcp.WithNumber("window_days", mcp.DefaultNumber(30), mcp.Description("Window size in days. Default 30.")),
+	)
+}
+
+func handleQueryConfidenceTrend(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		windowDays := int(parseNum(args["window_days"], 30))
+		out, err := dm.QueryConfidenceTrend(artifactID, artifactType, windowDays)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("query_confidence_trend failed", err), nil
 		}
 		return jsonResult(out), nil
 	}

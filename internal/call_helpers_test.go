@@ -168,3 +168,31 @@ func TestCallHelpers_QueryConfidenceChanges_FilterByArtifact(t *testing.T) {
 		assert.Equal(t, "mem-1", c["artifact_id"])
 	}
 }
+
+func TestCallHelpers_QueryConfidenceTrend_HappyPath(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+
+	out, err := dm.QueryConfidenceTrend("mem-1", "memory", 30)
+	require.NoError(t, err)
+	assert.Contains(t, out, "trend")
+}
+
+func TestCallHelpers_QueryConfidenceTrend_DefaultWindow(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+
+	out, err := dm.QueryConfidenceTrend("mem-1", "memory", 0)
+	require.NoError(t, err)
+	_, ok := out["trend"]
+	assert.True(t, ok)
+}
+
+func TestCallHelpers_QueryConfidenceTrend_RequiresArtifactID(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.QueryConfidenceTrend("", "memory", 30)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact_id")
+}
