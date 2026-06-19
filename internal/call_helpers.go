@@ -722,3 +722,62 @@ func ParseStringSliceOr(v interface{}) []string {
 func ParseFloatOr(v interface{}, def float64) float64 {
 	return parseFloatDefault(v, def)
 }
+
+// AddEvidence inserts an evidence row and returns the resulting confidence
+// for the artifact. Validation boundary: required-arg preflight +
+// IsValidEvidenceType + strength default. internal.AddEvidence runs the
+// deeper checks (sensitive-content scan, type registry, recompute).
+//
+// Both `mpm call add_evidence` and the `add_evidence` MCP tool route
+// through this method, so neither surface can bypass validation.
+//
+// Returns the same map the previous callAddEvidence returned:
+//   {"success": true, "confidence": <float>}
+//
+// Required fields: artifact_id, type, source_group, created_by.
+func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}, error) {
+	if in.ArtifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if in.Type == "" {
+		return nil, fmt.Errorf("type is required")
+	}
+	if !IsValidEvidenceType(in.Type) {
+		return nil, fmt.Errorf("invalid evidence type: %q", in.Type)
+	}
+	if in.SourceGroup == "" {
+		return nil, fmt.Errorf("source_group is required")
+	}
+	if in.CreatedBy == "" {
+		return nil, fmt.Errorf("created_by is required")
+	}
+	if in.ArtifactType == "" {
+		in.ArtifactType = "memory"
+	}
+	// Fill strength from the registry default if the caller passed 0.
+	if in.Strength == 0 {
+		if def, ok := DefaultStrength(in.Type); ok {
+			in.Strength = def
+		}
+	}
+	// Default independence to 1.0 to match the call handler behavior.
+	if in.IndependenceFactor == 0 {
+		in.IndependenceFactor = 1.0
+	}
+
+	if err := AddEvidence(dm, in); err != nil {
+		return nil, err
+	}
+
+	var conf float64
+	if err := dm.QueryRowTracked(
+		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, ArtifactTable(in.ArtifactType)),
+		in.ArtifactID,
+	).Scan(&conf); err != nil {
+		return nil, fmt.Errorf("read confidence: %w", err)
+	}
+	return map[string]interface{}{
+		"success":    true,
+		"confidence": conf,
+	}, nil
+}

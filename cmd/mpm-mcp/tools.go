@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -60,6 +61,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolProactiveRecallHint(), handleProactiveRecallHint(dm))
 	s.AddTool(toolRoute(), handleRoute(router))
 	s.AddTool(toolLogToChangelog(), handleLogToChangelog(dm))
+	s.AddTool(toolAddEvidence(), handleAddEvidence(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -930,5 +932,74 @@ func handleLogToChangelog(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 			"tags":        []string{internal.ChangelogTag, internal.CommitTagPrefix + strings.ToLower(commitHash)},
 			"collection":  "changelog",
 		}), nil
+	}
+}
+
+// ── add_evidence ──────────────────────────────────────────────────────────
+
+func toolAddEvidence() mcp.Tool {
+	return mcp.NewTool("add_evidence",
+		mcp.WithDescription(
+			"Insert a new evidence row and return the resulting confidence for the artifact. "+
+				"Required: artifact_id, type, source_group, created_by. Optional: artifact_type "+
+				"(default 'memory'), strength (default from type registry), independence_factor "+
+				"(default 1.0), notes."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact this evidence applies to.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+		mcp.WithString("type", mcp.Required(), mcp.Enum("observation", "test", "reproduction", "challenge", "decision_outcome", "external_reference"),
+			mcp.Description("Evidence type — must be a known v1 type.")),
+		mcp.WithString("source_group", mcp.Required(), mcp.Description("Source group label (e.g. 'user-X', 'test-rig-1').")),
+		mcp.WithNumber("strength", mcp.Description("Evidence strength 0–1; default from the type registry.")),
+		mcp.WithNumber("independence_factor", mcp.DefaultNumber(1.0), mcp.Description("Independence factor 0–1 (default 1.0).")),
+		mcp.WithString("created_by", mcp.Required(), mcp.Description("Who/what created this evidence.")),
+		mcp.WithString("notes", mcp.Description("Optional free-text notes.")),
+	)
+}
+
+func handleAddEvidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		evType, _ := args["type"].(string)
+		if evType == "" {
+			return mcp.NewToolResultError("type is required"), nil
+		}
+		source, _ := args["source_group"].(string)
+		if source == "" {
+			return mcp.NewToolResultError("source_group is required"), nil
+		}
+		createdBy, _ := args["created_by"].(string)
+		if createdBy == "" {
+			return mcp.NewToolResultError("created_by is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		var strength float64
+		if s, ok := args["strength"].(float64); ok {
+			strength = s
+		}
+		var independence float64 = 1.0
+		if i, ok := args["independence_factor"].(float64); ok {
+			independence = i
+		}
+		notes, _ := args["notes"].(string)
+
+		out, err := dm.AddEvidence(internal.EvidenceInput{
+			ArtifactID:         artifactID,
+			ArtifactType:       artifactType,
+			Type:               evType,
+			SourceGroup:        source,
+			Strength:           strength,
+			IndependenceFactor: independence,
+			CreatedBy:          createdBy,
+			CreatedAt:          time.Now(),
+			Notes:              notes,
+		})
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("add_evidence failed", err), nil
+		}
+		return jsonResult(out), nil
 	}
 }
