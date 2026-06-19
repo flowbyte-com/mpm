@@ -5,6 +5,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -511,11 +512,20 @@ func (dm *DatabaseManager) AddReferenceFromFileWith(filepath, title string, tags
 		return nil, fmt.Errorf("add reference: %w", err)
 	}
 
+	// Embed chunks in a separate phase after the chunk-insert tx has
+	// committed. Embedding failures are best-effort: a transient
+	// provider outage leaves embedding NULL on the affected rows, and
+	// a follow-up embed pass (or re-ingest) fills them in. We do NOT
+	// fail the ingest call on embedding errors — the chunk rows are
+	// already durable, and the operator can retry embedding later.
+	embedded, _, _ := dm.EmbedReferenceChunks(context.Background(), docID)
+
 	return map[string]interface{}{
 		"success":      true,
 		"id":           doc.ID,
 		"title":        doc.Title,
 		"total_chunks": doc.TotalChunks,
+		"embedded":     embedded,
 	}, nil
 }
 

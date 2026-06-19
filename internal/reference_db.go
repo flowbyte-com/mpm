@@ -1,8 +1,22 @@
 package internal
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 )
+
+// embeddingBytes marshals a []float32 to JSON bytes for storage in the
+// reference_chunks.embedding BLOB column. Matches the serialization
+// memories.embedding uses so the two columns are interchangeable
+// (one less thing for vector-search code to special-case).
+func embeddingBytes(vec []float32) ([]byte, error) {
+	if vec == nil {
+		return nil, nil
+	}
+	return json.Marshal(vec)
+}
 
 // ==================== Reference Library: DatabaseManager methods ====================
 //
@@ -108,7 +122,11 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 		}
 		// Updated chunks share the Inserted write path — same row,
 		// different content. ON CONFLICT(id) DO UPDATE rewrites
-		// content_hash so future diffs see the new content.
+		// content_hash AND clears the embedding column so
+		// EmbedReferenceChunks picks the row up on its next pass.
+		// Without the embedding reset, the row would carry a stale
+		// vector for new content and the diff-based embedding bypass
+		// would silently misroute searches.
 		for _, c := range diff.Updated {
 			if _, err := node.ExecTracked(`
 				INSERT INTO reference_chunks
@@ -118,7 +136,8 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 					content = excluded.content,
 					content_hash = excluded.content_hash,
 					section = excluded.section,
-					chunk_index = excluded.chunk_index
+					chunk_index = excluded.chunk_index,
+					embedding = NULL
 			`, 0,
 				c.ID, c.DocID, c.ChunkIndex,
 				c.Section, c.Content, c.SourcePath,
@@ -166,3 +185,113 @@ func (dm *DatabaseManager) DeleteReference(id string) error {
 		return nil
 	})
 }
+
+// EmbedReferenceChunks fills in NULL embeddings for chunks belonging
+// to docID. Idempotent: chunks with non-NULL embeddings are skipped
+// (they were embedded by a previous pass or by re-ingest of unchanged
+// content). Per-chunk embedding uses EmbedText, which falls back to
+// HashEmbed when no provider is configured — so this method always
+// populates something, never returns per-chunk failure counts in
+// production. Database-level errors (query / UPDATE) are returned as
+// err; ctx cancellation is checked between chunks and aborts cleanly.
+//
+// Embedding is intentionally split from AddReference:
+//   - AddReference's tx stays small and fast (chunk rows + diff logic
+//     only); a slow embed call would block the ingest tx and bloat
+//     the WAL.
+//   - Embedding is retryable independently — a transient provider
+//     failure does not roll back chunk inserts.
+//   - Embedding is parallelizable at the caller level (loop across
+//     docIDs, wrap in a worker pool) without rewriting AddReference.
+//
+// Why this works with the chunk_hash diff: AddReference only clears
+// embedding on the Updated branch (content changed). The Unchanged
+// branch skips the row entirely, so its existing embedding stays —
+// that is the whole point of the diff-based embedding bypass. Re-
+// ingesting an unchanged manual re-embeds zero chunks.
+func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID string) (embedded int, failed int, err error) {
+	if dm == nil || dm.db == nil {
+		return 0, 0, fmt.Errorf("EmbedReferenceChunks: database not initialized")
+	}
+	if docID == "" {
+		return 0, 0, fmt.Errorf("EmbedReferenceChunks: empty docID")
+	}
+
+	rows, err := dm.db.QueryContext(ctx,
+		`SELECT id, content FROM reference_chunks WHERE doc_id = ? AND embedding IS NULL`, docID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("EmbedReferenceChunks: query: %w", err)
+	}
+	type pending struct {
+		id      string
+		content string
+	}
+	var batch []pending
+	for rows.Next() {
+		var p pending
+		if scanErr := rows.Scan(&p.id, &p.content); scanErr != nil {
+			rows.Close()
+			return embedded, failed, fmt.Errorf("EmbedReferenceChunks: scan: %w", scanErr)
+		}
+		batch = append(batch, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return embedded, failed, fmt.Errorf("EmbedReferenceChunks: rows.Err: %w", err)
+	}
+	rows.Close()
+
+	for _, p := range batch {
+		if ctx.Err() != nil {
+			return embedded, failed, ctx.Err()
+		}
+		vec := EmbedText(p.content)
+		bytes, marshalErr := embeddingBytes(vec)
+		if marshalErr != nil {
+			failed++
+			continue
+		}
+		_, writeErr := dm.db.ExecContext(ctx,
+			`UPDATE reference_chunks SET embedding = ? WHERE id = ?`, bytes, p.id)
+		if writeErr != nil {
+			failed++
+			continue
+		}
+		embedded++
+	}
+	return embedded, failed, nil
+}
+
+// embedReferenceDoc is an internal helper that walks every chunk of
+// every doc and embeds the ones with NULL embedding. Used by full-
+// corpus backfill operations (e.g., after enabling embeddings for the
+// first time on a populated library). Not on the ingest hot path.
+func (dm *DatabaseManager) embedReferenceDoc(ctx context.Context, docID string) (int, int, error) {
+	return dm.EmbedReferenceChunks(ctx, docID)
+}
+
+// referenceChunksNeedingEmbedding returns the chunk ids for a doc
+// whose embedding column is NULL. Exposed for callers (CLI/MCP) that
+// want to surface "X chunks awaiting embedding" without running the
+// embedding themselves.
+func referenceChunksNeedingEmbedding(db *sql.DB, docID string) ([]string, error) {
+	if db == nil {
+		return nil, fmt.Errorf("referenceChunksNeedingEmbedding: database not initialized")
+	}
+	rows, err := db.Query(
+		`SELECT id FROM reference_chunks WHERE doc_id = ? AND embedding IS NULL`, docID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
