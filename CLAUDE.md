@@ -68,11 +68,12 @@ mpm/
 │   └── web_db.go             # Web-API-specific query helpers
 ├── src/db/mpm.db             # Single canonical database (WAL mode)
 ├── mode/ persona/            # JSON / Markdown configs for behavioral modes
-├── mpm-agent/                # Subproject: mpm-agent (CLI REPL, Telegram bot, MCP)
 └── docs/                     # security-review, SSE_TELEMETRY, MPM_WISHLIST
 ```
 
-The `mpm-agent/` subproject is a separate Go module with its own `go.mod`, `mini-bot.db`, and three binaries (`mini-bot`, `mini-bot-telegram`, `mini-bot-mcp`). Build separately; it is *not* part of the main `mpm` binary.
+## Sibling projects (not under mpm/)
+
+- **`../mpm-agent/`** — agent shell: `mini-bot` (CLI REPL), `mini-bot-telegram`, `mini-bot-mcp`. Separate Go module with its own `go.mod`, `mini-bot.db`, and `mini-bot-config.json`. Lives at github.com/flowbyte-com/mpm-agent. Build separately; it is *not* part of the main `mpm` binary, and it is *not* a plugin under `agent-plugins/`. The three agent-plugins/ entries (hermes, openclaw, opencode) are LLM/chat integrations that *call into* mpm; mpm-agent is a different kind of consumer — a self-contained agent that *uses* mpm as its memory store.
 
 ## Core Architecture
 
@@ -163,4 +164,4 @@ The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775
 - **SSE broker** is a package-level singleton. To broadcast a new event type, add a `Broadcast(...)` helper in `stream.go` — don't instantiate your own broker.
 - **Frontend (`cmd/mpm/web/app.js`)** uses inline `onclick=` attributes and string-concat HTML rendering. If you add new entity types (cards/menus), prefer `addEventListener` + `textContent` from the start; the audit flagged this as a future-XSS hazard.
 - **Memory scoring uses `reinforcement_count` and `weight` independently** — bumping one doesn't bump the other. `mpm reinforce` and `mpm set-weight` are separate commands for a reason.
-- **`call.go`** is the universal machine interface. Adding a new tool? Register it in `call.go` so other processes (mpm-agent, OpenClaw) can invoke it via `mpm call <name> --payload <json>`.
+- **`call.go`** is the universal machine interface. Adding a new tool? Register it in `call.go` so other processes (mpm-agent, OpenClaw, hermes, opencode) can invoke it via `mpm call <name> --payload <json>`.

@@ -1,5 +1,7 @@
 {
-  "persona": "auto",
-  "modes": ["auto"],
-  "updated": "2026-06-09T12:28:00Z"
+  "persona": "correspondent",
+  "modes": [
+    "programming"
+  ],
+  "updated": "2026-06-18T13:31:51+01:00"
 }
