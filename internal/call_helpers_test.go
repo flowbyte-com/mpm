@@ -196,3 +196,14 @@ func TestCallHelpers_QueryConfidenceTrend_RequiresArtifactID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "artifact_id")
 }
+
+func TestCallHelpers_QueryMemoryQuality_ReturnsPerSource(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, metadata) VALUES (?, 'memories', 'x', ?)`, 0, "mem-1", `{"provenance":{"model":"gpt-4o"}}`)
+	require.NoError(t, err)
+
+	out, err := dm.QueryMemoryQuality()
+	require.NoError(t, err)
+	assert.Contains(t, out, "sources")
+	assert.Contains(t, out, "count")
+}

@@ -66,6 +66,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolQueryConfidenceHistory(), handleQueryConfidenceHistory(dm))
 	s.AddTool(toolQueryConfidenceChanges(), handleQueryConfidenceChanges(dm))
 	s.AddTool(toolQueryConfidenceTrend(), handleQueryConfidenceTrend(dm))
+	s.AddTool(toolQueryMemoryQuality(), handleQueryMemoryQuality(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1127,6 +1128,26 @@ func handleQueryConfidenceTrend(dm *internal.DatabaseManager) server.ToolHandler
 		out, err := dm.QueryConfidenceTrend(artifactID, artifactType, windowDays)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("query_confidence_trend failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── query_memory_quality ─────────────────────────────────────────────────
+
+func toolQueryMemoryQuality() mcp.Tool {
+	return mcp.NewTool("query_memory_quality",
+		mcp.WithDescription("Return per-creator memory statistics — which models/agents "+
+			"produce memories that survive. Driven by the memory_source_evidence_ai trigger "+
+			"that auto-attributes each new memory to its writer."),
+	)
+}
+
+func handleQueryMemoryQuality(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		out, err := dm.QueryMemoryQuality()
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("query_memory_quality failed", err), nil
 		}
 		return jsonResult(out), nil
 	}
