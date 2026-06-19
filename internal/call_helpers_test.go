@@ -100,3 +100,43 @@ func TestCallHelpers_ListEvidence_RequiresArtifactID(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "artifact_id")
 }
+
+func TestCallHelpers_QueryConfidenceHistory_DefaultLimit(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+
+	// Insert 60 history rows to exceed the default limit.
+	for i := 0; i < 60; i++ {
+		_, err := dm.ExecTracked(`INSERT INTO confidence_history (artifact_id, artifact_type, computed_at, confidence, evidence_count, trigger) VALUES (?, 'memory', ?, 0.5, 0, 'manual_recompute')`, 0, "mem-1", int64(1700000000+i))
+		require.NoError(t, err)
+	}
+
+	out, err := dm.QueryConfidenceHistory("mem-1", "memory", 0)
+	require.NoError(t, err)
+	hist, ok := out["history"].([]map[string]interface{})
+	require.True(t, ok)
+	assert.Len(t, hist, 50, "default limit is 50")
+}
+
+func TestCallHelpers_QueryConfidenceHistory_CustomLimit(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
+	require.NoError(t, err)
+	for i := 0; i < 5; i++ {
+		_, err := dm.ExecTracked(`INSERT INTO confidence_history (artifact_id, artifact_type, computed_at, confidence, evidence_count, trigger) VALUES (?, 'memory', ?, 0.5, 0, 'manual_recompute')`, 0, "mem-1", int64(1700000000+i))
+		require.NoError(t, err)
+	}
+
+	out, err := dm.QueryConfidenceHistory("mem-1", "memory", 2)
+	require.NoError(t, err)
+	hist, _ := out["history"].([]map[string]interface{})
+	assert.Len(t, hist, 2)
+}
+
+func TestCallHelpers_QueryConfidenceHistory_RequiresArtifactID(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.QueryConfidenceHistory("", "memory", 10)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact_id")
+}
