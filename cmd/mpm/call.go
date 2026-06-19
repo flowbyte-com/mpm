@@ -900,25 +900,12 @@ func callShowConfidence(payload map[string]interface{}) (interface{}, error) {
 
 // callRecomputeConfidence forces a manual recompute and returns the snapshot.
 func callRecomputeConfidence(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
-	artifactType, _ := payload["artifact_type"].(string)
-	if artifactID == "" {
-		return nil, fmt.Errorf("artifact_id is required")
-	}
-	if artifactType == "" {
-		artifactType = "memory"
-	}
-
 	dm, closeDM, err := openCallDM()
 	if err != nil {
 		return nil, err
 	}
 	defer closeDM()
-
-	if err := internal.RecomputeConfidence(dm, artifactID, artifactType, internal.RecomputeReasonManual); err != nil {
-		return nil, err
-	}
-	return callShowConfidence(payload)
+	return dm.RecomputeConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
 }
 
 // callExplainConfidence returns the reasoning trace for an artifact's confidence:

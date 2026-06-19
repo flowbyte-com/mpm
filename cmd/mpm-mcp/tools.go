@@ -68,6 +68,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolQueryConfidenceTrend(), handleQueryConfidenceTrend(dm))
 	s.AddTool(toolQueryMemoryQuality(), handleQueryMemoryQuality(dm))
 	s.AddTool(toolShowConfidence(), handleShowConfidence(dm))
+	s.AddTool(toolRecomputeConfidence(), handleRecomputeConfidence(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1176,6 +1177,33 @@ func handleShowConfidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
 		out, err := dm.ShowConfidence(artifactID, artifactType)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("show_confidence failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── recompute_confidence ──────────────────────────────────────────────────
+
+func toolRecomputeConfidence() mcp.Tool {
+	return mcp.NewTool("recompute_confidence",
+		mcp.WithDescription("Force a manual confidence recompute and return the new snapshot. "+
+			"Result shape: {current, history: {history: [...]}} (same as show_confidence)."),
+		mcp.WithString("artifact_id", mcp.Required(), mcp.Description("Artifact ID to recompute.")),
+		mcp.WithString("artifact_type", mcp.Description("Artifact type: 'memory' or 'lesson'. Default 'memory'.")),
+	)
+}
+
+func handleRecomputeConfidence(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		artifactID, _ := args["artifact_id"].(string)
+		if artifactID == "" {
+			return mcp.NewToolResultError("artifact_id is required"), nil
+		}
+		artifactType, _ := args["artifact_type"].(string)
+		out, err := dm.RecomputeConfidence(artifactID, artifactType)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("recompute_confidence failed", err), nil
 		}
 		return jsonResult(out), nil
 	}
