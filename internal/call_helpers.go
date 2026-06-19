@@ -898,3 +898,34 @@ func (dm *DatabaseManager) QueryConfidenceChanges(filter ConfidenceChangesFilter
 		"count":   len(changes),
 	}, nil
 }
+
+// QueryConfidenceTrend returns the trajectory projection of confidence
+// over a time window. windowDays <= 0 defaults to 30.
+//
+// Both `mpm call query_confidence_trend` and the `query_confidence_trend`
+// MCP tool route through this method, so neither surface can bypass the
+// required-arg check or drift in window-day defaulting.
+//
+// Returns: {"success": true, "trend": <ConfidenceTrend>}.
+//
+// Required: artifact_id. Optional: artifact_type (default "memory"),
+// window_days (default 30).
+func (dm *DatabaseManager) QueryConfidenceTrend(artifactID, artifactType string, windowDays int) (map[string]interface{}, error) {
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		artifactType = "memory"
+	}
+	if windowDays <= 0 {
+		windowDays = 30
+	}
+	trend, err := QueryConfidenceTrend(dm, artifactID, artifactType, windowDays)
+	if err != nil {
+		return nil, fmt.Errorf("query confidence trend: %w", err)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"trend":   trend,
+	}, nil
+}
