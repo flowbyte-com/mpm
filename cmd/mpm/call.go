@@ -768,33 +768,20 @@ func callRoute(p map[string]interface{}) (interface{}, error) {
 // directly).
 
 // callAddEvidence inserts a new evidence row and returns the resulting
-// confidence for the artifact.
+// confidence. Thin shim over dm.AddEvidence.
 func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
-	artifactID, _ := payload["artifact_id"].(string)
 	artifactType, _ := payload["artifact_type"].(string)
-	evType, _ := payload["type"].(string)
-	source, _ := payload["source_group"].(string)
-	createdBy, _ := payload["created_by"].(string)
-	if artifactID == "" || evType == "" || source == "" || createdBy == "" {
-		return nil, fmt.Errorf("artifact_id, type, source_group, created_by are required")
-	}
-	if !internal.IsValidEvidenceType(evType) {
-		return nil, fmt.Errorf("invalid evidence type: %q", evType)
-	}
 	if artifactType == "" {
 		artifactType = "memory"
 	}
 	var strength float64
 	if s, ok := payload["strength"].(float64); ok {
 		strength = s
-	} else {
-		strength, _ = internal.DefaultStrength(evType)
 	}
 	var independence float64 = 1.0
 	if i, ok := payload["independence_factor"].(float64); ok {
 		independence = i
 	}
-	notes, _ := payload["notes"].(string)
 
 	dm, closeDM, err := openCallDM()
 	if err != nil {
@@ -802,32 +789,17 @@ func callAddEvidence(payload map[string]interface{}) (interface{}, error) {
 	}
 	defer closeDM()
 
-	if err := internal.AddEvidence(dm, internal.EvidenceInput{
-		ArtifactID:         artifactID,
+	return dm.AddEvidence(internal.EvidenceInput{
+		ArtifactID:         getString(payload, "artifact_id"),
 		ArtifactType:       artifactType,
-		Type:               evType,
-		SourceGroup:        source,
+		Type:               getString(payload, "type"),
+		SourceGroup:        getString(payload, "source_group"),
 		Strength:           strength,
 		IndependenceFactor: independence,
-		CreatedBy:          createdBy,
+		CreatedBy:          getString(payload, "created_by"),
 		CreatedAt:          time.Now(),
-		Notes:              notes,
-	}); err != nil {
-		return nil, err
-	}
-
-	// Read back the new confidence.
-	var conf float64
-	if err := dm.QueryRowTracked(
-		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, internal.ArtifactTable(artifactType)),
-		artifactID,
-	).Scan(&conf); err != nil {
-		return nil, fmt.Errorf("read confidence: %w", err)
-	}
-	return map[string]interface{}{
-		"success":    true,
-		"confidence": conf,
-	}, nil
+		Notes:              getString(payload, "notes"),
+	})
 }
 
 // callListEvidence returns all evidence rows for an artifact.
