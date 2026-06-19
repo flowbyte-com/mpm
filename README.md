@@ -857,7 +857,7 @@ MPM integrates directly with AI agents. Both OpenClaw and Hermes share the same 
 
 ### OpenClaw
 
-MPM is installed as an OpenClaw plugin (`agent-plugins/openclaw-mpm-plugin/mpm-plugin/`), giving the agent **native function-calling access** to 21 MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
+MPM is installed as an OpenClaw plugin (`agent-plugins/openclaw-mpm-plugin/mpm-plugin/`), giving the agent **native function-calling access** to a comprehensive suite of MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
 
 ```
 read_wake_context        query_long_term_memory    save_to_memory
@@ -866,8 +866,9 @@ list_lessons             create_topic              search_topics
 link_topic               add_reference             search_references
 list_references          read_directives           propose_theory
 resolve_theory           record_decision           proactive_recall_hint
-add_evidence             list_evidence            query_confidence_history
-explain_confidence       query_confidence_changes query_confidence_trend  query_memory_quality  route
+add_evidence             list_evidence             query_confidence_history
+explain_confidence       query_confidence_changes  query_confidence_trend
+query_memory_quality     route                     log_to_changelog
 ```
 
 Setup and config: see [`agent-plugins/openclaw-mpm-plugin/OPENCLAW.md`](agent-plugins/openclaw-mpm-plugin/OPENCLAW.md).
