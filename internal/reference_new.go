@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -46,20 +45,14 @@ type ReferenceDoc struct {
 
 // ReferenceChunk represents a chunk of a reference document
 type ReferenceChunk struct {
-	ID         string `json:"id"`
-	DocID      string `json:"doc_id"`
-	ChunkIndex int    `json:"chunk_index"`
-	Section    string `json:"section,omitempty"`
-	Content    string `json:"content"`
-	SourcePath string `json:"source_path"`
+	ID          string `json:"id"`
+	DocID       string `json:"doc_id"`
+	ChunkIndex  int    `json:"chunk_index"`
+	Section     string `json:"section,omitempty"`
+	Content     string `json:"content"`
+	SourcePath  string `json:"source_path"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
-
-// ErrAlreadyExists is returned by DatabaseManager.AddReference when a
-// document with the same primary-key id is already present. Callers who
-// want update semantics must delete and re-insert. The previous
-// INSERT OR REPLACE default silently overwrote metadata and could orphan
-// chunks under the old non-cascading schema.
-var ErrAlreadyExists = errors.New("reference document already exists")
 
 // ==================== Reference Library: File Parsers ====================
 
@@ -198,6 +191,29 @@ func GenerateReferenceID() string {
 func HashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(h[:])
+}
+
+// ComputeChunkHash returns sha256(content) as hex. This is the per-chunk
+// content fingerprint used by the chunk_hash diff ingest: AddReference
+// compares new chunks against existing rows by content_hash, skipping
+// rows that match and deleting orphans whose hash is not in the new set.
+// Same function as HashContent — kept as a separate name so call sites
+// read clearly at the chunk level vs the whole-doc level.
+func ComputeChunkHash(content string) string {
+	return HashContent(content)
+}
+
+// ComputeChunkID returns a deterministic chunk ID derived from the parent
+// doc id, the chunk index within the doc, and the chunk content hash.
+// Same content in the same slot in the same doc always produces the same
+// ID — a property AddReference depends on to keep chunk identity stable
+// across re-ingest. Current callers do not need to call this directly;
+// AddReference computes IDs internally from chunk fields when needed.
+// Exposed for migration tooling that needs to backfill deterministic IDs
+// onto existing chunk rows.
+func ComputeChunkID(docID string, chunkIndex int, contentHash string) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s", docID, chunkIndex, contentHash)))
+	return hex.EncodeToString(h[:])[:12]
 }
 
 // ==================== Reference Library: Chunking ====================

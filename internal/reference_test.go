@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -338,39 +337,56 @@ func TestReferenceStats(t *testing.T) {
 	}
 }
 
-// TestAddReferenceRejectsDuplicate locks in the ErrAlreadyExists contract:
-// the previous INSERT OR REPLACE silently overwrote metadata and could
-// orphan chunks. The unified AddReference must refuse a duplicate id with
-// a typed sentinel so callers can branch on it (vs treating every error
-// as fatal).
-func TestAddReferenceRejectsDuplicate(t *testing.T) {
+// TestAddReferenceUpserts locks in the upsert + chunk-diff contract:
+// the previous INSERT OR REPLACE silently overwrote metadata; then
+// AddReference rejected duplicates with ErrAlreadyExists so a re-ingest
+// was forced through delete-then-insert (a trapdoor). The chunk-hash
+// diff ingest requires re-ingest into the same doc id to work, so
+// AddReference now upserts via ON CONFLICT(id) DO UPDATE: metadata
+// refreshes, unchanged chunks are skipped, orphans are deleted.
+//
+// Callers wanting strict one-shot semantics must check existence first
+// (GetReferenceDoc by source_path) and pick a fresh id themselves.
+func TestAddReferenceUpserts(t *testing.T) {
 	dm, db := newTestRefDM(t)
 
-	doc := &ReferenceDoc{
+	first := &ReferenceDoc{
 		ID:         "dup-001",
 		Title:      "First",
 		SourcePath: "/test/dup.txt",
 		SourceType: "txt",
 	}
-	if err := dm.AddReference(doc, nil); err != nil {
+	if err := dm.AddReference(first, nil); err != nil {
 		t.Fatalf("first AddReference failed: %v", err)
 	}
 
-	err := dm.AddReference(doc, nil)
-	if err == nil {
-		t.Fatal("expected ErrAlreadyExists on duplicate id, got nil")
+	// Re-ingest with same id, updated title, same source path.
+	second := &ReferenceDoc{
+		ID:         "dup-001",
+		Title:      "First (updated)",
+		SourcePath: "/test/dup.txt",
+		SourceType: "txt",
 	}
-	if !errors.Is(err, ErrAlreadyExists) {
-		t.Fatalf("expected wrapped ErrAlreadyExists, got: %v", err)
+	if err := dm.AddReference(second, nil); err != nil {
+		t.Fatalf("upsert AddReference failed: %v", err)
 	}
 
-	// Title must be unchanged — no silent overwrite.
+	// Title must reflect the upsert — metadata refreshed.
 	got, err := GetReferenceDoc(db, "dup-001")
 	if err != nil {
 		t.Fatalf("GetReferenceDoc failed: %v", err)
 	}
-	if got.Title != "First" {
-		t.Errorf("expected title preserved, got: %q", got.Title)
+	if got.Title != "First (updated)" {
+		t.Errorf("expected title updated to %q, got %q", "First (updated)", got.Title)
+	}
+
+	// Still one doc row, not two.
+	var docCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reference_docs WHERE id = ?`, "dup-001").Scan(&docCount); err != nil {
+		t.Fatalf("count docs: %v", err)
+	}
+	if docCount != 1 {
+		t.Errorf("expected 1 doc row after upsert, got %d", docCount)
 	}
 }
 
@@ -455,3 +471,282 @@ func TestGetReferenceReturnsImportReason(t *testing.T) {
 		t.Errorf("tags lost on read: got %v", got.Tags)
 	}
 }
+
+// ==================== Chunk-Hash Diff Ingest ====================
+
+// TestComputeChunkIDStable verifies the deterministic-ID contract:
+// same (docID, chunkIndex, content) always yields the same id, different
+// content yields a different id. This is the property AddReference relies
+// on to keep chunk identity stable across re-ingests.
+func TestComputeChunkIDStable(t *testing.T) {
+	id1 := ComputeChunkID("doc-A", 0, HashContent("hello world"))
+	id2 := ComputeChunkID("doc-A", 0, HashContent("hello world"))
+	if id1 != id2 {
+		t.Errorf("ComputeChunkID not stable: %q != %q", id1, id2)
+	}
+	id3 := ComputeChunkID("doc-A", 1, HashContent("hello world"))
+	if id1 == id3 {
+		t.Errorf("ComputeChunkID collapsed different chunkIndex: %q == %q", id1, id3)
+	}
+	id4 := ComputeChunkID("doc-B", 0, HashContent("hello world"))
+	if id1 == id4 {
+		t.Errorf("ComputeChunkID collapsed different docID: %q == %q", id1, id4)
+	}
+	id5 := ComputeChunkID("doc-A", 0, HashContent("hello WORLD"))
+	if id1 == id5 {
+		t.Errorf("ComputeChunkID collapsed different content: %q == %q", id1, id5)
+	}
+}
+
+// TestDiffChunksFreshIngest: the re-ingest path against an existing
+// doc but with completely new content. Every new chunk is Inserted
+// because no row has matching content_hash; the old chunks (with the
+// original content) all become orphans. This is the "I rewrote the
+// file completely" scenario.
+func TestDiffChunksFreshIngest(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "diff-fresh", Title: "Fresh", SourcePath: "/fresh.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "f-c1", DocID: "diff-fresh", ChunkIndex: 0, Content: "alpha"},
+		{ID: "f-c2", DocID: "diff-fresh", ChunkIndex: 1, Content: "beta"},
+	}); err != nil {
+		t.Fatalf("seed AddReference failed: %v", err)
+	}
+
+	// Re-ingest: same doc id, completely different content. Old chunks
+	// become orphans; new chunks are all inserts.
+	diff, err := DiffChunks(db, "diff-fresh", []ReferenceChunk{
+		{ID: ComputeChunkID("diff-fresh", 0, HashContent("gamma")),
+			DocID: "diff-fresh", ChunkIndex: 0, Content: "gamma"},
+		{ID: ComputeChunkID("diff-fresh", 1, HashContent("delta")),
+			DocID: "diff-fresh", ChunkIndex: 1, Content: "delta"},
+	})
+	if err != nil {
+		t.Fatalf("DiffChunks failed: %v", err)
+	}
+	if len(diff.Inserted) != 2 {
+		t.Errorf("expected 2 inserted (no existing row with new content_hash), got %d", len(diff.Inserted))
+	}
+	if len(diff.Deleted) != 2 {
+		t.Errorf("expected 2 deleted (original alpha/beta now orphan), got %d", len(diff.Deleted))
+	}
+	if len(diff.Unchanged) != 0 {
+		t.Errorf("expected 0 unchanged (no content matched), got %d", len(diff.Unchanged))
+	}
+	if len(diff.Updated) != 0 {
+		t.Errorf("expected 0 updated, got %d", len(diff.Updated))
+	}
+}
+
+// TestDiffChunksReIngestSameContent: after seeding chunks with their
+// content_hash populated, re-ingesting the same content produces all
+// Unchanged + zero Deleted + zero Inserted.
+func TestDiffChunksReIngestSameContent(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "diff-same", Title: "Same", SourcePath: "/same.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "s-c1", DocID: "diff-same", ChunkIndex: 0, Content: "unchanged text"},
+		{ID: "s-c2", DocID: "diff-same", ChunkIndex: 1, Content: "also unchanged"},
+	}); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+	// Verify content_hash was written by the seed AddReference.
+	var hashCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reference_chunks WHERE doc_id = ? AND content_hash IS NOT NULL`, "diff-same").Scan(&hashCount); err != nil {
+		t.Fatalf("count hashed chunks: %v", err)
+	}
+	if hashCount != 2 {
+		t.Fatalf("expected both seed chunks to have content_hash populated, got %d/2", hashCount)
+	}
+
+	// Re-ingest: same content, new (deterministic) IDs.
+	diff, err := DiffChunks(db, "diff-same", []ReferenceChunk{
+		{ID: ComputeChunkID("diff-same", 0, HashContent("unchanged text")),
+			DocID: "diff-same", ChunkIndex: 0, Content: "unchanged text"},
+		{ID: ComputeChunkID("diff-same", 1, HashContent("also unchanged")),
+			DocID: "diff-same", ChunkIndex: 1, Content: "also unchanged"},
+	})
+	if err != nil {
+		t.Fatalf("DiffChunks failed: %v", err)
+	}
+	if len(diff.Unchanged) != 2 {
+		t.Errorf("expected 2 unchanged, got %d", len(diff.Unchanged))
+	}
+	if len(diff.Inserted) != 0 {
+		t.Errorf("expected 0 inserted, got %d", len(diff.Inserted))
+	}
+	if len(diff.Updated) != 0 {
+		t.Errorf("expected 0 updated, got %d", len(diff.Updated))
+	}
+	if len(diff.Deleted) != 0 {
+		t.Errorf("expected 0 deleted, got %d", len(diff.Deleted))
+	}
+}
+
+// TestDiffChunksReIngestWithChanges: re-ingest where one chunk is
+// unchanged, one is updated (same id but different content), one is new,
+// and one old chunk is gone. All four diff branches must fire correctly.
+func TestDiffChunksReIngestWithChanges(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "diff-mix", Title: "Mix", SourcePath: "/mix.txt", SourceType: "txt",
+	}, []ReferenceChunk{
+		{ID: "m-c1", DocID: "diff-mix", ChunkIndex: 0, Content: "keep me"},
+		{ID: "m-c2", DocID: "diff-mix", ChunkIndex: 1, Content: "replace me"},
+		{ID: "m-c3", DocID: "diff-mix", ChunkIndex: 2, Content: "drop me"},
+	}); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	// New chunk set: keep "keep me" (same content), update "replace me"
+	// (same id, different content), insert new "fresh me", drop "drop me".
+	replaceID := "m-c2"
+	diff, err := DiffChunks(db, "diff-mix", []ReferenceChunk{
+		{ID: "m-c1", DocID: "diff-mix", ChunkIndex: 0, Content: "keep me"},
+		{ID: replaceID, DocID: "diff-mix", ChunkIndex: 1, Content: "replaced content"},
+		{ID: "m-c4", DocID: "diff-mix", ChunkIndex: 3, Content: "fresh me"},
+	})
+	if err != nil {
+		t.Fatalf("DiffChunks failed: %v", err)
+	}
+	if len(diff.Unchanged) != 1 {
+		t.Errorf("expected 1 unchanged (keep me), got %d", len(diff.Unchanged))
+	}
+	if len(diff.Updated) != 1 {
+		t.Errorf("expected 1 updated (replace me), got %d", len(diff.Updated))
+	}
+	if len(diff.Inserted) != 1 {
+		t.Errorf("expected 1 inserted (fresh me), got %d", len(diff.Inserted))
+	}
+	if len(diff.Deleted) != 1 {
+		t.Errorf("expected 1 deleted (drop me), got %d", len(diff.Deleted))
+	}
+	if len(diff.Deleted) == 1 && diff.Deleted[0] != "m-c3" {
+		t.Errorf("expected deleted id m-c3, got %q", diff.Deleted[0])
+	}
+}
+
+// TestAddReferenceReIngestAppliesDiff: end-to-end through AddReference.
+// Seed a doc with three chunks, then re-ingest with one changed and one
+// new. After the call: total chunk count is correct, the unchanged
+// chunk is preserved, the changed chunk has new content + content_hash,
+// the orphan is gone, and the new chunk exists.
+func TestAddReferenceReIngestAppliesDiff(t *testing.T) {
+	dm, db := newTestRefDM(t)
+
+	doc := &ReferenceDoc{
+		ID: "reingest-doc", Title: "Reingest", SourcePath: "/ri.txt", SourceType: "txt",
+		TotalChunks: 3,
+	}
+	if err := dm.AddReference(doc, []ReferenceChunk{
+		{ID: "ri-c1", DocID: doc.ID, ChunkIndex: 0, Content: "stable"},
+		{ID: "ri-c2", DocID: doc.ID, ChunkIndex: 1, Content: "old text"},
+		{ID: "ri-c3", DocID: doc.ID, ChunkIndex: 2, Content: "will vanish"},
+	}); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	// Re-ingest: doc id stays the same, content_hash differs, chunks
+	// change. TotalChunks reflects the new chunk count.
+	updated := &ReferenceDoc{
+		ID: doc.ID, Title: "Reingest", SourcePath: doc.SourcePath, SourceType: "txt",
+		ContentHash: HashContent("fresh doc content"),
+		TotalChunks: 3,
+	}
+	if err := dm.AddReference(updated, []ReferenceChunk{
+		{ID: "ri-c1", DocID: doc.ID, ChunkIndex: 0, Content: "stable"},                // unchanged
+		{ID: "ri-c2", DocID: doc.ID, ChunkIndex: 1, Content: "new text after edit"},   // updated
+		{ID: "ri-c4", DocID: doc.ID, ChunkIndex: 3, Content: "added in re-ingest"},     // inserted
+	}); err != nil {
+		t.Fatalf("re-ingest failed: %v", err)
+	}
+
+	// Count: 3 chunks now (ri-c1, ri-c2 updated, ri-c4 new). ri-c3 gone.
+	chunks, err := GetReferenceChunksByDocID(db, doc.ID)
+	if err != nil {
+		t.Fatalf("GetReferenceChunksByDocID: %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Errorf("expected 3 chunks after re-ingest, got %d", len(chunks))
+	}
+
+	// Verify each expected chunk exists with the right content.
+	byID := make(map[string]string)
+	for _, c := range chunks {
+		byID[c.ID] = c.Content
+	}
+	if byID["ri-c1"] != "stable" {
+		t.Errorf("unchunk ri-c1: got %q, want %q", byID["ri-c1"], "stable")
+	}
+	if byID["ri-c2"] != "new text after edit" {
+		t.Errorf("updated ri-c2: got %q, want %q", byID["ri-c2"], "new text after edit")
+	}
+	if byID["ri-c4"] != "added in re-ingest" {
+		t.Errorf("new ri-c4: got %q, want %q", byID["ri-c4"], "added in re-ingest")
+	}
+	if _, ok := byID["ri-c3"]; ok {
+		t.Errorf("orphan ri-c3 should be deleted but still exists")
+	}
+
+	// Verify content_hash reflects the updated content.
+	var ri2Hash string
+	if err := db.QueryRow(`SELECT content_hash FROM reference_chunks WHERE id = ?`, "ri-c2").Scan(&ri2Hash); err != nil {
+		t.Fatalf("read ri-c2 hash: %v", err)
+	}
+	if ri2Hash != HashContent("new text after edit") {
+		t.Errorf("ri-c2 content_hash stale: got %q", ri2Hash)
+	}
+
+	// Verify total_chunks on the doc row updated to reflect the new set.
+	got, err := GetReferenceDoc(db, doc.ID)
+	if err != nil {
+		t.Fatalf("GetReferenceDoc: %v", err)
+	}
+	if got.TotalChunks != 3 {
+		t.Errorf("expected doc.total_chunks=3 after re-ingest, got %d", got.TotalChunks)
+	}
+}
+
+// TestFindReferenceBySourcePath covers the lookup helper used by both
+// CLI ingest paths to find an existing doc for re-ingest instead of
+// creating a duplicate.
+func TestFindReferenceBySourcePath(t *testing.T) {
+	dm, db := newTestRefDM(t)
+	if err := dm.AddReference(&ReferenceDoc{
+		ID: "lookup-1", Title: "Lookup", SourcePath: "/lookup.txt", SourceType: "txt",
+		ContentHash: "deadbeef",
+	}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	found, err := FindReferenceBySourcePath(db, "/lookup.txt")
+	if err != nil {
+		t.Fatalf("FindReferenceBySourcePath: %v", err)
+	}
+	if found == nil {
+		t.Fatal("expected to find the seeded doc, got nil")
+	}
+	if found.ID != "lookup-1" {
+		t.Errorf("expected id=lookup-1, got %q", found.ID)
+	}
+	if found.Title != "Lookup" {
+		t.Errorf("expected title=Lookup, got %q", found.Title)
+	}
+
+	// Empty sourcePath rejected.
+	if _, err := FindReferenceBySourcePath(db, ""); err == nil {
+		t.Error("expected error for empty sourcePath")
+	}
+
+	// Missing sourcePath returns (nil, nil) — caller decides whether to create.
+	missing, err := FindReferenceBySourcePath(db, "/never-ingested.txt")
+	if err != nil {
+		t.Fatalf("FindReferenceBySourcePath missing: %v", err)
+	}
+	if missing != nil {
+		t.Errorf("expected nil for missing source, got %+v", missing)
+	}
+}
+

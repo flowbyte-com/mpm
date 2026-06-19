@@ -451,33 +451,60 @@ func (dm *DatabaseManager) AddReferenceFromFileWith(filepath, title string, tags
 		return nil, fmt.Errorf("chunk reference: %w", err)
 	}
 
-	refChunks := make([]ReferenceChunk, len(chunks))
-	for i, c := range chunks {
-		refChunks[i] = ReferenceChunk{
-			ID:         GenerateID(),
-			ChunkIndex: c.Index,
-			Section:    c.Section,
-			Content:    c.Content,
-			SourcePath: filepath,
-		}
+	// Look up an existing doc by source path so re-ingest reuses the
+	// doc id. Without this every re-ingest would create a fresh doc
+	// (different id) and the chunk_hash diff would never fire — each
+	// ingest would land in a new doc row, the old one orphaned. The
+	// content_hash comparison below also lets us short-circuit when
+	// the file is byte-identical to the last ingest.
+	contentHash := HashContent(content)
+	existing, err := FindReferenceBySourcePath(dm.db, filepath)
+	if err != nil {
+		return nil, fmt.Errorf("find existing reference: %w", err)
+	}
+	if existing != nil && existing.ContentHash == contentHash {
+		// Same source, same bytes — nothing to do. Caller already has
+		// the doc id; return success with the existing stats.
+		return map[string]interface{}{
+			"success":      true,
+			"id":           existing.ID,
+			"title":        existing.Title,
+			"total_chunks": existing.TotalChunks,
+			"unchanged":    true,
+		}, nil
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
+	docID := GenerateID()
+	if existing != nil {
+		// Source path seen before but content changed: reuse the id so
+		// AddReference's chunk diff can replace chunks in place.
+		docID = existing.ID
+	}
 	doc := &ReferenceDoc{
-		ID:           GenerateID(),
+		ID:           docID,
 		Title:        title,
 		SourcePath:   filepath,
 		SourceType:   DetectSourceType(filepath),
 		Tags:         tags,
 		ImportReason: reason,
 		Content:      content,
-		ContentHash:  HashContent(content),
+		ContentHash:  contentHash,
 		TotalChunks:  len(chunks),
 		LastIndexed:  now,
 		Created:      now,
 	}
-	for i := range refChunks {
-		refChunks[i].DocID = doc.ID
+
+	refChunks := make([]ReferenceChunk, len(chunks))
+	for i, c := range chunks {
+		refChunks[i] = ReferenceChunk{
+			ID:         ComputeChunkID(docID, c.Index, contentHash), // stable across re-ingest of same content
+			DocID:      docID,
+			ChunkIndex: c.Index,
+			Section:    c.Section,
+			Content:    c.Content,
+			SourcePath: filepath,
+		}
 	}
 
 	if err := dm.AddReference(doc, refChunks); err != nil {

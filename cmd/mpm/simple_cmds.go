@@ -738,11 +738,44 @@ func handleRefAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "Error: failed to chunk content: %v\n", err)
 		return 1
 	}
+
+	// Look up an existing doc by source path so re-ingest reuses the
+	// doc id; the chunk_hash diff in AddReference then runs against
+	// the existing chunk rows. Without this every CLI ingest would
+	// create a fresh doc (different id) and the diff would never
+	// fire. Short-circuit when the file is byte-identical to last time.
+	existing, err := mpminternal.FindReferenceBySourcePath(dm.SQLDB(), filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error looking up existing reference: %v\n", err)
+		return 1
+	}
+	if existing != nil && existing.ContentHash == contentHash {
+		if *jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success":      true,
+				"id":           existing.ID,
+				"title":        existing.Title,
+				"total_chunks": existing.TotalChunks,
+				"unchanged":    true,
+			})
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("Reference unchanged: %s (id=%s)\n", existing.Title, existing.ID)
+		}
+		return 0
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	docID := mpminternal.GenerateID()
+	if existing != nil {
+		docID = existing.ID
+	}
+
 	refChunks := make([]mpminternal.ReferenceChunk, len(chunks))
 	for i, c := range chunks {
 		refChunks[i] = mpminternal.ReferenceChunk{
-			ID:         mpminternal.GenerateID(),
-			DocID:      "", // will be set after doc creation
+			ID:         mpminternal.ComputeChunkID(docID, c.Index, contentHash), // stable across re-ingest
+			DocID:      docID,
 			ChunkIndex: c.Index,
 			Section:    c.Section,
 			Content:    c.Content,
@@ -751,7 +784,7 @@ func handleRefAdd(args []string) int {
 	}
 
 	doc := &mpminternal.ReferenceDoc{
-		ID:           mpminternal.GenerateID(),
+		ID:           docID,
 		Title:        title,
 		SourcePath:   filePath,
 		SourceType:   sourceType,
@@ -760,12 +793,8 @@ func handleRefAdd(args []string) int {
 		Content:      content,
 		ContentHash:  contentHash,
 		TotalChunks:  len(chunks),
-		LastIndexed:  time.Now().UTC().Format(time.RFC3339),
-		Created:      time.Now().UTC().Format(time.RFC3339),
-	}
-
-	for i := range refChunks {
-		refChunks[i].DocID = doc.ID
+		LastIndexed:  now,
+		Created:      now,
 	}
 
 	err = dm.AddReference(doc, refChunks)
