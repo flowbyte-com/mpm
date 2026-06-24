@@ -1978,8 +1978,13 @@ func handleWake(args []string) int {
 		LastHandoff    *mpminternal.Handoff   `json:"last_handoff,omitempty"`
 	}
 
-	// Collect topics and build consolidated memory references
-	topicSet := map[string]bool{}
+	// Collect memory references; topics are pulled from the topics table
+	// directly via the shared GetRecentUserTopics helper so the structural
+	// filter (decisions, theories, any future auto-created anchors) is
+	// applied identically to the read_wake_context path. Previously the
+	// CLI derived topics from per-memory topic_memberships, which silently
+	// surfaced structural topics whenever a recent memory was linked to
+	// them — live DB had 27 memberships on `decisions` and 10 on `theories`.
 	memRefs := make([]memoryRef, 0)
 
 	for _, mem := range memories {
@@ -1988,10 +1993,6 @@ func handleWake(args []string) int {
 			Content:   mem["content"].(string),
 			CreatedAt: mem["created_at"].(string),
 		})
-		topics, _ := dm.GetMemoryTopics(mem["id"].(string))
-		for _, t := range topics {
-			topicSet[t.Name] = true
-		}
 	}
 
 	for _, l := range lessons {
@@ -2002,10 +2003,7 @@ func handleWake(args []string) int {
 		})
 	}
 
-	topics := make([]string, 0)
-	for t := range topicSet {
-		topics = append(topics, t)
-	}
+	topics := dm.GetRecentUserTopics(5)
 
 	result := wakeResult{
 		SessionID:      sessionID,
