@@ -1075,18 +1075,28 @@ func handleGC(args []string) int {
 	now := time.Now()
 	gcTimestampJSON, _ := json.Marshal(map[string]string{"timestamp": now.Format(time.RFC3339)})
 
-	// Atomic frequency cap: UPDATE last_gc_at only if no recent GC has run.
-	// This avoids the TOCTOU race between reading the config and writing it later.
-	// If another GC process updated last_gc_at since our read, rowsAffected will be 0
-	// and we'll skip this GC run.
+	// Atomic frequency cap: claim the GC slot by lazy-initialising the
+	// last_gc_at row, then doing a compare-and-swap against its timestamp.
+	// The previous plain UPDATE returned 0 rowsAffected on a fresh DB (no
+	// row existed) which the engine then misread as "cooldown active",
+	// silently aborting the maintenance loop. The upsert pattern fixes this:
+	//   - row missing      → INSERT happens           → rowsAffected=1 (claim)
+	//   - row exists, old  → ON CONFLICT UPDATE fires  → rowsAffected=1 (claim)
+	//   - row exists, hot  → ON CONFLICT UPDATE no-ops → rowsAffected=0 (skip)
+	//   - operator deleted → next run self-heals      → rowsAffected=1 (claim)
+	// The cooldown check is inside the DO UPDATE WHERE clause so the
+	// atomicity of the compare-and-swap is preserved across concurrent
+	// GC invocations.
 	result, err := dm.SQLDB().Exec(`
-		UPDATE system_config
-		SET raw_json = ?
-		WHERE key = 'last_gc_at'
-		AND (
-			raw_json IS NULL
-			OR
-			datetime(json_extract(raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+		INSERT INTO system_config (key, raw_json, content_hash)
+		VALUES ('last_gc_at', ?, '')
+		ON CONFLICT(key) DO UPDATE SET
+		  raw_json = excluded.raw_json,
+		  updated_at = CURRENT_TIMESTAMP
+		WHERE (
+		  system_config.raw_json IS NULL
+		  OR
+		  datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
 		)
 	`, string(gcTimestampJSON), strconv.Itoa(maxAgeHours))
 	rowsAffected, _ := result.RowsAffected()
