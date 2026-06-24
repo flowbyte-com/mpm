@@ -22,6 +22,7 @@ import (
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/synth"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -288,7 +289,7 @@ type watcherDaemon struct {
 	mu      sync.Mutex
 	stopCh  chan struct{}
 
-	synthClient      *mpminternal.SynthClient             // cached, created once
+	synthClient      *synth.SynthClient             // cached, created once
 	synthWorker      *mpminternal.SynthesisWorker         // isolated synthesis goroutine pool
 	lastClusterCheck time.Time                            // guards checkTopicClustering rate
 	lastEventAt      time.Time                            // last fsnotify event (for idle detection)
@@ -321,8 +322,8 @@ func newWatcherDaemon(w *fsnotify.Watcher, dirs []string, dryRun, verbose bool) 
 		dryRun:           dryRun,
 		verbose:          verbose,
 		stopCh:           make(chan struct{}),
-		synthClient:      mpminternal.NewSynthClient(),
-		synthWorker:      mpminternal.NewSynthesisWorker(db, mpminternal.NewSynthClient(), 3),
+		synthClient:      synth.NewSynthClient(),
+		synthWorker:      mpminternal.NewSynthesisWorker(db, synth.NewSynthClient(), 3),
 		lastClusterCheck: time.Time{}, // zero — will fire on first ingest
 		lastEventAt:      time.Now(),
 		idleWorker:       mpminternal.NewIdleConsolidationWorker(db, 30*time.Minute),

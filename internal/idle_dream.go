@@ -8,6 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"mpm/internal/config"
+	"mpm/internal/synth"
 )
 
 // IdleConsolidationWorker runs low-priority pattern detection when the
@@ -31,7 +34,7 @@ type IdleConsolidationWorker struct {
 
 	logger *slog.Logger
 
-	synthClient *SynthClient
+	synthClient *synth.SynthClient
 }
 
 // NewIdleConsolidationWorker creates an idle worker with a 30-minute quiet period.
@@ -46,7 +49,7 @@ func NewIdleConsolidationWorker(db *DatabaseManager, quietPeriod time.Duration) 
 		checkEvery:     5 * time.Minute,
 		driftCheckEvery: 6 * time.Hour,
 		shutdown:       make(chan struct{}),
-		synthClient:    NewSynthClient(),
+		synthClient:    synth.NewSynthClient(),
 		logger:         slog.Default(),
 	}
 }
@@ -501,7 +504,7 @@ If pattern_detected is false, respond with just {"pattern_detected": false}`, pa
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	vendor := SynthVendor{Name: "idle-synth", Model: "MiniMax-M2.7", BaseURL: "https://api.minimax.io/anthropic/v1"}
+	vendor := config.SynthVendor{Name: "idle-synth", Model: "MiniMax-M2.7", BaseURL: "https://api.minimax.io/anthropic/v1"}
 	if key := getEnv("MINIMAX_API_KEY", ""); key != "" {
 		vendor.APIKey = key
 	}

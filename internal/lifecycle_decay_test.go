@@ -7,6 +7,9 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"mpm/internal/config"
+	"mpm/internal/synth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -208,9 +211,9 @@ func TestLifecycleDecayHeartbeatWiring(t *testing.T) {
 	dm := openLifecycleFileDB(t)
 	defer dm.Close()
 
-	synth := &mockSynthClient{succeedResult: &synthResult{Content: "mock"}}
+	synth := &mockSynthClient{succeedResult: &synth.SynthResult{Content: "mock"}}
 	dlqTick := make(chan time.Time, 5)
-	worker := NewSynthesisWorkerForTest(dm, synth, 2, dlqTick, []SynthVendor{
+	worker := NewSynthesisWorkerForTest(dm, synth, 2, dlqTick, []config.SynthVendor{
 		{Name: "mock", Model: "mock", APIKey: "test", BaseURL: "http://localhost:0"},
 	})
 	worker.Start()

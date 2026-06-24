@@ -21,6 +21,7 @@ import (
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/synth"
 )
 
 // Package-level singleton DatabaseManager — initialized once per process,
@@ -388,7 +389,7 @@ func handleMemoryAdd(args []string) int {
 				return
 			}
 			defer synthDM.Close()
-			client := mpminternal.NewSynthClient()
+			client := synth.NewSynthClient()
 			mpminternal.AutoSynthesize(context.Background(), synthDM, client, id, c)
 		}(mem.ID, content)
 	}
@@ -3597,7 +3598,7 @@ func startWatchGoroutine() error {
 	// Initialize and start the isolated synthesis worker pool.
 	// This worker handles all LLM synthesis calls — never blocks the watcher.
 	if watchSynthWorker == nil {
-		synthClient := internal.NewSynthClient()
+		synthClient := synth.NewSynthClient()
 		watchSynthWorker = internal.NewSynthesisWorker(watchPool.DM(), synthClient, 3)
 		watchSynthWorker.Start()
 	}

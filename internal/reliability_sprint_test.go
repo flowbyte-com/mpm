@@ -9,6 +9,9 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"mpm/internal/config"
+	"mpm/internal/synth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +46,7 @@ func testSynthesisIsolationOverflow(t *testing.T) {
 	// Create worker but do NOT start it — we want the channel buffer to fill
 	// without any consumer draining events.
 	dlqTick := make(chan time.Time)
-	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []SynthVendor{
+	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []config.SynthVendor{
 		{Name: "test-vendor"},
 	})
 	worker.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -176,4 +179,4 @@ func reliabilityFreshDB(t *testing.T) *DatabaseManager {
 // controllableSynthClient is defined in synthesis_isolation_test.go — using
 // the same type from the same package (internal) so it's shared implicitly.
 // Below is a compile-time interface check for local use.
-var _ SynthClientInterface = (*controllableSynthClient)(nil)
+var _ synth.SynthClientInterface = (*controllableSynthClient)(nil)

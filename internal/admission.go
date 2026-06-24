@@ -1,5 +1,15 @@
 package internal
 
+// Memory admission: LLM-based decision whether a frequently-retrieved
+// reference chunk should become a memory. The active HTTP client lives
+// in internal/synth; this file owns the admission-specific prompts, result
+// shapes, and the orchestrating EvaluateCandidate function.
+//
+// Decoupled from SynthClient per 808 review (2026-06-24): the admission
+// flow takes the client as an argument rather than being a method receiver
+// on SynthClient. This keeps the synth package free of admission concerns
+// and lets admission use any synth.SynthClient (or mock) interchangeably.
+
 import (
 	"bytes"
 	"context"
@@ -9,6 +19,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"mpm/internal/synth"
 )
 
 // Admission is the LLM-based admission function described in decisions
@@ -62,12 +74,12 @@ The output must be valid JSON. No markdown, no explanation, no preamble.`
 
 // admitResult is the JSON structure the admission LLM must return.
 type admitResult struct {
-	Admit         bool               `json:"admit"`
-	Content       string             `json:"content,omitempty"`
-	Justification []admitChainEntry  `json:"justification"`
-	Confidence    float64            `json:"confidence,omitempty"`
-	Tags          []string           `json:"tags,omitempty"`
-	Reason        string             `json:"reason,omitempty"`
+	Admit         bool              `json:"admit"`
+	Content       string            `json:"content,omitempty"`
+	Justification []admitChainEntry `json:"justification"`
+	Confidence    float64           `json:"confidence,omitempty"`
+	Tags          []string          `json:"tags,omitempty"`
+	Reason        string            `json:"reason,omitempty"`
 }
 
 // admitChainEntry is one link in the admission justification chain. The
@@ -87,19 +99,23 @@ type admitChainEntry struct {
 //
 // The chunk is sent with its retrieval context (import_reason, queries
 // that surfaced it, hit count) so the LLM can evaluate connection
-// rather than just relevance. The model name is read from the
-// SynthClient.Model field — the same field is stamped into the
-// admitted memory's metadata.provenance.model via SaveMemoryWithContext.
-func (sc *SynthClient) EvaluateCandidate(ctx context.Context, candidate *AdmissionCandidate) (*admitResult, error) {
-	if sc.APIKey == "" {
+// rather than just relevance. The model name comes from the supplied
+// SynthClient.
+//
+// Refactored 2026-06-24: was a method receiver on SynthClient, now a
+// free function that takes the client as an argument. Keeps the synth
+// package free of admission concerns and avoids the cross-package method
+// receiver Go restriction.
+func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate *AdmissionCandidate) (*admitResult, error) {
+	if client.APIKey == "" {
 		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
 	}
 
 	userContent := candidate.ToPrompt()
 
 	body := map[string]interface{}{
-		"model":      sc.Model,
-		"max_tokens": sc.MaxTokens,
+		"model":      client.Model,
+		"max_tokens": client.MaxTokens,
 		"messages": []map[string]string{
 			{"role": "system", "content": admissionSystemPrompt},
 			{"role": "user", "content": userContent},
@@ -110,15 +126,15 @@ func (sc *SynthClient) EvaluateCandidate(ctx context.Context, candidate *Admissi
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", sc.BaseURL+"/messages", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", client.BaseURL+"/messages", bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+sc.APIKey)
+	req.Header.Set("Authorization", "Bearer "+client.APIKey)
 
-	client := &http.Client{Timeout: sc.Timeout}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: client.Timeout}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("admission API request failed: %w", err)
 	}
@@ -132,7 +148,7 @@ func (sc *SynthClient) EvaluateCandidate(ctx context.Context, candidate *Admissi
 		return nil, fmt.Errorf("admission API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	rawResult, err := sc.parseResponseBody(respBody, "admission")
+	rawResult, err := client.ParseResponseBody(respBody, "admission")
 	if err != nil {
 		return nil, fmt.Errorf("admission: %w", err)
 	}
@@ -162,16 +178,16 @@ func (sc *SynthClient) EvaluateCandidate(ctx context.Context, candidate *Admissi
 // not just the chunk — connection-driven admission requires the
 // retrieval evidence, not just the prose.
 type AdmissionCandidate struct {
-	DocID            string
-	DocTitle         string
-	ChunkID          string
-	ChunkContent     string
-	ImportReason     string
-	HitCount         int
-	DistinctQueries  int
-	RecentQueries    []string
-	ActiveProject    string
-	NearestTheories  []string
+	DocID           string
+	DocTitle        string
+	ChunkID         string
+	ChunkContent    string
+	ImportReason    string
+	HitCount        int
+	DistinctQueries int
+	RecentQueries   []string
+	ActiveProject   string
+	NearestTheories []string
 }
 
 // ToPrompt formats the candidate as the user message sent to the LLM.

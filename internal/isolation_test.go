@@ -9,23 +9,26 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"mpm/internal/config"
+	"mpm/internal/synth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// mockSynthClient is a test double implementing SynthClientInterface.
+// mockSynthClient is a test double implementing synth.SynthClientInterface.
 type mockSynthClient struct {
 	callCount     int
 	failFirst     int
 	failErr       error
-	succeedResult *synthResult
+	succeedResult *synth.SynthResult
 }
 
-func (m *mockSynthClient) Synthesize(ctx context.Context, fragments []string) (*synthResult, error) {
+func (m *mockSynthClient) Synthesize(ctx context.Context, fragments []string) (*synth.SynthResult, error) {
 	return nil, nil
 }
 
-func (m *mockSynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVendor, content string, tags []string) (*synthResult, error) {
+func (m *mockSynthClient) SynthesizeWithVendor(ctx context.Context, vendor config.SynthVendor, content string, tags []string) (*synth.SynthResult, error) {
 	m.callCount++
 	if m.callCount <= m.failFirst {
 		return nil, m.failErr
@@ -33,7 +36,7 @@ func (m *mockSynthClient) SynthesizeWithVendor(ctx context.Context, vendor Synth
 	return m.succeedResult, nil
 }
 
-var _ SynthClientInterface = (*mockSynthClient)(nil)
+var _ synth.SynthClientInterface = (*mockSynthClient)(nil)
 
 // freshDB creates a fully isolated DatabaseManager backed by a temp file.
 // Uses NewDatabaseManagerForDB + InitSchema to avoid workspace path resolution.
@@ -60,7 +63,7 @@ func TestSynthesisWorkerEnqueueThenDLQRetry(t *testing.T) {
 	mock := &mockSynthClient{
 		failFirst: 1,
 		failErr:   assert.AnError,
-		succeedResult: &synthResult{
+		succeedResult: &synth.SynthResult{
 			Content: `{"content": "synthesized insight", "tags": ["synthesized"]}`,
 			Tags:    []string{"synthesized"},
 		},
@@ -69,7 +72,7 @@ func TestSynthesisWorkerEnqueueThenDLQRetry(t *testing.T) {
 	// Use a manual-tick constructor with an explicit vendor chain.
 	// This bypasses getSynthVendorChain() which returns nil without real API keys.
 	dlqTick := make(chan time.Time) // never fires in this test
-	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []SynthVendor{{Name: "test-vendor"}})
+	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []config.SynthVendor{{Name: "test-vendor"}})
 	worker.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	worker.Start()
 	defer worker.Stop()
