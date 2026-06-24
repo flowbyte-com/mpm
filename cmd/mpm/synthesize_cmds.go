@@ -7,6 +7,7 @@ import (
 	"time"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/synth"
 )
 
 // mpm synthesize — Find near-duplicate memories and merge via LLM synthesis.
@@ -28,7 +29,7 @@ func handleSynthesize(args []string) int {
 	}
 	defer dm.Close()
 
-	client := mpminternal.NewSynthClient()
+	client := synth.NewSynthClient()
 
 	// Scan all non-deleted, non-LTM memories for near-miss clusters
 	rows, err := dm.SQLDB().Query(`

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"mpm/internal/config"
+	"mpm/internal/synth"
 )
 
 // MemoryEvent represents a synthesis trigger from the watcher.
@@ -25,8 +26,8 @@ const DefaultMaxWorkers = 3
 // SynthesisWorker manages the isolated synthesis goroutine pool.
 type SynthesisWorker struct {
 	db          *DatabaseManager
-	synth       SynthClientInterface // interface allows mock injection in tests
-	vendorChain []SynthVendor        // ordered fallback chain; nil = use getSynthVendorChain()
+	synth       synth.SynthClientInterface // interface allows mock injection in tests
+	vendorChain []config.SynthVendor        // ordered fallback chain; nil = use getSynthVendorChain()
 
 	events   chan MemoryEvent // inbound event channel
 	shutdown chan struct{}    // shutdown signal
@@ -42,7 +43,7 @@ type SynthesisWorker struct {
 // NewSynthesisWorker creates a worker with isolated goroutine context.
 // The worker holds its own event channel and manages a pool of maxWorkers
 // concurrent synthesis tasks via semaphore.
-func NewSynthesisWorker(db *DatabaseManager, synth SynthClientInterface, maxWorkers int) *SynthesisWorker {
+func NewSynthesisWorker(db *DatabaseManager, synth synth.SynthClientInterface, maxWorkers int) *SynthesisWorker {
 	if maxWorkers <= 0 {
 		maxWorkers = DefaultMaxWorkers
 	}
@@ -61,7 +62,7 @@ func NewSynthesisWorker(db *DatabaseManager, synth SynthClientInterface, maxWork
 // NewSynthesisWorkerWithManualTick creates a worker where the DLQ tick is
 // driven by an external channel (for testing). Production code should use
 // NewSynthesisWorker which creates its own 5-minute ticker.
-func NewSynthesisWorkerWithManualTick(db *DatabaseManager, synth SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time) *SynthesisWorker {
+func NewSynthesisWorkerWithManualTick(db *DatabaseManager, synth synth.SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time) *SynthesisWorker {
 	if maxWorkers <= 0 {
 		maxWorkers = DefaultMaxWorkers
 	}
@@ -80,7 +81,7 @@ func NewSynthesisWorkerWithManualTick(db *DatabaseManager, synth SynthClientInte
 // NewSynthesisWorkerForTest creates a worker for unit testing with an explicit
 // vendor chain and manual DLQ tick channel. This bypasses getSynthVendorChain()
 // which requires real API keys.
-func NewSynthesisWorkerForTest(db *DatabaseManager, synth SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time, vendorChain []SynthVendor) *SynthesisWorker {
+func NewSynthesisWorkerForTest(db *DatabaseManager, synth synth.SynthClientInterface, maxWorkers int, dlqTick <-chan time.Time, vendorChain []config.SynthVendor) *SynthesisWorker {
 	if maxWorkers <= 0 {
 		maxWorkers = DefaultMaxWorkers
 	}
@@ -422,11 +423,11 @@ func (w *SynthesisWorker) synthWithMultiVendor(ctx context.Context, memoryID, co
 }
 
 // getSynthVendorChain returns the ordered fallback chain from config and env.
-func getSynthVendorChain() []SynthVendor {
-	chain := []SynthVendor{}
+func getSynthVendorChain() []config.SynthVendor {
+	chain := []config.SynthVendor{}
 
 	// Primary: MiniMax
-	primary := SynthVendor{Name: "minimax", Model: "MiniMax-M2.7", BaseURL: "https://api.minimax.io/anthropic/v1"}
+	primary := config.SynthVendor{Name: "minimax", Model: "MiniMax-M2.7", BaseURL: "https://api.minimax.io/anthropic/v1"}
 	cfg, _ := config.LoadConfig()
 	if cfg != nil && cfg.Synth != nil {
 		if cfg.Synth.Model != "" {
@@ -446,7 +447,7 @@ func getSynthVendorChain() []SynthVendor {
 
 	// Fallback: OpenAI
 	if key := getEnv("OPENAI_API_KEY", ""); key != "" {
-		chain = append(chain, SynthVendor{
+		chain = append(chain, config.SynthVendor{
 			Name:    "openai",
 			APIKey:  key,
 			Model:   "gpt-4o",
@@ -457,7 +458,7 @@ func getSynthVendorChain() []SynthVendor {
 	// Fallback: Ollama (local)
 	if endpoint := getEnv("OLLAMA_ENDPOINT", ""); endpoint != "" {
 		model := getEnv("OLLAMA_MODEL", "llama3")
-		chain = append(chain, SynthVendor{
+		chain = append(chain, config.SynthVendor{
 			Name:    "ollama",
 			APIKey:  "",
 			Model:   model,
@@ -479,7 +480,7 @@ func getSynthVendorChain() []SynthVendor {
 // links. The topic-copy query intentionally omits the `m.deleted_at IS NULL`
 // filter that the previous version had: the source is now soft-deleted by
 // design, and we still need to copy its topic memberships forward.
-func persistSynthesizedMemory(dm *DatabaseManager, sourceID, _ string, synthesizedContent string, tags []string, vendor SynthVendor) {
+func persistSynthesizedMemory(dm *DatabaseManager, sourceID, _ string, synthesizedContent string, tags []string, vendor config.SynthVendor) {
 	metadata := map[string]interface{}{
 		"synthesized":    true,
 		"source_id":      sourceID,
