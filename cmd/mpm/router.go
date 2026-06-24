@@ -29,7 +29,7 @@ func NewRouter() *CommandRouter {
 		// Info commands
 		"version": {Name: "version", Description: "Show version info", MinArgs: 0, MaxArgs: 0},
 		"help":    {Name: "help", Description: "Show this help", MinArgs: 0, MaxArgs: 0},
-		"doctor":  {Name: "doctor", Description: "Run diagnostics", MinArgs: 0},
+		"doctor":  {Name: "doctor", Description: "Run diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)", MinArgs: 0},
 
 		// Memory commands
 		"recall":       {Name: "recall", Description: "Search memories for context", MinArgs: 1, Aliases: []string{"s"}},
@@ -37,12 +37,12 @@ func NewRouter() *CommandRouter {
 		"ls":           {Name: "ls", Description: "List memories", MinArgs: 0},
 		"show":         {Name: "show", Description: "Show memory details", MinArgs: 1},
 		"rm":           {Name: "rm", Description: "Delete a memory", MinArgs: 1},
-		"promote":      {Name: "promote", Description: "Make memory LTM (deprecated: use 'mpm kb memory promote')", MinArgs: 1},
-		"patch-memory": {Name: "patch-memory", Description: "Patch metadata JSON in-place (deprecated: use 'mpm debug patch-memory')", MinArgs: 2},
-		"reinforce":    {Name: "reinforce", Description: "Reinforce a memory (deprecated: use 'mpm kb memory reinforce')", MinArgs: 1},
-		"weaken":       {Name: "weaken", Description: "Weaken a memory (deprecated: use 'mpm kb memory weaken')", MinArgs: 1},
-		"snooze":       {Name: "snooze", Description: "Bump memory relevance (deprecated: use 'mpm kb memory snooze')", MinArgs: 1},
-		"set-weight":   {Name: "set-weight", Description: "Set memory weight (deprecated: use 'mpm kb memory set-weight')", MinArgs: 2, MaxArgs: 2},
+		"promote":      {Name: "promote", Description: "Make memory LTM", MinArgs: 1},
+		"patch-memory": {Name: "patch-memory", Description: "Patch metadata JSON in-place", MinArgs: 2},
+		"reinforce":    {Name: "reinforce", Description: "Reinforce a memory", MinArgs: 1},
+		"weaken":       {Name: "weaken", Description: "Weaken a memory", MinArgs: 1},
+		"snooze":       {Name: "snooze", Description: "Bump memory relevance", MinArgs: 1},
+		"set-weight":   {Name: "set-weight", Description: "Set memory weight", MinArgs: 2, MaxArgs: 2},
 		"synthesize":   {Name: "synthesize", Description: "Merge near-duplicate memories via LLM synthesis", MinArgs: 0},
 		"shred":        {Name: "shred", Description: "Secure delete memory", MinArgs: 1},
 		"stats":        {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
@@ -57,11 +57,11 @@ func NewRouter() *CommandRouter {
 		"watch":     {Name: "watch", Description: "File watcher for memory ingestion"},
 		"web":       {Name: "web", Description: "Start web UI server", MinArgs: 0},
 		"switch":    {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
-		"reference": {Name: "reference", Description: "Reference library (deprecated: use 'mpm kb reference')", MinArgs: 1},
-		"topic":     {Name: "topic", Description: "Topic management (deprecated: use 'mpm kb topic')", MinArgs: 1},
-		"session":   {Name: "session", Description: "Session operations (deprecated: use 'mpm kb session')", MinArgs: 1},
-		"lesson":    {Name: "lesson", Description: "Lesson operations (deprecated: use 'mpm kb lesson')", MinArgs: 1},
-		"memory":    {Name: "memory", Description: "Memory operations (deprecated: use 'mpm kb memory')", MinArgs: 1},
+		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
+		"topic":     {Name: "topic", Description: "Topic management", MinArgs: 1},
+		"session":   {Name: "session", Description: "Session operations", MinArgs: 1},
+		"lesson":    {Name: "lesson", Description: "Lesson operations", MinArgs: 1},
+		"memory":    {Name: "memory", Description: "Memory operations", MinArgs: 1},
 
 		"ingest": {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
@@ -87,7 +87,7 @@ func NewRouter() *CommandRouter {
 		"record_decision": {Name: "record_decision", Description: "Record a decision with context, choice, and rationale", MinArgs: 1},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
-		"call":            {Name: "call", Description: "Universal machine interface: mpm call <tool> [--payload <json>]", MinArgs: 1},
+		"call":            {Name: "call", Description: "Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 1},
 		"evidence":        {Name: "evidence", Description: "Evidence operations (add|list) — confidence/evidence foundation", MinArgs: 0},
 
 		// Knowledge Base — entity-centric namespace (reads + writes)
@@ -195,37 +195,37 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "rm":
 		return handleRm(args)
 	case "promote":
-		return handleMutationDeprecation("promote", args)
+		return handlePromote(args)
 	case "patch-memory":
-		return handleMutationDeprecation("patch-memory", args)
+		return handlePatchMemory(args)
 	case "reinforce":
-		return handleMutationDeprecation("reinforce", args)
+		return handleReinforce(args)
 	case "weaken":
-		return handleMutationDeprecation("weaken", args)
+		return handleWeaken(args)
 	case "snooze":
-		return handleMutationDeprecation("snooze", args)
+		return handleSnooze(args)
 	case "set-weight":
-		return handleMutationDeprecation("set-weight", args)
+		return handleSetWeight(args)
 	case "synthesize":
 		return handleSynthesize(args)
 	case "shred":
-		return handleShredMem(args)
+		return handleShred(args[1:])
 	case "reference":
-		return handleEntityDeprecation("reference", args)
+		return handleRef(args[1:])
 	case "directives":
 		return handlePrimeDirectives()
 	case "memory":
-		return handleEntityDeprecation("memory", args)
+		return handleMemory(args[1:])
 	case "mode":
 		return handleMode(args[1:])
 	case "persona":
 		return handlePersona(args[1:])
 	case "topic":
-		return handleEntityDeprecation("topic", args)
+		return handleTopic(args[1:])
 	case "session":
-		return handleEntityDeprecation("session", args)
+		return handleSession(args[1:])
 	case "lesson":
-		return handleEntityDeprecation("lesson", args)
+		return handleLesson(args[1:])
 	case "hint":
 		return handleHint(args[1:])
 	case "route":
@@ -361,36 +361,6 @@ func (r *CommandRouter) handleSwitch() int {
 	return handleSwitch([]string{})
 }
 
-// handleEntityDeprecation prints a deprecation notice then routes to the kb namespace.
-func handleEntityDeprecation(entity string, args []string) int {
-	fmt.Fprintf(os.Stderr, "[!] Warning: 'mpm %s' is deprecated.\n", entity)
-	fmt.Fprintf(os.Stderr, "    Use 'mpm kb %s' instead.\n\n", entity)
-	switch entity {
-	case "memory":
-		return handleKBMemory(args[1:])
-	case "topic":
-		return handleKBTopic(args[1:])
-	case "lesson":
-		return handleKBLesson(args[1:])
-	case "session":
-		return handleKBSession(args[1:])
-	case "reference":
-		return handleKBReference(args[1:])
-	default:
-		return 1
-	}
-}
-
-// handleMutationDeprecation prints a deprecation notice then routes to the kb namespace.
-// cmd is the root command name (e.g. "promote", "reinforce").
-// args[0] is the command name at root level; kb expects entity/subcommand at [1]/[2].
-func handleMutationDeprecation(cmd string, args []string) int {
-	fmt.Fprintf(os.Stderr, "[!] Warning: 'mpm %s' is deprecated.\n", cmd)
-	fmt.Fprintf(os.Stderr, "    Use 'mpm kb memory %s' instead.\n\n", cmd)
-	// Route to kb memory <cmd> <remaining args>
-	return handleKBMemory(append([]string{cmd}, args[1:]...))
-}
-
 // ============================================================================
 // Ops Subcommand — Maintenance, diagnostics, and engine-room tools
 // ============================================================================
@@ -463,9 +433,9 @@ func handleOps(args []string) int {
 	case "session":
 		return handleSession(subArgs)
 	case "reference":
-		return handleRef(append([]string{"reference"}, subArgs...))
+		return handleRef(subArgs)
 	case "wake":
-		return handleWake(append([]string{"wake"}, subArgs...))
+		return handleWake(subArgs)
 
 	// — Gateway —
 	case "gateway":
@@ -484,6 +454,9 @@ func handleOps(args []string) int {
 
 	case "changelog":
 		return handleOpsChangelogRoute(subArgs)
+
+	case "self-heal":
+		return handleSelfHeal(subArgs)
 
 	case "status":
 		return handleStatus()
@@ -504,7 +477,7 @@ var opsSubcommandDescs = []struct {
 	name string
 	desc string
 }{
-	{"doctor [--explain]", "Run diagnostics (--explain for FTS5 query plan)"},
+	{"doctor [--deep-scan|--explain]", "Run diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)"},
 	{"maintain", "Self-maintenance: decay, consolidate, prune"},
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
@@ -536,6 +509,7 @@ var opsSubcommandDescs = []struct {
 	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
 	{"confidence show|recompute", "Confidence/evidence engine: snapshot or trigger recompute"},
 	{"changelog build [--since/--until/--version/--legacy/--dry-run]", "Generate CHANGELOG.md + changelog.json from git log"},
+	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"help", "Show this help"},
 }
 
@@ -610,23 +584,23 @@ func handleKB(args []string) int {
 
 // handleKBMemory routes memory subcommands. Thin wrapper around handleMemory.
 func handleKBMemory(args []string) int {
-	return handleMemory(append([]string{"memory"}, args...))
+	return handleMemory(args)
 }
 
 func handleKBTopic(args []string) int {
-	return handleTopic(append([]string{"topic"}, args...))
+	return handleTopic(args)
 }
 
 func handleKBLesson(args []string) int {
-	return handleLesson(append([]string{"lesson"}, args...))
+	return handleLesson(args)
 }
 
 func handleKBSession(args []string) int {
-	return handleSession(append([]string{"session"}, args...))
+	return handleSession(args)
 }
 
 func handleKBReference(args []string) int {
-	return handleRef(append([]string{"reference"}, args...))
+	return handleRef(args)
 }
 
 // kbSubcommandDescs is the canonical list of all kb subcommands.

@@ -46,6 +46,24 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantModes:        []string{"architect"},
 			wantPersonaNotNil: true,
 		},
+		{
+			name:             "cross-validation prompt triggers moe mode",
+			prompt:           "Gemini said: Reflex Engine is a hallucination. claude suggested the same. chatgpt disagreed. Source-check this.",
+			wantModes:        []string{"moe"},
+			wantPersonaNotNil: true,
+		},
+		{
+			name:             "explicit moe invocation triggers moe mode",
+			prompt:           "moe: this gemini output needs verification before we act",
+			wantModes:        []string{"moe"},
+			wantPersonaNotNil: true,
+		},
+		{
+			name:             "source-verify language triggers moe mode",
+			prompt:           "Cross-validate this claude suggestion about the Reflex Engine. Source-verify before agreeing.",
+			wantModes:        []string{"moe"},
+			wantPersonaNotNil: true,
+		},
 	}
 
 	for _, tt := range tests {

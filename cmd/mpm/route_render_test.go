@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRenderRoute(t *testing.T) {
@@ -351,6 +353,263 @@ func TestApplyRouteLengthCap(t *testing.T) {
 				t.Errorf("applyRouteLengthCap() unexpected truncation marker in mode: %s", gotMode)
 			}
 		})
+	}
+}
+
+func TestDirectiveInjectionLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		envSet  bool
+		want    int
+	}{
+		{name: "unset returns 0", envSet: false, want: 0},
+		{name: "empty returns 0", envVal: "", envSet: true, want: 0},
+		{name: "non-numeric returns 0", envVal: "five", envSet: true, want: 0},
+		{name: "zero returns 0", envVal: "0", envSet: true, want: 0},
+		{name: "negative returns 0", envVal: "-1", envSet: true, want: 0},
+		{name: "positive returns N", envVal: "5", envSet: true, want: 5},
+		{name: "large positive returns N", envVal: "100", envSet: true, want: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSet {
+				t.Setenv("MPM_ROUTE_DIRECTIVES", tt.envVal)
+			} else {
+				os.Unsetenv("MPM_ROUTE_DIRECTIVES")
+			}
+			got := directiveInjectionLimit()
+			if got != tt.want {
+				t.Errorf("directiveInjectionLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveMPMDatabase(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, dir string) // creates candidate files
+		wantFile  string                         // basename of expected return, "" for none
+	}{
+		{
+			name:    "no candidates returns empty",
+			setup:   func(t *testing.T, dir string) {},
+			wantFile: "",
+		},
+		{
+			name: "mpm.db at root is preferred",
+			setup: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "mpm.db"), "")
+				mustWriteFile(t, filepath.Join(dir, "mpm.sqlite"), "")
+			},
+			wantFile: "mpm.db",
+		},
+		{
+			name: "mpm.sqlite when no mpm.db",
+			setup: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "mpm.sqlite"), "")
+			},
+			wantFile: "mpm.sqlite",
+		},
+		{
+			name: "src/db/mpm.db is fallback",
+			setup: func(t *testing.T, dir string) {
+				mustMkdir(t, filepath.Join(dir, "src", "db"))
+				mustWriteFile(t, filepath.Join(dir, "src", "db", "mpm.db"), "")
+			},
+			wantFile: "mpm.db",
+		},
+		{
+			name: "empty workspace returns empty",
+			setup: func(t *testing.T, dir string) {
+				mustWriteFile(t, filepath.Join(dir, "mpm.db"), "")
+			},
+			wantFile: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tt.setup(t, dir)
+
+			// Adjust for empty workspace case
+			ws := dir
+			if tt.name == "empty workspace returns empty" {
+				ws = ""
+			}
+
+			got := resolveMPMDatabase(ws)
+			if tt.wantFile == "" {
+				if got != "" {
+					t.Errorf("resolveMPMDatabase() = %q, want empty", got)
+				}
+				return
+			}
+			if filepath.Base(got) != tt.wantFile {
+				t.Errorf("resolveMPMDatabase() = %q, want file %q", got, tt.wantFile)
+			}
+		})
+	}
+}
+
+func TestFetchTopDirectives_GracefulDegradation(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		limit     int
+		wantEmpty bool
+	}{
+		{name: "empty workspace", workspace: "", limit: 5, wantEmpty: true},
+		{name: "zero limit", workspace: "/tmp", limit: 0, wantEmpty: true},
+		{name: "negative limit", workspace: "/tmp", limit: -1, wantEmpty: true},
+		{name: "non-existent workspace", workspace: "/nonexistent/path/abc123", limit: 5, wantEmpty: true},
+		{name: "workspace without DB", workspace: t.TempDir(), limit: 5, wantEmpty: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fetchTopDirectives(tt.workspace, tt.limit)
+			if tt.wantEmpty && got != "" {
+				t.Errorf("fetchTopDirectives() = %q, want empty (graceful degradation)", got)
+			}
+		})
+	}
+}
+
+func TestRenderRoute_DirectiveInjectionOptIn(t *testing.T) {
+	// Build a workspace that will route. Then verify that with MPM_ROUTE_DIRECTIVES
+	// unset, the output does NOT include directive markers; with it set, the
+	// output either includes directives (if a DB is present) or fails open
+	// (if no DB is present). The point is to lock in the opt-in semantics.
+	workspace := t.TempDir()
+	mustMkdir(t, filepath.Join(workspace, "mode"))
+	mustMkdir(t, filepath.Join(workspace, "persona"))
+	mustWriteFile(t, filepath.Join(workspace, "mode", "testmode.md"),
+		"---\nname: testmode\npatterns: testmode-directive-opt-in\n---\n\n# Test Mode\n\nTest mode body.\n")
+	mustWriteFile(t, filepath.Join(workspace, "persona", "testpersona.md"),
+		"---\nname: testpersona\npatterns: testpersona-directive-opt-in\n---\n\n# Test Persona\n\nTest persona body.\n")
+
+	prompt := "testmode-directive-opt-in with testpersona-directive-opt-in"
+
+	t.Run("default behavior excludes directive marker", func(t *testing.T) {
+		os.Unsetenv("MPM_ROUTE_DIRECTIVES")
+		got, err := renderRoute(workspace, prompt)
+		if err != nil {
+			t.Fatalf("renderRoute: %v", err)
+		}
+		if got == "" {
+			t.Fatalf("renderRoute returned empty — synthetic workspace didn't route")
+		}
+		if strings.Contains(got, "Prime Directives") {
+			t.Errorf("renderRoute() unexpectedly included directive marker\nGot: %s", got)
+		}
+	})
+
+	t.Run("MPM_ROUTE_DIRECTIVES=0 is treated as disabled", func(t *testing.T) {
+		t.Setenv("MPM_ROUTE_DIRECTIVES", "0")
+		got, err := renderRoute(workspace, prompt)
+		if err != nil {
+			t.Fatalf("renderRoute: %v", err)
+		}
+		if strings.Contains(got, "Prime Directives") {
+			t.Errorf("renderRoute() with MPM_ROUTE_DIRECTIVES=0 should not inject directives\nGot: %s", got)
+		}
+	})
+
+	t.Run("MPM_ROUTE_DIRECTIVES=5 with no DB fails open (no injection)", func(t *testing.T) {
+		// Synthetic workspace has no DB — directive injection must fail open
+		// rather than failing the route.
+		t.Setenv("MPM_ROUTE_DIRECTIVES", "5")
+		got, err := renderRoute(workspace, prompt)
+		if err != nil {
+			t.Fatalf("renderRoute: %v", err)
+		}
+		if got == "" {
+			t.Fatalf("renderRoute returned empty — synthetic workspace didn't route")
+		}
+		// Body must still be valid (mode + persona). The DB-less path means
+		// no directive block, which is the documented fail-open behavior.
+		if !strings.Contains(got, "mode=testmode") {
+			t.Errorf("renderRoute() should preserve mode section\nGot: %s", got)
+		}
+	})
+}
+
+func TestInvalidateDirectiveCache(t *testing.T) {
+	// Cache is package-level. Each subtest must start from a known state.
+	InvalidateDirectiveCache()
+	t.Cleanup(InvalidateDirectiveCache)
+
+	t.Run("cache returns empty when no fetch has occurred", func(t *testing.T) {
+		InvalidateDirectiveCache()
+		// Without any prior fetch, the cache has no entry for this key.
+		// We don't directly inspect the cache, but we can confirm
+		// InvalidateDirectiveCache doesn't error and a subsequent call
+		// still returns empty for a non-existent workspace.
+		got := fetchTopDirectivesCached("/nonexistent/path/cache-test", 5)
+		if got != "" {
+			t.Errorf("fetchTopDirectivesCached() for missing DB = %q, want empty", got)
+		}
+	})
+
+	t.Run("two invalidates in a row are safe", func(t *testing.T) {
+		InvalidateDirectiveCache()
+		InvalidateDirectiveCache() // must not panic on empty map
+	})
+
+	t.Run("concurrent invalidates are safe", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				InvalidateDirectiveCache()
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+func TestFetchTopDirectivesCached_ShortCircuits(t *testing.T) {
+	InvalidateDirectiveCache()
+	t.Cleanup(InvalidateDirectiveCache)
+
+	// All subtests use inputs that fetchTopDirectives returns "" for, so the
+	// only thing we're really asserting is that the cache wrapper doesn't
+	// change the short-circuit behavior. We're not measuring timing here
+	// (flaky) — we're asserting semantic equivalence with fetchTopDirectives
+	// for the no-injection paths.
+	tests := []struct {
+		name      string
+		workspace string
+		limit     int
+	}{
+		{"empty workspace", "", 5},
+		{"zero limit", "/tmp", 0},
+		{"negative limit", "/tmp", -1},
+		{"no DB at workspace", t.TempDir(), 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			InvalidateDirectiveCache()
+			cached := fetchTopDirectivesCached(tt.workspace, tt.limit)
+			direct := fetchTopDirectives(tt.workspace, tt.limit)
+			if cached != direct {
+				t.Errorf("cached = %q, direct = %q (cache should be semantically equivalent on short-circuit)", cached, direct)
+			}
+		})
+	}
+}
+
+func TestRenderRoute_DirectiveCacheTTLBounds(t *testing.T) {
+	// This test verifies the TTL constant is in a sensible range. If someone
+	// bumps it to an hour thinking it helps performance, this test fails and
+	// forces a conversation about staleness vs throughput.
+	if directiveCacheTTL > 30*time.Second {
+		t.Errorf("directiveCacheTTL = %v, want <= 30s to keep directive changes visible within a conversation", directiveCacheTTL)
+	}
+	if directiveCacheTTL < 100*time.Millisecond {
+		t.Errorf("directiveCacheTTL = %v, want >= 100ms to provide any meaningful absorption of burst traffic", directiveCacheTTL)
 	}
 }
 

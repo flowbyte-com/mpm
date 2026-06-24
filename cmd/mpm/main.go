@@ -313,12 +313,16 @@ func runDoctorCommand(args []string) {
 
 	fix := false
 	explain := false
+	deepScan := false
 	for _, a := range args {
 		if a == "--fix" {
 			fix = true
 		}
 		if a == "--explain" {
 			explain = true
+		}
+		if a == "--deep-scan" {
+			deepScan = true
 		}
 	}
 	// Check os.Args for -f shorthand (router.parseFlags consumes it as --force)
@@ -333,6 +337,14 @@ func runDoctorCommand(args []string) {
 
 	if explain {
 		runDoctorExplain()
+		return
+	}
+
+	// --deep-scan is its own audit mode: skip the standard suite and run
+	// on-demand integrity checks (FTS sync, soft-delete ghosts, dangling
+	// memberships). Useful when investigating search-index drift.
+	if deepScan {
+		runDoctorDeepScan(fix)
 		return
 	}
 
@@ -369,6 +381,282 @@ func runDoctorCommand(args []string) {
 	// Exit with appropriate code
 	if report.Failed > 0 {
 		os.Exit(1)
+	}
+}
+
+// DeepScanResult is the structured output of runDeepScanCheck. It captures
+// every finding in a form that both the human-facing runDoctorDeepScan and
+// the autonomous handleSelfHeal loop can consume without re-running queries.
+type DeepScanResult struct {
+	// FTSOrphans: per-FTS-table orphan count (rowid present in FTS, missing in source).
+	FTSOrphans map[string]int
+	// FTSOrphanSamples: per-FTS-table sample labels (capped at 5 each) for human reporting.
+	FTSOrphanSamples map[string][]string
+	// SoftDeleteGhosts: count of memories_fts rows whose memory has deleted_at IS NOT NULL.
+	SoftDeleteGhosts int
+	// SoftDeleteGhostSamples: sample IDs/rowids/timestamps (capped at 5).
+	SoftDeleteGhostSamples []string
+	// DanglingMemberships: count of topic_memberships rows whose topic no longer exists.
+	DanglingMemberships int
+	// QueryErrors: any individual queries that failed (so the caller can WARN).
+	QueryErrors map[string]string
+}
+
+// TotalDrift returns the aggregate drift count across all categories.
+func (r *DeepScanResult) TotalDrift() int {
+	t := r.SoftDeleteGhosts + r.DanglingMemberships
+	for _, n := range r.FTSOrphans {
+		t += n
+	}
+	return t
+}
+
+// HasKnownSafeDrift returns true if there is drift in the known-safe
+// (auto-fixable) category — currently just soft-delete ghosts.
+func (r *DeepScanResult) HasKnownSafeDrift() bool {
+	return r.SoftDeleteGhosts > 0
+}
+
+// HasUnknownDrift returns true if there is drift in categories the system
+// refuses to auto-fix (FTS orphans, dangling memberships).
+func (r *DeepScanResult) HasUnknownDrift() bool {
+	if r.DanglingMemberships > 0 {
+		return true
+	}
+	for _, n := range r.FTSOrphans {
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// runDeepScanCheck performs the three integrity checks and returns a structured
+// result. The DB is opened read-only; the caller is responsible for any writes.
+func runDeepScanCheck(dbPath string) (*DeepScanResult, error) {
+	sqlDB, err := sql.Open("sqlite3", dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	defer sqlDB.Close()
+
+	res := &DeepScanResult{
+		FTSOrphans:               map[string]int{},
+		FTSOrphanSamples:         map[string][]string{},
+		SoftDeleteGhostSamples:   []string{},
+		QueryErrors:              map[string]string{},
+	}
+
+	// — Check 1: FTS orphan scan —
+	ftsPairs := []struct {
+		fts   string
+		table string
+		idCol string
+	}{
+		{"memories_fts", "memories", "t.id"},
+		{"topics_fts", "topics", "t.name"},
+		{"lessons_fts", "lessons", "t.id"},
+		{"sessions_fts", "sessions", "t.id"},
+	}
+	for _, p := range ftsPairs {
+		q := fmt.Sprintf(
+			"SELECT f.rowid, %s FROM %s f LEFT JOIN %s t ON f.rowid = t.rowid WHERE t.rowid IS NULL",
+			p.idCol, p.fts, p.table,
+		)
+		rows, qerr := sqlDB.Query(q)
+		if qerr != nil {
+			res.QueryErrors[p.fts] = qerr.Error()
+			continue
+		}
+		var samples []string
+		count := 0
+		for rows.Next() {
+			var rid int64
+			var label sql.NullString
+			if err := rows.Scan(&rid, &label); err != nil {
+				continue
+			}
+			count++
+			if len(samples) < 5 {
+				if !label.Valid || label.String == "" {
+					samples = append(samples, fmt.Sprintf("rowid=%d", rid))
+				} else {
+					samples = append(samples, fmt.Sprintf("%s(rowid=%d)", label.String, rid))
+				}
+			}
+		}
+		rows.Close()
+		res.FTSOrphans[p.fts] = count
+		if count > 0 {
+			res.FTSOrphanSamples[p.fts] = samples
+		}
+	}
+
+	// — Check 2: soft-delete ghost scan (memories only) —
+	ghostRows, err := sqlDB.Query(
+		"SELECT m.rowid, m.id, m.deleted_at FROM memories_fts f JOIN memories m ON f.rowid = m.rowid WHERE m.deleted_at IS NOT NULL",
+	)
+	if err != nil {
+		res.QueryErrors["soft_delete_ghosts"] = err.Error()
+	} else {
+		for ghostRows.Next() {
+			var rid int64
+			var id, deletedAt string
+			if err := ghostRows.Scan(&rid, &id, &deletedAt); err != nil {
+				continue
+			}
+			res.SoftDeleteGhosts++
+			if len(res.SoftDeleteGhostSamples) < 5 {
+				res.SoftDeleteGhostSamples = append(res.SoftDeleteGhostSamples,
+					fmt.Sprintf("%s(rowid=%d, deleted_at=%s)", id, rid, deletedAt))
+			}
+		}
+		ghostRows.Close()
+	}
+
+	// — Check 3: dangling topic memberships —
+	var count int
+	if err := sqlDB.QueryRow(
+		"SELECT COUNT(*) FROM topic_memberships tm LEFT JOIN topics t ON tm.topic_id = t.id WHERE t.id IS NULL",
+	).Scan(&count); err != nil {
+		res.QueryErrors["dangling_memberships"] = err.Error()
+	} else {
+		res.DanglingMemberships = count
+	}
+
+	return res, nil
+}
+
+// runDeepScanFixSoftDeleteGhosts opens the DB writable and removes every
+// memories_fts row whose joined memory has deleted_at IS NOT NULL. Returns
+// the number of rows deleted. Safe to call when there are no ghosts (no-op).
+func runDeepScanFixSoftDeleteGhosts(dbPath string) (int64, error) {
+	wDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return 0, fmt.Errorf("open writable: %w", err)
+	}
+	defer wDB.Close()
+	res, err := wDB.Exec(
+		"DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE deleted_at IS NOT NULL)",
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// runDoctorDeepScan runs on-demand integrity checks that are too expensive
+// for the standard doctor run. Wraps runDeepScanCheck and formats the result
+// for human consumption.
+//
+// Pass --fix to clean soft-delete ghosts in place. FTS orphan and dangling
+// membership fixes are left to manual intervention (they indicate schema
+// drift, not just trigger lag).
+func runDoctorDeepScan(fix bool) {
+	fmt.Printf("\n%s[%s]%s %sDeep-Scan Integrity Audit%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
+	if fix {
+		fmt.Printf("  %s--fix enabled: soft-delete ghosts will be removed in place%s\n\n", ansiYellow, ansiReset)
+	}
+
+	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		fmt.Fprintf(os.Stderr, "  [%s] No database found at %s\n", colorRed("FAIL"), dbPath)
+		os.Exit(1)
+	}
+
+	// Run the shared scan; it opens the DB read-only internally.
+	scan, err := runDeepScanCheck(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  [%s] Cannot open database: %v\n", colorRed("FAIL"), err)
+		os.Exit(1)
+	}
+
+	failed := 0
+	warnings := 0
+	passed := 0
+
+	// — Render Check 1: FTS orphan scan —
+	fmt.Printf("  %s%sFTS Orphan Scan%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	order := []string{"memories_fts", "topics_fts", "lessons_fts", "sessions_fts"}
+	for _, name := range order {
+		if msg, ok := scan.QueryErrors[name]; ok {
+			fmt.Printf("    [%s] %s: query failed: %v\n", colorRed("FAIL"), name, msg)
+			failed++
+			continue
+		}
+		n := scan.FTSOrphans[name]
+		if n > 0 {
+			samples := scan.FTSOrphanSamples[name]
+			fmt.Printf("    [%s] %s: %d orphan(s): %s\n", colorYellow("WARN"), name, n, strings.Join(samples, ", "))
+			warnings++
+		} else {
+			fmt.Printf("    [%s] %s: 0 orphans\n", colorGreen("PASS"), name)
+			passed++
+		}
+	}
+	fmt.Println()
+
+	// — Render Check 2: soft-delete ghost scan —
+	fmt.Printf("  %s%sSoft-Delete Ghost Scan (memories_fts)%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	if msg, ok := scan.QueryErrors["soft_delete_ghosts"]; ok {
+		fmt.Printf("    [%s] query failed: %v\n", colorRed("FAIL"), msg)
+		failed++
+	} else if scan.SoftDeleteGhosts > 0 {
+		fmt.Printf("    [%s] %d ghost(s) found: %s\n", colorYellow("WARN"), scan.SoftDeleteGhosts, strings.Join(scan.SoftDeleteGhostSamples, ", "))
+		if fix {
+			n, ferr := runDeepScanFixSoftDeleteGhosts(dbPath)
+			if ferr != nil {
+				fmt.Printf("    [%s] --fix failed: %v\n", colorRed("FAIL"), ferr)
+				failed++
+			} else {
+				fmt.Printf("    [%s] --fix removed %d ghost row(s) from memories_fts\n", colorGreen("FIXED"), n)
+			}
+		} else {
+			fmt.Printf("          hint: re-run with --deep-scan --fix to clean\n")
+			warnings++
+		}
+	} else {
+		fmt.Printf("    [%s] 0 ghosts — soft-delete trigger is current\n", colorGreen("PASS"))
+		passed++
+	}
+	fmt.Println()
+
+	// — Render Check 3: dangling topic memberships —
+	fmt.Printf("  %s%sDangling Topic Membership Scan%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	if msg, ok := scan.QueryErrors["dangling_memberships"]; ok {
+		fmt.Printf("    [%s] query failed: %v\n", colorRed("FAIL"), msg)
+		failed++
+	} else if scan.DanglingMemberships > 0 {
+		fmt.Printf("    [%s] %d membership(s) reference deleted topics\n", colorYellow("WARN"), scan.DanglingMemberships)
+		fmt.Printf("          hint: manual cleanup required (DELETE FROM topic_memberships WHERE topic_id NOT IN (SELECT id FROM topics))\n")
+		warnings++
+	} else {
+		fmt.Printf("    [%s] 0 dangling memberships\n", colorGreen("PASS"))
+		passed++
+	}
+	fmt.Println()
+
+	// — Summary —
+	total := passed + warnings + failed
+	fmt.Printf("  %s%sSummary%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	fmt.Printf("    Passed:   %d\n", passed)
+	fmt.Printf("    Warnings: %d\n", warnings)
+	fmt.Printf("    Failed:   %d\n", failed)
+	fmt.Printf("    Total:    %d checks run\n\n", total)
+
+	totalOrphans := 0
+	for _, n := range scan.FTSOrphans {
+		totalOrphans += n
+	}
+
+	if failed > 0 {
+		fmt.Printf("  [%s] Deep-scan found %d hard failure(s) — investigate before proceeding.\n", colorRed("FAIL"), failed)
+		os.Exit(1)
+	}
+	if warnings > 0 {
+		fmt.Printf("  [%s] Deep-scan clean. %d soft warning(s) noted (FTS orphans: %d).\n", colorYellow("OK"), warnings, totalOrphans)
+	} else {
+		fmt.Printf("  [%s] Deep-scan clean. No drift detected.\n", colorGreen("OK"))
 	}
 }
 
@@ -649,7 +937,7 @@ func runDoctorDatabaseChecks(report *DoctorReport) {
 	}
 	check.Details = append(check.Details, fmt.Sprintf("Size: %s", formatBytes(dbSize)))
 
-	sqlDB, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	sqlDB, err := sql.Open("sqlite3", dbPath+"?mode=ro")
 	if err != nil {
 		check.Status = "FAIL"
 		check.Details = append(check.Details, "Cannot open: "+err.Error())
