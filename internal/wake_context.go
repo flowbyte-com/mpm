@@ -22,6 +22,18 @@ type WakeContextData struct {
 	ActivePersona  string              `json:"active_persona"`
 	RecentTopics   []string            `json:"recent_topics"`
 	RecentMemories []WakeContextMemory `json:"recent_memories"`
+	// AuditSummary is a one-line summary of system_audit_log activity in
+	// the last 24h, or empty if no error/fatal events were logged. The
+	// agent uses this as a signpost — if present, it should call
+	// query_audit_log to investigate.
+	AuditSummary string `json:"audit_summary,omitempty"`
+	// LastHandoff is the most recent unread handoff from the previous
+	// session, or nil if there is none. The handoff is marked as read
+	// when surfaced here, so the same handoff is never shown twice in a
+	// row. The agent uses this to continue work across restarts — the
+	// summary, commitments, and open_questions fields tell it where it
+	// left off, what it promised to do next, and what's still unresolved.
+	LastHandoff *Handoff `json:"last_handoff,omitempty"`
 }
 
 // WakeContextMemory is the trimmed memory reference shown in wake context.
@@ -45,27 +57,41 @@ func readActiveState() (mode, persona string) {
 	return mode, active.Persona
 }
 
-// GatherWakeContext returns the most recent session's wake context.
-// Returns a zero-value struct (no error) when there is no prior session —
-// callers can detect this via SessionID == "".
+// GatherWakeContext returns the wake context, populating active mode/persona
+// from active.json and recent memories/topics from the database even when
+// there is no prior session row. Callers can detect a missing session via
+// SessionID == "". The latest unread handoff (if any) is also surfaced
+// and marked as read.
 func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	var data WakeContextData
 
 	session, err := dm.GetLastSession()
-	if errors.Is(err, sql.ErrNoRows) {
-		return data, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return data, fmt.Errorf("get last session: %w", err)
 	}
-	if session == nil {
-		return data, nil
+	if err == nil && session != nil {
+		data.SessionID, _ = session["session_id"].(string)
 	}
 
-	data.SessionID, _ = session["session_id"].(string)
+	// Pull the latest unread handoff. The mark-read happens here so
+	// re-reading wake context (e.g. in the same session) doesn't re-show
+	// the same handoff. Wake-context timestamp is the read-by token —
+	// distinct from any session_id since the agent may not have one.
+	h, herr := dm.MarkLatestHandoffRead("wake-context")
+	if herr != nil && !errors.Is(herr, sql.ErrNoRows) {
+		// Non-fatal: log the handoff read failure to audit but continue
+		// with wake context. The handoff is bootstrap data; the agent
+		// can still wake up without it.
+		dm.LogAudit(AuditWarn, "wake_context", "handoff read failed: "+herr.Error(), "", AuditContext{})
+	}
+	if h != nil {
+		data.LastHandoff = h
+	}
+
 	data.ActiveMode, data.ActivePersona = readActiveState()
 	data.RecentMemories = dm.recentMemories(10)
 	data.RecentTopics = dm.recentTopicNames(5)
+	data.AuditSummary = dm.AuditSummary()
 	return data, nil
 }
 
@@ -92,9 +118,23 @@ func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
 }
 
 // recentTopicNames returns up to `limit` topic names ordered newest first.
+//
+// Structural topics (auto-created cross-reference anchors for epistemology
+// collections like `decisions` and `theories`) are excluded: they have empty
+// description and tags by design. Surfacing them in the agent's wake sequence
+// is visual noise — the underlying relationships are still queryable through
+// the topics table, just not advertised as recent context. The name allowlist
+// is a defense-in-depth layer for the known structural topics; if a future
+// auto-created topic has the same name pattern it will be filtered too.
 func (dm *DatabaseManager) recentTopicNames(limit int) []string {
 	rows, err := dm.SQLDB().Query(
-		`SELECT name FROM topics ORDER BY created_at DESC LIMIT ?`, limit)
+		`SELECT name FROM topics
+		 WHERE NOT (
+		   (description IS NULL OR description = '' OR description = '{}')
+		   AND (tags IS NULL OR tags = '' OR tags = '[]')
+		 )
+		 AND name NOT IN ('decisions', 'theories')
+		 ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil
 	}
@@ -113,15 +153,12 @@ func (dm *DatabaseManager) recentTopicNames(limit int) []string {
 
 // ReadWakeContext returns the formatted wake context string, matching the
 // Python plugin's `_format_wake_context` output. Returns "" (no error) when
-// there is no prior session — the MCP server interprets that as the "wake
+// no data is available — the MCP server interprets that as the "wake
 // context is empty" state.
 func (dm *DatabaseManager) ReadWakeContext() (string, error) {
 	data, err := dm.GatherWakeContext()
 	if err != nil {
 		return "", err
-	}
-	if data.SessionID == "" {
-		return "", nil
 	}
 	return formatWakeContext(data), nil
 }
@@ -155,6 +192,40 @@ func formatWakeContext(d WakeContextData) string {
 				ageSuffix = " (" + m.CreatedAt[:10] + ")"
 			}
 			lines = append(lines, fmt.Sprintf("  - %s%s", content, ageSuffix))
+		}
+	}
+	if d.AuditSummary != "" {
+		lines = append(lines, "**"+d.AuditSummary+"**")
+	}
+	if d.LastHandoff != nil {
+		lines = append(lines, formatHandoff(d.LastHandoff))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatHandoff renders a Handoff as a structured block. Designed to be
+// scannable but informative — the agent needs to know (1) when the last
+// session was, (2) what it was doing, (3) what it committed to do, and
+// (4) what's still unresolved. Anything beyond that is excess.
+func formatHandoff(h *Handoff) string {
+	var lines []string
+	header := fmt.Sprintf("**Previous Session Handoff** (%s, %s)", h.SessionID, h.EndedState)
+	if !h.EndedAt.IsZero() {
+		header = fmt.Sprintf("**Previous Session Handoff** (%s, ended %s, %s)",
+			h.SessionID, h.EndedAt.Format("2006-01-02 15:04 UTC"), h.EndedState)
+	}
+	lines = append(lines, header)
+	lines = append(lines, "  - Summary: "+h.Summary)
+	if len(h.Commitments) > 0 {
+		lines = append(lines, "  - Commitments:")
+		for _, c := range h.Commitments {
+			lines = append(lines, "    - "+c)
+		}
+	}
+	if len(h.OpenQuestions) > 0 {
+		lines = append(lines, "  - Open Questions:")
+		for _, q := range h.OpenQuestions {
+			lines = append(lines, "    - "+q)
 		}
 	}
 	return strings.Join(lines, "\n")

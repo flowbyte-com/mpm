@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"mpm/internal"
@@ -95,6 +99,9 @@ var toolRegistry = map[string]ToolHandler{
 	"query_memory_quality":     callQueryMemoryQuality,
 	"show_confidence":          callShowConfidence,
 	"recompute_confidence":     callRecomputeConfidence,
+
+	// Self-audit log
+	"query_audit_log":          callQueryAuditLog,
 	"explain_confidence":       callExplainConfidence,
 
 	// System
@@ -103,14 +110,25 @@ var toolRegistry = map[string]ToolHandler{
 	"proactive_recall_hint": callProactiveRecallHint,
 	"route":                 callRoute,
 
+	// Session handoffs
+	"session_end":      callSessionEnd,
+	"session_handoff":  callSessionHandoff,
+	"list_handoffs":    callListHandoffs,
+
 	// Release
 	"log_to_changelog": callLogToChangelog,
 }
 
-// handleCall is the main entry point for `mpm call <tool> [--payload <json>]`.
+// handleCall is the main entry point for `mpm call <tool>`.
+//
+// Payload is read from one of three sources (in priority order):
+//   1. --payload <json>     inline JSON arg (avoid with apostrophes/quotes)
+//   2. --payload-file <p>   JSON file path (no shell escaping)
+//   3. stdin                pipe or redirect (`echo ... | mpm call ...` or `< file`)
+// If none are present, returns an empty payload (some tools need no input).
 func handleCall(args []string) int {
 	if len(args) < 1 {
-		printError("usage: mpm call <tool_name> [--payload <json>]")
+		printError("usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)")
 		return 1
 	}
 
@@ -158,27 +176,70 @@ func handleCall(args []string) int {
 	return 0
 }
 
-// parsePayload extracts JSON from --payload flag or stdin.
-// If neither is present, returns an empty map (some tools need no input).
+// parsePayload extracts JSON from --payload flag, --payload-file flag, or stdin.
+// If none are present, returns an empty map (some tools need no input).
+//
+// Stdin is detected via hasStdinData() (ModeCharDevice check), which correctly
+// detects pipes and file redirection. The previous implementation used
+// stat.Size() > 0, which silently failed for pipes — Stat returns Size=0 for
+// pipes even when data is available, so the input was never read.
 func parsePayload(args []string) (map[string]interface{}, error) {
+	// Last-flag-wins for --payload and --payload-file, matching standard CLI
+	// convention (git, kubectl, etc.). Iterate fully, remember the most
+	// recent hit, return after the loop. If both are present, the later one
+	// in argv order wins.
+	var (
+		inlineJSON  string
+		inlineSet   bool
+		filePath    string
+		fileSet     bool
+	)
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--payload" && i+1 < len(args) {
-			var p map[string]interface{}
-			if err := json.Unmarshal([]byte(args[i+1]), &p); err != nil {
-				return nil, fmt.Errorf("--payload: %w", err)
-			}
-			return p, nil
+			inlineJSON = args[i+1]
+			inlineSet = true
+			fileSet = false // --payload overrides any earlier --payload-file
+			i++
+			continue
+		}
+		if args[i] == "--payload-file" && i+1 < len(args) {
+			filePath = args[i+1]
+			fileSet = true
+			inlineSet = false // --payload-file overrides any earlier --payload
+			i++
+			continue
 		}
 	}
-	// No --payload flag; try stdin if it has data.
-	if stat, _ := os.Stdin.Stat(); stat.Size() > 0 {
+	if inlineSet {
+		var p map[string]interface{}
+		if err := json.Unmarshal([]byte(inlineJSON), &p); err != nil {
+			return nil, fmt.Errorf("--payload: %w", err)
+		}
+		return p, nil
+	}
+	if fileSet {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("--payload-file: %w", err)
+		}
+		// Trim BOM if present (some editors write UTF-8 BOM)
+		s := strings.TrimPrefix(string(data), "\xef\xbb\xbf")
+		var p map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &p); err != nil {
+			return nil, fmt.Errorf("--payload-file: %w", err)
+		}
+		return p, nil
+	}
+	// No flag; try stdin if data is piped or redirected.
+	// hasStdinData uses ModeCharDevice — correct for both pipes (Size=0 but
+	// has data) and file redirection (Size>0).
+	if hasStdinData() {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return nil, fmt.Errorf("stdin: %w", err)
 		}
-		s := string(data)
 		// Trim BOM if present (some editors write UTF-8 BOM)
-		s = strings.TrimPrefix(s, "\xef\xbb\xbf")
+		s := strings.TrimPrefix(string(data), "\xef\xbb\xbf")
 		if len(s) > 0 {
 			var p map[string]interface{}
 			if err := json.Unmarshal([]byte(s), &p); err != nil {
@@ -221,6 +282,25 @@ func relayBroadcast(eventType string, payload interface{}) {
 		bytes.NewReader(body),
 	)
 	if err != nil {
+		// Connection refused just means the web server isn't running —
+		// delete stale port file and move on silently.
+		if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(err.Error(), "connection refused") {
+			if port == readActivePort() {
+				_ = os.Remove(filepath.Join(config.GetMPMDir(), "web.port"))
+			}
+			return
+		}
+		// Other errors (timeout, DNS, etc.) are real problems — log to
+		// audit ledger so the agent can see them across sessions. The
+		// stderr note remains for live debugging.
+		if dm, closeDM, dmErr := openCallDM(); dmErr == nil {
+			dm.LogAudit(internal.AuditWarn, "relay", "broadcast failed: "+err.Error(), "", internal.AuditContext{
+				"event":    eventType,
+				"port":     port,
+				"endpoint": "/api/internal/broadcast",
+			})
+			closeDM()
+		}
 		fmt.Fprintf(os.Stderr, "[relay] post error: %v\n", err)
 		return
 	}
@@ -660,17 +740,6 @@ func callReadWakeContext(_ map[string]interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("gather wake context: %w", err)
 	}
 
-	if data.SessionID == "" {
-		return map[string]interface{}{
-			"success":         true,
-			"session_id":      "",
-			"active_mode":     "",
-			"active_persona":  "",
-			"recent_topics":   []string{},
-			"recent_memories": []map[string]interface{}{},
-		}, nil
-	}
-
 	memRefs := make([]map[string]interface{}, 0, len(data.RecentMemories))
 	for _, m := range data.RecentMemories {
 		memRefs = append(memRefs, map[string]interface{}{
@@ -687,6 +756,8 @@ func callReadWakeContext(_ map[string]interface{}) (interface{}, error) {
 		"active_persona":  data.ActivePersona,
 		"recent_topics":   data.RecentTopics,
 		"recent_memories": memRefs,
+		"audit_summary":   data.AuditSummary,
+		"last_handoff":    data.LastHandoff,
 	}, nil
 }
 
@@ -953,5 +1024,225 @@ func callLogToChangelog(p map[string]interface{}) (interface{}, error) {
 		"id":          id,
 		"commit_hash": commitHash,
 		"collection":  "changelog",
+	}, nil
+}
+
+// callQueryAuditLog returns recent entries from system_audit_log. The
+// agent uses this to investigate what went wrong, especially across
+// sessions — the wake context surface only shows a count, the details
+// come from this tool.
+//
+// Args:
+//
+//	--level      (optional) one of warn|error|fatal; default: any
+//	--component (optional) subsystem name (e.g. "relay", "synthesis",
+//	             "watcher", "security"); default: any
+//	--days       (optional) lookback window in days; default 1
+//	--limit      (optional) max rows; default 20, max 500
+func callQueryAuditLog(p map[string]interface{}) (interface{}, error) {
+	levelStr := getString(p, "level")
+	component := getString(p, "component")
+	days := 1
+	if v, ok := p["days"]; ok {
+		switch t := v.(type) {
+		case float64:
+			days = int(t)
+		case int:
+			days = t
+		}
+	}
+	limit := 20
+	if v, ok := p["limit"]; ok {
+		switch t := v.(type) {
+		case float64:
+			limit = int(t)
+		case int:
+			limit = t
+		}
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, days, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"count":   len(items),
+		"results": items,
+	}, nil
+}
+
+// callSessionEnd writes a handoff for the just-ended session. The agent
+// calls this before exiting so the next session can pick up the thread.
+//
+// Args:
+//
+//	--session_id     (required) opaque session identifier (UUID is fine)
+//	--summary        (required) 1-3 sentence description of what was done
+//	--state          (optional) clean | crashed | interrupted | force_end; default clean
+//	--commitments    (optional) JSON array of strings; things this session committed to do
+//	--open_questions (optional) JSON array of strings; things still unresolved
+func callSessionEnd(p map[string]interface{}) (interface{}, error) {
+	sessionID := getString(p, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+	summary := getString(p, "summary")
+	if summary == "" {
+		return nil, fmt.Errorf("summary is required")
+	}
+	state := getString(p, "state")
+	if state == "" {
+		state = internal.HandoffClean
+	}
+
+	var commitments []string
+	if v, ok := p["commitments"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					commitments = append(commitments, s)
+				}
+			}
+		}
+	}
+	var openQuestions []string
+	if v, ok := p["open_questions"]; ok {
+		if arr, ok := v.([]interface{}); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					openQuestions = append(openQuestions, s)
+				}
+			}
+		}
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":        true,
+		"handoff":        h,
+		"handoff_id":     h.ID,
+		"message":        "session ended; handoff written. Next wake will surface it.",
+	}, nil
+}
+
+// callSessionHandoff returns the most recent handoff. The agent's wake
+// context surfaces unread handoffs automatically, but this tool is
+// available for explicit re-reads of any handoff (read or unread).
+//
+// Args:
+//
+//	--mark_read (optional) "true" to mark the returned handoff as read
+//	             after returning; default false. The wake context marks
+//	             its own reads — this tool does not by default so the
+//	             agent can browse the handoff history without consuming
+//	             the wake context's handoff.
+//	--unread    (optional) "true" to return only unread handoffs;
+//	             default false (returns latest regardless of read state)
+func callSessionHandoff(p map[string]interface{}) (interface{}, error) {
+	markRead := false
+	if v, ok := p["mark_read"]; ok {
+		if b, ok := v.(bool); ok {
+			markRead = b
+		}
+	}
+	unreadOnly := false
+	if v, ok := p["unread"]; ok {
+		if b, ok := v.(bool); ok {
+			unreadOnly = b
+		}
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	var h *internal.Handoff
+	if unreadOnly {
+		h, err = dm.GetLatestUnreadHandoff()
+	} else {
+		h, err = dm.GetLatestHandoff()
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return map[string]interface{}{
+				"success": true,
+				"handoff": nil,
+				"message": "no handoff found",
+			}, nil
+		}
+		return nil, err
+	}
+	if markRead {
+		// Best-effort mark-read; don't fail the call if marking fails
+		// because the caller explicitly opted in. Idempotent.
+		_ = dm.MarkHandoffRead(h.ID, "manual-call")
+		h.ReadAt = ptrTime(time.Now().UTC())
+		h.ReadBy = "manual-call"
+	}
+	return map[string]interface{}{
+		"success": true,
+		"handoff": h,
+	}, nil
+}
+
+// ptrTime is a small helper for the session_handoff tool.
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// callListHandoffs returns recent handoffs. Useful for the agent to see
+// the history of its own sessions.
+//
+// Args:
+//
+//	--limit      (optional) max handoffs; default 10, max 500
+//	--unread     (optional) "true" to filter to unread; default false
+func callListHandoffs(p map[string]interface{}) (interface{}, error) {
+	limit := 10
+	if v, ok := p["limit"]; ok {
+		switch t := v.(type) {
+		case float64:
+			limit = int(t)
+		case int:
+			limit = t
+		}
+	}
+	unreadOnly := false
+	if v, ok := p["unread"]; ok {
+		if b, ok := v.(bool); ok {
+			unreadOnly = b
+		}
+	}
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	items, err := dm.ListHandoffs(limit, unreadOnly)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"count":   len(items),
+		"results": items,
 	}, nil
 }

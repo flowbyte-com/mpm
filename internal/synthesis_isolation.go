@@ -177,8 +177,18 @@ func (w *SynthesisWorker) processEvent(event MemoryEvent) {
 
 	err := w.synthWithMultiVendor(ctx, event.ID, event.Content, event.Tags)
 	if err != nil {
-		// All vendors failed — route to DLQ
+		// All vendors failed — route to DLQ and log to audit ledger.
 		enqueueErr := DLQEnqueue(w.db.SQLDB(), event.ID, event.Content, event.Tags, err)
+		if w.db != nil {
+			dlqStatus := "ok"
+			if enqueueErr != nil {
+				dlqStatus = "enqueue_failed: " + enqueueErr.Error()
+			}
+			w.db.LogAudit(AuditError, "synthesis", "all vendors failed, event routed to DLQ: "+err.Error(), "", AuditContext{
+				"event_id":   event.ID,
+				"dlq_status": dlqStatus,
+			})
+		}
 		if enqueueErr != nil {
 			w.logger.Error("synthesis_worker: dlq enqueue failed",
 				"memory_id", event.ID,

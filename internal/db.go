@@ -454,6 +454,7 @@ func (dm *DatabaseManager) getSharedStore() (*MemoryStore, error) {
 	store := NewMemoryStore("")
 	store.SQLiteDBPath = dm.dbPath
 	store.DB = &SQLiteConnection{DB: dm.db}
+	store.DM = dm // wire DM so MemoryStore can audit-log via the same connection
 	dm.sharedStore = store
 	return store, nil
 }
@@ -1092,9 +1093,17 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 	// scanner is the same one MemoryStore.AddMemory uses; running it
 	// here closes the only remaining write path that bypassed it.
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
+		dm.LogAudit(AuditError, "security", "sensitive content blocked in SaveMemory", "", AuditContext{
+			"reason":    reason,
+			"len_chars": len(content),
+		})
 		return "", fmt.Errorf("sensitive content detected and blocked in SaveMemory: %s", reason)
 	}
 	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+		dm.LogAudit(AuditError, "security", "poison content blocked in SaveMemory", "", AuditContext{
+			"reason":    reason,
+			"len_chars": len(content),
+		})
 		return "", fmt.Errorf("poison content detected and blocked in SaveMemory: %s", reason)
 	}
 

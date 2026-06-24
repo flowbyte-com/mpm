@@ -288,6 +288,46 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);`,
 	`CREATE INDEX IF NOT EXISTS idx_lessons_retrieval_priority ON lessons(retrieval_priority);`,
 	`CREATE INDEX IF NOT EXISTS idx_lessons_importance ON lessons(importance);`,
+
+	// System audit log — runtime anomalies (errors, warnings, fatal conditions)
+	// from MPM subsystems. The agent queries this via the query_audit_log MCP
+	// tool to surface what went wrong, especially across sessions. A 30-day
+	// TTL is enforced by the gc sweep (see internal/gc.go and the
+	// runOpsMaintain hook) — not by SQLite triggers, because audit retention
+	// is a policy, not an invariant.
+	`CREATE TABLE IF NOT EXISTS system_audit_log (
+		id          TEXT PRIMARY KEY,
+		level       TEXT NOT NULL CHECK (level IN ('warn','error','fatal')),
+		component   TEXT NOT NULL,
+		message     TEXT NOT NULL,
+		stack_trace TEXT,
+		context     JSON,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_level_created ON system_audit_log(level, created_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_component ON system_audit_log(component);`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_log(created_at);`,
+
+	// Session handoffs: structured end-of-session record that the next session
+	// pulls from wake context. One row per session, marked as read when
+	// surfaced in wake. Distinct from the dormant `sessions` table (which
+	// holds content snapshots) — handoffs are bootstrap data, not logs.
+	// 90-day TTL enforced by gc sweep.
+	`CREATE TABLE IF NOT EXISTS session_handoffs (
+		id            TEXT PRIMARY KEY,
+		session_id    TEXT NOT NULL UNIQUE,
+		ended_at      DATETIME NOT NULL,
+		ended_state   TEXT NOT NULL CHECK (ended_state IN ('clean','crashed','interrupted','force_end')),
+		summary       TEXT NOT NULL,
+		commitments   JSON NOT NULL DEFAULT '[]',
+		open_questions JSON NOT NULL DEFAULT '[]',
+		read_at       DATETIME,
+		read_by       TEXT,
+		created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_handoffs_unread ON session_handoffs(read_at, ended_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_handoffs_ended ON session_handoffs(ended_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_handoffs_session ON session_handoffs(session_id);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
