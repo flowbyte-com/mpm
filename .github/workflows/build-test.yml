@@ -1,0 +1,52 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Two-job split is intentional. The "gate" job must pass for merge; it covers
+# the build and the migration-relevant test subset. The "full-suite" job runs
+# the entire test tree but is allowed to fail — it exists to track the
+# pre-existing test-pollution failures (see TestLessonStoreListLessons,
+# TestRenderRoute) until the test suite cleanup arc lands. When the noise is
+# fixed, promote full-suite to a gating job by removing `continue-on-error`.
+
+jobs:
+  gate:
+    name: Build + core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
+      # gate gets tighter locally, it gets tighter in CI too.
+      - name: Core tests (synthesis, reliability, lifecycle, hybrid)
+        run: go test -short -count=1 ./internal/ -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid"
+
+  full-suite:
+    name: Full test suite (tracking only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache: true
+
+      - name: Full test sweep
+        run: go test -count=1 ./... 2>&1 | tee test-output.log
