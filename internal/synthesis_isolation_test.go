@@ -11,25 +11,28 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"mpm/internal/config"
+	"mpm/internal/synth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// controllableSynthClient is a test double implementing SynthClientInterface
+// controllableSynthClient is a test double implementing synth.SynthClientInterface
 // whose failure/success behavior can be toggled at runtime.
 type controllableSynthClient struct {
 	mu         sync.Mutex
 	shouldFail bool
 	failErr    error
-	result     *synthResult
+	result     *synth.SynthResult
 	callCount  int
 }
 
-func (c *controllableSynthClient) Synthesize(ctx context.Context, fragments []string) (*synthResult, error) {
+func (c *controllableSynthClient) Synthesize(ctx context.Context, fragments []string) (*synth.SynthResult, error) {
 	return nil, nil
 }
 
-func (c *controllableSynthClient) SynthesizeWithVendor(ctx context.Context, vendor SynthVendor, content string, tags []string) (*synthResult, error) {
+func (c *controllableSynthClient) SynthesizeWithVendor(ctx context.Context, vendor config.SynthVendor, content string, tags []string) (*synth.SynthResult, error) {
 	c.mu.Lock()
 	c.callCount++
 	should := c.shouldFail
@@ -50,11 +53,11 @@ func (c *controllableSynthClient) setFail(err error) {
 func (c *controllableSynthClient) setSucceed(content string, tags []string) {
 	c.mu.Lock()
 	c.shouldFail = false
-	c.result = &synthResult{Content: content, Tags: tags}
+	c.result = &synth.SynthResult{Content: content, Tags: tags}
 	c.mu.Unlock()
 }
 
-var _ SynthClientInterface = (*controllableSynthClient)(nil)
+var _ synth.SynthClientInterface = (*controllableSynthClient)(nil)
 
 // synthesisFreshDB creates a fully isolated DatabaseManager for synthesis tests.
 // Same as freshDB() but defined here to avoid import cycle (same package, different file).
@@ -97,7 +100,7 @@ func testSynthesisNetworkFailure(t *testing.T) {
 	mock.setFail(fmt.Errorf("HTTP 504 Gateway Timeout"))
 
 	dlqTick := make(chan time.Time) // never fires — we drive DLQ manually
-	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []SynthVendor{
+	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []config.SynthVendor{
 		{Name: "test-vendor"},
 	})
 	worker.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -149,7 +152,7 @@ func testSynthesisHeartbeatRecovery(t *testing.T) {
 	mock.setFail(assert.AnError)
 
 	dlqTick := make(chan time.Time)
-	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []SynthVendor{
+	worker := NewSynthesisWorkerForTest(db, mock, 1, dlqTick, []config.SynthVendor{
 		{Name: "test-vendor"},
 	})
 	worker.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -222,7 +225,7 @@ func testSynthesisGracefulShutdown(t *testing.T) {
 	mock.setFail(assert.AnError)
 
 	dlqTick := make(chan time.Time)
-	worker := NewSynthesisWorkerForTest(db, mock, 2, dlqTick, []SynthVendor{
+	worker := NewSynthesisWorkerForTest(db, mock, 2, dlqTick, []config.SynthVendor{
 		{Name: "test-vendor"},
 	})
 	worker.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))

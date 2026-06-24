@@ -19,6 +19,7 @@ import (
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/synth"
 )
 
 // ============================================================================
@@ -219,7 +220,7 @@ func main() {
 							return
 						}
 						defer synthDM.Close()
-						mpminternal.AutoSynthesize(context.Background(), synthDM, mpminternal.NewSynthClient(), id, c)
+						mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
 					}(mem.ID, data)
 				}
 				os.Exit(0)

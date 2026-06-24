@@ -14,6 +14,7 @@ import (
 	"mpm/internal/config"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/synth"
 )
 
 // =============================================================================
@@ -1392,7 +1393,7 @@ func handleRefAdmit(args []string) int {
 		return 0
 	}
 
-	client := mpminternal.NewSynthClient()
+	client := synth.NewSynthClient()
 	if client.APIKey == "" {
 		fmt.Fprintf(os.Stderr, "Error: no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)\n")
 		return 1
@@ -1411,7 +1412,7 @@ func handleRefAdmit(args []string) int {
 		candidate.NearestTheories = nearestTheories
 
 		ctx, cancel := context.WithTimeout(context.Background(), client.Timeout)
-		result, err := client.EvaluateCandidate(ctx, candidate)
+		result, err := mpminternal.EvaluateCandidate(ctx, client, candidate)
 		cancel()
 		if err != nil {
 			errs++
