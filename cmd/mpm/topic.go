@@ -636,12 +636,25 @@ func suggestTopicsForMemory(dm *mpminternal.DatabaseManager, memoryID, content s
 	// Also get memory keywords from sanitize output for confidence scoring
 	memoryKeywords := strings.Fields(ftsQuery)
 
-	// FTS5 query to find active topics matching the content
+	// FTS5 query to find active topics matching the content.
+	//
+	// Structural-topic exclusion: the `decisions` and `theories` topics are
+	// auto-created cross-reference anchors for the epistemology collections.
+	// They have empty description and empty tags by design — surfacing them
+	// as suggestions for every new memory pollutes the cognitive space. The
+	// filter below mirrors internal/wake_context.recentTopicNames: a topic
+	// is structural if its description is empty/null/'{}' AND its tags are
+	// empty/null/'[]'; the name allowlist is defense-in-depth.
 	sql := `
 		SELECT t.id, t.name, t.description
 		FROM topics t
 		JOIN topics_fts fts ON t.rowid = fts.rowid
 		WHERE topics_fts MATCH ? AND t.is_active = 1
+		  AND NOT (
+		    (t.description IS NULL OR t.description = '' OR t.description = '{}')
+		    AND (t.tags IS NULL OR t.tags = '' OR t.tags = '[]')
+		  )
+		  AND t.name NOT IN ('decisions', 'theories')
 		LIMIT ?`
 
 	rows, err := dm.SQLDB().Query(sql, ftsQuery, maxTopics)
