@@ -90,7 +90,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 
 	data.ActiveMode, data.ActivePersona = readActiveState()
 	data.RecentMemories = dm.recentMemories(10)
-	data.RecentTopics = dm.recentTopicNames(5)
+	data.RecentTopics = dm.GetRecentUserTopics(5)
 	data.AuditSummary = dm.AuditSummary()
 	return data, nil
 }
@@ -117,16 +117,25 @@ func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
 	return out
 }
 
-// recentTopicNames returns up to `limit` topic names ordered newest first.
+// GetRecentUserTopics returns up to `limit` topic names from the topics
+// table, ordered newest first, with structural topics excluded.
 //
-// Structural topics (auto-created cross-reference anchors for epistemology
-// collections like `decisions` and `theories`) are excluded: they have empty
-// description and tags by design. Surfacing them in the agent's wake sequence
-// is visual noise — the underlying relationships are still queryable through
-// the topics table, just not advertised as recent context. The name allowlist
-// is a defense-in-depth layer for the known structural topics; if a future
-// auto-created topic has the same name pattern it will be filtered too.
-func (dm *DatabaseManager) recentTopicNames(limit int) []string {
+// A "structural" topic is an auto-created cross-reference anchor for an
+// epistemology collection (`decisions`, `theories`, or any future topic
+// auto-generated to act as a navigational hub). They are distinguished
+// from user topics by two characteristics:
+//   - description is empty/null/'{}'   (auto-created, no human description)
+//   - tags is empty/null/'[]'          (no curation, no metadata)
+//
+// The name allowlist ('decisions', 'theories') is defense-in-depth for
+// the known structural topics — if a future operator seeds a structural
+// topic with a placeholder description, the pattern still filters it.
+//
+// This is the single source of truth for "what counts as a user topic"
+// across the system. Both the human-facing `mpm wake` CLI handler and
+// the machine-facing `read_wake_context` MCP tool call into this method,
+// so the structural-topic filter applies uniformly.
+func (dm *DatabaseManager) GetRecentUserTopics(limit int) []string {
 	rows, err := dm.SQLDB().Query(
 		`SELECT name FROM topics
 		 WHERE NOT (
