@@ -166,6 +166,18 @@ func handleMemory(args []string) int {
 		return handleMemorySearchTerm(args[1:])
 	case "wipe":
 		return handleMemoryWipe(args[1:])
+	case "promote":
+		return handlePromote(args)
+	case "reinforce":
+		return handleReinforce(args)
+	case "weaken":
+		return handleWeaken(args)
+	case "snooze":
+		return handleSnooze(args)
+	case "set-weight":
+		return handleSetWeight(args)
+	case "patch-memory":
+		return handlePatchMemory(args)
 	default:
 		return handleMemoryHelp()
 	}
@@ -921,15 +933,20 @@ func handleShredPersonas(args []string) int {
 
 func handleShredTopic(id string) int {
 	store := getMemoryStore()
+	db := store.DB
 
-	// Get the topic first to verify it exists
-	topic, err := store.SearchTopics(id, 1)
-	if err != nil || len(topic) == 0 {
+	// Verify topic exists via direct ID lookup. SearchTopics uses FTS5 on
+	// (name, description) only — hex IDs are not tokenized, so they never
+	// match. Direct primary-key check is the right tool for ID-based lookups.
+	var exists int
+	err := db.QueryRow("SELECT 1 FROM topics WHERE id = ?", id).Scan(&exists)
+	if err == sql.ErrNoRows {
 		return respond("", fmt.Sprintf("Topic not found: %s\n", id), 1)
 	}
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to check topic: %v\n", err), 1)
+	}
 
-	// Use the internal ShredTopic function via DeleteByID
-	db := store.DB
 	tx, err := db.Begin()
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to shred topic: %v", err), 1)
@@ -957,7 +974,7 @@ func handleShredTopic(id string) int {
 func handleShredSession(id string) int {
 	store := getMemoryStore()
 
-	err := store.DeleteMemory(id, "sessions")
+	err := store.DeleteMemory(id, "session")
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to shred session: %v", err), 1)
 	}
@@ -1102,6 +1119,25 @@ func handleGC(args []string) int {
 		purged, _ := result.RowsAffected()
 		fmt.Printf("Purged %d old deleted memories\n", purged)
 		return 0
+	}
+
+	// Audit log retention sweep — drop entries older than 30 days. Wired
+	// into the GC cycle rather than a separate cron because GC is the
+	// canonical cleanup pass and we want one place to tune retention.
+	if pruned, err := dm.PruneAuditLog(30); err != nil {
+		fmt.Fprintf(os.Stderr, "audit prune error: %v\n", err)
+	} else if pruned > 0 {
+		fmt.Printf("Pruned %d audit log entries older than 30 days\n", pruned)
+	}
+
+	// Session handoffs retention sweep — 90 days. Handoffs are
+	// higher-signal, lower-volume than audit log, so they get a longer
+	// retention window. The next session may need to look back more than
+	// 30 days to understand a long-running project.
+	if pruned, err := dm.PruneHandoffs(90); err != nil {
+		fmt.Fprintf(os.Stderr, "handoff prune error: %v\n", err)
+	} else if pruned > 0 {
+		fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
 	}
 
 	// Get all non-deleted memories
@@ -1813,6 +1849,16 @@ func handleWake(args []string) int {
 		sessionID, _ = session["session_id"].(string)
 	}
 
+	// Pull the latest handoff (read or unread) so the agent can see
+	// what the previous session was doing, what it committed to, and
+	// what was still unresolved. Distinct from the (currently empty)
+	// sessions table — handoffs are bootstrap data, sessions are
+	// content logs. The mpm call read_wake_context path marks the
+	// handoff as read automatically; mpm wake leaves the read state
+	// alone so the agent can browse the history.
+	handoff, herr := dm.GetLatestHandoff()
+	_ = herr // ignore: no handoffs is fine, just skip the block below
+
 	// Strict mode: bypass fallback queries, rely solely on explicit session
 	if strictMode && sessionID == "" {
 		fmt.Println("No previous session found.")
@@ -1913,11 +1959,12 @@ func handleWake(args []string) int {
 		CreatedAt string `json:"created_at"`
 	}
 	type wakeResult struct {
-		SessionID      string      `json:"session_id"`
-		ActiveMode     string      `json:"active_mode"`
-		ActivePersona  string      `json:"active_persona"`
-		RecentTopics   []string    `json:"recent_topics"`
-		RecentMemories []memoryRef `json:"recent_memories"`
+		SessionID      string                 `json:"session_id"`
+		ActiveMode     string                 `json:"active_mode"`
+		ActivePersona  string                 `json:"active_persona"`
+		RecentTopics   []string               `json:"recent_topics"`
+		RecentMemories []memoryRef            `json:"recent_memories"`
+		LastHandoff    *mpminternal.Handoff   `json:"last_handoff,omitempty"`
 	}
 
 	// Collect topics and build consolidated memory references
@@ -1955,6 +2002,7 @@ func handleWake(args []string) int {
 		ActivePersona:  activePersona,
 		RecentTopics:   topics,
 		RecentMemories: memRefs,
+		LastHandoff:    handoff,
 	}
 
 	if jsonOutput {
@@ -1978,7 +2026,11 @@ func handleWake(args []string) int {
 		fmt.Printf("│ Persona:  %-42s │\n", activePersona)
 	}
 	if len(topics) > 0 {
-		topicStr := strings.Join(topics[:3], ", ")
+		shown := topics
+		if len(shown) > 3 {
+			shown = shown[:3]
+		}
+		topicStr := strings.Join(shown, ", ")
 		if len(topics) > 3 {
 			topicStr += fmt.Sprintf(" (+%d more)", len(topics)-3)
 		}
@@ -1994,6 +2046,37 @@ func handleWake(args []string) int {
 				content = content[:54] + "…"
 			}
 			fmt.Printf("│   • %-53s │\n", content)
+		}
+	}
+	if handoff != nil {
+		fmt.Println("│                                                             │")
+		fmt.Println("│ Previous session handoff:                                  │")
+		summary := handoff.Summary
+		if len(summary) > 54 {
+			summary = summary[:54] + "…"
+		}
+		fmt.Printf("│   [%s] %-49s │\n", handoff.EndedState, summary)
+		if !handoff.EndedAt.IsZero() {
+			ts := handoff.EndedAt.Format("2006-01-02 15:04 UTC")
+			fmt.Printf("│   ended %s%-40s │\n", ts, "")
+		}
+		if len(handoff.Commitments) > 0 {
+			fmt.Printf("│   %-54s │\n", "commitments:")
+			for _, c := range handoff.Commitments {
+				if len(c) > 52 {
+					c = c[:52] + "…"
+				}
+				fmt.Printf("│     - %-50s │\n", c)
+			}
+		}
+		if len(handoff.OpenQuestions) > 0 {
+			fmt.Printf("│   %-54s │\n", "open:")
+			for _, q := range handoff.OpenQuestions {
+				if len(q) > 52 {
+					q = q[:52] + "…"
+				}
+				fmt.Printf("│     ? %-50s │\n", q)
+			}
 		}
 	}
 	fmt.Println("╰─────────────────────────────────────────────────────────────╯")

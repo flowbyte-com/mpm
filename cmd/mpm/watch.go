@@ -456,12 +456,24 @@ func (d *watcherDaemon) processMarkdownFile(path string, isStartup bool) {
 	// Run sanitization checks (regex + toxic phrases)
 	if isSensitive, reason := mpminternal.IsSensitiveContent(contentStr); isSensitive {
 		fmt.Fprintf(os.Stderr, "   ❌ Sensitive content blocked in %s: %s\n", name, reason)
+		if d.db != nil {
+			d.db.LogAudit(mpminternal.AuditError, "watcher", "sensitive content blocked: "+reason, "", mpminternal.AuditContext{
+				"file":   name,
+				"reason": reason,
+			})
+		}
 		d.deleteFile(path, "sensitive content blocked")
 		return
 	}
 
 	if isPoisoned, reason := d.isPoisoned(contentStr); isPoisoned {
 		fmt.Fprintf(os.Stderr, "   ❌ Poison content blocked in %s: %s\n", name, reason)
+		if d.db != nil {
+			d.db.LogAudit(mpminternal.AuditError, "watcher", "poison content blocked: "+reason, "", mpminternal.AuditContext{
+				"file":   name,
+				"reason": reason,
+			})
+		}
 		d.deleteFile(path, "poison content blocked")
 		return
 	}

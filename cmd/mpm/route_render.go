@@ -1,12 +1,16 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"mpm/internal"
 )
@@ -132,6 +136,12 @@ func applyRouteLengthCap(modeText, personaText string) (string, string) {
 //   - Mode file missing for selected mode → "", nil (operational rules are load-bearing)
 //   - Persona file missing → render mode only, append marker
 //   - Combined output > 9500 chars → applyRouteLengthCap
+//
+// Directive injection (opt-in, off by default):
+//   - Set MPM_ROUTE_DIRECTIVES=N (N > 0) to prepend the top N prime directives
+//   - Directives are pulled from the MPM database, ordered by confidence DESC
+//   - DB unavailable / no directives / query error → no injection (fail open)
+//   - Default behavior (env var unset) preserves the microsecond contract
 func renderRoute(workspace, prompt string) (string, error) {
 	if workspace == "" {
 		return "", nil
@@ -202,7 +212,201 @@ func renderRoute(workspace, prompt string) (string, error) {
 		}
 		body.WriteString(truncatedPersona)
 	}
+
+	// Prime directive injection (opt-in via MPM_ROUTE_DIRECTIVES=N).
+	// Always runs LAST so it can prepend to the assembled body. Fail-open:
+	// any failure here is silently swallowed and the original body is returned.
+	// Uses fetchTopDirectivesCached to absorb concurrent route calls without
+	// hammering SQLite on every prompt (see cache docs below).
+	if n := directiveInjectionLimit(); n > 0 {
+		if directiveText := fetchTopDirectivesCached(workspace, n); directiveText != "" {
+			bodyStr := directiveText
+			if body.Len() > 0 {
+				bodyStr += "\n\n---\n\n"
+			}
+			bodyStr += body.String()
+			return wrapReminder(bodyStr), nil
+		}
+	}
+
 	return wrapReminder(body.String()), nil
+}
+
+// directiveInjectionLimit returns the N for directive injection, or 0 if
+// disabled. Reads MPM_ROUTE_DIRECTIVES env var. Returns 0 for unset, empty,
+// non-numeric, or non-positive values. The opt-in is deliberately off by
+// default to preserve the "zero-latency, no round-trip" route contract.
+func directiveInjectionLimit() int {
+	v := os.Getenv("MPM_ROUTE_DIRECTIVES")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// directiveCacheTTL bounds the staleness window for cached prime-directive
+// injection. 5 seconds is short enough that operator-driven changes (e.g.,
+// `mpm call challenge_memory`) surface within a few prompts of an active
+// conversation, and long enough to absorb a typical Claude Code hook burst
+// (the route command is invoked on every user message in the hook chain).
+// Operators who need stricter freshness can call InvalidateDirectiveCache()
+// after mutating directives.
+const directiveCacheTTL = 5 * time.Second
+
+// directiveCache stores the rendered top-N directive block keyed by
+// (workspace, limit). Entries auto-expire after directiveCacheTTL. The
+// underlying fetchTopDirectives call only happens on cache miss; concurrent
+// readers share the entry via RWMutex.RLock.
+var (
+	directiveCacheMu sync.RWMutex
+	directiveCache   = map[string]directiveCacheEntry{}
+)
+
+type directiveCacheEntry struct {
+	text      string
+	expiresAt time.Time
+}
+
+// InvalidateDirectiveCache clears all cached prime-directive blocks. Call
+// this after mutating the directives table (e.g., challenge_memory on a
+// directive, or seed inserts via save_to_memory) when 5 seconds of staleness
+// is unacceptable. Safe to call from any goroutine.
+func InvalidateDirectiveCache() {
+	directiveCacheMu.Lock()
+	directiveCache = map[string]directiveCacheEntry{}
+	directiveCacheMu.Unlock()
+}
+
+// fetchTopDirectivesCached returns the cached top-N directive block when
+// fresh, otherwise fetches via fetchTopDirectives and updates the cache.
+// Empty input still consults the cache (workspace="", limit<=0) so the
+// short-circuit lives in fetchTopDirectives itself; this function is the
+// only path that touches the cache.
+func fetchTopDirectivesCached(workspace string, limit int) string {
+	if workspace == "" || limit <= 0 {
+		return fetchTopDirectives(workspace, limit)
+	}
+
+	key := fmt.Sprintf("%s\x00%d", workspace, limit)
+	now := time.Now()
+
+	directiveCacheMu.RLock()
+	entry, ok := directiveCache[key]
+	directiveCacheMu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.text
+	}
+
+	// Cache miss or expired. Fetch outside the write lock so concurrent
+	// callers don't block on each other's SQLite query. The double-check
+	// pattern is unnecessary here: any extra fetches during the race just
+	// re-populate the same key with the same value (idempotent SELECT with
+	// confidence DESC LIMIT is stable for the same data).
+	text := fetchTopDirectives(workspace, limit)
+
+	directiveCacheMu.Lock()
+	directiveCache[key] = directiveCacheEntry{
+		text:      text,
+		expiresAt: now.Add(directiveCacheTTL),
+	}
+	directiveCacheMu.Unlock()
+
+	return text
+}
+
+// fetchTopDirectives returns a formatted Markdown block of the top N prime
+// directives from the MPM database, sorted by confidence descending. Returns
+// "" if: DB unavailable, no DB at workspace, query fails, or zero directives
+// match. The function is intentionally defensive — any failure mode degrades
+// to "no injection" rather than failing the route. Prime directives are
+// identified by either `collection = 'directives'` (the MCP path) or
+// `is_prime_directive = 1` in the metadata JSON.
+//
+// DB path resolution: walks the workspace looking for mpm.db, mpm.sqlite, or
+// src/db/mpm.db (in that order). This matches the common MPM layouts without
+// coupling route to DatabaseManager (which would require init that we want
+// to keep out of the route hot path).
+func fetchTopDirectives(workspace string, limit int) string {
+	if limit <= 0 || workspace == "" {
+		return ""
+	}
+
+	dbPath := resolveMPMDatabase(workspace)
+	if dbPath == "" {
+		return ""
+	}
+
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal_mode=WAL")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+
+	const query = `
+		SELECT id, content, COALESCE(confidence, 0.8) AS conf
+		FROM memories
+		WHERE collection = 'directives'
+		   OR json_extract(metadata, '$.is_prime_directive') = 1
+		ORDER BY conf DESC, created_at DESC
+		LIMIT ?`
+	rows, err := db.Query(query, limit)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var directives []struct {
+		ID        string
+		Content   string
+		Confidence float64
+	}
+	for rows.Next() {
+		var d struct {
+			ID        string
+			Content   string
+			Confidence float64
+		}
+		if err := rows.Scan(&d.ID, &d.Content, &d.Confidence); err != nil {
+			continue
+		}
+		directives = append(directives, d)
+	}
+	if len(directives) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("### Prime Directives (auto-injected, confidence-sorted)\n\n")
+	for i, d := range directives {
+		fmt.Fprintf(&b, "%d. **[conf=%.2f]** %s\n", i+1, d.Confidence, strings.TrimSpace(d.Content))
+	}
+	return b.String()
+}
+
+// resolveMPMDatabase locates the MPM SQLite database relative to the workspace.
+// Returns "" if no plausible DB file is found. Common MPM layouts:
+//   - <workspace>/mpm.db
+//   - <workspace>/mpm.sqlite
+//   - <workspace>/src/db/mpm.db
+//
+// The function is read-only and tolerant: missing files return "" rather than
+// erroring. We use the first match in priority order.
+func resolveMPMDatabase(workspace string) string {
+	candidates := []string{
+		filepath.Join(workspace, "mpm.db"),
+		filepath.Join(workspace, "mpm.sqlite"),
+		filepath.Join(workspace, "src", "db", "mpm.db"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // wrapReminder wraps body in a <system-reminder> block with the auto-route header.
@@ -210,3 +414,9 @@ func renderRoute(workspace, prompt string) (string, error) {
 func wrapReminder(body string) string {
 	return fmt.Sprintf("<system-reminder>\nMPM auto-route active\n\n%s\n</system-reminder>", body)
 }
+
+// _ ensures sql package is referenced even if route is built without DB driver.
+// This is a forward-compat guard: if the sqlite3 driver is later removed, the
+// import will still resolve at compile time. The driver is registered by the
+// _ "github.com/mattn/go-sqlite3" import elsewhere in the package.
+var _ = sql.ErrNoRows

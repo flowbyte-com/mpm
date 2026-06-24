@@ -1573,29 +1573,29 @@ func enrichCandidate(dm *mpminternal.DatabaseManager, active activeAdmission) (s
 
 // handleRef routes reference subcommands
 func handleRef(args []string) int {
-	if len(args) < 2 {
+	if len(args) < 1 {
 		_ = printRefHelp()
 		return 1
 	}
 
-	sub := args[1]
+	sub := args[0]
 	switch sub {
 	case "add":
-		return handleRefAdd(args[1:])
+		return handleRefAdd(args)
 	case "ls", "list":
-		return handleRefList(args[1:])
+		return handleRefList(args)
 	case "show", "get":
-		return handleRefShow(args[1:])
+		return handleRefShow(args)
 	case "search":
-		return handleRefSearch(args[1:])
+		return handleRefSearch(args)
 	case "shred", "rm":
-		return handleRefShred(args[1:])
+		return handleRefShred(args)
 	case "interactions":
-		return handleRefInteractions(args[1:])
+		return handleRefInteractions(args)
 	case "used":
-		return handleRefUsed(args[1:])
+		return handleRefUsed(args)
 	case "admit":
-		return handleRefAdmit(args[1:])
+		return handleRefAdmit(args)
 	default:
 		_ = printRefHelp()
 		return 1

@@ -35,6 +35,9 @@ mpm-backup-*.sql
 # OS artifacts
 .DS_Store
 
+# Local secrets store (chmod 600 — always private)
+secrets.env
+
 # Local config (contains secrets — always private)
 mpm_config.json
 mpm_config.json.bak

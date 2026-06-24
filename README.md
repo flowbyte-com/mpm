@@ -528,13 +528,18 @@ Maintenance, diagnostics, synthesis, and power tools.
 
 ```bash
 # Core engine
-mpm ops doctor [--explain]          # Diagnostics (--explain shows FTS5 query plan)
+mpm ops doctor [--explain|--deep-scan]  # Diagnostics (--explain: FTS5 query plan, --deep-scan: integrity audit)
+mpm ops self-heal [--dry-run|--force|--quiet]  # Autonomous integrity repair — cron-friendly, escalates unknown drift
 mpm ops maintain                     # Self-maintenance: decay, consolidate, prune
 mpm ops synthesize [--dry-run]       # LLM synthesis on all memories
 mpm ops gc [--dry-run|--review|--purge|--shred-negative]  # Decay sweep
 mpm ops backfill-embeddings [--batch-size|--collection|--dry-run]  # Embedding pipeline
 mpm ops dlq:review [review|clear|retry]  # Dead letter queue — failed synth events
 mpm ops changelog build [--since v1.0.0] [--release-version 1.1.0] [--legacy]  # Generate CHANGELOG.md + changelog.json from git log
+mpm call query_audit_log [--level|--component|--days|--limit]  # Runtime anomaly ledger (cross-session telemetry)
+mpm call session_end --payload '{"session_id":"...","summary":"...","commitments":[],"open_questions":[]}'  # End session with handoff (next wake will surface it)
+mpm call session_handoff [--unread|--mark_read]  # Read latest handoff (used by wake context automatically)
+mpm call list_handoffs [--limit|--unread]  # Browse handoff history
 
 # Watcher
 mpm ops watch start [--bg]|stop|status   # Watcher daemon (goroutine-based)
@@ -840,8 +845,141 @@ MPM is designed for long-running autonomous operation:
 - Event replay buffers
 - Watchdog telemetry
 - Overflow protection
+- **Self-healing integrity loop** — see below
 
 The goal is predictable behavior under sustained workloads.
+
+### Self-Healing Integrity Loop
+
+Long-running databases accumulate drift. Soft-deleted memories leave ghost rows in FTS5 indexes. Cascade-deletes fail to clean up all related tables. Schema migrations introduce orphans. Without a closed feedback loop, this drift degrades search quality silently and compounds over time.
+
+MPM ships an autonomous self-heal command that detects, classifies, and acts on integrity drift without any human in the loop:
+
+```bash
+mpm ops self-heal              # run with all defaults
+mpm ops self-heal --dry-run    # report drift without taking action
+mpm ops self-heal --force      # bypass the 24h cooldown
+mpm ops self-heal --quiet      # silent on clean state (for cron)
+```
+
+The companion on-demand audit:
+
+```bash
+mpm doctor --deep-scan         # human-readable integrity report
+mpm doctor --deep-scan --fix   # clean soft-delete ghosts in place
+```
+
+#### How it works
+
+```
+                              cron / operator
+                                    ↓
+                          mpm ops self-heal
+                                    ↓
+                          runDeepScanCheck
+                          (3 integrity queries)
+                                    ↓
+                ┌───────────────────┴────────────────────┐
+                ↓                                        ↓
+        known-safe drift                          unknown drift
+        (soft-delete ghosts)               (FTS orphans, dangling
+                ↓                             topic_memberships)
+        auto-fix + lesson                           ↓
+        (24h cooldown,                       pending theory
+         max 1000/run)                       (theories collection)
+                ↓                                        ↓
+        audit trail in                              ↓
+        lessons table                  next agent boot reads
+                ↓                     read_wake_context, sees
+        transparent.                  the theory, acts on it.
+        silent.                               ↓
+                                      self-healing.
+                                      escalates.
+```
+
+**Three drift classes detected:**
+
+| Class | Detection query | Behavior |
+|---|---|---|
+| Soft-delete ghosts | `memories_fts` rows whose joined `memories` row has `deleted_at IS NOT NULL` | **Auto-fix** (known-safe) |
+| FTS orphans | Any `*_fts` row whose rowid is missing from the source table | **Escalate** (unknown) |
+| Dangling memberships | `topic_memberships` referencing non-existent topics | **Escalate** (unknown) |
+
+**Four safety boundaries on auto-fix:**
+
+1. **Whitelist-only** — only soft-delete ghosts are auto-fixed. They are proven safe because the `memories_au` trigger is the *expected* cleanup mechanism; when it's missing or bypassed, the only effect is a stale FTS row that no longer matches any real memory.
+2. **Bounded blast radius** — if ghost count exceeds `SelfHealMaxFix` (default 1000), the system refuses to auto-fix and escalates instead. A 1000-row drift is no longer "drift" — it's a broken trigger.
+3. **Rate-limited** — 24h cooldown between same-signature auto-fixes, stored in `collection=projects` memory id `self-heal-state-marker`. Drift accumulation within the cooldown window is a real bug, not a routine sweep.
+4. **Audit trail** — every auto-fix writes a `lessons` table entry tagged `source=self-heal` with timestamp, count, and drift signature. Operator review is one SQL query away.
+
+**The cognitive loop closes through the existing wake context.** When self-heal escalates unknown drift, it injects a pending theory using the standard `HYPOTHESIS: ... \nVALIDATION_CRITERIA: ... \nSTATUS: pending` content format. Pending theories are stored in the `memories` table with `collection=theories`, which the next `mpm call read_wake_context` call surfaces in `recent_memories`. The next agent boot sees the structural anomaly, reads the validation criteria (which point at the exact recovery procedure), and acts on it. **No new wake code is needed** — the agent's existing self-bootstrap mechanism is the loop closure.
+
+**Why known-safe vs. unknown.** The asymmetry is deliberate. Soft-delete ghosts are the *only* drift class where we have a precise model of what the correct state is (FTS row count must equal active memory count) AND we have a proven-safe mechanism that should have produced that state (the `memories_au` trigger). For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug (orphan) or the source-table row is the bug (incorrectly deleted, should be restored). Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate, let a human — or an agent that has more context — decide.
+
+#### Recommended cron
+
+```cron
+# Weekly integrity sweep — alert on non-zero exit
+0 4 * * 0 cd /home/v/workspace/projects/mpm && /usr/local/bin/mpm ops self-heal || echo "MPM drift detected: $(date)" | mail -s "MPM Self-Heal Alert" v
+```
+
+The `--quiet` flag is unnecessary in cron; absence of output means clean. Non-zero exit means drift was found and escalated — wire to your alerting channel of choice.
+
+#### State marker
+
+The self-heal loop is rate-limited via a `projects` collection memory with a fixed id:
+
+```bash
+sqlite3 mpm/src/db/mpm.db "SELECT metadata FROM memories WHERE id='self-heal-state-marker'"
+# {"last_run":"2026-06-23T11:14:28Z","last_action":"auto-fixed","last_fixed_count":1,"last_theory_id":"","drift_signature":"..."}
+```
+
+To force a fresh run (e.g., after manual repair): `mpm ops self-heal --force`. To reset entirely: `mpm call save_to_memory` with `id=self-heal-state-marker` and a fresh metadata payload, or use direct SQL to `DELETE FROM memories WHERE id='self-heal-state-marker'`.
+
+### Self-Audit Log
+
+Runtime telemetry has historically lived in flat files (`watchdog.jsonl`, `mirror.jsonl`) or isolated queues (`synthesis_dlq`) — readable by humans grepping logs, blind to the agent. MPM moves that telemetry into the cognitive surface so the agent can see what went wrong across sessions.
+
+```bash
+mpm call query_audit_log --days 1 --limit 20          # all events, last 24h
+mpm call query_audit_log --level error --days 7       # errors only, last week
+mpm call query_audit_log --component relay --days 1   # relay subsystem only
+```
+
+The wake context surfaces a single-line summary when errors or fatals were logged in the last 24h:
+
+> **Audit note: 3 error(s) in the last 24h. Run mpm call query_audit_log to investigate.**
+
+#### Storage
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | TEXT PK | Unique identifier |
+| `level` | TEXT | `warn` / `error` / `fatal` (CHECK constraint) |
+| `component` | TEXT | Subsystem name (`relay`, `synthesis`, `watcher`, `security`) |
+| `message` | TEXT | Human-readable description |
+| `stack_trace` | TEXT | Auto-captured Go stack at log point (truncated to 4KB) |
+| `context` | JSON | Structured 3-5 field key-value pair for query |
+| `created_at` | DATETIME | UTC timestamp in SQLite `YYYY-MM-DD HH:MM:SS` format |
+
+Indexes: `(level, created_at)`, `(component)`, `(created_at)`. The 30-day retention is enforced by the gc sweep (`mpm ops gc` calls `PruneAuditLog(30)`), not by a SQLite trigger — retention is a tunable policy, not an invariant.
+
+#### Wired Subsystems
+
+Four runtime anomaly sources are wired into the audit ledger:
+
+| Component | Trigger |
+|---|---|
+| `security` | Poison phrase or sensitive content blocked during memory write |
+| `relay` | Non-trivial HTTP error during SSE broadcast (timeouts, DNS, etc. — connection-refused is silent) |
+| `synthesis` | All LLM vendors failed; event routed to DLQ |
+| `watcher` | Poison or sensitive content blocked during fsnotify ingest |
+
+The `LogAudit(level, component, message, stack, ctx)` method is safe to call from any goroutine. It captures the stack automatically if not provided, never panics on a closed DB, and fails silently with a stderr note if the insert itself fails — so callers can wire it on the error path without wrapping every site in defensive code.
+
+#### Why a SQLite table, not more jsonl files
+
+The audit log is queryable from the agent via the JSON boundary, surfaceable in wake context, and pruneable by the existing gc sweep — all without new infrastructure. Flat files would have required: a parser, a rotation policy, a separate retention mechanism, and a new surface for the agent. The table is the minimal substrate that closes the loop.
 
 ---
 
@@ -873,9 +1011,69 @@ resolve_theory           record_decision           proactive_recall_hint
 add_evidence             list_evidence             query_confidence_history
 explain_confidence       query_confidence_changes  query_confidence_trend
 query_memory_quality     route                     log_to_changelog
+session_end              session_handoff           list_handoffs
 ```
 
 Setup and config: see [`agent-plugins/openclaw-mpm-plugin/OPENCLAW.md`](agent-plugins/openclaw-mpm-plugin/OPENCLAW.md).
+
+### Session Handoffs (Episodic Memory)
+
+Working memory, long-term memory, audit, and self-heal. Four of the five layers a persistent agent needs. The missing one is **episodic memory** — the thread. When a session ends, the next boot shouldn't have to reconstruct what was happening from FTS-ranked recent memories. It should be told directly.
+
+A handoff is a structured end-of-session record: summary, commitments, and open questions. The next session pulls the latest unread handoff from wake context and uses it to continue work.
+
+```bash
+mpm call session_end --payload '{
+  "session_id":     "uuid-of-this-session",
+  "summary":        "Shipped MPM session handoffs. End-to-end verified.",
+  "state":          "clean",                                  # clean | crashed | interrupted | force_end
+  "commitments":    ["Run the substrate for a week",           # things this session committed to
+                      "Stop building, start using"],
+  "open_questions": ["Should commitments be promoted to lessons?"]
+}'
+
+mpm call session_handoff --payload '{}'           # returns the latest handoff (read or unread)
+mpm call session_handoff --payload '{"unread": true}'    # only unread
+mpm call session_handoff --payload '{"mark_read": true}' # return latest and mark it read
+mpm call list_handoffs --payload '{"limit": 10}'  # see recent handoffs
+```
+
+Wake context surfaces unread handoffs automatically and marks them read, so the same handoff is never shown twice in a row:
+
+```
+**Previous Session Handoff** (sess-abc, ended 2026-06-23 12:30 UTC, clean)
+  - Summary: Shipped MPM session handoffs. End-to-end verified.
+  - Commitments:
+    - Run the substrate for a week
+    - Stop building, start using
+  - Open Questions:
+    - Should commitments be promoted to lessons?
+```
+
+#### Storage
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | TEXT PK | Unique identifier |
+| `session_id` | TEXT UNIQUE | Opaque session identifier (UUID is fine) |
+| `ended_at` | DATETIME | UTC end-of-session timestamp |
+| `ended_state` | TEXT | `clean` / `crashed` / `interrupted` / `force_end` (CHECK) |
+| `summary` | TEXT | 1-3 sentence description of what was done |
+| `commitments` | JSON | Array of strings: things this session committed to do |
+| `open_questions` | JSON | Array of strings: things still unresolved |
+| `read_at` | DATETIME | When the next session surfaced this handoff (NULL = unread) |
+| `read_by` | TEXT | Token identifying the reader (e.g. "wake-context", "manual-call") |
+| `created_at` | DATETIME | UTC row creation timestamp |
+
+Indexes: `(read_at, ended_at DESC)` for the unread lookup, `(ended_at)` for the recency lookup, `(session_id)` for the unique constraint and direct lookup. The 90-day retention is enforced by `mpm ops gc` calling `PruneHandoffs(90)` — longer than audit log (30d) because handoffs are higher-signal, lower-volume bootstrap data.
+
+#### Why a separate table, not a metadata field on the `sessions` table
+
+The existing `sessions` table holds content snapshots (the session's transcript) and is dormant — zero rows in production. Handoffs are *bootstrap data*, not logs. Mixing them into one table would force every reader to filter by purpose, and a future feature that wants session transcripts would have to also pull in handoffs. Keeping them separate lets each feature evolve independently. The 3-index cost is negligible.
+
+#### Cadence
+
+The agent decides when to call `session_end`. The natural pattern is once per agent session (when v closes the chat, the agent writes a handoff and exits). There's no auto-timer — the agent always has full control over what goes into the summary, commitments, and open questions. A handoff is a deliberate act of synthesis, not a side effect.
 
 ### Hermes
 

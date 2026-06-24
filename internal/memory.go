@@ -630,6 +630,13 @@ func (s *MemoryStore) logSensitiveAttempt(content, reason string) {
 	fmt.Fprintf(os.Stderr, "   (logged to stderr for audit)\n")
 	// Also log to mirror file for persistence
 	_ = s.appendBlockedAttempt(content, reason, "sensitive_attempt")
+	// And to the audit ledger so the agent can query it across sessions.
+	if s.DM != nil {
+		s.DM.LogAudit(AuditError, "security", "sensitive content blocked: "+reason, "", AuditContext{
+			"reason":    reason,
+			"len_chars": len(content),
+		})
+	}
 }
 
 // logPoisonAttempt logs an attempt to store poison content (prompt injection)
@@ -638,6 +645,13 @@ func (s *MemoryStore) logPoisonAttempt(content, reason string) {
 	fmt.Fprintf(os.Stderr, "   (logged to stderr for audit)\n")
 	// Also log to mirror file for persistence
 	_ = s.appendBlockedAttempt(content, reason, "poison_attempt")
+	// And to the audit ledger so the agent can query it across sessions.
+	if s.DM != nil {
+		s.DM.LogAudit(AuditError, "security", "poison content blocked: "+reason, "", AuditContext{
+			"reason":    reason,
+			"len_chars": len(content),
+		})
+	}
 }
 
 // truncate shortens a string to maxLen with ellipsis
