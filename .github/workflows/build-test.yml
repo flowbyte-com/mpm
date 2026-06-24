@@ -33,8 +33,8 @@ jobs:
 
       # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
       # gate gets tighter locally, it gets tighter in CI too.
-      - name: Core tests (synthesis, reliability, lifecycle, hybrid)
-        run: go test -short -count=1 ./internal/ -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid"
+      - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context)
+        run: go test -short -count=1 ./internal/ -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
 
   full-suite:
     name: Full test suite (tracking only)
