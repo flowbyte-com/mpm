@@ -16,13 +16,32 @@ import (
 
 // EphemeralPersona represents a Just-In-Time generated persona definition
 // persisted as a JSON blob in system_config under the key "ephemeral_persona".
+//
+// RENAME NOTE (2026-06-26): The AntiPatterns field was misnamed in the
+// same way as the routing frontmatter field. It was always populated
+// with voice-guard prose, never regex input filters. To match the
+// routing rename (anti_patterns → voice_guards + domain_out), this
+// field becomes VoiceGuards. The JSON tag stays "anti_patterns" for
+// backward compatibility with existing on-disk ephemeral blobs in
+// system_config — deserialization accepts the old tag, the Go struct
+// field is renamed to match the new semantic.
+//
+// JIT personas do not support domain_out — by definition they're
+// generated on the fly with voice-guard prose from the LLM, not hand-
+// curated regex sets. If a domain_out is ever needed for an ephemeral
+// persona, it's a separate field and a separate scope.
 type EphemeralPersona struct {
-	Name         string `json:"name"`
-	Title        string `json:"title"`
-	Creature     string `json:"creature"`
-	Vibe         string `json:"vibe"`
-	Voice        string `json:"voice"`
-	AntiPatterns string `json:"anti_patterns"`
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Creature    string `json:"creature"`
+	Vibe        string `json:"vibe"`
+	Voice       string `json:"voice"`
+	AntiPatterns string `json:"anti_patterns"` // legacy tag — see note above
+	// VoiceGuards is the new semantic-aligned field name. Kept separate
+	// from AntiPatterns for one migration cycle to avoid breaking
+	// existing on-disk blobs; populators should write BOTH for the
+	// transition period (see SaveEphemeralPersona).
+	VoiceGuards string `json:"voice_guards,omitempty"`
 }
 
 type activeState struct {
@@ -121,22 +140,34 @@ func DeleteEphemeralPersona(dm *DatabaseManager) error {
 
 // FormatEphemeralPersonaAsFrontmatter converts an EphemeralPersona into a
 // YAML-frontmatter block suitable for injection into the system prompt.
+//
+// FRONTMATTER KEY MAPPING (2026-06-26): emits `voice_guards:` (the new
+// field name) with content drawn from either VoiceGuards (preferred) or
+// AntiPatterns (legacy fallback for backward compat). The old
+// `anti_patterns:` key is no longer emitted because the router now
+// ignores it (renamed to domain_out for input filters). VoiceGuards in
+// frontmatter is for LLM context only, NOT compiled as regex — see
+// router.go Component struct docs for the semantic split.
 func FormatEphemeralPersonaAsFrontmatter(ep *EphemeralPersona) (string, error) {
 	type fmPersona struct {
-		Name         string `yaml:"name"`
-		Title        string `yaml:"title"`
-		Creature     string `yaml:"creature"`
-		Vibe         string `yaml:"vibe"`
-		Voice        string `yaml:"voice"`
-		AntiPatterns string `yaml:"anti_patterns"`
+		Name        string `yaml:"name"`
+		Title       string `yaml:"title"`
+		Creature    string `yaml:"creature"`
+		Vibe        string `yaml:"vibe"`
+		Voice       string `yaml:"voice"`
+		VoiceGuards string `yaml:"voice_guards"`
+	}
+	voiceGuards := ep.VoiceGuards
+	if voiceGuards == "" {
+		voiceGuards = ep.AntiPatterns // legacy fallback
 	}
 	fm := fmPersona{
-		Name:         ep.Name,
+		Name:        ep.Name,
 		Title:        ep.Title,
 		Creature:     ep.Creature,
-		Vibe:         ep.Vibe,
-		Voice:        ep.Voice,
-		AntiPatterns: ep.AntiPatterns,
+		Vibe:        ep.Vibe,
+		Voice:       ep.Voice,
+		VoiceGuards: voiceGuards,
 	}
 	out, err := yaml.Marshal(&fm)
 	if err != nil {
@@ -147,14 +178,23 @@ func FormatEphemeralPersonaAsFrontmatter(ep *EphemeralPersona) (string, error) {
 
 // FormatEphemeralPersonaAsMarkdown converts an EphemeralPersona struct into a
 // full persona markdown file (YAML frontmatter + markdown body) for disk write.
+//
+// FRONTMATTER KEY (2026-06-26): emits `voice_guards:` in the frontmatter
+// (renamed from anti_patterns). The body section header is also renamed
+// from "## Anti-Patterns" to "## Voice Guards" to keep file shape and
+// frontmatter key aligned.
 func FormatEphemeralPersonaAsMarkdown(ep *EphemeralPersona) string {
+	voiceGuards := ep.VoiceGuards
+	if voiceGuards == "" {
+		voiceGuards = ep.AntiPatterns
+	}
 	return fmt.Sprintf(`---
 name: %s
 title: %s
 creature: %s
 vibe: %s
 voice: %s
-anti_patterns: %s
+voice_guards: %s
 ---
 
 # %s
@@ -168,10 +208,10 @@ anti_patterns: %s
 ## Voice
 %s
 
-## Anti-Patterns
+## Voice Guards
 %s
 `,
-		ep.Name, ep.Title, ep.Creature, ep.Vibe, ep.Voice, ep.AntiPatterns,
-		ep.Title, ep.Creature, ep.Vibe, ep.Voice, ep.AntiPatterns,
+		ep.Name, ep.Title, ep.Creature, ep.Vibe, ep.Voice, voiceGuards,
+		ep.Title, ep.Creature, ep.Vibe, ep.Voice, voiceGuards,
 	)
 }

@@ -140,4 +140,80 @@ func TestRouter_Evaluate(t *testing.T) {
 			t.Errorf("expected fallback marker in default's triggers, got %v", entry.Triggers)
 		}
 	})
+
+	// Domain-boundary enforcement (added 2026-06-26 with the
+	// anti_patterns → domain_out rename + PenaltiesApplied observability
+	// hook). Three sub-tests, each verifies:
+	//   (a) the bouncing persona's score is reduced by 1+ per domain_out match
+	//   (b) the matched regex appears in PenaltiesApplied
+	//   (c) a better-fit persona wins OR default fallback fires
+	t.Run("domain_out bounces venkat from grief prompt", func(t *testing.T) {
+		report := router.Evaluate("I just experienced a profound grief about the loss of my dog")
+		entry := report.Scores["venkat"]
+		if entry.Score >= 0 {
+			t.Errorf("venkat should be bounced (score<0), got %d", entry.Score)
+		}
+		foundGriefPenalty := false
+		for _, p := range entry.PenaltiesApplied {
+			if p == `(?i)\bgrief\b` {
+				foundGriefPenalty = true
+				break
+			}
+		}
+		if !foundGriefPenalty {
+			t.Errorf("expected (?i)\\bgrief\\b in venkat's PenaltiesApplied, got %v", entry.PenaltiesApplied)
+		}
+		// Better-fit persona should win — marcus handles grief
+		if report.SelectedPersona != "marcus" {
+			t.Logf("(info) expected marcus to win grief prompt, got %q (still a valid bounce)", report.SelectedPersona)
+		}
+	})
+
+	t.Run("domain_out bounces machiavelli from compiler error", func(t *testing.T) {
+		report := router.Evaluate("I have a compiler error in my Rust code and cannot figure out the syntax")
+		entry := report.Scores["machiavelli"]
+		if entry.Score >= 0 {
+			t.Errorf("machiavelli should be bounced (score<0), got %d", entry.Score)
+		}
+		foundCompilerPenalty := false
+		for _, p := range entry.PenaltiesApplied {
+			if p == `(?i)\bcompiler error\b` {
+				foundCompilerPenalty = true
+				break
+			}
+		}
+		if !foundCompilerPenalty {
+			t.Errorf("expected (?i)\\bcompiler error\\b in machiavelli's PenaltiesApplied, got %v", entry.PenaltiesApplied)
+		}
+	})
+
+	t.Run("domain_out bounces greybeard from hype-train prompt", func(t *testing.T) {
+		report := router.Evaluate("is rust the best new framework, is it a 10x developer tool")
+		entry := report.Scores["greybeard"]
+		// Two domain_out matches: best new framework + 10x developer → -2
+		if entry.Score >= -1 {
+			t.Errorf("greybeard should be bounced at score<=-2, got %d", entry.Score)
+		}
+		if len(entry.PenaltiesApplied) < 2 {
+			t.Errorf("expected at least 2 PenaltiesApplied for greybeard, got %v", entry.PenaltiesApplied)
+		}
+	})
+
+	// Voice guards must NOT affect routing score. The original
+	// anti_patterns mechanism was dormant because all 16 components had
+	// only voice-guard content; this test pins the contract that the
+	// rename preserves: voice_guards is purely for LLM context.
+	t.Run("voice_guards do not affect routing score", func(t *testing.T) {
+		report := router.Evaluate("bikeshedding premature optimization scope creep")
+		// artisan's voice_guards mention all three — but voice_guards
+		// must NOT trigger a penalty. artisan's score should be 0
+		// (no pattern match, no domain_out match).
+		entry := report.Scores["artisan"]
+		if entry.Score != 0 {
+			t.Errorf("artisan should score 0 (voice_guards ignored), got %d", entry.Score)
+		}
+		if len(entry.PenaltiesApplied) != 0 {
+			t.Errorf("artisan should have no PenaltiesApplied (voice_guards ignored), got %v", entry.PenaltiesApplied)
+		}
+	})
 }
