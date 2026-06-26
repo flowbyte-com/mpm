@@ -22,6 +22,14 @@ func handleChallenge(args []string) int {
 	}
 	defer dm.Close()
 
+	// Scan user-supplied evidence before it lands in a theory row. We can't
+	// route this through DatabaseManager.SaveMemory because the theory +
+	// patch update must be atomic — so we scan here, OUTSIDE the
+	// transaction, and rely on the scan result holding for the INSERT.
+	if blocked, reason := mpminternal.ScanContentForWrite(evidence); blocked {
+		return respond("", fmt.Sprintf("❌ Evidence blocked: %s\n", reason), 1)
+	}
+
 	// Verify memory exists
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
