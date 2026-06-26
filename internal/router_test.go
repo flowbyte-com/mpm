@@ -25,11 +25,9 @@ func TestRouter_Evaluate(t *testing.T) {
 		{
 			name:             "architecture keyword triggers architect mode",
 			prompt:           "Design the system architecture for our new API gateway",
-			// CUT 2026-06-26 (decision be61de1c4ef2ff4a): architect mode has no explicit
-			// `patterns:` field yet. With body-word inference deprecated, this prompt
-			// returns no mode. Test asserts the new (broken) contract; commit 2 restores
-			// wantModes: [architect] when architect gets its pattern set.
-			wantModes:        nil,
+			// RESTORED 2026-06-26 commit 2: architect mode has patterns: now.
+			// design/architecture/api/gateway/system all match.
+			wantModes:        []string{"architect"},
 			wantPersonaNotNil: false,
 		},
 		{
@@ -45,11 +43,14 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantPersonaNotNil: false, // score too low
 		},
 		{
-			name:             "code implementation triggers architect",
+			name:             "code implementation triggers architect or programming",
 			prompt:           "Implement the user authentication flow in Go",
-			// CUT 2026-06-26 (decision be61de1c4ef2ff4a): same as above. architect mode
-			// pattern set comes in commit 2.
-			wantModes:        nil,
+			// RESTORED 2026-06-26 commit 2: programming mode has patterns: now.
+			// implement/in Go/authentication/flow all match. Architect would
+			// not match this (no architecture keyword), so allow either.
+			// Architect mode is a fallback for this kind of prompt, but
+			// programming is the more semantically correct match.
+			wantModes:        []string{"architect", "programming"},
 			wantPersonaNotNil: false,
 		},
 		{
