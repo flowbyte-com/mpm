@@ -66,7 +66,7 @@ That distinction transforms memory from passive storage into persistent reasonin
 
 ## What MPM Is NOT
 
-- **Not a daemon** — every command is a single binary invocation. The optional watcher runs as a background goroutine, not a separate process.
+- **Not a daemon** — every command is a single binary invocation. No long-running processes; periodic work happens on demand via `mpm ops maintain`.
 - **Not generic storage** — built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
 - **Not a human dashboard** — machine-to-machine interface is primary; CLI is a convenience layer.
 
@@ -542,8 +542,11 @@ mpm call session_end --payload '{"session_id":"...","summary":"...","commitments
 mpm call session_handoff [--unread|--mark_read]  # Read latest handoff (used by wake context automatically)
 mpm call list_handoffs [--limit|--unread]  # Browse handoff history
 
-# Watcher
-mpm ops watch start [--bg]|stop|status   # Watcher daemon (goroutine-based)
+# Watcher (deprecated 2026-06-26 — see "Watcher deprecation" below)
+mpm watch status                         # DEPRECATED — prints deprecation warning, exits 0
+mpm ops maintain                         # On-demand decay/cleanup (replaces watcher's 5-min loop)
+mpm ops ingest --source <path>           # One-shot external SQLite ingestion (replaces watcher's poll goroutine)
+mpm ops synthesize [--dry-run]           # On-demand LLM synthesis (replaces watcher's synth worker)
 
 # UI
 mpm ops web [--port <n>]            # Web UI server + SSE telemetry at /api/stream
@@ -596,7 +599,7 @@ mpm debug gc [--dry-run]            # Decay sweep (dry-run for inspection)
 
 ### Embedding Pipeline
 
-- Auto-embed on `mpm add` and all watcher ingest paths
+- Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`
 - `mpm ops backfill-embeddings` — batched, resume-safe backfill for existing memories
 - tiktoken (`cl100k_base`) for token-aware chunking
 
@@ -656,9 +659,40 @@ mpm ops dlq:review clear    # Clear resolved DLQ entries
 
 `DatabaseManager` watchdog writes to `watchdog.jsonl` (separate from `mirror.jsonl`). Slow query threshold: 100ms. Exponential backoff on lock contention. `ExecTracked`, `QueryTracked`, `QueryRowTracked` methods log all DB operations.
 
-### Automatic Decay & Archive
+### Automatic Decay & Archive (deprecated 2026-06-26 — see "Watcher deprecation")
 
-Every 5 minutes: LTM memories decay exponentially via `MAX(weight - MAX(1, CAST(weight × DecayRate AS INTEGER)), 1)`. Weight=1 memories past 30-day archive threshold are soft-deleted, terminal state captured in `memory_revisions` for `--as-of` time-travel.
+The watcher used to drive decay every 5 minutes via an idle-consolidation goroutine. With the watcher removed, decay is now **on demand**: run `mpm ops maintain` periodically (every few weeks is plenty). The decay math is unchanged — `MAX(weight - MAX(1, CAST(weight × DecayRate AS INTEGER)), 1)` — only the trigger moved. Weight=1 memories past 30-day archive threshold are soft-deleted; terminal state is captured in `memory_revisions` for `--as-of` time-travel.
+
+### Watcher deprecation (2026-06-26)
+
+The MPM file-watcher daemon (`mpm watch start|stop|status`, plus the internal fsnotify goroutine + worker pool + 5-min decay loop) was deprecated and removed on 2026-06-26. Its original purpose — auto-ingest of files written by pre-MCP agents — is obsolete now that `save_to_memory` is a native MCP tool.
+
+**Removed:**
+- `cmd/mpm/watch.go` (1800 lines)
+- `cmd/mpm/worker.go` (WorkerPool, 399 lines)
+- `cmd/mpm/watch_lifecycle_test.go`
+- `contrib/systemd/mpm.service`
+- All daemon-mode audit rows (the `watcher` component is now dead)
+
+**Preserved as a reusable library** (`cmd/mpm/parsers.go`):
+- `extractFacts`, `extractFromSessionLine`, `looksLikeFact`, `extractKeywords` — regex parsers
+- `parseSessionsSnapshot` — sessions.json → structured map
+- `readJSONLines` — JSONL line reader
+- Pre-compiled regex patterns (`factPatterns`, `skipPatterns`, etc.)
+
+A future one-shot CLI command can rebuild filesystem auto-ingest on top of this library without re-deriving the parsers.
+
+**Replacement matrix:**
+
+| Watcher capability | Replacement |
+|---|---|
+| 5-min decay sweep | `mpm ops maintain --quiet` on demand |
+| External SQLite polling | `mpm ops ingest --source <path>` one-shot CLI |
+| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand |
+| Topic clustering | `mpm ops synthesize` (synthesis pass) |
+| Filesystem auto-ingest (original purpose) | Obsolete — `mpm call save_to_memory` covers it |
+
+**Invocation guard:** `mpm watch start|stop|status|restart|add-path|remove-path|list-paths` all print a friendly deprecation warning and exit 0. Operator scripts that referenced the old daemon won't break loudly.
 
 ### Memory Versioning
 
@@ -1013,7 +1047,7 @@ Four runtime anomaly sources are wired into the audit ledger:
 | `security` | Poison phrase or sensitive content blocked during memory write |
 | `relay` | Non-trivial HTTP error during SSE broadcast (timeouts, DNS, etc. — connection-refused is silent) |
 | `synthesis` | All LLM vendors failed; event routed to DLQ |
-| `watcher` | Poison or sensitive content blocked during fsnotify ingest |
+| `watcher` | DEPRECATED — the watcher daemon was removed 2026-06-26; new audit rows with this component are not expected |
 
 The `LogAudit(level, component, message, stack, ctx)` method is safe to call from any goroutine. It captures the stack automatically if not provided, never panics on a closed DB, and fails silently with a stderr note if the insert itself fails — so callers can wire it on the error path without wrapping every site in defensive code.
 
@@ -1240,11 +1274,8 @@ mpm route < "/noroute explain quantum computing"
 │  └─────────────┘   └─────────────┘   └────────┬────────┘  │
 │  ┌─────────────────────────────────────────────┼────────┐ │
 │  │            Background subsystem              │        │ │
-│  │  ┌──────────────┐  ┌───────────────────┐    │        │ │
-│  │  │  WorkerPool  │  │  fsnotify watcher │    │        │ │
-│  │  │  (3 goros)   │  │  (goroutine)      │    │        │ │
-│  │  └──────┬───────┘  └─────────┬─────────┘    │        │ │
-│  │         └──────────┬─────────┘              │        │ │
+│  │              (none — all periodic work is   │        │ │
+│  │               on-demand via mpm ops …)      │        │ │
 │  │                    ▼                        │        │ │
 │  │         ┌─────────────────────┐             │        │ │
 │  │         │  Shared DBManager   │             │        │ │
