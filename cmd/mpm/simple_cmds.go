@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1430,7 +1431,7 @@ func handleRefAdmit(args []string) int {
 
 		// Record the outcome to admission_log regardless of admit/reject.
 		if err := dm.RecordAdmissionOutcome(candidate, result, client.Model); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: failed to record admission outcome for %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+			slog.Warn("failed to record admission outcome", "chunk_id_prefix", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], "error", err.Error())
 		}
 
 		if !result.Admit {

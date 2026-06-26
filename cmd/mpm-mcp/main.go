@@ -20,11 +20,13 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"os"
 
 	"github.com/mark3labs/mcp-go/server"
 
 	"mpm/internal"
+	"mpm/internal/logging"
 )
 
 // router is initialised once at server boot — patterns and anti-patterns
@@ -32,6 +34,8 @@ import (
 // point, so Evaluate() is pure string matching with zero parsing overhead.
 
 func main() {
+	logging.Setup()
+	slog.Info("mpm-mcp starting")
 	workspace := os.Getenv("MPM_WORKSPACE")
 	if workspace == "" {
 		workspace = "."
