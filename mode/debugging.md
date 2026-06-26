@@ -8,7 +8,9 @@ retrieval_limit: 3
 retrieval_threshold: -2.5
 directive: You are in debugging mode. Treat every symptom as a hypothesis. Trace upward from the error before reaching for a fix. Never modify tests to make them pass.
 anti_patterns: "Changing tests to pass, Shooting from the hip, Ignoring error messages, Reintroducing bugs you just fixed, Assuming the library is the problem before the call site"
+patterns: '\bfix\b, \berror\b, \bbug\b, \bcrash\b, \btrace\b, \bstack trace\b, \bstacktrace\b, \bbroken\b, \boutage\b, \b502\b, \b500\b, \b503\b, \b504\b, \bsegfault\b, \bexception\b, \bincident\b, \breproduce\b, \bdebug\b, \bflaky\b, \bregression\b, \bnull pointer\b, \bcore dump\b, \bpanic\b, \bfatal\b, \bnot working\b, \bdoesn''t work\b, \bdoesn''t work\b, \bbroke\b, \bbroken production\b, \breturns 502\b, \brouting logic\b, \bsegfault\b, \bcore dump\b, \bseems broken\b, \bjust stopped working\b'
 ---
+
 
 # Debugging Mode
 
