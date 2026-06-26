@@ -10,11 +10,9 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"mpm/internal"
@@ -28,53 +26,6 @@ import (
 // shared across all handler calls to avoid connection proliferation.
 var dbManager *internal.DatabaseManager
 var dbManagerInitErr error
-
-// watchPool is the shared WorkerPool used by file watcher and external DB pollers.
-// It is initialized by main() in the unified process architecture.
-var watchPool *WorkerPool
-
-// Global synthesis worker — initialized in startWatchGoroutine, shared across
-// all file event processors. Wired here to avoid creating per-event instances.
-var watchSynthWorker *mpminternal.SynthesisWorker
-
-// Global idle consolidation worker — runs pattern detection when the
-// filesystem watcher has been quiet for 30+ minutes.
-var watchIdleWorker *mpminternal.IdleConsolidationWorker
-
-// Default worker pool size for the watcher background goroutines.
-const defaultWorkerPoolSize = 3
-
-// watchPIDFile is the path to the watcher's PID file.
-// Written by the detached child process, used by parent stop/status to locate the watcher.
-const watchPIDFile = "watch.pid"
-
-// watchPIDPath returns the absolute path to the watch.pid file.
-// Uses GetMPMDir() so the PID file lives alongside mpm.db and other runtime data.
-func watchPIDPath() string {
-	return filepath.Join(config.GetMPMDir(), watchPIDFile)
-}
-
-// readWatchPID reads the PID from watch.pid and returns it.
-// Returns 0 if the file does not exist or cannot be read.
-func readWatchPID() int {
-	data, err := os.ReadFile(watchPIDPath())
-	if err != nil {
-		return 0
-	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-	return pid
-}
-
-// writeWatchPID writes the current process PID to watch.pid.
-func writeWatchPID() error {
-	return os.WriteFile(watchPIDPath(), []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
-}
-
-// deleteWatchPID removes the watch.pid file.
-// Safe to call even if the file does not exist.
-func deleteWatchPID() {
-	os.Remove(watchPIDPath())
-}
 
 // activeContext holds the mode/persona for the current CLI invocation.
 // Set at the start of each handler via detectActiveContext(), cleared after use.
@@ -108,27 +59,10 @@ func clearActiveContext() {
 	activePersona = ""
 }
 
-// isWatchProcessAlive checks if the process identified by pid is running.
-// Uses signal 0 (no actual signal sent) to test process existence.
-func isWatchProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks if process exists without sending a real signal
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
-}
-
-// watcherLifecycle tracks the fsnotify watcher goroutine lifecycle.
-var (
-	watcherCtx    context.Context
-	watcherCancel context.CancelFunc
-	watcherDone   chan struct{}
-)
+// isWatchProcessAlive is no longer used — the watcher daemon was deprecated
+// 2026-06-26. Kept as a no-op stub for a single release to avoid breaking
+// any external scripts that may still reference it via reflection; will be
+// removed in a later release.
 
 // respond prints output/error and returns an exit code.
 // This replaces the old sendResponse() that wrote JSON over a socket.
@@ -2923,12 +2857,6 @@ func handleLessonStats() int {
 // ============================================================================
 
 func handleMenu() int {
-	// Get watch status
-	watching := false
-	if watchPool != nil {
-		watching = watchPool.ActiveWorkers() > 0
-	}
-
 	// Build menu output
 	var output strings.Builder
 	output.WriteString("\n")
@@ -2936,13 +2864,6 @@ func handleMenu() int {
 	output.WriteString("║         MPM Control Menu                 ║\n")
 	output.WriteString("╠══════════════════════════════════════════╣\n")
 	output.WriteString("║                                          ║\n")
-
-	if watching {
-		output.WriteString("║  🟢 Watcher Active                        ║\n")
-	} else {
-		output.WriteString("║  🔴 Watcher: Inactive                     ║\n")
-	}
-
 	output.WriteString("║                                          ║\n")
 	output.WriteString("║  Commands:                               ║\n")
 	output.WriteString("║    mpm session list   - Saved sessions    ║\n")
@@ -3058,15 +2979,12 @@ func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int,
 	return count, err
 }
 
+// getDaemonStatus returns the watcher daemon status. Deprecated 2026-06-26 —
+// the watcher is gone, so this always reports "not running". Kept as a stable
+// string contract for the status dashboard so callers don't have to special-case
+// a missing function.
 func getDaemonStatus() string {
-	pid := readWatchPID()
-	if pid == 0 {
-		return "not running"
-	}
-	if !isWatchProcessAlive(pid) {
-		return "not running"
-	}
-	return fmt.Sprintf("running (PID %d)", pid)
+	return "not running (watcher deprecated 2026-06-26)"
 }
 
 func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {
@@ -3494,292 +3412,29 @@ func generateID() string {
 // Handler: watch
 // ============================================================================
 
-// handleWatch manages the internal fsnotify watcher goroutine lifecycle.
-// In the unified process architecture, the watcher runs within the same process.
-// It supports both in-process goroutine management (direct start/stop) and detached
-// mode where the watcher runs as a separate child process.
+// handleWatch is a deprecation stub for the watcher daemon. The watcher was
+// deprecated on 2026-06-26 — its original purpose (file-to-memory auto-ingest
+// for pre-MCP agents) is obsolete now that save_to_memory is a native MCP tool.
+// Use `mpm ops maintain` for on-demand decay/cleanup and `mpm ops synthesize`
+// for ad-hoc synthesis. See cmd/mpm/parsers.go for the parser library that
+// survives the deprecation; a future one-shot CLI command can be built on
+// top of it if filesystem auto-ingest ever becomes a real use case again.
+//
+// All subcommands print a friendly deprecation message and exit 0 so that
+// any operator scripts referencing `mpm watch ...` don't break loudly.
 func handleWatch(args []string) int {
-	if len(args) < 1 || args[0] == "status" {
-		return handleWatchStatus()
+	subCmd := "status"
+	if len(args) > 0 {
+		subCmd = args[0]
 	}
-
-	subCmd := args[0]
-	switch subCmd {
-	case "start":
-		// Check if --bg flag is present (indicates this is the child process)
-		bgFlag := false
-		for _, arg := range args[1:] {
-			if arg == "--bg" {
-				bgFlag = true
-				break
-			}
-		}
-
-		if !bgFlag {
-			// PARENT: Check if watcher is already running via PID file
-			existingPID := readWatchPID()
-			if existingPID > 0 && isWatchProcessAlive(existingPID) {
-				return respond("", fmt.Sprintf("Watcher is already running (PID %d)\n", existingPID), 1)
-			}
-
-			// SPAWN CHILD: Re-invoke self with --bg flag
-			exe, err := os.Executable()
-			if err != nil {
-				return respond("", fmt.Sprintf("Error: cannot find executable: %v\n", err), 1)
-			}
-			cmd := exec.Command(exe, append([]string{"watch", "start", "--bg"}, args[1:]...)...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Start(); err != nil {
-				return respond("", fmt.Sprintf("Error: failed to start watcher: %v\n", err), 1)
-			}
-			fmt.Printf("🚀 Watcher started in background (PID %d)\n", cmd.Process.Pid)
-			os.Exit(0)
-		}
-
-		// CHILD: --bg flag present — proceed with normal startup
-		if err := startWatchGoroutine(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		// Block indefinitely — this process IS the watcher, don't return to main()
-		select {}
-		// Unreachable — select{} blocks forever until signal fires
-
-	case "stop":
-		return handleWatchStop()
-
-	case "restart":
-		// Check if detached watcher is running via PID file
-		pid := readWatchPID()
-		if pid > 0 && isWatchProcessAlive(pid) {
-			return respond("", "Restart is not supported while the detached watcher is running. Use 'mpm watch stop' then 'mpm watch start' to restart.\n", 1)
-		}
-		// For in-process restart (non-detached), stop and restart the goroutine
-		stopWatchGoroutine()
-		if err := startWatchGoroutine(); err != nil {
-			return respond("", fmt.Sprintf("Error restarting: %v\n", err), 1)
-		}
-		return respond("File watcher restarted\n", "", 0)
-
-	case "add-path":
-		return handleWatchAddPath(args[1:])
-	case "remove-path":
-		return handleWatchRemovePath(args[1:])
-	case "list-paths", "paths":
-		return handleWatchListPaths(args[1:])
-	case "help":
-		return handleWatchHelp()
-
-	default:
-		return handleWatchHelp()
-	}
-}
-
-// startWatchGoroutine launches the fsnotify watcher and external DB pollers
-// as background goroutines within the current process.
-// When run as a detached child (--bg flag), it also:
-//   - Writes its PID to watch.pid
-//   - Registers a SIGTERM/Interrupt handler for graceful shutdown
-//   - Blocks forever (select{}) until signalled
-func startWatchGoroutine() error {
-	if watcherCancel != nil {
-		return fmt.Errorf("watcher is already running")
-	}
-
-	// Lazy-init the worker pool with its own DatabaseManager.
-	// The DM is opened once and shared across all pool workers.
-	if watchPool == nil {
-		dm, err := internal.NewDatabaseManager("")
-		if err != nil {
-			return fmt.Errorf("failed to open database for watcher: %w", err)
-		}
-		watchPool = NewWorkerPool(dm, defaultWorkerPoolSize)
-		// Pre-warm the synthesis dedup map from past merges so previously
-		// resolved pairs are not re-synthesised after a restart.
-		internal.InitSynthDedupFromDB(dm)
-	}
-	watcherCtx, watcherCancel = context.WithCancel(context.Background())
-	watcherDone = make(chan struct{})
-	watchPool.Start(watcherCtx)
-
-	// Initialize and start the isolated synthesis worker pool.
-	// This worker handles all LLM synthesis calls — never blocks the watcher.
-	if watchSynthWorker == nil {
-		synthClient := synth.NewSynthClient()
-		watchSynthWorker = internal.NewSynthesisWorker(watchPool.DM(), synthClient, 3)
-		watchSynthWorker.Start()
-	}
-
-	// Initialize and start the idle consolidation worker.
-	// Fires when no filesystem events for 30 minutes, proposes cross-pattern theories.
-	if watchIdleWorker == nil {
-		watchIdleWorker = internal.NewIdleConsolidationWorker(watchPool.DM(), 30*time.Minute)
-		watchIdleWorker.Start()
-	}
-
-	// Write PID file only in detached mode (--bg flag).
-	// In in-process goroutine mode the PID would point to the main mpm process,
-	// causing stale PID file confusion on abnormal exit.
-	_ = writeWatchPID()
-
-	// Set up graceful shutdown handler
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		defer close(watcherDone)
-		defer deleteWatchPID() // clean up PID file on exit
-
-		// Launch the fsnotify watcher event loop in its own goroutine
-		// (it blocks internally on fsnotify events).
-		go startWatcherGoroutine(watcherCtx, watchPool, false, false)
-
-		// Start external DB polling goroutines (each spawns its own goroutine).
-		startExternalDBPollGoroutines(watcherCtx, watchPool, false, false)
-
-		// Start periodic reconciliation sweep goroutine.
-		go startReconciliationSweepGoroutine(watcherCtx, watchPool, false, false)
-
-		// Submit startup events to the pool.
-		watchPool.Submit(WatchEvent{Type: EventStartupSweep, DryRun: false, Verbose: false})
-		// Immediate reconciliation sweep — catches orphan .jsonl files that the
-		// startup sweep skips, closing the 10-minute blind spot before the
-		// periodic sweeper fires.
-		watchPool.Submit(WatchEvent{Type: EventReconciliationSweep, DryRun: false, Verbose: false})
-
-		// Block until cancelled or signal received
-		select {
-		case <-watcherCtx.Done():
-			// Cancelled by stopWatchGoroutine
-		case sig := <-sigCh:
-			// SIGTERM or Interrupt received — graceful shutdown
-			fmt.Fprintf(os.Stderr, "\n⚠️  Received %v — shutting down watcher...\n", sig)
-			stopWatchGoroutine()
-		}
-	}()
-
-	return nil
-}
-
-// stopWatchGoroutine cancels the watcher goroutine and waits for it to finish.
-func stopWatchGoroutine() {
-	if watcherCancel == nil {
-		return
-	}
-	watcherCancel()
-	<-watcherDone
-	watcherCancel = nil
-	watcherCtx = nil
-	watcherDone = nil
-
-	// Stop the isolated synthesis worker — waits for in-flight LLM calls
-	// to complete (or hit their 30s deadline) before returning.
-	if watchSynthWorker != nil {
-		watchSynthWorker.Stop()
-		watchSynthWorker = nil
-	}
-
-	// Stop the idle consolidation worker.
-	if watchIdleWorker != nil {
-		watchIdleWorker.Stop()
-		watchIdleWorker = nil
-	}
-}
-
-// handleWatchStop reads the PID from watch.pid and signals the watcher to stop.
-func handleWatchStop() int {
-	pid := readWatchPID()
-	if pid == 0 {
-		// Already stopped — desired state achieved, return 0
-		return respond("Watcher is not running (already stopped).\n", "", 0)
-	}
-
-	proc, _ := os.FindProcess(pid)
-	if !isWatchProcessAlive(pid) {
-		// Process gone — clean up stale PID file, return 0
-		deleteWatchPID()
-		return respond("Watcher is not running (already stopped).\n", "", 0)
-	}
-
-	// Process is alive — send Interrupt signal and wait for graceful shutdown
-	proc.Signal(os.Interrupt)
-
-	// Retry loop: wait up to 10 seconds for the PID to exit, polling every 200ms.
-	// The old 500ms sleep was insufficient when the watcher was in the middle of
-	// a long synthesis API call (up to 300s timeout), causing a false "still alive"
-	// report and stale PID file.
-	for wait := 0; wait < 50; wait++ { // 50 × 200ms = 10s
-		time.Sleep(200 * time.Millisecond)
-		if !isWatchProcessAlive(pid) {
-			deleteWatchPID()
-			return respond("Watcher stopped.\n", "", 0)
-		}
-	}
-
-	// Timed out — process still alive. Clean up PID file so the user can retry
-	// without a stale-PID error. The orphan process will be handled on next start.
-	deleteWatchPID()
-	return respond(fmt.Sprintf("⚠️  Watcher (PID %d) did not stop within 10s — PID file cleaned. You may need to kill it manually.\n", pid), "", 0)
-}
-
-// handleWatchStatus checks if the watcher is running via the PID file.
-func handleWatchStatus() int {
-	pid := readWatchPID()
-	if pid == 0 {
-		return respond("Watcher is not running.\n", "", 0)
-	}
-
-	if !isWatchProcessAlive(pid) {
-		// Stale PID file — clean it up
-		deleteWatchPID()
-		return respond("Watcher is not running.\n", "", 0)
-	}
-
-	// Process is alive — report status
-	// Note: In detached mode, the parent process cannot query the child's pool state.
-	// Pool statistics (active workers, events processed) are only visible to the
-	// child process itself. We report running state based on the PID file alone.
-	if watchPool == nil {
-		return respond(fmt.Sprintf("Watcher is running (PID %d)\n", pid), "", 0)
-	}
-	active := watchPool.ActiveWorkers()
-	processed := watchPool.ProcessedCount()
-	return respond(fmt.Sprintf("Watcher is running (PID %d, %d active workers, %d events processed)\n", pid, active, processed), "", 0)
-}
-
-// formatWatchStatus returns a human-readable status string for the file watcher.
-func formatWatchStatus() string {
-	if watchPool == nil {
-		return "Watch system: not initialized\n"
-	}
-	active := watchPool.ActiveWorkers()
-	processed := watchPool.ProcessedCount()
-	if watcherCancel != nil && watcherDone != nil {
-		return fmt.Sprintf("Watch system: running (%d active workers, %d events processed)\n", active, processed)
-	}
-	return fmt.Sprintf("Watch system: stopped (%d events processed)\n", processed)
-}
-
-func handleWatchHelp() int {
-	output := `mpm watch - File watcher for automatic memory ingestion
-
-Usage:
-  mpm watch start              Start the file watcher
-  mpm watch stop               Stop the file watcher
-  mpm watch status             Check watcher status
-  mpm watch add-path <path>    Add a directory to watch
-  mpm watch remove-path <path> Remove a directory from watch list
-  mpm watch list-paths         List watched directories
-
-Examples:
-  mpm watch start
-  mpm watch stop
-  mpm watch status
-  mpm watch add-path /home/user/notes --type memory
-  mpm watch list-paths
-`
-	return respond(output, "", 0)
+	fmt.Printf("⚠️  mpm watch %s is deprecated (removed 2026-06-26).\n", subCmd)
+	fmt.Println("    The watcher daemon was an auto-ingest workaround for pre-MCP agents.")
+	fmt.Println("    Use `mpm ops maintain` for decay/cleanup on demand.")
+	fmt.Println("    Use `mpm ops synthesize` for synthesis on demand.")
+	fmt.Println("    Use `mpm ops ingest --source <path>` for one-shot external DB ingestion.")
+	fmt.Println("    The parser library lives at cmd/mpm/parsers.go if a future one-shot")
+	fmt.Println("    CLI needs to be rebuilt from scratch.")
+	return 0
 }
 
 // draftInteractiveContent opens $EDITOR on a temp file, waits for the user
