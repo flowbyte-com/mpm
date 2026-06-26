@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,7 +212,7 @@ func handleOpsPromote() int {
 	// Only clear ephemeral_persona if file write succeeded
 	if err := mpminternal.DeleteEphemeralPersona(dm); err != nil {
 		// Log warning but don't fail — the file was written successfully
-		fmt.Fprintf(os.Stderr, "Warning: failed to clear ephemeral_persona: %v\n", err)
+		slog.Warn("failed to clear ephemeral persona after promote", "error", err.Error())
 	}
 
 	// Update active.json to point to the newly permanent persona

@@ -7,30 +7,30 @@
 //
 // Design principles:
 //
-//   1. ALWAYS-ON. Subsystems that emit audit events should call LogAudit
-//      unconditionally on the error path. We do not want a missing audit
-//      call to be the difference between "the agent knew" and "the agent
-//      was blind."
+//  1. ALWAYS-ON. Subsystems that emit audit events should call LogAudit
+//     unconditionally on the error path. We do not want a missing audit
+//     call to be the difference between "the agent knew" and "the agent
+//     was blind."
 //
-//   2. SAFE TO CALL FROM ANYWHERE. LogAudit must not panic on closed DB
-//      or nil args. A failed audit insert is logged to stderr and
-//      swallowed — the failing subsystem is what matters.
+//  2. SAFE TO CALL FROM ANYWHERE. LogAudit must not panic on closed DB
+//     or nil args. A failed audit insert is logged to stderr and
+//     swallowed — the failing subsystem is what matters.
 //
-//   3. STRUCTURED CONTEXT. The context field is JSON (not free text) so
-//      the agent can query it. Store the most useful 3-5 fields only;
-//      this is not a log file replacement, it is a queryable ledger.
+//  3. STRUCTURED CONTEXT. The context field is JSON (not free text) so
+//     the agent can query it. Store the most useful 3-5 fields only;
+//     this is not a log file replacement, it is a queryable ledger.
 //
-//   4. RETENTION IS POLICY, NOT INVARIANT. A 30-day TTL is enforced by
-//      the gc sweep in runOpsMaintain. We do not use SQLite triggers
-//      because retention is a tunable — different deployments may want
-//      different windows.
+//  4. RETENTION IS POLICY, NOT INVARIANT. A 30-day TTL is enforced by
+//     the gc sweep in runOpsMaintain. We do not use SQLite triggers
+//     because retention is a tunable — different deployments may want
+//     different windows.
 package internal
 
 import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
+	"log/slog"
 	"runtime/debug"
 	"time"
 )
@@ -63,7 +63,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 		return
 	}
 	if level != AuditWarn && level != AuditError && level != AuditFatal {
-		fmt.Fprintf(os.Stderr, "audit: invalid level %q, skipping\n", level)
+		slog.Warn("audit: invalid level, skipping", "level", level)
 		return
 	}
 	if stack == "" {
@@ -82,7 +82,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 		sql.NullString{String: truncateStack(stack, 4000), Valid: stack != ""},
 		ctxJSON, time.Now().UTC().Format("2006-01-02 15:04:05"),
 	); err != nil {
-		fmt.Fprintf(os.Stderr, "audit insert failed: %v (level=%s component=%s)\n", err, level, component)
+		slog.Warn("audit insert failed", "error", err.Error(), "level", string(level), "component", component)
 	}
 }
 

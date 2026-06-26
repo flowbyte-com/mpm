@@ -519,7 +519,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 		if _, err := dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2])); err != nil {
 			if !isDuplicateColumnError(err) {
-				fmt.Fprintf(os.Stderr, "Warning: migration failed for %s.%s: %v\n", m[0], m[1], err)
+				slog.Warn("migration failed", "table", m[0], "column", m[1], "error", err.Error())
 			}
 		}
 	}
@@ -534,7 +534,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 			continue // lessons is a view; its FTS is handled by migrateLessonsToView
 		}
 		if _, err := dm.db.Exec(sql); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: index creation error (may be benign on re-run): %v\n", err)
+			slog.Warn("index creation error (may be benign on re-run)", "error", err.Error())
 		}
 	}
 
@@ -546,7 +546,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
 	if err := dm.initFTSTables(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: FTS5 initialization failed: %v (search will use LIKE fallback)\n", err)
+		slog.Warn("FTS5 initialization failed; search will use LIKE fallback", "error", err.Error())
 	} else {
 		// FTS5 tables ready — backfill any existing data that predates the triggers
 		dm.backfillFTSTables()
@@ -604,7 +604,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 	for _, sql := range revisionTriggers {
 		if _, err := dm.db.Exec(sql); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: revision trigger creation failed: %v\nSQL: %s\n", err, sql)
+			slog.Warn("revision trigger creation failed", "error", err.Error(), "sql", sql)
 		}
 	}
 
@@ -912,7 +912,7 @@ func (dm *DatabaseManager) backfillFTSTables() error {
 		}
 		_, err := dm.db.Exec(b.insertSQL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: backfill FTS table %s failed: %v\n", b.destTable, err)
+			slog.Warn("backfill FTS table failed", "table", b.destTable, "error", err.Error())
 		}
 	}
 	return nil
@@ -927,53 +927,11 @@ func (dm *DatabaseManager) Close() error {
 
 // ==================== CRUD OPERATIONS ====================
 
-func (dm *DatabaseManager) SaveSession(sessionID, content, sourcePath string, metadata map[string]interface{}) (string, error) {
-	hash := sha256.Sum256([]byte(content))
-	contentHash := hex.EncodeToString(hash[:])
-	id := GenerateID()
-
-	metadataJSON := "{}"
-	if metadata != nil {
-		bytes, _ := json.Marshal(metadata)
-		metadataJSON = string(bytes)
-	}
-
-	_, err := dm.db.Exec(`INSERT INTO sessions (id, session_id, content, content_hash, source_path, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, sessionID, content, contentHash, sourcePath, metadataJSON)
-	return id, err
-}
-
 // UpdateSessionSummary upserts the LLM-generated summary for a session.
 // Uses the session_id as the unique key.
 func (dm *DatabaseManager) UpdateSessionSummary(sessionID, summary string) error {
 	_, err := dm.db.Exec(`UPDATE sessions SET summary = ? WHERE session_id = ?`, summary, sessionID)
 	return err
-}
-
-func (dm *DatabaseManager) GetSession(id string) (map[string]interface{}, error) {
-	var sessionID, content, contentHash, sourcePath, metadataJSON string
-	var createdAt time.Time
-
-	err := dm.db.QueryRow(`SELECT session_id, content, content_hash, source_path, metadata, created_at FROM sessions WHERE id = ?`, id).
-		Scan(&sessionID, &content, &contentHash, &sourcePath, &metadataJSON, &createdAt)
-	if err != nil {
-		return nil, err
-	}
-
-	var metadata map[string]interface{}
-	if metadataJSON != "" {
-		json.Unmarshal([]byte(metadataJSON), &metadata)
-	}
-
-	return map[string]interface{}{
-		"id":           id,
-		"session_id":   sessionID,
-		"content":      content,
-		"content_hash": contentHash,
-		"source_path":  sourcePath,
-		"metadata":     metadata,
-		"created_at":   createdAt,
-	}, nil
 }
 
 // GetLastSession returns the most recent session by created_at DESC.
