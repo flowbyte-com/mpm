@@ -401,6 +401,8 @@ to retrieve relevant knowledge.
 
 BM25 unbounded scores are sigmoid-normalized. Use `--semantic` flag to enable pure embedding search.
 
+**Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing reinforcement contribution, weight contribution, recency age, and the FTS5 terms that matched. Useful for "why did the agent pick this memory?" introspection without re-running the search.
+
 **LTM promotion:** `weight ≥ 10` OR explicit `mpm promote` OR auto-ingested `.md` file.
 
 ### Cognitive Immune System (Hybrid Search)
@@ -481,7 +483,7 @@ mpm rm <id>        # Soft delete
 mpm wake           # Last session context (mode, persona, topics, recent memories)
 mpm call <tool>    # Universal machine interface (JSON payload)
 mpm status         # System status dashboard
-mpm web            # Start web UI server
+mpm web [--port <n>] [--allow-anonymous]  # Start web UI server. Default: fail-closed (requires web_token in mpm_config.json). --allow-anonymous opts in to unauthenticated mode and prints a loud warning at startup.
 mpm version        # Version info
 mpm help           # Full help
 ```
@@ -550,6 +552,8 @@ mpm ops doctor [--explain|--deep-scan]  # Diagnostics (--explain: FTS5 query pla
 mpm ops self-heal [--dry-run|--force|--quiet]  # Autonomous integrity repair — cron-friendly, escalates unknown drift
 mpm ops maintain                     # Self-maintenance: decay, consolidate, prune
 mpm ops synthesize [--dry-run]       # LLM synthesis on all memories
+mpm ops synthesize status            # Recent synthesis telemetry (last 20 watchdog events)
+mpm ops synthesize failures          # Only error/skipped synthesis events (for "why are merges not happening?")
 mpm ops gc [--dry-run|--review|--purge|--shred-negative]  # Decay sweep
 mpm ops backfill-embeddings [--batch-size|--collection|--dry-run]  # Embedding pipeline
 mpm ops dlq:review [review|clear|retry]  # Dead letter queue — failed synth events
@@ -594,6 +598,9 @@ mpm ops persona [list|active|set|clear]
 mpm ops stance assume <mode> <persona> <rationale>
 mpm ops stance synthesize <name> [flags]
 mpm ops stance promote              # Flush ephemeral persona to permanent disk file
+
+# Multi-agent shared epistemology (Phase 1 — see WISHLIST.md)
+mpm ops shared [status]             # Show MPM_SHARED_DB attach state, row counts, file size
 
 # Entity ops
 mpm ops topic|lesson|session|reference|memory|wake|gateway
@@ -900,6 +907,10 @@ Wired into the pre-commit hook (`.git/hooks/pre-commit`, also tracked at `script
 ### Security Scanning
 
 Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but **never reaches the database**.
+
+**Coverage enforced by** `internal/scanner_coverage_test.go` — a static-analysis test that walks every function in `internal/` and `cmd/mpm/` containing a literal `INSERT INTO memories` statement and verifies the function (or its caller) calls the scanner. If you add a new write path, the test will tell you. New write paths should route through `DatabaseManager.SaveMemory` (which scans) or call `internal.ScanContentForWrite` before any raw INSERT.
+
+**Auth policy:** `mpm web` defaults to **fail-closed** — if `web_token` is unset in `mpm_config.json`, the server refuses to start. The historical "fail open when no token" behavior was the single biggest gap in the original code (any reachable client could read every memory on a LAN). Pass `--allow-anonymous` to opt in to unauthenticated mode for trusted-LAN debugging; the server prints a loud warning and sets `X-MPM-Auth: disabled-anonymous` on every response so clients know.
 
 ### Fsnotify Reconciliation
 
@@ -1420,6 +1431,13 @@ The tool requires a full 40-character SHA-1 (run `git rev-parse HEAD` to get the
 | `MPM_WORKSPACE` | Override workspace directory |
 | `MPM_FORCE` | Skip confirmation prompts |
 | `MPM_INTERACTIVE` | Force interactive mode |
+| `MPM_PORT` | Web server port (auto-detected if unset, written to `~/.mpm/web.port` for sibling processes) |
+| `MPM_LOG` | Log level: `debug` / `info` / `warn` / `error` (default: `info`) |
+| `MPM_LOG_FORMAT` | Log format: `text` / `json` (default: `text`) |
+| `MPM_SHARED_DB` | Path to a shared SQLite database for cross-agent house rules (Phase 1 of multi-agent shared epistemology). If unset, mpm runs in local-only mode. See [WISHLIST.md](WISHLIST.md). |
+| `MPM_SHARED_READONLY` | `1` to attach the shared DB read-only. Default: read/write. |
+| `MPM_ACTIVE_MODE` | Active mode (MCP only — populates child stdio env from the `.mcp.json` `env` block) |
+| `MPM_ACTIVE_PERSONA` | Active persona (MCP only — same population path) |
 | `MINIMAX_API_KEY` | LLM API key (synthesis fallback) |
 | `MINIMAX_BASE_URL` | LLM base URL (synthesis fallback) |
 
@@ -1466,9 +1484,12 @@ projects/mpm/
 
 ## Roadmap
 
-Upcoming items (priorities driven by operator need, not a fixed roadmap):
+### Recently Shipped
 
-- **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents. All MPM instances on a workstation would attach the same shared DB (e.g. `~/.mpm/shared/rules.db`) so house rules and cross-project decisions live in one place that every agent can see and propose to.
+- **Multi-Agent Shared Epistemology — Phase 1 (Plumbing)** — `MPM_SHARED_DB` env var, ATTACH on startup, graceful local-only fallback, `mpm ops shared status` command. Read tools (`query_global_rules`) and operator-gated writes (`record_global_rule`, `promote_to_global`) are tracked in [WISHLIST.md](WISHLIST.md) Phases 2-3.
+
+### Upcoming
+
 - **Native Event-Driven Hooks** — UNIX drop-in hooks for `on_theory_resolved`, `on_memory_synthesized`, etc.
 - **Memory Encryption at Rest** — SQLCipher AES-256 for enterprise-grade at-rest encryption
 - **Advanced Cognitive Analytics** — agent-level retention curves, confidence trajectory forecasting
