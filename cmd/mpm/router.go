@@ -70,6 +70,7 @@ func NewRouter() *CommandRouter {
 		"gc":                  {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
 		"backfill-embeddings": {Name: "backfill-embeddings", Description: "Backfill embeddings for existing memories (--batch-size, --collection, --dry-run)", MinArgs: 0},
 		"dlq:review":          {Name: "dlq:review", Description: "Inspect DLQ (review/clear/retry) — synth failures awaiting retry", MinArgs: 0},
+		"lint":                {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":              {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":             {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
 		"restore-db":          {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
@@ -182,6 +183,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleReview(args)
 	case "web":
 		return handleWeb(args)
+	case "lint":
+		return handleLint(args)
 	case "watch":
 		return handleWatch(args[1:])
 	case "switch":
@@ -384,6 +387,8 @@ func handleOps(args []string) int {
 		return 0
 	case "maintain":
 		return handleMaintain(append([]string{"maintain"}, subArgs...))
+	case "lint":
+		return handleLint(subArgs)
 	case "synthesize":
 		return handleSynthesize(append([]string{"synthesize"}, subArgs...))
 	case "gc":
