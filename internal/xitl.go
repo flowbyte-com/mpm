@@ -5,11 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-
-	"mpm/internal/config"
 
 	"gopkg.in/yaml.v3"
 )
@@ -44,12 +39,6 @@ type EphemeralPersona struct {
 	VoiceGuards string `json:"voice_guards,omitempty"`
 }
 
-type activeState struct {
-	Persona string   `json:"persona"`
-	Modes   []string `json:"modes"`
-	Updated string   `json:"updated"`
-}
-
 // fmPersona is the YAML shape shared by both frontmatter renderers.
 // Hoisted to package scope so FormatEphemeralPersonaAsFrontmatter (which
 // needs it as a *yaml.marshalable type) and FormatEphemeralPersonaAsMarkdown
@@ -63,47 +52,6 @@ type fmPersona struct {
 	Vibe        string `yaml:"vibe"`
 	Voice       string `yaml:"voice"`
 	VoiceGuards string `yaml:"voice_guards"`
-}
-
-func activeJSONPath() string {
-	return filepath.Join(config.GetMPMDir(), "active.json")
-}
-
-func loadActiveJSON() (*activeState, error) {
-	data, err := os.ReadFile(activeJSONPath())
-	if err != nil {
-		return nil, err
-	}
-	var s activeState
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, err
-	}
-	return &s, nil
-}
-
-// AutoStatus holds both the boolean gate check and the reason for denial.
-type AutoStatus struct {
-	Active bool
-	Reason string // empty when Active is true; describes which field blocks when false
-}
-
-// CheckAutoActive reads active.json and returns whether auto is engaged.
-// When auto is not active, Reason describes the exact state (e.g. mode="standard", persona="default")
-// so the caller can relay diagnostics to the user.
-func CheckAutoActive() AutoStatus {
-	s, err := loadActiveJSON()
-	if err != nil {
-		return AutoStatus{Active: false, Reason: fmt.Sprintf("cannot read active.json: %v", err)}
-	}
-	if s.Persona == "auto" {
-		return AutoStatus{Active: true, Reason: ""}
-	}
-	for _, m := range s.Modes {
-		if m == "auto" {
-			return AutoStatus{Active: true, Reason: ""}
-		}
-	}
-	return AutoStatus{Active: false, Reason: fmt.Sprintf("mode=%q, persona=%q — neither is set to \"auto\"", strings.Join(s.Modes, ","), s.Persona)}
 }
 
 // GetEphemeralPersona fetches the JIT persona blob from system_config.

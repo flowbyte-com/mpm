@@ -47,7 +47,7 @@ type WakeContextMemory struct {
 // xitl.go. Missing/unreadable file returns empty strings with no error —
 // the wake context is still useful without mode/persona metadata.
 func readActiveState() (mode, persona string) {
-	active, err := loadActiveJSON()
+	active, err := LoadActiveJSON()
 	if err != nil {
 		return "", ""
 	}
