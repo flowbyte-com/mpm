@@ -177,7 +177,7 @@ func handleGC(args []string) int {
 	// into the GC cycle rather than a separate cron because GC is the
 	// canonical cleanup pass and we want one place to tune retention.
 	if pruned, err := dm.PruneAuditLog(30); err != nil {
-		fmt.Fprintf(os.Stderr, "audit prune error: %v\n", err)
+		slog.Warn("audit prune failed", "error", err.Error(), "retention_days", 30)
 	} else if pruned > 0 {
 		fmt.Printf("Pruned %d audit log entries older than 30 days\n", pruned)
 	}
@@ -187,7 +187,7 @@ func handleGC(args []string) int {
 	// retention window. The next session may need to look back more than
 	// 30 days to understand a long-running project.
 	if pruned, err := dm.PruneHandoffs(90); err != nil {
-		fmt.Fprintf(os.Stderr, "handoff prune error: %v\n", err)
+		slog.Warn("handoff prune failed", "error", err.Error(), "retention_days", 90)
 	} else if pruned > 0 {
 		fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
 	}

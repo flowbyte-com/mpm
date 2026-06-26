@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
+	"log/slog"
 	"time"
 )
 
@@ -28,10 +28,10 @@ type Handoff struct {
 
 // EndedState values — kept in sync with the CHECK constraint in schema.go.
 const (
-	HandoffClean       = "clean"        // normal end, all state written
-	HandoffCrashed     = "crashed"      // unexpected exit, partial state
-	HandoffInterrupted = "interrupted"  // user closed session
-	HandoffForceEnd    = "force_end"    // agent explicitly force-quit
+	HandoffClean       = "clean"       // normal end, all state written
+	HandoffCrashed     = "crashed"     // unexpected exit, partial state
+	HandoffInterrupted = "interrupted" // user closed session
+	HandoffForceEnd    = "force_end"   // agent explicitly force-quit
 )
 
 // EndSession writes a handoff for the just-ended session. Safe to call
@@ -288,7 +288,7 @@ func (dm *DatabaseManager) ListHandoffs(limit int, unreadOnly bool) ([]*Handoff,
 		h, err := scanHandoffRows(rows)
 		if err != nil {
 			// Skip individual scan errors but keep going.
-			fmt.Fprintf(os.Stderr, "ListHandoffs: scan err: %v\n", err)
+			slog.Warn("ListHandoffs: scan error, skipping row", "error", err.Error())
 			continue
 		}
 		out = append(out, h)

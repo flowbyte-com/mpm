@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"mpm/internal/config"
+	"mpm/internal/logging"
 
 	mpminternal "mpm/internal"
 	"mpm/internal/synth"
@@ -32,9 +33,13 @@ func init() {
 	// Cap threads at 32 to prevent resource exhaustion while staying responsive.
 	// On a machine with many cores, this prevents a runaway goroutine storm
 	// from eating all available threads. The default (unlimited) can cause the
-	// Go scheduler to spawn hundreds of OS threads under heavy load, which on
-	// a shared or memory-constrained system can lead to OOM kills.
+	// Go scheduler to spawn hundreds of OS threads under heavy load, which on a
+	// shared or memory-constrained system can lead to OOM kills.
 	runtime.GOMAXPROCS(32)
+
+	// Initialize the package-level slog default. See internal/logging for the
+	// MPM_LOG / MPM_LOG_FORMAT env-var policy.
+	logging.Setup()
 
 	// Initialize global mode manager
 	// Will be used to set default 808 mode on daemon startup

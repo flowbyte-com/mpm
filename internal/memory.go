@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -260,7 +261,7 @@ func (s *MemoryStore) InitSQLite() error {
 	ftsAvailable := true
 	for _, ft := range fts {
 		if _, err := s.DB.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')"); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: FTS5 not available (%s), search will use LIKE fallback: %v\n", ft.name, err)
+			slog.Warn("FTS5 not available for table; search will use LIKE fallback", "table", ft.name, "error", err.Error())
 			ftsAvailable = false
 			break
 		}
@@ -268,7 +269,7 @@ func (s *MemoryStore) InitSQLite() error {
 
 	// Create triggers only if FTS5 is available
 	if !ftsAvailable {
-		fmt.Fprintf(os.Stderr, "Warning: FTS5 not available — memories will not be full-text indexed until FTS5 is supported\n")
+		slog.Warn("FTS5 not available — memories will not be full-text indexed until FTS5 is supported")
 		return nil
 	}
 	triggers := []string{
@@ -380,7 +381,7 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	// Append to mirror file (human-readable)
 	if err := s.appendToMirror(mem); err != nil {
 		// Log but don't fail
-		fmt.Fprintf(os.Stderr, "Warning: failed to write to mirror: %v\n", err)
+		slog.Warn("failed to write to mirror", "error", err.Error())
 	}
 
 	return mem, nil
@@ -471,7 +472,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	}
 
 	if err := s.appendToMirror(mem); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to write to mirror: %v\n", err)
+		slog.Warn("failed to write to mirror", "error", err.Error())
 	}
 	return mem, nil
 }

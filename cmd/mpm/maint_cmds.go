@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -362,7 +363,7 @@ func handleMaintain(args []string) int {
 	dm.SQLDB().QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL").Scan(&deletedCount)
 	if deletedCount > 0 {
 		if _, vacErr := dm.SQLDB().Exec("PRAGMA incremental_vacuum"); vacErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: incremental_vacuum failed: %v\n", vacErr)
+			slog.Warn("incremental_vacuum failed", "error", vacErr.Error())
 		} else {
 			fmt.Printf("   Vacuum reclaimed space (%d deleted records)\n", deletedCount)
 		}
