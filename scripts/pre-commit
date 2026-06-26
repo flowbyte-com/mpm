@@ -1,0 +1,71 @@
+#!/bin/sh
+# Pre-commit hook: fail the commit if the source tree doesn't compile, or if
+# the synthesis / reliability / lifecycle test suites regress.
+#
+# Rationale: the post-commit hook auto-pushes every commit to origin, so a
+# broken commit lands on the shared remote within seconds. This pre-commit gate
+# is the only thing standing between a WIP refactor and a noisy origin/main.
+#
+# Scope of this hook:
+#   - go build ./...            (always — must compile)
+#   - synthesis/reliability/lifecycle tests  (these are deterministic; some
+#     other test suites have pre-existing data-pollution failures we are not
+#     fixing in this arc — those belong in a CI matrix, not a local gate)
+#
+# Future: when the test suite stabilises, add `go test ./...` (full sweep) and
+# move the flaky tests into a separate CI job with -short + clean DB.
+
+set -e
+
+echo "[pre-commit] verifying build..."
+
+# Resolve go binary (PATH may not be set inside git hooks)
+GO="${GO:-$(command -v go || echo /usr/local/go/bin/go)}"
+
+if [ ! -x "$GO" ]; then
+  echo "[pre-commit] FATAL: go binary not found (tried: $GO)" >&2
+  echo "[pre-commit] Set GO=/path/to/go and retry, or install go." >&2
+  exit 1
+fi
+
+if ! "$GO" build ./...; then
+  echo "[pre-commit] ABORTING commit: go build ./... failed." >&2
+  echo "[pre-commit] Fix the build errors and stage the fixes before retrying." >&2
+  exit 1
+fi
+
+echo "[pre-commit] build OK"
+
+echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
+if ! "$GO" test -short -count=1 ./internal/ \
+     -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"; then
+  echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
+  exit 1
+fi
+
+echo "[pre-commit] running router linter (persona/mode frontmatter)..."
+# The linter catches YAML escape footguns and broken regex compilation
+# BEFORE the broken file is ever loaded by the runtime router. See
+# lesson 9e1b2142bd525c6d for the failure mode this defends against.
+# Only run if persona/ or mode/ files are staged for this commit —
+# avoids slowing down unrelated commits.
+if git diff --cached --name-only | grep -qE "^(persona|mode)/.*\.md$"; then
+  if [ ! -x "./bin/mpm" ]; then
+    echo "[pre-commit] WARN: bin/mpm not found, building..."
+    if ! "$GO" build -o bin/mpm ./cmd/mpm; then
+      echo "[pre-commit] ABORTING commit: could not build bin/mpm for linter." >&2
+      exit 1
+    fi
+  fi
+  if ! ./bin/mpm ops lint > /tmp/pre-commit-lint.log 2>&1; then
+    echo "[pre-commit] ABORTING commit: router frontmatter lint failed." >&2
+    echo "[pre-commit] Run \`mpm ops lint\` to see issues:" >&2
+    cat /tmp/pre-commit-lint.log >&2
+    rm -f /tmp/pre-commit-lint.log
+    exit 1
+  fi
+  rm -f /tmp/pre-commit-lint.log
+  echo "[pre-commit] linter OK"
+fi
+
+echo "[pre-commit] all checks passed — committing"
