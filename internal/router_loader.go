@@ -97,6 +97,7 @@ func parseComponentFile(path string, kind ComponentKind) (*Component, error) {
 			body = strings.TrimSpace(parts[1])
 		}
 	}
+	_ = body // body parsed for schema symmetry; not used for routing (deprecated 2026-06-26, decision be61de1c4ef2ff4a)
 
 	var fm frontmatterSchema
 	explicitCount := 0
@@ -128,17 +129,11 @@ func parseComponentFile(path string, kind ComponentKind) (*Component, error) {
 	}
 	explicitCount = len(compiled)
 
-	// 2. Implicit patterns from body text (non-trivial content words).
-	//    These capture topical keywords from the actual mode/persona description
-	//    without requiring an explicit `patterns:` field in every file.
-	bodyPatterns := extractBodyPatterns(body)
-	for _, p := range bodyPatterns {
-		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(p) + `\b`)
-		if err != nil {
-			continue
-		}
-		compiled = append(compiled, re)
-	}
+	// 2. Body text is voice only. Deprecated 2026-06-26 (decision be61de1c4ef2ff4a):
+	//    body-word inference was treated as implicit routing signal, which caused
+	//    persona/mode over-firing on common prose words. Patterns: frontmatter is
+	//    now the only routing signal. A component without `patterns:` is invisible
+	//    to the auto-router. See lesson 853d678719f905d7 for the failure mode.
 
 	// 3. Anti-patterns from frontmatter.
 	antiList := parseStringList(fm.AntiPatterns)
@@ -165,45 +160,10 @@ func parseComponentFile(path string, kind ComponentKind) (*Component, error) {
 	}, nil
 }
 
-// extractBodyPatterns returns significant words (3+ chars, non-stop-word)
-// extracted from body text. These serve as implicit positive triggers when
-// no explicit patterns: field exists in the frontmatter.
-func extractBodyPatterns(body string) []string {
-	words := strings.FieldsFunc(body, func(r rune) bool {
-		return r == ' ' || r == '\n' || r == '\t' || r == ',' || r == '.' ||
-			r == '!' || r == '?' || r == ':' || r == ';' || r == '"' ||
-			r == '\'' || r == '(' || r == ')' || r == '[' || r == ']' ||
-			r == '{' || r == '}' || r == '#' || r == '*' || r == '-' ||
-			r == '/' || r == '\\' || r == '|' || r == '`' || r == '~'
-	})
-
-	stop := map[string]bool{
-		"the": true, "and": true, "for": true, "that": true, "this": true,
-		"with": true, "from": true, "you": true, "are": true, "was": true,
-		"were": true, "been": true, "have": true, "has": true, "had": true,
-		"will": true, "would": true, "could": true, "should": true, "may": true,
-		"might": true, "can": true, "not": true, "but": true, "its": true,
-		"also": true, "into": true, "when": true, "then": true, "than": true,
-		"what": true, "which": true, "their": true, "there": true, "they": true,
-		"them": true, "your": true, "our": true, "all": true, "each": true,
-		"every": true, "both": true, "few": true, "more": true, "most": true,
-		"other": true, "some": true, "such": true, "only": true, "own": true,
-		"same": true, "so": true, "very": true, "just": true, "about": true,
-		"after": true, "before": true, "because": true, "being": true, "between": true,
-		"even": true, "how": true, "like": true, "make": true, "many": true,
-		"now": true, "one": true, "out": true, "said": true, "two": true,
-		"up": true, "way": true, "well": true, "who": true, "work": true,
-	}
-
-	var out []string
-	seen := make(map[string]bool)
-	for _, w := range words {
-		lower := strings.ToLower(w)
-		if len(lower) < 3 || stop[lower] || seen[lower] {
-			continue
-		}
-		seen[lower] = true
-		out = append(out, lower)
-	}
-	return out
-}
+// extractBodyPatterns — REMOVED 2026-06-26 (decision be61de1c4ef2ff4a).
+// Body-word inference caused false-positive over-firing (e.g. artisan scoring
+// on every prompt containing "does", "code", "function", "fix", "works" —
+// common prose words that happened to appear in the persona body).
+// Patterns: frontmatter is now the only routing signal. A persona/mode file
+// without `patterns:` is invisible to the auto-router and can only be invoked
+// manually via `mpm ops switch` or `mpm ops stance assume`.
