@@ -330,7 +330,9 @@ func (r *CommandRouter) handleHelp(args []string) int {
 
 	switch helpCmd {
 	case "watch":
-		helpFunc = handleWatchHelp
+		// handleWatch is now a deprecation stub that prints its own help —
+		// route through it instead of a dedicated helpFunc.
+		return handleWatch(args[1:])
 	case "mode":
 		helpFunc = handleModeHelp
 	case "persona":
