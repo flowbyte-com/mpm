@@ -386,7 +386,7 @@ func searchFTS5(db *sql.DB, query, collection string, limit int) ([]ftsEntry, er
 		       bm25(memories_fts) AS score
 		FROM memories_fts
 		JOIN memories m ON memories_fts.rowid = m.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
+		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 		  AND (? = '' OR m.collection = ?)
 		ORDER BY score
 		LIMIT ?`
@@ -407,7 +407,7 @@ func searchLike(db *sql.DB, query, collection string, limit int) ([]ftsEntry, er
 		       last_accessed_at, reference_id,
 		       0.0 AS score
 		FROM memories
-		WHERE content LIKE ? AND deleted_at IS NULL
+		WHERE content LIKE ? AND deleted_at IS NULL` + MemoryExpireClause + `
 		  AND (? = '' OR collection = ?)
 		ORDER BY created_at DESC
 		LIMIT ?`
@@ -459,7 +459,7 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, embedding
 		FROM memories
-		WHERE embedding IS NOT NULL AND embedding != 'null' AND deleted_at IS NULL `+colClause,
+		WHERE embedding IS NOT NULL AND embedding != 'null' AND deleted_at IS NULL`+MemoryExpireClause+` `+colClause,
 		args...)
 	if err != nil {
 		return nil, err
