@@ -36,10 +36,6 @@ func (r *AdapterRegistry) Detect(db *sql.DB) SchemaAdapter {
 	return nil
 }
 
-func (r *AdapterRegistry) Register(a SchemaAdapter) {
-	r.adapters = append(r.adapters, a)
-}
-
 // MPMAdapter handles MPM's own memories table schema (used for cross-MPM sync/polling)
 type MPMAdapter struct{}
 

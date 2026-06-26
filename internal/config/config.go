@@ -103,16 +103,6 @@ func LoadConfig() (*Config, error) {
 	return &config, nil
 }
 
-// SaveConfig saves the MPM configuration to file
-func SaveConfig(config *Config) error {
-	path := ConfigPath()
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0600)
-}
-
 // MPMDataDir is the subdirectory where all MPM runtime data resides
 const MPMDataDir = "mpm"
 
@@ -211,35 +201,11 @@ func GetWorkspace() string {
 	return cwd
 }
 
-// GetMemoryPath returns the memory directory path for MPM's internal database.
-// Priority: 1) Config file memory_dir(s), 2) MPM internal fallback (mpm/src/db)
-// NOTE: The memory_dir from config is for the WATCH DAEMON to process OpenClaw files.
-//
-//	The MPM database (mpm.db) ALWAYS lives at mpm/src/db/mpm.db.
-func GetMemoryPath() string {
-	if config, err := LoadConfig(); err == nil && config.MemoryDir != "" {
-		return ResolveEnvPath(config.MemoryDir)
-	}
-	// Legacy fallback: mpm/src/db (only used if no config)
-	return filepath.Join(GetMPMDir(), "src", "db")
-}
-
 // GetMirrorPath constructs the full path to the mirror JSONL file
 // Always located at mpm/src/db/mirror.jsonl (internal storage)
 func GetMirrorPath() string {
 	mpmDir := GetMPMDir()
 	return filepath.Join(mpmDir, "src", "db", "mirror.jsonl")
-}
-
-// GetSessionsPath returns the sessions directory path.
-// Priority: 1) Config file sessions_dir, 2) Default ~/.openclaw/agents/main/sessions
-func GetSessionsPath() string {
-	if config, err := LoadConfig(); err == nil && config.SessionsDir != "" {
-		return ResolveEnvPath(config.SessionsDir)
-	}
-	// Default: ~/.openclaw/agents/main/sessions
-	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
 }
 
 // GetOpenClawDBPath returns the OpenClaw source DB path for ingest.
@@ -277,16 +243,6 @@ func GetMPMDir() string {
 	return cwd
 }
 
-// GetPersonaPath constructs the full path to the persona configurations directory
-func GetPersonaPath() string {
-	return filepath.Join(GetMPMDir(), "persona")
-}
-
-// GetModePath constructs the full path to the mode configurations directory
-func GetModePath() string {
-	return filepath.Join(GetMPMDir(), "mode")
-}
-
 // GetToxicPhrasesPath constructs the full path to the toxic phrases file
 func GetToxicPhrasesPath() string {
 	return filepath.Join(GetMPMDir(), "toxicphrases.txt")
@@ -311,7 +267,4 @@ func ResolveEnvPath(path string) string {
 	return path
 }
 
-// ResolveEnvPathDebug is like ResolveEnvPath but with debug output
-func ResolveEnvPathDebug(path string) string {
-	return ResolveEnvPath(path)
-}
+

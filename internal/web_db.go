@@ -16,15 +16,6 @@ import (
 // "constraint failed: PRIMARY KEY constraint failed: <col>". A substring
 // match is sufficient — we only need to distinguish "already exists" from
 // other write failures for the AddReference error path.
-func isUniqueConstraintError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "PRIMARY KEY constraint failed")
-}
-
 // ==================== Lightweight reference types for cross-ref display ====================
 
 // TopicRef is a lightweight topic reference for cross-reference display

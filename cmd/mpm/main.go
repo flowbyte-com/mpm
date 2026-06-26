@@ -51,11 +51,6 @@ var startTime = time.Now()
 // modeManager is the global mode manager instance (initialized at startup)
 var modeManager any
 
-// printVersion outputs version info
-func printVersion() {
-	fmt.Printf("SymAI mpm %s\n", buildVersion)
-}
-
 // printError formats and prints an error message mpm-style
 func printError(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "[!] Error: "+format+"\n", args...)
@@ -144,16 +139,6 @@ func promptConfirmation() bool {
 	var response string
 	fmt.Fscanln(tty, &response)
 	return response == "y" || response == "Y"
-}
-
-// hasJSONFlagInArgs scans args for --json or -j before flag parsing
-func hasJSONFlagInArgs(args []string) bool {
-	for _, a := range args {
-		if a == "--json" || a == "-j" {
-			return true
-		}
-	}
-	return false
 }
 
 // handleGatewayCommand routes gateway subcommands
@@ -401,15 +386,6 @@ type DeepScanResult struct {
 	DanglingMemberships int
 	// QueryErrors: any individual queries that failed (so the caller can WARN).
 	QueryErrors map[string]string
-}
-
-// TotalDrift returns the aggregate drift count across all categories.
-func (r *DeepScanResult) TotalDrift() int {
-	t := r.SoftDeleteGhosts + r.DanglingMemberships
-	for _, n := range r.FTSOrphans {
-		t += n
-	}
-	return t
 }
 
 // HasKnownSafeDrift returns true if there is drift in the known-safe
@@ -721,10 +697,6 @@ LIMIT 10`
 // Color helper functions (no external dependencies)
 func colorCyan(s string) string {
 	return "\033[36m" + s + "\033[0m"
-}
-
-func colorMagenta(s string) string {
-	return "\033[35m" + s + "\033[0m"
 }
 
 func colorGreen(s string) string {
@@ -1149,377 +1121,6 @@ func printDoctorSummary(report *DoctorReport) {
 	}
 }
 
-// ============================================================================
-// Pre-Flight Health Check System
-// ============================================================================
-
-// runPreFlightChecks executes the diagnostic suite and returns results
-// Target: Complete within 1-2 seconds for fast startup
-func runPreFlightChecks() *PreFlightResult {
-	startTime := time.Now()
-	result := &PreFlightResult{
-		Timestamp: startTime,
-		Checks:    []PreFlightCheck{},
-	}
-
-	// Run all checks (order: fastest first, critical last)
-	runLockfileCheck(result)
-	runDirectoryCheck(result)
-	runDatabaseCheck(result)
-	runPersonaCheck(result)
-	runPermissionsCheck(result)
-
-	result.DurationMs = time.Since(startTime).Milliseconds()
-
-	// Determine overall status
-	hasError := false
-	hasRepair := false
-	for _, check := range result.Checks {
-		if check.Status == "Error" {
-			hasError = true
-			break
-		}
-		if check.Status == "Repaired" {
-			hasRepair = true
-		}
-	}
-	if hasError {
-		result.Status = "Failed"
-	} else if hasRepair {
-		result.Status = "Repaired"
-	} else {
-		result.Status = "Passed"
-	}
-
-	return result
-}
-
-// runLockfileCheck removes stale lockfiles from previous crash
-func runLockfileCheck(result *PreFlightResult) {
-	start := time.Now()
-	details := []string{}
-
-	// Check for common lockfile patterns
-	lockPatterns := []string{
-		filepath.Join(os.TempDir(), "mpm.lock"),
-		filepath.Join(os.TempDir(), "mpm-daemon.lock"),
-	}
-
-	for _, lockPath := range lockPatterns {
-		info, err := os.Stat(lockPath)
-		if err == nil && !info.IsDir() {
-			// Lockfile exists - check if it's stale (>24h old)
-			if time.Since(info.ModTime()) > 24*time.Hour {
-				if err := os.Remove(lockPath); err == nil {
-					details = append(details, fmt.Sprintf("Removed stale lockfile: %s", lockPath))
-				}
-			}
-		}
-	}
-
-	status := "OK"
-	message := "No stale lockfiles found"
-	if len(details) > 0 {
-		status = "Repaired"
-		message = fmt.Sprintf("Cleaned %d stale lockfile(s)", len(details))
-	}
-
-	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:       "Lockfile Cleanup",
-		Status:     status,
-		Message:    message,
-		Details:    details,
-		DurationMs: time.Since(start).Milliseconds(),
-	})
-}
-
-// runDirectoryCheck ensures all required directories exist
-func runDirectoryCheck(result *PreFlightResult) {
-	start := time.Now()
-	details := []string{}
-
-	// Determine workspace and data directories
-	workspace := config.GetWorkspace()
-	dirs := []string{
-		filepath.Join(workspace, "mode"),      // Mode configurations
-		config.GetPersonaPath(),               // Persona configurations (correct path: projects/mpm/persona)
-		filepath.Join(workspace, "src", "db"), // Database directory
-	}
-
-	// Also check sessions directory (may not exist yet)
-	sessionsPath := getSessionsDir()
-	if sessionsPath != "" {
-		dirs = append(dirs, sessionsPath)
-	}
-
-	for _, dir := range dirs {
-		info, err := os.Stat(dir)
-		if os.IsNotExist(err) {
-			// Create missing directory
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				result.Checks = append(result.Checks, PreFlightCheck{
-					Name:    "Directory Check",
-					Status:  "Error",
-					Message: fmt.Sprintf("Failed to create directory: %s", dir),
-					Details: []string{err.Error()},
-				})
-				return
-			}
-			details = append(details, fmt.Sprintf("Created: %s", dir))
-		} else if err != nil || !info.IsDir() {
-			result.Checks = append(result.Checks, PreFlightCheck{
-				Name:    "Directory Check",
-				Status:  "Error",
-				Message: fmt.Sprintf("Path exists but is not a directory: %s", dir),
-				Details: []string{},
-			})
-			return
-		}
-	}
-
-	status := "OK"
-	message := "All required directories exist"
-	if len(details) > 0 {
-		status = "Repaired"
-		message = fmt.Sprintf("Created %d missing directory(ies)", len(details))
-	}
-
-	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:       "Directory Check",
-		Status:     status,
-		Message:    message,
-		Details:    details,
-		DurationMs: time.Since(start).Milliseconds(),
-	})
-}
-
-// runDatabaseCheck validates database integrity (pre-flight)
-func runDatabaseCheck(result *PreFlightResult) {
-	start := time.Now()
-
-	// The database is ALWAYS at mpm/src/db/mpm.db
-	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
-
-	info, err := os.Stat(dbPath)
-	if err != nil || info.IsDir() {
-		// No database found - this is OK for first run
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Database Integrity",
-			Status:     "OK",
-			Message:    "No database file found (first run expected)",
-			Details:    []string{},
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-	dbSize := info.Size()
-
-	// Database exists - check if it's readable and valid
-	details := []string{fmt.Sprintf("Database: %s (%s)", dbPath, formatBytes(dbSize))}
-
-	// Try to open the database with SQLite
-	sqlDB, err := openDatabase(dbPath)
-	if err != nil {
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Database Integrity",
-			Status:     "Error",
-			Message:    fmt.Sprintf("Cannot open database: %v", err),
-			Details:    details,
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-	defer sqlDB.Close()
-
-	// Run PRAGMA integrity_check
-	var integrityResult string
-	row := sqlDB.QueryRow("PRAGMA integrity_check")
-	if err := row.Scan(&integrityResult); err != nil {
-		details = append(details, fmt.Sprintf("Integrity check failed to run: %v", err))
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Database Integrity",
-			Status:     "Warning",
-			Message:    "Integrity check query failed",
-			Details:    details,
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-
-	if integrityResult != "ok" {
-		details = append(details, fmt.Sprintf("Integrity check result: %s", integrityResult))
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Database Integrity",
-			Status:     "Error",
-			Message:    "Database corruption detected",
-			Details:    details,
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-
-	details = append(details, "Integrity check: ok")
-
-	// Quick table count check (non-blocking)
-	var tableCount int
-	sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&tableCount)
-	details = append(details, fmt.Sprintf("Tables: %d", tableCount))
-
-	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:       "Database Integrity",
-		Status:     "OK",
-		Message:    "Database valid",
-		Details:    details,
-		DurationMs: time.Since(start).Milliseconds(),
-	})
-}
-
-// openDatabase opens a SQLite database and returns the connection
-func openDatabase(path string) (*sql.DB, error) {
-	return sql.Open("sqlite3", path+"?mode=ro") // Read-only mode for checks
-}
-
-// runPersonaCheck validates active persona exists
-func runPersonaCheck(result *PreFlightResult) {
-	start := time.Now()
-
-	personaPath := config.GetPersonaPath()
-	details := []string{}
-
-	// Check if persona directory exists
-	if _, err := os.Stat(personaPath); os.IsNotExist(err) {
-		// Persona directory missing - CRITICAL
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Persona Validation",
-			Status:     "Error",
-			Message:    "Persona directory missing: " + personaPath,
-			Details:    []string{"Daemon cannot start without persona directory"},
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-	details = append(details, fmt.Sprintf("Persona dir: %s", personaPath))
-
-	// Check for active persona marker or default persona
-	defaultPersonaPath := filepath.Join(personaPath, "default.json")
-	activePersonaPath := filepath.Join(personaPath, "active.json")
-
-	defaultExists := fileExists(defaultPersonaPath)
-	activeExists := fileExists(activePersonaPath)
-
-	if !defaultExists && !activeExists {
-		// No persona found - CRITICAL (daemon needs at least a default)
-		result.Checks = append(result.Checks, PreFlightCheck{
-			Name:       "Persona Validation",
-			Status:     "Error",
-			Message:    "No default or active persona found",
-			Details:    details,
-			DurationMs: time.Since(start).Milliseconds(),
-		})
-		return
-	}
-
-	if defaultExists {
-		details = append(details, fmt.Sprintf("Default persona: %s", defaultPersonaPath))
-	}
-	if activeExists {
-		details = append(details, fmt.Sprintf("Active persona: %s", activePersonaPath))
-	}
-
-	// Count available personas
-	entries, err := os.ReadDir(personaPath)
-	if err == nil {
-		personaCount := 0
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-				personaCount++
-			}
-		}
-		details = append(details, fmt.Sprintf("Total personas: %d", personaCount))
-	}
-
-	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:       "Persona Validation",
-		Status:     "OK",
-		Message:    "Persona configuration valid",
-		Details:    details,
-		DurationMs: time.Since(start).Milliseconds(),
-	})
-}
-
-// runPermissionsCheck verifies R/W permissions on critical paths
-func runPermissionsCheck(result *PreFlightResult) {
-	start := time.Now()
-	details := []string{}
-
-	// Critical paths that must be writable
-	writablePaths := []string{
-		filepath.Join(config.GetWorkspace(), "src", "db"), // DB directory
-	}
-
-	// Check read/write access
-	for _, path := range writablePaths {
-		if err := testWritable(path); err != nil {
-			details = append(details, fmt.Sprintf("NOT WRITABLE: %s", path))
-		} else {
-			details = append(details, fmt.Sprintf("WRITABLE: %s", path))
-		}
-	}
-
-	status := "OK"
-	message := "All critical paths have correct permissions"
-	if len(details) > 0 {
-		hasError := false
-		for _, d := range details {
-			if strings.HasPrefix(d, "NOT") {
-				hasError = true
-				break
-			}
-		}
-		if hasError {
-			status = "Error"
-			message = "Some critical paths are not writable"
-		}
-	}
-
-	result.Checks = append(result.Checks, PreFlightCheck{
-		Name:       "Permissions Check",
-		Status:     status,
-		Message:    message,
-		Details:    details,
-		DurationMs: time.Since(start).Milliseconds(),
-	})
-}
-
-// testWritable checks if a directory is writable by attempting to create a temp file
-func testWritable(dir string) error {
-	testFile := filepath.Join(dir, ".mpm-perm-test-"+fmt.Sprintf("%d", os.Getpid()))
-	defer os.Remove(testFile)
-	f, err := os.Create(testFile)
-	if err != nil {
-		return err
-	}
-	f.Close()
-	return nil
-}
-
-// getSessionsDir returns the sessions directory path
-func getSessionsDir() string {
-	// Try config first
-	if config, err := config.LoadConfig(); err == nil && config.SessionsDir != "" {
-		return config.SessionsDir
-	}
-	// Fallback to workspace (workspace IS the mpm directory, so sessions is a sibling)
-	workspace := config.GetWorkspace()
-	return filepath.Join(workspace, "sessions")
-}
-
-// fileExists checks if a file exists
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // formatBytes returns a human-readable byte count
 func formatBytes(bytes int64) string {
 	const unit = 1024
@@ -1641,7 +1242,7 @@ func printHelp() {
 		{"watch | web | review", "", false},
 		{"stats | export | synthesize", "", false},
 		{"backup | restore-db | ingest", "", false},
-		{"dlq:review | backfill-embeddings", "", false},
+		{"backfill-embeddings", "", false},
 		{"gateway", "", false},
 		{"hint | theories | decisions", "", false},
 	})
@@ -1726,17 +1327,4 @@ func printGatewayHelp() int {
 
 	fmt.Print(b.String() + "\n\n")
 	return 0
-}
-
-// parseWorkspaceFlag extracts --workspace from args (doesn't mutate global state)
-func parseWorkspaceFlag(args []string) string {
-	for i, arg := range args {
-		if arg == "--workspace" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(arg, "--workspace=") {
-			return strings.TrimPrefix(arg, "--workspace=")
-		}
-	}
-	return ""
 }

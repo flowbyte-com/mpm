@@ -8,10 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"mpm/internal/synth"
 )
 
 // ActiveContext carries the agent's active mode/persona for provenance
@@ -1053,4 +1056,503 @@ func (dm *DatabaseManager) ExplainConfidence(artifactID, artifactType string) (m
 		"success":     true,
 		"explanation": expMap,
 	}, nil
+}
+
+// ── Memory feedback / mutation tools ─────────────────────────────────────────
+//
+// These close the agent feedback loop on memories. Without them, agents
+// have to fall back to shelling `mpm reinforce <id>` etc., which forces
+// them to invent CLI quoting and parse text output. Every tool below is
+// (a) a DM method, (b) wired into the mpm call registry, (c) registered
+// as an MCP tool so agents get typed arguments and JSON responses.
+
+// ShredMemoryWithCascade hard-deletes a memory and any theory it
+// challenged. Returns a result map with success flag, the shredded
+// memory id, and (if applicable) the purged theory id so callers can
+// chain a follow-up decision. Single transaction so a partial failure
+// can't leave orphan topic_memberships rows.
+//
+// Distinct from the legacy `ShredMemory(id) error` (internal/web_db.go)
+// which only deletes the memory row and leaves topic_memberships +
+// challenged_theory_id orphaned. The CLI's handleShredMem has been doing
+// the cascade manually since 2026-06-26; this method captures the same
+// logic in the DM API so MCP/`mpm call` tools don't have to reinvent it.
+func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+
+	// Pull the challenged_theory_id out of metadata BEFORE deleting the
+	// row, so we know which theory (if any) to cascade-purge.
+	var theoryID string
+	if mem, err := dm.GetMemory(memoryID); err == nil && mem != nil {
+		if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {
+			var meta map[string]interface{}
+			if json.Unmarshal([]byte(metaStr), &meta) == nil {
+				theoryID, _ = meta["challenged_theory_id"].(string)
+			}
+		}
+	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("shred: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, memoryID); err != nil {
+		return nil, fmt.Errorf("shred: delete memberships: %w", err)
+	}
+	if theoryID != "" {
+		if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
+			return nil, fmt.Errorf("shred: delete theory: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, memoryID); err != nil {
+		return nil, fmt.Errorf("shred: delete memory: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("shred: commit: %w", err)
+	}
+
+	result := map[string]interface{}{
+		"success":    true,
+		"memory_id":  memoryID,
+		"shredded":   true,
+	}
+	if theoryID != "" {
+		result["theory_purged"] = theoryID
+	}
+	return result, nil
+}
+
+// SnoozeMemory bumps a memory's relevance without promoting it to LTM.
+// Caps weight at 9 (never reaches the LTM threshold of 10) and refreshes
+// last_accessed_at by the given number of days. The days parameter is
+// clamped to >= 1 to prevent nonsense values.
+func (dm *DatabaseManager) SnoozeMemory(memoryID string, days int) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	if days <= 0 {
+		days = 1
+	}
+	res, err := dm.db.Exec(`
+		UPDATE memories
+		SET weight = MIN(weight + 1, 9),
+		    last_accessed_at = datetime('now', '+' || ? || ' days')
+		WHERE id = ? AND deleted_at IS NULL
+	`, days, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("snooze: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, fmt.Errorf("snooze: memory %q not found", memoryID)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"days":      days,
+	}, nil
+}
+
+// SetMemoryWeight sets a memory's weight directly. Validates the weight
+// is in the [0, 100] range so a typo can't blow the scoring model out of
+// proportion. Returns an error if the memory doesn't exist.
+func (dm *DatabaseManager) SetMemoryWeight(memoryID string, weight int) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	if weight < 0 || weight > 100 {
+		return nil, fmt.Errorf("weight must be 0-100 (got %d)", weight)
+	}
+	res, err := dm.db.Exec(`UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL`, weight, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("set weight: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, fmt.Errorf("set weight: memory %q not found", memoryID)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"weight":    weight,
+	}, nil
+}
+
+// PromoteMemory converts a memory to Long-Term Memory: clears TTL, applies
+// a +9 reinforcement, and sets weight=10 + is_long_term=1. The combination
+// is what the scoring model treats as "never decay, never garbage-collect."
+func (dm *DatabaseManager) PromoteMemory(memoryID string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	// Best-effort: clear TTL and reinforce. The hard-promote UPDATE below
+	// is what actually guarantees LTM status; the pre-steps just ensure
+	// the memory's reinforcement count and TTL reflect "this is permanent."
+	_ = dm.SetMemoryTTL(memoryID, time.Time{})
+	_ = dm.ReinforceMemory(memoryID, 9)
+	res, err := dm.db.Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("promote: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, fmt.Errorf("promote: memory %q not found", memoryID)
+	}
+	return map[string]interface{}{
+		"success":      true,
+		"memory_id":    memoryID,
+		"weight":       10,
+		"is_long_term": true,
+	}, nil
+}
+
+// ReinforceMemoryTool is the tool-facing wrapper around dm.ReinforceMemory.
+// Lives here (not next to the underlying method) so tool-callers don't
+// have to import web_db internals and the call signature stays simple.
+func (dm *DatabaseManager) ReinforceMemoryTool(memoryID string, delta int) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	if delta == 0 {
+		delta = 1
+	}
+	if err := dm.ReinforceMemory(memoryID, delta); err != nil {
+		return nil, fmt.Errorf("reinforce: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"delta":     delta,
+	}, nil
+}
+
+// WeakenMemoryTool mirrors ReinforceMemoryTool for the negative direction.
+// Uses AdjustMemoryWeight (which has a hard floor at 1) rather than
+// WeakenMemory so a typo can't drive weight negative.
+func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	if delta == 0 {
+		delta = 1
+	}
+	if err := dm.AdjustMemoryWeight(memoryID, -delta); err != nil {
+		return nil, fmt.Errorf("weaken: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"delta":     -delta,
+	}, nil
+}
+
+// PatchMemoryMetadata merges a JSON patch into the existing metadata.
+// The patch must be a JSON object string; primitive values are rejected.
+// Existing keys not in the patch are preserved (merge, not replace).
+func (dm *DatabaseManager) PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	if err := dm.UpdateMemoryMetadata(memoryID, patchJSON); err != nil {
+		return nil, fmt.Errorf("patch memory: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+	}, nil
+}
+
+// ── Workflow tools (Tier 2 — added 2026-06-26) ────────────────────────────────
+
+// ReviewMemories returns memories due for spaced reinforcement review:
+// LTM or high-weight memories not accessed in `days`+ days. This is the
+// read-only counterpart to handleReview's CLI flag parsing — the JSON
+// result is suitable for both the agent's next-action selection and
+// the web UI's review panel.
+func (dm *DatabaseManager) ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error) {
+	if daysSinceAccess <= 0 {
+		daysSinceAccess = 30
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	items, err := dm.GetSpacedReinforcementReview(daysSinceAccess, limit)
+	if err != nil {
+		return nil, fmt.Errorf("review: %w", err)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"items":   items,
+		"count":   len(items),
+		"days":    daysSinceAccess,
+		"limit":   limit,
+	}, nil
+}
+
+// SynthesizeMemoryFor runs LLM-driven merge synthesis for a single memory
+// against all other non-LTM memories. AutoSynthesize's per-call contract:
+// it scans for near-miss clusters and either merges them (writing a new
+// synthesized memory row + soft-deleting the originals) or no-ops.
+//
+// Lazy SynthClient construction: each call instantiates a fresh client
+// from env (MINIMAX_API_KEY / OPENAI_API_KEY). The client is stateless
+// apart from its config, so per-call creation is fine — the synthesis
+// loop is the slow part, not client init.
+//
+// Returns a result map with success flag and the auto-synthesize stats
+// (scanned/merged/no-op counts). Errors from the LLM surface as Go errors.
+func (dm *DatabaseManager) SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	// Fetch the memory to get its content for synthesis. GetMemory
+	// returns sql.ErrNoRows for missing rows (not nil map) — collapse
+	// both to a friendlier "not found" error so callers see one shape.
+	mem, err := dm.GetMemory(memoryID)
+	if err != nil || mem == nil {
+		return nil, fmt.Errorf("synthesize: memory %q not found", memoryID)
+	}
+	content, _ := mem["content"].(string)
+	if content == "" {
+		return nil, fmt.Errorf("synthesize: memory %q has no content to synthesize", memoryID)
+	}
+
+	client := synth.NewSynthClient()
+	AutoSynthesize(ctx, dm, client, memoryID, content)
+
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"ran_scan":  true,
+	}, nil
+}
+
+// GCOptions configures a single GC run invoked via mpm call / MCP. The
+// safe defaults (DryRun=true, Aggressive=false, MaxAgeHours=24) make
+// accidental damage unlikely. Agents wanting destructive runs must
+// explicitly set DryRun=false. The full CLI flag surface (--review,
+// --purge, --shred-negative) is intentionally NOT exposed here — those
+// modes are operationally distinct and stay on the `mpm gc` CLI where
+// humans can see what they're doing.
+type GCOptions struct {
+	DryRun       bool // when true, no writes — pure stats
+	Aggressive   bool // doubled decay rate
+	MaxAgeHours  int  // cooldown between successive GC runs
+}
+
+// GCRunResult is the structured output of dm.RunGC. Every numeric field
+// is the count of affected rows; booleans signal what was actually
+// attempted vs skipped. DeadMemories is populated on dry runs so
+// agents can decide whether to escalate (purge/shred).
+type GCRunResult struct {
+	Ran           bool       // false if cooldown skipped the run
+	CooldownSkip  bool       // true if cooldown blocked this run
+	LastGCRan     *time.Time // populated only on cooldown skip
+	Scanned       int
+	Updated       int
+	SoftDeleted   int
+	Shredded      int
+	AuditPruned   int
+	HandoffPruned int
+	DeadMemories  []map[string]interface{} // first 50 dead for inspection
+}
+
+// RunGC executes one maintenance pass with the standard cooldown cap.
+// Stats are returned regardless of dry-run flag so agents can plan
+// follow-up actions (e.g., "30 memories would die — escalate to shred?").
+// Safe for concurrent invocation: the cooldown claim is atomic.
+//
+// Failure modes:
+//   - cooldown active → Ran=false, CooldownSkip=true, LastGCRan set
+//   - SQL error → error returned, no partial writes (single transaction
+//     for the batch update so a mid-run failure rolls everything back)
+func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
+	if opts.MaxAgeHours <= 0 {
+		opts.MaxAgeHours = 24
+	}
+	result := &GCRunResult{}
+
+	// Atomic cooldown claim — same SQL as the test pins. See
+	// cmd/mpm/handlers.go for the multi-case contract.
+	now := time.Now()
+	gcTimestampJSON, _ := json.Marshal(map[string]string{"updated_at": now.Format(time.RFC3339)})
+	claim, err := dm.db.Exec(`
+		INSERT INTO system_config (key, raw_json, content_hash)
+		VALUES ('last_gc_at', ?, '')
+		ON CONFLICT(key) DO UPDATE SET
+		  raw_json = excluded.raw_json,
+		  updated_at = CURRENT_TIMESTAMP
+		WHERE (
+		  system_config.raw_json IS NULL
+		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
+		  OR datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+		)
+	`, string(gcTimestampJSON), strconv.Itoa(opts.MaxAgeHours))
+	if err != nil {
+		return nil, fmt.Errorf("gc: cooldown claim: %w", err)
+	}
+	rowsAffected, _ := claim.RowsAffected()
+	if rowsAffected == 0 {
+		result.CooldownSkip = true
+		if lastGC, gerr := dm.GetSystemConfig("last_gc_at"); gerr == nil {
+			// GetSystemConfig returns updated_at as time.Time (it comes from
+			// the row's updated_at column, parsed by sql.Scan into time.Time).
+			if t, ok := lastGC["updated_at"].(time.Time); ok && !t.IsZero() {
+				result.LastGCRan = &t
+			}
+		}
+		return result, nil
+	}
+
+	// Audit + handoff retention sweeps (always run on a successful
+	// claim — these are cheap and central to the GC contract).
+	if pruned, err := dm.PruneAuditLog(30); err == nil {
+		result.AuditPruned = int(pruned)
+	}
+	if pruned, err := dm.PruneHandoffs(90); err == nil {
+		result.HandoffPruned = int(pruned)
+	}
+
+	// Compute decay for every non-deleted memory.
+	rows, err := dm.db.Query(`
+		SELECT id, weight, last_accessed_at, created_at, is_long_term
+		FROM memories WHERE deleted_at IS NULL
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("gc: scan memories: %w", err)
+	}
+	defer rows.Close()
+
+	type delta struct {
+		id        string
+		newWeight float64
+		isLTM     bool
+	}
+	var deltas []delta
+	monotonicNow := time.Now()
+
+	for rows.Next() {
+		result.Scanned++
+		var id string
+		var weight int
+		var lastAccessed, createdAt *time.Time
+		var isLTM bool
+		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
+			continue
+		}
+		last := lastAccessed
+		if last == nil {
+			last = createdAt
+		}
+		if last == nil {
+			continue
+		}
+		days := monotonicNow.Sub(*last).Hours() / 24.0
+		decay := gcComputeDecay(float64(weight), days, isLTM, createdAt, opts.Aggressive, monotonicNow)
+		newW := float64(weight) - decay
+		if newW < -10.0 {
+			newW = -10.0
+		}
+		if (isLTM || float64(weight) >= 10) && newW < 1.0 {
+			newW = 1.0
+		}
+		lifetimeLTM := isLTM || float64(weight) >= 10
+		deltas = append(deltas, delta{id: id, newWeight: newW, isLTM: lifetimeLTM})
+
+		if newW <= 0.0 && !lifetimeLTM {
+			var preview string
+			_ = dm.db.QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&preview)
+			result.DeadMemories = append(result.DeadMemories, map[string]interface{}{
+				"id":      id,
+				"content": preview,
+				"weight":  weight,
+			})
+			// Cap the preview list — full list available via SQL for agents
+			// that want to enumerate.
+			if len(result.DeadMemories) >= 50 {
+				break
+			}
+		}
+	}
+
+	// Batch-apply weight updates in a single transaction. Skip entirely
+	// on dry-run — the whole point of dry-run is "show me what would
+	// happen without changing anything."
+	if !opts.DryRun && len(deltas) > 0 {
+		tx, txErr := dm.db.Begin()
+		if txErr != nil {
+			return nil, fmt.Errorf("gc: begin tx: %w", txErr)
+		}
+		rolledBack := false
+		defer func() {
+			if !rolledBack {
+				_ = tx.Rollback()
+			}
+		}()
+		for _, d := range deltas {
+			rounded := int(math.Round(d.newWeight))
+			if d.isLTM && rounded < 1 {
+				rounded = 1
+			} else if !d.isLTM && rounded < -10 {
+				rounded = -10
+			}
+			if _, err := tx.Exec(`UPDATE memories SET weight = ? WHERE id = ?`, rounded, d.id); err != nil {
+				_ = tx.Rollback()
+				rolledBack = true
+				return nil, fmt.Errorf("gc: update weight %s: %w", d.id, err)
+			}
+			result.Updated++
+		}
+		if err := tx.Commit(); err != nil {
+			rolledBack = true
+			return nil, fmt.Errorf("gc: commit: %w", err)
+		}
+	}
+
+	result.Ran = true
+	return result, nil
+}
+
+// gcComputeDecay mirrors cmd/mpm/handlers.go:computeDecay verbatim — the
+// CLI handler still owns the inline copy for its inline flow, and this
+// is the package-internal version for RunGC. Kept here (not exported)
+// because decay math is implementation detail; if it ever changes, both
+// copies must move together.
+//
+//   - LTM memory: very slow decay (0.01 * days)
+//   - High-weight (>=10, non-LTM): slow (0.02 * days)
+//   - Medium-weight (5-9): moderate (0.05 * days)
+//   - Low-weight: faster, scaled by age (newer memories decay faster)
+//
+// `aggressive` doubles every rate. `createdAt` is required for the
+// low-weight branch (age factor); nil falls back to base rate.
+func gcComputeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
+	multiplier := 1.0
+	if aggressive {
+		multiplier = 2.0
+	}
+	if isLongTerm {
+		return daysSinceAccess * 0.01 * multiplier
+	}
+	if weight >= 10 {
+		return daysSinceAccess * 0.02 * multiplier
+	}
+	if weight >= 5 {
+		return daysSinceAccess * 0.05 * multiplier
+	}
+	ageFactor := 1.0
+	if createdAt != nil {
+		daysSinceCreated := now.Sub(*createdAt).Hours() / 24.0
+		if daysSinceCreated > 30.0 {
+			ageFactor = 1.0
+		} else {
+			ageFactor = daysSinceCreated / 30.0
+		}
+	}
+	baseDecay := 0.1 + 0.2*ageFactor
+	return daysSinceAccess * baseDecay * multiplier
 }

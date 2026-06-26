@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -117,6 +118,23 @@ var toolRegistry = map[string]ToolHandler{
 
 	// Release
 	"log_to_changelog": callLogToChangelog,
+
+	// Memory feedback / mutation (agent loop closure — added 2026-06-26
+	// to close the gap where agents had to shell `mpm reinforce <id>` etc.)
+	"shred_memory":       callShredMemory,
+	"reinforce_memory":   callReinforceMemory,
+	"weaken_memory":      callWeakenMemory,
+	"snooze_memory":       callSnoozeMemory,
+	"set_memory_weight":  callSetMemoryWeight,
+	"patch_memory":       callPatchMemory,
+	"promote_memory":     callPromoteMemory,
+
+	// Workflow (Tier 2 — added 2026-06-26)
+	"review_memories":     callReviewMemories,
+	"synthesize_memory":   callSynthesizeMemory,
+
+	// Workflow (Tier 3 — added 2026-06-26)
+	"gc_run":              callGCRun,
 }
 
 // handleCall is the main entry point for `mpm call <tool>`.
@@ -487,6 +505,196 @@ func callRecordDecision(p map[string]interface{}) (interface{}, error) {
 		tags,
 		internal.ActiveContext{Mode: activeMode, Persona: activePersona},
 	)
+}
+
+// ── Memory feedback / mutation tools ─────────────────────────────────────────
+//
+// Wire-format (all accept JSON payload via --payload or stdin):
+//   shred_memory:        {"memory_id": "<id>"}
+//   reinforce_memory:    {"memory_id": "<id>", "delta": 1}
+//   weaken_memory:       {"memory_id": "<id>", "delta": 1}
+//   snooze_memory:       {"memory_id": "<id>", "days": 1}
+//   set_memory_weight:   {"memory_id": "<id>", "weight": 5}
+//   patch_memory:        {"memory_id": "<id>", "patch": {"key": "value"}}
+//   promote_memory:      {"memory_id": "<id>"}
+//
+// Added 2026-06-26 to close the agent feedback loop. Without these, agents
+// had to shell `mpm reinforce <id>` etc., which forces them to invent CLI
+// quoting and parse text output — neither works reliably across
+// punctuation-heavy memory ids or non-ASCII content.
+
+func callShredMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.ShredMemoryWithCascade(id)
+}
+
+func callReinforceMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	delta := int(internal.ParseFloatOr(p["delta"], 1))
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.ReinforceMemoryTool(id, delta)
+}
+
+func callWeakenMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	delta := int(internal.ParseFloatOr(p["delta"], 1))
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.WeakenMemoryTool(id, delta)
+}
+
+func callSnoozeMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	days := int(internal.ParseFloatOr(p["days"], 1))
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.SnoozeMemory(id, days)
+}
+
+func callSetMemoryWeight(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	weight := int(internal.ParseFloatOr(p["weight"], 0))
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.SetMemoryWeight(id, weight)
+}
+
+func callPatchMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	patch, _ := p["patch"]
+	// patch must be a JSON object (map). The DM layer takes a string,
+	// so marshal here. A nil/primitive patch is rejected upstream by
+	// the DM (UpdateMemoryMetadata validates the prefix).
+	patchJSON, err := json.Marshal(patch)
+	if err != nil {
+		return nil, fmt.Errorf("patch must be JSON-marshalable: %w", err)
+	}
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.PatchMemoryMetadata(id, string(patchJSON))
+}
+
+func callPromoteMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.PromoteMemory(id)
+}
+
+// callReviewMemories returns memories due for spaced reinforcement review.
+// Wire-format: {"days": 30, "limit": 20} — both optional with sensible defaults.
+func callReviewMemories(p map[string]interface{}) (interface{}, error) {
+	days := int(internal.ParseFloatOr(p["days"], 30))
+	limit := int(internal.ParseFloatOr(p["limit"], 20))
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.ReviewMemories(days, limit)
+}
+
+// callSynthesizeMemory runs LLM-driven merge synthesis for one memory.
+// Wire-format: {"memory_id": "<id>"}. Lazy SynthClient creation; requires
+// MINIMAX_API_KEY or OPENAI_API_KEY in env to actually invoke the LLM.
+func callSynthesizeMemory(p map[string]interface{}) (interface{}, error) {
+	id, _ := p["memory_id"].(string)
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+	return dm.SynthesizeMemoryFor(context.Background(), id)
+}
+
+// callGCRun wraps dm.RunGC with a typed payload. Safe defaults:
+// dry_run=true (no writes), aggressive=false, max_age_hours=24.
+// Callers must explicitly set dry_run=false to mutate state. The full
+// CLI flag surface (--review, --purge, --shred-negative) stays on
+// `mpm gc` because those modes are operationally distinct.
+func callGCRun(p map[string]interface{}) (interface{}, error) {
+	dryRun := parseBoolDefault(p["dry_run"], true) // safe default
+	aggressive := parseBoolDefault(p["aggressive"], false)
+	maxAge := int(internal.ParseFloatOr(p["max_age_hours"], 24))
+
+	dm, closeDM, err := openCallDM()
+	if err != nil {
+		return nil, err
+	}
+	defer closeDM()
+
+	out, err := dm.RunGC(internal.GCOptions{
+		DryRun:      dryRun,
+		Aggressive:  aggressive,
+		MaxAgeHours: maxAge,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := map[string]interface{}{
+		"success":         true,
+		"dry_run":         dryRun,
+		"cooldown_skip":   out.CooldownSkip,
+		"ran":             out.Ran,
+		"scanned":         out.Scanned,
+		"updated":         out.Updated,
+		"audit_pruned":    out.AuditPruned,
+		"handoff_pruned":  out.HandoffPruned,
+		"dead_memory_count": len(out.DeadMemories),
+		"dead_memories":   out.DeadMemories,
+	}
+	if out.LastGCRan != nil {
+		result["last_gc_ran"] = out.LastGCRan.Format(time.RFC3339)
+	}
+	return result, nil
+}
+
+// parseBoolDefault extracts a bool from the payload, falling back to def.
+// Accepts both native bool (JSON true/false) and the int-shaped values
+// some callers emit (0/1, "true"/"false"). Lenient on purpose — payload
+// shape across MCP / mpm call / openclaw-plugin isn't strictly uniform.
+func parseBoolDefault(v interface{}, def bool) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	case string:
+		switch t {
+		case "true", "True", "TRUE", "1", "yes":
+			return true
+		case "false", "False", "FALSE", "0", "no", "":
+			return false
+		}
+	}
+	return def
 }
 
 // callSaveLesson persists a lesson to MPM.

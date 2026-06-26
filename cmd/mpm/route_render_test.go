@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -533,72 +532,6 @@ func TestRenderRoute_DirectiveInjectionOptIn(t *testing.T) {
 			t.Errorf("renderRoute() should preserve mode section\nGot: %s", got)
 		}
 	})
-}
-
-func TestInvalidateDirectiveCache(t *testing.T) {
-	// Cache is package-level. Each subtest must start from a known state.
-	InvalidateDirectiveCache()
-	t.Cleanup(InvalidateDirectiveCache)
-
-	t.Run("cache returns empty when no fetch has occurred", func(t *testing.T) {
-		InvalidateDirectiveCache()
-		// Without any prior fetch, the cache has no entry for this key.
-		// We don't directly inspect the cache, but we can confirm
-		// InvalidateDirectiveCache doesn't error and a subsequent call
-		// still returns empty for a non-existent workspace.
-		got := fetchTopDirectivesCached("/nonexistent/path/cache-test", 5)
-		if got != "" {
-			t.Errorf("fetchTopDirectivesCached() for missing DB = %q, want empty", got)
-		}
-	})
-
-	t.Run("two invalidates in a row are safe", func(t *testing.T) {
-		InvalidateDirectiveCache()
-		InvalidateDirectiveCache() // must not panic on empty map
-	})
-
-	t.Run("concurrent invalidates are safe", func(t *testing.T) {
-		var wg sync.WaitGroup
-		for i := 0; i < 10; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				InvalidateDirectiveCache()
-			}()
-		}
-		wg.Wait()
-	})
-}
-
-func TestFetchTopDirectivesCached_ShortCircuits(t *testing.T) {
-	InvalidateDirectiveCache()
-	t.Cleanup(InvalidateDirectiveCache)
-
-	// All subtests use inputs that fetchTopDirectives returns "" for, so the
-	// only thing we're really asserting is that the cache wrapper doesn't
-	// change the short-circuit behavior. We're not measuring timing here
-	// (flaky) — we're asserting semantic equivalence with fetchTopDirectives
-	// for the no-injection paths.
-	tests := []struct {
-		name      string
-		workspace string
-		limit     int
-	}{
-		{"empty workspace", "", 5},
-		{"zero limit", "/tmp", 0},
-		{"negative limit", "/tmp", -1},
-		{"no DB at workspace", t.TempDir(), 5},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			InvalidateDirectiveCache()
-			cached := fetchTopDirectivesCached(tt.workspace, tt.limit)
-			direct := fetchTopDirectives(tt.workspace, tt.limit)
-			if cached != direct {
-				t.Errorf("cached = %q, direct = %q (cache should be semantically equivalent on short-circuit)", cached, direct)
-			}
-		})
-	}
 }
 
 func TestRenderRoute_DirectiveCacheTTLBounds(t *testing.T) {

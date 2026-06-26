@@ -70,6 +70,24 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 	s.AddTool(toolShowConfidence(), handleShowConfidence(dm))
 	s.AddTool(toolRecomputeConfidence(), handleRecomputeConfidence(dm))
 	s.AddTool(toolExplainConfidence(), handleExplainConfidence(dm))
+
+	// Memory feedback / mutation tools (added 2026-06-26 — close the
+	// agent feedback loop so agents don't have to shell out to `mpm
+	// reinforce <id>` and parse text output).
+	s.AddTool(toolShredMemory(), handleShredMemory(dm))
+	s.AddTool(toolReinforceMemory(), handleReinforceMemory(dm))
+	s.AddTool(toolWeakenMemory(), handleWeakenMemory(dm))
+	s.AddTool(toolSnoozeMemory(), handleSnoozeMemory(dm))
+	s.AddTool(toolSetMemoryWeight(), handleSetMemoryWeight(dm))
+	s.AddTool(toolPatchMemory(), handlePatchMemory(dm))
+	s.AddTool(toolPromoteMemory(), handlePromoteMemory(dm))
+
+	// Workflow tools (Tier 2 — added 2026-06-26)
+	s.AddTool(toolReviewMemories(), handleReviewMemories(dm))
+	s.AddTool(toolSynthesizeMemory(), handleSynthesizeMemory(dm))
+
+	// Workflow tools (Tier 3 — added 2026-06-26)
+	s.AddTool(toolGCRun(), handleGCRun(dm))
 }
 
 // jsonResult marshals v to JSON and wraps it in an mcp text result. Errors
@@ -1235,5 +1253,334 @@ func handleExplainConfidence(dm *internal.DatabaseManager) server.ToolHandlerFun
 			return mcp.NewToolResultErrorFromErr("explain_confidence failed", err), nil
 		}
 		return jsonResult(out), nil
+	}
+}
+
+// ── Memory feedback / mutation tools (added 2026-06-26) ───────────────────────
+//
+// These mirror the mpm call registry tools and let agents close the memory
+// feedback loop via typed JSON arguments instead of shell-quoting `mpm
+// reinforce <id>` etc. All schemas require memory_id; the numeric args
+// (delta/days/weight) are optional with sensible defaults.
+
+func toolShredMemory() mcp.Tool {
+	return mcp.NewTool("shred_memory",
+		mcp.WithDescription(
+			"Secure-delete a memory and any theory it challenged. Single transaction: "+
+				"removes topic_memberships, the memory row, and the linked theory (if any). "+
+				"Use after challenge_memory when the memory is confirmed wrong, or to "+
+				"remove a stale/duplicate row that you no longer want in recall results."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to delete.")),
+	)
+}
+
+func handleShredMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		out, err := dm.ShredMemoryWithCascade(id)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("shred_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolReinforceMemory() mcp.Tool {
+	return mcp.NewTool("reinforce_memory",
+		mcp.WithDescription(
+			"Increment a memory's reinforcement_count and bump its weight slightly. "+
+				"Call after the user agrees with or re-confirms a memory — stronger "+
+				"reinforcement means higher ranking in recall results and slower decay. "+
+				"Use delta > 1 for emphatic agreement; default 1 for normal."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to reinforce.")),
+		mcp.WithNumber("delta", mcp.DefaultNumber(1), mcp.Description("Reinforcement delta. Default 1.")),
+	)
+}
+
+func handleReinforceMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		delta := int(parseNum(args["delta"], 1))
+		out, err := dm.ReinforceMemoryTool(id, delta)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("reinforce_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolWeakenMemory() mcp.Tool {
+	return mcp.NewTool("weaken_memory",
+		mcp.WithDescription(
+			"Decrement a memory's weight with a hard floor at 1. Use when the user "+
+				"corrects or disconfirms a memory — soft punishment that lets natural "+
+				"decay finish the job without making the memory permanently "+
+				"invisible. For stronger signals (confirmed wrong), use shred_memory "+
+				"or challenge_memory instead."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to weaken.")),
+		mcp.WithNumber("delta", mcp.DefaultNumber(1), mcp.Description("Weaken delta. Default 1.")),
+	)
+}
+
+func handleWeakenMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		delta := int(parseNum(args["delta"], 1))
+		out, err := dm.WeakenMemoryTool(id, delta)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("weaken_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolSnoozeMemory() mcp.Tool {
+	return mcp.NewTool("snooze_memory",
+		mcp.WithDescription(
+			"Bump a memory's relevance without promoting it to LTM. Caps weight at 9 "+
+				"(never reaches the LTM threshold of 10) and refreshes last_accessed_at. "+
+				"Use when the agent just re-encountered a memory and wants to keep it "+
+				"sticky for a few more days without locking it in permanently."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to snooze.")),
+		mcp.WithNumber("days", mcp.DefaultNumber(1), mcp.Description("Days to extend relevance. Default 1.")),
+	)
+}
+
+func handleSnoozeMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		days := int(parseNum(args["days"], 1))
+		out, err := dm.SnoozeMemory(id, days)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("snooze_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolSetMemoryWeight() mcp.Tool {
+	return mcp.NewTool("set_memory_weight",
+		mcp.WithDescription(
+			"Set a memory's weight directly. Use when you know the exact weight "+
+				"(e.g. loading a saved ranking, applying a curator decision) and "+
+				"don't want to increment/decrement relative to the current value. "+
+				"Weight is clamped to [0, 100] — use promote_memory for the standard "+
+				"promote-to-LTM (weight=10 + is_long_term=1) flow."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to update.")),
+		mcp.WithNumber("weight", mcp.Required(), mcp.Description("New weight, 0-100 inclusive.")),
+	)
+}
+
+func handleSetMemoryWeight(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		weight := int(parseNum(args["weight"], 0))
+		out, err := dm.SetMemoryWeight(id, weight)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("set_memory_weight failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolPatchMemory() mcp.Tool {
+	return mcp.NewTool("patch_memory",
+		mcp.WithDescription(
+			"Merge a JSON object patch into the memory's metadata column. "+
+				"Existing keys not in the patch are preserved; keys in the patch "+
+				"overwrite existing values. Use for tagging memories post-hoc "+
+				"(e.g. set source/verified_by/decay_class) without re-writing the "+
+				"whole metadata blob. For raw SQL updates, use save_to_memory instead."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to patch.")),
+		mcp.WithObject("patch",
+			mcp.Required(),
+			mcp.Description("JSON object to merge into metadata."),
+		),
+	)
+}
+
+func handlePatchMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		patch, ok := args["patch"].(map[string]interface{})
+		if !ok {
+			return mcp.NewToolResultError("patch must be a JSON object"), nil
+		}
+		patchJSON, err := json.Marshal(patch)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("patch must be JSON-marshalable", err), nil
+		}
+		out, err := dm.PatchMemoryMetadata(id, string(patchJSON))
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("patch_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolPromoteMemory() mcp.Tool {
+	return mcp.NewTool("promote_memory",
+		mcp.WithDescription(
+			"Promote a memory to Long-Term Memory (LTM): clear its TTL, apply a strong "+
+				"reinforcement, set weight=10, and mark is_long_term=1. The scoring "+
+				"model treats LTM memories as immune to decay — use for facts that "+
+				"should survive across sessions (user identity, environment, core "+
+				"preferences). Use save_to_memory with weight >= 10 for the same "+
+				"effect on creation; this tool promotes an EXISTING memory."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to promote.")),
+	)
+}
+
+func handlePromoteMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		out, err := dm.PromoteMemory(id)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("promote_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── Workflow tools (Tier 2 — added 2026-06-26) ────────────────────────────────
+
+func toolReviewMemories() mcp.Tool {
+	return mcp.NewTool("review_memories",
+		mcp.WithDescription(
+			"Return memories due for spaced reinforcement review: LTM or high-weight "+
+				"memories not accessed in `days`+ days. Use this at session-start or before "+
+				"a maintenance pass to surface what's stale. Output is the same shape as "+
+				"`query_long_term_memory` — items are ordered by last_accessed_at ascending."),
+		mcp.WithNumber("days", mcp.DefaultNumber(30), mcp.Description("Days since last access threshold. Default 30.")),
+		mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("Max items to return. Default 20.")),
+	)
+}
+
+func handleReviewMemories(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		days := int(parseNum(args["days"], 30))
+		limit := int(parseNum(args["limit"], 20))
+		out, err := dm.ReviewMemories(days, limit)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("review_memories failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+func toolSynthesizeMemory() mcp.Tool {
+	return mcp.NewTool("synthesize_memory",
+		mcp.WithDescription(
+			"Run LLM-driven merge synthesis for a single memory against all other "+
+				"non-LTM memories. The LLM (MiniMax or OpenAI, picked by env config) decides "+
+				"if any near-miss clusters exist and either merges them into a new "+
+				"synthesized row (soft-deleting the originals) or no-ops. Use after "+
+				"discovering a memory that you suspect has duplicates. Requires "+
+				"MINIMAX_API_KEY or OPENAI_API_KEY in env."),
+		mcp.WithString("memory_id", mcp.Required(), mcp.Description("The MPM memory ID to scan for near-misses.")),
+	)
+}
+
+func handleSynthesizeMemory(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		id, _ := args["memory_id"].(string)
+		if id == "" {
+			return mcp.NewToolResultError("memory_id is required"), nil
+		}
+		out, err := dm.SynthesizeMemoryFor(ctx, id)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("synthesize_memory failed", err), nil
+		}
+		return jsonResult(out), nil
+	}
+}
+
+// ── Workflow tools (Tier 3 — added 2026-06-26) ────────────────────────────────
+
+func toolGCRun() mcp.Tool {
+	return mcp.NewTool("gc_run",
+		mcp.WithDescription(
+			"Run one GC maintenance pass: decay sweep + audit/handoff retention. "+
+				"Safe defaults: dry_run=true (no writes), aggressive=false, max_age_hours=24. "+
+				"Set dry_run=false to actually mutate state. The cooldown cap "+
+				"(max_age_hours) prevents overlapping runs — a second invocation "+
+				"within the cooldown window returns cooldown_skip=true instead of "+
+				"running again. Result includes scanned/updated counts and up to 50 "+
+				"dead-memory previews so the agent can decide whether to escalate "+
+				"(purge/shred are NOT exposed here; use the `mpm gc` CLI for those)."),
+		mcp.WithBoolean("dry_run", mcp.DefaultBool(true), mcp.Description("If true (default), no writes — pure stats.")),
+		mcp.WithBoolean("aggressive", mcp.DefaultBool(false), mcp.Description("Double the decay rate.")),
+		mcp.WithNumber("max_age_hours", mcp.DefaultNumber(24), mcp.Description("Cooldown between successive GC runs. Default 24.")),
+	)
+}
+
+func handleGCRun(dm *internal.DatabaseManager) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		dryRun := true
+		if v, ok := args["dry_run"].(bool); ok {
+			dryRun = v
+		}
+		aggressive := false
+		if v, ok := args["aggressive"].(bool); ok {
+			aggressive = v
+		}
+		maxAge := int(parseNum(args["max_age_hours"], 24))
+
+		out, err := dm.RunGC(internal.GCOptions{
+			DryRun:      dryRun,
+			Aggressive:  aggressive,
+			MaxAgeHours: maxAge,
+		})
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("gc_run failed", err), nil
+		}
+
+		result := map[string]interface{}{
+			"success":           true,
+			"dry_run":           dryRun,
+			"cooldown_skip":     out.CooldownSkip,
+			"ran":               out.Ran,
+			"scanned":           out.Scanned,
+			"updated":           out.Updated,
+			"audit_pruned":      out.AuditPruned,
+			"handoff_pruned":    out.HandoffPruned,
+			"dead_memory_count": len(out.DeadMemories),
+			"dead_memories":     out.DeadMemories,
+		}
+		if out.LastGCRan != nil {
+			result["last_gc_ran"] = out.LastGCRan.Format(time.RFC3339)
+		}
+		return jsonResult(result), nil
 	}
 }
