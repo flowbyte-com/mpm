@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	"mpm/internal"
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 )
 
 // =============================================================================
@@ -41,7 +41,7 @@ func handleIngest(args []string) int {
 	case "--undo", "undo":
 		return handleIngestUndo(args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "[!] Unknown ingest subcommand: %s\n", subcommand)
+		usererror.Error("Unknown ingest subcommand: %s", subcommand)
 		printIngestHelp()
 		return 1
 	}
@@ -91,21 +91,21 @@ func handleIngestSource(args []string) int {
 			dryRun = true
 		case "--batch-size":
 			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "[!] --batch-size requires a number\n")
+				usererror.Error("--batch-size requires a number")
 				return 1
 			}
 			fmt.Sscanf(args[i+1], "%d", &batchSize)
 			i++
 		case "--import-id":
 			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "[!] --import-id requires an ID\n")
+				usererror.Error("--import-id requires an ID")
 				return 1
 			}
 			importID = args[i+1]
 			i++
 		case "--source":
 			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "[!] --source requires a path\n")
+				usererror.Error("--source requires a path")
 				return 1
 			}
 			sourcePath = args[i+1]
@@ -127,14 +127,14 @@ func handleIngestSource(args []string) int {
 	// Detect schema first
 	schema, err := internal.DetectSchema(sourcePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Schema detection failed: %v\n", err)
+		usererror.Error("Schema detection failed: %v", err)
 		return 1
 	}
 	fmt.Printf("  Schema: %s (%s)\n", schema.DBType, schema.Tables[0].Name)
 
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -145,7 +145,7 @@ func handleIngestSource(args []string) int {
 
 	stats, err := dm.IngestOpenClaw(sourcePath, batchSize, importID, dryRun)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ingest failed: %v\n", err)
+		usererror.Error("Ingest failed: %v", err)
 		return 1
 	}
 
@@ -164,7 +164,7 @@ func handleIngestSource(args []string) int {
 // handleIngestListSchemas inspects a source DB's schema
 func handleIngestListSchemas(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "[!] Usage: mpm ingest --list-schemas <path>\n")
+		usererror.Usage("mpm ingest --list-schemas <path>")
 		return 1
 	}
 	path := args[0]
@@ -174,7 +174,7 @@ func handleIngestListSchemas(args []string) int {
 
 	schema, err := internal.DetectSchema(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		usererror.Error("%v", err)
 		return 1
 	}
 
@@ -191,14 +191,14 @@ func handleIngestListSchemas(args []string) int {
 func handleIngestStatus(args []string) int {
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
 
 	counts, err := dm.GetIngestStatus()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to get status: %v\n", err)
+		usererror.Error("Failed to get status: %v", err)
 		return 1
 	}
 
@@ -245,7 +245,7 @@ func handleIngestReview(args []string) int {
 		switch args[i] {
 		case "--batch":
 			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "[!] --batch requires a number\n")
+				usererror.Error("--batch requires a number")
 				return 1
 			}
 			fmt.Sscanf(args[i+1], "%d", &batchSize)
@@ -257,7 +257,7 @@ func handleIngestReview(args []string) int {
 
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -270,7 +270,7 @@ func handleIngestReview(args []string) int {
 
 	pending, err := dm.GetRawMemoriesByStatus("pending", batchSize)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to fetch pending: %v\n", err)
+		usererror.Error("Failed to fetch pending: %v", err)
 		return 1
 	}
 
@@ -294,7 +294,7 @@ func handleIngestReview(args []string) int {
 func handleIngestCleanup(args []string) int {
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -307,7 +307,7 @@ func handleIngestCleanup(args []string) int {
 		WHERE status = 'pending' AND expires_at > 0 AND expires_at < ?
 	`, now)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Cleanup failed: %v\n", err)
+		usererror.Warn("Cleanup failed: %v", err)
 		return 1
 	}
 	expired, _ := result.RowsAffected()
@@ -332,14 +332,14 @@ func handleIngestCleanup(args []string) int {
 func handleIngestHistory(args []string) int {
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
 
 	batches, err := dm.ListIngestBatches()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to get history: %v\n", err)
+		usererror.Error("Failed to get history: %v", err)
 		return 1
 	}
 
@@ -365,14 +365,14 @@ func handleIngestHistory(args []string) int {
 // handleIngestUndo reverts an ingest run
 func handleIngestUndo(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "[!] Usage: mpm ingest --undo <batch_id>\n")
+		usererror.Usage("mpm ingest --undo <batch_id>")
 		return 1
 	}
 	batchID := args[0]
 
 	dm, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -382,7 +382,7 @@ func handleIngestUndo(args []string) int {
 		DELETE FROM raw_memories WHERE import_batch = ? AND status IN ('pending', 'approved', 'reviewing')
 	`, batchID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Undo failed: %v\n", err)
+		usererror.Error("Undo failed: %v", err)
 		return 1
 	}
 	deleted, _ := result.RowsAffected()
