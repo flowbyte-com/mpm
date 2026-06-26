@@ -311,8 +311,7 @@ history row.
 | decision | 0.6 |
 | lesson | 0.7 |
 
-See `docs/superpowers/specs/2026-06-16-confidence-evidence-foundation-design.md`
-for the full design rationale.
+See the [Confidence and Evidence](#confidence-and-evidence) section above for the design rationale; the original design document from 2026-06-16 lives in git history (commit `b51066a`) but is no longer maintained as a separate doc — README is the source of truth.
 
 ### How It All Connects
 
@@ -1456,17 +1455,6 @@ projects/mpm/
 ├── mode/                            # Mode .md files (debugging, research, etc.)
 ├── persona/                         # Persona .md files
 ├── active.json                      # Active mode/persona state
-├── docs/
-│   ├── OPENCLAW.md                  # OpenClaw plugin integration guide
-│   ├── MPM_WISHLIST.md              # Roadmap / wishlist
-│   ├── archive_v1/                  # Historical specs and designs (reference)
-│   │   ├── epistemology-engine-spec.md
-│   │   ├── MPM_PRUNING.md
-│   │   ├── MPM_PROACTIVE_REVIEW_HOOK.md
-│   │   ├── MPM_SYNTHESIS_DEDUP.md
-│   │   ├── BREAK_90.md              # Feature scoring + roadmap
-│   │   └── ...
-│   └── superpowers/                 # Deep-dive specs
 ├── agent-plugins/                 # All MPM agent integrations live here
 │   └── hermes-mpm-plugin/          # Hermes Python agent plugin (CLI-bound; Hermes lacks native MCP)
 │       └── install.md
@@ -1476,15 +1464,15 @@ projects/mpm/
 
 ---
 
-## Roadmap / Wishlist
+## Roadmap
 
-See [`docs/MPM_WISHLIST.md`](docs/MPM_WISHLIST.md) for the full running wishlist. Notable upcoming items:
+Upcoming items (priorities driven by operator need, not a fixed roadmap):
 
-- **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents
+- **Multi-Agent Shared Epistemology** — SQLite `ATTACH DATABASE` for shared global rules across agents. All MPM instances on a workstation would attach the same shared DB (e.g. `~/.mpm/shared/rules.db`) so house rules and cross-project decisions live in one place that every agent can see and propose to.
 - **Native Event-Driven Hooks** — UNIX drop-in hooks for `on_theory_resolved`, `on_memory_synthesized`, etc.
 - **Memory Encryption at Rest** — SQLCipher AES-256 for enterprise-grade at-rest encryption
-- **Advanced Cognitive Analytics**
-- **Governance and Compliance Extensions**
+- **Advanced Cognitive Analytics** — agent-level retention curves, confidence trajectory forecasting
+- **Governance and Compliance Extensions** — redaction policies, retention windows, audit-export formats
 
 ---
 
