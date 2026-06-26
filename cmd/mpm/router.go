@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 )
 
 // Command describes a single command
@@ -69,7 +68,6 @@ func NewRouter() *CommandRouter {
 		"wake":                {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":                  {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
 		"backfill-embeddings": {Name: "backfill-embeddings", Description: "Backfill embeddings for existing memories (--batch-size, --collection, --dry-run)", MinArgs: 0},
-		"dlq:review":          {Name: "dlq:review", Description: "Inspect DLQ (review/clear/retry) — synth failures awaiting retry", MinArgs: 0},
 		"lint":                {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":              {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":             {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
@@ -397,8 +395,6 @@ func handleOps(args []string) int {
 		return handleGC(append([]string{"gc"}, subArgs...))
 	case "backfill-embeddings":
 		return handleBackfillEmbeddings(subArgs)
-	case "dlq:review":
-		return handleDLQReview(subArgs)
 
 	// — Watcher & Web —
 	case "watch":
@@ -489,7 +485,6 @@ var opsSubcommandDescs = []struct {
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
-	{"dlq:review [review/clear/retry]", "Dead letter queue — failed synth events"},
 	{"watch", "Start/stop/status watcher daemon"},
 	{"web", "Start web UI server"},
 	{"review", "Spaced reinforcement review"},
@@ -755,30 +750,6 @@ func ExtractJSONFlag(args []string) (bool, []string) {
 		}
 	}
 	return jsonOutput, cleaned
-}
-
-// ExtractFlags scans args for any flags in removeFlags map (key = flag name, value = consumes next arg),
-// removes them, returns (found flags as map, cleaned args).
-func ExtractFlags(args []string, removeFlags map[string]bool) (map[string]bool, []string) {
-	found := make(map[string]bool)
-	cleaned := make([]string, 0, len(args))
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-		if removeFlags[arg] {
-			found[arg] = true
-			if removeFlags[arg] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				// consume next arg if it's not a flag
-				i += 2
-				continue
-			}
-			i++
-			continue
-		}
-		cleaned = append(cleaned, arg)
-		i++
-	}
-	return found, cleaned
 }
 
 // handleRoute reads prompt from positional arg or stdin, evaluates against

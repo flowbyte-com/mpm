@@ -183,48 +183,6 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 	return nil
 }
 
-// GetActivePersona returns the active persona name (alias for GetActive)
-func (pm *PersonaManager) GetActivePersona() (string, error) {
-	return pm.GetActive()
-}
-
-// SetActivePersona updates the active persona (alias for SetActive)
-func (pm *PersonaManager) SetActivePersona(personaName string) error {
-	return pm.SetActive(personaName)
-}
-
-// SetActiveModes updates mode list in active file
-func (pm *PersonaManager) SetActiveModes(modes []string) error {
-	data, err := os.ReadFile(pm.ActiveFile)
-	if err != nil {
-		return err
-	}
-
-	type activeState struct {
-		Persona string   `json:"persona"`
-		Modes   []string `json:"modes"`
-		Updated string   `json:"updated"`
-	}
-	var active activeState
-	if err := json.Unmarshal(data, &active); err != nil {
-		active = activeState{}
-	}
-
-	active.Modes = modes
-	active.Updated = time.Now().Format(time.RFC3339)
-
-	newData, err := json.MarshalIndent(active, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(pm.ActiveFile, newData, 0644)
-}
-
-// ClearPersona sets active persona to empty
-func (pm *PersonaManager) ClearPersona() error {
-	return pm.SetActive("")
-}
-
 // RemoveAll removes all persona .md files (use with caution)
 func (pm *PersonaManager) RemoveAll() (int, error) {
 	entries, err := os.ReadDir(pm.Dir)

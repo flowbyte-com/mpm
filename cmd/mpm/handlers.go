@@ -456,84 +456,6 @@ func handleMemoryShred(args []string) int {
 	return respond(fmt.Sprintf("Memory shredded: %s\n", id), "", 0)
 }
 
-// handleSuggestTags returns unique tags matching a prefix, one per line.
-// Used by shell completion scripts. Hidden command: mpm _suggest_tags <prefix>
-func handleSuggestTags(args []string) int {
-	prefix := ""
-	if len(args) >= 2 && args[0] == "_suggest_tags" {
-		prefix = strings.ToLower(args[1])
-	} else if len(args) >= 1 {
-		prefix = strings.ToLower(args[len(args)-1])
-	}
-
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return 1
-	}
-	defer dm.Close()
-
-	rows, err := dm.SQLDB().Query(`
-		SELECT DISTINCT value
-		FROM memories,
-		json_each(memories.tags)
-		WHERE json_valid(memories.tags)
-		AND memories.tags IS NOT NULL
-		AND memories.tags != 'null'
-		AND memories.tags != '[]'
-		AND value IS NOT NULL
-		AND value != ''
-		AND lower(value) LIKE lower(?) || '%'
-		ORDER BY lower(value)
-	`, prefix)
-	if err != nil {
-		// Fallback: scan all tags in-memory if json_each fails
-		if rows != nil {
-			rows.Close()
-		}
-		allRows, err2 := dm.SQLDB().Query(`SELECT tags FROM memories WHERE tags IS NOT NULL`)
-		if err2 != nil {
-			return 1
-		}
-		defer allRows.Close()
-		seen := map[string]bool{}
-		var allTags []string
-		for allRows.Next() {
-			var tagsJSON string
-			if allRows.Scan(&tagsJSON) != nil {
-				continue
-			}
-			if tagsJSON == "" || tagsJSON == "null" || tagsJSON == "[]" {
-				continue
-			}
-			var tags []string
-			if json.Unmarshal([]byte(tagsJSON), &tags) == nil {
-				for _, t := range tags {
-					if t != "" && !seen[t] && strings.HasPrefix(strings.ToLower(t), prefix) {
-						seen[t] = true
-						allTags = append(allTags, t)
-					}
-				}
-			}
-		}
-		for _, t := range allTags {
-			fmt.Println(t)
-		}
-		return 0
-	}
-	defer rows.Close()
-
-	found := false
-	for rows.Next() {
-		var value string
-		if rows.Scan(&value) == nil && value != "" {
-			fmt.Println(value)
-			found = true
-		}
-	}
-	_ = found // suppress unused variable warning
-	return 0
-}
-
 func handleMemoryList(args []string) int {
 	store := getMemoryStore()
 
@@ -1007,17 +929,28 @@ func handleGC(args []string) int {
 	}
 
 	now := time.Now()
-	gcTimestampJSON, _ := json.Marshal(map[string]string{"timestamp": now.Format(time.RFC3339)})
+	// Key name MUST be "updated_at" — the cooldown SQL reads $.updated_at
+	// (handlers.go:960) and the "Skipped: last gc was X" branch (line 968)
+	// reads lastGC["updated_at"]. A previous version used "timestamp" here,
+	// which made the cooldown check permanently see NULL (json_extract on a
+	// missing key returns NULL → the < comparison short-circuits → every
+	// GC run reported rowsAffected=0 and printed "Skipped"). Fixed 2026-06-26.
+	gcTimestampJSON, _ := json.Marshal(map[string]string{"updated_at": now.Format(time.RFC3339)})
 
 	// Atomic frequency cap: claim the GC slot by lazy-initialising the
 	// last_gc_at row, then doing a compare-and-swap against its timestamp.
 	// The previous plain UPDATE returned 0 rowsAffected on a fresh DB (no
 	// row existed) which the engine then misread as "cooldown active",
 	// silently aborting the maintenance loop. The upsert pattern fixes this:
-	//   - row missing      → INSERT happens           → rowsAffected=1 (claim)
-	//   - row exists, old  → ON CONFLICT UPDATE fires  → rowsAffected=1 (claim)
-	//   - row exists, hot  → ON CONFLICT UPDATE no-ops → rowsAffected=0 (skip)
-	//   - operator deleted → next run self-heals      → rowsAffected=1 (claim)
+	//   - row missing                  → INSERT happens           → rowsAffected=1 (claim)
+	//   - row exists, no updated_at    → UPDATE fires (no timestamp to gate on) → rowsAffected=1 (claim)
+	//   - row exists, old timestamp    → ON CONFLICT UPDATE fires  → rowsAffected=1 (claim)
+	//   - row exists, hot timestamp    → ON CONFLICT UPDATE no-ops → rowsAffected=0 (skip)
+	//   - operator deleted             → next run self-heals      → rowsAffected=1 (claim)
+	// The empty-JSON case ('{}') used to silently no-op because json_extract
+	// on a missing key returns NULL, and `NULL < <anything>` is NULL (falsy),
+	// short-circuiting the WHERE clause. Adding the explicit IS NULL clause
+	// treats "no timestamp" as "claim it" — same semantic as a fresh row.
 	// The cooldown check is inside the DO UPDATE WHERE clause so the
 	// atomicity of the compare-and-swap is preserved across concurrent
 	// GC invocations.
@@ -1029,8 +962,8 @@ func handleGC(args []string) int {
 		  updated_at = CURRENT_TIMESTAMP
 		WHERE (
 		  system_config.raw_json IS NULL
-		  OR
-		  datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
+		  OR datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
 		)
 	`, string(gcTimestampJSON), strconv.Itoa(maxAgeHours))
 	rowsAffected, _ := result.RowsAffected()
@@ -2853,29 +2786,6 @@ func handleLessonStats() int {
 }
 
 // ============================================================================
-// Handler: menu
-// ============================================================================
-
-func handleMenu() int {
-	// Build menu output
-	var output strings.Builder
-	output.WriteString("\n")
-	output.WriteString("╔══════════════════════════════════════════╗\n")
-	output.WriteString("║         MPM Control Menu                 ║\n")
-	output.WriteString("╠══════════════════════════════════════════╣\n")
-	output.WriteString("║                                          ║\n")
-	output.WriteString("║                                          ║\n")
-	output.WriteString("║  Commands:                               ║\n")
-	output.WriteString("║    mpm session list   - Saved sessions    ║\n")
-	output.WriteString("║    mpm dashboard     - Open TUI          ║\n")
-	output.WriteString("║                                          ║\n")
-	output.WriteString("╚══════════════════════════════════════════╝\n")
-	output.WriteString("\n")
-
-	return respond(output.String(), "", 0)
-}
-
-// ============================================================================
 // Status Dashboard — mpm ops status
 // ============================================================================
 
@@ -3358,37 +3268,6 @@ func getMemoryStore() *internal.MemoryStore {
 	}
 }
 
-// initDB is called once during main() startup to prime the singleton.
-func initDB() error {
-	if dbManager != nil {
-		return nil
-	}
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	dbManager = dm
-	return nil
-}
-
-// closeDB closes the singleton connection. Call from main() on exit.
-func closeDB() {
-	if dbManager != nil {
-		dbManager.Close()
-		dbManager = nil
-	}
-}
-
-func getSessionDir() string {
-	paths := internal.DefaultMemoryPaths()
-	return paths.SessionSavePath
-}
-
-func getSessionStore() *internal.SessionStore {
-	paths := internal.DefaultMemoryPaths()
-	return internal.NewSessionStore(paths.SessionSavePath)
-}
-
 func datePrefix(s string) string {
 	if len(s) >= 10 {
 		return s[:10]
@@ -3401,11 +3280,6 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// GenerateID creates a unique ID for memories
-func generateID() string {
-	return internal.GenerateID()
 }
 
 // ============================================================================

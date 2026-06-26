@@ -24,15 +24,6 @@ var evidenceTypeRegistry = []evidenceType{
 	{"external_reference", 0.6},
 }
 
-// AllEvidenceTypes returns the v1 evidence type names in registry order.
-func AllEvidenceTypes() []string {
-	out := make([]string, len(evidenceTypeRegistry))
-	for i, entry := range evidenceTypeRegistry {
-		out[i] = entry.Name
-	}
-	return out
-}
-
 // IsValidEvidenceType reports whether name is a known v1 evidence type.
 func IsValidEvidenceType(name string) bool {
 	_, ok := lookupEvidenceType(name)

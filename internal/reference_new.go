@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unicode"
 
 	"github.com/ledongthuc/pdf"
@@ -180,13 +179,6 @@ func DetectSourceType(filePath string) string {
 	}
 }
 
-// GenerateReferenceID generates a unique reference ID.
-func GenerateReferenceID() string {
-	timestamp := time.Now().UnixNano()
-	h := sha256.Sum256([]byte(fmt.Sprintf("ref-%d-%d", timestamp, time.Now().UnixNano())))
-	return hex.EncodeToString(h[:])[:12]
-}
-
 // HashContent generates a SHA256 hash of content for deduplication
 func HashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
@@ -218,95 +210,11 @@ func ComputeChunkID(docID string, chunkIndex int, contentHash string) string {
 
 // ==================== Reference Library: Chunking ====================
 
-// Section represents a markdown section
-type Section struct {
-	Section string
-	Content string
-}
-
 // Chunk represents a text chunk
 type Chunk struct {
 	Index   int
 	Section string
 	Content string
-}
-
-// ParseMarkdownSections parses markdown content into sections
-// Each ## or ### header starts a new section with the header text as name
-func ParseMarkdownSections(content string) []Section {
-	sections := []Section{}
-	lines := strings.Split(content, "\n")
-	var currentSection *Section
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") {
-			if currentSection != nil && currentSection.Content != "" {
-				sections = append(sections, *currentSection)
-			}
-			title := strings.TrimSpace(strings.TrimPrefix(line, "## "))
-			title = strings.TrimSpace(strings.TrimPrefix(title, "### "))
-			currentSection = &Section{
-				Section: title,
-				Content: "",
-			}
-		} else if currentSection != nil {
-			currentSection.Content += line + "\n"
-		}
-	}
-
-	if currentSection != nil && currentSection.Content != "" {
-		sections = append(sections, *currentSection)
-	}
-
-	return sections
-}
-
-// ChunkReference chunks reference content into smaller pieces
-// Prefers section-based chunks (markdown headers), falls back to word-boundary chunks
-func ChunkReference(content string, chunkSize int) []Chunk {
-	chunks := []Chunk{}
-
-	// Try section-based chunking first
-	sections := ParseMarkdownSections(content)
-	if len(sections) > 1 {
-		for i, sec := range sections {
-			chunks = append(chunks, Chunk{
-				Index:   i,
-				Section: sec.Section,
-				Content: strings.TrimSpace(sec.Content),
-			})
-		}
-		return chunks
-	}
-
-	// Fall back to word-boundary chunking
-	words := strings.Fields(content)
-	var currentChunk strings.Builder
-	idx := 0
-
-	for _, word := range words {
-		if currentChunk.Len()+len(word)+1 > chunkSize && currentChunk.Len() > 0 {
-			chunks = append(chunks, Chunk{
-				Index:   idx,
-				Content: strings.TrimSpace(currentChunk.String()),
-			})
-			idx++
-			currentChunk.Reset()
-		}
-		if currentChunk.Len() > 0 {
-			currentChunk.WriteString(" ")
-		}
-		currentChunk.WriteString(word)
-	}
-
-	if currentChunk.Len() > 0 {
-		chunks = append(chunks, Chunk{
-			Index:   idx,
-			Content: strings.TrimSpace(currentChunk.String()),
-		})
-	}
-
-	return chunks
 }
 
 // tiktokenEnc caches the cl100k_base encoder after first successful load.

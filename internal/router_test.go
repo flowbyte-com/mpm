@@ -35,19 +35,20 @@ func TestRouter_Evaluate(t *testing.T) {
 			name:             "research query triggers research mode",
 			prompt:           "What are the latest findings on SQLite WAL performance?",
 			wantModes:        []string{"research"},
-			wantPersonaNotNil: true,
+			// Revised 2026-06-26: no implicit default fallback. If no
+			// persona's patterns match a prompt, no persona is selected —
+			// the agent runs with its active.json persona instead.
+			wantPersonaNotNil: false,
 		},
 		{
-			name:             "greeting triggers no mode, falls back to default persona",
+			name:             "greeting does not trigger any mode or persona",
 			prompt:           "hello there",
 			wantModes:        nil,
-			// FALLBACK 2026-06-26: no specialist pattern matches "hello there",
-			// but the hierarchy says "default" wins over bare metal. Selected
-			// persona is the default persona (loaded from persona/default.md),
-			// NOT empty. wantPersonaNotNil reflects this — the default persona
-			// is a real selection, not a no-op.
-			wantPersonaNotNil: true,
-			wantPersonaName:   "default",
+			// Revised 2026-06-26: was "falls back to default persona" —
+			// removed the unconditional default fallback. The route hook
+			// must not pollute context windows for short conversational
+			// prompts that don't match any pattern.
+			wantPersonaNotNil: false,
 		},
 		{
 			name:             "code implementation triggers architect or programming",
@@ -70,7 +71,9 @@ func TestRouter_Evaluate(t *testing.T) {
 			name:             "explicit moe invocation triggers moe mode",
 			prompt:           "moe: this gemini output needs verification before we act",
 			wantModes:        []string{"moe"},
-			wantPersonaNotNil: true,
+			// Revised 2026-06-26: no implicit default fallback. moe mode
+			// matches but no persona pattern does.
+			wantPersonaNotNil: false,
 		},
 		{
 			name:             "source-verify language triggers moe mode",
@@ -119,25 +122,20 @@ func TestRouter_Evaluate(t *testing.T) {
 		})
 	}
 
-	// Dedicated fallback behavior test — verifies the diagnostic
-	// surfaces WHY default was selected (a fallback marker trigger).
-	// Without this marker the report would show default as a "silent
-	// no-op selection", which is exactly what we are trying to avoid.
-	t.Run("default fallback surfaces fallback marker in diagnostic", func(t *testing.T) {
+	// No-default-fallback contract (revised 2026-06-26).
+	// Previously this subtest verified the default fallback fired for
+	// gibberish input and surfaced a "(fallback: ...)" marker trigger.
+	// The unconditional fallback was removed because it polluted the
+	// route hook's <system-reminder> for short conversational prompts
+	// that didn't match any pattern. The new contract: gibberish = no
+	// mode, no persona, no injection. This pins it.
+	t.Run("gibberish input selects no mode and no persona", func(t *testing.T) {
 		report := router.Evaluate("xyzzy gibberish no specialist pattern matches")
-		if report.SelectedPersona != "default" {
-			t.Fatalf("expected default fallback, got %q", report.SelectedPersona)
+		if len(report.SelectedModes) != 0 {
+			t.Errorf("gibberish should select no modes, got %v", report.SelectedModes)
 		}
-		entry := report.Scores["default"]
-		foundFallbackMarker := false
-		for _, tr := range entry.Triggers {
-			if tr == "(fallback: no specialist pattern matched)" {
-				foundFallbackMarker = true
-				break
-			}
-		}
-		if !foundFallbackMarker {
-			t.Errorf("expected fallback marker in default's triggers, got %v", entry.Triggers)
+		if report.SelectedPersona != "" {
+			t.Errorf("gibberish should select no persona, got %q", report.SelectedPersona)
 		}
 	})
 
