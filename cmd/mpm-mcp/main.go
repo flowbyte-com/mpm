@@ -21,12 +21,12 @@ package main
 import (
 	"log"
 	"log/slog"
-	"os"
 
 	"github.com/mark3labs/mcp-go/server"
 
 	"mpm/internal"
 	"mpm/internal/logging"
+	"mpm/internal/mpmcli"
 )
 
 // router is initialised once at server boot — patterns and anti-patterns
@@ -36,10 +36,7 @@ import (
 func main() {
 	logging.Setup()
 	slog.Info("mpm-mcp starting")
-	workspace := os.Getenv("MPM_WORKSPACE")
-	if workspace == "" {
-		workspace = "."
-	}
+	workspace := mpmcli.ResolveWorkspace()
 
 	dm, err := internal.NewDatabaseManager(workspace)
 	if err != nil {
@@ -47,10 +44,7 @@ func main() {
 	}
 	defer dm.Close()
 
-	ac := internal.ActiveContext{
-		Mode:    os.Getenv("MPM_ACTIVE_MODE"),
-		Persona: os.Getenv("MPM_ACTIVE_PERSONA"),
-	}
+	ac := mpmcli.ActiveContextFromEnv()
 
 	// Build the router once — pre-compiles all mode/persona patterns at boot.
 	router, err := internal.NewRouter(workspace)
