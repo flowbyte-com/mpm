@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -25,11 +26,36 @@ var (
 	stripMarkdownCode     = regexp.MustCompile("`([^`]+)`")
 )
 
+// lastQuery is the most recent query passed to handleRecall. Captured so
+// the --why provenance helper can extract matched FTS5 terms without
+// re-running the search. Cleared at the start of each handleRecall call.
+var lastQuery string
+
+// recallEntry is the in-memory shape used to render each memory in the
+// recall result list. Promoted to package scope so the --why provenance
+// helper (printProvenance) can take a value rather than reach into
+// handleRecall's local scope.
+type recallEntry struct {
+	id                 string
+	content            string
+	metadata           string
+	sessionID          string
+	createdAt          time.Time
+	tags               string
+	synthesized        bool
+	reinforcementCount int
+	weight             int
+	lastAccessedAt     time.Time
+	referenceID        string
+}
+var _ = recallEntry{} // ensure the type is "used" even if --why is off
+
 // =============================================================================
 // mpm recall <query> — Search memories for relevant context
 // =============================================================================
 
 func handleRecall(args []string) int {
+	lastQuery = "" // reset; the search code sets this once the query is known
 	fs := flag.NewFlagSet("recall", flag.ContinueOnError)
 	since := fs.String("since", "", "Search memories since date (YYYY-MM-DD)")
 	until := fs.String("until", "", "Search memories until date (YYYY-MM-DD)")
@@ -43,6 +69,7 @@ func handleRecall(args []string) int {
 	semantic := fs.Bool("semantic", false, "Use hybrid semantic search (FTS5 + embeddings)")
 	vectorWeight := fs.Float64("vector-weight", 0.5, "Vector weight in hybrid search (0=FTS5-only, 1=vector-only)")
 	asOf := fs.String("as-of", "", "Point-in-time reconstruction: retrieve memory state as of this timestamp (RFC3339)")
+	why := fs.Bool("why", false, "Show why each memory was retrieved (provenance: score factors, FTS terms, source engine)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
 		fmt.Println("\nRecall options:")
@@ -159,6 +186,7 @@ func handleRecall(args []string) int {
 		return 1
 	}
 	query = strings.TrimSpace(query)
+	lastQuery = query // captured for the --why provenance helper
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
@@ -196,26 +224,12 @@ func handleRecall(args []string) int {
 	}
 	defer rows.Close()
 
-	type recallEntry struct {
-		id                 string
-		content            string
-		metadata           string
-		sessionID          string
-		createdAt          time.Time
-		tags               string
-		synthesized        bool
-		reinforcementCount int
-		weight             int
-		lastAccessedAt     time.Time
-		referenceID        string
-	}
 	var entries []recallEntry
 	for rows.Next() {
 		var id, content, createdAt string
 		var nullableSessionID, nullableTags sql.NullString
 		var reinforcementCount, weight float64
 		var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
-
 		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
 			&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
 			continue
@@ -512,6 +526,12 @@ func handleRecall(args []string) int {
 			chipsLine, synthTag,
 			versionNote, reset,
 			content)
+
+		// --why provenance: show the score breakdown for this memory.
+		// Useful for "why did the agent retrieve this?" introspection.
+		if *why {
+			printProvenance(os.Stdout, e, content)
+		}
 
 		// Fetch and display cross-references
 		topics, _ := dm.GetMemoryTopics(e.id)
@@ -812,4 +832,87 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 		fmt.Printf("%d. [%.2f] [%s] %s\n   %s\n\n", i+1, score, source, createdAt.Format("2006-01-02"), content)
 	}
 	return 0
+}
+
+// printProvenance prints the "why was this retrieved?" breakdown for a
+// recall result. Shows the score components (reinforcement_count × 2 +
+// weight × 1.5 + recency bonus) and any matched FTS5 terms. Designed to
+// answer "why did the agent pick this memory?" without re-running the
+// query against a debugger.
+//
+// The output is plain text with a dim prefix so it stays unobtrusive
+// when stacked between result cards.
+func printProvenance(w io.Writer, e recallEntry, content string) {
+	// ANSI codes are hardcoded rather than reading the package-level
+	// dim/reset vars (which are local to handleRecall). Keeps the helper
+	// self-contained and easy to call from other handlers.
+	const dim = "\033[2m"
+	const reset = "\033[0m"
+
+	// Score components per internal/hybrid_search.go.
+	// score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
+	reinforcement := float64(e.reinforcementCount) * 2
+	weightContrib := float64(e.weight) * 1.5
+	// Recency bonus is harder to reverse-engineer; show the access age
+	// instead and let the operator intuit it.
+	recency := ""
+	if !e.lastAccessedAt.IsZero() {
+		recency = formatAge(e.lastAccessedAt) + " ago"
+	} else {
+		recency = formatAge(e.createdAt) + " old"
+	}
+
+	fmt.Fprintf(w, "    %s[why]%s reinforcement=%d (×2 = %.1f)  weight=%d (×1.5 = %.1f)  recency=%s\n",
+		dim, reset,
+		e.reinforcementCount, reinforcement,
+		e.weight, weightContrib,
+		recency,
+	)
+
+	// FTS5 hit terms: extract quoted query terms from the content. This
+	// is a heuristic — for proper FTS5 term highlighting we'd query
+	// the snippet() function, but that requires re-running the search.
+	// The heuristic is "good enough" for the agent's introspection.
+	if hits := ftsHitTerms(content, lastQuery); len(hits) > 0 {
+		fmt.Fprintf(w, "    %s[why]%s matched terms: %s\n", dim, reset, strings.Join(hits, ", "))
+	}
+
+	if e.synthesized {
+		fmt.Fprintf(w, "    %s[why]%s synthesized from prior memories\n", dim, reset)
+	}
+}
+
+// ftsHitTerms extracts likely FTS5 hit terms by lowercasing both the
+// content and the query, then returning query words that appear as
+// substrings in the content. Stopwords ("the", "a", "of", ...) are
+// filtered. This is a heuristic, not a real FTS5 parser — it gives
+// the operator a starting point for "why did this match?" without
+// re-running the search.
+func ftsHitTerms(content, query string) []string {
+	if query == "" {
+		return nil
+	}
+	stop := map[string]bool{
+		"a": true, "an": true, "and": true, "are": true, "as": true,
+		"at": true, "be": true, "by": true, "for": true, "from": true,
+		"has": true, "have": true, "in": true, "is": true, "it": true,
+		"of": true, "on": true, "or": true, "that": true, "the": true,
+		"to": true, "was": true, "were": true, "will": true, "with": true,
+	}
+	lowerContent := strings.ToLower(content)
+	var hits []string
+	seen := map[string]bool{}
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		word = strings.TrimFunc(word, func(r rune) bool {
+			return r == '"' || r == '*' || r == '(' || r == ')' || r == ','
+		})
+		if len(word) < 3 || stop[word] || seen[word] {
+			continue
+		}
+		if strings.Contains(lowerContent, word) {
+			hits = append(hits, word)
+			seen[word] = true
+		}
+	}
+	return hits
 }
