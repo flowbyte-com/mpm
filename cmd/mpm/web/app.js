@@ -223,7 +223,7 @@ function renderSearchResults(data, container) {
   if (topics.length) {
     html += '<div class="result-group"><h3>Topics</h3>';
     topics.forEach(t => {
-      html += '<div class="card" onclick="showTopic(' + q(t.id) + ')"><div class="card-title">' + esc(t.name) + '</div>';
+      html += '<div class="card" data-action="show-topic" data-id="' + esc(t.id) + '"><div class="card-title">' + esc(t.name) + '</div>';
       if (t.description) html += '<div class="card-content">' + esc(t.description) + '</div>';
       html += '</div>';
     });
@@ -233,7 +233,7 @@ function renderSearchResults(data, container) {
   if (lessons.length) {
     html += '<div class="result-group"><h3>Lessons</h3>';
     lessons.forEach(l => {
-      html += '<div class="card" onclick="showLesson(' + q(l.id) + ')"><div class="card-title">' + esc(l.content.slice(0, 80)) + '</div>';
+      html += '<div class="card" data-action="show-lesson" data-id="' + esc(l.id) + '"><div class="card-title">' + esc(l.content.slice(0, 80)) + '</div>';
       html += '<div class="card-meta">' + (l.type || 'insight') + '</div></div>';
     });
     html += '</div>';
@@ -286,8 +286,8 @@ function renderMemoryCard(m, showActions) {
   html += '</div>';
   if (showActions) {
     html += '<div class="card-actions">';
-    html += '<button class="btn-ghost" onclick="openMemoryModal(\'' + m.id + '\')">Edit</button>';
-    html += '<button class="btn-danger" onclick="deleteMemory(\'' + m.id + '\')">Shred</button>';
+    html += '<button class="btn-ghost" data-action="edit-memory" data-id="' + esc(m.id) + '">Edit</button>';
+    html += '<button class="btn-danger" data-action="shred-memory" data-id="' + esc(m.id) + '">Shred</button>';
     html += '</div>';
   }
   html += '</div>';
@@ -304,15 +304,15 @@ function renderMemPagination(data) {
   const cur = Math.floor(memOffset / memLimit) + 1;
   if (pages <= 1) { el.innerHTML = ''; return; }
   let html = '';
-  if (memOffset > 0) html += '<button onclick="memOffset(-' + memLimit + ')">Prev</button>';
+  if (memOffset > 0) html += '<button data-action="mem-page" data-delta="' + (-memLimit) + '">Prev</button>';
   for (let i = 1; i <= pages; i++) {
     if (i === 1 || i === pages || (i >= cur - 2 && i <= cur + 2)) {
-      html += '<button class="' + (i === cur ? 'active' : '') + '" onclick="memOffset(' + ((i-1)*memLimit - memOffset) + ')">' + i + '</button>';
+      html += '<button class="' + (i === cur ? 'active' : '') + '" data-action="mem-page" data-delta="' + ((i-1)*memLimit - memOffset) + '">' + i + '</button>';
     } else if (i === cur - 3 || i === cur + 3) {
       html += '<button disabled>…</button>';
     }
   }
-  if (memOffset + memLimit < total) html += '<button onclick="memOffset(' + memLimit + ')">Next</button>';
+  if (memOffset + memLimit < total) html += '<button data-action="mem-page" data-delta="' + memLimit + '">Next</button>';
   el.innerHTML = html;
 }
 
@@ -422,8 +422,8 @@ function renderTopics(items, el) {
   el.innerHTML = items.map(t => {
     let html = '<div class="card">';
     html += '<div class="card-header"><div class="card-title">' + esc(t.name) + '</div>';
-    html += '<div class="card-actions"><button class="btn-ghost" onclick="openTopicModal(\'' + t.id + '\')">Edit</button>';
-    html += '<button class="btn-danger" onclick="deleteTopic(\'' + t.id + '\')">Delete</button></div></div>';
+    html += '<div class="card-actions"><button class="btn-ghost" data-action="edit-topic" data-id="' + esc(t.id) + '">Edit</button>';
+    html += '<button class="btn-danger" data-action="delete-topic" data-id="' + esc(t.id) + '">Delete</button></div></div>';
     if (t.description) html += '<div class="card-content">' + esc(t.description) + '</div>';
     html += '<div class="card-meta">' + (t.memory_count || 0) + ' memories · ' + (t.created_at || '').split('T')[0] + '</div>';
     html += '</div>';
@@ -520,7 +520,7 @@ function renderLessons(items, el) {
     html += '<span class="tag" style="margin-bottom:0.3rem;background:rgba(63,185,80,0.15);color:var(--success)">' + (l.type || 'insight') + '</span>';
     html += '<div class="card-content" style="margin-top:0.3rem">' + esc(l.content || '') + '</div>';
     if (tagHtml) html += '<div style="margin-top:0.5rem">' + tagHtml + '</div>';
-    html += '</div><div class="card-actions"><button class="btn-danger" onclick="deleteLesson(\'' + l.id + '\')">Delete</button></div></div>';
+    html += '</div><div class="card-actions"><button class="btn-danger" data-action="delete-lesson" data-id="' + esc(l.id) + '">Delete</button></div></div>';
     html += '</div>';
     return html;
   }).join('');
@@ -597,9 +597,33 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function q(s) {
-  return String(s).replace(/'/g, "\\'");
-}
+// delegatedClickHandler is the single click listener that routes clicks on
+// data-action elements to their handler. Replaces the previous inline
+// onclick="..." attributes, which were a stored-XSS hazard when memory
+// IDs (caller-controlled) were interpolated into the HTML string.
+//
+// Registered once at boot from boot() — see bottom of file. Action
+// handlers receive the data-id / data-delta attributes via the event's
+// currentTarget dataset.
+const delegatedClickHandler = (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  const id = el.dataset.id;
+  const delta = parseInt(el.dataset.delta, 10);
+  switch (action) {
+    case 'show-topic':    if (id) showTopic(id); break;
+    case 'show-lesson':   if (id) showLesson(id); break;
+    case 'edit-memory':   if (id) openMemoryModal(id); break;
+    case 'shred-memory':  if (id) deleteMemory(id); break;
+    case 'edit-topic':    if (id) openTopicModal(id); break;
+    case 'delete-topic':  if (id) deleteTopic(id); break;
+    case 'delete-lesson': if (id) deleteLesson(id); break;
+    case 'mem-page':      if (!isNaN(delta)) memOffset(delta); break;
+    default: break;
+  }
+};
+document.addEventListener('click', delegatedClickHandler);
 
 function parseTags(tags) {
   if (!tags) return [];
