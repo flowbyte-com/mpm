@@ -16,13 +16,28 @@ const (
 )
 
 // Component holds the pre-compiled pattern set for one mode or persona.
-// Patterns are OR-matched against the input (any single match scores +1).
-// Anti-patterns are AND-matched (any single match scores -1 per match).
+// Patterns are OR-matched against the input (any single match scores +1,
+// +2 if explicit frontmatter pattern).
+//
+// DOMAIN_BOUNDARY FIELDS (renamed 2026-06-26):
+// The original `AntiPatterns` field was misconfigured across all 16
+// components as voice guards (output constraints describing things the
+// persona should NOT say). They almost never matched prompts, so the
+// -1 penalty mechanism was dormant. Split into two semantically explicit
+// fields:
+//   - DomainOut:  compiled regex fragments matching prompt vocabulary that
+//                 should reduce this component's routing score (-1 per match).
+//                 If a prompt matches several DomainOut patterns, a better-fit
+//                 specialist can win (or default fallback can take over).
+//   - VoiceGuards: raw text describing things the persona should NOT say
+//                  at generation time. NOT compiled. NOT used for routing.
+//                  Stored for the LLM's context window only.
 type Component struct {
-	Name         string
-	Kind         ComponentKind
-	Patterns     []*regexp.Regexp
-	AntiPatterns []*regexp.Regexp
+	Name             string
+	Kind             ComponentKind
+	Patterns         []*regexp.Regexp
+	DomainOut        []*regexp.Regexp
+	VoiceGuards      string
 	// explicitPatterns marks patterns that appear in frontmatter `patterns:` field
 	// rather than extracted from body text — these get a weight boost.
 	explicitPatterns int
@@ -36,10 +51,18 @@ type RoutingReport struct {
 }
 
 // ScoreEntry describes why a component was or wasn't selected.
+//
+// PenaltiesApplied (added 2026-06-26) is the observability hook for the
+// domain-boundary feature: when a DomainOut regex matches the input, the
+// matched string is appended here so future-me can see WHY a specialist
+// was bounced in favor of default fallback or a better-fit specialist.
+// Without this surface, the -1 penalty is invisible — exactly the failure
+// mode that let voice guards masquerade as routing filters for months.
 type ScoreEntry struct {
-	Score      int      `json:"score"`
-	Triggers   []string `json:"triggers,omitempty"`
-	Penalties  []string `json:"penalties,omitempty"`
+	Score            int      `json:"score"`
+	Triggers         []string `json:"triggers,omitempty"`
+	Penalties        []string `json:"penalties,omitempty"`
+	PenaltiesApplied []string `json:"penalties_applied,omitempty"`
 }
 
 // Router evaluates prompts against pre-loaded mode and persona definitions.
@@ -234,6 +257,16 @@ func (r *Router) findPersonaByName(name string) *Component {
 }
 
 // scoreComponent evaluates one component against the lowercased input.
+//
+// SCORING MODEL (post-rename 2026-06-26):
+//   - Each Patterns match: +1 (or +2 if explicit frontmatter pattern)
+//   - Each DomainOut match: -1 AND appended to PenaltiesApplied
+//   - VoiceGuards: NOT consulted. Voice constraints are LLM-context only.
+//
+// The Penalties slice remains in the struct for backward compatibility with
+// any caller that reads it, but is no longer populated. PenaltiesApplied is
+// the new observability hook — it shows exactly which DomainOut regexes
+// fired and reduced the score.
 func scoreComponent(lower string, comp *Component) ScoreEntry {
 	entry := ScoreEntry{}
 	seen := make(map[string]bool)
@@ -254,13 +287,18 @@ func scoreComponent(lower string, comp *Component) ScoreEntry {
 		}
 	}
 
-	// Penalize anti-patterns (-1 per matched anti-pattern)
-	for _, re := range comp.AntiPatterns {
+	// Apply domain-boundary penalty: -1 per matched DomainOut regex.
+	// The matched regex string is logged in PenaltiesApplied so the
+	// agent can see WHY this persona was bounced.
+	for _, re := range comp.DomainOut {
 		if re.MatchString(lower) {
-			entry.Penalties = append(entry.Penalties, reString(re))
+			entry.PenaltiesApplied = append(entry.PenaltiesApplied, reString(re))
 			entry.Score--
 		}
 	}
+
+	// VoiceGuards is intentionally NOT consulted here. It is descriptive
+	// prose for the LLM at generation time, not a routing signal.
 
 	return entry
 }
