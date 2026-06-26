@@ -1,0 +1,491 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"mpm/internal"
+	"mpm/internal/config"
+
+	mpminternal "mpm/internal"
+)
+
+func handleProposeTheory(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm propose_theory <text>", 1)
+	}
+
+	input := strings.Join(args, " ")
+
+	hypothesis := extractField(input, "HYPOTHESIS:")
+	validationCriteria := extractField(input, "VALIDATION_CRITERIA:")
+	status := extractField(input, "STATUS:")
+	tagsStr := extractField(input, "TAGS:")
+
+	if hypothesis == "" {
+		hypothesis = strings.TrimSpace(input)
+	}
+	if status == "" {
+		status = "pending"
+	}
+
+	var tags []string
+	if tagsStr != "" {
+		for _, t := range strings.Split(tagsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	content := hypothesis
+	if validationCriteria != "" {
+		content += "\n\nVALIDATION_CRITERIA: " + validationCriteria
+	}
+
+	meta := map[string]interface{}{
+		"status": status,
+	}
+	if validationCriteria != "" {
+		meta["validation_criteria"] = validationCriteria
+	}
+
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Error: memory store not available\n", 1)
+	}
+
+	mem, err := store.AddMemory(content, "theories", tags, meta, "", "cli")
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to save theory: %v\n", err), 1)
+	}
+
+	// Auto-link to theories topic (idempotent via INSERT OR IGNORE)
+	dm, dmErr := mpminternal.NewDatabaseManager("")
+	if dmErr == nil {
+		defer dm.Close()
+		topicID, tErr := dm.GetOrCreateTopic("theories")
+		if tErr == nil {
+			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
+		}
+	}
+
+	return respond("", fmt.Sprintf("✅ Theory proposed: %s (status: %s)\n", mem.ID, status), 0)
+}
+
+// handleResolveTheory marks a theory as resolved, updating metadata and bumping weight.
+func handleResolveTheory(args []string) int {
+	if len(args) < 2 {
+		return respond("", "Usage: mpm resolve_theory <id> <conclusion>", 1)
+	}
+
+	id := args[0]
+	conclusion := strings.Join(args[1:], " ")
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	mem, err := dm.GetMemory(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Theory not found: %s\n", id), 1)
+	}
+
+	coll, _ := mem["collection"].(string)
+	if coll != "theories" {
+		return respond("", fmt.Sprintf("Memory %s is not a theory (collection: %s)\n", id, coll), 1)
+	}
+
+	// Build metadata patch (upserts into existing metadata via json_patch)
+	now := time.Now().UTC().Format(time.RFC3339)
+	patch := map[string]interface{}{
+		"status":      "resolved",
+		"conclusion":  conclusion,
+		"resolved_at": now,
+	}
+	patchJSON, _ := json.Marshal(patch)
+
+	if err := dm.UpdateMemoryMetadata(id, string(patchJSON)); err != nil {
+		return respond("", fmt.Sprintf("Failed to resolve theory: %v\n", err), 1)
+	}
+
+	// Bump weight — reinforces the resolved theory
+	dm.ReinforceMemory(id, 1)
+
+	return respond("", fmt.Sprintf("✅ Theory resolved: %s — %s\n", id, conclusion), 0)
+}
+
+// handleRecordDecision parses structured decision text and saves to the decisions collection.
+func handleRecordDecision(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm record_decision <text>", 1)
+	}
+
+	input := strings.Join(args, " ")
+
+	contextText := extractField(input, "CONTEXT:")
+	choice := extractField(input, "CHOICE:")
+	rationale := extractField(input, "RATIONALE:")
+	tagsStr := extractField(input, "TAGS:")
+
+	if choice == "" {
+		choice = strings.TrimSpace(input)
+	}
+
+	var tags []string
+	if tagsStr != "" {
+		for _, t := range strings.Split(tagsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	content := "CHOICE: " + choice
+	if contextText != "" {
+		content += "\nCONTEXT: " + contextText
+	}
+	if rationale != "" {
+		content += "\nRATIONALE: " + rationale
+	}
+
+	meta := map[string]interface{}{}
+	if contextText != "" {
+		meta["context"] = contextText
+	}
+	if rationale != "" {
+		meta["rationale"] = rationale
+	}
+
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Error: memory store not available\n", 1)
+	}
+
+	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "cli")
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to record decision: %v\n", err), 1)
+	}
+
+	// Auto-link to decisions topic
+	dm, dmErr := mpminternal.NewDatabaseManager("")
+	if dmErr == nil {
+		defer dm.Close()
+		topicID, tErr := dm.GetOrCreateTopic("decisions")
+		if tErr == nil {
+			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
+		}
+	}
+
+	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
+}
+
+// handleTheories lists theories with status chips. Supports filter: all, pending, resolved.
+func handleTheories(args []string) int {
+	filter := "all"
+	if len(args) > 0 {
+		filter = args[0]
+	}
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	memories, err := dm.GetMemoriesForExport("theories", "", "")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(memories) == 0 {
+		return respond("", "No theories yet. Run `mpm propose_theory` to propose your first theory.\n", 0)
+	}
+
+	count := 0
+	for _, m := range memories {
+		content, _ := m["content"].(string)
+		id, _ := m["id"].(string)
+
+		var meta map[string]interface{}
+		metaStr, _ := m["metadata"].(string)
+		json.Unmarshal([]byte(metaStr), &meta)
+
+		status, _ := meta["status"].(string)
+		if status == "" {
+			status = "pending"
+		}
+
+		if filter != "all" && status != filter {
+			continue
+		}
+
+		display := strings.SplitN(content, "\n", 2)[0]
+		if len(display) > 80 {
+			display = display[:80] + "..."
+		}
+
+		fmt.Printf("[%s] %s  [status: %s]\n", id, display, status)
+		count++
+
+		if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
+			vcDisplay := vc
+			if len(vcDisplay) > 60 {
+				vcDisplay = vcDisplay[:60] + "..."
+			}
+			fmt.Printf("      validation: %s\n", vcDisplay)
+		}
+	}
+
+	if count == 0 {
+		fmt.Printf("No %s theories found.\n", filter)
+	}
+
+	return 0
+}
+
+// backfillEpistemologyTopics links existing theories/decisions memories to their topics.
+// Idempotent: AddMemoryToTopic uses INSERT OR IGNORE so it is safe to call repeatedly.
+func backfillEpistemologyTopics() {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return
+	}
+	defer dm.Close()
+
+	rows, err := dm.SQLDB().Query(
+		`SELECT id, collection FROM memories WHERE collection IN ('theories', 'decisions') AND deleted_at IS NULL`,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	linked := 0
+	now := time.Now().UTC().Format(time.RFC3339)
+	for rows.Next() {
+		var id, collection string
+		if err := rows.Scan(&id, &collection); err != nil {
+			continue
+		}
+		topicID, tErr := dm.GetOrCreateTopic(collection)
+		if tErr != nil {
+			continue
+		}
+		res, execErr := dm.SQLDB().Exec(
+			`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+			id, topicID, now, "primary",
+		)
+		if execErr == nil {
+			if ra, _ := res.RowsAffected(); ra > 0 {
+				linked++
+			}
+		}
+	}
+
+	if linked > 0 {
+		fmt.Printf("📚 Epistemology topics initialized: %d memories linked\n", linked)
+	}
+}
+
+// handleDecisions displays the decision ledger with context, choice, and rationale for each entry.
+func handleDecisions(args []string) int {
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	memories, err := dm.GetMemoriesForExport("decisions", "", "")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(memories) == 0 {
+		return respond("", "No decisions recorded yet. Run `mpm record_decision` to log your first decision.\n", 0)
+	}
+
+	for _, m := range memories {
+		content, _ := m["content"].(string)
+		createdAt, _ := m["created_at"].(string)
+
+		var meta map[string]interface{}
+		metaStr, _ := m["metadata"].(string)
+		json.Unmarshal([]byte(metaStr), &meta)
+
+		contextText, _ := meta["context"].(string)
+		rationale, _ := meta["rationale"].(string)
+
+		choice := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(choice), "CHOICE: ") {
+			choice = strings.TrimSpace(choice[7:])
+		}
+
+		dateStr := createdAt
+		if len(dateStr) >= 10 {
+			dateStr = dateStr[:10]
+		}
+
+		fmt.Println("─────────────────────")
+		if contextText != "" {
+			fmt.Printf("CONTEXT:  %s\n", contextText)
+		} else {
+			fmt.Println("CONTEXT:  —")
+		}
+		fmt.Printf("CHOICE:   %s\n", choice)
+		if rationale != "" {
+			fmt.Printf("RATIONALE: %s\n", rationale)
+		} else {
+			fmt.Println("RATIONALE: —")
+		}
+		fmt.Printf("[%s]\n", dateStr)
+	}
+	fmt.Println("─────────────────────")
+
+	return 0
+}
+
+// handleHint checks recent conversation context for epistemologically relevant
+// memories (theories and decisions). Supports --json and --max <n> flags.
+func handleHint(args []string) int {
+	// Parse --max and --json flags
+	maxHints := 1
+	jsonOutput := false
+	cleanArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOutput = true
+		case "--max":
+			if i+1 < len(args) {
+				i++
+				n, err := strconv.Atoi(args[i])
+				if err == nil && n > 0 {
+					maxHints = n
+				}
+			}
+		default:
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+
+	if len(cleanArgs) == 0 {
+		return respond("", "Usage: mpm hint [--json] [--max N] <conversation text>\n", 1)
+	}
+
+	conversationText := strings.Join(cleanArgs, " ")
+
+	keywords := internal.ExtractConversationKeywords(conversationText, 50)
+
+	dm, err := mpminternal.NewDatabaseManager("")
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	defer dm.Close()
+
+	retrievalLimit := maxHints
+	retrievalThreshold := -3.0
+	if active, err := mpminternal.LoadActiveJSON(); err == nil {
+		mm := mpminternal.NewModeManager(config.GetMPMDir())
+		for _, name := range active.Modes {
+			if m, err := mm.Get(name); err == nil {
+				retrievalLimit = m.RetrievalLimit
+				retrievalThreshold = m.RetrievalThreshold
+				break
+			}
+		}
+	}
+	if maxHints > 0 && maxHints < retrievalLimit {
+		retrievalLimit = maxHints
+	}
+
+	overlaps, err := internal.FindEpistemologyOverlaps(dm, keywords, retrievalLimit, retrievalThreshold)
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	if len(overlaps) == 0 {
+		if jsonOutput {
+			return respond("", "[]\n", 0)
+		}
+		return respond("", "", 0)
+	}
+
+	if jsonOutput {
+		out, _ := json.MarshalIndent(overlaps, "", "  ")
+		return respond("", string(out)+"\n", 0)
+	}
+
+	// Regular mode: show first hint only, formatted
+	hint := overlaps[0]
+	collection, _ := hint["collection"].(string)
+	content, _ := hint["content"].(string)
+	createdAt, _ := hint["created_at"].(string)
+	if len(createdAt) >= 10 {
+		createdAt = createdAt[:10]
+	}
+	meta, _ := hint["metadata"].(map[string]interface{})
+
+	var status string
+	if meta != nil {
+		if s, ok := meta["status"].(string); ok {
+			status = s
+		}
+	}
+	if status == "" {
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToUpper(trimmed), "STATUS:") {
+				status = strings.TrimSpace(trimmed[7:])
+				break
+			}
+		}
+	}
+
+	switch collection {
+	case "decisions":
+		choice := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(choice), "CHOICE: ") {
+			choice = strings.TrimSpace(choice[7:])
+		}
+		var rationale string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.HasPrefix(strings.ToUpper(line), "RATIONALE:") {
+				rationale = strings.TrimSpace(line[10:])
+				break
+			}
+		}
+		fmt.Printf("[Recall] You decided: %s\n", choice)
+		if status != "" {
+			fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+		}
+		if rationale != "" {
+			fmt.Printf("  RATIONALE: %s\n", rationale)
+		}
+	case "theories":
+		hypothesis := strings.SplitN(content, "\n", 2)[0]
+		if strings.HasPrefix(strings.ToUpper(hypothesis), "HYPOTHESIS: ") {
+			hypothesis = strings.TrimSpace(hypothesis[11:])
+		}
+		fmt.Printf("[Recall] Hypothesis: %s\n", hypothesis)
+		if meta != nil {
+			if conclusion, ok := meta["conclusion"].(string); ok && conclusion != "" {
+				fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+				fmt.Printf("  CONCLUSION: %s\n", conclusion)
+			} else {
+				fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+			}
+		} else {
+			fmt.Printf("  STATUS: %s | %s\n", status, createdAt)
+		}
+	}
+
+	return 0
+}
