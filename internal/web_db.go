@@ -16,6 +16,26 @@ import (
 // "constraint failed: PRIMARY KEY constraint failed: <col>". A substring
 // match is sufficient — we only need to distinguish "already exists" from
 // other write failures for the AddReference error path.
+
+// Memory read-path SQL fragments.
+//
+// MemoryExpireClause filters out rows whose expires_at is in the past.
+// Always include this in any SELECT against `memories` that surfaces user
+// data — SetMemoryTTL sets the flag but enforcement lives in the read paths.
+// (PruneExpired is the bulk delete; this is the per-row filter.)
+//
+// expires_at is stored as a Unix timestamp (REAL) — see SetMemoryTTL. The
+// clause uses strftime('%s','now') so the comparison is numeric; comparing
+// against CURRENT_TIMESTAMP (a string) leaks expired rows because SQLite
+// does lexicographic comparison and 'T' > ' ' in ASCII.
+//
+// MemoryExpireClauseM is the alias-qualified variant for queries that
+// SELECT FROM `memories m` (e.g. FTS5 joins).
+const (
+	MemoryExpireClause  = " AND (expires_at IS NULL OR expires_at > strftime('%s','now'))"
+	MemoryExpireClauseM = " AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))"
+)
+
 // ==================== Lightweight reference types for cross-ref display ====================
 
 // TopicRef is a lightweight topic reference for cross-reference display
@@ -127,10 +147,10 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 	var args []interface{}
 
 	if found {
-		query = `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.created_at, m.source_db, m.source_id, m.promoted_at FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH ? AND m.deleted_at IS NULL`
+		query = `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.created_at, m.source_db, m.source_id, m.promoted_at FROM memories m JOIN memories_fts f ON m.rowid = f.rowid WHERE memories_fts MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM
 		args = []interface{}{ftsQuery}
 	} else {
-		query = `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE deleted_at IS NULL AND content LIKE ?`
+		query = `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE deleted_at IS NULL AND content LIKE ?` + MemoryExpireClause
 		args = []interface{}{"%" + q + "%"}
 	}
 
@@ -215,7 +235,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 
 	err := dm.db.QueryRow(`
 		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
-		FROM memories WHERE id = ? AND deleted_at IS NULL
+		FROM memories WHERE id = ? AND deleted_at IS NULL`+MemoryExpireClause+`
 	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
 		return nil, err
@@ -507,6 +527,12 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 }
 
 // SetMemoryTTL sets an expiration time on a memory.
+//
+// expires_at is stored as a Unix timestamp (REAL) so it can be compared
+// against CURRENT_TIMESTAMP in SQL. Do not switch to RFC3339 strings
+// here without also updating every read-path clause — SQLite will
+// lexicographically compare the two and the filter will leak expired
+// rows (T > space in ASCII).
 func (dm *DatabaseManager) SetMemoryTTL(id string, expiresAt time.Time) error {
 	if expiresAt.IsZero() {
 		_, err := dm.db.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
@@ -514,14 +540,14 @@ func (dm *DatabaseManager) SetMemoryTTL(id string, expiresAt time.Time) error {
 	}
 	_, err := dm.db.Exec(`
 		UPDATE memories SET expires_at = ? WHERE id = ?
-	`, expiresAt.Format(time.RFC3339), id)
+	`, expiresAt.Unix(), id)
 	return err
 }
 
 // PruneExpired removes memories that have passed their expires_at time.
 func (dm *DatabaseManager) PruneExpired() (int, error) {
 	result, err := dm.db.Exec(`
-		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
 	`)
 	if err != nil {
 		return 0, err
@@ -543,7 +569,7 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 		       last_accessed_at, expires_at
 		FROM memories
 		WHERE deleted_at IS NULL
-		  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		  AND (? = '' OR collection = ?)
 		ORDER BY (COALESCE(reinforcement_count, 0) * 2) + (COALESCE(weight, 1) * 1.5) DESC,
 		         COALESCE(last_accessed_at, created_at) DESC
