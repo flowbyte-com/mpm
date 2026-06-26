@@ -571,6 +571,28 @@ func (s *MemoryStore) IsPoisonedForTest(content string) (bool, string) {
 	return isPoisoned(content)
 }
 
+// ScanContentForWrite runs the 20-pattern secret/poison scanner against
+// content destined for the memories or lessons tables. Returns true if
+// the content is blocked, with a human-readable reason.
+//
+// Exported wrapper so callers outside the internal package — e.g. the
+// challenge handler in cmd/mpm — can scan user input before persisting it
+// via raw INSERT (rather than going through MemoryStore.AddMemory or
+// DatabaseManager.SaveMemory, which scan internally).
+//
+// This keeps the scanner coverage invariant: any caller writing to
+// memories/lessons must either go through SaveMemory / AddMemory (which
+// scan), or call ScanContentForWrite before the raw INSERT.
+func ScanContentForWrite(content string) (blocked bool, reason string) {
+	if isSensitive, r := isSensitiveContent(content); isSensitive {
+		return true, "sensitive content: " + r
+	}
+	if isPoison, r := isPoisoned(content); isPoison {
+		return true, "poison phrase: " + r
+	}
+	return false, ""
+}
+
 // sensitivePatterns holds pre-compiled regex patterns for sensitive data detection.
 // Compiled once at package init for performance (avoids recompilation on every check).
 var sensitivePatterns = []struct {
@@ -681,7 +703,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		ftsQuery := `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at, fts.rank
 			FROM memories m
 			JOIN memories_fts fts ON m.rowid = fts.rowid
-			WHERE memories_fts MATCH ? AND m.collection = ? AND m.deleted_at IS NULL
+			WHERE memories_fts MATCH ? AND m.collection = ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 			ORDER BY fts.rank
 			LIMIT ?`
 		rows, err = s.DB.Query(ftsQuery, query, collection, n)
@@ -691,7 +713,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 			searchTerm := "%" + query + "%"
 			ftsQuery = `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at, 0
 				FROM memories m
-				WHERE m.content LIKE ? AND m.collection = ?
+				WHERE m.content LIKE ? AND m.collection = ?` + MemoryExpireClauseM + `
 				ORDER BY m.created_at DESC
 				LIMIT ?`
 			rows, err = s.DB.Query(ftsQuery, searchTerm, collection, n)
@@ -700,7 +722,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		// Strategy 3: No query — return recent memories
 		ftsQuery := `SELECT id, collection, content, session_id, tags, metadata, embedding, created_at, 0
 			FROM memories
-			WHERE collection = ?
+			WHERE collection = ?` + MemoryExpireClause + `
 			ORDER BY created_at DESC
 			LIMIT ?`
 		rows, err = s.DB.Query(ftsQuery, collection, n)
@@ -817,7 +839,7 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	var createdAt string
 	var sessionID sql.NullString
 
-	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL", id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
+	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL"+MemoryExpireClause, id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -862,7 +884,7 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		}
 	}
 
-	sqlQuery := "SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?"
+	sqlQuery := "SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE deleted_at IS NULL" + MemoryExpireClause + " ORDER BY created_at DESC LIMIT ?"
 
 	rows, err := s.DB.Query(sqlQuery, n)
 	if err != nil {
@@ -956,7 +978,7 @@ func (s *MemoryStore) GetLatestByCollection(collection string) (*Memory, error) 
 
 	err := s.DB.QueryRow(
 		`SELECT id, collection, content, session_id, tags, metadata, embedding, created_at
-		 FROM memories WHERE collection = ? AND deleted_at IS NULL
+		 FROM memories WHERE collection = ? AND deleted_at IS NULL`+MemoryExpireClause+`
 		 ORDER BY created_at DESC LIMIT 1`, collection,
 	).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 	if err == sql.ErrNoRows {
