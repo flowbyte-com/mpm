@@ -535,6 +535,7 @@ mpm ops synthesize [--dry-run]       # LLM synthesis on all memories
 mpm ops gc [--dry-run|--review|--purge|--shred-negative]  # Decay sweep
 mpm ops backfill-embeddings [--batch-size|--collection|--dry-run]  # Embedding pipeline
 mpm ops dlq:review [review|clear|retry]  # Dead letter queue — failed synth events
+mpm ops lint [--dir <path>]... [--show-clean]  # Validate persona/mode router frontmatter (YAML + regex compile) — wired into pre-commit hook
 mpm ops changelog build [--since v1.0.0] [--release-version 1.1.0] [--legacy]  # Generate CHANGELOG.md + changelog.json from git log
 mpm call query_audit_log [--level|--component|--days|--limit]  # Runtime anomaly ledger (cross-session telemetry)
 mpm call session_end --payload '{"session_id":"...","summary":"...","commitments":[],"open_questions":[]}'  # End session with handoff (next wake will surface it)
@@ -789,33 +790,72 @@ mpm call route --payload '{"prompt": "I need to draft a whitepaper about our Q3 
 Returns:
 ```json
 {
-  "selected_modes": ["architect", "research", "write"],
-  "selected_persona": "whiterabbit",
+  "selected_modes":   ["architect", "research", "write"],
+  "selected_persona": "venkat",
   "scores": {
     "write":     { "score": 4, "triggers": ["draft", "whitepaper"] },
-    "architect": { "score": 1, "triggers": ["architecture"] },
-    "research":  { "score": 1, "triggers": ["need"] }
+    "architect": { "score": 4, "triggers": ["(?i)\\barchitecture\\b"] },
+    "research":  { "score": 1, "triggers": ["research"] },
+    "default":   { "score": 0, "triggers": [] }
   }
 }
 ```
+
+**Frontmatter schema** (every `mode/*.md` and `persona/*.md`):
+
+| Key | Type | Purpose | Routing impact |
+|---|---|---|---|
+| `name:` | string | Identity (falls back to filename if absent) | none |
+| `title:`, `creature:`, `vibe:`, `voice:` | string | Persona identity / voice — LLM context only | none |
+| `patterns:` | string (regex fragments, comma-separated) | **When this component speaks** — prompt vocabulary that activates it | +2 per match (explicit frontmatter) |
+| `domain_out:` | string (regex fragments, comma-separated) | **When this component refuses** — prompt vocabulary that reduces its score | -1 per match, surfaced in `PenaltiesApplied` |
+| `voice_guards:` | string (prose, comma-separated) | **How this component sounds** — things it should NOT say at generation time | none (LLM context only) |
 
 **Scoring rules:**
 
 | | Modes | Personas |
 |---|---|---|
-| Selection logic | Threshold filter — any score ≥1 activates (multi-select) | Max-pooling — highest score wins if ≥1 (single-select) |
-| Explicit frontmatter `patterns:` | +2 per match | +2 per match |
-| Body-text implicit patterns | +1 per match | +1 per match |
-| Frontmatter `anti_patterns:` | -1 per match | -1 per match |
+| Selection logic | Threshold filter — any score ≥1 activates (multi-select) | Max-pooling + fallback hierarchy (single-select) |
+| `patterns:` match | +2 per match | +2 per match |
+| `domain_out:` match | -1 per match (logged in `penalties_applied`) | -1 per match (logged in `penalties_applied`) |
+| `voice_guards:` | ignored by router entirely (LLM context only) | ignored by router entirely (LLM context only) |
 
-**Pattern sources** (in order of weight):
-1. **`patterns:` field** in YAML frontmatter — explicit author intent, highest weight
-2. **Body text** — non-stop-word content words extracted at load time, lower weight
-3. **`anti_patterns:` field** — penalizes false positives (e.g., "quick and dirty" suppresses "write" mode triggered by the word "write")
+**Persona fallback hierarchy** (added 2026-06-26, decision `b466b4e6f6c37e40`):
+
+1. **Explicit match** — the highest-scoring persona, if any `patterns:` matched.
+2. **Graceful fallback** — the persona named `default`, if loaded from `persona/default.md`. Guarantees the agent maintains a consistent baseline voice for general queries that no specialist owns.
+3. **Bare metal** — empty `selected_persona`. Only if `default.md` has been deleted or is unavailable.
+
+Default NEVER overrides a matched specialist. When default is selected via fallback (not pattern match), its score entry is tagged with `(fallback: no specialist pattern matched)` in the triggers array so the diagnostic shows the fallback fired rather than presenting it as an unexplained silent selection.
+
+**Anti-pattern rename history** (decision `d676c0993c280e1d`): The original `anti_patterns:` field was misconfigured across all 16 components as voice-guard prose (output constraints like 'bikeshedding', 'premature optimization') rather than input filters. The -1 penalty mechanism was dormant because voice-guard phrasings almost never match prompt vocabulary. The field was split into two semantically explicit fields in 2026-06-26:
+- `voice_guards:` for output constraints (LLM context, not routing)
+- `domain_out:` for input filters (compiled regex, -1 per match, surfaces in `penalties_applied`)
 
 **Hot reload:** The router monitors `mode/` and `persona/` directory mtimes. Any file added or edited is re-parsed and regex recompiled automatically on the next `route` call — no server restart needed.
 
 **Calling systems** (OpenClaw, Claude Code, etc.) receive the JSON and inject `MPM_ACTIVE_MODE` / `MPM_ACTIVE_PERSONA` into the environment before the main generation call. The routing is completely stateless — no file locking, no write collisions.
+
+#### Router Frontmatter Linter (`mpm ops lint`)
+
+The router frontmatter is hand-curated and uses three classes of regex (`(?i)` patterns, `\b...\b` word boundaries, `regexp.QuoteMeta`). YAML's escape rules interact with regex escapes in subtle ways — e.g., `\b` in double-quoted YAML becomes a literal backspace character (0x08), and `\'` inside single-quoted YAML is rejected by the Go yaml parser. These classes of bug fail silently: the persona loads, the regex compiles, the prompt never matches, no diagnostic surfaces the dead wiring.
+
+`mpm ops lint` is the proactive defense:
+
+```bash
+mpm ops lint                    # scan default dirs (~/.mpm/persona + ~/.mpm/mode)
+mpm ops lint --dir <path>       # scan a custom dir
+mpm ops lint --show-clean       # print OK summary even when nothing is wrong
+```
+
+Checks:
+1. **YAML frontmatter parses without error** — catches the `\'` family.
+2. **Regex compile with (?i) prefix** — mirrors the runtime's compilation shape.
+3. **Raw-form regex compile on `domain_out:`** (no `regexp.QuoteMeta`) — catches the QuoteMeta-masked typo class where unbalanced brackets silently compile but never match.
+
+Wired into the pre-commit hook (`.git/hooks/pre-commit`, also tracked at `scripts/pre-commit`). When `persona/` or `mode/` files are staged, the hook aborts the commit with the linter output if any issues are found. Non-router commits skip the linter for speed.
+
+9 unit tests pin the contract (`internal/router_linter_test.go`): clean production files, broken frontmatter, broken regex in patterns, broken raw-form regex in domain_out, no-frontmatter files, multiple issues per file, voice guards NOT checked, deterministic output.
 
 ### Security Scanning
 
@@ -995,11 +1035,15 @@ The audit log is queryable from the agent via the JSON boundary, surfaceable in 
 
 ## Agent Integration
 
-MPM integrates directly with AI agents. Both OpenClaw and Hermes share the same Go backend — identical behavior, identical database, the same `mpm call` JSON boundary. The Hermes plugin uses Python `subprocess`; the OpenClaw plugin uses Node `child_process`.
+MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`bin/mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. There is no plugin layer, no Node/TypeScript wrapper, no Python shim — just one binary speaking MCP to whatever client connects.
 
-### OpenClaw
+### Single-path-of-truth architecture
 
-MPM is installed as an OpenClaw plugin (`agent-plugins/openclaw-mpm-plugin/mpm-plugin/`), giving the agent **native function-calling access** to a comprehensive suite of MPM tools. The OpenClaw plugin calls the Go binary directly via `child_process` — no MCP intermediary.
+The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders (`agent-plugins/openclaw-mpm-plugin/`, `agent-plugins/opencode-mpm-plugin/`) and their associated TypeScript sources are gone. The MCP server is the only integration surface.
+
+### MCP tool surface
+
+The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
 
 ```
 read_wake_context        query_long_term_memory    save_to_memory
@@ -1014,7 +1058,7 @@ query_memory_quality     route                     log_to_changelog
 session_end              session_handoff           list_handoffs
 ```
 
-Setup and config: see [`agent-plugins/openclaw-mpm-plugin/OPENCLAW.md`](agent-plugins/openclaw-mpm-plugin/OPENCLAW.md).
+Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The server binary is at `bin/mpm-mcp` relative to the MPM repo root.
 
 ### Session Handoffs (Episodic Memory)
 
@@ -1037,6 +1081,15 @@ mpm call session_handoff --payload '{"unread": true}'    # only unread
 mpm call session_handoff --payload '{"mark_read": true}' # return latest and mark it read
 mpm call list_handoffs --payload '{"limit": 10}'  # see recent handoffs
 ```
+
+**Upsert semantics** (decision `1263af51a34b8e69`, 2026-06-26): `session_handoffs.session_id` is `UNIQUE`. A session is a living context, not an append-only ledger. If you write a handoff, the user replies, and the agent does 20 more minutes of substantive work, the final handoff should reflect the new final state — not the snapshot from 20 minutes ago. `session_end` is an UPSERT keyed on `session_id`: **last writer wins**.
+
+- `id` is preserved across upserts (existing id returned) so external references stay stable.
+- `created_at` is preserved across upserts (the row's birth time doesn't move).
+- `ended_at`, `ended_state`, `summary`, `commitments`, `open_questions` move forward.
+- `read_at` and `read_by` are preserved across upserts — wake consumption state survives.
+
+The earlier "warn on UNIQUE failure" code path is gone; the schema constraint is now aligned with the semantic reality.
 
 Wake context surfaces unread handoffs automatically and marks them read, so the same handoff is never shown twice in a row:
 
@@ -1077,7 +1130,7 @@ The agent decides when to call `session_end`. The natural pattern is once per ag
 
 ### Hermes
 
-MPM is also installed as a Hermes Agent Python plugin (`agent-plugins/hermes-mpm-plugin/`). Setup: see [`agent-plugins/hermes-mpm-plugin/install.md`](agent-plugins/hermes-mpm-plugin/install.md).
+Hermes Agent uses a Python plugin (`agent-plugins/hermes-mpm-plugin/`) that calls the CLI binary directly via `subprocess`. Setup: see [`agent-plugins/hermes-mpm-plugin/install.md`](agent-plugins/hermes-mpm-plugin/install.md). Unlike the MCP integration, the Hermes plugin still uses the CLI boundary — the migration from plugin to MCP for OpenClaw was driven by OpenClaw's native MCP support; Hermes does not yet have an MCP client, so the Python wrapper remains.
 
 ---
 
@@ -1368,10 +1421,7 @@ projects/mpm/
 ├── agent-plugins/                 # All MPM agent integrations live here
 │   ├── hermes-mpm-plugin/          # Hermes Python agent plugin
 │   │   └── install.md
-│   ├── openclaw-mpm-plugin/        # OpenClaw TypeScript agent plugin
-│   │   ├── mpm-plugin/
-│   │   └── OPENCLAW.md
-│   └── opencode-mpm-plugin/        # OpenCode TypeScript agent plugin
+│   └── opencode-mpm-plugin/        # OpenCode TypeScript agent plugin (legacy, retained for reference)
 └── contrib/systemd/
     └── mpm.service
 ```
