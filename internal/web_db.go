@@ -198,9 +198,17 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 	return mems, nil
 }
 
-// GetMemory returns a single memory by ID
+// GetMemory returns a single memory by ID. NULL tags (which can occur
+// if a write path bypasses AddMemory's tags validation) are normalized
+// to "" so the returned map's "tags" value is always a string. Same
+// treatment for metadata and the nullable pointer columns: callers
+// can rely on type-stable access (string-or-empty) without per-call
+// nil checks. Production never sees this branch because every write
+// path populates tags; the normalization is here for safety against
+// future write paths and for tests that construct rows directly.
 func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) {
-	var collection, content, tagsJSON, metadataJSON, createdAt string
+	var collection, content, createdAt string
+	var tagsNS, metadataNS sql.NullString
 	var sessionID, sourceDB, sourceID *string
 	var promotedAt *float64
 	var weight int
@@ -208,17 +216,26 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	err := dm.db.QueryRow(`
 		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL
-	    `, id).Scan(&collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
+	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
 		return nil, err
+	}
+
+	tags := ""
+	if tagsNS.Valid {
+		tags = tagsNS.String
+	}
+	metadata := ""
+	if metadataNS.Valid {
+		metadata = metadataNS.String
 	}
 
 	m := map[string]interface{}{
 		"id":         id,
 		"collection": collection,
 		"content":    content,
-		"tags":       tagsJSON,
-		"metadata":   metadataJSON,
+		"tags":       tags,
+		"metadata":   metadata,
 		"created_at": createdAt,
 		"weight":     weight,
 	}
