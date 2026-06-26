@@ -38,10 +38,27 @@ const (
 // after the agent has done its work. The session_id is opaque — usually a
 // UUID the agent generates, but anything unique works.
 //
+// UPSERT SEMANTICS (added 2026-06-26, see decision
+// be61de1c4ef2ff4a-adjacent fix): session_handoffs.session_id is UNIQUE.
+// A session is a living context, not an append-only ledger. If the agent
+// writes a handoff, the user replies, and the agent does 20 more minutes
+// of substantive work, the final handoff should reflect the new final
+// state — not the snapshot from 20 minutes ago. So this is now an UPSERT
+// keyed on session_id: last writer wins. If a row already exists for
+// this session_id, every column is overwritten in place. The id is
+// preserved (existing id returned) so external references stay stable.
+// The created_at column is also preserved; only ended_at moves forward.
+//
+// The earlier "warn on UNIQUE failure" path was a schema rule firing
+// against a wrong mental model (treating the table as append-only). The
+// upsert aligns the SQL constraint with the semantic reality: the agent
+// may legitimately write a handoff multiple times per session as work
+// accumulates.
+//
 // Returns the persisted Handoff (with ID, timestamps populated) and a log
-// row to the audit ledger. If the DB is nil or the insert fails, returns
-// an error — but never panics. Callers should treat EndSession as
-// best-effort: log the error, move on.
+// row to the audit ledger on real error. If the DB is nil or the upsert
+// fails, returns an error — but never panics. Callers should treat
+// EndSession as best-effort: log the error, move on.
 func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("EndSession: db not initialized")
@@ -74,43 +91,95 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 	}
 
 	now := time.Now().UTC()
-	id := GenerateID()
 
+	// ON CONFLICT(session_id) DO UPDATE — overwrite every mutable column.
+	// id: preserve the existing id (id = session_handoffs.id refers to
+	//     the row being updated; excluded.id would clobber it). Stable id
+	//     across upserts is required so external references (wake
+	//     context pointers, logs, foreign keys) stay valid as the agent
+	//     writes multiple handoffs per session.
+	// created_at: NOT in the UPDATE clause — it represents when this
+	//     handoff row was first written for this session, and should
+	//     remain stable.
+	// ended_at + content columns: move forward to reflect the new
+	//     final state (last writer wins).
 	_, err = dm.db.Exec(`
 		INSERT INTO session_handoffs
 			(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, sessionID, now.Format("2006-01-02 15:04:05"), endedState, summary,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			id             = session_handoffs.id,
+			ended_at       = excluded.ended_at,
+			ended_state    = excluded.ended_state,
+			summary        = excluded.summary,
+			commitments    = excluded.commitments,
+			open_questions = excluded.open_questions`,
+		GenerateID(), sessionID, now.Format("2006-01-02 15:04:05"), endedState, summary,
 		string(commitJSON), string(questionJSON), now.Format("2006-01-02 15:04:05"),
 	)
 	if err != nil {
 		// Audit the failure — meta-error: even the handoff writer failed.
-		// The UNIQUE constraint case here is schema enforcement (caller
-		// wrote a handoff for the same session_id already), which is
-		// expected behavior under the Handoff Protocol's mid-session
-		// trigger-phrase rule. Log as warn, not error — the system is
-		// working as designed; the caller was overly eager.
-		dm.LogAudit(AuditWarn, "handoff", "EndSession insert failed: "+err.Error(), "", AuditContext{
+		// The UNIQUE-constraint path no longer fires here (upsert handles
+		// it), so any error from this Exec is a real problem: DB locked,
+		// disk full, schema mismatch, etc.
+		dm.LogAudit(AuditWarn, "handoff", "EndSession upsert failed: "+err.Error(), "", AuditContext{
 			"session_id": sessionID,
 		})
-		return nil, fmt.Errorf("EndSession: insert: %w", err)
+		return nil, fmt.Errorf("EndSession: upsert: %w", err)
 	}
 
 	// No audit log on the success path. The session_handoffs row IS the
 	// audit trail for session endings — logging the same event to
 	// system_audit_log too was doubling the noise without adding signal.
-	// (Was: AuditWarn with full summary. Removed 2026-06-23.)
+	// (Was: AuditWarn with full summary. Removed 2026-06-23. The upsert
+	// continues this principle: silent on success, loud on real error.)
 
-	return &Handoff{
-		ID:            id,
-		SessionID:     sessionID,
-		EndedAt:       now,
-		EndedState:    endedState,
-		Summary:       summary,
-		Commitments:   commitments,
-		OpenQuestions: openQuestions,
-		CreatedAt:     now,
-	}, nil
+	// Read the persisted row back so the caller sees the canonical id
+	// (the one that survived the upsert, not a now-stale generated id)
+	// and the canonical created_at (preserved across upserts).
+	persisted, err := dm.getHandoffBySessionID(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("EndSession: read back: %w", err)
+	}
+	return persisted, nil
+}
+
+// getHandoffBySessionID returns the handoff row for a session. Returns
+// sql.ErrNoRows if none exists. Internal helper for EndSession to
+// canonicalize the upsert result.
+//
+// Note on timestamp parsing: SQLite's DATETIME affinity normalizes stored
+// values on read into ISO 8601 form ("2026-06-26T10:16:47Z") regardless
+// of the format used at INSERT time. Scanning directly into time.Time
+// via the mattn/go-sqlite3 driver handles both formats correctly;
+// parsing the string manually with a fixed layout does NOT. So we let
+// the driver do the conversion.
+func (dm *DatabaseManager) getHandoffBySessionID(sessionID string) (*Handoff, error) {
+	row := dm.db.QueryRow(`
+		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
+		FROM session_handoffs WHERE session_id = ?`, sessionID)
+	var h Handoff
+	var endedAt, createdAt time.Time
+	var commitJSON, questionJSON []byte
+	if err := row.Scan(&h.ID, &h.SessionID, &endedAt, &h.EndedState, &h.Summary,
+		&commitJSON, &questionJSON, &createdAt); err != nil {
+		return nil, err
+	}
+	h.EndedAt = endedAt
+	h.CreatedAt = createdAt
+	if len(commitJSON) > 0 {
+		_ = json.Unmarshal(commitJSON, &h.Commitments)
+	}
+	if len(questionJSON) > 0 {
+		_ = json.Unmarshal(questionJSON, &h.OpenQuestions)
+	}
+	if h.Commitments == nil {
+		h.Commitments = []string{}
+	}
+	if h.OpenQuestions == nil {
+		h.OpenQuestions = []string{}
+	}
+	return &h, nil
 }
 
 // GetLatestUnreadHandoff returns the most recent handoff that has not been
