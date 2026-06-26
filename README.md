@@ -358,6 +358,25 @@ mpm call query_confidence_history --payload '{"artifact_id":"abc123","artifact_t
 
 This is the **machine-to-machine interface**. The human-facing CLI (documented below) calls the same handlers internally.
 
+#### MCP/C parity: what's exposed via `mpm call` and the MCP server vs CLI-only
+
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `DatabaseManager` methods. The 33 tools in the [MCP tool surface](#mcp-tool-surface) cover the agent's daily workflow: read/write memory, lessons, topics, references, theories, decisions, evidence, confidence, references, route, wake, directives, log_to_changelog, plus the memory feedback loop (`shred`/`reinforce`/`weaken`/`snooze`/`set-weight`/`patch`/`promote`) and workflow (`review`/`synthesize`/`gc`).
+
+A handful of CLI commands are intentionally **NOT** exposed via MCP/call because they're operationally distinct (destructive, cron-friendly, or human-gated):
+
+| CLI command | Why CLI-only |
+|---|---|
+| `mpm ops doctor` | Diagnostic report; agents don't need to run it, scheduled cron does |
+| `mpm ops lint` | Pre-commit / CI hook; agents should never invoke regex validation |
+| `mpm ops backfill-embeddings` | Bulk operation; runs on a schedule, not per-request |
+| `mpm ops synthesize [--dry-run]` (bulk) | Per-memory synthesis IS exposed as `synthesize_memory`; bulk scan is human-initiated |
+| `mpm ops gc --review` / `--purge` / `--shred-negative` | Destructive mass operations; core safe `gc_run` IS exposed |
+| `mpm ops changelog build` | Release engineering; not an agent task |
+| `mpm ops maintain` | Maintenance wrapper; individual ops below are exposed |
+| `mpm web` | Long-running HTTP server; can't be a tool call |
+
+If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
+
 ---
 
 ## Retrieval Architecture
@@ -395,9 +414,9 @@ On hybrid search, a contradiction scan evaluates top-15 candidates (≤105 pairs
 
 **Synchronous state collision resolution (Phase 4):** State collisions (cosine similarity ≥ 0.85 between a challenged memory and an unchallenged candidate) trigger a **synchronous database patch** via `ChallengeMemory()`, which instantly degrades the unchallenged candidate's weight, logs an evidence chain, and atomically flips its status to `challenged` in a single transaction. This eliminates the async ghost loop — state transitions commit atomically on the first collision turn. Equal-tier fall-throughs are bounded to avoid double-challenging an already-resolved target.
 
-### Concept Drift Detection (`idle_dream.go`)
+### Concept Drift Detection
 
-The engine autonomously identifies paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence. Every 6 hours, a low-priority background ticker runs a SQLite CTE audit loop checking for this specific drift signature:
+Concept drift detection — autonomously identifying paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence — is implemented as a **synchronous** operation that runs inline with `query_long_term_memory` (no background ticker). The detection signature is:
 
 | Signal | Threshold |
 |---|---|
@@ -411,7 +430,7 @@ When a drifting memory triggers this signature, the engine:
 2. **Proposes** a pending theory in the theories collection (`trigger='concept_drift'`) to alert the agent
 3. **Survives restarts** — SQLite-native dedup check prevents duplicate theory generation across process restarts
 
-The cycle runs on its own 6-hour ticker, independent of the idle consolidation ticker — drift detection is purely SQLite math with no filesystem dependency.
+The earlier background ticker (every 6 hours, `internal/idle_dream.go`, separate goroutine pool) was removed in the 2026-06-26 purge. Drift detection is now a pure-SQLite operation that piggybacks on the read path — no separate process, no separate timer, no panic-recovery surface to maintain. A drift that the agent missed last query is just as catchable next query.
 
 ---
 
@@ -643,17 +662,9 @@ The web UI server includes a live Server-Sent Events (SSE) stream at `GET /api/s
 
 **Web port discovery:** The web server writes its active port to `~/.mpm/web.port` on startup (and removes it on exit). `mpm call` reads this file to find the relay endpoint — no environment variable inheritance required between separate process invocations.
 
-### Watcher / Synth Isolation + DLQ
+### Watcher / Synth Isolation
 
-Watcher and synthesis run on isolated SQLite read connections (WAL readers are thread-safe). Synthesis events pass through a typed channel with a **200-event buffer**. **Overflow backpressure:** events beyond capacity are offloaded to `raw_memories` as `overflow_deferred`, processed alongside normal DLQ entries with shared exponential backoff. Failed synthesis events route to `synthesis_dlq` — **never dropped, never blocking**.
-
-Multi-vendor fallback chain: **MiniMax → OpenAI → Ollama (local)**. Each vendor has independent timeout (10s). All vendors fail → DLQ enqueue. Periodic retry tick processes DLQ when vendors recover.
-
-```bash
-mpm ops dlq:review review    # Inspect DLQ
-mpm ops dlq:review retry     # Process pending retries
-mpm ops dlq:review clear    # Clear resolved DLQ entries
-```
+The watcher daemon was deprecated 2026-06-26 (see [Watcher deprecation](#watcher-deprecation-2026-06-26)). Synthesis now runs on-demand only — `mpm ops synthesize [--dry-run]` and the per-memory `mpm call synthesize_memory` MCP tool. Both use the same multi-vendor fallback chain: **MiniMax → OpenAI → Ollama (local)**. Each vendor has independent timeout (10s). All vendors fail → error returned to the caller; the caller decides whether to retry.
 
 ### Deadlock Observability
 
@@ -849,18 +860,14 @@ Returns:
 
 | | Modes | Personas |
 |---|---|---|
-| Selection logic | Threshold filter — any score ≥1 activates (multi-select) | Max-pooling + fallback hierarchy (single-select) |
+| Selection logic | Threshold filter — any score ≥1 activates (multi-select) | Max-pooling — highest-scoring wins (single-select) |
 | `patterns:` match | +2 per match | +2 per match |
 | `domain_out:` match | -1 per match (logged in `penalties_applied`) | -1 per match (logged in `penalties_applied`) |
 | `voice_guards:` | ignored by router entirely (LLM context only) | ignored by router entirely (LLM context only) |
 
-**Persona fallback hierarchy** (added 2026-06-26, decision `b466b4e6f6c37e40`):
+**Persona selection rule (revised 2026-06-26):** A persona activates ONLY when at least one of its `patterns:` matches the input (net score ≥ 1 after `domain_out:` penalties). There is **no implicit `default` fallback** — if nothing matches, `selected_persona` is empty. The `default` persona still loads and scores like any other; it wins when its patterns match, never for free.
 
-1. **Explicit match** — the highest-scoring persona, if any `patterns:` matched.
-2. **Graceful fallback** — the persona named `default`, if loaded from `persona/default.md`. Guarantees the agent maintains a consistent baseline voice for general queries that no specialist owns.
-3. **Bare metal** — empty `selected_persona`. Only if `default.md` has been deleted or is unavailable.
-
-Default NEVER overrides a matched specialist. When default is selected via fallback (not pattern match), its score entry is tagged with `(fallback: no specialist pattern matched)` in the triggers array so the diagnostic shows the fallback fired rather than presenting it as an unexplained silent selection.
+Rationale: the route hook is a **context-injection mechanism for matched routing targets**, not a persona-defaulting mechanism. The agent's active persona lives in `active.json` (set via `mpm mode/persona`) and the route hook must not override it. An unconditional default fallback previously injected a full `<system-reminder>` block for every short conversational prompt (`"hi"`, `"hello there"`), polluting the agent's context window with mode/persona content that wasn't relevant.
 
 **Anti-pattern rename history** (decision `d676c0993c280e1d`): The original `anti_patterns:` field was misconfigured across all 16 components as voice-guard prose (output constraints like 'bikeshedding', 'premature optimization') rather than input filters. The -1 penalty mechanism was dormant because voice-guard phrasings almost never match prompt vocabulary. The field was split into two semantically explicit fields in 2026-06-26:
 - `voice_guards:` for output constraints (LLM context, not routing)
@@ -1012,7 +1019,7 @@ To force a fresh run (e.g., after manual repair): `mpm ops self-heal --force`. T
 
 ### Self-Audit Log
 
-Runtime telemetry has historically lived in flat files (`watchdog.jsonl`, `mirror.jsonl`) or isolated queues (`synthesis_dlq`) — readable by humans grepping logs, blind to the agent. MPM moves that telemetry into the cognitive surface so the agent can see what went wrong across sessions.
+Runtime telemetry has historically lived in flat files (`watchdog.jsonl`, `mirror.jsonl`) — readable by humans grepping logs, blind to the agent. MPM moves that telemetry into the cognitive surface so the agent can see what went wrong across sessions.
 
 ```bash
 mpm call query_audit_log --days 1 --limit 20          # all events, last 24h
@@ -1073,7 +1080,7 @@ MPM integrates directly with AI agents as a **single MCP server**. The Go binary
 
 ### Single-path-of-truth architecture
 
-The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders (`agent-plugins/openclaw-mpm-plugin/`, `agent-plugins/opencode-mpm-plugin/`) and their associated TypeScript sources are gone. The MCP server is the only integration surface.
+The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders (`agent-plugins/openclaw-mpm-plugin/`, `agent-plugins/opencode-mpm-plugin/`) and their associated TypeScript sources are gone. The MCP server is the only integration surface for MCP-aware clients; Hermes retains a small Python plugin (`agent-plugins/hermes-mpm-plugin/`) because it doesn't yet have an MCP client.
 
 ### MCP tool surface
 
@@ -1090,6 +1097,15 @@ add_evidence             list_evidence             query_confidence_history
 explain_confidence       query_confidence_changes  query_confidence_trend
 query_memory_quality     route                     log_to_changelog
 session_end              session_handoff           list_handoffs
+
+# Memory feedback loop (added 2026-06-26 — close the agent loop so
+# agents don't have to shell `mpm reinforce <id>` etc.)
+shred_memory             reinforce_memory          weaken_memory
+snooze_memory            set_memory_weight         patch_memory
+promote_memory
+
+# Workflow (added 2026-06-26)
+review_memories          synthesize_memory          gc_run
 ```
 
 Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The server binary is at `bin/mpm-mcp` relative to the MPM repo root.
@@ -1164,7 +1180,7 @@ The agent decides when to call `session_end`. The natural pattern is once per ag
 
 ### Hermes
 
-Hermes Agent uses a Python plugin (`agent-plugins/hermes-mpm-plugin/`) that calls the CLI binary directly via `subprocess`. Setup: see [`agent-plugins/hermes-mpm-plugin/install.md`](agent-plugins/hermes-mpm-plugin/install.md). Unlike the MCP integration, the Hermes plugin still uses the CLI boundary — the migration from plugin to MCP for OpenClaw was driven by OpenClaw's native MCP support; Hermes does not yet have an MCP client, so the Python wrapper remains.
+Hermes Agent uses a Python plugin (`agent-plugins/hermes-mpm-plugin/`) that calls the CLI binary directly via `subprocess` (mostly the `mpm call <tool> --payload '{...}'` interface — the JSON boundary is the universal machine interface, so the plugin is a thin payload-construction layer over the same handlers MCP uses). Setup: see [`agent-plugins/hermes-mpm-plugin/install.md`](agent-plugins/hermes-mpm-plugin/install.md). The plugin-to-MCP migration was driven by OpenClaw's native MCP support; Hermes does not yet have an MCP client, so the Python wrapper remains.
 
 ---
 
@@ -1299,10 +1315,8 @@ mpm route < "/noroute explain quantum computing"
 ```
 
 - No socket IPC — commands execute in the same process
-- Watcher = background goroutine (not separate process); `--bg` spawns detached child for systemd
-- Synthesis = isolated goroutine with independent panic recovery and deadline propagation
-- DLQ = SQLite table; failed synth events retried every 5min via ticker
-- Multi-vendor failover: MiniMax → OpenAI → Ollama → DLQ
+- No background goroutines — synthesis, GC, maintenance are all on-demand via `mpm call <tool>` or `mpm ops <subcommand>`
+- Multi-vendor LLM failover: MiniMax → OpenAI → Ollama → error to caller (no DLQ — failures bubble up so the caller decides whether to retry)
 - SSEBroker is a package-level singleton — callable from `main()` with no HTTP server handle; agent/CLI path relays via `POST /api/internal/broadcast`
 
 ### Database Schema
@@ -1319,8 +1333,12 @@ mpm route < "/noroute explain quantum computing"
 | `reference_chunks` | Smart Fence chunks from ingested documents |
 | `system_config` | Configuration snapshots, ephemeral personas |
 | `raw_memories` | Staging area for ingest workflow |
-| `synthesis_dlq` | Dead-letter queue for failed synthesis jobs |
-| `synthesis_raw` | Overflow deferred entries pending retry |
+| `evidence` | Evidence rows (with strength + decay) backing `confidence` |
+| `confidence_history` | Append-only audit trail of every confidence recompute |
+| `confidence_components` | Component breakdown (evidence strength, decay, prior) for `explain_confidence` |
+| `memory_source_evidence_ai` | Per-source survival-rate trigger backing `query_memory_quality` |
+| `session_handoffs` | End-of-session handoff records (summary, commitments, open_questions) |
+| `audit_log` | Cross-session runtime anomaly ledger (`level`, `component`, `stack_trace`, `context`) |
 
 ---
 
@@ -1450,9 +1468,8 @@ projects/mpm/
 │   │   └── ...
 │   └── superpowers/                 # Deep-dive specs
 ├── agent-plugins/                 # All MPM agent integrations live here
-│   ├── hermes-mpm-plugin/          # Hermes Python agent plugin
-│   │   └── install.md
-│   └── opencode-mpm-plugin/        # OpenCode TypeScript agent plugin (legacy, retained for reference)
+│   └── hermes-mpm-plugin/          # Hermes Python agent plugin (CLI-bound; Hermes lacks native MCP)
+│       └── install.md
 └── contrib/systemd/
     └── mpm.service
 ```
