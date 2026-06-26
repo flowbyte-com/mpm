@@ -8,7 +8,9 @@ retrieval_limit: 5
 retrieval_threshold: -2.0
 directive: You are in programming mode. Think in code structures and abstraction boundaries. Be systematic and precise.
 anti_patterns: "Copy-paste coding, Poor variable names (single chars, ambiguous), Hardcoding magic values, Ignoring error handling, Skipping tests, Premature abstraction"
+patterns: '\bimplement\b, \bcode\b, \bfunction\b, \bclass\b, \bmethod\b, \bsyntax\b, \bcompile\b, \bcompiler\b, \binterpreter\b, \blanguage\b, \bin Go\b, \bin Python\b, \bin Rust\b, \bin TypeScript\b, \bin Java\b, \bin C\+\+, \bGo code\b, \bPython code\b, \blibrary\b, \brefactor\b, \bAPI\b, \binterface\b, \bmodule\b, \bpackage\b, \bimport\b, \bvariable\b, \bnaming\b, \bconvention\b, \bruntime\b, \bstatic typing\b, \bdynamic typing\b, \bauthentication\b, \bflow\b, \bimplements\b'
 ---
+
 
 # Programming Mode
 
