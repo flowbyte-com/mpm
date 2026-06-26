@@ -1523,12 +1523,8 @@ type activeAdmission struct {
 
 func loadActiveForAdmission() activeAdmission {
 	out := activeAdmission{}
-	data, err := os.ReadFile(activeJSONPath())
+	st, err := mpminternal.LoadActiveJSON()
 	if err != nil {
-		return out
-	}
-	var st ActiveState
-	if err := json.Unmarshal(data, &st); err != nil {
 		return out
 	}
 	if len(st.Modes) > 0 {
@@ -1619,49 +1615,16 @@ Supported formats: .txt, .md, .html, .epub, .pdf`)
 	return 0
 }
 
-// =============================================================================
 // Context Switcher — Active State
-// =============================================================================
-
-// ActiveState represents the current persona and mode configuration.
-// Persisted as active.json in the MPM directory.
-type ActiveState struct {
-	Persona string   `json:"persona"`
-	Modes   []string `json:"modes"`
-	Updated string   `json:"updated"`
-}
-
-func activeJSONPath() string {
-	return filepath.Join(config.GetMPMDir(), "active.json")
-}
-
-func loadActiveJSON() (*ActiveState, error) {
-	path := activeJSONPath()
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return &ActiveState{
-			Persona: "default",
-			Modes:   []string{"standard"},
-			Updated: time.Now().UTC().Format(time.RFC3339),
-		}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var state ActiveState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
-	return &state, nil
-}
-
-func saveActiveJSON(s *ActiveState) error {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(activeJSONPath(), data, 0644)
-}
+//
+// active.json read/write was duplicated here in main package AND in
+// internal/xitl.go for years, with subtly different shapes (this one
+// defaulted to Persona="default" / Modes=["standard"] when missing; the
+// internal one defaulted to zero values). 2026-06-26 consolidation
+// moved the canonical owner to internal/active_state.go (internal
+// package) so both surfaces route through one path. The main-package
+// loadActiveJSON/saveActiveJSON/activeJSONPath were deleted; callers
+// below now use mpminternal.LoadActiveJSON / mpminternal.SaveActiveJSON.
 
 func getModeFiles() []string {
 	dir := filepath.Join(config.GetMPMDir(), "mode")
@@ -1706,7 +1669,7 @@ func getPersonaFiles() []string {
 // If the active persona is "ephemeral", it fetches the JIT persona blob from
 // system_config and formats it as YAML frontmatter in place of a file read.
 func GetSystemPrompt() string {
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		return ""
 	}

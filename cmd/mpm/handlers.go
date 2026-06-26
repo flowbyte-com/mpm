@@ -1076,12 +1076,11 @@ func handleGC(args []string) int {
 		}
 		// LTM protection: preserve memories that are explicitly marked LTM OR have weight >= 10.
 		// Applying the floor BEFORE dead detection ensures LTM memories are never flagged for deletion.
-		if (isLongTerm || float64(weight) >= 10) && newWeight < 1.0 {
+if (mpminternal.IsLTMMemory(isLongTerm, weight)) && newWeight < 1.0 {
 			newWeight = 1.0
 		}
-
 		// Record delta for batch update
-		deltas = append(deltas, weightDelta{id: id, oldWeight: weight, newWeight: newWeight, isLTM: isLongTerm || float64(weight) >= 10})
+		deltas = append(deltas, weightDelta{id: id, oldWeight: weight, newWeight: newWeight, isLTM: mpminternal.IsLTMMemory(isLongTerm, weight)})
 
 		// Dead if <= 0 (post-clamp) and not LTM — LTM memories are never eligible for deletion.
 		// Also catches already-dead memories (weight already <= 0 from a previous GC)
@@ -2817,7 +2816,7 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	// Auto-mode transparency
 	modeLine := ""
 	personaLine := ""
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
 		if len(active.Modes) > 0 && active.Modes[0] == "auto" {
 			modeLine = "Mode: auto (loaded: auto)"
@@ -3116,7 +3115,7 @@ func handleSwitch(args []string) int {
 		return 1
 	}
 
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		fmt.Printf("[!] Error loading active.json: %v\n", err)
 		return 1
@@ -3156,7 +3155,7 @@ func handleSwitch(args []string) int {
 	}
 
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
-	if err := saveActiveJSON(active); err != nil {
+	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		fmt.Printf("[!] Error saving: %v\n", err)
 		return 1
 	}
@@ -3166,7 +3165,7 @@ func handleSwitch(args []string) int {
 	return 0
 }
 
-func switchPersona(reader *bufio.Reader, active *ActiveState) {
+func switchPersona(reader *bufio.Reader, active *mpminternal.ActiveState) {
 	personas := getPersonaFiles()
 	if len(personas) == 0 {
 		fmt.Println("[!] No persona files found in persona/")
@@ -3193,7 +3192,7 @@ func switchPersona(reader *bufio.Reader, active *ActiveState) {
 	active.Persona = personas[idx-1]
 }
 
-func toggleModes(reader *bufio.Reader, active *ActiveState) {
+func toggleModes(reader *bufio.Reader, active *mpminternal.ActiveState) {
 	modes := getModeFiles()
 	if len(modes) == 0 {
 		fmt.Println("[!] No mode files found in mode/")
@@ -3787,7 +3786,7 @@ func handleHint(args []string) int {
 
 	retrievalLimit := maxHints
 	retrievalThreshold := -3.0
-	if active, err := loadActiveJSON(); err == nil {
+	if active, err := mpminternal.LoadActiveJSON(); err == nil {
 		mm := mpminternal.NewModeManager(config.GetMPMDir())
 		for _, name := range active.Modes {
 			if m, err := mm.Get(name); err == nil {
@@ -3929,7 +3928,7 @@ func handleStanceAssume(args []string) int {
 	mpminternal.DeleteEphemeralPersona(dm)
 
 	// Read active.json
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
@@ -3942,7 +3941,7 @@ func handleStanceAssume(args []string) int {
 		active.Persona = persona
 	}
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
-	if err := saveActiveJSON(active); err != nil {
+	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		return respond("", fmt.Sprintf("Error saving active.json: %v\n", err), 1)
 	}
 
@@ -4033,13 +4032,13 @@ func handleStanceSynthesize(args []string) int {
 	}
 
 	// Update active.json to point to ephemeral
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
 	active.Persona = "ephemeral"
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
-	if err := saveActiveJSON(active); err != nil {
+	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		return respond("", fmt.Sprintf("Error saving active.json: %v\n", err), 1)
 	}
 
@@ -4093,13 +4092,13 @@ func handleOpsPromote() int {
 	}
 
 	// Update active.json to point to the newly permanent persona
-	active, err := loadActiveJSON()
+	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
 	active.Persona = ep.Name
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
-	if err := saveActiveJSON(active); err != nil {
+	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		return respond("", fmt.Sprintf("Error saving active.json: %v\n", err), 1)
 	}
 
