@@ -72,6 +72,9 @@ func parseModeFile(path string) (*Mode, error) {
 			return nil, fmt.Errorf("invalid frontmatter in %s: %w", path, err)
 		}
 	}
+	if err := validateMode(&m, path); err != nil {
+		return nil, err
+	}
 	if m.RetrievalLimit <= 0 {
 		m.RetrievalLimit = 5
 	}
@@ -81,6 +84,37 @@ func parseModeFile(path string) (*Mode, error) {
 	m.Content = body
 
 	return &m, nil
+}
+
+// validateMode checks that a parsed mode has the minimum required fields.
+// Failure here means a malformed mode file will not silently land in the
+// routing engine — operators see the error at load time, not when an
+// agent tries to use the mode hours later.
+//
+// Required: name OR title must be present. name is preferred because it's
+// how callers reference the mode (mpm mode <name>). The pattern list and
+// anti-patterns are optional (some modes exist purely as persona anchors).
+func validateMode(m *Mode, path string) error {
+	if m.Name == "" && m.Title == "" {
+		return fmt.Errorf("mode file %s has no name and no title; one is required", path)
+	}
+	if m.Name != "" {
+		// Name must be a valid identifier: lowercase letters, digits, dashes,
+		// underscores. Reject whitespace, slashes, control chars, etc.
+		for _, r := range m.Name {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return fmt.Errorf("mode file %s has invalid name %q: must be [a-z0-9_-]+", path, m.Name)
+			}
+		}
+	}
+	if m.Version != "" {
+		// Version is loose-validated: must start with a digit. We don't
+		// enforce semver strictly; that's a community convention.
+		if !((m.Version[0] >= '0' && m.Version[0] <= '9')) {
+			return fmt.Errorf("mode file %s has invalid version %q: must start with a digit", path, m.Version)
+		}
+	}
+	return nil
 }
 
 // Get retrieves a mode by name from .md file

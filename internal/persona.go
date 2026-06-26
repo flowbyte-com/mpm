@@ -69,9 +69,36 @@ func parsePersonaFile(path string) (*Persona, error) {
 			return nil, fmt.Errorf("invalid frontmatter in %s: %w", path, err)
 		}
 	}
+	if err := validatePersona(&p, path); err != nil {
+		return nil, err
+	}
 	p.Content = body
 
 	return &p, nil
+}
+
+// validatePersona checks that a parsed persona has the minimum required
+// fields. Mirrors validateMode: a malformed persona must fail at load
+// time, not when an agent tries to use it.
+//
+// Required: name OR title. name is the canonical identifier (used in
+// active.json and mpm persona <name>). Names share the same character
+// class as modes.
+func validatePersona(p *Persona, path string) error {
+	if p.Name == "" && p.Title == "" {
+		return fmt.Errorf("persona file %s has no name and no title; one is required", path)
+	}
+	if p.Name != "" {
+		for _, r := range p.Name {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return fmt.Errorf("persona file %s has invalid name %q: must be [a-z0-9_-]+", path, p.Name)
+			}
+		}
+	}
+	if p.Version != "" && !((p.Version[0] >= '0' && p.Version[0] <= '9')) {
+		return fmt.Errorf("persona file %s has invalid version %q: must start with a digit", path, p.Version)
+	}
+	return nil
 }
 
 // Get retrieves a persona by name from .md file
