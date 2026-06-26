@@ -115,6 +115,12 @@ type DatabaseManager struct {
 
 	watchdogPath string     // path to watchdog.jsonl for query observability
 	watchdogMu   sync.Mutex // serializes watchdog log writes
+
+	// sharedPath is the path of the attached shared DB, or "" if not attached.
+	// Set by attachShared() when MPM_SHARED_DB is configured and ATTACH succeeds.
+	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
+	sharedPath     string
+	sharedAttached bool
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
@@ -511,7 +517,157 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Phase 1 of the multi-agent shared-epistemology arc (WISHLIST.md):
+	// if MPM_SHARED_DB is set, ATTACH the shared SQLite database. Failure
+	// to attach is non-fatal — mpm continues in local-only mode. This
+	// keeps single-instance use cases unaffected while making the
+	// plumbing available for operators who opt in.
+	if sharedPath := os.Getenv("MPM_SHARED_DB"); sharedPath != "" {
+		if err := manager.attachShared(sharedPath); err != nil {
+			slog.Warn("shared DB attach failed; continuing in local-only mode",
+				"path", sharedPath, "error", err.Error())
+		}
+	}
+
 	return manager, nil
+}
+
+// attachShared ATTACHes sharedPath as the `shared` schema in the current
+// connection and runs SafeMigrations + index creation against it. The
+// shared DB uses the same schema as the local DB (see WISHLIST.md
+// Schema overlap section) so SQL is identical, just prefixed `shared.`.
+//
+// Idempotent: SafeMigrations uses ALTER TABLE ADD COLUMN, which is a
+// no-op if the column already exists. Indexes use IF NOT EXISTS.
+//
+// Returns nil on success; errors are non-fatal and the caller logs +
+// continues. SharedAttached() returns "" until this succeeds.
+func (dm *DatabaseManager) attachShared(sharedPath string) error {
+	// Ensure the directory exists so the file can be created on first write.
+	if err := os.MkdirAll(filepath.Dir(sharedPath), 0755); err != nil {
+		return fmt.Errorf("mkdir shared db dir: %w", err)
+	}
+
+	// ATTACH as 'shared'. Read-only mode is selected via MPM_SHARED_READONLY.
+	// For ATTACH, SQLite accepts either a plain filename or a URI. We use
+	// the plain filename (escape single quotes in the path) for maximum
+	// compatibility — the mattn/go-sqlite3 driver accepts both.
+	stmt := fmt.Sprintf("ATTACH DATABASE '%s' AS shared", strings.ReplaceAll(sharedPath, "'", "''"))
+	if _, err := dm.db.Exec(stmt); err != nil {
+		return fmt.Errorf("ATTACH: %w", err)
+	}
+
+	// Apply read-only after attach if requested (URI is per-connection,
+	// but ATTACH doesn't take a mode). Use PRAGMA on the attached schema.
+	if os.Getenv("MPM_SHARED_READONLY") == "1" {
+		// SQLite doesn't have a per-ATTACH read-only flag, but we can
+		// emulate it by attempting a write and rolling back. For now
+		// we trust the operator — they said read-only. A future
+		// enhancement could enforce via a session-level guard.
+		_ = sharedPath // marker for future enforcement
+	}
+
+	// Run BaseTables (the canonical DDL) against the shared schema FIRST.
+	// CREATE TABLE IF NOT EXISTS is idempotent. We can't use a simple
+	// "CREATE TABLE shared.X" prefix because the original BaseTables
+	// DDL has triggers and FTS definitions that expect the table to be
+	// in the default schema. For Phase 1 we only run the core CREATE
+	// TABLE statements (not triggers/FTS) — that's enough for the
+	// shared-rules read path. Triggers + FTS are Phase 2 work.
+	for _, ddl := range BaseTables {
+		if !strings.HasPrefix(ddl, "CREATE TABLE") {
+			continue
+		}
+		// Rewrite "CREATE TABLE foo" to "CREATE TABLE shared.foo". The
+		// FTS5 virtual tables and triggers remain in the local DB.
+		sharedDDL := rewriteTablePrefix(ddl, "shared.")
+		if _, err := dm.db.Exec(sharedDDL); err != nil {
+			slog.Warn("shared table DDL failed",
+				"sql_prefix", sharedDDLTruncate(sharedDDL, 60), "error", err.Error())
+		}
+	}
+
+	// Now run SafeMigrations against the shared schema (tables exist now).
+	// ALTER TABLE in SQLite doesn't accept a schema prefix, so we use
+	// sqlite_master to set the search_path equivalent. For our purposes
+	// (per-table ALTER), we just qualify the table name in the error
+	// path; the actual ALTER doesn't care about the schema.
+	//
+	// We skip tables that aren't shared-schema (lessons handled separately,
+	// reference_* tables live in ReferenceTables, not BaseTables — Phase 1
+	// only shares the core memory/decision/theory tables).
+	sharedTables := map[string]bool{
+		"sessions": true, "topics": true, "topic_memberships": true,
+		"memories": true, "system_config": true, "lessons": true,
+		"raw_memories": true, "external_db_cursors": true,
+		"memory_revisions": true, "evidence": true, "confidence_history": true,
+	}
+	for _, m := range SafeMigrations {
+		if !sharedTables[m[0]] {
+			continue
+		}
+		alter := fmt.Sprintf("ALTER TABLE shared.%s ADD COLUMN %s %s", m[0], m[1], m[2])
+		if _, err := dm.db.Exec(alter); err != nil {
+			if !isDuplicateColumnError(err) {
+				slog.Warn("shared migration failed",
+					"table", m[0], "column", m[1], "error", err.Error())
+			}
+		}
+	}
+
+	dm.sharedPath = sharedPath
+	dm.sharedAttached = true
+	slog.Info("shared DB attached", "path", sharedPath, "readonly", os.Getenv("MPM_SHARED_READONLY") == "1")
+	return nil
+}
+
+// rewriteTablePrefix prepends `prefix.` to the table name in a CREATE TABLE
+// statement. Naive — assumes the table name is the only bare identifier
+// (no embedded "table.column" references in the column list, which is
+// true for our BaseTables DDL).
+func rewriteTablePrefix(ddl, prefix string) string {
+	// "CREATE TABLE IF NOT EXISTS foo (" -> "CREATE TABLE IF NOT EXISTS shared.foo ("
+	// Find the start of the table name (after "CREATE TABLE" and optional "IF NOT EXISTS").
+	const marker = "CREATE TABLE "
+	idx := strings.Index(ddl, marker)
+	if idx < 0 {
+		return ddl
+	}
+	afterMarker := idx + len(marker)
+	// Skip "IF NOT EXISTS " if present.
+	rest := ddl[afterMarker:]
+	if strings.HasPrefix(rest, "IF NOT EXISTS ") || strings.HasPrefix(rest, "IF NOT EXISTS\t") {
+		afterMarker += len("IF NOT EXISTS ")
+	}
+	// Find the next space, tab, newline, or '(' — the table name ends there.
+	cutAt := -1
+	for i := afterMarker; i < len(ddl); i++ {
+		c := ddl[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '(' {
+			cutAt = i
+			break
+		}
+	}
+	if cutAt < 0 {
+		return ddl
+	}
+	return ddl[:afterMarker] + prefix + ddl[afterMarker:]
+}
+
+func sharedDDLTruncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// SharedAttached reports whether the shared DB is currently attached.
+// Returns the path; "" means local-only mode.
+func (dm *DatabaseManager) SharedAttached() string {
+	if !dm.sharedAttached {
+		return ""
+	}
+	return dm.sharedPath
 }
 
 // NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.

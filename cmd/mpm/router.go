@@ -391,6 +391,8 @@ func handleOps(args []string) int {
 		return handleLint(subArgs)
 	case "synthesize":
 		return handleSynthesize(append([]string{"synthesize"}, subArgs...))
+	case "shared":
+		return handleOpsShared(subArgs)
 	case "gc":
 		return handleGC(append([]string{"gc"}, subArgs...))
 	case "backfill-embeddings":
