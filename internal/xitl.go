@@ -31,11 +31,11 @@ import (
 // curated regex sets. If a domain_out is ever needed for an ephemeral
 // persona, it's a separate field and a separate scope.
 type EphemeralPersona struct {
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Creature    string `json:"creature"`
-	Vibe        string `json:"vibe"`
-	Voice       string `json:"voice"`
+	Name         string `json:"name"`
+	Title        string `json:"title"`
+	Creature     string `json:"creature"`
+	Vibe         string `json:"vibe"`
+	Voice        string `json:"voice"`
 	AntiPatterns string `json:"anti_patterns"` // legacy tag — see note above
 	// VoiceGuards is the new semantic-aligned field name. Kept separate
 	// from AntiPatterns for one migration cycle to avoid breaking
@@ -48,6 +48,21 @@ type activeState struct {
 	Persona string   `json:"persona"`
 	Modes   []string `json:"modes"`
 	Updated string   `json:"updated"`
+}
+
+// fmPersona is the YAML shape shared by both frontmatter renderers.
+// Hoisted to package scope so FormatEphemeralPersonaAsFrontmatter (which
+// needs it as a *yaml.marshalable type) and FormatEphemeralPersonaAsMarkdown
+// (which needs the same shape to guarantee key parity between the two
+// outputs) can share one definition. Adding a field here is a deliberate
+// API change — both formats will pick it up.
+type fmPersona struct {
+	Name        string `yaml:"name"`
+	Title       string `yaml:"title"`
+	Creature    string `yaml:"creature"`
+	Vibe        string `yaml:"vibe"`
+	Voice       string `yaml:"voice"`
+	VoiceGuards string `yaml:"voice_guards"`
 }
 
 func activeJSONPath() string {
@@ -64,14 +79,6 @@ func loadActiveJSON() (*activeState, error) {
 		return nil, err
 	}
 	return &s, nil
-}
-
-func saveActiveJSON(s *activeState) error {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(activeJSONPath(), data, 0644)
 }
 
 // AutoStatus holds both the boolean gate check and the reason for denial.
@@ -99,11 +106,6 @@ func CheckAutoActive() AutoStatus {
 	return AutoStatus{Active: false, Reason: fmt.Sprintf("mode=%q, persona=%q — neither is set to \"auto\"", strings.Join(s.Modes, ","), s.Persona)}
 }
 
-// IsAutoActive is a convenience wrapper that returns only the boolean.
-func IsAutoActive() bool {
-	return CheckAutoActive().Active
-}
-
 // GetEphemeralPersona fetches the JIT persona blob from system_config.
 func GetEphemeralPersona(dm *DatabaseManager) (*EphemeralPersona, error) {
 	row, err := dm.GetSystemConfig("ephemeral_persona")
@@ -122,6 +124,13 @@ func GetEphemeralPersona(dm *DatabaseManager) (*EphemeralPersona, error) {
 }
 
 // SaveEphemeralPersona upserts the JIT persona blob into system_config.
+//
+// Snapshot column is empty — the JIT persona has no derived/indexed
+// metadata worth pre-computing; readers always deserialize raw_json
+// (GetEphemeralPersona only reads raw_json, never snapshot). Pass ""
+// instead of "{}" so GetSystemConfig returns snapshot=nil rather than
+// snapshot={} — same semantic ("no metadata") but consistent with the
+// other SaveSystemConfig caller (handlers.go:1159 passes "").
 func SaveEphemeralPersona(dm *DatabaseManager, ep *EphemeralPersona) error {
 	data, err := json.Marshal(ep)
 	if err != nil {
@@ -129,7 +138,7 @@ func SaveEphemeralPersona(dm *DatabaseManager, ep *EphemeralPersona) error {
 	}
 	hash := sha256.Sum256(data)
 	contentHash := hex.EncodeToString(hash[:])
-	_, err = dm.SaveSystemConfig("ephemeral_persona", string(data), contentHash, "{}")
+	_, err = dm.SaveSystemConfig("ephemeral_persona", string(data), contentHash, "")
 	return err
 }
 
@@ -149,22 +158,14 @@ func DeleteEphemeralPersona(dm *DatabaseManager) error {
 // frontmatter is for LLM context only, NOT compiled as regex — see
 // router.go Component struct docs for the semantic split.
 func FormatEphemeralPersonaAsFrontmatter(ep *EphemeralPersona) (string, error) {
-	type fmPersona struct {
-		Name        string `yaml:"name"`
-		Title       string `yaml:"title"`
-		Creature    string `yaml:"creature"`
-		Vibe        string `yaml:"vibe"`
-		Voice       string `yaml:"voice"`
-		VoiceGuards string `yaml:"voice_guards"`
-	}
 	voiceGuards := ep.VoiceGuards
 	if voiceGuards == "" {
 		voiceGuards = ep.AntiPatterns // legacy fallback
 	}
 	fm := fmPersona{
 		Name:        ep.Name,
-		Title:        ep.Title,
-		Creature:     ep.Creature,
+		Title:       ep.Title,
+		Creature:    ep.Creature,
 		Vibe:        ep.Vibe,
 		Voice:       ep.Voice,
 		VoiceGuards: voiceGuards,
@@ -183,21 +184,41 @@ func FormatEphemeralPersonaAsFrontmatter(ep *EphemeralPersona) (string, error) {
 // (renamed from anti_patterns). The body section header is also renamed
 // from "## Anti-Patterns" to "## Voice Guards" to keep file shape and
 // frontmatter key aligned.
+//
+// YAML SAFETY (2026-06-26): the frontmatter is emitted via yaml.v3
+// marshalling, not fmt.Sprintf interpolation. The previous format
+// injected raw %s values into the YAML block, which broke (and allowed
+// injection of arbitrary keys/values) when any persona field contained a
+// `:` or newline. yaml.Marshal escapes scalar values per the YAML 1.2
+// spec so hostile input round-trips losslessly. The markdown body is
+// still emitted via fmt.Sprintf because markdown is not a security
+// boundary — injection there is a rendering oddity, not a parser
+// exploit. See TestFormatEphemeralPersonaAsMarkdown_YAMLInjection for
+// the regression guard.
 func FormatEphemeralPersonaAsMarkdown(ep *EphemeralPersona) string {
 	voiceGuards := ep.VoiceGuards
 	if voiceGuards == "" {
 		voiceGuards = ep.AntiPatterns
 	}
-	return fmt.Sprintf(`---
-name: %s
-title: %s
-creature: %s
-vibe: %s
-voice: %s
-voice_guards: %s
----
 
-# %s
+	fm := fmPersona{
+		Name:        ep.Name,
+		Title:       ep.Title,
+		Creature:    ep.Creature,
+		Vibe:        ep.Vibe,
+		Voice:       ep.Voice,
+		VoiceGuards: voiceGuards,
+	}
+	// yaml.Marshal cannot fail for a struct of strings; the only failure
+	// modes are cyclic values or unsupported kinds, neither of which apply.
+	// Fall back to a minimal sentinel rather than panic, since this
+	// function is on the persona-promotion write path.
+	frontmatter, err := yaml.Marshal(&fm)
+	if err != nil {
+		frontmatter = []byte("name: error\n")
+	}
+
+	body := fmt.Sprintf(`# %s
 
 ## Creature
 %s
@@ -211,7 +232,7 @@ voice_guards: %s
 ## Voice Guards
 %s
 `,
-		ep.Name, ep.Title, ep.Creature, ep.Vibe, ep.Voice, voiceGuards,
 		ep.Title, ep.Creature, ep.Vibe, ep.Voice, voiceGuards,
 	)
+	return "---\n" + string(frontmatter) + "---\n\n" + body
 }

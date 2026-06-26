@@ -494,63 +494,10 @@ func TestGetReferenceDoc(t *testing.T) {
 	}
 }
 
-// TestGetSessionCount verifies GetSessionCount counts from memories with collection='session'.
-func TestGetSessionCount(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	memStore := NewMemoryStore("")
-	memStore.SQLiteDBPath = dbPath
-	if err := memStore.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer memStore.DB.Close()
-
-	dm := &DatabaseManager{db: memStore.DB.DB, dbPath: memStore.SQLiteDBPath}
-	sessStore := &SessionStore{DB: dm, MemoryStore: memStore}
-
-	// Should start at 0
-	count, err := sessStore.GetSessionCount()
-	if err != nil {
-		t.Fatalf("GetSessionCount failed: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected count 0, got %d", count)
-	}
-
-	// Add a session memory
-	_, err = memStore.AddMemory("session test content", "session", nil, nil, "", "cli")
-	if err != nil {
-		t.Fatalf("AddMemory(session) failed: %v", err)
-	}
-
-	count, err = sessStore.GetSessionCount()
-	if err != nil {
-		t.Fatalf("GetSessionCount failed: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected count 1 after adding session memory, got %d", count)
-	}
-
-	// Add a non-session memory to ensure it doesn't affect count
-	_, err = memStore.AddMemory("regular memory content", "memories", nil, nil, "", "cli")
-	if err != nil {
-		t.Fatalf("AddMemory(memories) failed: %v", err)
-	}
-
-	count, err = sessStore.GetSessionCount()
-	if err != nil {
-		t.Fatalf("GetSessionCount failed: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected count 1 after adding non-session memory, got %d", count)
-	}
-}
-
 // TestMemoryProvenanceStorage verifies provenance-based decay multipliers.
 // A compute:"high" memory decays at half the rate of compute:"standard".
 func TestMemoryProvenanceStorage(t *testing.T) {
-	db := freshDB(t)
+	db := newTestDM(t)
 	defer db.Close()
 
 	// Insert high-compute memory
@@ -605,7 +552,7 @@ func TestMemoryProvenanceStorage(t *testing.T) {
 // Insert absolute (human) and ephemeral (model) memories with identical embeddings,
 // assert the ephemeral is challenged and its weight slashed.
 func TestImmuneProvenanceTieBreaker(t *testing.T) {
-	db := freshDB(t)
+	db := newTestDM(t)
 	defer db.Close()
 
 	content := "The user always prefers direct yes/no answers without explanation."
@@ -669,7 +616,7 @@ func TestImmuneProvenanceTieBreaker(t *testing.T) {
 // TestMemoryProvenanceGracefulDegradation verifies that malformed metadata JSON
 // does not cause panics and defaults to "standard" compute logic.
 func TestMemoryProvenanceGracefulDegradation(t *testing.T) {
-	db := freshDB(t)
+	db := newTestDM(t)
 	defer db.Close()
 
 	// Insert a memory with a broken metadata string via raw SQL

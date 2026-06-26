@@ -271,16 +271,6 @@ type directiveCacheEntry struct {
 	expiresAt time.Time
 }
 
-// InvalidateDirectiveCache clears all cached prime-directive blocks. Call
-// this after mutating the directives table (e.g., challenge_memory on a
-// directive, or seed inserts via save_to_memory) when 5 seconds of staleness
-// is unacceptable. Safe to call from any goroutine.
-func InvalidateDirectiveCache() {
-	directiveCacheMu.Lock()
-	directiveCache = map[string]directiveCacheEntry{}
-	directiveCacheMu.Unlock()
-}
-
 // fetchTopDirectivesCached returns the cached top-N directive block when
 // fresh, otherwise fetches via fetchTopDirectives and updates the cache.
 // Empty input still consults the cache (workspace="", limit<=0) so the

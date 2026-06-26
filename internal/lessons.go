@@ -18,11 +18,6 @@ func NewLessonStore(dbPath string) (*LessonStore, error) {
 	return &LessonStore{dm: dm}, nil
 }
 
-// Init is a no-op; the lessons table is created by DatabaseManager at startup.
-func (s *LessonStore) Init() error {
-	return nil
-}
-
 // AddLesson delegates to DatabaseManager.AddLesson
 func (s *LessonStore) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
 	if s.dm == nil {

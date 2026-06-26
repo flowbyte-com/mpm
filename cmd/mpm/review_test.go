@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"testing"
-	"time"
 )
 
 func TestReviewFlagDefaults(t *testing.T) {
@@ -55,38 +54,7 @@ func TestShortID(t *testing.T) {
 	}
 }
 
-func TestSortByLastAccessed(t *testing.T) {
-	// Create test data with known timestamps
-	memories := []map[string]interface{}{
-		{
-			"id":               "aaa",
-			"last_accessed_at": parseTime("2026-05-01T00:00:00Z"),
-		},
-		{
-			"id":               "bbb",
-			"last_accessed_at": parseTime("2026-05-10T00:00:00Z"),
-		},
-		{
-			"id":               "ccc",
-			"last_accessed_at": parseTime("2026-05-05T00:00:00Z"),
-		},
-	}
 
-	sortByLastAccessed(memories)
-
-	// After sorting by last_accessed_at DESC, order should be: bbb, ccc, aaa
-	expected := []string{"bbb", "ccc", "aaa"}
-	for i, m := range memories {
-		if m["id"].(string) != expected[i] {
-			t.Errorf("memories[%d].id = %q, want %q", i, m["id"].(string), expected[i])
-		}
-	}
-}
-
-func parseTime(s string) time.Time {
-	t, _ := time.Parse("2006-01-02T15:04:05Z", s)
-	return t
-}
 
 func TestReviewPromotedMode(t *testing.T) {
 	// Test that --promoted triggers promoted mode

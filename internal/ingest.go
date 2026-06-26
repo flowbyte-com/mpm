@@ -93,61 +93,6 @@ func DetectSchema(dbPath string) (*Schema, error) {
 	return nil, fmt.Errorf("unrecognized schema in %s (chunks table not found or unexpected columns)", dbPath)
 }
 
-// ReadOpenClawChunks streams chunks from an OpenClaw SQLite DB.
-// Returns a channel of chunk batches.
-func ReadOpenClawChunks(dbPath string, batchSize int) (<-chan []OpenClawChunk, <-chan error, error) {
-	if batchSize <= 0 {
-		batchSize = 100
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open OpenClaw DB: %w", err)
-	}
-
-	errChan := make(chan error, 1)
-	chunkChan := make(chan []OpenClawChunk, 10)
-
-	go func() {
-		defer close(chunkChan)
-		defer close(errChan)
-		defer db.Close()
-
-		rows, err := db.Query(`
-			SELECT id, path, source, start_line, end_line, hash, model, text, updated_at
-			FROM chunks
-			ORDER BY path, start_line
-		`)
-		if err != nil {
-			errChan <- fmt.Errorf("query failed: %w", err)
-			return
-		}
-		defer rows.Close()
-
-		batch := make([]OpenClawChunk, 0, batchSize)
-		for rows.Next() {
-			var c OpenClawChunk
-			if err := rows.Scan(&c.ID, &c.Path, &c.Source, &c.StartLine, &c.EndLine, &c.Hash, &c.Model, &c.Text, &c.UpdatedAt); err != nil {
-				errChan <- fmt.Errorf("scan error: %w", err)
-				continue
-			}
-			batch = append(batch, c)
-			if len(batch) >= batchSize {
-				chunkChan <- batch
-				batch = make([]OpenClawChunk, 0, batchSize)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			errChan <- err
-		}
-		if len(batch) > 0 {
-			chunkChan <- batch
-		}
-	}()
-
-	return chunkChan, errChan, nil
-}
-
 // IngestStats holds statistics from an ingest run.
 type IngestStats struct {
 	RowsRead     int
@@ -282,43 +227,10 @@ func (dm *DatabaseManager) insertRawMemory(raw *RawMemory) error {
 	return err
 }
 
-// insertRawMemoryRejected inserts a rejected entry (security filter).
-func (dm *DatabaseManager) insertRawMemoryRejected(chunk OpenClawChunk, now float64, importBatch string, reason string) error {
-	metadata, _ := json.Marshal(map[string]interface{}{
-		"path":       chunk.Path,
-		"source":     chunk.Source,
-		"start_line": chunk.StartLine,
-		"end_line":   chunk.EndLine,
-		"model":      chunk.Model,
-		"updated_at": chunk.UpdatedAt,
-	})
-	// Hash for rejected content
-	h := sha256.Sum256([]byte(chunk.Text))
-	_, err := dm.db.Exec(`
-		INSERT INTO raw_memories (id, source_id, source_db, content_hash, text, metadata, ingested_at, status, llm_verdict, llm_notes, import_batch, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'rejected', 'toxic', ?, ?, ?)
-	`, GenerateID(), chunk.ID, "openclaw", hex.EncodeToString(h[:]), chunk.Text, string(metadata), now, "security filter: "+reason, importBatch, now)
-	return err
-}
-
 // contentHashExistsInMemory checks if a content hash is already in the memory table.
 func (dm *DatabaseManager) contentHashExistsInMemory(contentHash string) (bool, error) {
 	var count int
 	err := dm.db.QueryRow("SELECT COUNT(*) FROM memories WHERE content_hash = ?", contentHash).Scan(&count)
-	return count > 0, err
-}
-
-// sourceIDExistsInRawMemories checks if a source_id is already staged.
-func (dm *DatabaseManager) sourceIDExistsInRawMemories(sourceDB, sourceID string) (bool, error) {
-	var count int
-	err := dm.db.QueryRow("SELECT COUNT(*) FROM raw_memories WHERE source_db = ? AND source_id = ?", sourceDB, sourceID).Scan(&count)
-	return count > 0, err
-}
-
-// contentHashExistsInRawMemories checks if a content hash exists in raw_memories with a given status.
-func (dm *DatabaseManager) contentHashExistsInRawMemories(contentHash, status string) (bool, error) {
-	var count int
-	err := dm.db.QueryRow("SELECT COUNT(*) FROM raw_memories WHERE content_hash = ? AND status = ?", contentHash, status).Scan(&count)
 	return count > 0, err
 }
 

@@ -197,19 +197,6 @@ func shortID(id string) string {
 	return id
 }
 
-// sortByLastAccessed sorts memories by last_accessed_at DESC
-func sortByLastAccessed(memories []map[string]interface{}) {
-	for i := 0; i < len(memories)-1; i++ {
-		for j := i + 1; j < len(memories); j++ {
-			ti := memories[i]["last_accessed_at"].(time.Time)
-			tj := memories[j]["last_accessed_at"].(time.Time)
-			if tj.After(ti) {
-				memories[i], memories[j] = memories[j], memories[i]
-			}
-		}
-	}
-}
-
 // toInt safely extracts an int from interface{} handling both int and int64.
 func toInt(v interface{}) int {
 	switch n := v.(type) {

@@ -89,43 +89,7 @@ func (sc *SQLiteConnection) WipeRecord(tier, id string) error {
 	return err
 }
 
-// ShredDatabase securely wipes the entire database and recreates it fresh.
-// NOTE: This only works if there are no other open connections to the database.
-// Caller is responsible for ensuring all connections are closed before calling.
-func ShredDatabase(dbPath string) error {
-	// Close any connection we can open (best effort)
-	// Note: This may not close connections held by other DatabaseManager/MemoryStore instances
-	// Caller should ensure all connections are closed before calling this function.
-	if db, err := NewSQLiteConnection(dbPath); err == nil {
-		db.Close()
-	}
 
-	// Remove WAL and SHM files first (best effort)
-	os.Remove(dbPath + "-wal")
-	os.Remove(dbPath + "-shm")
-	os.Remove(dbPath + "-journal")
-
-	// Overwrite with zeros before delete (secure delete simulation)
-	if data, err := os.ReadFile(dbPath); err == nil {
-		zeroed := make([]byte, len(data))
-		os.WriteFile(dbPath, zeroed, 0600)
-	}
-
-	// Remove the database file
-	if err := os.Remove(dbPath); err != nil {
-		return fmt.Errorf("failed to remove database: %w", err)
-	}
-
-	// Recreate fresh database using MemoryStore
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		return fmt.Errorf("failed to recreate database: %w", err)
-	}
-	store.DB.Close()
-
-	return nil
-}
 
 // MarshalJSON is a helper for JSON marshaling (for backwards compatibility)
 func MarshalJSON(v interface{}) (string, error) {
@@ -1249,7 +1213,13 @@ func (dm *DatabaseManager) SaveSystemConfig(key, rawJSON, contentHash string, sn
 
 // GetSystemConfig retrieves a system config entry by key
 func (dm *DatabaseManager) GetSystemConfig(key string) (map[string]interface{}, error) {
-	var rawJSON, contentHash, snapshotJSON string
+	var rawJSON, contentHash string
+	// snapshotJSON is nullable — the config_snapshot column defaults to
+	// NULL when callers insert via raw SQL (e.g. the GC cooldown upsert)
+	// instead of going through SaveSystemConfig. Scan into *string so
+	// NULL doesn't error the whole read; callers that care about snapshot
+	// content check for nil before dereferencing.
+	var snapshotJSON *string
 	var updatedAt time.Time
 	err := dm.db.QueryRow(`SELECT raw_json, content_hash, updated_at, config_snapshot FROM system_config WHERE key = ?`, key).
 		Scan(&rawJSON, &contentHash, &updatedAt, &snapshotJSON)
@@ -1257,8 +1227,8 @@ func (dm *DatabaseManager) GetSystemConfig(key string) (map[string]interface{}, 
 		return nil, err
 	}
 	var snapshot map[string]interface{}
-	if snapshotJSON != "" {
-		json.Unmarshal([]byte(snapshotJSON), &snapshot)
+	if snapshotJSON != nil && *snapshotJSON != "" {
+		json.Unmarshal([]byte(*snapshotJSON), &snapshot)
 	}
 	return map[string]interface{}{
 		"key":          key,
@@ -1433,43 +1403,6 @@ func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 func ShredMemory(db *sql.DB, id string) error {
 	_, err := db.Exec("DELETE FROM memories WHERE id = ?", id)
 	return err
-}
-
-// ShredSession performs a hard delete on sessions table
-func ShredSession(db *sql.DB, id string) error {
-	_, err := db.Exec("DELETE FROM sessions WHERE id = ?", id)
-	return err
-}
-
-// DeleteByID performs a hard delete (for general use)
-func DeleteByID(db *sql.DB, table, id string) error {
-	tableName := WipeTableNames[table]
-	if tableName == "" {
-		return fmt.Errorf("cannot delete from table: %s", table)
-	}
-	_, err := db.Exec("DELETE FROM "+tableName+" WHERE id = ?", id)
-	return err
-}
-
-// ShredTopic performs a hard delete on topics table.
-// The membership rows in topic_memberships and the parent row in topics are
-// deleted in a single transaction so a crash mid-write cannot leave orphan
-// memberships behind.
-func ShredTopic(db *sql.DB, id string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("ShredTopic: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM topic_memberships WHERE topic_id = ?", id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec("DELETE FROM topics WHERE id = ?", id); err != nil {
-		return err
-	}
-
-	return tx.Commit()
 }
 
 // ==================== HELPERS ====================
@@ -2062,36 +1995,6 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 		r.CreatedAt = t
 	}
 	return &r, nil
-}
-
-// =============================================================================
-// Overflow Deferred Enqueue (Ingestion Backpressure)
-// =============================================================================
-
-// DLQEnqueueOverflow writes an overflowed event to the raw_memories table with
-// status='overflow_deferred'. Called from the non-blocking default branch of
-// Enqueue() when the channel buffer is saturated. Runs in an isolated goroutine
-// to prevent blocking the hot fsnotify loop. Overflow entries follow the same
-// exponential backoff timeline as normal DLQ entries via processDLQ.
-func (dm *DatabaseManager) DLQEnqueueOverflow(event MemoryEvent) error {
-	id := GenerateID()
-	contentHash := sha256.Sum256([]byte(event.Content))
-
-	tagsJSON, _ := json.Marshal(event.Tags)
-	metadata := fmt.Sprintf(`{"tags":%s,"overflowed":true,"overflowed_at":"%s"}`,
-		string(tagsJSON), time.Now().UTC().Format(time.RFC3339))
-
-	now := float64(time.Now().Unix())
-	expiresAt := float64(time.Now().Add(24 * time.Hour).Unix())
-	nextRetry := time.Now().Add(1 * time.Minute).UTC().Format(time.RFC3339)
-
-	_, err := dm.db.Exec(`
-		INSERT INTO raw_memories (id, source_id, source_db, content_hash, text, metadata,
-			ingested_at, status, import_batch, updated_at, expires_at, next_retry, attempt)
-		VALUES (?, ?, 'overflow', ?, ?, ?, ?, 'overflow_deferred', ?, ?, ?, ?, 0)
-	`, id, event.ID, hex.EncodeToString(contentHash[:]), event.Content, metadata,
-		now, "", now, expiresAt, nextRetry)
-	return err
 }
 
 // =============================================================================

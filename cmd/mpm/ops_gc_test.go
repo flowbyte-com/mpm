@@ -45,8 +45,8 @@ func gcClaimSlot(t *testing.T, db *sql.DB, ts string, maxAgeHours int) int64 {
 		  updated_at = CURRENT_TIMESTAMP
 		WHERE (
 		  system_config.raw_json IS NULL
-		  OR
-		  datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
+		  OR datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
 		)
 	`, ts, strconv.Itoa(maxAgeHours))
 	require.NoError(t, err)
@@ -118,10 +118,11 @@ func TestGCLock_OperatorDeletedRow_SelfHeals(t *testing.T) {
 
 func TestGCLock_EmptyRawJSON_ClaimsOnFirstRun(t *testing.T) {
 	// Edge case: someone INSERTed the row with raw_json='{}' (no timestamp
-	// field). The original UPDATE was the same — it would skip. The upsert
-	// should still claim because json_extract on a missing key returns
-	// NULL, and NULL < <anything> is NULL (falsy), so the WHERE clause
-	// would short-circuit. Let's see what SQLite does.
+	// field). The WHERE clause explicitly checks for NULL on the extracted
+	// updated_at, so the upsert claims the slot — same semantic as a fresh
+	// DB. Without the explicit IS NULL check, json_extract on a missing key
+	// returns NULL, and `NULL < <anything>` is NULL (falsy), short-circuiting
+	// the WHERE clause and silently no-oping the GC cooldown.
 	dm := newTestDM(t)
 	_, err := dm.SQLDB().Exec(`
 		INSERT INTO system_config (key, raw_json, content_hash) VALUES ('last_gc_at', '{}', '')
@@ -130,11 +131,5 @@ func TestGCLock_EmptyRawJSON_ClaimsOnFirstRun(t *testing.T) {
 
 	ts := `{"updated_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
 	rows := gcClaimSlot(t, dm.SQLDB(), ts, 24)
-	// Documenting the observed behaviour: json_extract on a missing key
-	// returns NULL; the < comparison with NULL is NULL, which is falsy,
-	// so the WHERE fails. The upsert returns 0 — same as the cooldown case.
-	// This is a known pre-existing edge case; the bug we're fixing is the
-	// fresh-DB case, not the empty-JSON case. If a future change addresses
-	// the empty-JSON case, this assertion is the place to update.
-	require.Equal(t, int64(0), rows, "empty JSON object currently treated as 'no timestamp available' — skip")
+	require.Equal(t, int64(1), rows, "empty JSON object treated as 'no timestamp available' — should claim")
 }

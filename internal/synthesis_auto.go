@@ -102,65 +102,6 @@ var (
 	synthSeenMu sync.Mutex
 )
 
-// InitSynthDedupFromDB queries the synthesis collection in the database and
-// pre-populates the in-memory dedup map so that previously merged pairs are
-// not re-synthesised after a process restart.
-//
-// Call once during application startup before any call to AutoSynthesize.
-func InitSynthDedupFromDB(dm *DatabaseManager) {
-	if dm == nil {
-		return
-	}
-	rows, err := dm.SQLDB().Query(`
-		SELECT metadata FROM memories
-		WHERE collection = 'synthesis'
-		  AND deleted_at IS NULL
-		ORDER BY created_at DESC
-		LIMIT 200
-	`)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-
-	now := time.Now()
-	synthSeenMu.Lock()
-	defer synthSeenMu.Unlock()
-
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			continue
-		}
-		var record struct {
-			SourceIDs []string `json:"source_ids"`
-		}
-		if json.Unmarshal([]byte(raw), &record) != nil {
-			// Try parsing as metadata wrapper: collection=synthesis stores the
-			// SynthesisRecord JSON in the content column, but the metadata may
-			// also contain source_ids directly.
-			var meta struct {
-				SourceIDs []string `json:"source_ids"`
-			}
-			if json.Unmarshal([]byte(raw), &meta) == nil {
-				record.SourceIDs = meta.SourceIDs
-			}
-		}
-		if len(record.SourceIDs) < 2 {
-			continue
-		}
-		for i := 0; i < len(record.SourceIDs); i++ {
-			for j := i + 1; j < len(record.SourceIDs); j++ {
-				a, b := record.SourceIDs[i], record.SourceIDs[j]
-				if a > b {
-					a, b = b, a
-				}
-				synthSeen[a+"|"+b] = now
-			}
-		}
-	}
-}
-
 const synthDedupTTL = 1 * time.Hour
 
 // synthSweepExpired removes entries older than synthDedupTTL.

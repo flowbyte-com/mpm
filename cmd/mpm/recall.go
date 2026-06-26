@@ -571,34 +571,6 @@ func handleRecall(args []string) int {
 	return 0
 }
 
-func keywordSearch(db *sql.DB, query string, limit int) (*sql.Rows, error) {
-	// Try FTS5 first — use table-level MATCH with JOIN pattern (same as QueryMemory)
-	ftsQuery := `
-		SELECT m.id, m.content, m.session_id, m.tags, m.created_at
-		FROM memories m
-		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
-		ORDER BY fts.rank
-		LIMIT ?`
-
-	rows, err := db.Query(ftsQuery, query, limit)
-	if err == nil {
-		return rows, nil
-	}
-
-	// FTS5 failed (malformed query or unavailable) — fallback to LIKE search
-	fmt.Fprintf(os.Stderr, "⚠️ FTS5 query failed (query=%q): %v — falling back to LIKE\n", query, err)
-	likePattern := "%" + query + "%"
-	likeQuery := `
-		SELECT id, content, session_id, tags, created_at
-		FROM memories
-		WHERE deleted_at IS NULL
-		  AND (content LIKE ? OR tags LIKE ?)
-		ORDER BY created_at DESC
-		LIMIT ?`
-	return db.Query(likeQuery, likePattern, likePattern, limit)
-}
-
 func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, weightBelow int, before string, limit int) (*sql.Rows, error) {
 	if collection == "" {
 		collection = "memories"

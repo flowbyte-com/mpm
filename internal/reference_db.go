@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 )
@@ -260,38 +259,5 @@ func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID strin
 		embedded++
 	}
 	return embedded, failed, nil
-}
-
-// embedReferenceDoc is an internal helper that walks every chunk of
-// every doc and embeds the ones with NULL embedding. Used by full-
-// corpus backfill operations (e.g., after enabling embeddings for the
-// first time on a populated library). Not on the ingest hot path.
-func (dm *DatabaseManager) embedReferenceDoc(ctx context.Context, docID string) (int, int, error) {
-	return dm.EmbedReferenceChunks(ctx, docID)
-}
-
-// referenceChunksNeedingEmbedding returns the chunk ids for a doc
-// whose embedding column is NULL. Exposed for callers (CLI/MCP) that
-// want to surface "X chunks awaiting embedding" without running the
-// embedding themselves.
-func referenceChunksNeedingEmbedding(db *sql.DB, docID string) ([]string, error) {
-	if db == nil {
-		return nil, fmt.Errorf("referenceChunksNeedingEmbedding: database not initialized")
-	}
-	rows, err := db.Query(
-		`SELECT id FROM reference_chunks WHERE doc_id = ? AND embedding IS NULL`, docID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
