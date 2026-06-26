@@ -7,7 +7,7 @@ purpose: Balanced general-purpose operation. Neither turbocharged nor restrained
 retrieval_limit: 7
 retrieval_threshold: -1.5
 directive: You are operating in standard mode. Answer the question directly, compress where possible, move on.
-anti_patterns: Over-engineering the solution, Solving problems that don't exist yet, Multi-step plans for simple questions
+voice_guards: Over-engineering the solution, Solving problems that don't exist yet, Multi-step plans for simple questions
 ---
 
 # Standard Mode

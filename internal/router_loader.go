@@ -10,11 +10,24 @@ import (
 )
 
 // frontmatterSchema handles both comma-separated string and []string shapes
-// for patterns/anti_patterns fields. YAML.v3 unmarshals either into any.
+// for the three list fields. YAML.v3 unmarshals either into any.
+//
+// ANTI-PATTERNS RENAME (2026-06-26):
+// The original `anti_patterns:` field was misconfigured across all 16
+// components as voice guards (output constraints like 'bikeshedding',
+// 'premature optimization') rather than as input filters. They almost
+// never matched prompts, so the -1 penalty mechanism was dormant.
+// Split into two semantically explicit fields:
+//   - voice_guards:  output constraints (descriptive prose; not compiled)
+//                    kept for LLM context — what the persona should NOT say
+//   - domain_out:    input filters (regex fragments; compiled; -1 per match)
+//                    prompt-vocabulary phrases that should reduce the persona's
+//                    routing score and let a better-fit specialist win
 type frontmatterSchema struct {
-	Name         string `yaml:"name"`
-	Patterns     any    `yaml:"patterns,omitempty"`
-	AntiPatterns any    `yaml:"anti_patterns,omitempty"`
+	Name        string `yaml:"name"`
+	Patterns    any    `yaml:"patterns,omitempty"`
+	VoiceGuards any    `yaml:"voice_guards,omitempty"`
+	DomainOut   any    `yaml:"domain_out,omitempty"`
 }
 
 // parseStringList accepts a YAML value that may be a string, []string, or nil,
@@ -135,27 +148,49 @@ func parseComponentFile(path string, kind ComponentKind) (*Component, error) {
 	//    now the only routing signal. A component without `patterns:` is invisible
 	//    to the auto-router. See lesson 853d678719f905d7 for the failure mode.
 
-	// 3. Anti-patterns from frontmatter.
-	antiList := parseStringList(fm.AntiPatterns)
-	var antiCompiled []*regexp.Regexp
-	for _, ap := range antiList {
-		ap = strings.TrimSpace(ap)
-		if ap == "" {
+	// 3. domain_out from frontmatter (renamed from anti_patterns 2026-06-26).
+	//    These ARE input filters — compiled to regex, applied as -1 per match
+	//    in scoreComponent. Voice guards (the old anti_patterns content) are
+	//    NOT compiled and NOT used for routing; they live in the frontmatter
+	//    for LLM context only.
+	domainOutList := parseStringList(fm.DomainOut)
+	var domainOutCompiled []*regexp.Regexp
+	for _, d := range domainOutList {
+		d = strings.TrimSpace(d)
+		if d == "" {
 			continue
 		}
-		// Anti-patterns use word-boundary matching.
-		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(ap) + `\b`)
+		// domain_out uses word-boundary matching, just like anti_patterns did.
+		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(d) + `\b`)
 		if err != nil {
 			continue
 		}
-		antiCompiled = append(antiCompiled, re)
+		domainOutCompiled = append(domainOutCompiled, re)
+	}
+
+	// 4. voice_guards from frontmatter. NOT compiled. Stored as raw string
+	//    for the LLM's context window (so the persona can self-check at
+	//    generation time). Routing layer ignores this field entirely.
+	var voiceGuards string
+	switch t := fm.VoiceGuards.(type) {
+	case string:
+		voiceGuards = t
+	case []interface{}:
+		parts := make([]string, 0, len(t))
+		for _, x := range t {
+			if s, ok := x.(string); ok && s != "" {
+				parts = append(parts, s)
+			}
+		}
+		voiceGuards = strings.Join(parts, ", ")
 	}
 
 	return &Component{
 		Name:             name,
 		Kind:             kind,
 		Patterns:         compiled,
-		AntiPatterns:     antiCompiled,
+		DomainOut:        domainOutCompiled,
+		VoiceGuards:      voiceGuards,
 		explicitPatterns: explicitCount,
 	}, nil
 }
