@@ -190,6 +190,62 @@ func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
 	f.Write([]byte("\n"))
 }
 
+// WatchdogOp is one parsed entry from watchdog.jsonl. Both the legacy
+// watchdogOp schema and the newer raw schema (op / timestamp / error / reason)
+// surface here as a flat map so callers don't need to know which version
+// produced the line.
+type WatchdogOp map[string]interface{}
+
+// RecentWatchdogOps returns the most recent n entries from watchdog.jsonl,
+// optionally filtered by op-prefix (e.g. "synthesize_" to see only synthesis
+// events). Newest entries come last in the returned slice. A zero n returns
+// all entries (up to a hard cap of 10_000 to avoid OOM on a runaway log).
+//
+// This is the read path for `mpm synthesize status|errors` — the watchdog
+// log is the de-facto synthesis telemetry store since there is no in-memory
+// queue or DLQ for synthesis attempts.
+func (dm *DatabaseManager) RecentWatchdogOps(n int, opPrefix string) ([]WatchdogOp, error) {
+	if dm.watchdogPath == "" {
+		return nil, fmt.Errorf("watchdog log path not configured")
+	}
+	dm.watchdogMu.Lock()
+	data, err := os.ReadFile(dm.watchdogPath)
+	dm.watchdogMu.Unlock()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	const hardCap = 10_000
+	if n <= 0 || n > hardCap {
+		n = hardCap
+	}
+
+	var out []WatchdogOp
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var op WatchdogOp
+		if err := json.Unmarshal([]byte(line), &op); err != nil {
+			continue
+		}
+		if opPrefix != "" {
+			name, _ := op["op"].(string)
+			if !strings.HasPrefix(name, opPrefix) {
+				continue
+			}
+		}
+		out = append(out, op)
+	}
+	if len(out) > n {
+		out = out[len(out)-n:]
+	}
+	return out, nil
+}
+
 // DBNode abstracts the query execution environment so functions can run
 // either standalone (against *DatabaseManager) or inside an active
 // transaction (against *txNode). RecomputeConfidence and its helpers take
