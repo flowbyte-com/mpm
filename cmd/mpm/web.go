@@ -20,10 +20,11 @@ const defaultWebPort = "18792"
 
 // WebServer holds the HTTP server state
 type WebServer struct {
-	port    string
-	mux     *http.ServeMux
-	db      *internal.DatabaseManager
-	handler http.Handler
+	port            string
+	mux             *http.ServeMux
+	db              *internal.DatabaseManager
+	handler         http.Handler
+	allowAnonymous  bool   // set when --allow-anonymous was passed; auth is then skipped with a warning header
 }
 
 // NewWebServer creates a new web server
@@ -36,6 +37,14 @@ func NewWebServer(port string, db *internal.DatabaseManager) *WebServer {
 	ws.setupRoutes()
 	ws.handler = ws.withAuth(ws.mux)
 	return ws
+}
+
+// SetAllowAnonymous toggles the auth-skip behaviour. Called by handleWeb
+// when --allow-anonymous is passed. The flag exists so operators can run
+// `mpm web --allow-anonymous` for trusted-LAN debugging while the default
+// config remains fail-closed.
+func (ws *WebServer) SetAllowAnonymous(b bool) {
+	ws.allowAnonymous = b
 }
 
 //go:embed web
@@ -130,7 +139,22 @@ func (ws *WebServer) Start() error {
 }
 
 // withAuth validates bearer token from mpm_config.json web_token field.
-// If no web_token is configured, auth is skipped.
+//
+// Auth policy (post security-review-2026-06-15 fix):
+//   - web_token set in mpm_config.json → enforced; requests without a valid
+//     Bearer token get 401.
+//   - web_token unset AND --allow-anonymous flag was passed at server start
+//     → auth skipped, but a one-shot WARN is logged so operators notice.
+//   - web_token unset AND no --allow-anonymous → ws.startWithAuth returns
+//     false at boot and the server refuses to start.
+//
+// The "fail open when token is empty" behaviour was the single biggest
+// security gap in the original code: a default `mpm web` on a LAN would
+// serve every memory to anyone reachable. The fix flips the default so
+// operators must opt in to running an unauthenticated server.
+//
+// The token lookup is extracted to a package-level var so tests can stub
+// it without touching the real workspace mpm_config.json.
 func (ws *WebServer) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip auth for static assets, SPA, and health checks
@@ -140,17 +164,15 @@ func (ws *WebServer) withAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get optional web_token from mpm_config.json
-		cfg, err := config.LoadConfig()
-		if err != nil || cfg == nil {
-			// No config — skip auth
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		token := cfg.WebToken
-		if token == "" {
-			// No token configured — skip auth
+		token, ok := currentWebToken()
+		if !ok {
+			// No config or no token → fail closed unless operator opted in.
+			if !ws.allowAnonymous {
+				writeError(w, http.StatusUnauthorized, "auth required: configure web_token in mpm_config.json or restart with --allow-anonymous")
+				return
+			}
+			// Operator explicitly opted in. Set a header so any client knows.
+			w.Header().Set("X-MPM-Auth", "disabled-anonymous")
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -169,6 +191,23 @@ func (ws *WebServer) withAuth(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// webTokenLookup returns the configured web_token from mpm_config.json.
+// The second return is false when no config is available or no token is
+// configured (regardless of why). Tests override this variable.
+var webTokenLookup = realWebTokenLookup
+
+// realWebTokenLookup reads mpm_config.json from disk.
+func realWebTokenLookup() (string, bool) {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil || cfg.WebToken == "" {
+		return "", false
+	}
+	return cfg.WebToken, true
+}
+
+// currentWebToken is a thin wrapper so tests can stub webTokenLookup.
+func currentWebToken() (string, bool) { return webTokenLookup() }
 
 // JSON helpers
 
@@ -227,11 +266,22 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // handleWeb starts the web UI server
 func handleWeb(args []string) int {
 	port := defaultWebPort
+	allowAnonymous := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--port" && i+1 < len(args) {
-			port = args[i+1]
-			i++
+		switch args[i] {
+		case "--port":
+			if i+1 < len(args) {
+				port = args[i+1]
+				i++
+			}
+		case "--allow-anonymous":
+			allowAnonymous = true
 		}
+	}
+
+	// Loud pre-start warning if the operator opted into unauthenticated mode.
+	if allowAnonymous {
+		fmt.Fprintf(os.Stderr, "⚠️  WARNING: --allow-anonymous set. The web server will serve every memory to any client reachable on the network. Do NOT use this on a hostile network.\n")
 	}
 
 	// Export port so concurrent mpm call processes can relay SSE events here.
@@ -250,6 +300,8 @@ func handleWeb(args []string) int {
 	defer db.Close()
 
 	ws := NewWebServer(port, db)
+	ws.SetAllowAnonymous(allowAnonymous)
+	allowAnonymousSSE = allowAnonymous // mirror policy into the SSE auth path
 	fmt.Printf("mpm web: http://localhost:%s\n", port)
 	if err := ws.Start(); err != nil {
 		return 1

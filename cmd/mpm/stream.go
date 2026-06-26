@@ -97,6 +97,11 @@ type SSEBroker struct {
 
 var broker = newBroker()
 
+// allowAnonymousSSE mirrors the WebServer's allowAnonymous flag. It is set
+// at server start by handleWeb when --allow-anonymous is passed. Used by
+// authValid() so SSE auth matches web-server auth policy.
+var allowAnonymousSSE bool
+
 func newBroker() *SSEBroker {
 	b := &SSEBroker{
 		clients:    make(map[chan string]int64),
@@ -195,15 +200,21 @@ func (b *SSEBroker) BroadcastRaw(msg string) {
 // ── HTTP Handler ───────────────────────────────────────────────────────────
 
 // authValid checks the bearer token from mpm_config.json.
-// If no web_token is configured, auth is skipped.
+//
+// Auth policy (post security-review-2026-06-15 fix): fail closed unless
+// the operator started the server with --allow-anonymous. See
+// WebServer.withAuth for the matching web-server policy and rationale.
 func authValid(r *http.Request) bool {
 	cfg, err := config.LoadConfig()
 	if err != nil || cfg == nil {
-		return true // No config — skip auth
+		return false // No config — fail closed
 	}
 	token := cfg.WebToken
 	if token == "" {
-		return true // No token configured — skip auth
+		// SSE is a server-internal endpoint but it has been used as a
+		// side-channel for unauthenticated access historically. Mirror the
+		// web-server policy: only allow if the operator opted in.
+		return allowAnonymousSSE
 	}
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
