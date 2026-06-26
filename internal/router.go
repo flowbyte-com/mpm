@@ -144,6 +144,19 @@ func (r *Router) maybeReload() {
 // Personas use max-pooling (only the highest-scoring persona wins, if score >= 1).
 // Returns a RoutingReport with selected modes, selected persona, and full diagnostics.
 //
+// PERSONA FALLBACK HIERARCHY (2026-06-26):
+//   1. Explicit match — the highest-scoring persona, if any pattern matches.
+//   2. Graceful fallback — the persona named "default" (if it exists on disk
+//      and is loaded). Guarantees the agent maintains a consistent baseline
+//      voice for general queries that no specialist persona owns.
+//   3. Bare metal — empty SelectedPersona. Only if "default" has been
+//      deleted or is unavailable.
+//
+// Step 2 ensures that arbitrary, non-specialist prompts ("hello there",
+// "what's the weather", "thanks") still receive the default persona's
+// voice rather than falling into a no-persona state. The default persona
+// is intended as a deliberate baseline, not an automatic fall-through.
+//
 // If any mode or persona file has changed on disk since the last load (detected
 // via directory mtime), Evaluate() reloads automatically before scoring. This
 // means new modes and personas are picked up without restarting mpm-mcp.
@@ -180,11 +193,44 @@ func (r *Router) Evaluate(input string) RoutingReport {
 		bestPersona = ""
 	}
 
+	// Fallback to "default" persona if no pattern-matched persona won.
+	// Only fires when no pattern matched (bestScore == 0). Honors the
+	// explicit-match-first hierarchy: default never overrides a matched
+	// specialist. The default persona's score entry is synthesized as
+	// 0 with a marker trigger so the diagnostic shows the fallback fired
+	// rather than appearing as an unexplained silent selection.
+	if bestPersona == "" {
+		if defaultComp := r.findPersonaByName("default"); defaultComp != nil {
+			bestPersona = defaultComp.Name
+			// If default wasn't already scored (it was, in the loop above),
+			// its entry exists. Tag it with the fallback reason so the
+			// diagnostic explains WHY default was selected rather than
+			// presenting it as a normal pattern match.
+			entry := scores[defaultComp.Name]
+			entry.Score = 0
+			entry.Triggers = append(entry.Triggers, "(fallback: no specialist pattern matched)")
+			scores[defaultComp.Name] = entry
+		}
+	}
+
 	return RoutingReport{
 		SelectedModes:   selectedModes,
 		SelectedPersona: bestPersona,
 		Scores:          scores,
 	}
+}
+
+// findPersonaByName returns the persona component with the given Name,
+// or nil if not loaded. Used by the default-fallback logic above. O(n)
+// over loaded personas — fine because the persona set is small (single
+// digits) and this runs at most once per Evaluate() call.
+func (r *Router) findPersonaByName(name string) *Component {
+	for _, comp := range r.personas {
+		if comp.Name == name {
+			return comp
+		}
+	}
+	return nil
 }
 
 // scoreComponent evaluates one component against the lowercased input.
