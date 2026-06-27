@@ -2626,3 +2626,104 @@ func ProvenancePreamble(metadataJSON string) string {
 		return ""
 	}
 }
+
+// RecordGlobalRule writes a memory row to the shared DB with
+// is_global=1. This is the operator-gated write path for the
+// shared epistemology: only callers that pass `confirm: true` get
+// past the gate, and the caller is responsible for surfacing that
+// flag to the human operator.
+//
+// The row is written with collection="rules" by default — the shared
+// DB's home for cross-agent conventions. Other collections are
+// allowed but `rules` is the canonical home per WISHLIST.md.
+//
+// Phase 3 of WISHLIST.md: operator-only. No agent should be writing
+// house rules autonomously. CLI and MCP both gate on confirm=true.
+func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weight int, provenance string) (string, error) {
+	if !dm.sharedAttached {
+		return "", fmt.Errorf("shared DB not attached (set MPM_SHARED_DB)")
+	}
+	if content == "" {
+		return "", fmt.Errorf("content is required")
+	}
+	if weight < 0 || weight > 100 {
+		return "", fmt.Errorf("weight must be 0-100, got %d", weight)
+	}
+	id := GenerateID()
+	tagsJSON, _ := json.Marshal(tags)
+
+	var metaJSON []byte
+	if provenance != "" {
+		metaJSON, _ = json.Marshal(map[string]interface{}{
+			"provenance": provenance,
+			"source":     "mpm",
+		})
+	}
+
+	_, err := dm.db.Exec(`
+		INSERT INTO shared.memories
+		    (id, collection, content, tags, metadata, weight,
+		     is_global, created_at, updated_at, deleted_at)
+		VALUES
+		    (?, 'rules', ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
+	`, id, content, string(tagsJSON), string(metaJSON), weight)
+	if err != nil {
+		return "", fmt.Errorf("insert shared rule: %w", err)
+	}
+	return id, nil
+}
+
+// PromoteToGlobal copies a local memory to the shared DB. The
+// original local row stays in the local DB (per WISHLIST.md: "Source
+// row stays in local DB"). The shared copy is marked is_global=1
+// with collection="rules" and a metadata.derived_from_local_id
+// field linking back to the original.
+//
+// Phase 3 of WISHLIST.md: operator-only. Requires confirm: true at
+// the tool boundary.
+func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
+	if !dm.sharedAttached {
+		return "", fmt.Errorf("shared DB not attached (set MPM_SHARED_DB)")
+	}
+	if localID == "" {
+		return "", fmt.Errorf("localID is required")
+	}
+
+	// Read the local row.
+	var content, collection string
+	var tagsNS, metaNS sql.NullString
+	var weight, reinforcement int
+	err := dm.db.QueryRow(`
+		SELECT content, collection, tags, metadata, weight, COALESCE(reinforcement_count, 0)
+		FROM memories
+		WHERE id = ? AND deleted_at IS NULL
+	`, localID).Scan(&content, &collection, &tagsNS, &metaNS, &weight, &reinforcement)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("local memory %s not found or deleted", localID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read local memory: %w", err)
+	}
+
+	// Build lineage metadata. If the source already had metadata,
+	// keep it; otherwise start fresh.
+	meta := map[string]interface{}{}
+	if metaNS.Valid && metaNS.String != "" {
+		_ = json.Unmarshal([]byte(metaNS.String), &meta)
+	}
+	meta["derived_from_local_id"] = localID
+	metaJSON, _ := json.Marshal(meta)
+
+	newID := GenerateID()
+	_, err = dm.db.Exec(`
+		INSERT INTO shared.memories
+		    (id, collection, content, tags, metadata, weight,
+		     reinforcement_count, is_global, created_at, updated_at, deleted_at)
+		VALUES
+		    (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
+	`, newID, collection, content, tagsNS.String, string(metaJSON), weight, reinforcement)
+	if err != nil {
+		return "", fmt.Errorf("insert shared copy: %w", err)
+	}
+	return newID, nil
+}
