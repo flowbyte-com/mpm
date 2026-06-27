@@ -20,6 +20,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"mpm/internal"
+	_ "github.com/mattn/go-sqlite3"
+	"mpm/internal/tools"
 )
 
 func newCLILogChangelogDM(t *testing.T) *internal.DatabaseManager {
@@ -43,10 +45,9 @@ func newCLILogChangelogDM(t *testing.T) *internal.DatabaseManager {
 
 func TestCallLogToChangelog_HappyPath(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
-	setTestDMOverride(dm)
 
 	const hash = "0123456789abcdef0123456789abcdef01234567"
-	result, err := callLogToChangelog(map[string]interface{}{
+	result, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
 		"fact":        "changelog prose for the test commit",
 		"commit_hash": hash,
 		"tags":        "test,smoke",
@@ -67,9 +68,8 @@ func TestCallLogToChangelog_HappyPath(t *testing.T) {
 
 func TestCallLogToChangelog_RequiresFact(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
-	setTestDMOverride(dm)
 
-	_, err := callLogToChangelog(map[string]interface{}{
+	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
 		"commit_hash": "0123456789abcdef0123456789abcdef01234567",
 	})
 	if err == nil {
@@ -82,9 +82,8 @@ func TestCallLogToChangelog_RequiresFact(t *testing.T) {
 
 func TestCallLogToChangelog_RequiresCommitHash(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
-	setTestDMOverride(dm)
 
-	_, err := callLogToChangelog(map[string]interface{}{
+	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
 		"fact": "orphan entry",
 	})
 	if err == nil {
@@ -97,9 +96,8 @@ func TestCallLogToChangelog_RequiresCommitHash(t *testing.T) {
 
 func TestCallLogToChangelog_RejectsMalformedCommit(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
-	setTestDMOverride(dm)
 
-	_, err := callLogToChangelog(map[string]interface{}{
+	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
 		"fact":        "body",
 		"commit_hash": "abc1234", // short hash
 	})
@@ -110,10 +108,10 @@ func TestCallLogToChangelog_RejectsMalformedCommit(t *testing.T) {
 
 // TestCallLogToChangelog_ToolRegistered: prove the CLI tool
 // registry has the binding. If someone removes the entry from
-// the toolRegistry map, this test fails immediately.
+// the tools.ByName map, this test fails immediately.
 func TestCallLogToChangelog_ToolRegistered(t *testing.T) {
-	_, ok := toolRegistry["log_to_changelog"]
+	_, ok := tools.ByName("log_to_changelog")
 	if !ok {
-		t.Fatal("log_to_changelog not registered in toolRegistry — CLI binding missing")
+		t.Fatal("log_to_changelog not registered in tools.ByName — CLI binding missing")
 	}
 }
