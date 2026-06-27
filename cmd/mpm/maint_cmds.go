@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"mpm/internal/usererror"
 	"os"
 	"strconv"
 	"strings"
@@ -18,15 +19,13 @@ import (
 func handleStats(args []string) int {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to open database: %v\n", err)
-		return 1
+		usererror.Error("Failed to open database: %v", err)
 	}
 	defer dm.Close()
 
 	stats, err := dm.GetMemoryStats()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to get stats: %v\n", err)
-		return 1
+		usererror.Error("Failed to get stats: %v", err)
 	}
 
 	printStats(stats)
@@ -124,8 +123,7 @@ func handlePrune(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to open database: %v\n", err)
-		return 1
+		usererror.Error("Failed to open database: %v", err)
 	}
 	defer dm.Close()
 
@@ -135,29 +133,25 @@ func handlePrune(args []string) int {
 	if *olderThan != "" {
 		duration, parseErr := parseDuration(*olderThan)
 		if parseErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: Invalid duration '%s': %v\n", *olderThan, parseErr)
-			return 1
+			usererror.Error("Invalid duration '%s': %v", *olderThan, parseErr)
 		}
 		cutoff := time.Now().Add(-duration)
 		count, pruneErr = dm.PruneOlderThan(cutoff)
 		if pruneErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: Prune failed: %v\n", pruneErr)
-			return 1
+			usererror.Error("Prune failed: %v", pruneErr)
 		}
 		fmt.Printf("Pruned %d memories older than %s (before %s)\n", count, *olderThan, cutoff.Format(time.RFC3339))
 	} else if *neverAccessed {
 		count, pruneErr = dm.PruneNeverAccessed()
 		if pruneErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: Prune failed: %v\n", pruneErr)
-			return 1
+			usererror.Error("Prune failed: %v", pruneErr)
 		}
 		fmt.Printf("Pruned %d memories never accessed\n", count)
 	} else {
 		// Default: prune expired
 		count, pruneErr = dm.PruneExpired()
 		if pruneErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: Prune failed: %v\n", pruneErr)
-			return 1
+			usererror.Error("Prune failed: %v", pruneErr)
 		}
 		fmt.Printf("Pruned %d expired memories\n", count)
 	}
@@ -213,15 +207,13 @@ func handleExport(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to open database: %v\n", err)
-		return 1
+		usererror.Error("Failed to open database: %v", err)
 	}
 	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Export failed: %v\n", err)
-		return 1
+		usererror.Error("Export failed: %v", err)
 	}
 
 	var writer *csv.Writer
@@ -230,8 +222,7 @@ func handleExport(args []string) int {
 	if *output != "" {
 		outputFile, err = os.Create(*output)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Cannot create output file: %v\n", err)
-			return 1
+			usererror.Error("Cannot create output file: %v", err)
 		}
 		defer outputFile.Close()
 
@@ -244,8 +235,7 @@ func handleExport(args []string) int {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(memories); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: JSON encode failed: %v\n", err)
-			return 1
+			usererror.Error("JSON encode failed: %v", err)
 		}
 	} else if *format == "csv" {
 		if writer == nil {
@@ -278,14 +268,14 @@ func handleExport(args []string) int {
 					lt = int(l)
 				}
 				if err := writer.Write([]string{id, coll, content, tags, created, fmt.Sprintf("%d", rc), fmt.Sprintf("%d", w), fmt.Sprintf("%d", lt)}); err != nil {
-					fmt.Fprintf(os.Stderr, "CSV write error: %v\n", err)
+					usererror.Error("CSV write error: %v", err)
 					break
 				}
 			}
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Exported %d memories\n", len(memories))
+	usererror.Notice("Exported %d memories", len(memories))
 	return 0
 }
 
@@ -305,8 +295,7 @@ func handleMaintain(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -314,8 +303,7 @@ func handleMaintain(args []string) int {
 		// Show memories for spaced reinforcement review
 		memories, err := dm.GetSpacedReinforcementReview(*days, 20)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			usererror.Error("%v", err)
 		}
 
 		if len(memories) == 0 {
@@ -346,8 +334,7 @@ func handleMaintain(args []string) int {
 	// Run full self-maintenance
 	stats, err := dm.RunSelfMaintenance()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Println("\n✅ Self-maintenance complete:")

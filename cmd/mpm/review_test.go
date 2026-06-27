@@ -54,8 +54,6 @@ func TestShortID(t *testing.T) {
 	}
 }
 
-
-
 func TestReviewPromotedMode(t *testing.T) {
 	// Test that --promoted triggers promoted mode
 	args := []string{"review", "--promoted"}

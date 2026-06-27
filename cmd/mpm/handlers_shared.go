@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"mpm/internal/usererror"
 	"os"
 	"path/filepath"
 
@@ -27,8 +28,7 @@ func handleOpsShared(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
-		return 1
+		usererror.Error("DB open failed: %v", err)
 	}
 	defer dm.Close()
 

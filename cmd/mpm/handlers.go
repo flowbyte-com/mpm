@@ -9,6 +9,7 @@ import (
 
 	"mpm/internal"
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 )
 
 // Package-level singleton DatabaseManager — initialized once per process,
@@ -161,7 +162,7 @@ func getMemoryStore() *internal.MemoryStore {
 	if dbManager == nil {
 		dm, err := internal.NewDatabaseManager("")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+			usererror.Error("opening database: %v", err)
 			return nil
 		}
 		dbManager = dm

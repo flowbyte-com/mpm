@@ -2,18 +2,19 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
-	"github.com/sergi/go-diff/diffmatchpatch"
 	mpminternal "mpm/internal"
+	"mpm/internal/usererror"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // mpm history <id> — Show version history for a memory
 func handleHistory(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm history <id>\n")
+		usererror.Usage("mpm history <id>")
 		return 1
 	}
 
@@ -21,15 +22,13 @@ func handleHistory(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	revisions, err := dm.GetMemoryRevisions(id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	if len(revisions) == 0 {
 		fmt.Printf("No revisions found for memory %s\n", id)
@@ -49,26 +48,23 @@ func handleHistory(args []string) int {
 // mpm diff <id> <v1> <v2> — Show unified diff between two versions
 func handleDiff(args []string) int {
 	if len(args) < 4 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm diff <id> <v1> <v2>\n")
+		usererror.Usage("mpm diff <id> <v1> <v2>")
 		return 1
 	}
 
 	id := args[1]
 	v1, err := strconv.Atoi(args[2])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: v1 must be an integer, got %q\n", args[2])
-		return 1
+		usererror.Error("v1 must be an integer, got %q", args[2])
 	}
 	v2, err := strconv.Atoi(args[3])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: v2 must be an integer, got %q\n", args[3])
-		return 1
+		usererror.Error("v2 must be an integer, got %q", args[3])
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -81,8 +77,7 @@ func handleDiff(args []string) int {
 
 	revisions, err := dm.GetMemoryRevisions(id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	for _, r := range revisions {
 		if r.Version == v1 || r.Version == v2 {
@@ -93,12 +88,10 @@ func handleDiff(args []string) int {
 	v1Info, ok1 := versions[v1]
 	v2Info, ok2 := versions[v2]
 	if !ok1 {
-		fmt.Fprintf(os.Stderr, "Error: version %d not found for memory %s\n", v1, id)
-		return 1
+		usererror.Error("version %d not found for memory %s", v1, id)
 	}
 	if !ok2 {
-		fmt.Fprintf(os.Stderr, "Error: version %d not found for memory %s\n", v2, id)
-		return 1
+		usererror.Error("version %d not found for memory %s", v2, id)
 	}
 
 	dmp := diffmatchpatch.New()
@@ -114,7 +107,7 @@ func handleDiff(args []string) int {
 // mpm diff-lines <v1-content> <v2-content> — Compute unified diff of two text blocks (used for testing)
 func handleDiffLines(args []string) int {
 	if len(args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm diff-lines <v1-content> <v2-content>\n")
+		usererror.Usage("mpm diff-lines <v1-content> <v2-content>")
 		return 1
 	}
 

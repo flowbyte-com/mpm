@@ -19,8 +19,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"mpm/internal"
 	_ "github.com/mattn/go-sqlite3"
+	"mpm/internal"
 	"mpm/internal/tools"
 )
 

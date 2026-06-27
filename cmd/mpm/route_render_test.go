@@ -25,8 +25,8 @@ func TestRenderRoute(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name:      "architect mode triggered by architecture keyword",
-			prompt:    "Design the system architecture for our new API gateway",
+			name:   "architect mode triggered by architecture keyword",
+			prompt: "Design the system architecture for our new API gateway",
 			wantContains: []string{
 				"<system-reminder>",
 				"mode=",
@@ -35,8 +35,8 @@ func TestRenderRoute(t *testing.T) {
 			},
 		},
 		{
-			name:      "code-review-flavored prompt also routes",
-			prompt:    "Implement the user authentication flow in Go with proper security",
+			name:   "code-review-flavored prompt also routes",
+			prompt: "Implement the user authentication flow in Go with proper security",
 			wantContains: []string{
 				"<system-reminder>",
 				"MPM auto-route active",
@@ -314,7 +314,7 @@ func TestApplyRouteLengthCap(t *testing.T) {
 			wantPersonaLen: -1, // exact match (empty)
 		},
 		{
-			name:           "persona dropped but mode preserved (the bug class)",
+			name: "persona dropped but mode preserved (the bug class)",
 			// This is the regression case the renderer used to miss: a body
 			// in the 9,500-10,000 range with a long persona and short mode.
 			// The persona-priority branch should drop the persona and append
@@ -357,10 +357,10 @@ func TestApplyRouteLengthCap(t *testing.T) {
 
 func TestDirectiveInjectionLimit(t *testing.T) {
 	tests := []struct {
-		name    string
-		envVal  string
-		envSet  bool
-		want    int
+		name   string
+		envVal string
+		envSet bool
+		want   int
 	}{
 		{name: "unset returns 0", envSet: false, want: 0},
 		{name: "empty returns 0", envVal: "", envSet: true, want: 0},
@@ -387,13 +387,13 @@ func TestDirectiveInjectionLimit(t *testing.T) {
 
 func TestResolveMPMDatabase(t *testing.T) {
 	tests := []struct {
-		name      string
-		setup     func(t *testing.T, dir string) // creates candidate files
-		wantFile  string                         // basename of expected return, "" for none
+		name     string
+		setup    func(t *testing.T, dir string) // creates candidate files
+		wantFile string                         // basename of expected return, "" for none
 	}{
 		{
-			name:    "no candidates returns empty",
-			setup:   func(t *testing.T, dir string) {},
+			name:     "no candidates returns empty",
+			setup:    func(t *testing.T, dir string) {},
 			wantFile: "",
 		},
 		{

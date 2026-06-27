@@ -533,7 +533,7 @@ func (ws *WebServer) handleInternalBroadcast(w http.ResponseWriter, r *http.Requ
 	}
 	var input struct {
 		EventType string      `json:"eventType"`
-		Payload  interface{} `json:"payload"`
+		Payload   interface{} `json:"payload"`
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
