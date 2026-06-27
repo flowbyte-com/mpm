@@ -670,6 +670,97 @@ func (dm *DatabaseManager) SharedAttached() string {
 	return dm.sharedPath
 }
 
+// QueryGlobalRules returns memories from the shared DB marked
+// is_global = 1. Returns an empty result (not an error) if the shared
+// DB is not attached — the agent should fall back to local recall
+// in that case.
+//
+// This is the read-side counterpart to record_global_rule (Phase 3).
+// Today the caller is an MCP agent calling query_global_rules; in
+// Phase 2b the same query will be UNIONed into query_long_term_memory.
+//
+// Args:
+//   - query (optional): FTS5 keyword search scoped to the shared DB.
+//     Empty string returns all is_global rows.
+//   - limit: max rows (default 50, hard-capped at 500).
+func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[string]interface{}, error) {
+	if !dm.sharedAttached {
+		return nil, nil // local-only mode; not an error
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	query = strings.TrimSpace(query)
+
+	// Phase 2 (this commit): the shared DB does NOT have a populated
+	// FTS5 virtual table yet (Phase 1 only bootstraps core tables). We
+	// use LIKE for keyword search; Phase 2b will add shared.memories_fts
+	// and switch this back to FTS5 once it is reliably populated.
+	var querySQL string
+	var args []interface{}
+	if query == "" {
+		querySQL = `
+			SELECT id, content, collection, tags, metadata, weight,
+			       reinforcement_count, created_at, updated_at, is_global
+			FROM shared.memories
+			WHERE is_global = 1 AND deleted_at IS NULL
+			ORDER BY weight DESC, created_at DESC
+			LIMIT ?
+		`
+		args = []interface{}{limit}
+	} else {
+		querySQL = `
+			SELECT id, content, collection, tags, metadata, weight,
+			       reinforcement_count, created_at, updated_at, is_global
+			FROM shared.memories
+			WHERE is_global = 1 AND deleted_at IS NULL AND content LIKE ?
+			ORDER BY weight DESC, created_at DESC
+			LIMIT ?
+		`
+		args = []interface{}{"%" + query + "%", limit}
+	}
+	rows, err := dm.db.Query(querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query shared.memories: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		// Use sql.NullX for every column. SQLite's flexible typing means
+		// any column might be NULL depending on when the row was written
+		// vs when the column was added — defensive reads cost nothing
+		// here (max 500 rows per query) and prevent silent row drops.
+		var id, content, coll sql.NullString
+		var tags, meta, createdAt, updatedAt sql.NullString
+		var weight, reinforcement, isGlobal sql.NullInt64
+		if err := rows.Scan(&id, &content, &coll, &tags, &meta, &weight, &reinforcement,
+			&createdAt, &updatedAt, &isGlobal); err != nil {
+			continue
+		}
+		weightInt := int(weight.Int64)
+		reinforcementInt := int(reinforcement.Int64)
+		isGlobalInt := int(isGlobal.Int64)
+		results = append(results, map[string]interface{}{
+			"id":                 id.String,
+			"content":            content.String,
+			"collection":         coll.String,
+			"tags":               tags.String,
+			"metadata":           meta.String,
+			"weight":             weightInt,
+			"reinforcement_count": reinforcementInt,
+			"created_at":         createdAt.String,
+			"updated_at":         updatedAt.String,
+			"is_global":          isGlobalInt,
+			"source":             "shared",
+		})
+	}
+	return results, nil
+}
+
 // NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.
 // Use this for one-off CLI commands that don't need managed persistence.
 func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {

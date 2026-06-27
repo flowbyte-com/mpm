@@ -358,6 +358,11 @@ var SafeMigrations = [][3]string{
 	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "confidence",         "REAL NOT NULL DEFAULT 0.8"},
+	// is_global marks rows that originated as shared (cross-agent) rules.
+	// Local writes always set 0; shared writes (via record_global_rule or
+	// promote_to_global in Phase 3) set 1. The shared DB schema mirrors
+	// the local DB so this migration is applied to both via attachShared.
+	{"memories", "is_global",          "INTEGER NOT NULL DEFAULT 0"},
 	{"lessons",  "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
