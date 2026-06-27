@@ -285,6 +285,18 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}}}`),
 		Handler:     handleQueryGlobalRules,
 	},
+	{
+		Name:        "record_global_rule",
+		Description: "Operator-gated: write a memory to the shared DB with is_global=1. Requires confirm=true. Without confirm the call is rejected. CLI and MCP both gate on this; agents should not write house rules autonomously.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"type":"string"},"weight":{"type":"number"},"provenance":{"type":"string"},"confirm":{"type":"boolean"}},"required":["fact","confirm"]}`),
+		Handler:     handleRecordGlobalRule,
+	},
+	{
+		Name:        "promote_to_global",
+		Description: "Operator-gated: copy a local memory to the shared DB. Original local row stays in the local DB. Shared copy gets is_global=1 and metadata.derived_from_local_id linking back. Requires confirm=true.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["memory_id","confirm"]}`),
+		Handler:     handlePromoteToGlobal,
+	},
 }
 
 // ByName returns the tool with the given name, or false.

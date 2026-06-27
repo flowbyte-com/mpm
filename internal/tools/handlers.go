@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
 	"mpm/internal"
+	mpminternal "mpm/internal"
 )
 
 // handlers.go contains the unified tool handlers that power both
@@ -29,7 +30,6 @@ func handleSaveToMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	if fact == "" {
 		return nil, fmt.Errorf("fact is required")
 	}
-
 
 	out, mem, err := dm.SaveMemoryWithContext(
 		fact,
@@ -70,7 +70,6 @@ func handleQueryLongTermMemory(dm *mpminternal.DatabaseManager, ac mpminternal.A
 	}
 	collection, _ := p["collection"].(string)
 
-
 	items, err := dm.HybridSearchMemories(query, collection, limit)
 	if err != nil {
 		return nil, err
@@ -90,7 +89,6 @@ func handleChallengeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 	}
 	evidence, _ := p["evidence"].(string)
 
-
 	return dm.ChallengeMemoryWithTheory(memoryID, evidence)
 }
 
@@ -105,7 +103,6 @@ func handleProposeTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 	if tags == nil {
 		tags = []string{}
 	}
-
 
 	return dm.ProposeTheory(hypothesis, validationCriteria, tags)
 }
@@ -125,7 +122,6 @@ func handleResolveTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
 	}
 
-
 	return dm.ResolveTheory(theoryID, conclusion, newStatus)
 }
 
@@ -139,7 +135,6 @@ func handleRecordDecision(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 	if tags == nil {
 		tags = []string{}
 	}
-
 
 	return dm.RecordDecision(
 		internal.ParseStringOr(p["context"], ""),
@@ -240,7 +235,6 @@ func handleGCRun(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, 
 	aggressive := parseBoolDefault(p["aggressive"], false)
 	maxAge := int(internal.ParseFloatOr(p["max_age_hours"], 24))
 
-
 	out, err := dm.RunGC(internal.GCOptions{
 		DryRun:      dryRun,
 		Aggressive:  aggressive,
@@ -251,16 +245,16 @@ func handleGCRun(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, 
 	}
 
 	result := map[string]interface{}{
-		"success":         true,
-		"dry_run":         dryRun,
-		"cooldown_skip":   out.CooldownSkip,
-		"ran":             out.Ran,
-		"scanned":         out.Scanned,
-		"updated":         out.Updated,
-		"audit_pruned":    out.AuditPruned,
-		"handoff_pruned":  out.HandoffPruned,
+		"success":           true,
+		"dry_run":           dryRun,
+		"cooldown_skip":     out.CooldownSkip,
+		"ran":               out.Ran,
+		"scanned":           out.Scanned,
+		"updated":           out.Updated,
+		"audit_pruned":      out.AuditPruned,
+		"handoff_pruned":    out.HandoffPruned,
 		"dead_memory_count": len(out.DeadMemories),
-		"dead_memories":   out.DeadMemories,
+		"dead_memories":     out.DeadMemories,
 	}
 	if out.LastGCRan != nil {
 		result["last_gc_ran"] = out.LastGCRan.Format(time.RFC3339)
@@ -300,7 +294,6 @@ func handleSaveLesson(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 	lessonType := internal.ParseStringOr(p["type"], "insight")
 	tags := internal.ParseStringSliceOr(p["tags"])
 
-
 	out, lesson, err := dm.SaveLesson(fact, lessonType, tags)
 	if err != nil {
 		return nil, err
@@ -325,7 +318,6 @@ func handleSearchLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 		return nil, fmt.Errorf("query is required")
 	}
 
-
 	items, err := dm.SearchLessonsLimited(query)
 	if err != nil {
 		return nil, err
@@ -340,7 +332,6 @@ func handleSearchLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 // callListLessons lists all lessons, optionally filtered by type.
 func handleListLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	lessonType := internal.ParseStringOr(p["type"], "")
-
 
 	items, err := dm.ListLessonsFiltered(lessonType)
 	if err != nil {
@@ -361,7 +352,6 @@ func handleCreateTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 	}
 	description := internal.ParseStringOr(p["description"], "")
 
-
 	topicID, err := dm.CreateTopicWithDescription(name, description)
 	if err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
@@ -380,7 +370,6 @@ func handleSearchTopics(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	if limit <= 0 {
 		limit = 20
 	}
-
 
 	items, err := dm.SearchTopicsByQuery(query, limit)
 	if err != nil {
@@ -404,7 +393,6 @@ func handleLinkTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveConte
 		return nil, fmt.Errorf("topic_id is required")
 	}
 
-
 	if err := dm.AddMemoryToTopic(memoryID, topicID, "manual"); err != nil {
 		return nil, fmt.Errorf("link topic: %w", err)
 	}
@@ -423,7 +411,6 @@ func handleAddReference(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	}
 	title := internal.ParseStringOr(p["title"], "")
 
-
 	return dm.AddReferenceFromFile(filepath, title)
 }
 
@@ -437,7 +424,6 @@ func handleSearchReferences(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 	if limit <= 0 {
 		limit = 5
 	}
-
 
 	results, err := dm.SearchReferenceChunks(query, limit)
 	if err != nil {
@@ -469,7 +455,6 @@ func handleListReferences(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 	if offset < 0 {
 		offset = 0
 	}
-
 
 	refs, err := dm.ListReferences(limit, offset)
 	if err != nil {
@@ -538,7 +523,6 @@ func handleProactiveRecallHint(dm *mpminternal.DatabaseManager, ac mpminternal.A
 		maxHints = 3
 	}
 
-
 	overlaps, err := dm.ProactiveRecallHint(conversationText, maxHints, internal.ParseFloatOr(p["min_score"], -3.0))
 	if err != nil {
 		return nil, err
@@ -596,7 +580,6 @@ func handleAddEvidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 		independence = i
 	}
 
-
 	return dm.AddEvidence(internal.EvidenceInput{
 		ArtifactID:         getString(payload, "artifact_id"),
 		ArtifactType:       artifactType,
@@ -649,10 +632,11 @@ func handleQueryConfidenceChanges(dm *mpminternal.DatabaseManager, ac mpminterna
 
 // callQueryConfidenceTrend returns the trajectory projection of confidence
 // over a time window. Completes the orthogonal set:
-//   state  → explain_confidence       (current reasoning trace)
-//   cause  → query_confidence_changes (recent events with delta)
-//   history → query_confidence_history (full timeline)
-//   direction → query_confidence_trend (this: trajectory, velocity)
+//
+//	state  → explain_confidence       (current reasoning trace)
+//	cause  → query_confidence_changes (recent events with delta)
+//	history → query_confidence_history (full timeline)
+//	direction → query_confidence_trend (this: trajectory, velocity)
 //
 // velocity is the raw signal; trend is the human-readable label.
 // Agents reason better from velocity than from labels.
@@ -673,17 +657,17 @@ func handleQueryMemoryQuality(dm *mpminternal.DatabaseManager, ac mpminternal.Ac
 
 // callShowConfidence returns the current confidence and history for an artifact.
 func handleShowConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
-	return dm.ShowConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
+	return dm.ShowConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callRecomputeConfidence forces a manual recompute and returns the snapshot.
 func handleRecomputeConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
-	return dm.RecomputeConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
+	return dm.RecomputeConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callExplainConfidence returns the reasoning trace for an artifact's confidence.
 func handleExplainConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
-	return dm.ExplainConfidence(getString(payload,"artifact_id"), getString(payload,"artifact_type"))
+	return dm.ExplainConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // ── Release / Changelog ──────────────────────────────────────────────
@@ -705,7 +689,6 @@ func handleLogToChangelog(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 	if commitHash == "" {
 		return nil, fmt.Errorf("commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit). Run `git rev-parse HEAD` to get the canonical 40-char SHA-1")
 	}
-
 
 	id, err := dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
 	if err != nil {
@@ -752,7 +735,6 @@ func handleQueryAuditLog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 			limit = t
 		}
 	}
-
 
 	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, days, limit)
 	if err != nil {
@@ -810,16 +792,15 @@ func handleSessionEnd(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 		}
 	}
 
-
 	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":        true,
-		"handoff":        h,
-		"handoff_id":     h.ID,
-		"message":        "session ended; handoff written. Next wake will surface it.",
+		"success":    true,
+		"handoff":    h,
+		"handoff_id": h.ID,
+		"message":    "session ended; handoff written. Next wake will surface it.",
 	}, nil
 }
 
@@ -849,7 +830,6 @@ func handleSessionHandoff(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 			unreadOnly = b
 		}
 	}
-
 
 	var h *internal.Handoff
 	var err error
@@ -908,7 +888,6 @@ func handleListHandoffs(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 		}
 	}
 
-
 	items, err := dm.ListHandoffs(limit, unreadOnly)
 	if err != nil {
 		return nil, err
@@ -926,8 +905,9 @@ func handleListHandoffs(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 // house rules, conventions, and persona overlays.
 //
 // Args:
-//   --query  (optional) FTS5 keyword search
-//   --limit  (optional) max rows; default 50, max 500
+//
+//	--query  (optional) FTS5 keyword search
+//	--limit  (optional) max rows; default 50, max 500
 //
 // In local-only mode (no MPM_SHARED_DB attached) returns an empty
 // result with success=true — the agent should fall back to local
@@ -953,10 +933,102 @@ func handleQueryGlobalRules(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":   true,
-		"source":    "shared",
-		"attached":  dm.SharedAttached() != "",
-		"count":     len(items),
-		"results":   items,
+		"success":  true,
+		"source":   "shared",
+		"attached": dm.SharedAttached() != "",
+		"count":    len(items),
+		"results":  items,
 	}, nil
+}
+
+// handleRecordGlobalRule writes a memory to the shared DB with
+// is_global=1. Phase 3 of WISHLIST.md: operator-only. The caller must
+// pass confirm=true — without it the call is rejected. This is
+// defense-in-depth against agents writing house rules autonomously.
+//
+// Args:
+//
+//	--fact        (required) The rule content
+//	--tags        (optional) Comma-separated tags
+//	--weight      (optional) 0-100, default 10 (house-rule weight)
+//	--provenance  (optional) Operator's name / why the rule exists
+//	--confirm     (required) Must be true. Refuses without it.
+func handleRecordGlobalRule(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("record_global_rule requires confirm=true; house rules should not be written autonomously")
+	}
+	content, _ := p["fact"].(string)
+	if content == "" {
+		return nil, fmt.Errorf("fact is required")
+	}
+	tagsRaw, _ := p["tags"].(string)
+	tags := splitTags(tagsRaw)
+	weight := 10
+	if v, ok := p["weight"]; ok {
+		switch t := v.(type) {
+		case float64:
+			weight = int(t)
+		case int:
+			weight = t
+		}
+	}
+	provenance, _ := p["provenance"].(string)
+
+	id, err := dm.RecordGlobalRule(content, tags, weight, provenance)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"id":      id,
+		"source":  "shared",
+	}, nil
+}
+
+// handlePromoteToGlobal copies a local memory to the shared DB. The
+// original local row is preserved. The shared copy carries a
+// metadata.derived_from_local_id field linking back to the source.
+//
+// Args:
+//
+//	--memory_id  (required) The local memory ID to promote
+//	--confirm    (required) Must be true.
+func handlePromoteToGlobal(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("promote_to_global requires confirm=true; cross-project promotion should be operator-gated")
+	}
+	localID, _ := p["memory_id"].(string)
+	if localID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+
+	sharedID, err := dm.PromoteToGlobal(localID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"shared_id": sharedID,
+		"local_id":  localID,
+		"lineage":   fmt.Sprintf("local:%s -> shared:%s", localID, sharedID),
+	}, nil
+}
+
+// splitTags is a small helper that turns a comma-separated tag string
+// into a []string. Empty input returns nil.
+func splitTags(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
