@@ -6,7 +6,8 @@ import (
 )
 
 func TestCallRoute_RequiresPrompt(t *testing.T) {
-	_, err := callRoute(map[string]interface{}{})
+	dm := newTestDMForCmd(t)
+	_, err := runHandler(dm, "route", map[string]interface{}{})
 	if err == nil {
 		t.Fatal("callRoute with empty payload should require prompt field")
 	}
@@ -15,9 +16,10 @@ func TestCallRoute_RequiresPrompt(t *testing.T) {
 func TestCallRoute_ReturnsReport(t *testing.T) {
 	// Use the live workspace — matches the pattern in cmd/mpm-mcp/tools.go
 	// and internal/router_test.go. Sets MPM_ROUTE_WORKSPACE for the test scope.
+	dm := newTestDMForCmd(t)
 	t.Setenv("MPM_ROUTE_WORKSPACE", "/home/v/workspace/projects/mpm")
 
-	result, err := callRoute(map[string]interface{}{
+	result, err := runHandler(dm, "route", map[string]interface{}{
 		"prompt": "Design the system architecture for our new API gateway",
 	})
 	if err != nil {

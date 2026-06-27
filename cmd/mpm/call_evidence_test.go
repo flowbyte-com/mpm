@@ -14,7 +14,8 @@ import (
 )
 
 func TestCallAddEvidence_RequiresFields(t *testing.T) {
-	_, err := callAddEvidence(map[string]interface{}{})
+	dm := newTestDMForCmd(t)
+	_, err := runHandler(dm, "add_evidence", map[string]interface{}{})
 	require.Error(t, err)
 }
 
@@ -28,7 +29,7 @@ func TestCallAddEvidence_RoutesToStore(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, mem)
 
-	_, err = callAddEvidence(map[string]interface{}{
+	_, err = runHandler(dm, "add_evidence", map[string]interface{}{
 		"artifact_id":   mem.ID,
 		"artifact_type": "memory",
 		"type":          "reproduction",
@@ -46,7 +47,7 @@ func TestCallAddEvidence_RoutesToStore(t *testing.T) {
 func TestCallListEvidence_EmptyResultIsObject(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	_ = dm // helper exists to mirror the other tests' setup; not strictly needed here
-	res, err := callListEvidence(map[string]interface{}{
+	res, err := runHandler(dm, "list_evidence", map[string]interface{}{
 		"artifact_id":   "nonexistent",
 		"artifact_type": "memory",
 	})
@@ -66,7 +67,7 @@ func TestCallQueryConfidenceHistory_ReturnsTimeline(t *testing.T) {
 
 	// Add evidence twice to produce two history rows.
 	for i := 0; i < 2; i++ {
-		_, err = callAddEvidence(map[string]interface{}{
+		_, err = runHandler(dm, "add_evidence", map[string]interface{}{
 			"artifact_id":   mem.ID,
 			"artifact_type": "memory",
 			"type":          "observation",
@@ -76,7 +77,7 @@ func TestCallQueryConfidenceHistory_ReturnsTimeline(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	res, err := callQueryConfidenceHistory(map[string]interface{}{
+	res, err := runHandler(dm, "query_confidence_history", map[string]interface{}{
 		"artifact_id":   mem.ID,
 		"artifact_type": "memory",
 		"limit":         10,
@@ -110,9 +111,7 @@ func newTestDMForCmd(t *testing.T) *internal.DatabaseManager {
 	require.NoError(t, err)
 	dm := internal.NewDatabaseManagerForDB(db)
 	require.NoError(t, dm.InitSchema())
-	setTestDMOverride(dm)
 	t.Cleanup(func() {
-		setTestDMOverride(nil)
 		dm.Close()
 	})
 	return dm
@@ -127,7 +126,7 @@ func TestCallQueryConfidenceChanges_ReturnsDeltas(t *testing.T) {
 
 	// Add evidence twice to produce two history rows with deltas.
 	for i := 0; i < 2; i++ {
-		_, err = callAddEvidence(map[string]interface{}{
+		_, err = runHandler(dm, "add_evidence", map[string]interface{}{
 			"artifact_id":   mem.ID,
 			"artifact_type": "memory",
 			"type":          "observation",
@@ -137,7 +136,7 @@ func TestCallQueryConfidenceChanges_ReturnsDeltas(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	res, err := callQueryConfidenceChanges(map[string]interface{}{
+	res, err := runHandler(dm, "query_confidence_changes", map[string]interface{}{
 		"since_seconds_ago": 3600,
 		"limit":             10,
 		"artifact_id":       mem.ID,
@@ -159,7 +158,7 @@ func TestCallQueryConfidenceTrend_ReturnsTrajectory(t *testing.T) {
 
 	// Add 3 pieces of evidence with increasing strength to create an upward trend.
 	for i := 0; i < 3; i++ {
-		_, err = callAddEvidence(map[string]interface{}{
+		_, err = runHandler(dm, "add_evidence", map[string]interface{}{
 			"artifact_id":   mem.ID,
 			"artifact_type": "memory",
 			"type":          "observation",
@@ -170,7 +169,7 @@ func TestCallQueryConfidenceTrend_ReturnsTrajectory(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	res, err := callQueryConfidenceTrend(map[string]interface{}{
+	res, err := runHandler(dm, "query_confidence_trend", map[string]interface{}{
 		"artifact_id":   mem.ID,
 		"artifact_type": "memory",
 		"window_days":   30,
@@ -193,7 +192,7 @@ func TestCallQueryMemoryQuality_PerSourceStats(t *testing.T) {
 		require.NotNil(t, mem)
 	}
 
-	res, err := callQueryMemoryQuality(map[string]interface{}{})
+	res, err := runHandler(dm, "query_memory_quality", map[string]interface{}{})
 	require.NoError(t, err)
 	out, _ := json.Marshal(res)
 	assert.Contains(t, string(out), "sources")
