@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	mpminternal "mpm/internal"
 	"mpm/internal/synth"
+	"mpm/internal/usererror"
 )
 
 // mpm synthesize — Find near-duplicate memories and merge via LLM synthesis.
@@ -15,10 +15,11 @@ import (
 // standalone command scans the entire memories table for potential merges.
 //
 // Subcommands:
-//   mpm synthesize                Full-table synthesis scan (default)
-//   mpm synthesize status         Show recent synthesis telemetry (last 20)
-//   mpm synthesize failures       Show only failed/skipped synthesis events
-//   mpm synthesize --dry-run      Scan without calling the LLM
+//
+//	mpm synthesize                Full-table synthesis scan (default)
+//	mpm synthesize status         Show recent synthesis telemetry (last 20)
+//	mpm synthesize failures       Show only failed/skipped synthesis events
+//	mpm synthesize --dry-run      Scan without calling the LLM
 func handleSynthesize(args []string) int {
 	// Subcommand dispatch: status / failures route to watchdog reader.
 	if len(args) > 0 {
@@ -43,8 +44,7 @@ func handleSynthesize(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
-		return 1
+		usererror.Error("DB open failed: %v", err)
 	}
 	defer dm.Close()
 
@@ -58,8 +58,7 @@ func handleSynthesize(args []string) int {
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Query failed: %v\n", err)
-		return 1
+		usererror.Error("Query failed: %v", err)
 	}
 
 	type memInfo struct {
@@ -107,15 +106,13 @@ func handleSynthesize(args []string) int {
 func handleSynthesizeStatus(limit int) int {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
-		return 1
+		usererror.Error("DB open failed: %v", err)
 	}
 	defer dm.Close()
 
 	ops, err := dm.RecentWatchdogOps(limit, "synthesize_")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Watchdog read failed: %v\n", err)
-		return 1
+		usererror.Error("Watchdog read failed: %v", err)
 	}
 	if len(ops) == 0 {
 		fmt.Println("No synthesis telemetry yet.")
@@ -150,15 +147,13 @@ func handleSynthesizeStatus(limit int) int {
 func handleSynthesizeFailures(limit int) int {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
-		return 1
+		usererror.Error("DB open failed: %v", err)
 	}
 	defer dm.Close()
 
 	ops, err := dm.RecentWatchdogOps(limit, "synthesize_")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Watchdog read failed: %v\n", err)
-		return 1
+		usererror.Error("Watchdog read failed: %v", err)
 	}
 
 	fmted := 0

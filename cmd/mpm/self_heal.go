@@ -17,12 +17,12 @@
 //
 // Safety boundaries:
 //
-//   1. WHITELIST-ONLY auto-fix. Only soft-delete ghosts are auto-fixed.
-//   2. BOUNDED BLAST RADIUS. If ghost count exceeds SelfHealMaxFix, do
-//      not auto-fix; escalate as a bounded theory.
-//   3. RATE LIMIT. Max one auto-fix per SelfHealCooldown. Re-running
-//      within the cooldown with no new drift signature is a no-op.
-//   4. AUDIT TRAIL. Every auto-fix writes a lesson tagged source=self-heal.
+//  1. WHITELIST-ONLY auto-fix. Only soft-delete ghosts are auto-fixed.
+//  2. BOUNDED BLAST RADIUS. If ghost count exceeds SelfHealMaxFix, do
+//     not auto-fix; escalate as a bounded theory.
+//  3. RATE LIMIT. Max one auto-fix per SelfHealCooldown. Re-running
+//     within the cooldown with no new drift signature is a no-op.
+//  4. AUDIT TRAIL. Every auto-fix writes a lesson tagged source=self-heal.
 package main
 
 import (
@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 
 	mpminternal "mpm/internal"
 )
@@ -56,11 +57,11 @@ const SelfHealStateID = "self-heal-state-marker"
 
 // SelfHealState captures the rate-limit + last-action metadata.
 type SelfHealState struct {
-	LastRun         time.Time `json:"last_run"`
-	LastAction      string    `json:"last_action"`      // "clean", "auto-fixed", "escalated", "bounded"
-	LastFixedCount  int       `json:"last_fixed_count"` // ghosts cleaned in last run
-	LastTheoryID    string    `json:"last_theory_id"`   // pending theory id, if escalated
-	DriftSignature  string    `json:"drift_signature"`  // hash of last drift finding, for dedup
+	LastRun        time.Time `json:"last_run"`
+	LastAction     string    `json:"last_action"`      // "clean", "auto-fixed", "escalated", "bounded"
+	LastFixedCount int       `json:"last_fixed_count"` // ghosts cleaned in last run
+	LastTheoryID   string    `json:"last_theory_id"`   // pending theory id, if escalated
+	DriftSignature string    `json:"drift_signature"`  // hash of last drift finding, for dedup
 }
 
 // loadSelfHealState reads the rate-limit marker. Returns a zero state if
@@ -133,13 +134,13 @@ func handleSelfHeal(args []string) int {
 
 	dbPath := fmt.Sprintf("%s/src/db/mpm.db", config.GetMPMDir())
 	if _, err := os.Stat(dbPath); err != nil {
-		fmt.Fprintf(os.Stderr, "self-heal: no database at %s\n", dbPath)
+		usererror.Warn("self-heal: no database at %s", dbPath)
 		return 1
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "self-heal: cannot open db: %v\n", err)
+		usererror.Warn("self-heal: cannot open db: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -153,7 +154,7 @@ func handleSelfHeal(args []string) int {
 	// Run the shared scan.
 	scan, err := runDeepScanCheck(dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "self-heal: scan failed: %v\n", err)
+		usererror.Warn("self-heal: scan failed: %v", err)
 		return 1
 	}
 	sig := driftSignature(scan)
@@ -193,12 +194,11 @@ func handleSelfHeal(args []string) int {
 			// Bounded. Do NOT auto-fix. Escalate.
 			action = "bounded"
 			exitCode = 1
-			fmt.Fprintf(os.Stderr, "self-heal: %d ghosts exceeds SelfHealMaxFix=%d — escalating without fix\n",
-				scan.SoftDeleteGhosts, SelfHealMaxFix)
+			usererror.Warn("self-heal: %d ghosts exceeds SelfHealMaxFix=%d — escalating without fix", scan.SoftDeleteGhosts, SelfHealMaxFix)
 		} else if !*dryRun {
 			n, ferr := runDeepScanFixSoftDeleteGhosts(dbPath)
 			if ferr != nil {
-				fmt.Fprintf(os.Stderr, "self-heal: ghost fix failed: %v\n", ferr)
+				usererror.Warn("self-heal: ghost fix failed: %v", ferr)
 				action = "fix-failed"
 				exitCode = 1
 			} else {
@@ -220,7 +220,7 @@ func handleSelfHeal(args []string) int {
 		if !*dryRun {
 			t, terr := dm.ProposeTheory(hypothesis, criteria, []string{"mpm", "self-heal", "fts5", "drift", "auto-escalated"})
 			if terr != nil {
-				fmt.Fprintf(os.Stderr, "self-heal: theory injection failed: %v\n", terr)
+				usererror.Warn("self-heal: theory injection failed: %v", terr)
 			} else {
 				if id, ok := t["id"].(string); ok {
 					theoryID = id
@@ -247,7 +247,7 @@ func handleSelfHeal(args []string) int {
 			lesson,
 			`["mpm","self-heal","auto-fix","audit"]`,
 		); err != nil {
-			fmt.Fprintf(os.Stderr, "self-heal: lesson write failed: %v\n", err)
+			usererror.Warn("self-heal: lesson write failed: %v", err)
 		}
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"mpm/internal/usererror"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,8 +23,7 @@ import (
 func handleBackup(args []string) int {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	dbPath := dm.DBPath()
 	dm.Close()
@@ -94,8 +94,7 @@ func handleRestoreDB(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	dbPath := dm.DBPath()
 	// Close all DB handles BEFORE clearing WAL/SHM so SQLite doesn't fight us.

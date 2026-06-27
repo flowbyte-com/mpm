@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 )
 
 // ── Ring Buffer ─────────────────────────────────────────────────────────────
@@ -86,10 +86,10 @@ func (rb *ringBuffer) Count() int64 {
 
 // SSEBroker holds active SSE client connections and broadcasts events to all of them.
 type SSEBroker struct {
-	clients    map[chan string]int64    // client channel → client ID
-	register   chan (chan string)       // channel to register
-	unregister chan (chan string)       // channel to unregister
-	broadcast  chan string              // message to fan out (buffered for backpressure)
+	clients    map[chan string]int64 // client channel → client ID
+	register   chan (chan string)    // channel to register
+	unregister chan (chan string)    // channel to unregister
+	broadcast  chan string           // message to fan out (buffered for backpressure)
 	rb         *ringBuffer
 	idSeq      int64
 	mu         sync.Mutex
@@ -105,9 +105,9 @@ var allowAnonymousSSE bool
 func newBroker() *SSEBroker {
 	b := &SSEBroker{
 		clients:    make(map[chan string]int64),
-		register:   make(chan (chan string), 8),  // H2 FIX: buffer so brief stalls in run() don't hang new SSE clients
-		unregister: make(chan (chan string), 8),  // H2 FIX: same — decouples disconnect cleanup from run() pace
-		broadcast:  make(chan string, 256),       // buffered: slow consumers don't block broadcast
+		register:   make(chan (chan string), 8), // H2 FIX: buffer so brief stalls in run() don't hang new SSE clients
+		unregister: make(chan (chan string), 8), // H2 FIX: same — decouples disconnect cleanup from run() pace
+		broadcast:  make(chan string, 256),      // buffered: slow consumers don't block broadcast
 		rb:         newRingBuffer(50),
 	}
 	go b.run()
@@ -118,7 +118,7 @@ func newBroker() *SSEBroker {
 func (b *SSEBroker) run() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "[SSEBroker] CRITICAL: run() panicked: %v. Restarting broker loop.\n", r)
+			usererror.Warn("[SSEBroker] CRITICAL: run() panicked: %v. Restarting broker loop.", r)
 			// C2 hardening: backoff before respawn to prevent a CPU-spinning
 			// crash loop if the panic is persistent (e.g., closed channel stuck
 			// in clients map).

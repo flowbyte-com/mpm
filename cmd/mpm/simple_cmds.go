@@ -16,6 +16,7 @@ import (
 
 	mpminternal "mpm/internal"
 	"mpm/internal/synth"
+	"mpm/internal/usererror"
 )
 
 // =============================================================================
@@ -51,15 +52,13 @@ func handleAdd(args []string) int {
 
 	// Extract content: use first positional arg, or join all for multi-word content
 	if fs.NArg() == 0 {
-		fmt.Fprintf(os.Stderr, "Error: content required\n")
-		return 1
+		usererror.Error("content required")
 	}
 	content := strings.Join(fs.Args(), " ")
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -99,8 +98,7 @@ func handleAdd(args []string) int {
 
 	id, err := dm.SaveMemory(*collection, content, *session, tags, metadata, embedding, isLongTerm, *weight)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	// Set TTL if specified
@@ -143,15 +141,13 @@ func handleLs(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	filtered := memories
@@ -217,7 +213,7 @@ func filterByTag(memories []map[string]interface{}, tag string) []map[string]int
 // mpm show <id> — Show memory details
 func handleShow(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm show <id>\n")
+		usererror.Usage("mpm show <id>")
 		return 1
 	}
 
@@ -225,15 +221,13 @@ func handleShow(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
-		fmt.Fprintf(os.Stderr, "Memory not found: %s\n", id)
-		return 1
+		usererror.Error("Memory not found: %s", id)
 	}
 
 	fmt.Println("\n══════════════════════════════════════════")
@@ -268,7 +262,7 @@ func handleShow(args []string) int {
 // mpm rm <id> — Soft delete memory
 func handleRm(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm rm <id>\n")
+		usererror.Usage("mpm rm <id>")
 		return 1
 	}
 
@@ -276,16 +270,14 @@ func handleRm(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	// Soft delete by setting deleted_at
 	_, err = dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Deleted memory %s\n", id)
@@ -295,7 +287,7 @@ func handleRm(args []string) int {
 // mpm patch-memory <id> <json-patch> — Patch metadata JSON in-place (no content change, no FTS re-index)
 func handlePatchMemory(args []string) int {
 	if len(args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm patch-memory <id> <json-patch>\n")
+		usererror.Usage("mpm patch-memory <id> <json-patch>")
 		return 1
 	}
 
@@ -304,21 +296,18 @@ func handlePatchMemory(args []string) int {
 
 	// Basic JSON validity check
 	if !strings.HasPrefix(strings.TrimSpace(patchJSON), "{") {
-		fmt.Fprintf(os.Stderr, "Error: patch must be a JSON object string\n")
-		return 1
+		usererror.Error("patch must be a JSON object string")
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	err = dm.UpdateMemoryMetadata(id, patchJSON)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Patched metadata for memory %s\n", id)
@@ -328,7 +317,7 @@ func handlePatchMemory(args []string) int {
 // mpm promote <id> — Make memory LTM
 func handlePromote(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm promote <id>\n")
+		usererror.Usage("mpm promote <id>")
 		return 1
 	}
 
@@ -336,8 +325,7 @@ func handlePromote(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -357,28 +345,24 @@ func handlePromote(args []string) int {
 // Delta sign is determined by the caller: +1 for reinforce, -1 for weaken.
 func handleFeedback(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Error: internal: handleFeedback requires id and delta\n")
-		return 1
+		usererror.Error("internal: handleFeedback requires id and delta")
 	}
 	id := args[1]
 	delta, err := strconv.Atoi(args[2])
 	if err != nil || delta == 0 {
-		fmt.Fprintf(os.Stderr, "Error: invalid delta %q\n", args[2])
-		return 1
+		usererror.Error("invalid delta %q", args[2])
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	// Check memory exists and challenged status
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
-		fmt.Fprintf(os.Stderr, "Error: memory not found: %s\n", id)
-		return 1
+		usererror.Error("memory not found: %s", id)
 	}
 	isChallenged := false
 	if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {
@@ -394,22 +378,19 @@ func handleFeedback(args []string) int {
 		// Positive feedback: implicit challenge restore if challenged, then reinforce
 		if isChallenged {
 			if err := dm.ChallengeAndReinforce(id, delta); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				return 1
+				usererror.Error("%v", err)
 			}
 			fmt.Printf("⚡ Reinforced memory %s (+%d) — challenge cleared\n", id, delta)
 		} else {
 			if err := dm.ReinforceMemory(id, delta); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				return 1
+				usererror.Error("%v", err)
 			}
 			fmt.Printf("⚡ Reinforced memory %s (+%d)\n", id, delta)
 		}
 	} else {
 		// Negative feedback: weaken with hard floor at 1
 		if err := dm.AdjustMemoryWeight(id, delta); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			usererror.Error("%v", err)
 		}
 		// Check if already at minimum
 		updated, _ := dm.GetMemory(id)
@@ -425,7 +406,7 @@ func handleFeedback(args []string) int {
 // handleReinforce is the public command handler for `mpm reinforce`.
 func handleReinforce(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reinforce <id> [delta]\n")
+		usererror.Usage("mpm reinforce <id> [delta]")
 		return 1
 	}
 
@@ -439,15 +420,13 @@ func handleReinforce(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	err = dm.ReinforceMemory(id, delta)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Reinforced memory %s (+%d)\n", id, delta)
@@ -457,7 +436,7 @@ func handleReinforce(args []string) int {
 // mpm weaken <id> [delta] — Decrement reinforcement
 func handleWeaken(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm weaken <id> [delta]\n")
+		usererror.Usage("mpm weaken <id> [delta]")
 		return 1
 	}
 
@@ -471,15 +450,13 @@ func handleWeaken(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	err = dm.WeakenMemory(id, delta)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Weakened memory %s (-%d)\n", id, delta)
@@ -489,32 +466,28 @@ func handleWeaken(args []string) int {
 // mpm set-weight <id> <weight> — Set weight directly
 func handleSetWeight(args []string) int {
 	if len(args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm set-weight <id> <weight>\n")
+		usererror.Usage("mpm set-weight <id> <weight>")
 		return 1
 	}
 
 	id := args[1]
 	w, err := strconv.Atoi(args[2])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid weight '%s'\n", args[2])
-		return 1
+		usererror.Error("invalid weight '%s'", args[2])
 	}
 	if w < 0 || w > 100 {
-		fmt.Fprintf(os.Stderr, "Error: weight must be 0-100\n")
-		return 1
+		usererror.Error("weight must be 0-100")
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	_, err = dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ?`, w, id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Set weight of %s to %d\n", id, w)
@@ -526,7 +499,7 @@ func handleSetWeight(args []string) int {
 // last_accessed_at. Never sets is_long_term or inflates weight to >= 10.
 func handleSnooze(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm snooze <id> [--days N]\n")
+		usererror.Usage("mpm snooze <id> [--days N]")
 		return 1
 	}
 	id := args[1]
@@ -542,8 +515,7 @@ func handleSnooze(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -555,8 +527,7 @@ func handleSnooze(args []string) int {
 		WHERE id = ? AND deleted_at IS NULL
 	`, days, id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	fmt.Printf("Snoozed memory %s (+1 weight, +%d day(s) last_accessed)\n", id, days)
@@ -566,7 +537,7 @@ func handleSnooze(args []string) int {
 // mpm shred <id> — Secure delete memory
 func handleShredMem(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm shred <id>\n")
+		usererror.Usage("mpm shred <id>")
 		return 1
 	}
 
@@ -574,8 +545,7 @@ func handleShredMem(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -594,31 +564,26 @@ func handleShredMem(args []string) int {
 	// Transaction: DELETE topic_memberships → DELETE theory (if exists) → DELETE memory
 	tx, err := dm.SQLDB().Begin()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer tx.Rollback()
 
 	if _, err = tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, id); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if theoryID != "" {
 		if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			usererror.Error("%v", err)
 		}
 	}
 
 	if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if theoryID != "" {
@@ -636,16 +601,17 @@ func handleShredMem(args []string) int {
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]\n")
+		usererror.Usage("mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]")
+// Multi-line usage help text — structured output, not a single error message
 		fmt.Fprintf(os.Stderr, "  --reason: import reason (why this is being added; seed of the admission justification chain)\n")
+// Multi-line usage help text — structured output, not a single error message
 		fmt.Fprintf(os.Stderr, "  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)\n")
 		return 1
 	}
 
 	filePath := args[1]
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "File not found: %s\n", filePath)
-		return 1
+		usererror.Error("File not found: %s", filePath)
 	}
 
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
@@ -673,14 +639,12 @@ func handleRefAdd(args []string) int {
 		*chunkSize = parsedChunkSize
 	}
 	if *chunkSize < 64 || *chunkSize > 2048 {
-		fmt.Fprintf(os.Stderr, "Error: --chunk-size must be between 64 and 2048 (got %d)\n", *chunkSize)
-		return 1
+		usererror.Error("--chunk-size must be between 64 and 2048 (got %d)", *chunkSize)
 	}
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -696,29 +660,25 @@ func handleRefAdd(args []string) int {
 	case ".html", ".xhtml":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
-			return 1
+			usererror.Error("Error reading file: %v", err)
 		}
 		content = mpminternal.StripHTML(string(data))
 	case ".txt", ".md":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
-			return 1
+			usererror.Error("Error reading file: %v", err)
 		}
 		content = string(data)
 	default:
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Unsupported file type: %s\n", ext)
-			return 1
+			usererror.Error("Unsupported file type: %s", ext)
 		}
 		content = string(data)
 	}
 
 	if parseErr != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing file: %v\n", parseErr)
-		return 1
+		usererror.Error("Error parsing file: %v", parseErr)
 	}
 
 	title := filepath.Base(filePath)
@@ -737,8 +697,7 @@ func handleRefAdd(args []string) int {
 
 	chunks, err := mpminternal.ChunkByTokens(content, *chunkSize)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to chunk content: %v\n", err)
-		return 1
+		usererror.Error("failed to chunk content: %v", err)
 	}
 
 	// Look up an existing doc by source path so re-ingest reuses the
@@ -748,8 +707,7 @@ func handleRefAdd(args []string) int {
 	// fire. Short-circuit when the file is byte-identical to last time.
 	existing, err := mpminternal.FindReferenceBySourcePath(dm.SQLDB(), filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error looking up existing reference: %v\n", err)
-		return 1
+		usererror.Error("Error looking up existing reference: %v", err)
 	}
 	if existing != nil && existing.ContentHash == contentHash {
 		if *jsonOutput {
@@ -801,8 +759,7 @@ func handleRefAdd(args []string) int {
 
 	err = dm.AddReference(doc, refChunks)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving reference: %v\n", err)
-		return 1
+		usererror.Error("Error saving reference: %v", err)
 	}
 
 	// Embed chunks in a separate phase after the chunk-insert tx
@@ -845,15 +802,13 @@ func handleRefList(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	refs, err := dm.ListReferences(50, 0)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if len(refs) == 0 {
@@ -959,15 +914,14 @@ func handleRefList(args []string) int {
 // handleRefShow shows a reference document with its chunks
 func handleRefShow(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference show <id> [--json]\n")
+		usererror.Usage("mpm reference show <id> [--json]")
 		return 1
 	}
 
 	id := args[1]
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -980,7 +934,7 @@ func handleRefShow(args []string) int {
 			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Reference not found: " + id})
 			fmt.Println(string(data))
 		} else {
-			fmt.Fprintf(os.Stderr, "Reference not found: %s\n", id)
+			usererror.Error("Reference not found: %s", id)
 		}
 		return 1
 	}
@@ -1070,7 +1024,7 @@ func handleRefShow(args []string) int {
 // handleRefSearch searches reference chunks
 func handleRefSearch(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference search <query> [--json]\n")
+		usererror.Usage("mpm reference search <query> [--json]")
 		return 1
 	}
 
@@ -1078,15 +1032,13 @@ func handleRefSearch(args []string) int {
 	query := strings.Join(cleanArgs, " ")
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if len(chunks) == 0 {
@@ -1178,22 +1130,20 @@ func handleRefSearch(args []string) int {
 // handleRefShred deletes a reference document
 func handleRefShred(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mpm reference shred <id>\n")
+		usererror.Usage("mpm reference shred <id>")
 		return 1
 	}
 
 	id := args[1]
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	err = dm.DeleteReference(id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error deleting reference: %v\n", err)
-		return 1
+		usererror.Error("Error deleting reference: %v", err)
 	}
 
 	fmt.Printf("Deleted reference: %s\n", id)
@@ -1215,8 +1165,7 @@ func handleRefInteractions(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -1227,8 +1176,7 @@ func handleRefInteractions(args []string) int {
 		rows, err = dm.GetRecentInteractions(*limit)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if *jsonOutput {
@@ -1291,15 +1239,13 @@ func handleRefUsed(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	rows, err := dm.GetMostUsedReferences(*limit)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 
 	if *jsonOutput {
@@ -1353,15 +1299,13 @@ func handleRefAdmit(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	candidates, err := dm.FindAdmissionCandidates(*limit)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding candidates: %v\n", err)
-		return 1
+		usererror.Error("Error finding candidates: %v", err)
 	}
 	if len(candidates) == 0 {
 		if *jsonOutput {
@@ -1396,8 +1340,7 @@ func handleRefAdmit(args []string) int {
 
 	client := synth.NewSynthClient()
 	if client.APIKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)\n")
-		return 1
+		usererror.Error("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
 	}
 
 	// Read active context for memory provenance.
@@ -1424,7 +1367,7 @@ func handleRefAdmit(args []string) int {
 					"error":    err.Error(),
 				})
 			} else {
-				fmt.Fprintf(os.Stderr, "  err on %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+				usererror.Warn("err %s: %v", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
 			}
 			continue
 		}
@@ -1475,19 +1418,19 @@ func handleRefAdmit(args []string) int {
 		)
 		if err != nil {
 			errs++
-			fmt.Fprintf(os.Stderr, "  err writing memory for %s: %v\n", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
+			usererror.Warn("err memory for %s: %v", candidate.ChunkID[:min(len(candidate.ChunkID), 12)], err)
 			continue
 		}
 		admitted++
 		if *jsonOutput {
 			results = append(results, map[string]interface{}{
-				"chunk_id":  candidate.ChunkID,
-				"doc_id":    candidate.DocID,
-				"admit":     true,
-				"memory_id": resp["id"],
-				"content":   result.Content,
-				"confidence": result.Confidence,
-				"tags":      result.Tags,
+				"chunk_id":      candidate.ChunkID,
+				"doc_id":        candidate.DocID,
+				"admit":         true,
+				"memory_id":     resp["id"],
+				"content":       result.Content,
+				"confidence":    result.Confidence,
+				"tags":          result.Tags,
 				"justification": result.Justification,
 			})
 		} else {

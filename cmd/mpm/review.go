@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"time"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/usererror"
 )
 
 // handleReview implements `mpm review [flags]` for spaced reinforcement review.
@@ -49,7 +49,7 @@ func handleReview(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return 1
 	}
 	defer dm.Close()
@@ -74,21 +74,21 @@ func handleReview(args []string) int {
 			LIMIT ?
 		`, resultLimit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Review query failed: %v\n", err)
+			usererror.Error("Review query failed: %v", err)
 			return 1
 		}
 		defer rows.Close()
 
 		memories, err = scanMemoriesFromRows(rows)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Review scan failed: %v\n", err)
+			usererror.Error("Review scan failed: %v", err)
 			return 1
 		}
 	} else {
 		// Stale: LTM/high-weight memories not accessed in N+ days
 		memories, err = dm.GetSpacedReinforcementReview(daysFilter, 20)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Stale query failed: %v\n", err)
+			usererror.Error("Stale query failed: %v", err)
 			return 1
 		}
 	}

@@ -14,17 +14,18 @@ import (
 
 	"mpm/internal"
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 )
 
 const defaultWebPort = "18792"
 
 // WebServer holds the HTTP server state
 type WebServer struct {
-	port            string
-	mux             *http.ServeMux
-	db              *internal.DatabaseManager
-	handler         http.Handler
-	allowAnonymous  bool   // set when --allow-anonymous was passed; auth is then skipped with a warning header
+	port           string
+	mux            *http.ServeMux
+	db             *internal.DatabaseManager
+	handler        http.Handler
+	allowAnonymous bool // set when --allow-anonymous was passed; auth is then skipped with a warning header
 }
 
 // NewWebServer creates a new web server
@@ -281,7 +282,7 @@ func handleWeb(args []string) int {
 
 	// Loud pre-start warning if the operator opted into unauthenticated mode.
 	if allowAnonymous {
-		fmt.Fprintf(os.Stderr, "⚠️  WARNING: --allow-anonymous set. The web server will serve every memory to any client reachable on the network. Do NOT use this on a hostile network.\n")
+		usererror.Warn("WARNING: --allow-anonymous set. The web server will serve every memory to any client reachable on the network. Do NOT use this on a hostile network.")
 	}
 
 	// Export port so concurrent mpm call processes can relay SSE events here.
@@ -294,8 +295,7 @@ func handleWeb(args []string) int {
 
 	db, err := internal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to open database: %v\n", err)
-		return 1
+		usererror.Error("Failed to open database: %v", err)
 	}
 	defer db.Close()
 

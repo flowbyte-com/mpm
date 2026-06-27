@@ -27,9 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"mpm/internal"
+
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
-	"mpm/internal"
 )
 
 // gcClaimSlot is the actual SQL used by the GC cooldown lock, kept verbatim
