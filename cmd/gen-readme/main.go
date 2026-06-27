@@ -62,9 +62,12 @@ func run() error {
 		return fmt.Errorf("README sentinels in wrong order: begin at %d, end at %d", beginIdx, endIdx)
 	}
 
-	// Replace the entire span from beginIdx through endIdx (inclusive
-	// of the end sentinel). Preserve the original prefix/suffix so the
-	// rendered block stays inside its code fence.
+	// Replace the span from beginIdx (start of begin sentinel) through
+	// endLineEnd (end of the line containing the end sentinel). The prefix
+	// (typically the ``` fence opening) goes BEFORE the begin sentinel;
+	// the suffix (typically the ``` fence closing) goes AFTER the end
+	// sentinel. This keeps the generated block inside its existing
+	// markdown code fence.
 	beginLineStart := strings.LastIndex(content[:beginIdx], "\n") + 1
 	endLineEnd := strings.Index(content[endIdx:], "\n")
 	if endLineEnd < 0 {
@@ -74,7 +77,7 @@ func run() error {
 	}
 
 	prefix := content[beginLineStart:beginIdx]
-	suffix := content[endIdx:endLineEnd]
+	suffix := content[endLineEnd:]
 
 	var newBlock strings.Builder
 	newBlock.WriteString(prefix)
