@@ -279,6 +279,12 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"review":{"type":"boolean"},"purge":{"type":"boolean"}}}`),
 		Handler:     handleGCRun,
 	},
+	{
+		Name:        "query_global_rules",
+		Description: "Query shared (cross-agent) global rules from the MPM_SHARED_DB. Returns is_global=1 rows from shared.memories. Empty result when no shared DB is attached (local-only mode).",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}}}`),
+		Handler:     handleQueryGlobalRules,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
