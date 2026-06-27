@@ -316,7 +316,7 @@ function renderMemPagination(data) {
   el.innerHTML = html;
 }
 
-function memOffset(delta) {
+function setMemOffset(delta) {
   memOffset = Math.max(0, memOffset + delta);
   loadMemories();
 }
@@ -619,7 +619,7 @@ const delegatedClickHandler = (e) => {
     case 'edit-topic':    if (id) openTopicModal(id); break;
     case 'delete-topic':  if (id) deleteTopic(id); break;
     case 'delete-lesson': if (id) deleteLesson(id); break;
-    case 'mem-page':      if (!isNaN(delta)) memOffset(delta); break;
+    case 'mem-page':      if (!isNaN(delta)) setMemOffset(delta); break;
     default: break;
   }
 };
