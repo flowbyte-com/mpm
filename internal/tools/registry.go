@@ -53,3 +53,4 @@ type Tool struct {
 	Schema      json.RawMessage
 	Handler     HandlerFunc
 }
+//go:generate go run ../../cmd/gen-readme
