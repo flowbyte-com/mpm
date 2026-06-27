@@ -108,7 +108,7 @@ func TestQueryGlobalRules_FiltersByIsGlobal(t *testing.T) {
 	}
 }
 
-func TestQueryGlobalRules_LikeSearch(t *testing.T) {
+func TestQueryGlobalRules_FTSSearch(t *testing.T) {
 	tmp := t.TempDir()
 	sharedPath := filepath.Join(tmp, "shared.db")
 	t.Setenv("MPM_SHARED_DB", sharedPath)
@@ -138,7 +138,7 @@ func TestQueryGlobalRules_LikeSearch(t *testing.T) {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 LIKE hit for 'api', got %d: %+v", len(got), got)
+		t.Fatalf("expected 1 FTS hit for 'api', got %d: %+v", len(got), got)
 	}
 	if got[0]["id"] != "rule-a" {
 		t.Errorf("expected rule-a, got %v", got[0]["id"])

@@ -34,6 +34,13 @@ type WakeContextData struct {
 	// summary, commitments, and open_questions fields tell it where it
 	// left off, what it promised to do next, and what's still unresolved.
 	LastHandoff *Handoff `json:"last_handoff,omitempty"`
+	// GlobalRules is the list of shared (cross-agent) house rules that
+	// apply to every agent on this workstation. Populated by
+	// GatherWakeContext when MPM_SHARED_DB is attached and the shared
+	// DB has any is_global rows. Empty in local-only mode (the default).
+	// The agent reads these on wake to know the conventions, voice
+	// rules, and operator overrides before it starts working.
+	GlobalRules []WakeContextRule `json:"global_rules,omitempty"`
 }
 
 // WakeContextMemory is the trimmed memory reference shown in wake context.
@@ -41,6 +48,15 @@ type WakeContextMemory struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
+}
+
+// WakeContextRule is a single shared house rule. Trimmed to content +
+// weight so the wake context payload stays small even with hundreds
+// of rules. The agent calls query_global_rules for the full row when
+// it needs the metadata / weight context.
+type WakeContextRule struct {
+	Content string `json:"content"`
+	Weight  int    `json:"weight"`
 }
 
 // readActiveState reads {MPM_DIR}/active.json via the shared loader in
@@ -92,6 +108,27 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.RecentMemories = dm.recentMemories(10)
 	data.RecentTopics = dm.GetRecentUserTopics(5)
 	data.AuditSummary = dm.AuditSummary()
+
+	// Phase 2c (this commit): surface shared global rules in wake
+	// context. Cheap to query (lazy-backfilled FTS) and high-signal —
+	// every agent on the workstation sees the same house rules on
+	// wake. Skipped silently when no shared DB is attached (local-only
+	// mode is the default).
+	if rules, _ := dm.QueryGlobalRules("", 10); len(rules) > 0 {
+		data.GlobalRules = make([]WakeContextRule, 0, len(rules))
+		for _, r := range rules {
+			content, _ := r["content"].(string)
+			weight := 0
+			if w, ok := r["weight"].(int); ok {
+				weight = w
+			}
+			data.GlobalRules = append(data.GlobalRules, WakeContextRule{
+				Content: content,
+				Weight:  weight,
+			})
+		}
+	}
+
 	return data, nil
 }
 
@@ -205,6 +242,16 @@ func formatWakeContext(d WakeContextData) string {
 	}
 	if d.AuditSummary != "" {
 		lines = append(lines, "**"+d.AuditSummary+"**")
+	}
+	if len(d.GlobalRules) > 0 {
+		lines = append(lines, "**Global Rules (shared across all agents on this workstation):**")
+		for _, r := range d.GlobalRules {
+			content := r.Content
+			if len(content) > 100 {
+				content = content[:100] + "…"
+			}
+			lines = append(lines, fmt.Sprintf("  - [w=%d] %s", r.Weight, content))
+		}
 	}
 	if d.LastHandoff != nil {
 		lines = append(lines, formatHandoff(d.LastHandoff))

@@ -587,6 +587,26 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		}
 	}
 
+	// Phase 2b (this commit): also create the FTS5 virtual table for
+	// shared.memories. Phase 1 deferred FTS because the initial schema
+	// was "core tables only"; now that query_global_rules has a real
+	// consumer (Phase 2), keyword search via FTS5 is worth wiring up.
+	//
+	// We create shared.memories_fts mirroring the local memories_fts
+	// schema. We do NOT create triggers (Phase 2b keeps it manual — a
+	// future enhancement could add shared AFTER INSERT triggers).
+	// QueryGlobalRules backfills FTS rows on each call when the index
+	// is empty relative to the underlying table — this keeps the
+	// bootstrap simple without losing keyword search.
+	if _, err := dm.db.Exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS shared.memories_fts USING fts5(
+			content, collection, session_id UNINDEXED, tags UNINDEXED,
+			content='memories', content_rowid='rowid'
+		)
+	`); err != nil {
+		slog.Warn("shared FTS5 virtual table creation failed", "error", err.Error())
+	}
+
 	// Now run SafeMigrations against the shared schema (tables exist now).
 	// ALTER TABLE in SQLite doesn't accept a schema prefix, so we use
 	// sqlite_master to set the search_path equivalent. For our purposes
@@ -695,10 +715,23 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 	}
 	query = strings.TrimSpace(query)
 
-	// Phase 2 (this commit): the shared DB does NOT have a populated
-	// FTS5 virtual table yet (Phase 1 only bootstraps core tables). We
-	// use LIKE for keyword search; Phase 2b will add shared.memories_fts
-	// and switch this back to FTS5 once it is reliably populated.
+	// Phase 2b (this commit): the shared FTS5 virtual table exists but
+	// is not auto-populated by triggers (Phase 1 deferred triggers
+	// to keep the bootstrap simple). We lazy-backfill on the first
+	// query of a session if the index is empty relative to the
+	// underlying table. After backfill, queries hit FTS5; the LIKE
+	// fallback remains for the rare case where FTS5 fails.
+	//
+	// Lazy backfill is intentional — adding triggers to the shared
+	// schema would mean cross-schema INSERT triggers, which SQLite
+	// supports but requires careful handling. Backfilling on the
+	// first read is simpler and bounded — the shared DB is
+	// append-mostly per the WISHLIST.md concurrency model.
+	if err := dm.backfillSharedFTSIfEmpty(); err != nil {
+		// Non-fatal — fall back to LIKE if backfill or FTS query fails.
+		slog.Warn("shared FTS backfill failed; falling back to LIKE", "error", err.Error())
+	}
+
 	var querySQL string
 	var args []interface{}
 	if query == "" {
@@ -712,28 +745,52 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 		`
 		args = []interface{}{limit}
 	} else {
-		querySQL = `
+		// FTS5 search with LIKE fallback if the index is missing or
+		// empty (e.g. fresh shared DB before first backfill).
+		escaped := strings.ReplaceAll(query, `"`, `""`)
+		ftsQuery := `"` + escaped + `"*`
+		rows, err := dm.db.Query(`
+			SELECT m.id, m.content, m.collection, m.tags, m.metadata, m.weight,
+			       m.reinforcement_count, m.created_at, m.updated_at, m.is_global
+			FROM shared.memories m
+			JOIN shared.memories_fts fts ON m.rowid = fts.rowid
+			WHERE shared.memories_fts MATCH ? AND m.is_global = 1 AND m.deleted_at IS NULL
+			ORDER BY m.weight DESC, m.created_at DESC
+			LIMIT ?
+		`, ftsQuery, limit)
+		if err == nil {
+			defer rows.Close()
+			return dm.scanGlobalRuleRows(rows)
+		}
+		// Fallback to LIKE — FTS5 virtual table not populated or error.
+		rows, err = dm.db.Query(`
 			SELECT id, content, collection, tags, metadata, weight,
 			       reinforcement_count, created_at, updated_at, is_global
 			FROM shared.memories
 			WHERE is_global = 1 AND deleted_at IS NULL AND content LIKE ?
 			ORDER BY weight DESC, created_at DESC
 			LIMIT ?
-		`
-		args = []interface{}{"%" + query + "%", limit}
+		`, "%"+query+"%", limit)
+		if err != nil {
+			return nil, fmt.Errorf("query shared.memories: %w", err)
+		}
+		defer rows.Close()
+		return dm.scanGlobalRuleRows(rows)
 	}
 	rows, err := dm.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query shared.memories: %w", err)
 	}
 	defer rows.Close()
+	return dm.scanGlobalRuleRows(rows)
+}
 
+// scanGlobalRuleRows reads the rows from a QueryGlobalRules SELECT
+// and produces the standardized result map. Extracted because two
+// query paths (no-query, FTS5-or-LIKE) need identical scan logic.
+func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
 	for rows.Next() {
-		// Use sql.NullX for every column. SQLite's flexible typing means
-		// any column might be NULL depending on when the row was written
-		// vs when the column was added — defensive reads cost nothing
-		// here (max 500 rows per query) and prevent silent row drops.
 		var id, content, coll sql.NullString
 		var tags, meta, createdAt, updatedAt sql.NullString
 		var weight, reinforcement, isGlobal sql.NullInt64
@@ -741,24 +798,61 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 			&createdAt, &updatedAt, &isGlobal); err != nil {
 			continue
 		}
-		weightInt := int(weight.Int64)
-		reinforcementInt := int(reinforcement.Int64)
-		isGlobalInt := int(isGlobal.Int64)
 		results = append(results, map[string]interface{}{
-			"id":                 id.String,
-			"content":            content.String,
-			"collection":         coll.String,
-			"tags":               tags.String,
-			"metadata":           meta.String,
-			"weight":             weightInt,
-			"reinforcement_count": reinforcementInt,
-			"created_at":         createdAt.String,
-			"updated_at":         updatedAt.String,
-			"is_global":          isGlobalInt,
-			"source":             "shared",
+			"id":                  id.String,
+			"content":             content.String,
+			"collection":          coll.String,
+			"tags":                tags.String,
+			"metadata":            meta.String,
+			"weight":              int(weight.Int64),
+			"reinforcement_count": int(reinforcement.Int64),
+			"created_at":          createdAt.String,
+			"updated_at":          updatedAt.String,
+			"is_global":           int(isGlobal.Int64),
+			"source":              "shared",
 		})
 	}
 	return results, nil
+}
+
+// backfillSharedFTSIfEmpty populates shared.memories_fts from
+// shared.memories if the FTS table is empty (or if the underlying
+// table has rows that the FTS index doesn't). Phase 2b keeps the
+// shared schema simple — no AFTER INSERT triggers — so we lazy-
+// backfill on the first query.
+//
+// This is O(N) on the number of is_global rows. The shared DB is
+// append-mostly per WISHLIST.md so the cost amortizes to zero on
+// subsequent queries.
+func (dm *DatabaseManager) backfillSharedFTSIfEmpty() error {
+	if !dm.sharedAttached {
+		return nil
+	}
+	var memCount, ftsCount int
+	if err := dm.db.QueryRow("SELECT COUNT(*) FROM shared.memories WHERE is_global = 1").Scan(&memCount); err != nil {
+		return fmt.Errorf("count shared.memories: %w", err)
+	}
+	if err := dm.db.QueryRow("SELECT COUNT(*) FROM shared.memories_fts").Scan(&ftsCount); err != nil {
+		// FTS table doesn't exist — backfill would fail. Caller falls
+		// back to LIKE via the QueryGlobalRules fallback path.
+		return fmt.Errorf("count shared.memories_fts: %w", err)
+	}
+	if ftsCount >= memCount {
+		return nil // already in sync
+	}
+	// Backfill is_global rows from shared.memories into shared.memories_fts.
+	// INSERT OR IGNORE handles the case where some rows are already indexed
+	// (race between backfill and concurrent inserts).
+	_, err := dm.db.Exec(`
+		INSERT OR IGNORE INTO shared.memories_fts(rowid, content, collection, session_id, tags)
+		SELECT rowid, content, COALESCE(collection, ''), COALESCE(session_id, ''), COALESCE(tags, '')
+		FROM shared.memories
+		WHERE is_global = 1 AND deleted_at IS NULL
+	`)
+	if err != nil {
+		return fmt.Errorf("backfill shared.memories_fts: %w", err)
+	}
+	return nil
 }
 
 // NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.
