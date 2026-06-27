@@ -919,3 +919,44 @@ func handleListHandoffs(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 		"results": items,
 	}, nil
 }
+
+// handleQueryGlobalRules returns memories from the shared DB that
+// are marked is_global = 1. This is the read-side of the multi-agent
+// shared epistemology: every agent on the workstation sees the same
+// house rules, conventions, and persona overlays.
+//
+// Args:
+//   --query  (optional) FTS5 keyword search
+//   --limit  (optional) max rows; default 50, max 500
+//
+// In local-only mode (no MPM_SHARED_DB attached) returns an empty
+// result with success=true — the agent should fall back to local
+// recall. This is intentional: shared rules are an additive layer,
+// not a replacement for project-specific memory.
+func handleQueryGlobalRules(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	query, _ := p["query"].(string)
+	limit := 50
+	if v, ok := p["limit"]; ok {
+		switch t := v.(type) {
+		case float64:
+			limit = int(t)
+		case int:
+			limit = t
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	items, err := dm.QueryGlobalRules(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"source":    "shared",
+		"attached":  dm.SharedAttached() != "",
+		"count":     len(items),
+		"results":   items,
+	}, nil
+}
