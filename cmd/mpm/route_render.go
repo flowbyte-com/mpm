@@ -350,14 +350,14 @@ func fetchTopDirectives(workspace string, limit int) string {
 	defer rows.Close()
 
 	var directives []struct {
-		ID        string
-		Content   string
+		ID         string
+		Content    string
 		Confidence float64
 	}
 	for rows.Next() {
 		var d struct {
-			ID        string
-			Content   string
+			ID         string
+			Content    string
 			Confidence float64
 		}
 		if err := rows.Scan(&d.ID, &d.Content, &d.Confidence); err != nil {

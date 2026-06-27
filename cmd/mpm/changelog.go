@@ -39,6 +39,7 @@ import (
 	"strings"
 
 	mpminternal "mpm/internal"
+	"mpm/internal/usererror"
 )
 
 // handleOpsChangelog is the entry point for `mpm ops changelog build`.
@@ -56,7 +57,7 @@ func handleOpsChangelogRoute(args []string) int {
 	case "build":
 		return handleOpsChangelog(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "changelog: unknown subcommand %q\n", args[0])
+		usererror.Warn("changelog: unknown subcommand %q", args[0])
 		fmt.Fprintln(os.Stderr, "Run `mpm ops changelog help` for usage.")
 		return 1
 	}
@@ -122,7 +123,7 @@ func handleOpsChangelog(args []string) int {
 	if *since == "" {
 		tag, err := mpminternal.LatestTag(*repoDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "changelog: resolve latest tag: %v\n", err)
+			usererror.Warn("changelog: resolve latest tag: %v", err)
 			return 1
 		}
 		*since = tag
@@ -141,7 +142,7 @@ func handleOpsChangelog(args []string) int {
 		Until:   *until,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "changelog: git log (%s..%s): %v\n", *since, *until, err)
+		usererror.Warn("changelog: git log (%s..%s): %v", *since, *until, err)
 		return 1
 	}
 	mainEntries := mpminternal.ParseCommitLog(mainLog)
@@ -152,7 +153,7 @@ func handleOpsChangelog(args []string) int {
 	if *notesFile != "" {
 		body, readErr := os.ReadFile(*notesFile)
 		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "changelog: read release-notes: %v\n", readErr)
+			usererror.Warn("changelog: read release-notes: %v", readErr)
 			return 1
 		}
 		mainEntries = append([]mpminternal.ChangelogEntry{
@@ -186,7 +187,7 @@ func handleOpsChangelog(args []string) int {
 			Reverse: true,   // oldest-first so the section reads chronologically
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "changelog: git log (legacy): %v\n", err)
+			usererror.Warn("changelog: git log (legacy): %v", err)
 			return 1
 		}
 		legacyEntries := mpminternal.ParseCommitLog(legacyLog)
@@ -211,7 +212,7 @@ func handleOpsChangelog(args []string) int {
 	if *withSynthesis {
 		synResult, synErr := runSynthesis(doc)
 		if synErr != nil {
-			fmt.Fprintf(os.Stderr, "changelog: synthesis: %v\n", synErr)
+			usererror.Warn("changelog: synthesis: %v", synErr)
 			return 1
 		}
 		doc = synResult.Document
@@ -221,10 +222,9 @@ func handleOpsChangelog(args []string) int {
 		// non-interactively (e.g., in CI). The orphan section
 		// inside the file is the persistent signal.
 		if len(synResult.Orphans) > 0 {
-			fmt.Fprintf(os.Stderr,
-				"WARN: Found %d changelog memories with unmatched commit hashes.\n"+
-					"      These are surfaced in the 'Orphan Changelog Memories' section at the end of %s.\n"+
-					"      Common causes: agent hallucinated a hash, commit was squashed, or branch was abandoned.\n",
+			usererror.Warn("Found %d changelog memories with unmatched commit hashes.\n"+
+				"      These are surfaced in the 'Orphan Changelog Memories' section at the end of %s.\n"+
+				"      Common causes: agent hallucinated a hash, commit was squashed, or branch was abandoned.",
 				len(synResult.Orphans), *output)
 		}
 		fmt.Printf("changelog: synthesis: %d matched, %d unmatched, %d orphans\n",
@@ -238,7 +238,7 @@ func handleOpsChangelog(args []string) int {
 
 	// Write Markdown.
 	if err := os.WriteFile(*output, []byte(markdown), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "changelog: write %s: %v\n", *output, err)
+		usererror.Warn("changelog: write %s: %v", *output, err)
 		return 1
 	}
 	absMd, _ := filepath.Abs(*output)
@@ -247,11 +247,11 @@ func handleOpsChangelog(args []string) int {
 	// Write JSON sibling.
 	jsonBytes, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "changelog: marshal json: %v\n", err)
+		usererror.Warn("changelog: marshal json: %v", err)
 		return 1
 	}
 	if err := os.WriteFile(*jsonOutput, jsonBytes, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "changelog: write %s: %v\n", *jsonOutput, err)
+		usererror.Warn("changelog: write %s: %v", *jsonOutput, err)
 		return 1
 	}
 	absJSON, _ := filepath.Abs(*jsonOutput)

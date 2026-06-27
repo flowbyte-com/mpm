@@ -12,6 +12,7 @@ import (
 
 	mpminternal "mpm/internal"
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 )
 
 // handleBackfillEmbeddings runs the embedding backfill pipeline.
@@ -33,16 +34,14 @@ func handleBackfillEmbeddings(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
 	// Count total missing (no provider needed for this)
 	total, err := countMemoriesWithoutEmbedding(dm.SQLDB(), *collection)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error counting memories: %v\n", err)
-		return 1
+		usererror.Error("Error counting memories: %v", err)
 	}
 	fmt.Printf("   Total memories missing embeddings: %d\n", total)
 
@@ -60,8 +59,7 @@ func handleBackfillEmbeddings(args []string) int {
 	provider := cfg.Provider
 
 	if provider.Name() == "null" {
-		fmt.Fprintf(os.Stderr, "Error: no embedding provider available.\nSet OLLAMA_ENDPOINT and OLLAMA_MODEL env vars and ensure Ollama is running.\n")
-		return 1
+		usererror.Error("no embedding provider available.\nSet OLLAMA_ENDPOINT and OLLAMA_MODEL env vars and ensure Ollama is running.")
 	}
 	fmt.Printf("⚡ Embedding backfill using %s\n", provider.Name())
 
@@ -74,7 +72,7 @@ func handleBackfillEmbeddings(args []string) int {
 	for {
 		memories, err := fetchMemoriesWithoutEmbedding(dm.SQLDB(), *collection, batch, offset)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching batch: %v\n", err)
+			usererror.Error("Error fetching batch: %v", err)
 			break
 		}
 		if len(memories) == 0 {

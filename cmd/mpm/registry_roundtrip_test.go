@@ -203,7 +203,7 @@ func mustMarshal(v interface{}) []byte {
 func minimalPayload(schemaRaw json.RawMessage) map[string]interface{} {
 	var schema struct {
 		Properties map[string]map[string]interface{} `json:"properties"`
-		Required   []string                         `json:"required"`
+		Required   []string                          `json:"required"`
 	}
 	if err := json.Unmarshal(schemaRaw, &schema); err != nil {
 		return map[string]interface{}{}

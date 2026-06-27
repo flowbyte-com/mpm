@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"mpm/internal/config"
+	"mpm/internal/usererror"
 
 	mpminternal "mpm/internal"
 )
@@ -102,8 +103,7 @@ func handleSessionAdd(args []string) int {
 func handleWake(args []string) int {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 

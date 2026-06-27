@@ -21,6 +21,7 @@ import (
 
 	mpminternal "mpm/internal"
 	"mpm/internal/synth"
+	"mpm/internal/usererror"
 )
 
 // ============================================================================
@@ -56,9 +57,10 @@ var startTime = time.Now()
 // modeManager is the global mode manager instance (initialized at startup)
 var modeManager any
 
-// printError formats and prints an error message mpm-style
+// printError formats and prints an error message mpm-style.
+// Migrated to usererror so the severity prefix is centralized.
 func printError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "[!] Error: "+format+"\n", args...)
+	usererror.Error(format, args...)
 }
 
 // printSuccess prints a success message mpm-style
@@ -427,10 +429,10 @@ func runDeepScanCheck(dbPath string) (*DeepScanResult, error) {
 	defer sqlDB.Close()
 
 	res := &DeepScanResult{
-		FTSOrphans:               map[string]int{},
-		FTSOrphanSamples:         map[string][]string{},
-		SoftDeleteGhostSamples:   []string{},
-		QueryErrors:              map[string]string{},
+		FTSOrphans:             map[string]int{},
+		FTSOrphanSamples:       map[string][]string{},
+		SoftDeleteGhostSamples: []string{},
+		QueryErrors:            map[string]string{},
 	}
 
 	// — Check 1: FTS orphan scan —
@@ -546,14 +548,14 @@ func runDoctorDeepScan(fix bool) {
 
 	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		fmt.Fprintf(os.Stderr, "  [%s] No database found at %s\n", colorRed("FAIL"), dbPath)
+		usererror.Warn("[%s] No database found at %s", colorRed("FAIL"), dbPath)
 		os.Exit(1)
 	}
 
 	// Run the shared scan; it opens the DB read-only internally.
 	scan, err := runDeepScanCheck(dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  [%s] Cannot open database: %v\n", colorRed("FAIL"), err)
+		usererror.Warn("[%s] Cannot open database: %v", colorRed("FAIL"), err)
 		os.Exit(1)
 	}
 
@@ -651,7 +653,7 @@ func runDoctorDeepScan(fix bool) {
 func runDoctorExplain() {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
+		usererror.Error("DB open failed: %v", err)
 		return
 	}
 	defer dm.Close()
@@ -669,8 +671,8 @@ LIMIT 10`
 
 	rows, err := dm.SQLDB().Query(query)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ EXPLAIN QUERY PLAN failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "   This may indicate FTS5 is not enabled or the memories_fts table is missing.\n")
+		usererror.Error("EXPLAIN QUERY PLAN failed: %v", err)
+		usererror.Error("   This may indicate FTS5 is not enabled or the memories_fts table is missing.")
 		return
 	}
 	defer rows.Close()
@@ -682,7 +684,7 @@ LIMIT 10`
 	var detail string
 	for rows.Next() {
 		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️  Scan error: %v\n", err)
+			usererror.Warn("Scan error: %v", err)
 			continue
 		}
 		indent := ""
@@ -693,7 +695,7 @@ LIMIT 10`
 	}
 
 	if err := rows.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Rows error: %v\n", err)
+		usererror.Warn("Rows error: %v", err)
 	}
 
 	fmt.Println("\n✅ If you see `SEARCH memories_fts USING VIRTUAL TABLE INDEX`")
@@ -1104,7 +1106,7 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 	if err != nil {
 		report.Checks = append(report.Checks, DoctorCheck{
 			Name: "Synthesis Telemetry", Status: "WARN",
-			Message: fmt.Sprintf("cannot open db to read watchdog: %v", err),
+			Message:  fmt.Sprintf("cannot open db to read watchdog: %v", err),
 			Duration: "0ms",
 		})
 		report.Warnings++
@@ -1116,7 +1118,7 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 		if werr != nil {
 			report.Checks = append(report.Checks, DoctorCheck{
 				Name: "Synthesis Telemetry", Status: "WARN",
-				Message: fmt.Sprintf("watchdog read failed: %v", werr),
+				Message:  fmt.Sprintf("watchdog read failed: %v", werr),
 				Duration: "0ms",
 			})
 			report.Warnings++
@@ -1149,7 +1151,7 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 	if cfg == nil || cfg.WebToken == "" {
 		report.Checks = append(report.Checks, DoctorCheck{
 			Name: "Auth Token", Status: "WARN",
-			Message: "web_token is empty — `mpm web` will require --allow-anonymous flag (this is safe, not fail-open)",
+			Message:  "web_token is empty — `mpm web` will require --allow-anonymous flag (this is safe, not fail-open)",
 			Duration: "0ms",
 		})
 		report.Warnings++
@@ -1168,7 +1170,7 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 	// they suspect a regression.
 	report.Checks = append(report.Checks, DoctorCheck{
 		Name: "Scanner Coverage", Status: "PASS",
-		Message: "enforced by internal/scanner_coverage_test.go (run `go test ./internal/...` to verify)",
+		Message:  "enforced by internal/scanner_coverage_test.go (run `go test ./internal/...` to verify)",
 		Duration: "0ms",
 	})
 	report.TotalChecks++

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mpm/internal/usererror"
 	"os"
 	"regexp"
 	"sort"
@@ -14,8 +15,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	mpminternal "mpm/internal"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // Pre-compiled regexes for stripMarkdown (avoid repeated recompilation)
@@ -48,6 +50,7 @@ type recallEntry struct {
 	lastAccessedAt     time.Time
 	referenceID        string
 }
+
 var _ = recallEntry{} // ensure the type is "used" even if --why is off
 
 // =============================================================================
@@ -182,7 +185,7 @@ func handleRecall(args []string) int {
 	hasFilter := *weightBelow > 0 || *before != "" || *since != "" || *until != "" || *collection != "memories"
 	query := fs.Arg(0)
 	if query == "" && !hasFilter {
-		fmt.Fprintf(os.Stderr, "Usage: mpm recall [options] <query>\n")
+		usererror.Usage("mpm recall [options] <query>")
 		return 1
 	}
 	query = strings.TrimSpace(query)
@@ -190,8 +193,7 @@ func handleRecall(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ DB open failed: %v\n", err)
-		return 1
+		usererror.Error("DB open failed: %v", err)
 	}
 	defer dm.Close()
 
@@ -205,8 +207,7 @@ func handleRecall(args []string) int {
 		cfg.VectorWeight = *vectorWeight
 		hybridResults, err := mpminternal.HybridSearch(dm, query, *collection, cfg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Semantic search failed: %v\n", err)
-			return 1
+			usererror.Error("Semantic search failed: %v", err)
 		}
 		if len(hybridResults) == 0 {
 			fmt.Printf("No memories found for: %s\n", query)
@@ -219,8 +220,7 @@ func handleRecall(args []string) int {
 	// Keyword search using LIKE + FTS5 fallback with time and weight filters
 	rows, err := keywordSearchWithTime(db, query, *collection, *since, *until, *weightBelow, *before, *limit)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Search failed: %v\n", err)
-		return 1
+		usererror.Error("Search failed: %v", err)
 	}
 	defer rows.Close()
 
@@ -289,8 +289,7 @@ func handleRecall(args []string) int {
 	if *asOf != "" {
 		asOfTime, err := time.Parse(time.RFC3339, *asOf)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: --as-of must be an RFC3339 timestamp, got %q\n", *asOf)
-			return 1
+			usererror.Error("--as-of must be an RFC3339 timestamp, got %q", *asOf)
 		}
 
 		timeTravelVersionMap = make(map[string]int, len(entries))
@@ -377,11 +376,11 @@ func handleRecall(args []string) int {
 			}
 
 			jsonContent := e.content
-		if preamble := mpminternal.ProvenancePreamble(e.metadata); preamble != "" {
-			jsonContent = preamble + "\n" + jsonContent
-		}
+			if preamble := mpminternal.ProvenancePreamble(e.metadata); preamble != "" {
+				jsonContent = preamble + "\n" + jsonContent
+			}
 
-		result = append(result, memoryEntry{
+			result = append(result, memoryEntry{
 				ID:                   shortID(e.id),
 				Content:              jsonContent,
 				Tags:                 e.tags,

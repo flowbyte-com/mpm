@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
+	"mpm/internal/usererror"
 	"strconv"
 	"strings"
 	"time"
@@ -48,8 +48,7 @@ func handleGC(args []string) int {
 
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer dm.Close()
 
@@ -64,8 +63,7 @@ func handleGC(args []string) int {
 	}(); shredNegative {
 		negMemories, err := dm.GetNegativeWeightMemories()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			usererror.Error("%v", err)
 		}
 		if len(negMemories) == 0 {
 			fmt.Println("No negative-weight memories found.")
@@ -78,7 +76,7 @@ func handleGC(args []string) int {
 			weight, _ := m["weight"].(int)
 			theory, err := dm.GetProvenTheoryForMemory(id)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  [%s] error checking theory: %v\n", id, err)
+				usererror.Warn("error checking theory: %s: %v", id, err)
 				continue
 			}
 			if theory != nil {
@@ -86,7 +84,7 @@ func handleGC(args []string) int {
 					fmt.Printf("  [%s] weight=%d → WOULD SHRED (proven theory %s)\n", id, weight, theory["id"])
 				} else {
 					if err := dm.ShredMemory(id); err != nil {
-						fmt.Fprintf(os.Stderr, "  [%s] shred error: %v\n", id, err)
+						usererror.Warn("shred error: %s: %v", id, err)
 						continue
 					}
 					fmt.Printf("  [%s] weight=%d → SHREDDED (proven theory %s)\n", id, weight, theory["id"])
@@ -165,8 +163,7 @@ func handleGC(args []string) int {
 			AND deleted_at < datetime('now', '-30 days')
 		`)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
+			usererror.Error("%v", err)
 		}
 		purged, _ := result.RowsAffected()
 		fmt.Printf("Purged %d old deleted memories\n", purged)
@@ -198,8 +195,7 @@ func handleGC(args []string) int {
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
+		usererror.Error("%v", err)
 	}
 	defer rows.Close()
 
@@ -277,7 +273,7 @@ func handleGC(args []string) int {
 	if !dryRun && len(deltas) > 0 {
 		tx, txErr := dm.SQLDB().Begin()
 		if txErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to begin transaction: %v\n", txErr)
+			usererror.Error("failed to begin transaction: %v", txErr)
 		} else {
 			var batchErr error
 			for _, d := range deltas {
@@ -302,10 +298,10 @@ func handleGC(args []string) int {
 			}
 			if batchErr != nil {
 				tx.Rollback()
-				fmt.Fprintf(os.Stderr, "Error: batch update failed, rolled back: %v\n", batchErr)
+				usererror.Error("batch update failed, rolled back: %v", batchErr)
 			} else if err := tx.Commit(); err != nil {
 				tx.Rollback()
-				fmt.Fprintf(os.Stderr, "Error: batch commit failed, rolled back: %v\n", err)
+				usererror.Error("batch commit failed, rolled back: %v", err)
 			}
 		}
 	}

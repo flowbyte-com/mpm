@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"mpm/internal/usererror"
 	"os"
 	"os/exec"
 	"strings"
@@ -261,13 +262,13 @@ func parseSelectorResult(line string) []string {
 func RunSelectorStandalone() bool {
 	itemsEnv := os.Getenv("MPM_SELECT_ITEMS")
 	if itemsEnv == "" {
-		fmt.Fprintf(os.Stderr, "MPM_SELECT_ITEMS not set\n")
+		usererror.Error("MPM_SELECT_ITEMS not set")
 		return false
 	}
 
 	items, err := parseSelectorItemsJSON(itemsEnv)
 	if err != nil || len(items) == 0 {
-		fmt.Fprintf(os.Stderr, "No items to select: %v\n", err)
+		usererror.Error("No items to select: %v", err)
 		return false
 	}
 
@@ -282,7 +283,7 @@ func RunSelectorStandalone() bool {
 
 	finalModel, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Selector error: %v\n", err)
+		usererror.Error("Selector error: %v", err)
 		return false
 	}
 

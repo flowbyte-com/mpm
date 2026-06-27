@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"mpm/internal/usererror"
 	"os"
 	"path/filepath"
 
@@ -12,19 +13,20 @@ import (
 // YAML escape footgun family documented in lesson 9e1b2142bd525c6d.
 //
 // Checks (per v's spec, 2026-06-26):
-//   1. YAML validity — frontmatter must parse without error
-//   2. Regex compilation — every string in `patterns` and `domain_out`
-//      must compile via regexp.Compile when prefixed with (?i) (and with
-//      \b...\b wrapping for domain_out, matching router_loader.go)
+//  1. YAML validity — frontmatter must parse without error
+//  2. Regex compilation — every string in `patterns` and `domain_out`
+//     must compile via regexp.Compile when prefixed with (?i) (and with
+//     \b...\b wrapping for domain_out, matching router_loader.go)
 //
 // Voice guards are NOT regex-compiled (they are LLM-context prose), so
 // they are not checked here. But YAML parse errors in voice_guards
 // strings are still caught by check #1.
 //
 // Exit codes:
-//   0 — clean (no issues)
-//   1 — issues found, lint failed
-//   2 — operational error (cannot read directory, etc.)
+//
+//	0 — clean (no issues)
+//	1 — issues found, lint failed
+//	2 — operational error (cannot read directory, etc.)
 func handleLint(args []string) int {
 	dirs := []string{}
 	strict := false
@@ -74,8 +76,7 @@ See lesson 9e1b2142bd525c6d for the YAML escape footgun family this
 linter defends against.`)
 			return 0
 		default:
-			fmt.Fprintf(os.Stderr, "Error: unknown flag %q\n", a)
-			return 2
+			usererror.Error("unknown flag %q", a)
 		}
 	}
 
@@ -85,8 +86,7 @@ linter defends against.`)
 		if mpmDir == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: cannot determine home dir: %v\n", err)
-				return 2
+				usererror.Error("cannot determine home dir: %v", err)
 			}
 			mpmDir = filepath.Join(home, ".mpm")
 		}
@@ -99,11 +99,9 @@ linter defends against.`)
 	// Verify all dirs exist before scanning
 	for _, d := range dirs {
 		if info, err := os.Stat(d); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: cannot stat %q: %v\n", d, err)
-			return 2
+			usererror.Error("cannot stat %q: %v", d, err)
 		} else if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "Error: %q is not a directory\n", d)
-			return 2
+			usererror.Error("%q is not a directory", d)
 		}
 	}
 

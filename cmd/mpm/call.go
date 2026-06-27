@@ -12,9 +12,10 @@ import (
 	"strings"
 	"syscall"
 
-	"mpm/internal/config"
 	mpminternal "mpm/internal"
+	"mpm/internal/config"
 	"mpm/internal/tools"
+	"mpm/internal/usererror"
 )
 
 // openCallDM returns a freshly-opened workspace DatabaseManager and a
@@ -30,13 +31,13 @@ func openCallDM() (*mpminternal.DatabaseManager, func(), error) {
 	return dm, func() { dm.Close() }, nil
 }
 
-
 // handleCall is the main entry point for `mpm call <tool>`.
 //
 // Payload is read from one of three sources (in priority order):
-//   1. --payload <json>     inline JSON arg (avoid with apostrophes/quotes)
-//   2. --payload-file <p>   JSON file path (no shell escaping)
-//   3. stdin                pipe or redirect (`echo ... | mpm call ...` or `< file`)
+//  1. --payload <json>     inline JSON arg (avoid with apostrophes/quotes)
+//  2. --payload-file <p>   JSON file path (no shell escaping)
+//  3. stdin                pipe or redirect (`echo ... | mpm call ...` or `< file`)
+//
 // If none are present, returns an empty payload (some tools need no input).
 func handleCall(args []string) int {
 	if len(args) < 1 {
@@ -76,7 +77,8 @@ func handleCall(args []string) int {
 	result, err := tool.Handler(dm, ac, payload)
 	if err != nil {
 		// Errors are JSON to stderr so the agent can parse them
-		fmt.Fprintf(os.Stderr, "%s\n", must(json.Marshal(map[string]interface{}{
+		// Direct fmt.Fprintf to stderr: JSON error envelope for `mpm call` — must be raw JSON, not user-formatted.
+	fmt.Fprintf(os.Stderr, "%s\n", must(json.Marshal(map[string]interface{}{
 			"success": false,
 			"error":   err.Error(),
 		})))
@@ -117,10 +119,10 @@ func parsePayload(args []string) (map[string]interface{}, error) {
 	// recent hit, return after the loop. If both are present, the later one
 	// in argv order wins.
 	var (
-		inlineJSON  string
-		inlineSet   bool
-		filePath    string
-		fileSet     bool
+		inlineJSON string
+		inlineSet  bool
+		filePath   string
+		fileSet    bool
 	)
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--payload" && i+1 < len(args) {
@@ -179,7 +181,6 @@ func parsePayload(args []string) (map[string]interface{}, error) {
 	return map[string]interface{}{}, nil
 }
 
-
 // must is a tiny helper for JSON marshalling where marshalling errors are
 // programming bugs (we always pass concrete map[string]interface{} or
 // []byte payloads, both of which marshal cleanly). The trailing-error arg
@@ -224,7 +225,7 @@ func relayBroadcast(eventType string, payload interface{}) {
 			})
 			closeDM()
 		}
-		fmt.Fprintf(os.Stderr, "[relay] post error: %v\n", err)
+		usererror.Warn("relay post error: %v", err)
 		return
 	}
 	defer resp.Body.Close()

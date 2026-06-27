@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"mpm/internal/usererror"
 	"os"
 )
 
@@ -77,7 +78,7 @@ func NewRouter() *CommandRouter {
 		"ops":                 {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
 		// Proactive Recall Hint
-		"hint": {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
+		"hint":  {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
 		"route": {Name: "route", Description: "Render mode+persona for a prompt (Claude Code hook input)", MinArgs: 0, MaxArgs: 1},
 
 		// Epistemology Engine
@@ -90,7 +91,7 @@ func NewRouter() *CommandRouter {
 		"evidence":        {Name: "evidence", Description: "Evidence operations (add|list) — confidence/evidence foundation", MinArgs: 0},
 
 		// Knowledge Base — entity-centric namespace (reads + writes)
-		"kb":   {Name: "kb", Description: "Knowledge base: memory, topic, lesson, session, reference", MinArgs: 0},
+		"kb":    {Name: "kb", Description: "Knowledge base: memory, topic, lesson, session, reference", MinArgs: 0},
 		"debug": {Name: "debug", Description: "Low-level inspection tools for human troubleshooting", MinArgs: 0},
 	}
 
@@ -736,7 +737,7 @@ func (r *CommandRouter) unknownCommand(name string) {
 }
 
 func (r *CommandRouter) errorf(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, format, args...)
+	usererror.Error(format, args...)
 }
 
 // ExtractJSONFlag scans args for --json or -j, removes it, returns (jsonOutput, cleanedArgs).
@@ -760,9 +761,10 @@ func ExtractJSONFlag(args []string) (bool, []string) {
 // blocks the user on errors (any failure → exit 0, no output).
 //
 // Usage:
-//   mpm route "review this code"        # positional arg
-//   echo "review this" | mpm route      # stdin literal
-//   mpm route < hook-stdin.json         # stdin JSON (Claude Code format)
+//
+//	mpm route "review this code"        # positional arg
+//	echo "review this" | mpm route      # stdin literal
+//	mpm route < hook-stdin.json         # stdin JSON (Claude Code format)
 func (r *CommandRouter) handleRoute(args []string) int {
 	prompt := extractRoutePrompt(args, os.Stdin)
 	skip, _ := shouldSkipRoute(prompt, os.Getenv)
@@ -776,7 +778,7 @@ func (r *CommandRouter) handleRoute(args []string) int {
 		// Programmer-level error. Only surface on TTY (interactive) — never
 		// when invoked from a hook (would corrupt hook output).
 		if isatty(os.Stdout) {
-			fmt.Fprintf(os.Stderr, "mpm route: %v\n", err)
+			usererror.Error("%v", err)
 		}
 		return 0
 	}
@@ -795,4 +797,3 @@ func isatty(f *os.File) bool {
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
-
