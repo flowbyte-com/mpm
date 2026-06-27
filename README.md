@@ -1120,6 +1120,24 @@ review_memories          synthesize_memory          gc_run
 
 Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The server binary is at `bin/mpm-mcp` relative to the MPM repo root.
 
+#### Single source of truth: `internal/tools/registry.go`
+
+Both the CLI (`mpm call <tool>`) and the MCP server iterate the same registry — a package-level `[]Tool` slice in `internal/tools/registry_list.go`. Each entry holds:
+
+- `Name` — the tool identifier (used by both surfaces)
+- `Description` — short prose shown to MCP clients
+- `Schema` — JSON-Schema (raw bytes, parseable by both surfaces; the MCP server passes it via `mcp.NewToolWithRawSchema`)
+- `Handler` — `func(dm *DatabaseManager, ac *ActiveContext, payload map[string]interface{}) (interface{}, error)`. Same function called by both surfaces.
+
+Adding a new tool:
+
+1. Write `handleFoo` in `internal/tools/handlers.go` (one function).
+2. Append a `Tool{Name, Description, Schema, Handler}` entry in `internal/tools/registry_list.go`.
+
+Both the CLI dispatcher and the MCP server pick it up automatically. No edits to either `cmd/mpm/call.go` or `cmd/mpm-mcp/tools.go`.
+
+Before this refactor (commit `8423cd8`), each tool had two independently-maintained handlers (`callFoo` in `call.go` and `handleFoo` in `tools.go`) that drifted apart — the CLI would silently keep a stale tool while the MCP server added the new one, or vice versa. Now they share one handler, and `cmd/mpm/registry_roundtrip_test.go::TestRegistry_AllToolsExecuteWithoutPanic` enforces byte-identical JSON output from both surfaces on every tool.
+
 ### Session Handoffs (Episodic Memory)
 
 Working memory, long-term memory, audit, and self-heal. Four of the five layers a persistent agent needs. The missing one is **episodic memory** — the thread. When a session ends, the next boot shouldn't have to reconstruct what was happening from FTS-ranked recent memories. It should be told directly.
