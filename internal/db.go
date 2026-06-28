@@ -1404,26 +1404,27 @@ func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]ma
 }
 
 func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error) {
-	// Scrub content for secrets and poison phrases BEFORE any DB work.
-	// SaveMemory is a low-level write path used by synthesis/idle_dream
-	// paths that bypass MemoryStore.AddMemory. Without this scrub, an
-	// LLM response that picked up a prompt-injection could persist
-	// sensitive content directly to the memories table. The 20-pattern
-	// scanner is the same one MemoryStore.AddMemory uses; running it
-	// here closes the only remaining write path that bypassed it.
+	return dm.SaveMemoryWithExtras(collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, "", "0.5", "0.5", "", expiresAt...)
+}
+
+// SaveMemoryWithExtras extends SaveMemory with the additional columns that
+// MemoryStore.AddMemory and AddMemoryWithWeight need: reference_id,
+// retrieval_priority, importance, and created_at. Callers that don't need
+// these can use SaveMemory directly; both functions share the same scanner.
+func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
-		dm.LogAudit(AuditError, "security", "sensitive content blocked in SaveMemory", "", AuditContext{
+		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
 		})
-		return "", fmt.Errorf("sensitive content detected and blocked in SaveMemory: %s", reason)
+		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
 	if isPoisoned, reason := isPoisoned(content); isPoisoned {
-		dm.LogAudit(AuditError, "security", "poison content blocked in SaveMemory", "", AuditContext{
+		dm.LogAudit(AuditError, "security", "poison content blocked", "", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
 		})
-		return "", fmt.Errorf("poison content detected and blocked in SaveMemory: %s", reason)
+		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 
 	id := GenerateID()
@@ -1436,36 +1437,30 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 		embeddingJSON = string(bytes)
 	}
 
-	// Handle empty sessionID as NULL to satisfy FK constraint
 	var sessionIDVal interface{} = nil
 	if sessionID != "" {
 		sessionIDVal = sessionID
 	}
 
-	// is_long_term and weight for indexed queries
 	isLTM := 0
-	if isLongTerm {
+	if isLongTerm || weight >= 10 {
 		isLTM = 1
 	}
 
-	// Handle optional expires_at parameter
 	var expiresAtStr interface{} = nil
 	if len(expiresAt) > 0 && !expiresAt[0].IsZero() {
 		expiresAtStr = expiresAt[0].UTC().Format(time.RFC3339)
 	}
 
-	// Set the initial confidence to the per-collection initial value. The
-	// memories table default is 0.8 (the memory initial), but theories and
-	// decisions have lower starts (0.5 / 0.6). Without this, callers that
-	// pass collection="theories" or "decisions" would get a row with the
-	// memory default confidence — silently violating the spec's epistemic
-	// model. The single source of truth for initial values is
-	// InitialConfidence() (confidence.go); MemoryStore.AddMemory uses the
-	// same function so both write paths agree.
 	initialConf := InitialConfidence(artifactTypeFromCollection(collection))
 
-	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf)
+	created := createdAt
+	if created == "" {
+		created = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance)
 	return id, err
 }
 

@@ -22,14 +22,6 @@ func handleChallenge(args []string) int {
 	}
 	defer dm.Close()
 
-	// Scan user-supplied evidence before it lands in a theory row. We can't
-	// route this through DatabaseManager.SaveMemory because the theory +
-	// patch update must be atomic — so we scan here, OUTSIDE the
-	// transaction, and rely on the scan result holding for the INSERT.
-	if blocked, reason := mpminternal.ScanContentForWrite(evidence); blocked {
-		return respond("", fmt.Sprintf("❌ Evidence blocked: %s\n", reason), 1)
-	}
-
 	// Verify memory exists
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
@@ -40,10 +32,15 @@ func handleChallenge(args []string) int {
 	theoryID := mpminternal.GenerateID()
 	now := time.Now().Format(time.RFC3339)
 
-	// Build theory content with back-link
+	// Build theory content with back-link — scan the fully assembled content
+	// so that both the user-supplied evidence AND any malicious content
+	// embedded via the id field are caught before the atomic transaction.
 	theoryContent := fmt.Sprintf(
 		"HYPOTHESIS: Memory %s is obsolete.\nRATIONALE: %s\nSTATUS: pending\nVALIDATION_CRITERIA: Check weight trend over 30 days. If declining and evidence is strong, mark proven.",
 		id, evidence)
+	if blocked, reason := mpminternal.ScanContentForWrite(theoryContent); blocked {
+		return respond("", fmt.Sprintf("❌ Theory blocked: %s\n", reason), 1)
+	}
 
 	// Theory metadata with back-link to memory
 	theoryMeta := map[string]interface{}{

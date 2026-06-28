@@ -301,86 +301,53 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		collection = "memories"
 	}
 
-	// Ensure database is initialized
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
 			return nil, fmt.Errorf("failed to initialize database: %v", err)
 		}
 	}
 
-	// Check for sensitive content BEFORE processing
-	if isSensitive, reason := isSensitiveContent(content); isSensitive {
-		s.logSensitiveAttempt(content, reason)
-		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
-	}
-
-	// Check for poison phrases (prompt injection attempts)
-	if isPoisoned, reason := isPoisoned(content); isPoisoned {
-		s.logPoisonAttempt(content, reason)
-		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
-	}
-
-	// Generate embedding for vector search
 	embedding := EmbedText(content)
-
-	// Create memory record
-	mem := &Memory{
-		ID:         GenerateID(),
-		Content:    content,
-		Metadata:   metadata,
-		Tags:       tags,
-		Created:    time.Now().UTC().Format(time.RFC3339),
-		Source:     source,
-		Embedding:  embedding,
-		Collection: collection, // Add collection for JSONL mirror
-		SessionID:  sessionID,
-		RetrievalPriority: 0.5,
-		Importance:        0.5,
-		Confidence:        InitialConfidence(artifactTypeFromCollection(collection)),
-	}
-
-	// Add metadata fields for filtering
+	createdAt := time.Now().UTC().Format(time.RFC3339)
 	fullMetadata := map[string]interface{}{
 		"source":    source,
-		"created":   mem.Created,
-		"tags":      strings.Join(tags, ","), // SQLite compatible format
+		"created":   createdAt,
+		"tags":      strings.Join(tags, ","),
 		"timestamp": time.Now().Unix(),
 	}
 	for k, v := range metadata {
 		fullMetadata[k] = v
 	}
 
-	// Convert embedding to JSON bytes for storage
-	embeddingJSON, _ := json.Marshal(embedding)
+	var id string
+	var err error
 
-	// Add to SQLite
-	metadataJSON, _ := json.Marshal(fullMetadata)
-	tagsJSON, _ := json.Marshal(tags)
-
-	// Use NULL when sessionID is empty to satisfy FK constraint (NULL means no FK reference)
-	var sessID interface{} = nil
-	if sessionID != "" {
-		sessID = sessionID
+	if s.DM != nil {
+		id, err = s.DM.SaveMemoryWithExtras(collection, content, sessionID, tags, fullMetadata, embedding, false, 1, "", "0.5", "0.5", createdAt)
+	} else {
+		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, 1, createdAt)
 	}
-
-	_, err := s.DB.Exec(`
-		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID,
-		mem.RetrievalPriority, mem.Importance, mem.Confidence)
 	if err != nil {
 		return nil, err
 	}
 
-	// Reflect actual stored weight back on the struct so callers get a
-	// truthful weight in their response (DB default 1, not Go zero 0).
-	if existing, getErr := s.getStoredWeight(mem.ID); getErr == nil {
-		mem.Weight = existing
+	mem := &Memory{
+		ID:                id,
+		Content:           content,
+		Metadata:          metadata,
+		Tags:              tags,
+		Created:           createdAt,
+		Source:            source,
+		Embedding:         embedding,
+		Collection:        collection,
+		SessionID:         sessionID,
+		RetrievalPriority: 0.5,
+		Importance:        0.5,
+		Confidence:        InitialConfidence(artifactTypeFromCollection(collection)),
+		Weight:            1,
 	}
 
-	// Append to mirror file (human-readable)
 	if err := s.appendToMirror(mem); err != nil {
-		// Log but don't fail
 		slog.Warn("failed to write to mirror", "error", err.Error())
 	}
 
@@ -401,17 +368,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 			return nil, fmt.Errorf("failed to initialize database: %v", err)
 		}
 	}
-	if isSensitive, reason := isSensitiveContent(content); isSensitive {
-		s.logSensitiveAttempt(content, reason)
-		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
-	}
-	if isPoisoned, reason := isPoisoned(content); isPoisoned {
-		s.logPoisonAttempt(content, reason)
-		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
-	}
 
-	// Encode weight: float [0,1] -> int [1,100]. Floor at 1 so rows survive
-	// the weight=1 pruning threshold unless the caller explicitly opts in.
 	if weight <= 0 {
 		weight = 0.5
 	}
@@ -427,12 +384,35 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	}
 
 	embedding := EmbedText(content)
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	fullMetadata := map[string]interface{}{
+		"source":    source,
+		"created":   createdAt,
+		"tags":      strings.Join(tags, ","),
+		"timestamp": time.Now().Unix(),
+	}
+	for k, v := range metadata {
+		fullMetadata[k] = v
+	}
+
+	var id string
+	var err error
+
+	if s.DM != nil {
+		id, err = s.DM.SaveMemoryWithExtras(collection, content, sessionID, tags, fullMetadata, embedding, intWeight >= 10, intWeight, "", "0.5", "0.5", createdAt)
+	} else {
+		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, intWeight, createdAt)
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	mem := &Memory{
-		ID:                GenerateID(),
+		ID:                id,
 		Content:           content,
 		Metadata:          metadata,
 		Tags:              tags,
-		Created:           time.Now().UTC().Format(time.RFC3339),
+		Created:           createdAt,
 		Source:            source,
 		Embedding:         embedding,
 		Collection:        collection,
@@ -443,19 +423,27 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		Weight:            intWeight,
 	}
 
-	fullMetadata := map[string]interface{}{
-		"source":    source,
-		"created":   mem.Created,
-		"tags":      strings.Join(tags, ","),
-		"timestamp": time.Now().Unix(),
+	if err := s.appendToMirror(mem); err != nil {
+		slog.Warn("failed to write to mirror", "error", err.Error())
 	}
-	for k, v := range metadata {
-		fullMetadata[k] = v
+	return mem, nil
+}
+
+// addMemoryDirect is the fallback path when s.DM is nil (e.g. test fixtures
+// using NewMemoryStore directly). It inlines the scanner so tests still
+// catch unsanned writes via TestScannerCoverage.
+func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, weight int, createdAt string) (string, error) {
+	if isSensitive, reason := isSensitiveContent(content); isSensitive {
+		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 
-	embeddingJSON, _ := json.Marshal(embedding)
-	metadataJSON, _ := json.Marshal(fullMetadata)
+	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
+	metadataJSON, _ := json.Marshal(metadata)
+	embeddingJSON, _ := json.Marshal(embedding)
 
 	var sessID interface{} = nil
 	if sessionID != "" {
@@ -465,25 +453,8 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	_, err := s.DB.Exec(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, mem.ID, collection, content, sessID, tagsJSON, metadataJSON, embeddingJSON, time.Now().UTC().Format(time.RFC3339), mem.ReferenceID,
-		mem.RetrievalPriority, mem.Importance, mem.Confidence, mem.Weight)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := s.appendToMirror(mem); err != nil {
-		slog.Warn("failed to write to mirror", "error", err.Error())
-	}
-	return mem, nil
-}
-
-// getStoredWeight returns the persisted weight for an existing memory id.
-// Used to reflect actual DB state back onto the returned struct after writes
-// that don't include weight in their INSERT (e.g. legacy AddMemory callers).
-func (s *MemoryStore) getStoredWeight(id string) (int, error) {
-	var w int
-	err := s.DB.QueryRow(`SELECT weight FROM memories WHERE id = ?`, id).Scan(&w)
-	return w, err
+	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAt, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight)
+	return id, err
 }
 
 // poisonPhraseCache holds loaded poison phrases in memory
