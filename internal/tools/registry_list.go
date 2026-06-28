@@ -42,13 +42,13 @@ var Registry = []Tool{
 	{
 		Name:        "propose_theory",
 		Description: "Create a pending theory row in the memories table (collection='theories').",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"statement":{"type":"string"},"rationale":{"type":"string"},"tags":{"type":"string"},"memory_id":{"type":"string"}}}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"type":"string"}},"required":["hypothesis"]}`),
 		Handler:     handleProposeTheory,
 	},
 	{
 		Name:        "resolve_theory",
 		Description: "Resolve a pending theory as confirmed or disproven.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"theory_id":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"evidence":{"type":"string"}},"required":["theory_id","conclusion"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"theoryId":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"newStatus":{"type":"string","enum":["proven","disproven"]}},"required":["theoryId","conclusion","newStatus"]}`),
 		Handler:     handleResolveTheory,
 	},
 	{
