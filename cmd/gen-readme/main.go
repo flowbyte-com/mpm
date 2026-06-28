@@ -87,7 +87,7 @@ func run() error {
 	newBlock.WriteString(readmeEndSentinel)
 	newBlock.WriteString(suffix)
 
-	newContent := content[:beginLineStart] + newBlock.String() + content[endLineEnd:]
+	newContent := content[:beginLineStart] + newBlock.String()
 	if newContent == content {
 		fmt.Printf("%s unchanged\n", readmePath)
 		return nil
