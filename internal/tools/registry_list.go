@@ -297,6 +297,34 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["memory_id","confirm"]}`),
 		Handler:     handlePromoteToGlobal,
 	},
+	{
+		// Phase 5a: opportunistic scheduler. target_time accepts an
+		// absolute unix epoch OR a relative duration string ("24h", "2h",
+		// "30m", "7d"). recurring_rule is stored as a hint; the agent
+		// itself is responsible for re-scheduling (no daemon parses it).
+		Name:        "schedule_wake",
+		Description: "Schedule a future wake: writes a row to scheduled_wakes. Any subsequent MPM call after target_time surfaces it as WakesPending in the response. Stateless — no daemon, no cron. Use theory_id to bind the wake to a pending theory.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"},"target_time":{"type":"string"},"theory_id":{"type":"string"},"recurring_rule":{"type":"string"},"metadata":{"type":"object"}},"required":["reason","target_time"]}`),
+		Handler:     handleScheduleWake,
+	},
+	{
+		// Phase 5a: explicit pull variant of the opportunistic check.
+		// Folds any due wakes into the response as WakesPending. Useful
+		// at session start or after a passive poll.
+		Name:        "check_wakes",
+		Description: "Pull all due wakes (fired=0 AND target_time<=now), mark them fired, and return them in WakesPending. Idempotent across concurrent callers (transactional mark).",
+		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Handler:     handleCheckWakes,
+	},
+	{
+		// Phase 5a: inspect the wake queue. Defaults to pending only;
+		// pass include_fired=true for audit, overdue_only=true for the
+		// "what did I forget?" inspection case.
+		Name:        "list_wakes",
+		Description: "List scheduled wakes. Defaults to pending (unfired) only. Pass overdue_only=true to see wakes whose target_time has passed but were never surfaced (likely missed).",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"include_fired":{"type":"boolean"},"overdue_only":{"type":"boolean"},"limit":{"type":"number"}}}`),
+		Handler:     handleListWakes,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
