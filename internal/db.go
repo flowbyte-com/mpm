@@ -1185,6 +1185,14 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
 
+		// scheduled_wakes_fts: full-text search over wake reasons so the agent
+		// can locate a wake by intent ("the Wimbledon wake", "the WC2026 one")
+		// without remembering the row id. FTS mirrors the reasons and the
+		// optional theory_id (UNINDEXED so it's not tokenized). Updates on
+		// UPDATE keep the index in sync if reason is ever edited; the agent
+		// is expected to insert new wakes rather than mutate old ones.
+		`CREATE VIRTUAL TABLE IF NOT EXISTS scheduled_wakes_fts USING fts5(reason, theory_id UNINDEXED, tokenize='porter unicode61');`,
+
 		`CREATE TRIGGER IF NOT EXISTS sessions_ai AFTER INSERT ON sessions BEGIN INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
 		`CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
@@ -1247,6 +1255,10 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ai AFTER INSERT ON reference_chunks BEGIN INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_ad AFTER DELETE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS reference_chunks_au AFTER UPDATE ON reference_chunks BEGIN DELETE FROM reference_chunks_fts WHERE rowid = old.rowid; INSERT INTO reference_chunks_fts(rowid, section, content) VALUES (new.rowid, new.section, new.content); END;`,
+
+		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_ai AFTER INSERT ON scheduled_wakes BEGIN INSERT INTO scheduled_wakes_fts(rowid, reason, theory_id) VALUES (new.rowid, new.reason, COALESCE(new.theory_id,'')); END;`,
+		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_ad AFTER DELETE ON scheduled_wakes BEGIN DELETE FROM scheduled_wakes_fts WHERE rowid = old.rowid; END;`,
+		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_au AFTER UPDATE ON scheduled_wakes BEGIN DELETE FROM scheduled_wakes_fts WHERE rowid = old.rowid; INSERT INTO scheduled_wakes_fts(rowid, reason, theory_id) VALUES (new.rowid, new.reason, COALESCE(new.theory_id,'')); END;`,
 	}
 
 	for _, sqlQuery := range ftsStatements {
@@ -1297,6 +1309,13 @@ func (dm *DatabaseManager) backfillFTSTables() error {
 			cols:      "id, content, tags",
 			insertSQL: `INSERT INTO lessons_fts(rowid, content, tags)
 					SELECT rowid, content, COALESCE(tags,'[]') FROM lessons`,
+		},
+		{
+			destTable: "scheduled_wakes_fts",
+			srcTable:  "scheduled_wakes",
+			cols:      "id, reason, theory_id",
+			insertSQL: `INSERT INTO scheduled_wakes_fts(rowid, reason, theory_id)
+					SELECT rowid, reason, COALESCE(theory_id,'') FROM scheduled_wakes`,
 		},
 	}
 

@@ -23,6 +23,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"time"
+
 	"mpm/internal"
 	"mpm/internal/tools"
 )
@@ -76,6 +78,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 // already takes that shape directly — we just need to:
 //   - convert errors to mcp.NewToolResultErrorFromErr
 //   - convert the result to a JSON text result
+//   - opportunistically fold any due scheduled_wakes into the response
 //
 // No arg-rewriting, no type assertions, no per-tool boilerplate. The
 // 30+ previous handle*() functions collapsed to this single closure.
@@ -88,6 +91,17 @@ func mcpAdapter(dm *internal.DatabaseManager, ac internal.ActiveContext, handler
 		result, err := handler(dm, ac, payload)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
+		}
+		// Opportunistic wake fold (Phase 5a): mirror the CLI dispatcher's
+		// fold at the MCP adapter so MCP clients see the same wake
+		// surfacing behavior. Without this, MCP clients would have to
+		// call check_wakes explicitly between every other call.
+		if resultMap, ok := result.(map[string]interface{}); ok {
+			if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
+				resultMap["WakesPending"] = due
+				resultMap["WakesPendingCount"] = len(due)
+			}
+			result = resultMap
 		}
 		return jsonResult(result), nil
 	}

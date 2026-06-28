@@ -328,6 +328,41 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_handoffs_unread ON session_handoffs(read_at, ended_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_handoffs_ended ON session_handoffs(ended_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_handoffs_session ON session_handoffs(session_id);`,
+
+	// Scheduled wakes: agent-intended delayed callbacks. The "opportunistic"
+	// scheduler works because ANY mpm-mcp call (from any session/agent)
+	// invokes CheckPendingWakes before returning, surfacing due wakes in
+	// the response payload. No long-lived process, no cron, no ticker.
+	//
+	//   - target_time:  unix epoch seconds; wake is due when <= now().
+	//   - fired:        0 = not yet surfaced; 1 = surfaced at fired_at.
+	//   - recurring_rule: agent's own cron-like spec (e.g. "+24h", "next monday").
+	//                    The schema stores it; the agent is responsible for
+	//                    re-scheduling itself. No daemon parses this field.
+	//   - theory_id:    optional pointer to a pending theory to evaluate.
+	//
+	// The composite index idx_scheduled_wakes_due supports the hot path:
+	//   SELECT ... WHERE fired = 0 AND target_time <= ?1
+	// which must run on every single MPM call.
+	//
+	// GC: 30-day TTL on fired rows via ops maintain (matches handoffs/audit
+	// retention). Unfired rows with target_time < now - 90d are stale;
+	// surfaced as `overdue` in list_wakes for inspection.
+	`CREATE TABLE IF NOT EXISTS scheduled_wakes (
+		id              TEXT PRIMARY KEY,
+		target_time     INTEGER NOT NULL,
+		reason          TEXT NOT NULL,
+		theory_id       TEXT,
+		recurring_rule  TEXT,
+		fired           INTEGER NOT NULL DEFAULT 0,
+		fired_at        INTEGER,
+		created_by      TEXT NOT NULL,
+		created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+		metadata        JSON
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);`,
+	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_theory ON scheduled_wakes(theory_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_created ON scheduled_wakes(created_at);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
