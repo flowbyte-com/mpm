@@ -49,11 +49,6 @@ func clearActiveContext() {
 	activePersona = ""
 }
 
-// isWatchProcessAlive is no longer used — the watcher daemon was deprecated
-// 2026-06-26. Kept as a no-op stub for a single release to avoid breaking
-// any external scripts that may still reference it via reflection; will be
-// removed in a later release.
-
 // respond prints output/error and returns an exit code.
 // This replaces the old sendResponse() that wrote JSON over a socket.
 func respond(output, errMsg string, exitCode int) int {
