@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"syscall"
 
 	mpminternal "mpm/internal"
@@ -83,6 +84,20 @@ func handleCall(args []string) int {
 			"error":   err.Error(),
 		})))
 		return 1
+	}
+
+	// Opportunistic wake fold (Phase 5a): any `mpm call` surfaces due
+	// wakes in its response. The dispatcher is the single chokepoint so we
+	// add the fold here rather than in every handler. Cost: one indexed
+	// SELECT (sub-millisecond on WAL with the scheduled_wakes_due index).
+	// The wake handlers themselves also fold (defense-in-depth + unit-test
+	// visibility when the dispatcher is bypassed).
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
+			resultMap["WakesPending"] = due
+			resultMap["WakesPendingCount"] = len(due)
+		}
+		result = resultMap
 	}
 
 	// Extract __sse_broadcast before any mutation.

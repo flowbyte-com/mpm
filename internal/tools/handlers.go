@@ -1032,3 +1032,114 @@ func splitTags(s string) []string {
 	}
 	return out
 }
+
+// ── Phase 5a: scheduled_wakes handlers ───────────────────────────────────
+//
+// Stateless, opportunistic scheduler. No daemon, no ticker. Any MPM call
+// that passes through checkWakesAndFold (called inline below) sees due
+// wakes surfaced as a WakesPending block in the response. The agent sees
+// the wake on the next tool call after its target_time, regardless of
+// which session or agent issued the call.
+//
+// handleCheckWakes / handleListWakes are the explicit pull variants for
+// the agent to use when it wants to inspect the wake queue on demand
+// (e.g. at session start, or after waking from a passive check).
+//
+// handleScheduleWake is the write path. Returns the resolved absolute
+// target_time so the caller can log it. No operator gate — wakes are
+// not house rules; the agent scheduling its own work is the entire
+// point of this feature. (The DB-layer scanner/scrubber covers the
+// reason field at write time via SaveMemoryWithContext-style choke.)
+
+// checkWakesAndFold runs CheckPendingWakes and folds any due wakes into
+// out as a WakesPending block. Returns the (possibly decorated) out map
+// so callers can do `out := ...; return checkWakesAndFold(dm, out)`.
+// No-op when out is nil or when there are no due wakes.
+func checkWakesAndFold(dm *mpminternal.DatabaseManager, out map[string]interface{}) map[string]interface{} {
+	if out == nil {
+		out = map[string]interface{}{}
+	}
+	due, err := dm.CheckPendingWakes(time.Now())
+	if err != nil || len(due) == 0 {
+		return out
+	}
+	out["WakesPending"] = due
+	out["WakesPendingCount"] = len(due)
+	return out
+}
+
+func handleScheduleWake(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	reason, _ := p["reason"].(string)
+	if reason == "" {
+		return nil, fmt.Errorf("reason is required")
+	}
+	targetTime, _ := p["target_time"].(string)
+	if targetTime == "" {
+		return nil, fmt.Errorf("target_time is required (absolute unix epoch or relative like '24h', '2h', '30m')")
+	}
+	theoryID, _ := p["theory_id"].(string)
+	recurringRule, _ := p["recurring_rule"].(string)
+
+	createdBy := ac.Agent
+	if createdBy == "" {
+		createdBy = ac.Model
+	}
+	if createdBy == "" {
+		createdBy = "mpm_call"
+	}
+
+	var metadata map[string]interface{}
+	if raw, ok := p["metadata"]; ok {
+		if m, ok := raw.(map[string]interface{}); ok {
+			metadata = m
+		}
+	}
+
+	out, err := dm.ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return checkWakesAndFold(dm, out), nil
+}
+
+func handleCheckWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	out := checkWakesAndFold(dm, map[string]interface{}{
+		"success": true,
+	})
+	if _, ok := out["WakesPending"]; !ok {
+		out["WakesPending"] = []map[string]interface{}{}
+		out["WakesPendingCount"] = 0
+	}
+	return out, nil
+}
+
+func handleListWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	includeFired := false
+	if v, ok := p["include_fired"].(bool); ok {
+		includeFired = v
+	}
+	overdueOnly := false
+	if v, ok := p["overdue_only"].(bool); ok {
+		overdueOnly = v
+	}
+	limit := 100
+	if v, ok := p["limit"]; ok {
+		switch n := v.(type) {
+		case float64:
+			limit = int(n)
+		case int:
+			limit = n
+		}
+	}
+	items, err := dm.ListScheduledWakes(includeFired, overdueOnly, limit)
+	if err != nil {
+		return nil, err
+	}
+	return checkWakesAndFold(dm, map[string]interface{}{
+		"success":       true,
+		"wakes":         items,
+		"count":         len(items),
+		"include_fired": includeFired,
+		"overdue_only":  overdueOnly,
+	}), nil
+}
