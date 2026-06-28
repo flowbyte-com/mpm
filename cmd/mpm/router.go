@@ -68,7 +68,6 @@ func NewRouter() *CommandRouter {
 		"mode":                {Name: "mode", Description: "Mode operations"},
 		"wake":                {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":                  {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
-		"backfill-embeddings": {Name: "backfill-embeddings", Description: "Backfill embeddings for existing memories (--batch-size, --collection, --dry-run)", MinArgs: 0},
 		"lint":                {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":              {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":             {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
@@ -85,6 +84,7 @@ func NewRouter() *CommandRouter {
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
 		"resolve_theory":  {Name: "resolve_theory", Description: "Mark a theory as resolved", MinArgs: 2},
 		"record_decision": {Name: "record_decision", Description: "Record a decision with context, choice, and rationale", MinArgs: 1},
+		"challenge":      {Name: "challenge", Description: "Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)", MinArgs: 1, MaxArgs: 2},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
 		"call":            {Name: "call", Description: "Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 1},
@@ -242,12 +242,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTheories(args[1:])
 	case "decisions":
 		return handleDecisions(args[1:])
-	case "history":
-		return handleHistory(args)
-	case "diff":
-		return handleDiff(args)
-	case "diff-lines":
-		return handleDiffLines(args)
 	case "challenge":
 		sub := args[1]
 		if sub == "restore" && len(args) >= 3 {
@@ -348,6 +342,11 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		helpFunc = handleMemoryHelp
 	case "gateway":
 		helpFunc = printGatewayHelp
+	case "challenge":
+		fmt.Println("Usage: mpm challenge <id> <evidence>")
+		fmt.Println("       mpm challenge restore <id>")
+		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
+		return 0
 	default:
 		// Fall back to general help
 		r.errorf("[!] Error: no help available for '%s'\n", helpCmd)
