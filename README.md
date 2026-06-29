@@ -31,17 +31,7 @@ No distributed infrastructure.
 
 Just a persistent cognitive substrate.
 
----
-
-<p align="center">
-
-**MPM is not designed to maximize recall.**
-
-**It is designed to preserve intellectual progress.**
-
-</p>
-
----
+> **MPM is not designed to maximize recall. It is designed to preserve intellectual progress.**
 
 ## Reading Guide
 
@@ -50,6 +40,21 @@ Evaluating MPM? Read Sections 1–5.
 Integrating MPM? Read Sections 4–9.
 
 Contributing? Read the entire document.
+
+## Table of Contents
+
+1. What is MPM?
+2. Why this isn't a memory system
+3. The Cognitive Model
+4. Quick Start
+5. System Architecture
+6. Core Stability
+7. CLI Reference
+8. Runtime Services
+9. Reliability
+10. Glossary
+Non-goals
+License
 
 ---
 
@@ -229,7 +234,7 @@ Key concepts:
 - **Confidence only rises with new evidence.** It is allowed to decrease automatically as time passes without reinforcement.
 - **More positive evidence never decreases confidence.** This property is a forever-true invariant; the formula that computes it is a forever-drifting implementation detail. Encoded as a property test in `internal/confidence/properties_test.go` — when the formula changes, the invariant survives.
 
-See §5.2 for the implementation details (evidence type registry, atomicity, initial confidence by artifact type).
+See §5.2 for the implementation details.
 
 ### 3.4 Belief Lifecycle
 
@@ -445,9 +450,25 @@ The distinction is important. The Core describes what the agent knows. The Runti
 
 Mature systems often owe their longevity to having a very small, stable core. Every feature that lives in Core must earn its place through years of usage evidence, not through the effort it took to build. Features that fail to justify themselves are removed. Engineers are sentimental about code; the regret log and disciplined review break that sentiment.
 
-### 5.2 Evidence & Confidence Implementation
+### 5.2 Confidence Engine
 
-#### Evidence types
+The Confidence Engine computes and tracks the system's belief in each artifact.
+
+#### Formula
+
+```
+confidence
+  = initial(type)
+  + supporting evidence
+  − contradicting evidence
+  − decay(time)
+
+bounded to [0, 1]
+```
+
+This is forever-drifting. The authoritative implementation lives in `internal/confidence/`.
+
+#### Evidence Registry
 
 | Type | Default strength | Meaning |
 |---|---|---|
@@ -460,22 +481,34 @@ Mature systems often owe their longevity to having a very small, stable core. Ev
 
 Override the default with `--strength`. Artifact types are a strict enum — the LLM cannot invent categories.
 
-#### Initial confidence by artifact type
+Initial confidence is also fixed by artifact type:
 
-| Artifact type | Initial confidence |
+| Artifact type | Initial |
 |---|---|
 | memory | 0.8 |
 | theory | 0.5 |
 | decision | 0.6 |
 | lesson | 0.7 |
 
-#### Atomicity guarantee
+#### Atomicity
 
 `add_evidence` and confidence-history-triggered recomputes run inside a single SQLite transaction (`WithTx` over `DBNode`). If the recompute fails (e.g. CHECK constraint violation on `confidence_history.trigger`), the evidence INSERT rolls back with it — no orphan evidence rows, no confidence column updated without a matching history row.
 
-#### Property tests as confidence spec
+#### Triggers
 
-The conceptual confidence equation in §3.3 is forever-drifting. The invariants it must obey are forever-true. Those invariants live in `internal/confidence/properties_test.go` — when the formula changes, the tests stay green and the meaning survives.
+SQLite triggers wire the recompute path on memory mutations. The `memories_ai` / `memories_au` / `memories_ad` triggers fire on insert / update / delete; the `confidence_history.trigger` column enforces valid trigger metadata.
+
+#### Caching
+
+The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `query_confidence_history` derives its view from evidence, not the cached column.
+
+#### Invariants
+
+- More positive evidence never decreases confidence.
+- Decay never increases confidence.
+- Cached confidence is always `f(evidence, decay)` at most-recent recompute.
+
+These invariants live in `internal/confidence/properties_test.go` — when the formula changes, the tests stay green and the meaning survives.
 
 ### 5.3 Retrieval Architecture
 
@@ -777,9 +810,9 @@ mpm debug gc [--dry-run]
 
 ---
 
-## 8. Runtime Features
+## 8. Runtime Services
 
-The Runtime is where MPM evolves. Features in this section are intentionally decoupled from Core — they may be redesigned, replaced, or removed without invalidating existing knowledge.
+The Runtime is where MPM evolves. Services documented here are intentionally decoupled from Core — they may be redesigned, replaced, or removed without invalidating existing knowledge.
 
 ### Embedding Pipeline
 
@@ -1084,6 +1117,23 @@ The audit log is queryable from the agent via the JSON boundary, surfaceable in 
 **Theory.** A testable hypothesis with explicit validation criteria. Theories have lifecycle states: pending → confirmed | disproven.
 
 **Wake.** A scheduled reminder stored in `scheduled_wakes`. Surfaces on the next MPM call after `target_time`.
+
+---
+
+## Non-goals
+
+MPM is intentionally not:
+
+- a knowledge graph
+- a workflow engine
+- an autonomous planner
+- a distributed memory service
+- a replacement for agent reasoning
+- an infinitely extensible plugin framework
+
+Those may be built on top of MPM. They are not part of the Core.
+
+Explicit non-goals give the project permission to say no. The discipline comes from stating what we refuse to become.
 
 ---
 
