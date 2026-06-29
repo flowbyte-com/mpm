@@ -21,15 +21,15 @@ Instead of assigning arbitrary confidence scores, confidence is derived from evi
 
 Instead of rewriting memories, beliefs evolve while history remains intact.
 
-Everything is built on a single SQLite database.
+Just one persistent cognitive substrate.
 
-No vector database.
+One SQLite database.
 
 No daemon.
 
-No distributed infrastructure.
+No vector database.
 
-Just a persistent cognitive substrate.
+No distributed infrastructure.
 
 > **MPM is not designed to maximize recall. It is designed to preserve intellectual progress.**
 
@@ -244,35 +244,28 @@ This is the section readers learn how beliefs form, get tested, get updated, and
 
 ```
 Observation
-      │
-      ▼
- Save Memory
-      │
-      ▼
-Add Evidence
-      │
-      ▼
-Recompute Confidence
-      │
-      ▼
-  Retrieve
-      │
-      ▼
-Challenge?
-   │        │
-  No       Yes
-   │        │
-   ▼        ▼
- Done   Create Theory
-              │
-              ▼
-      Gather Evidence
-              │
-              ▼
-      Resolve Theory
-              │
-              ▼
-   Update Confidence
+ │
+ ▼
+ Memory
+ │
+ ▼
+ Decision
+ │
+ ▼
+ Theory
+ │
+ ▼
+ Evidence
+ │
+ ▼
+ Confidence
+ │
+ ▼
+ Retrieval
+ │
+ └──────────────┐
+ │
+ New Observation
 ```
 
 Notice what never happens. The original memory is never edited. Only confidence changes. That distinction allows historical reasoning to remain inspectable months later.
@@ -638,6 +631,9 @@ The following concepts define MPM. They should change rarely.
 - Confidence
 
 Everything else is considered Runtime.
+
+The Core should evolve only when the model of cognition evolves.
+Runtime should evolve whenever the operation of agents improves.
 
 Runtime features may evolve rapidly without changing the cognitive model.
 
