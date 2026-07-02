@@ -407,7 +407,17 @@ mpm ops stats
 mpm wake               # last session context
 ```
 
-Done. That's the cognitive loop: observe, decide, theorize, challenge. The rest of this document explains how each piece works and how to operate the system at scale.
+### Initialize baseline directives (Optional but recommended)
+
+```bash
+mpm ops init directives
+```
+
+MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. If a user wants the self-healing loop to work out of the box, they run this command once. If a user is building a completely custom agent workflow and doesn't want MPM's default event triage, they skip it.
+
+The command is **idempotent** — safe to re-run. It detects existing directives by stable ID and skips them. Local edits to a seeded directive are preserved (not silently overwritten); the run report flags any drift so the operator can reconcile manually.
+
+Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep memory alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
 ---
 
@@ -886,6 +896,10 @@ Storage: `collection='directives'` (MCP path) or legacy `is_prime_directive = 1`
 Elevation: `mpm call save_to_memory --payload '{"fact": "Always verify before acting", "collection": "directives", "tags": ["prime_directive"]}'`.
 
 The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
+
+#### Baseline Cognitive Bootstrap
+
+For fresh installs, MPM ships a small set of reference directives in `internal/seed/directives.go` that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See the Quick Start §4 step above for context.
 
 ### Modes & Personas (File-Based)
 
