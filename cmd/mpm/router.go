@@ -460,6 +460,9 @@ func handleOps(args []string) int {
 	case "changelog":
 		return handleOpsChangelogRoute(subArgs)
 
+	case "init":
+		return handleOpsInit(subArgs)
+
 	case "self-heal":
 		return handleSelfHeal(subArgs)
 
@@ -513,6 +516,7 @@ var opsSubcommandDescs = []struct {
 	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
 	{"confidence show|recompute", "Confidence/evidence engine: snapshot or trigger recompute"},
 	{"changelog build [--since/--until/--version/--legacy/--dry-run]", "Generate CHANGELOG.md + changelog.json from git log"},
+	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"help", "Show this help"},
 }
@@ -795,4 +799,22 @@ func isatty(f *os.File) bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// handleOpsInit dispatches `mpm ops init <subcommand>`. Currently
+// supports `init directives` to seed the Baseline Cognitive Bootstrap.
+// Other init subcommands (e.g. `init config`) can be added here.
+func handleOpsInit(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives")
+		return 1
+	}
+	sub := args[0]
+	switch sub {
+	case "directives":
+		return handleOpsInitDirectives(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown init subcommand: %q (want: directives)\n", sub)
+		return 1
+	}
 }

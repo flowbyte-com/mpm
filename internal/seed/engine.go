@@ -1,0 +1,115 @@
+// Package seed (engine.go) — the runtime that performs the seeding.
+//
+// ApplyDirectives walks the SeedDirectives registry and idempotently
+// inserts each entry as a row in the memories table (collection='directives').
+// The contract:
+//
+//   - StableID present, content matches → Skipped (no-op)
+//   - StableID present, content drifted → Updated flag (operator's edit preserved, flagged for visibility)
+//   - StableID absent → Created (INSERT OR IGNORE on id PRIMARY KEY)
+//
+// ApplyDirectives never overwrites a local edit. The "Updated" bucket
+// is for visibility — the operator sees that their local copy differs
+// from the upstream seed and can decide to reconcile manually. This
+// preserves the "less auto-noise" voice: the system never silently
+// mutates operator content.
+//
+// The function is safe to call concurrently from multiple processes
+// against the same DB only if SQLite's locking is properly serialized
+// (which it is by default in WAL mode for single-writer).
+package seed
+
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+)
+
+// ApplyDirectives walks the SeedDirectives registry and inserts any
+// missing rows into the memories table. Returns a SeedSummary that
+// the CLI command prints as a human-readable report.
+//
+// dm must be a connected DatabaseManager (any path — local DB or
+// attached shared DB). The function uses dm.SQLDB() for the direct
+// INSERT OR IGNORE — it does not call the SaveMemoryWithContext
+// helper because that path generates a fresh id (we want our
+// StableID as the primary key so the seeded row is identifiable
+// across re-runs).
+func ApplyDirectives(dm interface {
+	SQLDB() *sql.DB
+}) (SeedSummary, error) {
+	summary := SeedSummary{
+		Created: []string{},
+		Skipped: []string{},
+		Updated: []string{},
+	}
+
+	db := dm.SQLDB()
+	if db == nil {
+		return summary, fmt.Errorf("seed.ApplyDirectives: db not initialized")
+	}
+
+	for _, sd := range SeedDirectives {
+		// 1. Look up existing row by id.
+		var existingContent string
+		var existingID string
+		err := db.QueryRow(
+			`SELECT id, content FROM memories WHERE id = ? AND deleted_at IS NULL`,
+			sd.StableID,
+		).Scan(&existingID, &existingContent)
+
+		switch {
+		case err == sql.ErrNoRows:
+			// 2a. No existing row — insert.
+			if err := insertSeedRow(db, sd); err != nil {
+				return summary, fmt.Errorf("insert %s: %w", sd.StableID, err)
+			}
+			summary.Created = append(summary.Created, sd.StableID)
+
+		case err != nil:
+			// 2b. Real DB error.
+			return summary, fmt.Errorf("lookup %s: %w", sd.StableID, err)
+
+		default:
+			// 2c. Row exists — compare content.
+			if strings.TrimSpace(existingContent) == strings.TrimSpace(sd.Content) {
+				summary.Skipped = append(summary.Skipped, sd.StableID)
+			} else {
+				// Operator's local edit diverged from seed. Preserve
+				// the local edit; flag in summary for visibility.
+				summary.Updated = append(summary.Updated, sd.StableID)
+			}
+		}
+	}
+
+	return summary, nil
+}
+
+// insertSeedRow writes one seed row. Uses INSERT OR IGNORE on the
+// primary key so a race between two concurrent `mpm ops init directives`
+// runs is benign — only one wins, the other sees ErrNoRows on lookup
+// and skips. Collection is 'directives' (matches the MCP read path);
+// is_prime_directive is set to 1 for legacy web/CLI read compatibility.
+func insertSeedRow(db *sql.DB, sd SeedDirective) error {
+	tagsJSON := "[" + strings.Join(quoteStrings(sd.Tags), ",") + "]"
+	meta := `{"is_prime_directive":1,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`
+	_, err := db.Exec(`
+		INSERT OR IGNORE INTO memories
+		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance)
+		VALUES
+		    (?, 'directives', ?, ?, ?, 1, 10, 1.0, 1.0, 1.0)`,
+		sd.StableID, sd.Content, tagsJSON, meta)
+	return err
+}
+
+// quoteStrings wraps each tag in JSON double quotes. Replaces the
+// strings/encoding/json import for a 4-line dependency we don't
+// otherwise need. Safe for ASCII tags (the registry only uses
+// alphanumeric + underscores in tag names).
+func quoteStrings(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	}
+	return out
+}
