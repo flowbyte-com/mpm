@@ -75,14 +75,30 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 			ctxJSON = sql.NullString{String: string(b), Valid: true}
 		}
 	}
+	// Derive `now` once and pass the same string to both the raw
+	// audit insert and the cluster upsert. Temporal alignment
+	// matters: the cluster's last_seen must match the audit_log's
+	// created_at so the 7d rolling-window reset (see
+	// upsertClusterCounter) uses the same moment as the event.
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	if _, err := dm.db.Exec(
 		`INSERT INTO system_audit_log (id, level, component, message, stack_trace, context, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		GenerateID(), string(level), component, message,
 		sql.NullString{String: truncateStack(stack, 4000), Valid: stack != ""},
-		ctxJSON, time.Now().UTC().Format("2006-01-02 15:04:05"),
+		ctxJSON, now,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "audit insert failed: %v (level=%s component=%s)\n", err, level, component)
+		return
+	}
+
+	// SECONDARY: cluster counter. Best-effort aggregation. The raw
+	// event is already durably stored above, so a failure here means
+	// only that the cluster count lags by one — the next event in
+	// the same cluster will retry the upsert. NEVER return error
+	// from here: observation must not back-pressure the failing path.
+	if err := dm.upsertClusterCounter(component, message, now); err != nil {
+		fmt.Fprintf(os.Stderr, "audit cluster upsert failed: %v (component=%s) — raw event preserved; will retry on next event\n", err, component)
 	}
 }
 
@@ -215,4 +231,63 @@ func truncateStack(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n... (truncated)"
+}
+
+// upsertClusterCounter is the write-side hook for the cluster detector.
+// Called by LogAudit after the raw audit event is durably stored. This
+// is best-effort aggregation: failure is logged to stderr but does NOT
+// fail LogAudit (the raw event is already on disk; the next event in
+// the same cluster will retry).
+//
+// The single SQL statement does five things atomically:
+//   1. INSERT a new row on first occurrence (count=1).
+//   2. ON CONFLICT (existing cluster_key), increment count.
+//   3. If last_seen is older than ClusterWindowDays, reset count to 1
+//      and first_seen to now (true rolling window — dormant clusters
+//      decay naturally and re-cluster if they come back).
+//   4. Update last_seen to the event's timestamp (passed in for
+//      temporal alignment with system_audit_log.created_at).
+//   5. Auto-reactivate snoozed clusters whose snooze_until has passed
+//      (status='snoozed' → 'active'). Resolved clusters are NOT
+//      auto-reactivated — that's an explicit agent decision that the
+//      write-side must not override.
+//
+// Helpers (HashMessage, ClusterKey) live in internal/cluster_proposals.go
+// as the canonical home for the cluster proposal API. Both the write
+// path (here) and the future read path (wake_context.AuditSummary)
+// share them so there's no copy-paste drift.
+func (dm *DatabaseManager) upsertClusterCounter(component, message, now string) error {
+	if dm == nil || dm.db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	msgHash := HashMessage(message)
+	clusterKey := ClusterKey(component, msgHash)
+	windowClause := fmt.Sprintf("-%d days", ClusterWindowDays)
+
+	_, err := dm.db.Exec(
+		`INSERT INTO audit_cluster_proposals
+		    (cluster_key, component, message_hash, count, first_seen, last_seen)
+		VALUES (?, ?, ?, 1, ?, ?)
+		ON CONFLICT(cluster_key) DO UPDATE SET
+		    count = CASE
+		        WHEN audit_cluster_proposals.last_seen < datetime('now', ?)
+		        THEN 1
+		        ELSE audit_cluster_proposals.count + 1
+		    END,
+		    first_seen = CASE
+		        WHEN audit_cluster_proposals.last_seen < datetime('now', ?)
+		        THEN excluded.last_seen
+		        ELSE audit_cluster_proposals.first_seen
+		    END,
+		    last_seen = excluded.last_seen,
+		    updated_at = CURRENT_TIMESTAMP,
+		    status = CASE
+		        WHEN audit_cluster_proposals.status = 'snoozed'
+		             AND audit_cluster_proposals.snooze_until < datetime('now')
+		        THEN 'active'
+		        ELSE audit_cluster_proposals.status
+		    END`,
+		clusterKey, component, msgHash, now, now, windowClause, windowClause,
+	)
+	return err
 }
