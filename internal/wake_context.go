@@ -321,62 +321,13 @@ func (dm *DatabaseManager) auditSummaryRich() string {
 		// floods wake context. The agent still has query_audit_log.
 		return ""
 	}
-
-	// --- Fetch active clusters (incl. expired snoozes) above threshold ---
-	clusterRows, err := dm.db.Query(`
-		SELECT cluster_key, component, count, first_seen
-		FROM audit_cluster_proposals
-		WHERE count >= ?
-		  AND (status = 'active'
-		       OR (status = 'snoozed' AND snooze_until < datetime('now')))
-		ORDER BY count DESC, component ASC`,
-		ClusterThreshold)
+	// --- Fetch + dedup via shared helper (same source as list_active_clusters) ---
+	knownClusters, unknownClusters, err := dm.ActiveClusters()
 	if err != nil {
+		// Non-fatal: degrade to silent so a transient DB hiccup never
+		// floods wake context. The agent still has query_audit_log +
+		// list_active_clusters for structured retrieval.
 		return ""
-	}
-	type clusterRow struct {
-		key       string
-		component string
-		count     int
-		firstSeen string
-	}
-	var clusters []clusterRow
-	for clusterRows.Next() {
-		var c clusterRow
-		if err := clusterRows.Scan(&c.key, &c.component, &c.count, &c.firstSeen); err != nil {
-			continue
-		}
-		clusters = append(clusters, c)
-	}
-	clusterRows.Close()
-
-	// --- Dedup: split clusters into known vs unknown ---
-	// Known = cluster_key appears in:
-	//   - pending theories (status='pending')
-	//   - recent decisions (last 30d)
-	//   - resolved theories (status='proven' or 'disproven') —
-	//     keep these known so a closed loop isn't re-investigated.
-	// The LIKE lookup is on memories.content (free text) because the
-	// schema doesn't have a cluster_key tag column. Escape % and _
-	// from cluster_key to harden against future component names that
-	// contain SQL LIKE wildcards.
-	var knownClusters []clusterRow
-	var unknownClusters []clusterRow
-	if len(clusters) > 0 {
-		for _, c := range clusters {
-			matched, err := dm.clusterKeyKnownByEpistemology(c.key)
-			if err != nil {
-				// Treat lookup failures as 'unknown' — surfacing more
-				// is safer than hiding a real cluster due to a query bug.
-				unknownClusters = append(unknownClusters, c)
-				continue
-			}
-			if matched {
-				knownClusters = append(knownClusters, c)
-			} else {
-				unknownClusters = append(unknownClusters, c)
-			}
-		}
 	}
 
 	// --- Build output ---
@@ -400,12 +351,12 @@ func (dm *DatabaseManager) auditSummaryRich() string {
 	if hasUnknowns {
 		lines = append(lines, "- Active Clusters (Unknown):")
 		for _, c := range unknownClusters {
-			firstSeen := c.firstSeen
+			firstSeen := c.FirstSeen
 			if len(firstSeen) >= 10 {
 				firstSeen = firstSeen[:10]
 			}
 			lines = append(lines, fmt.Sprintf("  * [%s] %d events since %s (ID: %s)",
-				c.component, c.count, firstSeen, c.key))
+				c.Component, c.Count, firstSeen, c.Key))
 		}
 	}
 

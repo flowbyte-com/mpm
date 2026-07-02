@@ -53,3 +53,84 @@ func HashMessage(msg string) string {
 func ClusterKey(component, messageHash string) string {
 	return component + ":" + messageHash
 }
+// ClusterProposal is the structured representation of one row from
+// audit_cluster_proposals, enriched with the "known vs unknown"
+// classification. Returned by ActiveClusters() and consumed by both
+// the wake-context string formatter (AuditSummary) and the
+// list_active_clusters MCP tool. Keeping a single struct prevents
+// drift between the two consumers.
+type ClusterProposal struct {
+	Key       string `json:"key"`        // cluster_key — also the dedup primary key
+	Component string `json:"component"`  // subsystem name (relay, security, etc.)
+	Count     int    `json:"count"`      // events in the rolling window
+	FirstSeen string `json:"first_seen"` // ISO timestamp, first event in window
+	LastSeen  string `json:"last_seen"`  // ISO timestamp, most recent event
+	Status    string `json:"status"`     // active / snoozed / resolved
+	Known     bool   `json:"known"`      // true if cluster_key appears in pending theory / recent decision / resolved theory
+}
+
+// ActiveClusters returns the deduped cluster proposals above threshold,
+// partitioned into known and unknown buckets. This is the shared read
+// primitive — AuditSummary (string formatter) and list_active_clusters
+// (structured tool) both call it. One source of truth for the
+// (fetch + dedup) pipeline; the consumers only differ in output shape.
+//
+// Thresholds:
+//   - count >= ClusterThreshold
+//   - status='active' OR (status='snoozed' AND snooze_until < now)
+//
+// "Known" means cluster_key appears in:
+//   - pending theories (json_extract(metadata,'$.status')='pending')
+//   - resolved theories (status='proven' or 'disproven')
+//   - recent decisions (last 30d, no status field — recency is the filter)
+//
+// On error, returns the error with nil slices — callers decide whether
+// to degrade (AuditSummary returns "") or propagate (list_active_clusters
+// surfaces the error to the agent).
+func (dm *DatabaseManager) ActiveClusters() (known, unknown []ClusterProposal, err error) {
+	if dm == nil || dm.db == nil {
+		return nil, nil, fmt.Errorf("db not initialized")
+	}
+
+	// Fetch: rows above threshold that are active or have expired snooze.
+	rows, err := dm.db.Query(`
+		SELECT cluster_key, component, count, first_seen, last_seen, status
+		FROM audit_cluster_proposals
+		WHERE count >= ?
+		  AND (status = 'active'
+		       OR (status = 'snoozed' AND snooze_until < datetime('now')))
+		ORDER BY count DESC, component ASC`,
+		ClusterThreshold)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch active clusters: %w", err)
+	}
+	defer rows.Close()
+
+	var clusters []ClusterProposal
+	for rows.Next() {
+		var c ClusterProposal
+		if err := rows.Scan(&c.Key, &c.Component, &c.Count, &c.FirstSeen, &c.LastSeen, &c.Status); err != nil {
+			continue
+		}
+		clusters = append(clusters, c)
+	}
+
+	// Dedup: classify each cluster as known or unknown. Lookup failures
+	// are treated as 'unknown' — surfacing more is safer than hiding a
+	// real cluster due to a query bug.
+	for _, c := range clusters {
+		matched, err := dm.clusterKeyKnownByEpistemology(c.Key)
+		if err != nil {
+			c.Known = false
+			unknown = append(unknown, c)
+			continue
+		}
+		c.Known = matched
+		if matched {
+			known = append(known, c)
+		} else {
+			unknown = append(unknown, c)
+		}
+	}
+	return known, unknown, nil
+}

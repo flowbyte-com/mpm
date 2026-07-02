@@ -172,6 +172,12 @@ var Registry = []Tool{
 		Handler:     handleQueryAuditLog,
 	},
 	{
+		Name:        "list_active_clusters",
+		Description: "List active audit cluster proposals, partitioned into known vs unknown. Use right before session_end to capture unresolved clusters for the open_questions payload of session_handoff.",
+		Schema:      json.RawMessage(`{"type":"object"}`),
+		Handler:     handleListActiveClusters,
+	},
+	{
 		Name:        "read_wake_context",
 		Description: "Read the agent's wake context — session state, active mode, recent memories.",
 		Schema:      json.RawMessage(`{"type":"object"}`),
