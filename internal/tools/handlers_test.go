@@ -1,11 +1,12 @@
 package tools
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 	"testing"
+	"time"
 
 	"mpm/internal"
 )
@@ -309,5 +310,207 @@ func TestHandleListWakes_DefaultsAndFilters(t *testing.T) {
 	m = res.(map[string]interface{})
 	if c, _ := m["count"].(int); c != 1 {
 		t.Errorf("include_fired+overdue_only count: got %d, want 1 (past wake still unfired)", c)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// list_active_clusters handler tests
+// ---------------------------------------------------------------------------
+
+// newTestIsolatedDM opens a fresh sqlite3 file in t.TempDir() and runs
+// the canonical MPM schema via NewDatabaseManagerForDB + InitSchema.
+// Unlike newTestSharedDM this does NOT attach the workspace MPM_SHARED_DB,
+// so tests using it cannot pollute the workspace database or read
+// state from prior tests. Use this for tests that need a clean slate.
+func newTestIsolatedDM(t *testing.T) *internal.DatabaseManager {
+	t.Helper()
+	tmp := filepath.Join(t.TempDir(), "cluster-test.db")
+	db, err := sql.Open("sqlite3", tmp)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("InitSchema: %v", err)
+	}
+	t.Cleanup(func() { dm.Close() })
+	return dm
+}
+
+// seedClusterRow inserts a row into audit_cluster_proposals directly.
+// INSERT OR REPLACE (UPSERT) so tests that re-run or share state via
+// the shared DB don't trip the PRIMARY KEY constraint.
+func seedClusterRow(t *testing.T, dm *internal.DatabaseManager, clusterKey, component, messageHash, status string, count int, firstSeen, lastSeen string) {
+	t.Helper()
+	_, err := dm.SQLDB().Exec(`
+		INSERT OR REPLACE INTO audit_cluster_proposals
+		    (cluster_key, component, message_hash, count, first_seen, last_seen, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		clusterKey, component, messageHash, count, firstSeen, lastSeen, status)
+	if err != nil {
+		t.Fatalf("seedClusterRow: %v", err)
+	}
+}
+
+// seedTheoryForCluster inserts a theories row whose content references
+// the given cluster_key. Used to test the "known" classification.
+func seedTheoryForCluster(t *testing.T, dm *internal.DatabaseManager, id, content, status string) {
+	t.Helper()
+	meta := fmt.Sprintf(`{"status":"%s"}`, status)
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, tags, metadata)
+		VALUES (?, 'theories', ?, '[]', ?)`,
+		id, content, meta)
+	if err != nil {
+		t.Fatalf("seedTheoryForCluster: %v", err)
+	}
+}
+
+func TestHandleListActiveClusters_EmptyReturnsEmptyArrays(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+
+	result, err := handleListActiveClusters(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleListActiveClusters: %v", err)
+	}
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", result)
+	}
+	if m["success"] != true {
+		t.Errorf("expected success=true, got %v", m["success"])
+	}
+	// Both buckets must be empty slices (not nil), so JSON encodes as [].
+	known, ok := m["known_clusters"].([]internal.ClusterProposal)
+	if !ok {
+		t.Fatalf("expected known_clusters to be []ClusterProposal, got %T", m["known_clusters"])
+	}
+	if len(known) != 0 {
+		t.Errorf("expected 0 known clusters, got %d", len(known))
+	}
+	unknown, ok := m["unknown_clusters"].([]internal.ClusterProposal)
+	if !ok {
+		t.Fatalf("expected unknown_clusters to be []ClusterProposal, got %T", m["unknown_clusters"])
+	}
+	if len(unknown) != 0 {
+		t.Errorf("expected 0 unknown clusters, got %d", len(unknown))
+	}
+	counts := m["count"].(map[string]int)
+	if counts["known"] != 0 || counts["unknown"] != 0 {
+		t.Errorf("expected counts both zero, got %+v", counts)
+	}
+}
+
+func TestHandleListActiveClusters_BucketsKnownVsUnknown(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	knownKey := "relay:abc123def456abc123def456abc12345"
+	unknownKey := "storage:def456abc123def456abc123def456ab"
+	now := "2026-07-02 14:00:00"
+
+	seedClusterRow(t, dm, knownKey, "relay", "abc123def456abc123def456abc12345", "active", 5, now, now)
+	seedClusterRow(t, dm, unknownKey, "storage", "def456abc123def456abc123def456ab", "active", 4, now, now)
+	// Reference the known cluster_key in a pending theory's content.
+	seedTheoryForCluster(t, dm, "th-1",
+		fmt.Sprintf("HYPOTHESIS: relay cluster %s is a misconfigured retry loop", knownKey),
+		"pending")
+
+	result, err := handleListActiveClusters(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleListActiveClusters: %v", err)
+	}
+	m := result.(map[string]interface{})
+
+	known := m["known_clusters"].([]internal.ClusterProposal)
+	unknown := m["unknown_clusters"].([]internal.ClusterProposal)
+
+	if len(known) != 1 {
+		t.Fatalf("expected 1 known cluster, got %d", len(known))
+	}
+	if known[0].Key != knownKey {
+		t.Errorf("known cluster key mismatch: got %q want %q", known[0].Key, knownKey)
+	}
+	if !known[0].Known {
+		t.Error("known cluster should have Known=true")
+	}
+
+	if len(unknown) != 1 {
+		t.Fatalf("expected 1 unknown cluster, got %d", len(unknown))
+	}
+	if unknown[0].Key != unknownKey {
+		t.Errorf("unknown cluster key mismatch: got %q want %q", unknown[0].Key, unknownKey)
+	}
+	if unknown[0].Known {
+		t.Error("unknown cluster should have Known=false")
+	}
+
+	counts := m["count"].(map[string]int)
+	if counts["known"] != 1 || counts["unknown"] != 1 {
+		t.Errorf("count mismatch: got %+v", counts)
+	}
+}
+
+func TestHandleListActiveClusters_BelowThresholdExcluded(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	now := "2026-07-02 14:00:00"
+	// count=2 is below ClusterThreshold=3.
+	seedClusterRow(t, dm, "relay:abc123def456abc123def456abc12345", "relay",
+		"abc123def456abc123def456abc12345", "active", 2, now, now)
+
+	result, err := handleListActiveClusters(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleListActiveClusters: %v", err)
+	}
+	m := result.(map[string]interface{})
+	unknown := m["unknown_clusters"].([]internal.ClusterProposal)
+	if len(unknown) != 0 {
+		t.Errorf("cluster below threshold should be excluded, got %d", len(unknown))
+	}
+}
+
+func TestHandleListActiveClusters_FutureSnoozeExcluded(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	now := "2026-07-02 14:00:00"
+	key := "relay:abc123def456abc123def456abc12345"
+	seedClusterRow(t, dm, key, "relay", "abc123def456abc123def456abc12345",
+		"snoozed", 5, now, now)
+	_, err := dm.SQLDB().Exec(`UPDATE audit_cluster_proposals SET snooze_until = ? WHERE cluster_key = ?`,
+		"2026-12-31 00:00:00", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := handleListActiveClusters(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleListActiveClusters: %v", err)
+	}
+	m := result.(map[string]interface{})
+	unknown := m["unknown_clusters"].([]internal.ClusterProposal)
+	if len(unknown) != 0 {
+		t.Errorf("future-snoozed cluster should be excluded, got %d", len(unknown))
+	}
+}
+
+// TestHandleListActiveClusters_RegistryEntryWired pins that the tool
+// is registered. If a future refactor removes it from the Registry
+// slice, this test fails before the agent loses access.
+func TestHandleListActiveClusters_RegistryEntryWired(t *testing.T) {
+	var found bool
+	for _, tool := range Registry {
+		if tool.Name == "list_active_clusters" {
+			found = true
+			if tool.Handler == nil {
+				t.Error("list_active_clusters registry entry has nil Handler")
+			}
+			if tool.Description == "" {
+				t.Error("list_active_clusters registry entry has empty Description")
+			}
+			if len(tool.Schema) == 0 {
+				t.Error("list_active_clusters registry entry has empty Schema")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("list_active_clusters not in Registry — agent will not see this tool")
 	}
 }

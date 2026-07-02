@@ -724,6 +724,53 @@ func handleQueryAuditLog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 	}, nil
 }
 
+// callListActiveClusters returns the deduped audit cluster proposals
+// above threshold, partitioned into known vs unknown. Same fetch+dedup
+// pipeline as wake_context.AuditSummary but in structured form, so the
+// agent can pull the cluster_key strings it needs to populate
+// open_questions at session end. Use this RIGHT BEFORE session_end
+// to capture critical-but-unresolved clusters for the next session.
+//
+// Args:
+//
+//	(none) — returns whatever's currently active in the cluster table.
+//
+// Returns:
+//
+//	{
+//	  "success": true,
+//	  "known_clusters":   [{key, component, count, first_seen, last_seen, status, known: true}, ...],
+//	  "unknown_clusters": [{key, component, count, first_seen, last_seen, status, known: false}, ...],
+//	  "count":            {"known": N, "unknown": M}
+//	}
+//
+// "Known" means cluster_key appears in a pending theory, recent
+// decision (last 30d), or resolved theory. See internal/cluster_proposals.go
+// ActiveClusters() for the dedup logic. One source of truth; the
+// wake_context string formatter and this tool pull from the same helper.
+func handleListActiveClusters(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	known, unknown, err := dm.ActiveClusters()
+	if err != nil {
+		return nil, err
+	}
+	// Empty slices serialize as [] not null in JSON.
+	if known == nil {
+		known = []internal.ClusterProposal{}
+	}
+	if unknown == nil {
+		unknown = []internal.ClusterProposal{}
+	}
+	return map[string]interface{}{
+		"success":         true,
+		"known_clusters":  known,
+		"unknown_clusters": unknown,
+		"count": map[string]int{
+			"known":   len(known),
+			"unknown": len(unknown),
+		},
+	}, nil
+}
+
 // callSessionEnd writes a handoff for the just-ended session. The agent
 // calls this before exiting so the next session can pick up the thread.
 //
