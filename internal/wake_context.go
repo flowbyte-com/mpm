@@ -286,3 +286,189 @@ func formatHandoff(h *Handoff) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// auditSummaryRich is the source of truth for wake-context audit
+// surfacing. See AuditSummary() in audit.go for the contract.
+//
+// Shape:
+//
+//	Audit Summary (Last 7 Days):
+//	  - N errors, M warnings logged.
+//	  - Active Clusters (Unknown):
+//	    * [component] K events since YYYY-MM-DD (ID: cluster_key)
+//	  - (X known cluster(s) already tracked in active theories/decisions).
+//
+// Or, if nothing to surface: "" (caller skips the line entirely).
+func (dm *DatabaseManager) auditSummaryRich() string {
+	if dm == nil || dm.db == nil {
+		return ""
+	}
+
+	// --- Headline: raw error/warning counts in 7d window ---
+	// COALESCE(SUM(...), 0) is required: when the 7d window has zero
+	// matching rows, SUM() returns NULL and `Scan(&int)` errors. This
+	// was the bug that made the entire summary return "" on a fresh
+	// DB or post-prune state. NULL → 0 is the correct semantic.
+	var errCount, warnCount int
+	row := dm.db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN level = 'warn'  THEN 1 ELSE 0 END), 0)
+		FROM system_audit_log
+		WHERE created_at >= datetime('now', '-7 days')`)
+	if err := row.Scan(&errCount, &warnCount); err != nil {
+		// Non-fatal: degrade to silent so a transient DB hiccup never
+		// floods wake context. The agent still has query_audit_log.
+		return ""
+	}
+
+	// --- Fetch active clusters (incl. expired snoozes) above threshold ---
+	clusterRows, err := dm.db.Query(`
+		SELECT cluster_key, component, count, first_seen
+		FROM audit_cluster_proposals
+		WHERE count >= ?
+		  AND (status = 'active'
+		       OR (status = 'snoozed' AND snooze_until < datetime('now')))
+		ORDER BY count DESC, component ASC`,
+		ClusterThreshold)
+	if err != nil {
+		return ""
+	}
+	type clusterRow struct {
+		key       string
+		component string
+		count     int
+		firstSeen string
+	}
+	var clusters []clusterRow
+	for clusterRows.Next() {
+		var c clusterRow
+		if err := clusterRows.Scan(&c.key, &c.component, &c.count, &c.firstSeen); err != nil {
+			continue
+		}
+		clusters = append(clusters, c)
+	}
+	clusterRows.Close()
+
+	// --- Dedup: split clusters into known vs unknown ---
+	// Known = cluster_key appears in:
+	//   - pending theories (status='pending')
+	//   - recent decisions (last 30d)
+	//   - resolved theories (status='proven' or 'disproven') —
+	//     keep these known so a closed loop isn't re-investigated.
+	// The LIKE lookup is on memories.content (free text) because the
+	// schema doesn't have a cluster_key tag column. Escape % and _
+	// from cluster_key to harden against future component names that
+	// contain SQL LIKE wildcards.
+	var knownClusters []clusterRow
+	var unknownClusters []clusterRow
+	if len(clusters) > 0 {
+		for _, c := range clusters {
+			matched, err := dm.clusterKeyKnownByEpistemology(c.key)
+			if err != nil {
+				// Treat lookup failures as 'unknown' — surfacing more
+				// is safer than hiding a real cluster due to a query bug.
+				unknownClusters = append(unknownClusters, c)
+				continue
+			}
+			if matched {
+				knownClusters = append(knownClusters, c)
+			} else {
+				unknownClusters = append(unknownClusters, c)
+			}
+		}
+	}
+
+	// --- Build output ---
+	var totalEvents = errCount + warnCount
+	hasHeadline := totalEvents > 0
+	hasUnknowns := len(unknownClusters) > 0
+	hasKnowns := len(knownClusters) > 0
+	if !hasHeadline && !hasUnknowns && !hasKnowns {
+		return ""
+	}
+
+	var lines []string
+	lines = append(lines, "Audit Summary (Last 7 Days):")
+
+	if hasHeadline {
+		lines = append(lines, fmt.Sprintf("- %d errors, %d warnings logged.", errCount, warnCount))
+	} else {
+		lines = append(lines, "- No errors or warnings logged.")
+	}
+
+	if hasUnknowns {
+		lines = append(lines, "- Active Clusters (Unknown):")
+		for _, c := range unknownClusters {
+			firstSeen := c.firstSeen
+			if len(firstSeen) >= 10 {
+				firstSeen = firstSeen[:10]
+			}
+			lines = append(lines, fmt.Sprintf("  * [%s] %d events since %s (ID: %s)",
+				c.component, c.count, firstSeen, c.key))
+		}
+	}
+
+	if hasKnowns {
+		// Single low-noise summary line — the per-cluster detail for
+		// known clusters is deliberately omitted because the agent
+		// can look up the theory/decision by cluster_key if it wants
+		// more. This is the "less auto-noise" voice from handoff.go.
+		if len(knownClusters) == 1 {
+			lines = append(lines, "- (1 known cluster already tracked in active theories/decisions.)")
+		} else {
+			lines = append(lines, fmt.Sprintf("- (%d known clusters already tracked in active theories/decisions.)", len(knownClusters)))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// clusterKeyKnownByEpistemology returns true if cluster_key appears in
+// the content of any pending theory, recent decision (last 30d), or
+// resolved theory. Uses LIKE with explicit ESCAPE to harden against
+// future component names that contain SQL LIKE wildcards (% or _).
+func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (bool, error) {
+	if dm == nil || dm.db == nil {
+		return false, fmt.Errorf("db not initialized")
+	}
+	if clusterKey == "" {
+		return false, nil
+	}
+	// Escape SQL LIKE wildcards: % and _. Go's strings.NewReplacer is
+	// faster than regex for this trivial substitution.
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(clusterKey)
+	pattern := "%" + escaped + "%"
+
+	var matched int
+	// Single query covers all three categories. Pending theories are
+	// status='pending'. Resolved theories are status IN ('proven',
+	// 'disproven'). Decisions are 'recent' (last 30d). The LIKE is on
+	// content because theories/decisions don't carry cluster_key as a
+	// structured field — the agent pastes the cluster_key into the
+	// rationale/context when proposing.
+	row := dm.db.QueryRow(`
+		SELECT
+			EXISTS(
+				SELECT 1 FROM memories
+				WHERE collection = 'theories'
+				  AND json_extract(metadata, '$.status') = 'pending'
+				  AND content LIKE ? ESCAPE '\'
+			)
+			OR EXISTS(
+				SELECT 1 FROM memories
+				WHERE collection = 'theories'
+				  AND json_extract(metadata, '$.status') IN ('proven','disproven')
+				  AND content LIKE ? ESCAPE '\'
+			)
+			OR EXISTS(
+				SELECT 1 FROM memories
+				WHERE collection = 'decisions'
+				  AND created_at >= datetime('now', '-30 days')
+				  AND content LIKE ? ESCAPE '\'
+			)`, pattern, pattern, pattern)
+	if err := row.Scan(&matched); err != nil {
+		return false, err
+	}
+	return matched != 0, nil
+}
