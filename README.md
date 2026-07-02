@@ -1098,6 +1098,29 @@ Indexes: `(level, created_at)`, `(component)`, `(created_at)`. 30-day retention 
 
 The audit log is queryable from the agent via the JSON boundary, surfaceable in wake context, and pruneable by the existing gc sweep — all without new infrastructure.
 
+#### Audit cluster proposals — three-layer self-healing
+
+Raw audit events are the *nervous system* of the substrate, but a single error doesn't tell the agent what's been breaking. MPM runs a write-side cluster detector that aggregates repeated (component, message) pairs into structured proposals, then exposes them through the wake context and a dedicated MCP tool. The architecture is intentionally three layers so the agent can act on what it sees.
+
+| Layer | What | Where |
+|---|---|---|
+| Write | Atomic UPSERT into `audit_cluster_proposals` on every `LogAudit` call. Rolling 7d window. Default threshold: 3 events. | `internal/audit.go::upsertClusterCounter` |
+| Read | Deduped view partitioned into `known` (cluster_key in any pending theory / recent decision / resolved theory) vs `unknown`. Surfaced as a tiered string in `read_wake_context`. | `internal/cluster_proposals.go::ActiveClusters` + `internal/wake_context.go::auditSummaryRich` |
+| Act | `mpm call list_active_clusters` returns structured JSON (cluster_key strings) so the agent can triage at session end. The bootstrap directive instructs the agent to carry critical unknown cluster_keys into `session_handoff.open_questions` so they survive the 7d rolling decay. | `internal/tools/handlers.go::handleListActiveClusters` + `internal/seed/directives.go::SeedDirective` |
+
+Tunables centralized in `internal/cluster_proposals.go`: `ClusterThreshold`, `ClusterWindowDays`, and the status constants (`active` / `snoozed` / `resolved`). Snooze and resolve tools are planned but not yet shipped — for now, carry-forward via `open_questions` is the survival path.
+
+Read-side dedup uses `LIKE '%cluster_key%' ESCAPE '\'` against `memories.content` (free text in pending theories / recent decisions / resolved theories). It catches operators who paste the cluster_key into a theory's rationale without tagging a structured field. The schema has no `cluster_key` column by design — keeping the detection primitive as a side-effect of normal theory/decision writing avoids imposing a tagging convention.
+
+```bash
+mpm call list_active_clusters
+# → {"known_clusters": [...], "unknown_clusters": [...], "count": {...}}
+
+mpm call read_wake_context
+# → "Audit Summary (Last 7 Days):\n- N errors, M warnings logged.\n
+#    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
+```
+
 ---
 
 ## 10. Glossary
