@@ -172,36 +172,28 @@ func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component string, day
 	return out, nil
 }
 
-// AuditSummary returns a single-line summary of error/fatal activity in
-// the last 7 days. Used by the wake context surface. Returns "" if no
-// errors or fatals were logged — the caller should skip the line entirely.
+// AuditSummary returns the rich audit summary string for wake context.
+// It surfaces:
+//   - headline error/warning counts in the last 7 days
+//   - rich per-cluster lines for UNKNOWN clusters (component, count,
+//     first_seen, cluster_key) so the agent can act immediately
+//   - a single low-noise line for the count of KNOWN clusters
+//     (those whose cluster_key appears in a pending theory, recent
+//     decision, or resolved theory — they're tracked, don't re-trigger
 //
-// Window bumped from 24h to 7d on 2026-07-02: a 24h glance on a
-// multi-day agent loop is functionally blind. 7d covers a full weekly
-// cycle, catches error clusters between session boundaries, and stays
-// within the 30-day audit-log retention (PruneAuditLog).
-// See decision log: mpm-logs-diagnostic 2026-07-02.
+// Returns "" if no errors, warnings, or clusters were seen — caller
+// should skip the line entirely.
+//
+// Backwards-compat shim: the pre-cluster era AuditSummary() lived here.
+// The new version is in wake_context.go because it pulls from three
+// tables (audit_cluster_proposals + theories + decisions) and belongs
+// in the wake-context domain. This file still owns the raw audit_log
+// primitives (LogAudit, QueryAuditLog, PruneAuditLog).
 func (dm *DatabaseManager) AuditSummary() string {
 	if dm == nil || dm.db == nil {
 		return ""
 	}
-	var errCount, fatalCount int
-	row := dm.db.QueryRow(`
-		SELECT
-			SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN level = 'fatal' THEN 1 ELSE 0 END)
-		FROM system_audit_log
-		WHERE created_at >= datetime('now', '-7 days')`)
-	if err := row.Scan(&errCount, &fatalCount); err != nil {
-		return ""
-	}
-	if errCount == 0 && fatalCount == 0 {
-		return ""
-	}
-	if fatalCount > 0 {
-		return fmt.Sprintf("Audit note: %d error(s), %d fatal in the last 7 days. Run mpm call query_audit_log to investigate.", errCount, fatalCount)
-	}
-	return fmt.Sprintf("Audit note: %d error(s) in the last 7 days. Run mpm call query_audit_log to investigate.", errCount)
+	return dm.auditSummaryRich()
 }
 
 // PruneAuditLog deletes entries older than the given number of days.
