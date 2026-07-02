@@ -2,11 +2,8 @@
 //
 // Routes three surfaces: `mpm call <tool> --payload '{...}'`,
 // `<tool>` MCP entry, and the original `mpm <command>` CLI handlers.
-// Each method:
-//   - returns a wire-format map[string]interface{} so both `mpm call`
-//     and the MCP tool can json.Marshal it identically
-//   - bundles __sse_broadcast when downstream consumers (web UI SSE)
-//     need to know the change happened
+// Each method returns a wire-format map[string]interface{} so both
+// `mpm call` and the MCP tool can json.Marshal it identically.
 //
 // Mutations (shred/snooze/set-weight/promote/reinforce/weaken/patch)
 // are grouped together because they share the same authorization model
