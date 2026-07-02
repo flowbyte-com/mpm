@@ -308,6 +308,31 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_audit_component ON system_audit_log(component);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_log(created_at);`,
 
+	// audit_cluster_proposals: detector rows for error clusters. A cluster
+	// is (component, message_hash). When the same error fires
+	// ClusterThreshold times within ClusterWindowDays, a row lands here.
+	// Lifecycle: status='active' (agent should investigate), 'snoozed'
+	// (deferred until snooze_until), 'resolved' (handled or stopped firing).
+	// Read-side: wake_context.AuditSummary surfaces active + expired-snooze
+	// rows, filtered against existing pending theories + recent decisions
+	// so the agent sees "known" vs "unknown" clusters.
+	`CREATE TABLE IF NOT EXISTS audit_cluster_proposals (
+		cluster_key   TEXT PRIMARY KEY,
+		component     TEXT NOT NULL,
+		message_hash  TEXT NOT NULL,
+		count         INTEGER NOT NULL DEFAULT 1,
+		first_seen    DATETIME NOT NULL,
+		last_seen     DATETIME NOT NULL,
+		status        TEXT NOT NULL DEFAULT 'active'
+		              CHECK (status IN ('active','snoozed','resolved')),
+		snooze_until  DATETIME,
+		created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_acp_component ON audit_cluster_proposals(component);`,
+	`CREATE INDEX IF NOT EXISTS idx_acp_status_snooze ON audit_cluster_proposals(status, snooze_until);`,
+	`CREATE INDEX IF NOT EXISTS idx_acp_last_seen ON audit_cluster_proposals(last_seen);`,
+
 	// Session handoffs: structured end-of-session record that the next session
 	// pulls from wake context. One row per session, marked as read when
 	// surfaced in wake. Distinct from the dormant `sessions` table (which
