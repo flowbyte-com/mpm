@@ -31,7 +31,7 @@ func handleSaveToMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 		return nil, fmt.Errorf("fact is required")
 	}
 
-	out, mem, err := dm.SaveMemoryWithContext(
+	out, _, err := dm.SaveMemoryWithContext(
 		fact,
 		internal.ParseStringOr(p["collection"], "memories"),
 		internal.ParseStringSliceOr(p["tags"]),
@@ -41,19 +41,6 @@ func handleSaveToMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	)
 	if err != nil {
 		return nil, err
-	}
-	// SaveMemoryWithContext does not bundle __sse_broadcast; the CLI SSE
-	// relay expects the legacy "memory_saved" event with this shape.
-	out["__sse_broadcast"] = map[string]interface{}{
-		"eventType": "memory_saved",
-		"payload": map[string]interface{}{
-			"id":         mem.ID,
-			"content":    mem.Content,
-			"weight":     mem.Weight,
-			"collection": mem.Collection,
-			"tags":       mem.Tags,
-			"provenance": map[string]interface{}{"agent": "mpm_call"},
-		},
 	}
 	return out, nil
 }
@@ -294,19 +281,9 @@ func handleSaveLesson(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 	lessonType := internal.ParseStringOr(p["type"], "insight")
 	tags := internal.ParseStringSliceOr(p["tags"])
 
-	out, lesson, err := dm.SaveLesson(fact, lessonType, tags)
+	out, _, err := dm.SaveLesson(fact, lessonType, tags)
 	if err != nil {
 		return nil, err
-	}
-	// SaveLesson does not bundle __sse_broadcast; add the legacy lesson_saved
-	// event so the SSE broker can relay it.
-	out["__sse_broadcast"] = map[string]interface{}{
-		"eventType": "lesson_saved",
-		"payload": map[string]interface{}{
-			"id":   lesson.ID,
-			"type": string(lesson.Type),
-			"fact": fact,
-		},
 	}
 	return out, nil
 }
@@ -712,12 +689,12 @@ func handleLogToChangelog(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 //	--level      (optional) one of warn|error|fatal; default: any
 //	--component (optional) subsystem name (e.g. "relay", "synthesis",
 //	             "watcher", "security"); default: any
-//	--days       (optional) lookback window in days; default 1
+//	--days       (optional) lookback window in days; default 7
 //	--limit      (optional) max rows; default 20, max 500
 func handleQueryAuditLog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	levelStr := getString(p, "level")
 	component := getString(p, "component")
-	days := 1
+	days := 7
 	if v, ok := p["days"]; ok {
 		switch t := v.(type) {
 		case float64:
