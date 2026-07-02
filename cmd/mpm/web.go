@@ -128,8 +128,6 @@ func (ws *WebServer) setupRoutes() {
 
 	// Health
 	ws.mux.HandleFunc("/health", ws.handleHealth)
-	ws.mux.HandleFunc("/api/stream", Broker().ServeSSE)
-	ws.mux.HandleFunc("/api/internal/broadcast", ws.handleInternalBroadcast)
 }
 
 // Start starts the web server
@@ -301,7 +299,6 @@ func handleWeb(args []string) int {
 
 	ws := NewWebServer(port, db)
 	ws.SetAllowAnonymous(allowAnonymous)
-	allowAnonymousSSE = allowAnonymous // mirror policy into the SSE auth path
 	fmt.Printf("mpm web: http://localhost:%s\n", port)
 	if err := ws.Start(); err != nil {
 		return 1

@@ -99,12 +99,6 @@ func (ws *WebServer) addMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	Broker().Broadcast("memory_saved", map[string]interface{}{
-		"id":         id,
-		"content":    input.Content,
-		"collection": input.Collection,
-		"tags":       input.Tags,
-	})
 
 	mem, err2 := ws.db.GetMemory(id)
 	if err2 != nil {
@@ -276,10 +270,6 @@ func (ws *WebServer) createTopic(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	Broker().Broadcast("topic_created", map[string]interface{}{
-		"id":   id,
-		"name": input.Name,
-	})
 
 	topic, _ := ws.db.GetTopic(id)
 	writeJSON(w, http.StatusCreated, topic)
@@ -409,11 +399,6 @@ func (ws *WebServer) addLesson(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	Broker().Broadcast("lesson_saved", map[string]interface{}{
-		"id":   lesson.ID,
-		"type": input.Type,
-		"fact": input.Content,
-	})
 
 	writeJSON(w, http.StatusCreated, lesson)
 }
@@ -522,28 +507,4 @@ func (ws *WebServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	results["lessons"] = lessons
 
 	writeJSON(w, http.StatusOK, results)
-}
-
-// handleInternalBroadcast relays tool-call events from separate mpm call processes
-// into the shared SSE broker. This lets CLI tool calls drive live telemetry.
-func (ws *WebServer) handleInternalBroadcast(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var input struct {
-		EventType string      `json:"eventType"`
-		Payload   interface{} `json:"payload"`
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := json.Unmarshal(body, &input); err != nil || input.EventType == "" {
-		http.Error(w, "invalid json or missing eventType", http.StatusBadRequest)
-		return
-	}
-	Broker().Broadcast(input.EventType, input.Payload)
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
