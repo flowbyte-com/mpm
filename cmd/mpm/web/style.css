@@ -69,24 +69,6 @@ nav {
   gap: 0.5rem;
 }
 
-/* SSE Connection Status Dot */
-.sse-status {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  display: inline-block;
-  background: #f59e0b; /* Connecting (Orange) */
-  transition: background-color 0.3s ease;
-  flex-shrink: 0;
-}
-.sse-status.connected {
-  background: #22c55e; /* Live (Green) */
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
-}
-.sse-status.disconnected {
-  background: #ef4444; /* Dead (Red) */
-}
-
 /* UI Animations and States */
 @keyframes fadeSlideIn {
   from { opacity: 0; transform: translateY(-8px); }

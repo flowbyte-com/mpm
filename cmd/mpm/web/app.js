@@ -120,7 +120,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     showView('search');
     updateStatus();
     setInterval(updateStatus, 30000);
-    initSSE();
   }
 });
 
@@ -639,101 +638,7 @@ function parseJSON(s, fallback) {
   return fallback;
 }
 
-// ==================== SSE Telemetry ====================
 
-let lastEventID = localStorage.getItem('mpm_sse_id') || '0';
-let evtSource = null;
-
-function initSSE() {
-  if (evtSource) return; // Already connected
-  evtSource = new EventSource('/api/stream');
-  const statusDot = document.getElementById('sse-status-dot');
-
-  function updateStatusDot(state, title) {
-    if (!statusDot) return;
-    statusDot.className = 'sse-status';
-    if (state) statusDot.classList.add(state);
-    statusDot.title = title;
-  }
-
-  evtSource.addEventListener('open', () => {
-    updateStatusDot('connected', 'Live telemetry stream active');
-  });
-
-  evtSource.addEventListener('error', () => {
-    updateStatusDot('disconnected', 'Stream disconnected. Reconnecting...');
-  });
-
-  evtSource.addEventListener('message', (e) => {
-    if (e.lastEventId) {
-      lastEventID = e.lastEventId;
-      localStorage.setItem('mpm_sse_id', lastEventID);
-    }
-
-    let ev;
-    try { ev = JSON.parse(e.data); } catch { return; }
-
-    switch (ev.type) {
-      case 'memory_saved':
-        prependMemoryCard(ev);
-        break;
-
-      case 'immune_slash': {
-        const card = document.querySelector(`[data-memory-id="${ev.memory_id}"]`);
-        if (card) card.classList.add('slashed');
-        break;
-      }
-
-      case 'theory_proposed':
-      case 'theory_resolved':
-        refreshStats();
-        flashMatrixCell(ev.type === 'theory_resolved' ? 'resolved' : 'proposed');
-        break;
-
-      case 'lesson_saved':
-        prependLessonCard(ev);
-        break;
-
-      case 'ping':
-        updateStatusDot('connected', 'Live telemetry stream active');
-        break;
-    }
-  });
-}
-
-function prependMemoryCard(ev) {
-  const feed = document.getElementById('memory-feed');
-  if (!feed) return;
-  const tags = (ev.tags || []).map(t => '<span class="tag">' + escHtml(t) + '</span>').join('');
-  const compute = ev.provenance?.compute || 'unknown';
-  const html = `
-  <div class="card memory-card" data-memory-id="${escHtml(ev.id)}" style="animation: fadeSlideIn 0.3s ease">
-    <div class="card-header">
-      <div>
-        ${ev.collection && ev.collection !== 'memories' ? '<span class="tag" style="margin-bottom:0.3rem">' + escHtml(ev.collection) + '</span><br>' : ''}
-        <div class="card-content">${escHtml(ev.content || '')}</div>
-        ${tags ? '<div style="margin-top:0.5rem">' + tags + '</div>' : ''}
-      </div>
-    </div>
-    <div class="card-meta">compute: ${escHtml(compute)}</div>
-  </div>`;
-  feed.insertAdjacentHTML('afterbegin', html);
-}
-
-function prependLessonCard(ev) {
-  const feed = document.getElementById('lesson-feed');
-  if (!feed) return;
-  const html = `
-  <div class="card lesson-card" data-lesson-id="${escHtml(ev.id)}" style="animation: fadeSlideIn 0.3s ease">
-    <div class="card-header">
-      <div>
-        <span class="tag" style="background:rgba(63,185,80,0.15);color:var(--success)">${escHtml(ev.type || 'insight')}</span>
-        <div class="card-content" style="margin-top:0.3rem">${escHtml(ev.content || ev.fact || '')}</div>
-      </div>
-    </div>
-  </div>`;
-  feed.insertAdjacentHTML('afterbegin', html);
-}
 
 async function refreshStats() {
   try {
@@ -748,17 +653,4 @@ async function refreshStats() {
   }
 }
 
-function flashMatrixCell(type) {
-  const cell = document.querySelector(`[data-isr-cell="${type}"]`);
-  if (!cell) return;
-  cell.style.transition = 'background 0.2s';
-  cell.style.background = type === 'resolved' ? '#22c55e' : '#f59e0b';
-  setTimeout(() => { cell.style.background = ''; }, 800);
-}
-
-function escHtml(s) {
-  if (!s) return '';
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
 }
