@@ -1,22 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
-	"syscall"
 
 	mpminternal "mpm/internal"
-	"mpm/internal/config"
 	"mpm/internal/tools"
-	"mpm/internal/usererror"
 )
 
 // openCallDM returns a freshly-opened workspace DatabaseManager and a
@@ -100,24 +93,7 @@ func handleCall(args []string) int {
 		result = resultMap
 	}
 
-	// Extract __sse_broadcast before any mutation.
-	var sseRaw interface{}
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		sseRaw = resultMap["__sse_broadcast"]
-		delete(resultMap, "__sse_broadcast")
-	}
 	fmt.Println(string(must(json.Marshal(result))))
-	// Relay tool_exec to the web server's SSE broker.
-	relayBroadcast("tool_exec", map[string]interface{}{
-		"tool":   toolName,
-		"result": result,
-	})
-	// Relay any extra SSE event bundled in the result (e.g. immune_slash from challenge_memory).
-	if sse, ok := sseRaw.(map[string]interface{}); ok {
-		if et, ok := sse["eventType"].(string); ok {
-			relayBroadcast(et, sse["payload"])
-		}
-	}
 	return 0
 }
 
@@ -202,64 +178,6 @@ func parsePayload(args []string) (map[string]interface{}, error) {
 // matches the (data, err) return shape of json.Marshal so call sites read
 // naturally: `must(json.Marshal(x))`.
 func must(data []byte, _ error) []byte { return data }
-
-// relayBroadcast sends an event to the web server's internal SSE relay
-// endpoint. If the web server is not running, the event is silently
-// dropped — this is intentional: SSE is best-effort telemetry, not a
-// critical path. Errors are logged to the audit ledger so the agent can
-// see them across sessions.
-func relayBroadcast(eventType string, payload interface{}) {
-	port := os.Getenv("MPM_PORT")
-	if port == "" {
-		port = readActivePort()
-	}
-	if port == "" {
-		port = "18792"
-	}
-	body, _ := json.Marshal(map[string]interface{}{
-		"eventType": eventType,
-		"payload":   payload,
-	})
-	resp, err := http.Post(
-		"http://localhost:"+port+"/api/internal/broadcast",
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(err.Error(), "connection refused") {
-			if port == readActivePort() {
-				_ = os.Remove(filepath.Join(config.GetMPMDir(), "web.port"))
-			}
-			return
-		}
-		if dm, closeDM, dmErr := openCallDM(); dmErr == nil {
-			dm.LogAudit(mpminternal.AuditWarn, "relay", "broadcast failed: "+err.Error(), "", mpminternal.AuditContext{
-				"event":    eventType,
-				"port":     port,
-				"endpoint": "/api/internal/broadcast",
-			})
-			closeDM()
-		}
-		usererror.Warn("relay post error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-}
-
-// readActivePort reads the web server's port from the well-known file
-// `~/.mpm/web.port`. The web server writes this file on startup so
-// sibling processes (e.g. `mpm call` running in parallel) can find the
-// SSE relay endpoint even if MPM_PORT isn't in the environment.
-// Returns "" if the file is missing or empty.
-func readActivePort() string {
-	mpmDir := config.GetMPMDir()
-	portFile := mpmDir + "/web.port"
-	data, err := os.ReadFile(portFile)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
 
 // runHandler invokes a registry handler with the test DM and an empty
 // ActiveContext. Tests that previously called callFoo(payload) directly

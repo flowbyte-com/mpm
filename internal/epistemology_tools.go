@@ -46,15 +46,6 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 		"action":        "weakened",
 		"theory_id":     theory.ID,
 		"theory_status": "pending",
-		"__sse_broadcast": map[string]interface{}{
-			"eventType": "immune_slash",
-			"payload": map[string]interface{}{
-				"memory_id":     memoryID,
-				"theory_id":     theory.ID,
-				"action":        "weakened",
-				"theory_status": "pending",
-			},
-		},
 	}, nil
 }
 
@@ -87,14 +78,6 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 		"id":         mem.ID,
 		"status":     "pending",
 		"hypothesis": hypothesis,
-		"__sse_broadcast": map[string]interface{}{
-			"eventType": "theory_proposed",
-			"payload": map[string]interface{}{
-				"id":         mem.ID,
-				"hypothesis": hypothesis,
-				"status":     "pending",
-			},
-		},
 	}, nil
 }
 
@@ -127,15 +110,6 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 		"status":      newStatus,
 		"conclusion":  conclusion,
 		"resolved_at": now,
-		"__sse_broadcast": map[string]interface{}{
-			"eventType": "theory_resolved",
-			"payload": map[string]interface{}{
-				"id":          theoryID,
-				"status":      newStatus,
-				"conclusion":  conclusion,
-				"resolved_at": now,
-			},
-		},
 	}, nil
 }
 
