@@ -113,15 +113,37 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "add_evidence",
-		Description: "Add a piece of evidence supporting or refuting a theory.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"theory_id":{"type":"string"},"notes":{"type":"string"},"source_group":{"type":"string"},"source_url":{"type":"string"},"source_path":{"type":"string"},"created_by":{"type":"string"}},"required":["theory_id"]}`),
-		Handler:     handleAddEvidence,
+		Description: "Attach evidence to an artifact (memory, theory, decision, or lesson) to support or refute it.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":         {"type": "string",  "description": "ID of the artifact (memory/theory/decision/lesson) this evidence attaches to. To attach to a theory, set artifact_type='theory'."},
+				"artifact_type":       {"type": "string",  "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Type of the artifact. Defaults to 'memory' if omitted."},
+				"type":                {"type": "string",  "enum": ["observation","test","reproduction","challenge","decision_outcome","external_reference"], "description": "Evidence type. Determines default strength when strength is not provided (challenge is negative; the rest are positive)."},
+				"source_group":        {"type": "string",  "description": "Grouping tag for the source, e.g. 'wc2026 R32' or 'audit-trail-2026-07'."},
+				"source_url":          {"type": "string",  "description": "Optional URL of the source."},
+				"source_path":         {"type": "string",  "description": "Optional filesystem path of the source."},
+				"notes":               {"type": "string",  "description": "Optional narrative note about the evidence."},
+				"created_by":          {"type": "string",  "description": "Creator/agent identifier."},
+				"strength":            {"type": "number",  "minimum": -1, "maximum": 1, "description": "Optional. Strength in [-1, 1]; defaults to the type's registry value when omitted. Use negative for refuting evidence (challenge type defaults to -0.6)."},
+				"independence_factor": {"type": "number",  "default": 1.0,  "description": "Optional independence factor for confidence aggregation; defaults to 1.0."}
+			},
+			"required": ["artifact_id", "type", "source_group", "created_by"]
+		}`),
+		Handler: handleAddEvidence,
 	},
 	{
 		Name:        "list_evidence",
-		Description: "List evidence entries, optionally filtered.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"theory_id":{"type":"string"},"limit":{"type":"number"}}}`),
-		Handler:     handleListEvidence,
+		Description: "List evidence rows attached to an artifact (memory, theory, decision, or lesson).",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string", "description": "ID of the artifact to list evidence for."},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Type of the artifact. Defaults to 'memory' if omitted."}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleListEvidence,
 	},
 	{
 		Name:        "query_confidence_history",
