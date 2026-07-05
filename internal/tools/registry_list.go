@@ -54,7 +54,7 @@ var Registry = []Tool{
 	{
 		Name:        "record_decision",
 		Description: "Record an architectural decision with context, choice, and rationale.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"tags":{"type":"string"}},"required":["context","choice","rationale"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"outcome":{"type":"string","description":"Optional. Out-of-band learning captured about the decision's eventual outcome; visible to future-me via search_references."},"tags":{"type":"string"}},"required":["context","choice","rationale"]}`),
 		Handler:     handleRecordDecision,
 	},
 	{
@@ -84,7 +84,7 @@ var Registry = []Tool{
 	{
 		Name:        "search_topics",
 		Description: "Search topics by name or description.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number","default":20,"description":"Optional. Max results; default 20."}},"required":["query"]}`),
 		Handler:     handleSearchTopics,
 	},
 	{
@@ -108,7 +108,7 @@ var Registry = []Tool{
 	{
 		Name:        "list_references",
 		Description: "List reference documents.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number"}}}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":50},"offset":{"type":"number","default":0,"description":"Optional. Pagination offset; default 0."}}}`),
 		Handler:     handleListReferences,
 	},
 	{
@@ -165,7 +165,8 @@ var Registry = []Tool{
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"artifact_id":        {"type": "string", "description": "Optional filter to a single artifact."},
+				"artifact_id":        {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Optional. ID of the artifact to filter on. Pair with artifact_type when ambiguous."},
+				"artifact_type":      {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Optional. Type of the artifact. Defaults to 'memory'."},
 				"since":              {"type": "string", "description": "Optional. ISO-8601 timestamp or unix epoch seconds — return changes on or after this time."},
 				"since_seconds_ago":  {"type": "number", "description": "Optional alternative to 'since': duration in seconds from now."},
 				"limit":              {"type": "number", "description": "Optional. Max rows to return; default 50."}
@@ -259,19 +260,19 @@ var Registry = []Tool{
 	{
 		Name:        "proactive_recall_hint",
 		Description: "Surface conversation-relevant memories as hints before the agent acts.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"conversation":{"type":"string"},"max_hints":{"type":"number"}},"required":["conversation"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"conversation_text":{"type":"string","description":"Required. The conversation snippet to anchor recall on."},"max_hints":{"type":"number","default":3,"description":"Optional. Max hints to surface; default 3."},"min_score":{"type":"number","default":-3,"description":"Optional. Minimum relevance score; default -3.0 (matches default boost score). Negative values allow weak matches."}},"required":["conversation_text"]}`),
 		Handler:     handleProactiveRecallHint,
 	},
 	{
 		Name:        "route",
-		Description: "Evaluate the current mode/persona routing for a text snippet.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+		Description: "Evaluate the current mode/persona routing for a prompt.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"Required. The prompt to route through mode/persona selection."}},"required":["prompt"]}`),
 		Handler:     handleRoute,
 	},
 	{
 		Name:        "session_end",
 		Description: "End the current session: write a handoff for next wake to surface.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"commitments":{"type":"array"},"open_questions":{"type":"array"}},"required":["session_id","summary"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"state":{"type":"string","description":"Optional. Session state field (e.g. 'clean', 'crashed', 'force_end'); defaults to 'clean' if omitted."},"commitments":{"type":"array"},"open_questions":{"type":"array"}},"required":["session_id","summary"]}`),
 		Handler:     handleSessionEnd,
 	},
 	{
@@ -313,7 +314,7 @@ var Registry = []Tool{
 	{
 		Name:        "snooze_memory",
 		Description: "Temporarily suppress a memory from retrieval.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"hours":{"type":"number"}},"required":["memory_id"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"days":{"type":"number","default":1,"description":"Optional. Snooze duration in days; default 1."}},"required":["memory_id"]}`),
 		Handler:     handleSnoozeMemory,
 	},
 	{
@@ -337,7 +338,7 @@ var Registry = []Tool{
 	{
 		Name:        "review_memories",
 		Description: "List memories due for spaced-repetition review.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number"},"stale_only":{"type":"boolean"}}}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":20},"stale_only":{"type":"boolean","default":false},"days":{"type":"number","default":30,"description":"Optional. Stale window in days; default 30."}}}`),
 		Handler:     handleReviewMemories,
 	},
 	{
@@ -348,8 +349,8 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "gc_run",
-		Description: "Run a lifecycle decay / archive sweep.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"review":{"type":"boolean"},"purge":{"type":"boolean"}}}`),
+		Description: "Run a lifecycle decay / archive sweep. dry_run=true is the safe default (no writes). The full CLI flag surface (--review, --purge, --shred-negative) stays on `mpm gc` because those modes are operationally distinct.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"dry_run":{"type":"boolean","default":true,"description":"Safe default true. Set false to actually mutate state."},"aggressive":{"type":"boolean","default":false,"description":"Optional. Aggressive sweep."},"max_age_hours":{"type":"number","default":24,"description":"Optional. Max age (hours) for decay eligibility; default 24."}}}`),
 		Handler:     handleGCRun,
 	},
 	{
