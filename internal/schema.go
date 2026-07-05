@@ -388,6 +388,34 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_theory ON scheduled_wakes(theory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_created ON scheduled_wakes(created_at);`,
+
+	// Ephemeral Scratchpad — single-row-per-session volatile thesis
+	// storage. Used by agents (808 in particular) to checkpoint
+	// working thoughts that aren't ready for permanent memory. When a
+	// session ends without promotion, the row becomes an "orphan"
+	// surfaced on next session's wake context with age tagging
+	// ([Fresh]/[Dormant]/[Expired]). The agent decides whether to
+	// promote_scratchpad, amend, or discard.
+	//
+	// `decay_at` is TTL metadata only — set on flush and reset on every
+	// UPSERT (now + 24h). Future `mpm ops gc --scratchpads` reads it to
+	// vacuum. Wake-context surface query IGNORES it: orphan-surfacing
+	// is the whole point, and filtering by decay would hide exactly
+	// the rows that need attention (trashed sessions whose TTL has
+	// expired but whose thesis never made it to memory).
+	//
+	// `updated_at` is the per-flush evolution timestamp — multiple
+	// flushes to the same session_id let us measure how actively a
+	// thesis is being refined. PRIMARY KEY is session_id (single-row-
+	// per-session invariant).
+	`CREATE TABLE IF NOT EXISTS ephemeral_scratchpad (
+		session_id TEXT PRIMARY KEY,
+		thesis TEXT NOT NULL,
+		supporting JSON,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		decay_at DATETIME
+	);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.

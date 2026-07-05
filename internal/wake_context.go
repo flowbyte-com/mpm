@@ -41,7 +41,27 @@ type WakeContextData struct {
 	// The agent reads these on wake to know the conventions, voice
 	// rules, and operator overrides before it starts working.
 	GlobalRules []WakeContextRule `json:"global_rules,omitempty"`
+	// ScratchpadOrphans is the agent-facing summary of unpromoted
+	// scratchpad rows from previous sessions. Empty when no orphans
+	// exist (the common case). Populated by GatherWakeContext via
+	// ScratchpadOrphansSummary(). Each orphan carries [Fresh] /
+	// [Dormant] / [Expired] age-tag, the session_id, and a 200-char
+	// truncated thesis preview. The agent's options are: promote
+	// (promote_scratchpad), amend (flush_scratchpad with same
+	// session_id), or discard (discard_scratchpad).
+	ScratchpadOrphans string `json:"scratchpad_orphans,omitempty"`
 }
+
+// Scratchpad age-tag thresholds. Tunable from one place. The
+// presentation thresholds (wake context) are independent of the
+// TTL threshold (decay_at, set on flush + reset on UPSERT). The
+// surface uses presentation thresholds; gc_run --scratchpads uses
+// the TTL. Decoupling is the "no invisible orphans" mandate.
+const (
+	ScratchpadFreshHours       = 24.0
+	ScratchpadDormantDays      = 7.0
+	ScratchpadThesisPreviewMax = 200
+)
 
 // WakeContextMemory is the trimmed memory reference shown in wake context.
 type WakeContextMemory struct {
@@ -128,6 +148,8 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 			})
 		}
 	}
+
+	data.ScratchpadOrphans = dm.ScratchpadOrphansSummary()
 
 	return data, nil
 }
@@ -253,6 +275,9 @@ func formatWakeContext(d WakeContextData) string {
 			lines = append(lines, fmt.Sprintf("  - [w=%d] %s", r.Weight, content))
 		}
 	}
+	if d.ScratchpadOrphans != "" {
+		lines = append(lines, d.ScratchpadOrphans)
+	}
 	if d.LastHandoff != nil {
 		lines = append(lines, formatHandoff(d.LastHandoff))
 	}
@@ -373,6 +398,88 @@ func (dm *DatabaseManager) auditSummaryRich() string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// previewThesisTruncated strips embedded newlines and truncates to
+// ScratchpadThesisPreviewMax characters with an ellipsis suffix. Used
+// by ScratchpadOrphansSummary to keep the wake-context payload bounded
+// — a 5KB thesis flush would otherwise inflate every wake by 5KB+
+// regardless of how stale the row is.
+func previewThesisTruncated(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= ScratchpadThesisPreviewMax {
+		return s
+	}
+	return s[:ScratchpadThesisPreviewMax] + "..."
+}
+
+// scratchpadAgeTag maps an age-in-hours to a presentation tag using
+// the ScratchpadFreshHours / ScratchpadDormantDays thresholds. The
+// thresholds are presentation-only; the wake-context query does NOT
+// filter by them (orphan-surfacing mandate — see schema.go comment).
+// gc_run --scratchpads is the one true vacuum path.
+func scratchpadAgeTag(ageHours float64) string {
+	if ageHours > ScratchpadDormantDays*24 {
+		return "[Expired]"
+	}
+	if ageHours > ScratchpadFreshHours {
+		return "[Dormant]"
+	}
+	return "[Fresh]"
+}
+
+// ScratchpadOrphansSummary returns the agent-facing wake-context block
+// for unpromoted scratchpad rows from previous sessions. Empty string
+// when no orphans exist (caller skips the line entirely).
+//
+// Surface rule (locked 2026-07-05): every row in ephemeral_scratchpad
+// whose session_id != the current session is surfaced, regardless of
+// decay_at. The age tag ([Fresh]/[Dormant]/[Expired]) tells the
+// agent how stale the row is; filtering it out at the query layer
+// would defeat orphan-recovery — exactly the case we want to catch
+// (trashed session whose thesis never made it to memory).
+//
+// Telemetry mirrors auditSummaryRich: a transient DB hiccup returns
+// "" so wake context isn't flooded by error noise.
+func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
+	if dm == nil || dm.db == nil {
+		return ""
+	}
+
+	currentSession := ""
+	if s, err := dm.GetLastSession(); err == nil && s != nil {
+		currentSession, _ = s["session_id"].(string)
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT session_id, thesis,
+		       (julianday('now') - julianday(updated_at)) * 24 AS age_hours
+		FROM ephemeral_scratchpad
+		WHERE session_id != ?`,
+		currentSession)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var id, thesis string
+		var ageHours float64
+		if err := rows.Scan(&id, &thesis, &ageHours); err != nil {
+			continue
+		}
+		tag := scratchpadAgeTag(ageHours)
+		lines = append(lines, fmt.Sprintf("  * %s session %s: %s", tag, id, previewThesisTruncated(thesis)))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	header := "- Ephemeral Scratchpads (Action Required: promote_scratchpad, amend, or discard):"
+	out := []string{header}
+	out = append(out, lines...)
+	return strings.Join(out, "\n")
 }
 
 // clusterKeyKnownByEpistemology returns true if cluster_key appears in

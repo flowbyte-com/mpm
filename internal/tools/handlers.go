@@ -464,14 +464,15 @@ func handleReadWakeContext(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 	}
 
 	return map[string]interface{}{
-		"success":         true,
-		"session_id":      data.SessionID,
-		"active_mode":     data.ActiveMode,
-		"active_persona":  data.ActivePersona,
-		"recent_topics":   data.RecentTopics,
-		"recent_memories": memRefs,
-		"audit_summary":   data.AuditSummary,
-		"last_handoff":    data.LastHandoff,
+		"success":           true,
+		"session_id":        data.SessionID,
+		"active_mode":       data.ActiveMode,
+		"active_persona":    data.ActivePersona,
+		"recent_topics":     data.RecentTopics,
+		"recent_memories":   memRefs,
+		"audit_summary":     data.AuditSummary,
+		"last_handoff":      data.LastHandoff,
+		"scratchpad_orphans": data.ScratchpadOrphans,
 	}, nil
 }
 
@@ -1166,4 +1167,197 @@ func handleListWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveConte
 		"include_fired": includeFired,
 		"overdue_only":  overdueOnly,
 	}), nil
+}
+
+// ---------------------------------------------------------------------------
+// Ephemeral Scratchpad
+// ---------------------------------------------------------------------------
+//
+// Single-row-per-session volatile thesis storage. Lets the agent checkpoint
+// reasoning that isn't ready for permanent memory (save_to_memory). When a
+// session ends without promotion, the row becomes an "orphan" surfaced on
+// next session's wake context with age tagging ([Fresh]/[Dormant]/[Expired]).
+//
+// Wire-format invariant: all four tools require session_id. We deliberately
+// reject defaulting to the current session — making the agent pass session_id
+// explicitly keeps the JSON-Schema contract uniform and prevents the agent
+// from making lazy context-blind assumptions when querying state.
+//
+// Promote is the only mutating tool that crosses table boundaries; it
+// reaches SaveMemoryNode via the WithTx callback (DBNode interface), so the
+// 20-pattern security scanner runs INSIDE the transaction. Poison rejection
+// rolls back both the memory INSERT and the scratchpad DELETE, leaving the
+// scratchpad intact for retry with a redacted fact.
+
+// normalizeSupporting accepts either a JSON string (caller pre-serialized)
+// or any other JSON-marshallable shape (most common: map[string]interface{}
+// from the MCP boundary). nil/missing returns "" with no error — supporting
+// is optional. Errors propagate so the handler can return a 4xx-equivalent.
+func normalizeSupporting(raw interface{}) (string, error) {
+	if raw == nil {
+		return "", nil
+	}
+	if s, ok := raw.(string); ok {
+		return s, nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// handleFlushScratchpad upserts a volatile working thesis for a session.
+// Idempotent: repeated calls in the same session overwrite cleanly via
+// SQLite's UPSERT. decay_at is reset on every flush (TTL metadata for
+// future `mpm ops gc --scratchpads`); updated_at is reset for thesis
+// evolution velocity tracking. The wake-context surface query IGNORES
+// decay_at — orphan-surfacing is the whole point.
+func handleFlushScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	sessionID := getString(p, "session_id")
+	thesis := getString(p, "thesis")
+	if sessionID == "" || thesis == "" {
+		return nil, fmt.Errorf("session_id and thesis are required")
+	}
+
+	supporting, err := normalizeSupporting(p["supporting"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize supporting data: %w", err)
+	}
+
+	const query = `
+		INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at)
+		VALUES (?, ?, ?, datetime('now', '+24 hours'))
+		ON CONFLICT(session_id) DO UPDATE SET
+			thesis = excluded.thesis,
+			supporting = excluded.supporting,
+			updated_at = CURRENT_TIMESTAMP,
+			decay_at = excluded.decay_at;`
+
+	if _, err := dm.ExecTracked(query, 0, sessionID, thesis, supporting); err != nil {
+		return nil, fmt.Errorf("flush scratchpad: %w", err)
+	}
+	return map[string]string{"status": "flushed", "session_id": sessionID}, nil
+}
+
+// handleReadScratchpad returns the current scratchpad row for a session.
+// Empty payload errors loudly so the agent can self-correct; we do NOT
+// default to the current session — explicit session_id is the contract.
+func handleReadScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	sessionID := getString(p, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	var thesis, supporting, updatedAt string
+	err := dm.QueryRowTracked(
+		`SELECT thesis, supporting, updated_at FROM ephemeral_scratchpad WHERE session_id = ?`,
+		sessionID,
+	).Scan(&thesis, &supporting, &updatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("no scratchpad found for session: %s", sessionID)
+		}
+		return nil, err
+	}
+	return map[string]string{
+		"session_id":  sessionID,
+		"thesis":      thesis,
+		"supporting":  supporting,
+		"updated_at":  updatedAt,
+	}, nil
+}
+
+// handleDiscardScratchpad hard-deletes a scratchpad row. No soft-delete
+// overhead — scratchpads are volatile by design. Idempotent: deleting a
+// non-existent row is a no-op (RowsAffected=0, no error).
+func handleDiscardScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	sessionID := getString(p, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	if _, err := dm.ExecTracked(`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`, 0, sessionID); err != nil {
+		return nil, fmt.Errorf("discard scratchpad: %w", err)
+	}
+	return map[string]string{"status": "discarded", "session_id": sessionID}, nil
+}
+
+// handlePromoteScratchpad is the only multi-table mutation in the scratchpad
+// surface. It atomically:
+//   1. SELECTs the scratchpad row (inside the tx — race window closed)
+//   2. INSERTs a memory via SaveMemoryNode (scanner runs INSIDE the tx)
+//   3. DELETEs the scratchpad row (also inside the tx)
+//
+// All three operations share one DBNode (txNode). If the scanner rejects
+// the memory INSERT (poison phrase, sensitive content), WithTx rolls back
+// the entire tx and the scratchpad stays intact for retry with a redacted
+// fact. The agent gets the rejection error verbatim from the scanner.
+//
+// Lineage: the promoted memory gets the `from-scratchpad:<session_id>` tag
+// automatically, so future queries can trace the memory back to the
+// scratchpad session that produced it.
+func handlePromoteScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	sessionID := getString(p, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	var memoryID string
+	lineage := fmt.Sprintf("from-scratchpad:%s", sessionID)
+
+	err := dm.WithTx(func(node mpminternal.DBNode) error {
+		// Step 1: SELECT inside the tx. If the row vanishes between
+		// this read and the DELETE (concurrent discard, or external
+		// cleanup), QueryRowTracked returns ErrNoRows and the tx
+		// aborts before any INSERT runs.
+		var thesis, supporting string
+		if err := node.QueryRowTracked(
+			`SELECT thesis, supporting FROM ephemeral_scratchpad WHERE session_id = ?`,
+			sessionID,
+		).Scan(&thesis, &supporting); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("no scratchpad found for session: %s", sessionID)
+			}
+			return err
+		}
+
+		// Step 2: INSERT memory. SaveMemoryNode runs the 20-pattern
+		// scanner; rejection here returns an error and the tx aborts.
+		// SaveMemoryNode is the canonical tx-aware primitive (see
+		// db.go:1433); it accepts the DBNode so the INSERT joins
+		// the same tx as the DELETE below.
+		content := fmt.Sprintf("Thesis: %s\nSupporting Context: %s", thesis, supporting)
+		tags := []string{lineage}
+		var err error
+		memoryID, err = dm.SaveMemoryNode(
+			node,
+			"memories", content, "", tags, nil, nil,
+			false, 5, // weight=5 (medium), isLongTerm=false
+			"", "0.5", "0.5", "", // referenceID, retrieval, importance, createdAt (defaults)
+		)
+		if err != nil {
+			return fmt.Errorf("promote scratchpad: %w", err)
+		}
+
+		// Step 3: DELETE scratchpad. If scanner rejected, we never
+		// reach this line — WithTx's deferred rollback catches it.
+		if _, err := node.ExecTracked(
+			`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`,
+			0, sessionID,
+		); err != nil {
+			return fmt.Errorf("delete scratchpad after promote: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]string{
+		"status":    "promoted",
+		"memory_id": memoryID,
+		"lineage":   lineage,
+	}, nil
+
 }

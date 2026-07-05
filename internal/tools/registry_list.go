@@ -275,6 +275,68 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"state":{"type":"string","description":"Optional. Session state field (e.g. 'clean', 'crashed', 'force_end'); defaults to 'clean' if omitted."},"commitments":{"type":"array"},"open_questions":{"type":"array"}},"required":["session_id","summary"]}`),
 		Handler:     handleSessionEnd,
 	},
+
+	// --- Ephemeral Scratchpad (volatile thesis storage) ---
+	//
+	// Single-row-per-session working memory for hypotheses that aren't ready
+	// for save_to_memory. Orphans (unpromoted scratchpads from previous
+	// sessions) surface on next wake context with age tagging so the agent
+	// can promote, amend, or discard.
+	//
+	// Wire-format invariant: session_id is REQUIRED on all four tools.
+	// Defaulting to the current session would let the agent make lazy
+	// context-blind queries; explicit session_id keeps the contract uniform
+	// across the surface and matches the AST guard rail's expectation.
+	{
+		Name:        "flush_scratchpad",
+		Description: "Save or update a volatile working thesis for a session. Use this to explicitly checkpoint reasoning that isn't ready for permanent memory. Idempotent per session_id.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"session_id": {"type": "string", "description": "The explicit session ID to attach this scratchpad to."},
+				"thesis":     {"type": "string", "description": "The core hypothesis, prediction, or working thought."},
+				"supporting": {"type": ["string", "object"], "description": "Optional supporting evidence, variables, or context (JSON object or pre-stringified JSON)."}
+			},
+			"required": ["session_id", "thesis"]
+		}`),
+		Handler: handleFlushScratchpad,
+	},
+	{
+		Name:        "read_scratchpad",
+		Description: "Read the current ephemeral scratchpad for a specific session.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"session_id": {"type": "string", "description": "The explicit session ID of the scratchpad to retrieve."}
+			},
+			"required": ["session_id"]
+		}`),
+		Handler: handleReadScratchpad,
+	},
+	{
+		Name:        "discard_scratchpad",
+		Description: "Permanently delete an ephemeral scratchpad without promoting it to memory.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"session_id": {"type": "string", "description": "The explicit session ID of the scratchpad to delete."}
+			},
+			"required": ["session_id"]
+		}`),
+		Handler: handleDiscardScratchpad,
+	},
+	{
+		Name:        "promote_scratchpad",
+		Description: "Atomically promote an ephemeral scratchpad into a permanent memory with a `from-scratchpad:<session_id>` lineage tag, then delete the scratchpad. If the security scanner rejects the synthesized memory, the entire operation rolls back and the scratchpad is preserved for retry.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"session_id": {"type": "string", "description": "The explicit session ID of the scratchpad to promote."}
+			},
+			"required": ["session_id"]
+		}`),
+		Handler: handlePromoteScratchpad,
+	},
 	{
 		Name:        "session_handoff",
 		Description: "Read the latest session handoff (used by wake context automatically).",
