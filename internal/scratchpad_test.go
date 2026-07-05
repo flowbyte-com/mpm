@@ -356,3 +356,96 @@ func TestSaveMemoryNode_NoRaceWindow(t *testing.T) {
 		t.Errorf("expected sql.ErrNoRows, got: %v", err)
 	}
 }
+
+// ─── Aggregate-header tests for ScratchpadOrphansSummary ──────────────
+//
+// The header carries two pieces of information: total orphan count
+// (with grammatical pluralization) and per-tag breakdown. Both must
+// stay accurate as the row set evolves.
+
+func TestScratchpadOrphansSummary_AggregateHeader_MixedAges(t *testing.T) {
+	dm := scratchpadDM(t)
+
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now'))`,
+		"orphan-fresh-1", "fresh one"); err != nil { t.Fatal(err) }
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now'))`,
+		"orphan-fresh-2", "fresh two"); err != nil { t.Fatal(err) }
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now', '-2 days'))`,
+		"orphan-dormant-1", "dormant one"); err != nil { t.Fatal(err) }
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now', '-10 days'))`,
+		"orphan-expired-1", "expired one"); err != nil { t.Fatal(err) }
+
+	out := dm.ScratchpadOrphansSummary()
+
+	if !strings.Contains(out, "4 orphans pending") {
+		t.Errorf("expected '4 orphans pending' header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Fresh=2") {
+		t.Errorf("expected 'Fresh=2' breakdown, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Dormant=1") {
+		t.Errorf("expected 'Dormant=1' breakdown, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Expired=1") {
+		t.Errorf("expected 'Expired=1' breakdown, got:\n%s", out)
+	}
+}
+
+func TestScratchpadOrphansSummary_AggregateHeader_SingularPluralization(t *testing.T) {
+	dm := scratchpadDM(t)
+
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"orphan-solo", "lonely"); err != nil { t.Fatal(err) }
+
+	out := dm.ScratchpadOrphansSummary()
+	if !strings.Contains(out, "1 orphan pending") {
+		t.Errorf("expected singular '1 orphan pending' (no 's'), got:\n%s", out)
+	}
+	if strings.Contains(out, "1 orphans") {
+		t.Errorf("'1 orphans' is grammatically wrong, got:\n%s", out)
+	}
+}
+
+func TestScratchpadOrphansSummary_AggregateHeader_PluralZeroAndN(t *testing.T) {
+	dm := scratchpadDM(t)
+	// Zero orphans → no output at all (header only renders with content).
+	if got := dm.ScratchpadOrphansSummary(); got != "" {
+		t.Errorf("zero orphans should produce empty output, got:\n%s", got)
+	}
+}
+
+func TestScratchpadOrphansSummary_HeaderOnFirstLine(t *testing.T) {
+	dm := scratchpadDM(t)
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"orphan-A", "test"); err != nil { t.Fatal(err) }
+
+	out := dm.ScratchpadOrphansSummary()
+	lines := strings.Split(out, "\n")
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "- Ephemeral Scratchpads") {
+		t.Errorf("first line should be the header, got:\n%v", lines)
+	}
+}
+
+func TestTernaryPlural(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "s"},   // "0 orphans"
+		{1, ""},    // "1 orphan"
+		{2, "s"},   // "2 orphans"
+		{99, "s"},  // "99 orphans"
+	}
+	for _, c := range cases {
+		got := ternaryPlural(c.n)
+		if got != c.want {
+			t.Errorf("ternaryPlural(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
