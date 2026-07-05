@@ -772,6 +772,76 @@ func handleListActiveClusters(dm *mpminternal.DatabaseManager, ac mpminternal.Ac
 	}, nil
 }
 
+// handleSnoozeCluster transitions an active audit-cluster proposal to
+// 'snoozed' until a future timestamp. Auto-reactivates when snooze_until
+// passes (filter clause in ActiveClusters handles the re-emergence).
+//
+// Wire schema (enforced by JSON-Schema in registry_list.go):
+//   - cluster_key  (required) — primary key from list_active_clusters
+//   - snooze_until (required) — ISO 8601 absolute ("2026-07-12T12:00:00Z")
+//                              OR Go duration ("24h", "7d", "1h30m")
+//   - reason       (optional) — audit-friendly note
+//
+// The two parsed formats are accepted because the agent's wire format
+// varies: relative durations ("24h") are ergonomic, absolute timestamps
+// are needed for cross-tool coordination. parseClusterSnoozeUntil
+// handles both. The handler does NOT silently default the cluster_key
+// to "current" — explicit input prevents accidental cross-cluster
+// snoozing when the agent's intent drifts.
+func handleSnoozeCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	clusterKey, _ := p["cluster_key"].(string)
+	if clusterKey == "" {
+		return nil, fmt.Errorf("cluster_key required")
+	}
+	snoozeUntil, _ := p["snooze_until"].(string)
+	if snoozeUntil == "" {
+		return nil, fmt.Errorf("snooze_until required for snooze_cluster")
+	}
+	reason, _ := p["reason"].(string)
+
+	if err := dm.SetClusterStatus(clusterKey, internal.ClusterStatusSnoozed, snoozeUntil, reason); err != nil {
+		return nil, fmt.Errorf("snooze cluster: %w", err)
+	}
+	return map[string]interface{}{
+		"success":      true,
+		"cluster_key":  clusterKey,
+		"status":       "snoozed",
+		"snooze_until": snoozeUntil,
+		"reason":       reason,
+	}, nil
+}
+
+// handleResolveCluster permanently dismisses an audit-cluster proposal.
+// Sets status='resolved'; the cluster row stays in the table for
+// forensics but is filtered out of ActiveClusters forever — it can no
+// longer re-surface as active.
+//
+// Wire schema (enforced by JSON-Schema in registry_list.go):
+//   - cluster_key (required) — primary key from list_active_clusters
+//   - reason      (optional) — audit-friendly note explaining root cause
+//
+// Resolved clusters can be re-resolved (idempotent) — useful if the
+// agent reaches a more refined understanding and overwrites reason
+// with the better explanation. The row's first_seen / count stays
+// intact so historical signal is preserved.
+func handleResolveCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	clusterKey, _ := p["cluster_key"].(string)
+	if clusterKey == "" {
+		return nil, fmt.Errorf("cluster_key required")
+	}
+	reason, _ := p["reason"].(string)
+
+	if err := dm.SetClusterStatus(clusterKey, internal.ClusterStatusResolved, "", reason); err != nil {
+		return nil, fmt.Errorf("resolve cluster: %w", err)
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"cluster_key": clusterKey,
+		"status":      "resolved",
+		"reason":      reason,
+	}, nil
+}
+
 // callSessionEnd writes a handoff for the just-ended session. The agent
 // calls this before exiting so the next session can pick up the thread.
 //
