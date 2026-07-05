@@ -1426,11 +1426,23 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 	return dm.SaveMemoryWithExtras(collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, "", "0.5", "0.5", "", expiresAt...)
 }
 
-// SaveMemoryWithExtras extends SaveMemory with the additional columns that
-// MemoryStore.AddMemory and AddMemoryWithWeight need: reference_id,
-// retrieval_priority, importance, and created_at. Callers that don't need
-// these can use SaveMemory directly; both functions share the same scanner.
-func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+// SaveMemoryNode is the canonical INSERT primitive for the memories table.
+// Accepts a DBNode so callers can run the write inside an active transaction
+// (via WithTx(func(node DBNode) error)) or standalone (passing dm itself,
+// which satisfies DBNode at compile time — see db.go:267). The 20-pattern
+// security scanner runs unconditionally before any INSERT; rejection
+// returns an error and emits an audit row, no row is written.
+//
+// This is the single source of truth for the security scan + INSERT pair.
+// SaveMemoryWithExtras is now a thin wrapper; AddEvidence and
+// promote_scratchpad both reach the scanner through this primitive. Any new
+// caller that needs to write a memory inside a multi-statement transaction
+// should use WithTx + SaveMemoryNode, NOT a parallel *sql.Tx handle.
+//
+// Watchdog telemetry: when node is a txNode (in-tx), the ExecTracked call
+// is attributed to the txNode, so watchdog.jsonl entries from inside a tx
+// carry the same shape as standalone queries.
+func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
 			"reason":    reason,
@@ -1478,9 +1490,23 @@ func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID s
 		created = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	_, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance)
+	_, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance)
 	return id, err
+}
+
+// SaveMemoryWithExtras extends SaveMemory with the additional columns that
+// MemoryStore.AddMemory and AddMemoryWithWeight need: reference_id,
+// retrieval_priority, importance, and created_at. Callers that don't need
+// these can use SaveMemory directly; both functions share the same scanner.
+//
+// This is now a thin wrapper that routes through SaveMemoryNode with `dm`
+// as the DBNode (dm satisfies DBNode at compile time). Existing callers are
+// unaffected — the refactor is purely an internal restructuring to expose the
+// tx-aware primitive. Callers that need transactional atomicity should call
+// SaveMemoryNode directly inside a WithTx callback.
+func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+	return dm.SaveMemoryNode(dm, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
 }
 
 // UpdateMemoryMetadata patches the metadata JSON column for a specific memory ID.
