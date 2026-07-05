@@ -282,6 +282,100 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 	return nil
 }
 
+// AnnotateCluster appends a forensic annotation to the audit trail for
+// an existing audit_cluster_proposals row. The annotation captures
+// late-arriving insight, post-mortem context, or root-cause refinement
+// without touching the cluster's status, snooze_until, count, or any
+// other state field.
+//
+// Why a separate tool (not a flag on resolve_cluster):
+//   - Resolves are intentionally final. Allowing resolve_with_note to
+//     rewrite the resolution reason would invite flip-flopping.
+//   - Annotations apply to ANY cluster state — active, snoozed, or
+//     resolved. The agent often has more context a week later; the
+//     tool must accept that without re-opening the cluster.
+//   - Forensic append (audit log) is the right home — single source
+//     of truth for the agent's decision stream, queryable via
+//     query_audit_log with component='cluster'.
+//
+// Output target: a fresh row in system_audit_log with:
+//   - level = AuditWarn (deliberate action, not anomaly)
+//   - component = "cluster"
+//   - message = "cluster annotated by agent: <first 80 chars of annotation>"
+//   - context = {cluster_key, annotation, prior_status, prior_count, reason}
+//
+// Audit row identity (component='cluster' + prefix "cluster annotated
+// by agent") is the queryable key. query_audit_log can pull a
+// cluster's full annotation history by:
+//
+//	audit_logs := query_audit_log(component='cluster', days=30)
+//	annotations := audit_logs.filter(l => strings.HasPrefix(l.message, 'cluster annotated by agent'))
+//
+// Annotations never mutate the cluster row. The SELECT-then-INSERT
+// pattern is the same one SetClusterStatus uses; the annotation
+// failure mode (audit row fails to write) returns an error but does
+// not corrupt the cluster state — the cluster is independent of any
+// annotation that refers to it.
+//
+// Re-annotating an existing cluster is permitted (no idempotency
+// check) — each annotation is a distinct forensic event with its own
+// timestamp. Two annotations for the same cluster on the same day
+// each get their own audit row, in order.
+func (dm *DatabaseManager) AnnotateCluster(clusterKey, annotation, reason string) error {
+	if dm == nil || dm.db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	if clusterKey == "" {
+		return fmt.Errorf("cluster_key required")
+	}
+	if annotation == "" {
+		return fmt.Errorf("annotation required")
+	}
+
+	// Verify the cluster exists. Annotations on phantom clusters would
+	// clutter the audit log with no forensic value. Same defensive
+	// check SetClusterStatus uses.
+	var existingStatus string
+	var existingCount int
+	if err := dm.db.QueryRow(
+		`SELECT status, count FROM audit_cluster_proposals WHERE cluster_key = ?`,
+		clusterKey,
+	).Scan(&existingStatus, &existingCount); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("cluster not found: %q", clusterKey)
+		}
+		return fmt.Errorf("lookup cluster: %w", err)
+	}
+
+	// Build the audit message. Truncate annotation to 80 chars in the
+	// message header for at-a-glance queryability; the full text lives
+	// in context.annotation for full retrieval. 80 chars is enough to
+	// convey "post-mortem", "week-later-refinement", etc. without
+	// flooding query_audit_log's tail-render.
+	msgPreview := annotation
+	if len(msgPreview) > 80 {
+		msgPreview = msgPreview[:77] + "..."
+	}
+	message := "cluster annotated by agent: " + msgPreview
+
+	// Audit row. Same watchdog.jsonl capture path as SetClusterStatus;
+	// annotation events get the same component='cluster' tag so a
+	// single query_audit_log(component='cluster') returns the full
+	// decision stream (snooze, resolve, annotate).
+	if c := dm.LogAudit; c != nil {
+		c(AuditWarn, "cluster", message, "",
+			AuditContext{
+				"cluster_key":   clusterKey,
+				"annotation":    annotation,
+				"prior_status":  existingStatus,
+				"prior_count":   existingCount,
+				"reason":        reason,
+			})
+	}
+
+	return nil
+}
+
 // parseClusterSnoozeUntil accepts both ISO 8601 absolute timestamps
 // and Go-relative durations and returns a normalized UTC time.Time.
 //

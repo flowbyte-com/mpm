@@ -273,6 +273,20 @@ var Registry = []Tool{
 		Handler: handleResolveCluster,
 	},
 	{
+		Name:        "annotate_cluster",
+		Description: "Append a forensic annotation to an existing audit-cluster proposal's audit trail. Does NOT change cluster status, snooze_until, count, or any state field. Use when late-arriving context or root-cause refinement should be captured without re-opening the cluster. Annotations accumulate in the audit log and are queryable via query_audit_log(component='cluster').",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"cluster_key": {"type": "string", "description": "The cluster_key from list_active_clusters OR a remembered historical key for resolved/snoozed clusters."},
+				"annotation":  {"type": "string", "description": "Substantive insight, root-cause refinement, or post-mortem context. Appended verbatim to the audit trail. Required."},
+				"reason":      {"type": "string", "description": "Optional short label (e.g. 'post-mortem', 'week-later-refinement') to categorize the annotation."}
+			},
+			"required": ["cluster_key", "annotation"]
+		}`),
+		Handler: handleAnnotateCluster,
+	},
+	{
 		Name:        "read_wake_context",
 		Description: "Read the agent's wake context — session state, active mode, recent memories.",
 		Schema:      json.RawMessage(`{"type":"object"}`),
