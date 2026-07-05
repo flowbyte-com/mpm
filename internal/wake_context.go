@@ -463,6 +463,7 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 	defer rows.Close()
 
 	var lines []string
+	tagCounts := map[string]int{"[Fresh]": 0, "[Dormant]": 0, "[Expired]": 0}
 	for rows.Next() {
 		var id, thesis string
 		var ageHours float64
@@ -470,16 +471,38 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 			continue
 		}
 		tag := scratchpadAgeTag(ageHours)
+		tagCounts[tag]++
 		lines = append(lines, fmt.Sprintf("  * %s session %s: %s", tag, id, previewThesisTruncated(thesis)))
 	}
 	if len(lines) == 0 {
 		return ""
 	}
 
-	header := "- Ephemeral Scratchpads (Action Required: promote_scratchpad, amend, or discard):"
+	// Aggregate header summary. Mirrors the auditSummaryRich pattern
+	// ("N events since DATE"): a glance tells v whether to act now or
+	// defer. Break down by age tag so stale orphans (the ones most
+	// likely to be safely discardable) are visually separable.
+	total := tagCounts["[Fresh]"] + tagCounts["[Dormant]"] + tagCounts["[Expired]"]
+	header := fmt.Sprintf(
+		"- Ephemeral Scratchpads (%d orphan%s pending; Action Required: promote_scratchpad, amend, or discard): "+
+			"Fresh=%d, Dormant=%d, Expired=%d",
+		total,
+		ternaryPlural(total),
+		tagCounts["[Fresh]"], tagCounts["[Dormant]"], tagCounts["[Expired]"])
 	out := []string{header}
 	out = append(out, lines...)
 	return strings.Join(out, "\n")
+}
+
+// ternaryPlural returns "s" unless count == 1 (matches English
+// pluralization for "1 orphan pending" vs "0/N orphans pending").
+// Extracted so the orphan header reads naturally without inline
+// conditionals in fmt format strings.
+func ternaryPlural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // clusterKeyKnownByEpistemology returns true if cluster_key appears in
