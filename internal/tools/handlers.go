@@ -842,6 +842,53 @@ func handleResolveCluster(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 	}, nil
 }
 
+// handleAnnotateCluster appends a forensic annotation to an existing
+// audit-cluster proposal's audit trail. The annotation captures
+// late-arriving context, root-cause refinement, or post-mortem
+// without mutating the cluster's status, snooze_until, count, or any
+// other state field.
+//
+// Wire schema (enforced by JSON-Schema in registry_list.go):
+//   - cluster_key (required) — primary key (from list_active_clusters
+//                              OR remembered historical key for
+//                              resolved clusters).
+//   - annotation  (required) — substantive insight text; appended to
+//                              the audit trail verbatim.
+//   - reason      (optional) — short label (e.g. "post-mortem",
+//                              "week-later-refinement").
+//
+// Distinct from resolve_cluster: that tool writes a single audit row
+// at resolution time and freezes the cluster. annotate_cluster can be
+// called any number of times on any cluster state — the cluster is
+// never re-opened, but the audit trail accumulates refinement.
+//
+// Distinct from snooze_cluster: that tool changes the surface state
+// (active → snoozed). Annotating does NOT change surface state at
+// all; the cluster continues to surface (or not) according to its
+// current status.
+func handleAnnotateCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	clusterKey, _ := p["cluster_key"].(string)
+	if clusterKey == "" {
+		return nil, fmt.Errorf("cluster_key required")
+	}
+	annotation, _ := p["annotation"].(string)
+	if annotation == "" {
+		return nil, fmt.Errorf("annotation required")
+	}
+	reason, _ := p["reason"].(string)
+
+	if err := dm.AnnotateCluster(clusterKey, annotation, reason); err != nil {
+		return nil, fmt.Errorf("annotate cluster: %w", err)
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"cluster_key": clusterKey,
+		"annotation":  annotation,
+		"reason":      reason,
+		"appended_to": "system_audit_log (component='cluster')",
+	}, nil
+}
+
 // callSessionEnd writes a handoff for the just-ended session. The agent
 // calls this before exiting so the next session can pick up the thread.
 //
