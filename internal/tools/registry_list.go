@@ -147,21 +147,45 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_confidence_history",
-		Description: "Query the confidence timeline for a memory or theory.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"limit":{"type":"number"}}}`),
-		Handler:     handleQueryConfidenceHistory,
+		Description: "Query the confidence timeline for an artifact (memory, theory, decision, or lesson).",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string", "description": "ID of the artifact to query."},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Type of the artifact."},
+				"limit":         {"type": "number", "default": 50, "description": "Max rows to return. Defaults to 50."}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleQueryConfidenceHistory,
 	},
 	{
 		Name:        "query_confidence_changes",
-		Description: "Query confidence change events.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}`),
-		Handler:     handleQueryConfidenceChanges,
+		Description: "Query confidence change events (delta + trigger) for an artifact, or global recent events.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":        {"type": "string", "description": "Optional filter to a single artifact."},
+				"since":              {"type": "string", "description": "Optional. ISO-8601 timestamp or unix epoch seconds — return changes on or after this time."},
+				"since_seconds_ago":  {"type": "number", "description": "Optional alternative to 'since': duration in seconds from now."},
+				"limit":              {"type": "number", "description": "Optional. Max rows to return; default 50."}
+			}
+		}`),
+		Handler: handleQueryConfidenceChanges,
 	},
 	{
 		Name:        "query_confidence_trend",
-		Description: "Compute a confidence trend (linear fit) for a memory.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"window_days":{"type":"number"}},"required":["memory_id"]}`),
-		Handler:     handleQueryConfidenceTrend,
+		Description: "Compute a confidence trend (linear fit) for an artifact's history.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string", "description": "ID of the artifact."},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Type of the artifact."},
+				"window_days":   {"type": "number", "default": 30,  "description": "Rolling window for the linear fit; defaults to 30 days."}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleQueryConfidenceTrend,
 	},
 	{
 		Name:        "query_memory_quality",
@@ -171,21 +195,42 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "show_confidence",
-		Description: "Show the current confidence of a memory.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
-		Handler:     handleShowConfidence,
+		Description: "Show the current confidence of an artifact (memory, theory, decision, or lesson).",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string"},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory"}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleShowConfidence,
 	},
 	{
 		Name:        "recompute_confidence",
-		Description: "Recompute confidence for a memory using current evidence.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
-		Handler:     handleRecomputeConfidence,
+		Description: "Force a manual recompute of an artifact's confidence from current evidence.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string"},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory"}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleRecomputeConfidence,
 	},
 	{
 		Name:        "explain_confidence",
-		Description: "Explain how a memory's confidence was computed (factors + history).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
-		Handler:     handleExplainConfidence,
+		Description: "Explain how an artifact's confidence was computed (factors + history trace).",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"artifact_id":   {"type": "string"},
+				"artifact_type": {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory"}
+			},
+			"required": ["artifact_id"]
+		}`),
+		Handler: handleExplainConfidence,
 	},
 	{
 		Name:        "query_audit_log",
