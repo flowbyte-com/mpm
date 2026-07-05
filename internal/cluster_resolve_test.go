@@ -345,3 +345,264 @@ func TestSetClusterStatus_EmptyClusterKeyRejected(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+// ─── AnnotateCluster tests ─────────────────────────────────────────────
+//
+// Annotations append forensic context to the audit log without
+// mutating the cluster row. The state-changing verbs (resolve/snooze)
+// and the append-only verb (annotate) are deliberately separate tools
+// so the audit trail can't be back-doored.
+
+func TestAnnotateCluster_WritesAuditRow(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:test", "annotate", "annotation cluster")
+
+	if err := dm.AnnotateCluster("annotate:test", "root cause was DNS upstream", "post-mortem"); err != nil {
+		t.Fatalf("annotate: %v", err)
+	}
+
+	var message string
+	var ctx sql.NullString
+	if err := dm.db.QueryRow(
+		`SELECT message, context FROM system_audit_log WHERE component = 'cluster' LIMIT 1`,
+	).Scan(&message, &ctx); err != nil {
+		t.Fatalf("expected audit row, got: %v", err)
+	}
+	if !strings.Contains(message, "cluster annotated by agent:") {
+		t.Errorf("audit message = %q, expected 'cluster annotated by agent:' prefix", message)
+	}
+	if !strings.Contains(message, "root cause was DNS upstream") {
+		t.Errorf("annotation text not in message preview: %q", message)
+	}
+	if !ctx.Valid {
+		t.Error("audit context should be JSON-populated")
+	}
+}
+
+func TestAnnotateCluster_DoesNotMutateClusterRow(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:no-mutate", "annotate", "annotation cluster")
+
+	// Capture the row before annotation.
+	var statusBefore, snoozeBefore string
+	var countBefore int
+	dm.db.QueryRow(
+		`SELECT status, IFNULL(snooze_until, ''), count FROM audit_cluster_proposals WHERE cluster_key = ?`,
+		"annotate:no-mutate",
+	).Scan(&statusBefore, &snoozeBefore, &countBefore)
+
+	if err := dm.AnnotateCluster("annotate:no-mutate", "annotation text", "label"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Row must be byte-identical — annotations never touch state.
+	var statusAfter, snoozeAfter string
+	var countAfter int
+	dm.db.QueryRow(
+		`SELECT status, IFNULL(snooze_until, ''), count FROM audit_cluster_proposals WHERE cluster_key = ?`,
+		"annotate:no-mutate",
+	).Scan(&statusAfter, &snoozeAfter, &countAfter)
+
+	if statusAfter != statusBefore {
+		t.Errorf("status changed: %q → %q (annotation must not mutate)", statusBefore, statusAfter)
+	}
+	if snoozeAfter != snoozeBefore {
+		t.Errorf("snooze_until changed: %q → %q", snoozeBefore, snoozeAfter)
+	}
+	if countAfter != countBefore {
+		t.Errorf("count changed: %d → %d", countBefore, countAfter)
+	}
+}
+
+func TestAnnotateCluster_OnResolvedCluster(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:resolved", "annotate", "annotation cluster")
+
+	if err := dm.SetClusterStatus("annotate:resolved", ClusterStatusResolved, "", "initial resolution"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A week later: post-mortem on a resolved cluster.
+	if err := dm.AnnotateCluster("annotate:resolved", "found the real cause: clock skew on relay", "post-mortem"); err != nil {
+		t.Fatalf("annotate resolved cluster should work: %v", err)
+	}
+
+	// Cluster is STILL resolved (no reactivation back-door).
+	var status string
+	dm.db.QueryRow(`SELECT status FROM audit_cluster_proposals WHERE cluster_key = ?`, "annotate:resolved").Scan(&status)
+	if status != ClusterStatusResolved {
+		t.Errorf("status = %q, want resolved (annotation must not back-door reactivation)", status)
+	}
+
+	// The annotation IS in the audit log.
+	var n int
+	dm.db.QueryRow(
+		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'cluster' AND message LIKE 'cluster annotated by agent%'`,
+	).Scan(&n)
+	if n != 1 {
+		t.Errorf("expected 1 annotation audit row, got %d", n)
+	}
+}
+
+func TestAnnotateCluster_OnSnoozedCluster(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:snoozed", "annotate", "annotation cluster")
+
+	if err := dm.SetClusterStatus("annotate:snoozed", ClusterStatusSnoozed, "24h", "noise today"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dm.AnnotateCluster("annotate:snoozed", "this is the daily cron that always fires", "refinement"); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	dm.db.QueryRow(`SELECT status FROM audit_cluster_proposals WHERE cluster_key = ?`, "annotate:snoozed").Scan(&status)
+	if status != ClusterStatusSnoozed {
+		t.Errorf("status = %q, want snoozed", status)
+	}
+}
+
+func TestAnnotateCluster_MultipleAnnotations(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:multi", "annotate", "annotation cluster")
+
+	// Three sequential annotations — each must get its own audit row.
+	for _, note := range []string{
+		"first observation",
+		"second observation — refined cause",
+		"third observation — confirmed",
+	} {
+		if err := dm.AnnotateCluster("annotate:multi", note, "iteration"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var n int
+	dm.db.QueryRow(
+		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'cluster' AND message LIKE 'cluster annotated by agent%'`,
+	).Scan(&n)
+	if n != 3 {
+		t.Errorf("expected 3 annotation audit rows, got %d", n)
+	}
+}
+
+func TestAnnotateCluster_MessagePreviewTruncated(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:trunc", "annotate", "annotation cluster")
+
+	longAnnotation := strings.Repeat("x", 500)
+	if err := dm.AnnotateCluster("annotate:trunc", longAnnotation, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	var message string
+	dm.db.QueryRow(
+		`SELECT message FROM system_audit_log WHERE component = 'cluster' AND message LIKE 'cluster annotated by agent%'`,
+	).Scan(&message)
+	if !strings.Contains(message, "...") {
+		t.Errorf("long annotation should be truncated with ellipsis, got: %q", message)
+	}
+	if strings.Contains(message, longAnnotation) {
+		t.Errorf("full 500-char annotation should NOT be in the message preview")
+	}
+}
+
+func TestAnnotateCluster_RejectsEmptyClusterKey(t *testing.T) {
+	dm := newClusterTestDM(t)
+	err := dm.AnnotateCluster("", "some annotation", "")
+	if err == nil {
+		t.Error("empty cluster_key should be rejected")
+	}
+	if !strings.Contains(err.Error(), "cluster_key required") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestAnnotateCluster_RejectsEmptyAnnotation(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:empty", "annotate", "annotation cluster")
+
+	err := dm.AnnotateCluster("annotate:empty", "", "no-annotation")
+	if err == nil {
+		t.Error("empty annotation should be rejected")
+	}
+	if !strings.Contains(err.Error(), "annotation required") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestAnnotateCluster_RejectsUnknownCluster(t *testing.T) {
+	dm := newClusterTestDM(t)
+	err := dm.AnnotateCluster("does:not:exist", "some annotation", "")
+	if err == nil {
+		t.Error("unknown cluster should be rejected")
+	}
+	if !strings.Contains(err.Error(), "cluster not found") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestAnnotateCluster_NilDMDefensive(t *testing.T) {
+	var nilDM *DatabaseManager
+	err := nilDM.AnnotateCluster("x:y", "annotation", "")
+	if err == nil {
+		t.Error("nil DM should return error")
+	}
+}
+
+func TestAnnotateCluster_PriorStatusInAuditContext(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:prior", "annotate", "annotation cluster")
+
+	// Resolve first so prior_status='resolved'.
+	if err := dm.SetClusterStatus("annotate:prior", ClusterStatusResolved, "", "init"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dm.AnnotateCluster("annotate:prior", "week-later insight", "post-mortem"); err != nil {
+		t.Fatal(err)
+	}
+
+	var ctx sql.NullString
+	dm.db.QueryRow(
+		`SELECT context FROM system_audit_log WHERE component = 'cluster' AND message LIKE 'cluster annotated by agent%' ORDER BY id DESC LIMIT 1`,
+	).Scan(&ctx)
+	if !ctx.Valid {
+		t.Fatal("expected JSON context")
+	}
+	// prior_status and prior_count must be in the audit context so
+	// post-mortem readers can reconstruct what the cluster looked
+	// like when annotated.
+	if !strings.Contains(ctx.String, "resolved") {
+		t.Errorf("audit context should include prior_status=resolved, got: %s", ctx.String)
+	}
+	if !strings.Contains(ctx.String, "prior_count") {
+		t.Errorf("audit context should include prior_count, got: %s", ctx.String)
+	}
+	if !strings.Contains(ctx.String, "annotation") {
+		t.Errorf("audit context should include the full annotation text, got: %s", ctx.String)
+	}
+}
+
+func TestAnnotateCluster_ReasonOptional(t *testing.T) {
+	dm := newClusterTestDM(t)
+	seedClusterResolve(t, dm, "annotate:noreason", "annotate", "annotation cluster")
+
+	// No reason field — must still succeed.
+	if err := dm.AnnotateCluster("annotate:noreason", "no reason given", ""); err != nil {
+		t.Errorf("annotation without reason should succeed: %v", err)
+	}
+
+	// Audit context includes reason (possibly empty).
+	var ctx sql.NullString
+	dm.db.QueryRow(
+		`SELECT context FROM system_audit_log WHERE component = 'cluster' AND message LIKE 'cluster annotated by agent%' LIMIT 1`,
+	).Scan(&ctx)
+	if !ctx.Valid {
+		t.Error("audit context should be JSON-populated even without reason")
+	}
+	if !strings.Contains(ctx.String, "reason") {
+		t.Errorf("audit context should still include reason field (even if empty): %s", ctx.String)
+	}
+}
