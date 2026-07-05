@@ -246,6 +246,33 @@ var Registry = []Tool{
 		Handler:     handleListActiveClusters,
 	},
 	{
+		Name:        "snooze_cluster",
+		Description: "Temporarily hide an active audit cluster proposal. Auto-reactivates when snooze_until passes. Use when the cluster is a known noisy signal that should not dominate the wake context right now.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"cluster_key":  {"type": "string", "description": "The cluster_key from list_active_clusters (component:hash format)."},
+				"snooze_until": {"type": "string", "description": "ISO 8601 absolute (e.g. 2026-07-12T12:00:00Z) OR Go-relative duration (e.g. 24h, 7d, 1h30m). Required."},
+				"reason":       {"type": "string", "description": "Audit-friendly note — recorded in audit context for the watchdog stream."}
+			},
+			"required": ["cluster_key", "snooze_until"]
+		}`),
+		Handler: handleSnoozeCluster,
+	},
+	{
+		Name:        "resolve_cluster",
+		Description: "Permanently dismiss an active audit cluster proposal. Sets status=resolved; the cluster row stays in the table for forensics but is filtered out of list_active_clusters forever. Use when the cluster's root cause is known and it should no longer surface as an active signal.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"cluster_key": {"type": "string", "description": "The cluster_key from list_active_clusters (component:hash format)."},
+				"reason":      {"type": "string", "description": "Audit-friendly note explaining the resolution root cause."}
+			},
+			"required": ["cluster_key"]
+		}`),
+		Handler: handleResolveCluster,
+	},
+	{
 		Name:        "read_wake_context",
 		Description: "Read the agent's wake context — session state, active mode, recent memories.",
 		Schema:      json.RawMessage(`{"type":"object"}`),
