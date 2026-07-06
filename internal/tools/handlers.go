@@ -1372,6 +1372,25 @@ func handleListWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveConte
 	}), nil
 }
 
+// handleDigestWakes returns a compact summary of overdue + pending wakes.
+// Designed for the "agent wakes up after a long idle" case where listing
+// every overdue wake individually would blow out context. Returns age
+// buckets, top-N most overdue, total counts, and oldest overdue timestamp.
+//
+// Pass top_n (default 5) to control how many top-overdue rows are surfaced.
+func handleDigestWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	topN := 5
+	if v, ok := p["top_n"]; ok {
+		switch n := v.(type) {
+		case float64:
+			topN = int(n)
+		case int:
+			topN = n
+		}
+	}
+	return dm.DigestScheduledWakes(topN)
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral Scratchpad
 // ---------------------------------------------------------------------------

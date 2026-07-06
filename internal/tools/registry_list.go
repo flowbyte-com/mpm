@@ -506,6 +506,17 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"include_fired":{"type":"boolean"},"overdue_only":{"type":"boolean"},"limit":{"type":"number"}}}`),
 		Handler:     handleListWakes,
 	},
+	{
+		// Phase 5a: compact wake summary. For the "agent wakes up after
+		// a long idle" case — listing every overdue wake individually
+		// would blow out context. Digest returns age buckets + top-N
+		// most overdue + total counts in ~500 bytes regardless of how
+		// many wakes piled up.
+		Name:        "digest_wakes",
+		Description: "Compact summary of overdue + pending wakes. Returns age-bucket counts, top-N most overdue, and totals. Use at session start after long idle instead of list_wakes to avoid context blowout.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"top_n":{"type":"number","description":"How many top-overdue rows to surface (default 5)"}}}`),
+		Handler:     handleDigestWakes,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
