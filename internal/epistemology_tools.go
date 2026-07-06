@@ -51,7 +51,14 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 
 // ProposeTheory logs a hypothesis with validation criteria and auto-links
 // to the "theories" topic. Mirrors callProposeTheory.
-func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, tags []string) (map[string]interface{}, error) {
+//
+// dependencies: optional list of artifact IDs (memories, lessons, other
+// theories) that this theory's reasoning depends on. Stored as a JSON
+// array in the `dependencies` column. When any of these are deleted
+// (soft or hard), FireStaleFoundationWakes emits a wake per dependent
+// theory so the agent can re-evaluate. Empty/nil is fine — that's the
+// default for theories with no forward dependencies.
+func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, tags []string) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -59,9 +66,14 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 	if validationCriteria != "" {
 		content += "\n\nVALIDATION_CRITERIA: " + validationCriteria
 	}
+	depsJSON, err := encodeDependencyList(dependencies)
+	if err != nil {
+		return nil, fmt.Errorf("encode dependencies: %w", err)
+	}
 	meta := map[string]interface{}{
 		"status":              "pending",
 		"validation_criteria": validationCriteria,
+		"dependencies":        dependencies,
 	}
 	store, err := dm.getSharedStore()
 	if err != nil {
@@ -71,14 +83,43 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 	if err != nil {
 		return nil, fmt.Errorf("propose theory: %w", err)
 	}
+	// Persist dependencies in the dedicated column. AddMemory doesn't
+	// accept a column-list, so we patch via the SQL interface directly.
+	if depsJSON != "" {
+		if _, err := dm.db.Exec(
+			`UPDATE memories SET dependencies = ? WHERE id = ? AND collection = 'theories'`,
+			depsJSON, mem.ID,
+		); err != nil {
+			return nil, fmt.Errorf("persist dependencies: %w", err)
+		}
+	}
 	topicID, _ := dm.GetOrCreateTopic("theories")
 	dm.AddMemoryToTopic(mem.ID, topicID, "primary")
 	return map[string]interface{}{
-		"success":    true,
-		"id":         mem.ID,
-		"status":     "pending",
-		"hypothesis": hypothesis,
+		"success":      true,
+		"id":           mem.ID,
+		"status":       "pending",
+		"hypothesis":   hypothesis,
+		"dependencies": dependencies,
 	}, nil
+}
+
+// encodeDependencyList converts a dependency list to the JSON storage
+// format used in the `dependencies` column. Returns "" for empty/nil —
+// the empty string is the column's sentinel for "no dependencies",
+// distinct from NULL which means "column not yet populated" for
+// pre-migration rows. SQLite's json_each over an empty string returns
+// zero rows, so the wake-on-delete scan treats both cases as "no
+// forward dependencies".
+func encodeDependencyList(deps []string) (string, error) {
+	if len(deps) == 0 {
+		return "", nil
+	}
+	out, err := json.Marshal(deps)
+	if err != nil {
+		return "", fmt.Errorf("marshal deps: %w", err)
+	}
+	return string(out), nil
 }
 
 // ResolveTheory marks a theory as proven or disproven. Mirrors callResolveTheory.

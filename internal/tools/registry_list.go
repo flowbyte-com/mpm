@@ -47,8 +47,8 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "propose_theory",
-		Description: "Create a pending theory row in the memories table (collection='theories').",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"type":"string"}},"required":["hypothesis"]}`),
+		Description: "Create a pending theory row in the memories table (collection='theories'). Pass dependencies as a JSON array of artifact IDs (memories, lessons, theories) that this theory's reasoning depends on; deletion of any dependency fires a 'stale foundation' wake so the agent can re-evaluate.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"},"description":"Artifact IDs (memories/lessons/theories) this theory depends on. Deletion fires a stale-foundation wake."}},"required":["hypothesis"]}`),
 		Handler:     handleProposeTheory,
 	},
 	{
