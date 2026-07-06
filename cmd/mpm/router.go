@@ -393,6 +393,8 @@ func handleOps(args []string) int {
 		return handleSynthesize(append([]string{"synthesize"}, subArgs...))
 	case "shared":
 		return handleOpsShared(subArgs)
+	case "logs":
+		return handleOpsLogs(subArgs)
 	case "gc":
 		return handleGC(append([]string{"gc"}, subArgs...))
 	case "backfill-embeddings":

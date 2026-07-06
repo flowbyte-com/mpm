@@ -41,6 +41,20 @@ func isDuplicateColumnError(err error) bool {
 // via the MPM_LOG_ROTATE_BYTES environment variable.
 const defaultLogRotateBytes int64 = 5 * 1024 * 1024
 
+// LogRotateThresholdBytesForCLI is the CLI-accessible alias for
+// logRotateThresholdBytes. `mpm ops logs status` reads the current
+// threshold via this wrapper. Kept distinct from the unexported name so
+// the runtime call site doesn't accidentally bypass the env-var check.
+func LogRotateThresholdBytesForCLI() int64 { return logRotateThresholdBytes() }
+
+// RotateLogIfNeededForCLI is the CLI-accessible wrapper for
+// rotateLogIfNeeded. The CLI passes a threshold of 1 byte to force
+// rotation regardless of the configured MPM_LOG_ROTATE_BYTES — the
+// operator's intent in calling `mpm ops logs rotate` IS the force.
+func RotateLogIfNeededForCLI(path string, thresholdBytes int64) error {
+	return rotateLogIfNeeded(path, thresholdBytes)
+}
+
 // logRotateThresholdBytes resolves the current rotation threshold.
 // Reads MPM_LOG_ROTATE_BYTES (a non-negative integer); falls back to the
 // default. Invalid values (negative, non-numeric) are clamped to default
