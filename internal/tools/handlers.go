@@ -1395,6 +1395,15 @@ func handleDigestWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 	return dm.DigestScheduledWakes(topN)
 }
 
+// handleHealthCheck returns compact operational status for the agent:
+// PRAGMA integrity + SQLite page stats + domain counts + lifetime
+// SQLITE_BUSY retry counter. Designed for self-diagnosis when the
+// agent notices latency, timeouts, or storage pressure. Accepts no
+// parameters — the result is the entire payload.
+func handleHealthCheck(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	return dm.HealthCheck()
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral Scratchpad
 // ---------------------------------------------------------------------------
