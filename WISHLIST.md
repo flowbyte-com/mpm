@@ -1,7 +1,8 @@
 # WISHLIST — Multi-Agent Shared Epistemology
 
-**Status:** design brief, not yet implemented. Owner: TBD.
-**Target release:** post-2026-06-26 cleanup arc.
+**Status:** Core ATTACH architecture shipped (commits `18226c8`, `b37cab0`).
+The runtime substrate is in production. Remaining items below are
+incremental UX/scoping work, not architectural gaps.
 
 ---
 

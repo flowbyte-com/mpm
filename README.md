@@ -630,6 +630,39 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
+### 5.5 Multi-Agent Shared Epistemology
+
+Multiple agents on a single workstation can share a single source of truth for house rules, cross-project decisions, and durable conventions, while keeping their per-project tactical memories isolated. The substrate: SQLite `ATTACH DATABASE`.
+
+**The architecture.** Each workspace has its own `mpm.db` (per-project tactical memory). On `DatabaseManager` init, a second database — `~/.mpm/shared/shared.db` by default — is ATTACHed as the `shared` schema. Cross-DB queries become plain SQL:
+
+```sql
+SELECT m.id, m.content, 'shared' AS source
+FROM shared.memories m
+WHERE m.deleted_at IS NULL AND m.is_global = 1
+```
+
+The shared DB uses the **same table schema** as the local DB (full schema, not a subset). This keeps SQL simple — `shared.memories` is the same shape as `memories`. Migrations apply to both DBs at startup via the existing `SafeMigrations` framework. The `is_global` column on `memories` marks rows that originated as shared rules; local writes always set 0, shared writes always set 1.
+
+**Configuration.** Two environment variables:
+
+| Env var | Effect |
+|---|---|
+| `MPM_SHARED_DB` | Path to the shared DB. If unset or path missing, shared features are disabled (local-only mode). |
+| `MPM_SHARED_READONLY` | If `1`, attach in read-only mode. Default: read+write. |
+
+**What lives in shared vs local.** Shared = house rules that should apply across projects ("never expose secrets", "always tag migrations with rationale", "use the FTS5 tokenizer `porter unicode61`"). Local = everything else: project-specific facts, session state, tactical context, theories tied to local artifacts.
+
+**Concurrency model.** SQLite ATTACH is per-connection. Each MPM instance attaches its own connection. WAL mode on both DBs allows concurrent local writers without blocking. **Cross-DB transactions are NOT supported** — every shared write is its own atomic transaction on the shared DB. This is fine for the use case (rule records are append-mostly).
+
+**Operator gate.** Writing to shared (`record_global_rule`, `promote_to_global`) requires `confirm=true` in the tool payload. Without it the call is rejected. The agent cannot autonomously extend the shared rule set — only the operator can.
+
+**Read path in practice.** The agent's wake context (`read_wake_context`) surfaces both local memories and shared rules. `query_global_rules` is the dedicated shared-only read primitive. Hybrid recall combines both via the same scoring formula but with a small boost for shared results (house rules outrank noisy local memories).
+
+**Why SQLite ATTACH, not Postgres, not a separate service.** The design contract is single-workstation scope. SQLite ATTACH gives the architecture without adding a server, a network boundary, or a new failure mode. The trade-off is no cross-DB transactions — accepted because rule writes are append-mostly and operator-gated.
+
+See `WISHLIST.md` for the design brief and `internal/cluster_proposals.go`, `internal/shared_query_test.go`, and `internal/wake_context_global_rules_test.go` for the runtime substrate.
+
 ---
 
 ## 6. Core Stability
