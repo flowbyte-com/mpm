@@ -25,6 +25,26 @@ type HybridConfig struct {
 
 	// Limit: maximum results to return.
 	Limit int
+
+	// SchemaPrefix (since 2026-07-06): empty string targets the local
+	// 'memories'/'memories_fts' tables; "shared." targets the shared-DB
+	// equivalents via ATTACH. Set Origin at the same time so downstream
+	// consumers can render results distinctly.
+	//
+	// Used by Phase 2d of WISHLIST.md (Multi-Agent Shared Epistemology)
+	// to fuse local and shared-memory recall into one ranked stream.
+	// threading the prefix through searchFTS5/searchLike/VectorMatch
+	// keeps the search primitives schema-agnostic so the same code path
+	// runs against both ATTACHed databases.
+	SchemaPrefix string
+
+	// Origin: "local" (default) or "shared". Stamped onto every
+	// HybridResult the search returns. Distinct from Source below —
+	// Source describes the SEARCH METHOD that produced the row
+	// (fts5/vector/hybrid); Origin describes the DATA ORIGIN.
+	// Two different concerns; overloading them is a silent-regression
+	// trap (see WISHLIST Phase 2d for the rationale).
+	Origin string
 }
 
 // DefaultHybridConfig returns sensible defaults.
@@ -33,6 +53,8 @@ func DefaultHybridConfig() HybridConfig {
 		VectorWeight:       0.5,
 		RetrievalThreshold: -3.0, // BM25 can be negative; threshold here is on combined score
 		Limit:              15,
+		SchemaPrefix:       "",
+		Origin:             "local",
 	}
 }
 
@@ -51,7 +73,8 @@ type HybridResult struct {
 	FTS5Score          float64 // raw BM25
 	VectorSimilarity   float64 // cosine similarity (0.0–1.0)
 	CombinedScore      float64 // weighted blend
-	Source             string  // "fts5", "vector", "hybrid"
+	Source             string  // "fts5", "vector", "hybrid" — search method
+	Origin             string  // "local" | "shared" — data origin (Phase 2d)
 	IsChallenged       bool
 	IsConceptDrift     bool
 	ChallengedTheoryID string
@@ -68,12 +91,18 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	if cfg.VectorWeight < 0 || cfg.VectorWeight > 1 {
 		cfg.VectorWeight = 0.5
 	}
+	// Phase 2d (2026-07-06): default empty prefix + local origin.
+	// Callers targeting the shared DB set both explicitly so the same
+	// code path runs against either ATTACHed schema.
+	if cfg.Origin == "" {
+		cfg.Origin = "local"
+	}
 
 	// ── Step 1: FTS5 keyword search ──────────────────────────────────────────
-	ftsResults, err := searchFTS5(dm.SQLDB(), query, collection, cfg.Limit*2)
+	ftsResults, err := searchFTS5(dm.SQLDB(), query, collection, cfg.Limit*2, cfg.SchemaPrefix)
 	if err != nil {
 		// Fall back to LIKE if FTS5 is unavailable
-		ftsResults, err = searchLike(dm.SQLDB(), query, collection, cfg.Limit*2)
+		ftsResults, err = searchLike(dm.SQLDB(), query, collection, cfg.Limit*2, cfg.SchemaPrefix)
 		if err != nil {
 			return nil, fmt.Errorf("hybrid search: FTS5/LIKE failed: %w", err)
 		}
@@ -85,7 +114,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	if provider.Name() != "null" {
 		vec, err := provider.Embed(query)
 		if err == nil && len(vec) > 0 {
-			vecResults, err = dm.VectorMatch(collection, vec, cfg.Limit*2)
+			vecResults, err = dm.VectorMatch(collection, vec, cfg.Limit*2, cfg.SchemaPrefix)
 			// VecResults already sorted by similarity; ignore error and continue
 		}
 	}
@@ -180,6 +209,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			VectorSimilarity:   vecSim,
 			CombinedScore:      combinedScore,
 			Source:             source,
+			Origin:             cfg.Origin,
 			IsChallenged:       isChallenged,
 			IsConceptDrift:     isConceptDrift,
 			ChallengedTheoryID: challengedTheoryID,
@@ -210,11 +240,14 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		isChallenged bool
 		metadataJSON string
 	}
+	// Phase 2d: build the contradiction lookup once with the schema prefix.
+	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
+	contradictionTable := cfg.SchemaPrefix + "memories"
 	candMap := make(map[string]candidateInfo, scanLimit)
 	for _, c := range scanSet {
 		var embStr string
 		err := dm.SQLDB().QueryRow(
-			`SELECT embedding, COALESCE(metadata, '{}') FROM memories WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`,
+			fmt.Sprintf(`SELECT embedding, COALESCE(metadata, '{}') FROM %s WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`, contradictionTable),
 			c.ID,
 		).Scan(&embStr, &c.Metadata)
 		if err == nil && embStr != "" {
@@ -378,15 +411,20 @@ type VectorMatch struct {
 }
 
 // searchFTS5 runs FTS5 MATCH with bm25 scoring.
-func searchFTS5(db *sql.DB, query, collection string, limit int) ([]ftsEntry, error) {
+func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix string) ([]ftsEntry, error) {
+	// schemaPrefix is either "" (local) or "shared." (ATTACHed shared DB).
+	// Constants only — never user input — so direct concatenation is safe.
+	// FTS5 bm25() requires the virtual table's full qualified name.
+	ftsTable := schemaPrefix + "memories_fts"
+	memTable := schemaPrefix + "memories"
 	sqlQuery := `
 		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
 		       m.created_at, m.reinforcement_count, m.weight,
 		       m.last_accessed_at, m.reference_id,
-		       bm25(memories_fts) AS score
-		FROM memories_fts
-		JOIN memories m ON memories_fts.rowid = m.rowid
-		WHERE memories_fts MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
+		       bm25(` + ftsTable + `) AS score
+		FROM ` + ftsTable + `
+		JOIN ` + memTable + ` m ON ` + ftsTable + `.rowid = m.rowid
+		WHERE ` + ftsTable + ` MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 		  AND (? = '' OR m.collection = ?)
 		ORDER BY score
 		LIMIT ?`
@@ -399,14 +437,15 @@ func searchFTS5(db *sql.DB, query, collection string, limit int) ([]ftsEntry, er
 }
 
 // searchLike is the FTS5 fallback using LIKE.
-func searchLike(db *sql.DB, query, collection string, limit int) ([]ftsEntry, error) {
+func searchLike(db *sql.DB, query, collection string, limit int, schemaPrefix string) ([]ftsEntry, error) {
 	likePat := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
+	memTable := schemaPrefix + "memories"
 	sqlQuery := `
 		SELECT id, content, collection, tags, metadata,
 		       created_at, reinforcement_count, weight,
 		       last_accessed_at, reference_id,
 		       0.0 AS score
-		FROM memories
+		FROM ` + memTable + `
 		WHERE content LIKE ? AND deleted_at IS NULL` + MemoryExpireClause + `
 		  AND (? = '' OR collection = ?)
 		ORDER BY created_at DESC
@@ -445,7 +484,11 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 // VectorMatch searches the memories table for vector similarity.
 // This uses the existing in-memory approach (JSON embedding column).
 // DatabaseManager.VectorMatch is the method — this is a top-level wrapper.
-func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int) ([]VectorMatch, error) {
+//
+// schemaPrefix (since Phase 2d, 2026-07-06): empty for local tables,
+// "shared." for ATTACHed shared DB. Constrained to two values; safe
+// to interpolate directly into the table reference.
+func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int, schemaPrefix string) ([]VectorMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -455,10 +498,11 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 		colClause = "AND collection = ?"
 		args = append(args, collection)
 	}
+	memTable := schemaPrefix + "memories"
 
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, embedding
-		FROM memories
+		FROM `+memTable+`
 		WHERE embedding IS NOT NULL AND embedding != 'null' AND deleted_at IS NULL`+MemoryExpireClause+` `+colClause,
 		args...)
 	if err != nil {

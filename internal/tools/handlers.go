@@ -133,7 +133,11 @@ func handleQueryLongTermMemory(dm *mpminternal.DatabaseManager, ac mpminternal.A
 	}
 	collection, _ := p["collection"].(string)
 
-	items, err := dm.HybridSearchMemories(query, collection, limit)
+	// Phase 2d: scope param (all|local|shared). Empty / missing
+	// defaults to "all" inside the DM method.
+	scope, _ := p["scope"].(string)
+
+	items, err := dm.HybridSearchMemories(query, collection, limit, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +145,22 @@ func handleQueryLongTermMemory(dm *mpminternal.DatabaseManager, ac mpminternal.A
 		"success":  true,
 		"memories": items,
 		"count":    len(items),
+		"scope":    defaultScope(scope),
 	}, nil
+}
+
+// defaultScope normalises the user-supplied scope string to one of
+// the three recognised values. Centralised here so the surface stays
+// consistent across MCP and CLI callers.
+func defaultScope(s string) string {
+	switch s {
+	case "local":
+		return "local"
+	case "shared":
+		return "shared"
+	default:
+		return "all"
+	}
 }
 
 // callChallengeMemory weakens a memory and creates a pending theory.
