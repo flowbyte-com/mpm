@@ -66,7 +66,7 @@ var Registry = []Tool{
 	{
 		Name:        "search_lessons",
 		Description: "Search MPM lessons by content query.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}},"required":["query"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		Handler:     handleSearchLessons,
 	},
 	{
@@ -95,8 +95,8 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "add_reference",
-		Description: "Add an external reference document (file_path, content) to MPM.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"filepath":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}},"required":["filepath"]}`),
+		Description: "Add an external reference document by reading its file path into MPM.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"filepath":{"type":"string"},"title":{"type":"string"}},"required":["filepath"]}`),
 		Handler:     handleAddReference,
 	},
 	{
@@ -120,10 +120,8 @@ var Registry = []Tool{
 				"artifact_id":         {"type": "string",  "description": "ID of the artifact (memory/theory/decision/lesson) this evidence attaches to. To attach to a theory, set artifact_type='theory'."},
 				"artifact_type":       {"type": "string",  "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Type of the artifact. Defaults to 'memory' if omitted."},
 				"type":                {"type": "string",  "enum": ["observation","test","reproduction","challenge","decision_outcome","external_reference"], "description": "Evidence type. Determines default strength when strength is not provided (challenge is negative; the rest are positive)."},
-				"source_group":        {"type": "string",  "description": "Grouping tag for the source, e.g. 'wc2026 R32' or 'audit-trail-2026-07'."},
-				"source_url":          {"type": "string",  "description": "Optional URL of the source."},
-				"source_path":         {"type": "string",  "description": "Optional filesystem path of the source."},
-				"notes":               {"type": "string",  "description": "Optional narrative note about the evidence."},
+				"source_group":        {"type": "string",  "description": "Grouping tag for the source, e.g. 'wc2026 R32' or 'audit-trail-2026-07'. Use 'notes' for narrative context, citations, or per-evidence rationale."},
+				"notes":               {"type": "string",  "description": "Optional narrative note about the evidence — use this for citations, URLs, file paths, or any context the source_group tag can't carry."},
 				"created_by":          {"type": "string",  "description": "Creator/agent identifier."},
 				"strength":            {"type": "number",  "minimum": -1, "maximum": 1, "description": "Optional. Strength in [-1, 1]; defaults to the type's registry value when omitted. Use negative for refuting evidence (challenge type defaults to -0.6)."},
 				"independence_factor": {"type": "number",  "default": 1.0,  "description": "Optional independence factor for confidence aggregation; defaults to 1.0."}
@@ -441,7 +439,7 @@ var Registry = []Tool{
 	{
 		Name:        "review_memories",
 		Description: "List memories due for spaced-repetition review.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":20},"stale_only":{"type":"boolean","default":false},"days":{"type":"number","default":30,"description":"Optional. Stale window in days; default 30."}}}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":20},"days":{"type":"number","default":30,"description":"Optional. Stale window in days; default 30."}}}`),
 		Handler:     handleReviewMemories,
 	},
 	{
