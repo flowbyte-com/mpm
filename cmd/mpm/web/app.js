@@ -199,7 +199,7 @@ async function doSearch() {
     if (!data) return;
     renderSearchResults(data, el);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><p>Search failed: ' + err.message + '</p></div>';
+    el.innerHTML = '<div class="empty-state"><p>Search failed: ' + esc(err.message) + '</p></div>';
   }
 }
 
@@ -258,7 +258,7 @@ async function loadMemories() {
     renderMemories(data.items || [], el);
     renderMemPagination(data);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + err.message + '</p></div>';
+    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + esc(err.message) + '</p></div>';
   }
 }
 
@@ -409,7 +409,7 @@ async function loadTopics() {
     if (!data) return;
     renderTopics(data.items || [], el);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + err.message + '</p></div>';
+    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + esc(err.message) + '</p></div>';
   }
 }
 
@@ -503,7 +503,7 @@ async function loadLessons() {
     if (!data) return;
     renderLessons(data.items || [], el);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + err.message + '</p></div>';
+    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + esc(err.message) + '</p></div>';
   }
 }
 
@@ -581,7 +581,7 @@ async function loadDirectives() {
     if (!data) return;
     renderMemories(data.items || [], el);
   } catch (err) {
-    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + err.message + '</p></div>';
+    el.innerHTML = '<div class="empty-state"><p>Failed to load: ' + esc(err.message) + '</p></div>';
   }
 }
 
