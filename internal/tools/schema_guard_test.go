@@ -105,6 +105,17 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 		// positives on the passthrough pattern. Handlers that read
 		// nothing AND the schema has no properties are fine; the
 		// under-decl pass already covered that.
+		//
+		// LIMITATION (verified 2026-07-06): in the current codebase,
+		// all zero-read handlers also have empty schemas
+		// (read_wake_context, read_directives, check_wakes,
+		// list_active_clusters, query_memory_quality). If a future
+		// tool has a non-empty schema AND reads zero keys, the over-
+		// decl check WILL skip it and a real silent-drop bug could
+		// land. The audit at the time found no such case. If one
+		// appears, either: (a) make the handler read the keys
+		// explicitly, or (b) add a passthrough detector that
+		// recognizes `return dm.X(payload[, ...])` patterns.
 		if len(reads) == 0 {
 			continue
 		}

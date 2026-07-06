@@ -814,7 +814,6 @@ func handleOpsInit(args []string) int {
 	case "directives":
 		return handleOpsInitDirectives(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown init subcommand: %q (want: directives)\n", sub)
-		return 1
+		return usererror.Error("unknown init subcommand: %q (want: directives)", sub)
 	}
 }
