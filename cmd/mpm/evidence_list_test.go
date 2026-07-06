@@ -1,14 +1,11 @@
 package main
 
 import (
-	"database/sql"
-	"path/filepath"
 	"testing"
 	"time"
 
 	mpminternal "mpm/internal"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,19 +23,14 @@ func TestEvidenceList_RequiresArtifact(t *testing.T) {
 	assert.Contains(t, err.Error(), "--artifact")
 }
 
-// TestEvidenceList_EndToEnd exercises the full path: real temp DB, add evidence,
-// list it, assert the row comes back. Closes the production-path coverage gap.
+// TestEvidenceList_EndToEnd exercises the full path: in-memory DatabaseManager
+// via internal.NewTestDM, add evidence, list it, assert the row comes back.
+// Closes the production-path coverage gap.
 func TestEvidenceList_EndToEnd(t *testing.T) {
-	// Build a real DatabaseManager on a temp file.
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := mpminternal.NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
+	dm := mpminternal.NewTestDM(t)
 
 	// Insert a memory to attach evidence to.
-	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES ('mem-1', 'memories', 'x')`, 0)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES ('mem-1', 'memories', 'x')`, 0)
 	require.NoError(t, err)
 
 	// Add two pieces of evidence.

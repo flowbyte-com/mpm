@@ -18,26 +18,17 @@ package internal
 // These tests pin the structural-topic exclusion contract.
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	_ "github.com/mattn/go-sqlite3"
-	"database/sql"
 )
 
-// newTestDMForWake mirrors the pattern in call_evidence_test.go: a fresh
-// sqlite3 file in t.TempDir() + InitSchema. Used by wake-context tests so
-// the test never touches the workspace database.
+// newTestDMForWake returns a hermetic in-memory DatabaseManager. Used by
+// wake-context tests so the test never touches the workspace database.
+// Backed by NewTestDM so the DSN strategy stays in one place.
 func newTestDMForWake(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "wake-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 // seedTopic inserts a topic row with the given name, description, and

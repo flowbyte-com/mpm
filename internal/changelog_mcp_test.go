@@ -1,34 +1,18 @@
 package internal
 
 import (
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
 	"strings"
 	"testing"
 )
 
-// newTestChangelogDM returns a per-test in-memory DM. Same pattern
-// as newTestRefDM but with a different DSN prefix so a future
-// refactor that shares the cache globally cannot accidentally
-// cross-contaminate reference and changelog tests.
+// newTestChangelogDM returns a per-test in-memory DM. The DSN strategy
+// (unique shared-cache name per test) is now centralized in
+// internal/testhelpers.go::NewTestDM, so cross-contamination between
+// reference / changelog / synthesis test families cannot happen —
+// each call gets a unique counter-derived name.
 func newTestChangelogDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		t.Fatalf("rand.Read: %v", err)
-	}
-	dsn := "file:changelog_" + hex.EncodeToString(suffix) + "?mode=memory&cache=shared"
-	raw, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	dm := NewDatabaseManagerForDB(raw)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { _ = raw.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 func TestLogChangelogEntry_HappyPath(t *testing.T) {

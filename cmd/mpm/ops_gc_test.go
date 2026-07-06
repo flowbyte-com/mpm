@@ -22,14 +22,12 @@ package main
 
 import (
 	"database/sql"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"mpm/internal"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,13 +56,7 @@ func gcClaimSlot(t *testing.T, db *sql.DB, ts string, maxAgeHours int) int64 {
 
 func newTestDM(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "gc-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := internal.NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return internal.NewTestDM(t)
 }
 
 func TestGCLock_FreshDB_ClaimsSlot(t *testing.T) {

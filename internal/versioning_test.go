@@ -1,12 +1,10 @@
 package internal
 
 import (
-	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,7 +17,6 @@ func TestMemoryVersioning(t *testing.T) {
 	tMinus15 := now.Add(-15 * time.Minute)
 
 	dm := versioningFreshDB(t)
-	defer dm.Close()
 
 	sourceContent := "This is the original version 1 content for testing."
 	updatedContent := "This is version 2 with significantly modified content."
@@ -107,22 +104,18 @@ func TestMemoryVersioning(t *testing.T) {
 	})
 }
 
-// versioningFreshDB creates a fully isolated DatabaseManager for versioning tests.
+// versioningFreshDB returns a hermetic in-memory DatabaseManager. The
+// consolidation lives in internal/testhelpers.go::NewTestDM. Cleanup is
+// registered automatically — callers do NOT need `defer dm.Close()`.
 func versioningFreshDB(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := t.TempDir() + "/versioning_test.db"
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	return dm
+	return NewTestDM(t)
 }
 
 // TestMemoryVersioningConcurrent verifies the race-free version numbering
 // under concurrent WAL writes using the SQLite MAX(subquery) pattern.
 func TestMemoryVersioningConcurrent(t *testing.T) {
 	dm := versioningFreshDB(t)
-	defer dm.Close()
 
 	// Create one memory and manually set its revision timestamps
 	id, err := dm.SaveMemory("memories", "concurrent test base content", "", nil, nil, nil, false, 1)

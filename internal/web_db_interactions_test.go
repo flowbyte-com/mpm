@@ -2,46 +2,23 @@ package internal
 
 import (
 	"database/sql"
-	"os"
 	"strings"
 	"testing"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
-// setupTestDM creates a DatabaseManager backed by a temp DB with the
-// reference_interactions schema applied. Returns the dm and a cleanup func.
+// setupTestDM returns a hermetic in-memory DatabaseManager. The
+// consolidation lives in internal/testhelpers.go::NewTestDM — cleanup
+// is registered automatically, so callers do NOT need a defer.
 // NOTE: NewDatabaseManager() ignores its argument and uses config.GetMPMDir().
 // Tests must use NewDatabaseManagerForDB with a fresh *sql.DB to avoid
 // polluting the live MPM database.
-func setupTestDM(t *testing.T) (*DatabaseManager, func()) {
+func setupTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmpFile, err := os.CreateTemp("", "mpm-int-test-*.db")
-	if err != nil {
-		t.Fatalf("create temp: %v", err)
-	}
-	tmpFile.Close()
-	dbPath := tmpFile.Name()
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		os.Remove(dbPath)
-		t.Fatalf("sql.Open: %v", err)
-	}
-	dm := NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		db.Close()
-		os.Remove(dbPath)
-		t.Fatalf("InitSchema: %v", err)
-	}
-	return dm, func() {
-		db.Close()
-		os.Remove(dbPath)
-	}
+	return NewTestDM(t)
 }
 
 func TestReferenceInteractionsTableExists(t *testing.T) {
-	dm, cleanup := setupTestDM(t)
-	defer cleanup()
+	dm := setupTestDM(t)
 
 	// The interactions table should exist after InitSchema.
 	row := dm.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='reference_interactions'`)
@@ -55,8 +32,7 @@ func TestReferenceInteractionsTableExists(t *testing.T) {
 }
 
 func TestReferenceInteractionRecordAndRead(t *testing.T) {
-	dm, cleanup := setupTestDM(t)
-	defer cleanup()
+	dm := setupTestDM(t)
 
 	// Insert a reference doc first, with one chunk so FTS5 has content.
 	doc := &ReferenceDoc{
@@ -109,8 +85,7 @@ func TestReferenceInteractionFilterShortQuery(t *testing.T) {
 	// by ensuring short queries do not land in the table when called via
 	// the public SearchReferenceChunks path. This test requires a doc with
 	// matching content.
-	dm, cleanup := setupTestDM(t)
-	defer cleanup()
+	dm := setupTestDM(t)
 
 	doc := &ReferenceDoc{
 		ID:           "test-doc-2",
@@ -148,8 +123,7 @@ func TestReferenceInteractionFilterShortQuery(t *testing.T) {
 }
 
 func TestReferenceMostUsedAggregation(t *testing.T) {
-	dm, cleanup := setupTestDM(t)
-	defer cleanup()
+	dm := setupTestDM(t)
 
 	// Two docs, one is searched 3 times with 2 distinct queries,
 	// the other is searched once. Aggregation should rank the first.

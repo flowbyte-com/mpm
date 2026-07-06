@@ -1,29 +1,21 @@
 package internal
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// freshReferenceDM returns an isolated DatabaseManager wired to a fresh
-// sqlite file in t.TempDir(). Mirrors the helper in reliability_sprint_test.go
-// but does not depend on the synthesis worker schema — keeps this test
-// focused on the reference ingestion + search contract.
+// freshReferenceDM returns a hermetic in-memory DatabaseManager. The
+// consolidation lives in internal/testhelpers.go::NewTestDM so the DSN
+// strategy stays in one place.
 func freshReferenceDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "mcp_ingest_test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	return dm
+	return NewTestDM(t)
 }
 
 // TestMCPAddReferenceIsSearchable locks in the fix for the bug where
