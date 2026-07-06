@@ -836,3 +836,5 @@ func TestHandleHealthCheck_ReflectsState(t *testing.T) {
 		t.Errorf("memories_active: got %d, want 1", n)
 	}
 }
+
+// ── annotate_cluster ──────────────────────────────────────────────────
