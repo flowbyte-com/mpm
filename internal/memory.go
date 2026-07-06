@@ -1961,6 +1961,16 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 		return fmt.Errorf("no memory record found (id: %s, collection: %s)", id, collection)
 	}
 
+	// Stale-foundation reconciliation: any theory whose forward
+	// dependencies reference this memory must be notified. Best-effort —
+	// a failure to fire wakes here does not roll back the delete, but it
+	// IS logged via the returned wake count (caller can check).
+	// The hook only fires when the MemoryStore has a DM (production path);
+	// legacy callers without DM (the s.DB != nil init path) skip it.
+	if s.DM != nil {
+		_, _ = s.DM.FireStaleFoundationWakes(id)
+	}
+
 	return nil
 }
 

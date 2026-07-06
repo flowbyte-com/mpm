@@ -457,4 +457,10 @@ var SafeMigrations = [][3]string{
 	{"reference_docs", "import_reason", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
 	{"reference_chunks", "embedding",     "BLOB"},
+	// dependencies: JSON array of artifact IDs that this theory depends on
+	// (forward edges: theory -> memory/lesson/theory). Populated only on
+	// collection='theories' rows. FireStaleFoundationWakes scans this column
+	// on memory delete to detect "foundational rotted, theory orphaned".
+	// Format: JSON array of strings, e.g. ["mem-abc","les-def"].
+	{"memories", "dependencies",       "TEXT"},
 }

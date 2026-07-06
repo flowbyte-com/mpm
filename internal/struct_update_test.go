@@ -168,7 +168,7 @@ func TestRecordDecision_SetsInitialConfidence(t *testing.T) {
 // MemoryStore.AddMemory → InitialConfidence("theory") = 0.5.
 func TestProposeTheory_SetsInitialConfidence(t *testing.T) {
 	dm := newTestDM(t)
-	res, err := dm.ProposeTheory("theory hypothesis", "criteria", nil)
+	res, err := dm.ProposeTheory("theory hypothesis", "criteria", nil, nil)
 	require.NoError(t, err)
 	id, _ := res["id"].(string)
 	require.NotEmpty(t, id)

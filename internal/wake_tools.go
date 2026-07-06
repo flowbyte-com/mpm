@@ -27,9 +27,11 @@ package internal
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -375,6 +377,82 @@ func (dm *DatabaseManager) DigestScheduledWakes(topN int) (map[string]interface{
 		out["oldest_overdue_reason"] = oldestReason
 	}
 	return out, nil
+}
+
+// FireStaleFoundationWakes scans theories whose `dependencies` column
+// contains deletedArtifactID and fires one wake per match. Called from
+// MemoryStore.DeleteMemory (soft) and DatabaseManager.ShredMemory
+// (hard) — both paths funnel through here so the reconciliation surface
+// is symmetric regardless of how the foundation rotted.
+//
+// The wake is fired with a small delay (default 60 seconds) so the
+// agent that deleted the artifact can finish its current operation
+// before being interrupted. The reason is human-readable; the
+// metadata carries structured fields (theory_id, missing_artifact_id)
+// for programmatic consumers.
+//
+// Returns the count of wakes fired. Zero is normal — most memories
+// aren't dependencies of any theory. Errors are non-fatal: a failure
+// to fire one wake should not abort the upstream delete.
+//
+// Cost: O(theories) row scan with json_each per row. Fine at current
+// scale (theories < 1K). The edge table that would replace this
+// (with a memory_id -> theories reverse index) is a future optimization
+// — we are not at the scale where it matters yet.
+func (dm *DatabaseManager) FireStaleFoundationWakes(deletedArtifactID string) (int, error) {
+	if deletedArtifactID == "" {
+		return 0, nil
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT id, dependencies
+		FROM memories
+		WHERE collection = 'theories'
+		  AND deleted_at IS NULL
+		  AND dependencies IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1 FROM json_each(dependencies)
+		    WHERE value = ?
+		  )
+	`, deletedArtifactID)
+	if err != nil {
+		return 0, fmt.Errorf("scan dependent theories: %w", err)
+	}
+	defer rows.Close()
+
+	fired := 0
+	var failures []string
+	for rows.Next() {
+		var theoryID string
+		var depsJSON sql.NullString
+		if err := rows.Scan(&theoryID, &depsJSON); err != nil {
+			return fired, fmt.Errorf("scan dependent theory row: %w", err)
+		}
+		// Target ~60s in the future so the deleting operation can
+		// complete before the wake surfaces. Convert to absolute
+		// unix seconds via time.Time.
+		targetTime := strconv.FormatInt(time.Now().Add(60*time.Second).Unix(), 10)
+		meta := map[string]interface{}{
+			"type":                 "stale_foundation",
+			"theory_id":            theoryID,
+			"missing_artifact_id":  deletedArtifactID,
+			"detected_at":          time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		reason := fmt.Sprintf("Stale foundation: theory %s depends on missing artifact %s",
+			theoryID, deletedArtifactID)
+		if _, err := dm.ScheduleWake(reason, targetTime, theoryID, "", "mpm-reconcile", meta); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", theoryID, err))
+			continue
+		}
+		fired++
+	}
+	if err := rows.Err(); err != nil {
+		return fired, fmt.Errorf("iterate dependent theories: %w", err)
+	}
+	if len(failures) > 0 {
+		return fired, fmt.Errorf("partial failure firing stale-foundation wakes: %v", failures)
+	}
+	return fired, nil
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

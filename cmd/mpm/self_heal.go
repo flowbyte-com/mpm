@@ -218,7 +218,7 @@ func handleSelfHeal(args []string) int {
 		hypothesis, criteria := buildDriftTheory(scan, *dryRun)
 		tagsJSON, _ := json.Marshal([]string{"mpm", "self-heal", "fts5", "drift", "auto-escalated"})
 		if !*dryRun {
-			t, terr := dm.ProposeTheory(hypothesis, criteria, []string{"mpm", "self-heal", "fts5", "drift", "auto-escalated"})
+			t, terr := dm.ProposeTheory(hypothesis, criteria, nil, []string{"mpm", "self-heal", "fts5", "drift", "auto-escalated"})
 			if terr != nil {
 				usererror.Warn("self-heal: theory injection failed: %v", terr)
 			} else {

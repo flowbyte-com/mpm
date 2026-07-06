@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestCascadingDecay_TheoryConfidenceUnchangedWhenUnderlyingMemoryDeleted(t *
 	// The validation_criteria text mentions memID — that's the only place
 	// the dependency is recorded in the current schema.
 	hypothesis := fmt.Sprintf("T depends on memory %s being true", memID)
-	res, err := dm.ProposeTheory(hypothesis, "if M is shredded, T should be re-evaluated", []string{"test", "cascading-decay"})
+	res, err := dm.ProposeTheory(hypothesis, "if M is shredded, T should be re-evaluated", nil, []string{"test", "cascading-decay"})
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
 	require.NotEmpty(t, theoryID)
@@ -137,4 +138,129 @@ func TestCascadingDecay_TheoryConfidenceUnchangedWhenUnderlyingMemoryDeleted(t *
 			"Until reconcile_theories is built, this drift is silent — the theory continues to "+
 			"claim whatever it claimed with unchanged confidence, even though a foundation has rotted.",
 		confAfterEvidence, confAfterMemDeleted)
+}
+// TestStaleFoundationWake_FiresOnDeclaredDependencyRemoval is the positive
+// counterpart to the forcing function above. With the dependencies JSON
+// column in place, a theory that EXPLICITLY declares a dependency
+// triggers a stale-foundation wake when that dependency is soft-deleted.
+//
+// This is the visible proof that Gap #2 is closed: forward dependency
+// edges are now part of the schema, and the substrate emits a wake
+// when the edge breaks. The agent decides what to do with the wake
+// (re-evaluate the theory, mark it disproven, dismiss).
+//
+// Sequence:
+//  1. Insert memory M.
+//  2. Propose theory T with explicit dependencies=[M.id].
+//  3. Soft-delete M.
+//  4. Assert: a wake exists with theory_id=T.id and
+//     metadata.missing_artifact_id=M.id.
+func TestStaleFoundationWake_FiresOnDeclaredDependencyRemoval(t *testing.T) {
+	dm := newTestDM(t)
+
+	// Step 1: foundational memory M.
+	memID, err := dm.SaveMemory(
+		"memories",
+		"Stale foundation test: M is a foundational fact.",
+		"", nil, nil, nil,
+		false, 5,
+	)
+	require.NoError(t, err)
+
+	// Step 2: theory T that explicitly declares M as a dependency.
+	res, err := dm.ProposeTheory(
+		"T depends on M",
+		"if M is shredded, T is orphaned",
+		[]string{memID}, // <-- the new dependencies parameter
+		[]string{"test", "stale-foundation"},
+	)
+	require.NoError(t, err)
+	theoryID, _ := res["id"].(string)
+	require.NotEmpty(t, theoryID)
+
+	// Verify dependencies column was persisted.
+	var depsJSON sql.NullString
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT dependencies FROM memories WHERE id = ?`, theoryID,
+	).Scan(&depsJSON))
+	require.True(t, depsJSON.Valid, "dependencies column should be populated")
+	require.Contains(t, depsJSON.String, memID, "dependencies JSON should contain M's id")
+
+	// Step 3: soft-delete M via the production path.
+	store := &MemoryStore{DM: dm, DB: &SQLiteConnection{DB: dm.SQLDB()}}
+	require.NoError(t, store.DeleteMemory(memID, "memories"))
+
+	// Step 4: assert the stale-foundation wake fired with the right payload.
+	var wakeCount int
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE theory_id = ?`, theoryID,
+	).Scan(&wakeCount))
+	require.Equal(t, 1, wakeCount, "exactly one stale-foundation wake should fire for the dependent theory")
+
+	// Verify the wake carries structured metadata for programmatic consumers.
+	rows, err := dm.SQLDB().Query(`
+		SELECT reason, metadata FROM scheduled_wakes WHERE theory_id = ?
+	`, theoryID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next(), "expected at least one row from the wake query")
+
+	var reason, metaJSON string
+	require.NoError(t, rows.Scan(&reason, &metaJSON))
+	require.Contains(t, reason, memID, "wake reason should mention the missing artifact")
+	require.Contains(t, reason, theoryID, "wake reason should mention the dependent theory")
+	require.Contains(t, metaJSON, `"type":"stale_foundation"`, "metadata should carry structured type field")
+	require.Contains(t, metaJSON, `"theory_id":"`+theoryID+`"`, "metadata should carry the dependent theory id")
+	require.Contains(t, metaJSON, `"missing_artifact_id":"`+memID+`"`, "metadata should carry the missing artifact id")
+}
+
+// TestStaleFoundationWake_NoWakeForUnrelatedDelete confirms the hook
+// is scoped: deleting a memory that NO theory depends on fires zero
+// wakes. The reconcile must be a no-op for the common case.
+func TestStaleFoundationWake_NoWakeForUnrelatedDelete(t *testing.T) {
+	dm := newTestDM(t)
+
+	// Memory M1, theory T1 that depends on M1.
+	mem1ID, err := dm.SaveMemory("memories", "M1 is foundational.", "", nil, nil, nil, false, 5)
+	require.NoError(t, err)
+	_, err = dm.ProposeTheory("T1 depends on M1", "", []string{mem1ID}, []string{"test"})
+	require.NoError(t, err)
+
+	// Unrelated memory M2 — no theory depends on it.
+	mem2ID, err := dm.SaveMemory("memories", "M2 is unrelated.", "", nil, nil, nil, false, 5)
+	require.NoError(t, err)
+
+	store := &MemoryStore{DM: dm, DB: &SQLiteConnection{DB: dm.SQLDB()}}
+	require.NoError(t, store.DeleteMemory(mem2ID, "memories"))
+
+	// No wake should have fired for T1 (T1's dependency M1 is still alive).
+	var wakeCount int
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT COUNT(*) FROM scheduled_wakes`,
+	).Scan(&wakeCount))
+	assert.Equal(t, 0, wakeCount, "deleting an unrelated memory should fire zero wakes")
+}
+
+// TestStaleFoundationWake_TheoryWithNoDependenciesStillClean confirms
+// the new column doesn't break the legacy path: theories with no
+// declared dependencies (the historical default) behave exactly as
+// before — soft-delete of any memory fires zero wakes for them.
+func TestStaleFoundationWake_TheoryWithNoDependenciesStillClean(t *testing.T) {
+	dm := newTestDM(t)
+
+	memID, err := dm.SaveMemory("memories", "M is a fact.", "", nil, nil, nil, false, 5)
+	require.NoError(t, err)
+
+	// Theory with NO declared dependencies (legacy-style propose).
+	_, err = dm.ProposeTheory("T makes no dependency claims", "", nil, []string{"test"})
+	require.NoError(t, err)
+
+	store := &MemoryStore{DM: dm, DB: &SQLiteConnection{DB: dm.SQLDB()}}
+	require.NoError(t, store.DeleteMemory(memID, "memories"))
+
+	var wakeCount int
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT COUNT(*) FROM scheduled_wakes`,
+	).Scan(&wakeCount))
+	assert.Equal(t, 0, wakeCount, "theory with no declared deps should fire no wakes on unrelated delete")
 }
