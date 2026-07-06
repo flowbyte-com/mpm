@@ -171,7 +171,24 @@ func handleProposeTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 		dependencies = []string{}
 	}
 
-	return dm.ProposeTheory(hypothesis, validationCriteria, dependencies, tags)
+	result, err := dm.ProposeTheory(hypothesis, validationCriteria, dependencies, tags)
+	if err != nil {
+		return nil, err
+	}
+	// Forensic log — deliberate theory proposal. AuditInfo is gated
+	// out of cluster detection in LogAudit (see audit.go).
+	if id, ok := result["id"].(string); ok && id != "" {
+		dm.LogAudit(
+			mpminternal.AuditInfo, "epistemology",
+			fmt.Sprintf("propose_theory %s", id), "",
+			mpminternal.AuditContext{
+				"theory_id":      id,
+				"dependencies":   len(dependencies),
+				"validation_set": validationCriteria != "",
+			},
+		)
+	}
+	return result, nil
 }
 
 // callResolveTheory marks a theory as proven or disproven.
@@ -189,7 +206,24 @@ func handleResolveTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
 	}
 
-	return dm.ResolveTheory(theoryID, conclusion, newStatus)
+	result, err := dm.ResolveTheory(theoryID, conclusion, newStatus)
+	if err != nil {
+		return nil, err
+	}
+	// Forensic log — theory state-machine transition. The cluster
+	// detector stays strict (proven/disproven are deliberately
+	// resolved states, not anomalies); this row is for the operator's
+	// audit trail.
+	dm.LogAudit(
+		mpminternal.AuditInfo, "epistemology",
+		fmt.Sprintf("resolve_theory %s -> %s", theoryID, newStatus), "",
+		mpminternal.AuditContext{
+			"theory_id": theoryID,
+			"status":    newStatus,
+			"conclusion": conclusion,
+		},
+	)
+	return result, nil
 }
 
 // callRecordDecision logs a decision with context, choice, and rationale.
@@ -231,7 +265,29 @@ func handleRecordDecision(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 
 func handleShredMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
-	return dm.ShredMemoryWithCascade(id)
+
+	result, err := dm.ShredMemoryWithCascade(id)
+	if err != nil {
+		return nil, err
+	}
+	// Forensic log — irrecoverable hard delete. Without this, a
+	// "rogue agent shreds foundational theory" event is invisible
+	// until someone notices the absence of data. AuditInfo is gated
+	// out of cluster detection (see audit.go).
+	if memoryID, _ := result["memory_id"].(string); memoryID != "" {
+		ctx := mpminternal.AuditContext{
+			"memory_id": memoryID,
+		}
+		if tp, ok := result["theory_purged"].(string); ok && tp != "" {
+			ctx["theory_purged"] = tp
+		}
+		dm.LogAudit(
+			mpminternal.AuditInfo, "epistemology",
+			fmt.Sprintf("shred_memory %s", memoryID), "",
+			ctx,
+		)
+	}
+	return result, nil
 }
 
 func handleReinforceMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1211,6 +1267,19 @@ func handleRecordGlobalRule(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 	if err != nil {
 		return nil, err
 	}
+	// Forensic log — cross-agent shared-DB write. Other agents see
+	// this row when they query audit_log; the row is the operator's
+	// record that a house rule was established (or replaced).
+	dm.LogAudit(
+		mpminternal.AuditInfo, "shared_db",
+		fmt.Sprintf("record_global_rule %s", id), "",
+		mpminternal.AuditContext{
+			"rule_id":  id,
+			"weight":   weight,
+			"tags":     tags,
+			"is_house_rule": true,
+		},
+	)
 	return map[string]interface{}{
 		"success": true,
 		"id":      id,
@@ -1240,6 +1309,18 @@ func handlePromoteToGlobal(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 	if err != nil {
 		return nil, err
 	}
+	// Forensic log — local→shared promotion. The local copy stays
+	// (per WISHLIST.md Phase 3); this row records the lineage edge
+	// so other agents can see which local IDs have been elevated.
+	dm.LogAudit(
+		mpminternal.AuditInfo, "shared_db",
+		fmt.Sprintf("promote_to_global %s", localID), "",
+		mpminternal.AuditContext{
+			"local_id":  localID,
+			"shared_id": sharedID,
+			"lineage":   fmt.Sprintf("local:%s -> shared:%s", localID, sharedID),
+		},
+	)
 	return map[string]interface{}{
 		"success":   true,
 		"shared_id": sharedID,
