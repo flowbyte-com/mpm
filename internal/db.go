@@ -5,6 +5,7 @@
 package internal
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,98 @@ func isDuplicateColumnError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "duplicate column name")
+}
+
+// defaultLogRotateBytes is the default file-size threshold for log rotation
+// (watchdog.jsonl, mirror.jsonl). At 5 MiB the JSONL files stay readable
+// by `jq`, `tail`, and text editors without paging. Operators can override
+// via the MPM_LOG_ROTATE_BYTES environment variable.
+const defaultLogRotateBytes int64 = 5 * 1024 * 1024
+
+// logRotateThresholdBytes resolves the current rotation threshold.
+// Reads MPM_LOG_ROTATE_BYTES (a non-negative integer); falls back to the
+// default. Invalid values (negative, non-numeric) are clamped to default
+// with a single warning logged via slog at WARN level — once per process
+// is not worth tracking.
+func logRotateThresholdBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("MPM_LOG_ROTATE_BYTES"))
+	if raw == "" {
+		return defaultLogRotateBytes
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		slog.Warn("invalid MPM_LOG_ROTATE_BYTES; using default",
+			"got", raw, "default_bytes", defaultLogRotateBytes)
+		return defaultLogRotateBytes
+	}
+	return n
+}
+
+// rotateLogIfNeeded checks the size of path; if it exceeds thresholdBytes,
+// reads the current contents, gzips them to path.YYYYMMDD-HHMMSS.gz, and
+// truncates the original to zero bytes. The next O_APPEND write creates
+// fresh content. Returns nil on no-op (file missing or below threshold) or
+// on success; errors are non-fatal — the caller logs and continues with
+// the append.
+//
+// Called from inside the watchdogMu critical section so rotation does not
+// race with concurrent writers.
+//
+// Atomicity: the read-then-truncate is not atomic across processes. Two
+// MPM instances writing to the same log (production has only one — the
+// workspace DB is per-process) would race. We accept this; the design
+// contract is "one process owns one workspace DB and its logs." A
+// separate `mpm ops logs rotate` command can be added later if manual
+// rotation is needed.
+func rotateLogIfNeeded(path string, thresholdBytes int64) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat log for rotation: %w", err)
+	}
+	if info.Size() < thresholdBytes {
+		return nil
+	}
+
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	rotated := path + "." + timestamp + ".gz"
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read log for rotation: %w", err)
+	}
+	gz, err := os.Create(rotated)
+	if err != nil {
+		return fmt.Errorf("create rotated log: %w", err)
+	}
+	gzWriter := gzip.NewWriter(gz)
+	if _, err := gzWriter.Write(data); err != nil {
+		_ = gzWriter.Close()
+		_ = gz.Close()
+		_ = os.Remove(rotated)
+		return fmt.Errorf("gzip write: %w", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		_ = gz.Close()
+		_ = os.Remove(rotated)
+		return fmt.Errorf("gzip close: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("close rotated log: %w", err)
+	}
+	// Truncate in place so the existing O_APPEND handle (if any) keeps
+	// appending at offset 0. If a different process raced us here, the
+	// log content between the gzip snapshot and now would be lost —
+	// accepted risk per the atomicity note above.
+	if err := os.Truncate(path, 0); err != nil {
+		return fmt.Errorf("truncate after rotation: %w", err)
+	}
+	return nil
 }
 
 // dbFileName is the canonical filename for the MPM database.
@@ -241,13 +335,19 @@ type watchdogOp struct {
 
 // logWatchdog appends a watchdog entry to watchdog.jsonl.
 // File-write contention is serialised by watchdogMu so that concurrent
-// DatabaseManager users do not corrupt the log.
+// DatabaseManager users do not corrupt the log. Log rotation (gzip +
+// truncate) runs inside the same critical section so concurrent writers
+// don't race on the truncation step.
 func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
 	if dm.watchdogPath == "" {
 		return
 	}
 	dm.watchdogMu.Lock()
 	defer dm.watchdogMu.Unlock()
+
+	if err := rotateLogIfNeeded(dm.watchdogPath, logRotateThresholdBytes()); err != nil {
+		slog.Warn("watchdog log rotation failed", "err", err)
+	}
 
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -264,13 +364,17 @@ func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
 
 // logWatchdogRaw appends raw JSON bytes to watchdog.jsonl under the dm mutex.
 // Used by synthesis and other subsystems that want structured events with
-// custom schemas rather than the watchdogOp query-timing format.
+// custom schemas rather than the watchdogOp query-timing format. Log
+// rotation runs inside the same critical section.
 func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
 	if dm == nil || dm.watchdogPath == "" {
 		return
 	}
 	dm.watchdogMu.Lock()
 	defer dm.watchdogMu.Unlock()
+	if err := rotateLogIfNeeded(dm.watchdogPath, logRotateThresholdBytes()); err != nil {
+		slog.Warn("watchdog log rotation failed", "err", err)
+	}
 	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
@@ -2488,11 +2592,6 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string) {
 	go func() {
 		mirrorPath := filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl")
-		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return
-		}
-		defer f.Close()
 
 		entry := map[string]interface{}{
 			"event":     "contradiction_detected",
@@ -2501,9 +2600,21 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		}
 		line, _ := json.Marshal(entry)
+
+		// Hold watchdogMu across rotation + write so concurrent mirror
+		// writers (and concurrent watchdog writers — they share the
+		// mutex) don't race on the truncate step.
 		dm.watchdogMu.Lock()
+		defer dm.watchdogMu.Unlock()
+		if err := rotateLogIfNeeded(mirrorPath, logRotateThresholdBytes()); err != nil {
+			slog.Warn("mirror log rotation failed", "err", err)
+		}
+		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
 		f.WriteString(string(line) + "\n")
-		dm.watchdogMu.Unlock()
 	}()
 }
 
