@@ -166,8 +166,12 @@ func handleProposeTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 	if tags == nil {
 		tags = []string{}
 	}
+	dependencies := internal.ParseStringSliceOr(p["dependencies"])
+	if dependencies == nil {
+		dependencies = []string{}
+	}
 
-	return dm.ProposeTheory(hypothesis, validationCriteria, tags)
+	return dm.ProposeTheory(hypothesis, validationCriteria, dependencies, tags)
 }
 
 // callResolveTheory marks a theory as proven or disproven.

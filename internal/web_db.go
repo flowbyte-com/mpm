@@ -619,9 +619,16 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 	return results, rows.Err()
 }
 
-// ShredMemory wraps the standalone ShredMemory function for DatabaseManager
+// ShredMemory wraps the standalone ShredMemory function for DatabaseManager.
+// Fires stale-foundation wakes for any theory whose dependencies reference
+// this memory — the hard-delete equivalent of the soft-delete hook in
+// MemoryStore.DeleteMemory.
 func (dm *DatabaseManager) ShredMemory(id string) error {
-	return ShredMemory(dm.db, id)
+	if err := ShredMemory(dm.db, id); err != nil {
+		return err
+	}
+	_, _ = dm.FireStaleFoundationWakes(id)
+	return nil
 }
 
 // GetNegativeWeightMemories returns all non-deleted memories with weight < 0.
