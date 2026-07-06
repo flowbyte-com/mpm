@@ -10,6 +10,7 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -78,5 +79,59 @@ func NewTestDM(t *testing.T) *DatabaseManager {
 		// waiting for GC.
 		dm.Close()
 	})
+	return dm
+}
+
+// NewTestSharedDM opens a hermetic DatabaseManager with a local tmpfile
+// DB and an ATTACHed shared tmpfile DB — both rooted at t.TempDir().
+//
+// Replaces the previous pattern of using NewDatabaseManager("") with
+// only MPM_SHARED_DB set, which left the local DB pointed at the real
+// workspace (~/.mpm/src/db/mpm.db). Every `make test` run polluted the
+// workspace with ~22 leftover rows from TestHandlePromoteToGlobal_* and
+// TestPromoteToGlobal_*.
+//
+// Fix: MPM_WORKSPACE redirects the local DB to a tmpdir. NewDatabaseManager
+// derives its dbPath from config.GetMPMDir(), which honours MPM_WORKSPACE.
+// The shared DB lives next to it in the same tmpdir. Both DBs (and the
+// watchdog.jsonl that NewDatabaseManager derives from dbPath) are
+// cleaned up via t.Cleanup. The previous pattern also wrote watchdog
+// entries to ~/.mpm/src/db/watchdog.jsonl on every test call, which
+// contributed to that file's unbounded growth.
+//
+// For tests that need to verify the "shared DB not attached" path
+// (RecordGlobalRule / PromoteToGlobal refuse to fall through to local
+// without a shared DB), see NewTestLocalOnlyDM.
+func NewTestSharedDM(t *testing.T) *DatabaseManager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+	t.Setenv("MPM_SHARED_DB", filepath.Join(tmpDir, "shared.db"))
+
+	dm, err := NewDatabaseManager("")
+	if err != nil {
+		t.Fatalf("NewTestSharedDM: NewDatabaseManager: %v", err)
+	}
+	t.Cleanup(func() { dm.Close() })
+	return dm
+}
+
+// NewTestLocalOnlyDM opens a hermetic DatabaseManager with a local
+// tmpfile DB and NO shared DB attached. For tests that exercise the
+// "shared DB not configured" path. Setting MPM_WORKSPACE keeps these
+// tests from polluting the workspace the way the previous pattern did
+// (the previous code used NewDatabaseManager("") directly, which
+// always opens ~/.mpm/src/db/mpm.db regardless of intent).
+func NewTestLocalOnlyDM(t *testing.T) *DatabaseManager {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+	t.Setenv("MPM_SHARED_DB", "")
+
+	dm, err := NewDatabaseManager("")
+	if err != nil {
+		t.Fatalf("NewTestLocalOnlyDM: NewDatabaseManager: %v", err)
+	}
+	t.Cleanup(func() { dm.Close() })
 	return dm
 }
