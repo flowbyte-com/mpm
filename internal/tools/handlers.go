@@ -45,6 +45,82 @@ func handleSaveToMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	return out, nil
 }
 
+// MinMilestoneSummaryChars is the minimum length for a milestone summary.
+// The threshold encodes "could another agent defend this claim from the
+// summary alone?" — a 20-char string like "shipped scratchpad" is tactical
+// noise that fails the signal-density test. 50 chars is the floor; longer
+// is preferred and the wake-context renderer allows up to 80 chars before
+// truncation.
+const MinMilestoneSummaryChars = 50
+
+// handleCommitMilestone persists a deliberate narrative milestone. It is a
+// thin wrapper over save_to_memory with two hard gates:
+//
+//  1. Summary length floor (MinMilestoneSummaryChars). The verb exists to
+//     force a commitment ceremony — a milestone that doesn't survive the
+//     summary length test isn't a milestone, it's noise.
+//  2. Flavor taxonomy. shipped vs insight, prefix-injected as
+//     type:milestone-<flavor>. The prefix is the SQL anchor for the
+//     wake-context query; do not double-prefix if the caller passed it.
+//
+// Milestones are decoupled from session_id by design (a milestone is a
+// cognitive artifact that should survive session boundaries). The
+// underlying save_to_memory call attaches session metadata via
+// ActiveContext.withActiveContextMeta() for forensic value, but the
+// memory row itself is not session-bound, and the wake-context query
+// for recent milestones crosses all sessions by default.
+//
+// The save_to_memory path inherits the 20-pattern security scanner and
+// 20-pattern poison scanner from SaveMemoryNode, so commit_milestone
+// inherits them at no extra cost. A milestone about "AWS keys found"
+// would fail the scanner; that's the right shape (the milestone should
+// describe the *fact*, not the secret).
+func handleCommitMilestone(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	summary, _ := p["summary"].(string)
+	if summary == "" {
+		return nil, fmt.Errorf("summary is required")
+	}
+	if len(summary) < MinMilestoneSummaryChars {
+		return nil, fmt.Errorf("summary must be at least %d characters (got %d) — a milestone must be defensible from the summary alone", MinMilestoneSummaryChars, len(summary))
+	}
+
+	flavor := internal.ParseStringOr(p["flavor"], "shipped")
+	switch flavor {
+	case "shipped", "insight":
+		// valid
+	default:
+		return nil, fmt.Errorf("flavor must be 'shipped' or 'insight' (got %q)", flavor)
+	}
+
+	typeTag := "type:milestone-" + flavor
+	tags := internal.ParseStringSliceOr(p["tags"])
+
+	// Dedupe: if caller already passed the canonical tag, don't double it.
+	dup := false
+	for _, t := range tags {
+		if t == typeTag {
+			dup = true
+			break
+		}
+	}
+	if !dup {
+		tags = append([]string{typeTag}, tags...)
+	}
+
+	out, _, err := dm.SaveMemoryWithContext(
+		summary,
+		"memories",
+		tags,
+		0.5,
+		"",
+		ac,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // callQueryLongTermMemory searches memory for context.
 func handleQueryLongTermMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
@@ -463,15 +539,25 @@ func handleReadWakeContext(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 		})
 	}
 
+	milestoneRefs := make([]map[string]interface{}, 0, len(data.RecentMilestones))
+	for _, m := range data.RecentMilestones {
+		milestoneRefs = append(milestoneRefs, map[string]interface{}{
+			"id":         m.ID,
+			"content":    m.Content,
+			"created_at": m.CreatedAt,
+		})
+	}
+
 	return map[string]interface{}{
-		"success":           true,
-		"session_id":        data.SessionID,
-		"active_mode":       data.ActiveMode,
-		"active_persona":    data.ActivePersona,
-		"recent_topics":     data.RecentTopics,
-		"recent_memories":   memRefs,
-		"audit_summary":     data.AuditSummary,
-		"last_handoff":      data.LastHandoff,
+		"success":            true,
+		"session_id":         data.SessionID,
+		"active_mode":        data.ActiveMode,
+		"active_persona":     data.ActivePersona,
+		"recent_topics":      data.RecentTopics,
+		"recent_memories":    memRefs,
+		"recent_milestones":  milestoneRefs,
+		"audit_summary":      data.AuditSummary,
+		"last_handoff":       data.LastHandoff,
 		"scratchpad_orphans": data.ScratchpadOrphans,
 	}, nil
 }
