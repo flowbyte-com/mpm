@@ -50,8 +50,11 @@ func TestHandoff_EndSession_InsertsAndReadsBack(t *testing.T) {
 //   (a) second call returns no error (no UNIQUE blow-up)
 //   (b) summary is the new value (last writer wins)
 //   (c) id is stable across upserts (external refs stay valid)
-//   (d) created_at is stable across upserts (the row's birth time
-//       doesn't move; only ended_at moves forward)
+//   (d) created_at moves forward on upsert (table reader sees the
+//       most recent closeout as a fresh row, not a 12-day-old stale
+//       timestamp from the row's first incarnation — see bug
+//       2026-07-06 where agent:main:main closeouts were invisible
+//       to wake context because read_at + created_at carried over)
 //   (e) ended_at does move forward on the second call
 //   (f) only ONE row exists in the table (upsert, not append)
 func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
@@ -62,7 +65,6 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 		[]string{"started"}, nil)
 	require.NoError(t, err)
 	firstID := first.ID
-	firstCreatedAt := first.CreatedAt
 	firstEndedAt := first.EndedAt
 	require.False(t, firstEndedAt.IsZero())
 
@@ -74,10 +76,11 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 	// (c) id stable
 	require.Equal(t, firstID, second.ID, "id should be stable across upserts")
 
-	// (d) created_at stable
-	require.True(t, second.CreatedAt.Equal(firstCreatedAt),
-		"created_at should be stable across upserts, got first=%v second=%v",
-		firstCreatedAt, second.CreatedAt)
+	// (d) created_at moves forward on upsert (so a stale row's age
+	// reflects the latest closeout, not its first incarnation)
+	require.True(t, !second.CreatedAt.Before(firstEndedAt),
+		"created_at should move forward to (or past) the first call's ended_at, got first=%v second=%v",
+		firstEndedAt, second.CreatedAt)
 
 	// (b) summary is the NEW value (last writer wins)
 	require.Equal(t, "round 2: did 20 more minutes of substantive work", second.Summary)
@@ -99,16 +102,19 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 	require.Equal(t, 1, rowCount, "upsert must not append")
 }
 
-// TestHandoff_EndSession_UpsertPreservesReadAt verifies that the
-// read_at column (which the agent sets when it consumes the handoff
-// during wake) survives an upsert. Otherwise the upsert would mark
-// already-consumed handoffs as unread again, breaking wake semantics.
+// TestHandoff_EndSession_UpsertResetsReadAt pins the 2026-07-06
+// fix. The UPSERT MUST reset read_at + read_by to NULL on every
+// overwrite, because a handoff with new content is, by definition,
+// unread. Otherwise a long-lived session_id whose first handoff was
+// consumed weeks ago silently shadows every subsequent closeout —
+// wake context's `WHERE read_at IS NULL` filter would skip the new
+// content as "already read" and return no handoff at all.
 //
-// If read_at is nil at the time of upsert, it should remain nil.
-// The upsert SET clause does not touch read_at or read_by, so this
-// should hold — but pin it explicitly so a future SET expansion can't
-// regress it.
-func TestHandoff_EndSession_UpsertPreservesReadAt(t *testing.T) {
+// Regression scenario: agent:main:main session_id has been alive
+// since 2026-06-23; its first handoff was read on day 1; every
+// subsequent closeout overwrote the same row but kept the stale
+// read_at, so 12 days of work were invisible to wake.
+func TestHandoff_EndSession_UpsertResetsReadAt(t *testing.T) {
 	dm := newHandoffTestDM(t)
 	sessionID := "session-upsert-readat"
 
@@ -119,17 +125,32 @@ func TestHandoff_EndSession_UpsertPreservesReadAt(t *testing.T) {
 	_, err = dm.db.Exec(`UPDATE session_handoffs SET read_at = datetime('now'), read_by = 'agent' WHERE id = ?`, first.ID)
 	require.NoError(t, err)
 
-	// Upsert — should preserve read_at
-	second, err := dm.EndSession(sessionID, "v2", HandoffClean, nil, nil)
-	require.NoError(t, err)
-
+	// Sanity: row IS read before upsert
 	row := dm.db.QueryRow(`SELECT read_at, read_by FROM session_handoffs WHERE session_id = ?`, sessionID)
 	var readAt sql.NullString
 	var readBy sql.NullString
 	require.NoError(t, row.Scan(&readAt, &readBy))
-	require.True(t, readAt.Valid, "read_at should be preserved across upsert")
-	require.True(t, readBy.Valid && readBy.String == "agent", "read_by should be preserved")
+	require.True(t, readAt.Valid, "pre-upsert: read_at should be set")
+	require.True(t, readBy.Valid && readBy.String == "agent", "pre-upsert: read_by should be 'agent'")
+
+	// Upsert — must reset read_at + read_by
+	second, err := dm.EndSession(sessionID, "v2", HandoffClean, nil, nil)
+	require.NoError(t, err)
+
+	row = dm.db.QueryRow(`SELECT read_at, read_by FROM session_handoffs WHERE session_id = ?`, sessionID)
+	require.NoError(t, row.Scan(&readAt, &readBy))
+	require.False(t, readAt.Valid, "post-upsert: read_at should be NULL so wake surfaces the new content")
+	require.False(t, readBy.Valid, "post-upsert: read_by should be NULL")
 	require.NotNil(t, second)
+
+	// And: GetLatestUnreadHandoff should now find this row (the
+	// bug was that it returned ErrNoRows because read_at was
+	// sticky across upserts)
+	latest, err := dm.GetLatestUnreadHandoff()
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	require.Equal(t, sessionID, latest.SessionID)
+	require.Equal(t, "v2", latest.Summary, "wake should see the NEW summary, not v1")
 }
 
 // TestHandoff_EndSession_EmptySlicesSerializeAsBrackets verifies the
