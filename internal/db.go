@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mpm/internal/config"
@@ -116,6 +117,13 @@ type DatabaseManager struct {
 	watchdogPath string     // path to watchdog.jsonl for query observability
 	watchdogMu   sync.Mutex // serializes watchdog log writes
 
+	// busyRetries counts lifetime SQLITE_BUSY retry attempts via ExecTracked.
+	// Use BusyRetryCount() to inspect. Zero is healthy; non-zero means
+	// contention is occurring somewhere in the call stack. The counter is
+	// per-DatabaseManager (per-process); cross-process contention visible
+	// only via the watchdog.jsonl tail.
+	busyRetries atomic.Uint64
+
 	// sharedPath is the path of the attached shared DB, or "" if not attached.
 	// Set by attachShared() when MPM_SHARED_DB is configured and ATTACH succeeds.
 	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
@@ -140,6 +148,82 @@ func (dm *DatabaseManager) DBPath() string {
 // IsOpen returns true if the database connection is non-nil.
 func (dm *DatabaseManager) IsOpen() bool {
 	return dm.db != nil
+}
+
+// BusyRetryCount returns the lifetime count of SQLITE_BUSY retry attempts
+// across all ExecTracked calls in this process. Zero is the healthy
+// baseline. Non-zero means contention is occurring somewhere in the
+// call stack — investigate via watchdog.jsonl tail before scaling up
+// the tooling surface that shares this DB.
+func (dm *DatabaseManager) BusyRetryCount() uint64 {
+	return dm.busyRetries.Load()
+}
+
+// HealthCheck runs a quick SQLite integrity check + returns key DB stats.
+// Designed for the "is everything healthy?" question that previously
+// required 6 separate lookups (audit clusters, wakes, memory review,
+// memory quality, watchdog size, git status). Returns:
+//   - ok: bool, true iff PRAGMA quick_check returns "ok"
+//   - page_count, freelist_count: from PRAGMA page_count / freelist_count
+//   - memories_active: count of non-deleted memories
+//   - theories_pending: count of pending theories
+//   - wakes_overdue: count of unfired wakes whose target_time < now
+//   - busy_retries: lifetime SQLITE_BUSY retry counter (process-local)
+//
+// Not a tool today — DM-level method that future ops commands can wrap.
+// Failure modes: returns whatever it managed to read; the `ok` field
+// reflects only the integrity check result.
+func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
+	out := map[string]interface{}{
+		"busy_retries": dm.BusyRetryCount(),
+	}
+
+	// Integrity check (PRAGMA quick_check is cheap, runs in <100ms).
+	var integrity string
+	if err := dm.db.QueryRow(`PRAGMA quick_check`).Scan(&integrity); err != nil {
+		out["ok"] = false
+		out["integrity_error"] = err.Error()
+		return out, fmt.Errorf("integrity check: %w", err)
+	}
+	out["ok"] = integrity == "ok"
+	if !out["ok"].(bool) {
+		out["integrity_status"] = integrity
+	}
+
+	// Page-level stats (cheap, no scan).
+	var pageCount, freelistCount sql.NullInt64
+	if err := dm.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err == nil && pageCount.Valid {
+		out["page_count"] = pageCount.Int64
+	}
+	if err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err == nil && freelistCount.Valid {
+		out["freelist_count"] = freelistCount.Int64
+	}
+
+	// Domain stats (each a single COUNT query).
+	queries := []struct {
+		key, sql string
+	}{
+		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`},
+		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND json_extract(metadata, '$.status') = 'pending'`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ?`},
+		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
+	}
+	now := time.Now().Unix()
+	for _, q := range queries {
+		var n int64
+		var err error
+		if q.key == "wakes_overdue" {
+			err = dm.db.QueryRow(q.sql, now).Scan(&n)
+		} else {
+			err = dm.db.QueryRow(q.sql).Scan(&n)
+		}
+		if err == nil {
+			out[q.key] = n
+		}
+		// Non-fatal — skip on error.
+	}
+
+	return out, nil
 }
 
 // ==================== Watchdog / Query Observability ====================
@@ -379,6 +463,7 @@ func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interf
 		elapsed := time.Since(start)
 
 		if err != nil && isBusyError(err) && attempts <= retries {
+			dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
 			time.Sleep(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
