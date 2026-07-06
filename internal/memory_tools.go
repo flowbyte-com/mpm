@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,37 +73,214 @@ func (dm *DatabaseManager) SaveMemoryWithContext(
 
 // HybridSearchMemories runs hybrid (BM25 + semantic) search with FTS fallback.
 // Named to avoid collision with dm.SearchMemories in web_db.go.
-func (dm *DatabaseManager) HybridSearchMemories(query, collection string, limit int) ([]map[string]interface{}, error) {
+//
+// scope (Phase 2d, WISHLIST.md multi-agent shared epistemology):
+//
+//	"all"    (default) — federated local + shared. Shared rows get
+//	                       the "Shared Premium" multiplier
+//	                       (1.2x; rules collection 1.35x; cap 1.0).
+//	                       Result count is capped at `limit` after
+//	                       post-retrieval re-ranking across both
+//	                       sides. Empty scope or unknown values
+//	                       default to "all".
+//	"local"  — same behaviour as pre-Phase-2d HybridSearch: hybrid
+//	            search on local memories only, no Shared Premium.
+//	"shared" — keyword-only QueryGlobalRules path. No vector search,
+//	            no Shared Premium (within a single side there is no
+//	            local to soften). is_global=1 rows only.
+func (dm *DatabaseManager) HybridSearchMemories(query, collection string, limit int, scope string) ([]map[string]interface{}, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+	if scope == "" {
+		scope = "all"
+	}
+
+	switch scope {
+	case "local":
+		return dm.hybridSearchScopeLocal(query, collection, limit)
+	case "shared":
+		return dm.hybridSearchScopeShared(query, limit)
+	case "all":
+		return dm.hybridSearchScopeAll(query, collection, limit)
+	default:
+		return nil, fmt.Errorf("invalid scope %q (want all|local|shared)", scope)
+	}
+}
+
+// hybridSearchScopeLocal: the pre-Phase-2d behaviour, isolated so the
+// "all" path doesn't branch on local vs shared mid-merge.
+func (dm *DatabaseManager) hybridSearchScopeLocal(query, collection string, limit int) ([]map[string]interface{}, error) {
 	cfg := DefaultHybridConfig()
 	cfg.Limit = limit
 	mems, err := HybridSearch(dm, query, collection, cfg)
 	if err != nil {
-		// Fallback: try FullTextSearch alone (no vector, no quarantine)
-		store, storeErr := dm.getSharedStore()
-		if storeErr != nil {
-			return nil, fmt.Errorf("hybrid search: %w; fallback store: %v", err, storeErr)
+		fb, fbErr := dm.fallbackLocal(query, collection, limit, err)
+		if fbErr != nil {
+			return nil, fbErr
 		}
-		fallback, fallbackErr := store.FullTextSearch(query, collection, limit)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("hybrid search: %w; fulltext fallback: %v", err, fallbackErr)
-		}
-		mems = nil // signal fallback mode
-		for _, m := range fallback {
-			mems = append(mems, HybridResult{
-				ID:         m.ID,
-				Content:    m.Content,
-				Collection: m.Collection,
-				Tags:       strings.Join(m.Tags, ","),
-				Weight:     m.Weight,
-			})
-		}
+		return hybridResultsToMaps(fb), nil
 	}
+	return hybridResultsToMaps(mems), nil
+}
+
+// hybridSearchScopeShared: keyword-only retrieval against shared.memories
+// via QueryGlobalRules (existing FTS5 + LIKE fallback path).
+func (dm *DatabaseManager) hybridSearchScopeShared(query string, limit int) ([]map[string]interface{}, error) {
+	rules, err := dm.QueryGlobalRules(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query shared.memories: %w", err)
+	}
+	items := make([]map[string]interface{}, 0, len(rules))
+	for _, r := range rules {
+		items = append(items, map[string]interface{}{
+			"id":         r["id"],
+			"content":    r["content"],
+			"weight":     r["weight"],
+			"collection": r["collection"],
+			"origin":     "shared",
+		})
+	}
+	return items, nil
+}
+
+// hybridSearchScopeAll: federated local + shared.
+//
+// Fetching strategy (the "Federated Fetch Buffer"):
+//
+//	1. Run HybridSearch against local with cfg.Limit=2*limit.
+//	2. Run HybridSearch against shared.memories with cfg.Limit=2*limit.
+//	   Same code path, different schema prefix.
+//	3. Concat (up to 4*limit rows).
+//	4. applySharedPremium: re-rank with the multiplier, slice to `limit`.
+//	   The 2x fetch buffer ensures a shared row promoted by the boost
+//	   doesn't get truncated at the cfg.Limit gate.
+func (dm *DatabaseManager) hybridSearchScopeAll(query, collection string, limit int) ([]map[string]interface{}, error) {
+	fetch := limit * 2
+	if fetch < 10 {
+		fetch = 10
+	}
+
+	localCfg := DefaultHybridConfig()
+	localCfg.Limit = fetch
+	localMems, errLocal := HybridSearch(dm, query, collection, localCfg)
+	if errLocal != nil {
+		localMems, errLocal = dm.fallbackLocal(query, collection, fetch, errLocal)
+		_ = errLocal
+	}
+
+	sharedCfg := DefaultHybridConfig()
+	sharedCfg.SchemaPrefix = "shared."
+	sharedCfg.Origin = "shared"
+	sharedCfg.Limit = fetch
+	sharedMems, errShared := HybridSearch(dm, query, collection, sharedCfg)
+	if errShared != nil {
+		// Empty shared side is fine; return whatever local produced.
+		sharedMems = nil
+	}
+
+	merged := make([]HybridResult, 0, len(localMems)+len(sharedMems))
+	merged = append(merged, localMems...)
+	merged = append(merged, sharedMems...)
+
+	ranked := applySharedPremium(merged, limit)
+	return hybridResultsToMaps(ranked), nil
+}
+
+// fallbackLocal: FTS-only path used when hybrid vector side can't be
+// exercised (no embedding provider / transient cosine failure).
+func (dm *DatabaseManager) fallbackLocal(query, collection string, limit int, prevErr error) ([]HybridResult, error) {
+	store, storeErr := dm.getSharedStore()
+	if storeErr != nil {
+		return nil, fmt.Errorf("hybrid search: %w; fallback store: %v", prevErr, storeErr)
+	}
+	fallback, fallbackErr := store.FullTextSearch(query, collection, limit)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("hybrid search: %w; fulltext fallback: %v", prevErr, fallbackErr)
+	}
+	out := make([]HybridResult, 0, len(fallback))
+	for _, m := range fallback {
+		out = append(out, HybridResult{
+			ID:         m.ID,
+			Content:    m.Content,
+			Collection: m.Collection,
+			Tags:       strings.Join(m.Tags, ","),
+			Weight:     m.Weight,
+			Origin:     "local",
+		})
+	}
+	return out, nil
+}
+
+// applySharedPremium is the post-merge re-ranker (Phase 2d).
+//
+// Multiplier logic:
+//
+//	local rows      → final = combined      (raw relevance)
+//	shared non-rule → final = min(combined * 1.20,  1.0)
+//	shared rule     → final = min(combined * 1.35,  1.0)
+//
+// Rationale: a multiplicative boost scales with relevance, so an
+// irrelevant shared row sinks (negative or zero scores stay at or
+// below their raw ranking) while a relevant shared row edges out a
+// similarly-relevant local row. The 1.0 cap prevents a near-perfect
+// score from compounding unbounded. Stacking 1.20 (shared) and 1.35
+// (rules) preserves the WISHLIST's two-tier hierarchy: house rules
+// outrank shared decisions outrank local.
+//
+// final is stashed on HybridResult.CombinedScore so callers see what
+// the ranker actually used. Raw scores remain on FTS5Score and
+// VectorSimilarity for diagnostics.
+//
+// Sort: final-score desc, then weight desc, then collection asc
+// (stable + predictable).
+func applySharedPremium(merged []HybridResult, targetCount int) []HybridResult {
+	type scored struct {
+		r     HybridResult
+		final float64
+	}
+	out := make([]scored, len(merged))
+	for i, r := range merged {
+		final := r.CombinedScore
+		if r.Origin == "shared" {
+			multiplier := 1.20
+			if r.Collection == "rules" {
+				multiplier = 1.35
+			}
+			final = r.CombinedScore * multiplier
+			if final > 1.0 {
+				final = 1.0
+			}
+		}
+		r.CombinedScore = final
+		out[i] = scored{r: r, final: final}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].final != out[j].final {
+			return out[i].final > out[j].final
+		}
+		if out[i].r.Weight != out[j].r.Weight {
+			return out[i].r.Weight > out[j].r.Weight
+		}
+		return out[i].r.Collection < out[j].r.Collection
+	})
+	if targetCount > 0 && len(out) > targetCount {
+		out = out[:targetCount]
+	}
+	ranked := make([]HybridResult, len(out))
+	for i, s := range out {
+		ranked[i] = s.r
+	}
+	return ranked
+}
+
+// hybridResultsToMaps projects the HybridResult struct into the
+// external map shape handleQueryLongTermMemory returns. Phase 2d
+// adds origin + combined_score so agents and tests can distinguish
+// local vs shared rows and verify the boosted score landed.
+func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(mems))
 	for _, m := range mems {
-		// Extract banner from content if present (banner is prepended in Phase 5)
 		var banner string
 		if m.IsConceptDrift {
 			banner = conceptDriftWarning
@@ -110,18 +288,20 @@ func (dm *DatabaseManager) HybridSearchMemories(query, collection string, limit 
 			banner = challengeWarning
 		}
 		items = append(items, map[string]interface{}{
-			"id":                  m.ID,
-			"content":             m.Content,
-			"weight":              m.Weight,
-			"tags":                m.Tags,
-			"collection":          m.Collection,
-			"banner":              banner,
-			"is_concept_drift":    m.IsConceptDrift,
-			"is_challenged":       m.IsChallenged,
+			"id":                   m.ID,
+			"content":              m.Content,
+			"weight":               m.Weight,
+			"tags":                 m.Tags,
+			"collection":           m.Collection,
+			"origin":               m.Origin,
+			"banner":               banner,
+			"is_concept_drift":     m.IsConceptDrift,
+			"is_challenged":        m.IsChallenged,
 			"challenged_theory_id": m.ChallengedTheoryID,
+			"combined_score":       m.CombinedScore,
 		})
 	}
-	return items, nil
+	return items
 }
 
 // ── Memory feedback / mutation tools (Tier 1) ───────────────────────────────
