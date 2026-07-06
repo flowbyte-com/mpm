@@ -1,14 +1,11 @@
 package main
 
 import (
-	"database/sql"
-	"path/filepath"
 	"testing"
 	"time"
 
 	mpminternal "mpm/internal"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,16 +37,12 @@ func TestOpsConfidence_RejectsUnknownSubcommand(t *testing.T) {
 }
 
 // TestGetConfidenceForArtifact_EndToEnd exercises the full path against a
-// real temp DB: insert memory, add evidence, get the snapshot, assert.
+// real DatabaseManager: insert memory, add evidence, get the snapshot,
+// assert. Backed by an in-memory DB via internal.NewTestDM.
 func TestGetConfidenceForArtifact_EndToEnd(t *testing.T) {
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := mpminternal.NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
+	dm := mpminternal.NewTestDM(t)
 
-	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES ('mem-1', 'memories', 'x')`, 0)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES ('mem-1', 'memories', 'x')`, 0)
 	require.NoError(t, err)
 
 	require.NoError(t, mpminternal.AddEvidence(dm, mpminternal.EvidenceInput{

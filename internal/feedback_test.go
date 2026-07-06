@@ -1,11 +1,9 @@
 package internal
 
 import (
-	"database/sql"
 	"encoding/json"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,13 +111,9 @@ func TestFeedbackCLIFlagCollision(t *testing.T) {
 	}
 }
 
-// feedbackFreshDB creates an isolated DatabaseManager for feedback tests.
+// feedbackFreshDB returns a hermetic in-memory DatabaseManager. The
+// consolidation lives in internal/testhelpers.go::NewTestDM.
 func feedbackFreshDB(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := t.TempDir() + "/feedback_test.db"
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	return dm
+	return NewTestDM(t)
 }

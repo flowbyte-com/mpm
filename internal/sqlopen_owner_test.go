@@ -32,6 +32,8 @@ import (
 //     deep-scan checks; safe because reads don't contend with writes.
 //   - cmd/mpm/handlers_backup.go: opens the workspace DB read-only for
 //     backup verification; same reasoning.
+//   - internal/testhelpers.go: opens per-test in-memory shared-cache DBs
+//     for the test suite; not a production connection.
 //
 // If you need a new *sql.DB connection, add the call site to this whitelist
 // with a justifying comment, OR (preferred) extend DatabaseManager.
@@ -45,6 +47,7 @@ func TestDatabaseManagerIsOnlyOwnerOfSqlOpen(t *testing.T) {
 		"main.go":            true, // read-only opens for doctor deep-scan
 		"handlers_backup.go": true, // read-only opens for backup integrity check
 		"route_render.go":    true, // read-only opens for wake-context route rendering
+		"testhelpers.go":     true, // opens hermetic in-memory DBs for tests; not a production connection
 	}
 
 	dirs := []string{"internal", "cmd/mpm"}

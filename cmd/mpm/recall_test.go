@@ -2,25 +2,41 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func setupTestDB(t *testing.T) (*sql.DB, string) {
-	tmpFile, err := os.CreateTemp("", "mpm-test-*.db")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	tmpFile.Close()
+// recallTestDBCounter increments per call to setupTestDB, giving each
+// caller a uniquely-named shared-cache in-memory database. The DSN form
+// `file:<unique>?mode=memory&cache=shared` keeps the DB in RAM while making
+// it visible to every connection in the pool — bare ":memory:" would give
+// each pooled connection its own private DB and silently lose schema state.
+var recallTestDBCounter int64
 
-	db, err := sql.Open("sqlite3", tmpFile.Name())
+// setupTestDB opens a fresh in-memory SQLite database with the minimal
+// `memories` schema these tests need (plus a handful of indexes). Returns
+// the *sql.DB and registers cleanup with t.Cleanup so callers don't have
+// to remember `defer db.Close()`.
+//
+// The recall tests touch the raw *sql.DB directly because the functions
+// under test (keywordSearchWithTime, etc.) take *sql.DB rather than a
+// DatabaseManager. For tests that DO want a full DatabaseManager, use
+// internal.NewTestDM(t) instead.
+func setupTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	n := atomic.AddInt64(&recallTestDBCounter, 1)
+	dsn := fmt.Sprintf("file:recall-memtest-%d?mode=memory&cache=shared", n)
+
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		os.Remove(tmpFile.Name())
-		t.Fatalf("failed to open temp db: %v", err)
+		t.Fatalf("sql.Open(%q): %v", dsn, err)
 	}
 
 	// Create memories table with all required columns (matches schema + SafeMigrations)
@@ -49,22 +65,13 @@ func setupTestDB(t *testing.T) (*sql.DB, string) {
 	CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(last_accessed_at);
 	CREATE INDEX IF NOT EXISTS idx_memories_reference ON memories(reference_id);
 	`
-	_, err = db.Exec(schema)
-	if err != nil {
+	if _, err := db.Exec(schema); err != nil {
 		db.Close()
-		os.Remove(tmpFile.Name())
-		t.Fatalf("failed to create schema: %v", err)
+		t.Fatalf("create schema: %v", err)
 	}
 
-	// Enable WAL mode for test database (needed for FTS5 + concurrent access)
-	_, err = db.Exec("PRAGMA journal_mode=WAL")
-	if err != nil {
-		db.Close()
-		os.Remove(tmpFile.Name())
-		t.Fatalf("failed to enable WAL: %v", err)
-	}
-
-	return db, tmpFile.Name()
+	t.Cleanup(func() { db.Close() })
+	return db
 }
 
 // insertMemory inserts a test memory directly via SQL (bypassing MPM internals)
@@ -81,22 +88,30 @@ func insertMemory(t *testing.T, db *sql.DB, id, collection, content, sessionID, 
 // TestRecallDeduplicatesReinforcement verifies that calling keywordSearchWithTime
 // and then reinforcing only once per unique memory ID per call.
 func TestRecallDeduplicatesReinforcement(t *testing.T) {
-	db, dbPath := setupTestDB(t)
+	db := setupTestDB(t)
 	defer db.Close()
-	defer os.Remove(dbPath)
+	
 
 	// Insert two memories with same keyword so they both match
 	insertMemory(t, db, "mem-1", "memories", "golang programming language", "sess1", `[]`)
 	insertMemory(t, db, "mem-2", "memories", "golang is great", "sess1", `[]`)
 
-	// Simulate what handleRecall does: query then reinforce per unique ID
+	// Simulate what handleRecall does: query then reinforce per unique ID.
+	// NOTE: production handleRecall collects IDs into a map and runs a
+	// SINGLE bulk UPDATE after the row iterator closes — not per-ID
+	// UPDATEs inside the loop. The test mirrors the production flow now
+	// because per-ID UPDATEs while the row cursor is open hit
+	// "database is locked" under shared-cache in-memory (the production
+	// code's bulk UPDATE after Close() does not).
 	rows, err := keywordSearchWithTime(db, "golang", "memories", "", "", 0, "", 10)
 	if err != nil {
 		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
 
-	// Simulate per-call dedup (same logic as handleRecall)
+	// First pass: walk the rows, dedup per call via sessionAccessCounts,
+	// collect unique IDs for the bulk update.
 	sessionAccessCounts := make(map[string]int)
+	var uniqueIDs []string
 	for rows.Next() {
 		var id string
 		// Scan all 9 columns: id, content, session_id, tags, created_at, reinforcement_count, weight, last_accessed_at, reference_id
@@ -104,15 +119,21 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 			continue
 		}
 		if sessionAccessCounts[id] == 0 {
-			// ReinforceMemory: increment reinforcement_count and weight
-			_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
-			if err != nil {
-				t.Fatalf("reinforce failed for %s: %v", id, err)
-			}
+			uniqueIDs = append(uniqueIDs, id)
 		}
 		sessionAccessCounts[id]++
 	}
 	rows.Close()
+
+	// Second pass: reinforce (matching what ReinforceMemory does) once
+	// per unique ID. Done after rows.Close() so the read txn is gone
+	// before the write txn tries to acquire the lock.
+	for _, id := range uniqueIDs {
+		_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
+		if err != nil {
+			t.Fatalf("reinforce failed for %s: %v", id, err)
+		}
+	}
 
 	// Verify both IDs appear in sessionAccessCounts
 	if sessionAccessCounts["mem-1"] != 1 {
@@ -145,20 +166,23 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 // memory ID appears twice in a single recall result (duplicate rows), it is
 // only reinforced once.
 func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
-	db, dbPath := setupTestDB(t)
+	db := setupTestDB(t)
 	defer db.Close()
-	defer os.Remove(dbPath)
+	
 
 	// Insert a single memory
 	insertMemory(t, db, "mem-dup", "memories", "duplicate test content", "sess1", `[]`)
 
-	// Simulate recall returning the same memory twice (duplicate rows)
+	// Simulate recall returning the same memory twice (duplicate rows).
+	// Same flow as TestRecallDeduplicatesReinforcement: collect IDs, then
+	// reinforce after rows.Close() to avoid the shared-cache lock.
 	rows, err := keywordSearchWithTime(db, "duplicate", "memories", "", "", 0, "", 10)
 	if err != nil {
 		t.Fatalf("keywordSearchWithTime failed: %v", err)
 	}
 
 	sessionAccessCounts := make(map[string]int)
+	var uniqueIDs []string
 	for rows.Next() {
 		var id string
 		// Scan all 9 columns: id, content, session_id, tags, created_at, reinforcement_count, weight, last_accessed_at, reference_id
@@ -166,14 +190,18 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 			continue
 		}
 		if sessionAccessCounts[id] == 0 {
-			_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
-			if err != nil {
-				t.Fatalf("reinforce failed for %s: %v", id, err)
-			}
+			uniqueIDs = append(uniqueIDs, id)
 		}
 		sessionAccessCounts[id]++
 	}
 	rows.Close()
+
+	for _, id := range uniqueIDs {
+		_, err := db.Exec(`UPDATE memories SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, id)
+		if err != nil {
+			t.Fatalf("reinforce failed for %s: %v", id, err)
+		}
+	}
 
 	// Should be accessed once and reinforced once
 	// Note: our query (FTS5 or LIKE) does not produce duplicate rows for the same ID,
@@ -196,9 +224,9 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 // TestRecallReinforceSQLPattern verifies the reinforcement SQL pattern
 // (mimics what ReinforceMemory does) updates reinforcement_count correctly.
 func TestRecallReinforceSQLPattern(t *testing.T) {
-	db, dbPath := setupTestDB(t)
+	db := setupTestDB(t)
 	defer db.Close()
-	defer os.Remove(dbPath)
+	
 
 	// Insert a memory
 	insertMemory(t, db, "mem-real", "memories", "real reinforcement test", "sess1", `[]`)

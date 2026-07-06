@@ -1,14 +1,11 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 
 	"mpm/internal"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -106,15 +103,7 @@ func TestCallQueryConfidenceHistory_ReturnsTimeline(t *testing.T) {
 // workspace DB. The override is cleared on test cleanup.
 func newTestDMForCmd(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := internal.NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() {
-		dm.Close()
-	})
-	return dm
+	return internal.NewTestDM(t)
 }
 
 func TestCallQueryConfidenceChanges_ReturnsDeltas(t *testing.T) {
