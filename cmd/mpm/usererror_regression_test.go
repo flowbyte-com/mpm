@@ -24,8 +24,7 @@ import (
 // every whitelisted site must have a one-line reason.
 func TestNoNewDirectStderrWrites(t *testing.T) {
 	allowedSites := map[string]string{
-		"call.go:81":        "JSON error envelope for `mpm call` — must be raw JSON, not user-formatted", // comment line
-		"call.go:82":        "JSON error envelope for `mpm call` — must be raw JSON, not user-formatted",
+		"call.go:75":        "JSON error envelope for `mpm call` — must be raw JSON, not user-formatted",
 		"simple_cmds.go:606": "Multi-line usage help text — structured output, not a single error message",
 		"simple_cmds.go:608": "Multi-line usage help text — structured output, not a single error message",
 	}
