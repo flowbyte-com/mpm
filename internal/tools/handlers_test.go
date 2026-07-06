@@ -793,3 +793,46 @@ func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
 		t.Errorf("milestone id drift: got %s, want %s", refs[0]["id"], myID)
 	}
 }
+
+// ── health_check tool ──────────────────────────────────────────────────
+
+// TestHandleHealthCheck_PassesThrough verifies the tool-layer wrapper
+// invokes DM.HealthCheck() and returns its payload. Pins that the
+// registered tool is just a thin shim over the DM method.
+func TestHandleHealthCheck_PassesThrough(t *testing.T) {
+	dm := newTestSharedDM(t)
+	out, err := handleHealthCheck(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleHealthCheck: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", out)
+	}
+	if okVal, _ := m["ok"].(bool); !okVal {
+		t.Errorf("ok: got false, want true; payload=%+v", m)
+	}
+	if _, present := m["busy_retries"]; !present {
+		t.Error("busy_retries missing from handler payload")
+	}
+}
+
+// TestHandleHealthCheck_ReflectsState pins that the handler reflects
+// domain state — adding a memory bumps memories_active.
+func TestHandleHealthCheck_ReflectsState(t *testing.T) {
+	dm := newTestSharedDM(t)
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, deleted_at, created_at, updated_at)
+		VALUES ('mem-hc-handler-1', 'memories', 'handler test', NULL, '2026-07-06', '2026-07-06')
+	`); err != nil {
+		t.Fatalf("insert memory: %v", err)
+	}
+	out, err := handleHealthCheck(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("handleHealthCheck: %v", err)
+	}
+	m := out.(map[string]interface{})
+	if n, _ := m["memories_active"].(int64); n != 1 {
+		t.Errorf("memories_active: got %d, want 1", n)
+	}
+}
