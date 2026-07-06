@@ -40,6 +40,12 @@ var Registry = []Tool{
 		Handler:     handleChallengeMemory,
 	},
 	{
+		Name:        "commit_milestone",
+		Description: "Commit a deliberate narrative milestone. Thin wrapper over save_to_memory with a type:milestone-* tag for wake-context surfacing. summary must be ≥50 chars and defensible from the summary alone.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":50,"description":"The milestone claim. Must be ≥50 chars and stand alone — another agent should be able to defend it from the summary text without surrounding context."},"flavor":{"type":"string","enum":["shipped","insight"],"default":"shipped","description":"Type of milestone. 'shipped' = work done (e.g. shipped a feature, fixed a class of bug, closed a debt arc). 'insight' = durable learning (e.g. architectural rule discovered, anti-pattern identified, principle earned)."},"tags":{"type":"string","description":"Optional additional tags as comma-separated or JSON list. The handler always injects type:milestone-<flavor>; do not double-prefix."}},"required":["summary"]}`),
+		Handler:     handleCommitMilestone,
+	},
+	{
 		Name:        "propose_theory",
 		Description: "Create a pending theory row in the memories table (collection='theories').",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"type":"string"}},"required":["hypothesis"]}`),
