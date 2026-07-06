@@ -15,6 +15,7 @@
 package internal
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -285,4 +286,125 @@ func abs(x int64) int64 {
 		return -x
 	}
 	return x
+}
+// ── digest tests ───────────────────────────────────────────────────────
+
+// TestDigestScheduledWakes_BucketsAndTopN verifies the digest summarises
+// overdue wakes into age buckets and surfaces the top-N most overdue by
+// target_time ASC. Pins the contract for the "agent wakes after long
+// idle" case where listing every overdue wake individually would blow
+// out context.
+func TestDigestScheduledWakes_BucketsAndTopN(t *testing.T) {
+	dm := newTestDM(t)
+
+	now := time.Now().Unix()
+	// Seed wakes across age buckets + a future one.
+	// (target_time, reason) — times are absolute seconds-from-epoch.
+	seed := []struct {
+		offsetSecs int64
+		reason     string
+		theoryID   string // empty for none
+	}{
+		{-30, "30s overdue (under_1h)", ""},
+		{-7200, "2h overdue (1h_to_1d)", ""},
+		{-3 * 86400, "3d overdue (1d_to_1w)", ""},
+		{-14 * 86400, "14d overdue (1w_to_1mo)", "th-oldest"},
+		{-45 * 86400, "45d overdue (over_1mo)", ""},
+		{-2 * 86400, "2d overdue (1d_to_1w, second entry)", "th-recent"},
+		{3600, "1h future pending", ""},
+	}
+	for _, s := range seed {
+		theory := sql.NullString{String: s.theoryID, Valid: s.theoryID != ""}
+		if _, err := dm.db.Exec(`
+			INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, fired, created_by)
+			VALUES (?, ?, ?, ?, 0, 'test')
+		`, "wk-test-"+s.reason, now+s.offsetSecs, s.reason, theory); err != nil {
+			t.Fatalf("seed wake %q: %v", s.reason, err)
+		}
+	}
+
+	d, err := dm.DigestScheduledWakes(3)
+	if err != nil {
+		t.Fatalf("DigestScheduledWakes: %v", err)
+	}
+
+	// 6 overdue + 1 future pending.
+	if c, _ := d["total_overdue"].(int); c != 6 {
+		t.Errorf("total_overdue: got %d, want 6", c)
+	}
+	if c, _ := d["total_pending_future"].(int); c != 1 {
+		t.Errorf("total_pending_future: got %d, want 1", c)
+	}
+
+	// 2 wakes linked to theories.
+	if c, _ := d["linked_to_theory"].(int); c != 2 {
+		t.Errorf("linked_to_theory: got %d, want 2", c)
+	}
+
+	// Bucket counts.
+	buckets, ok := d["age_buckets"].(map[string]int)
+	if !ok {
+		t.Fatalf("age_buckets missing or wrong type: %T", d["age_buckets"])
+	}
+	want := map[string]int{
+		"under_1h":  1,
+		"1h_to_1d":  1,
+		"1d_to_1w":  2,
+		"1w_to_1mo": 1,
+		"over_1mo":  1,
+	}
+	for k, v := range want {
+		if buckets[k] != v {
+			t.Errorf("bucket %q: got %d, want %d", k, buckets[k], v)
+		}
+	}
+
+	// Oldest is the 45d one (most negative target_time).
+	if reason, _ := d["oldest_overdue_reason"].(string); reason != "45d overdue (over_1mo)" {
+		t.Errorf("oldest_overdue_reason: got %q, want the 45d one", reason)
+	}
+	if secs, _ := d["oldest_overdue_secs"].(int64); secs < 44*86400 {
+		t.Errorf("oldest_overdue_secs: got %d, want >= %d", secs, 44*86400)
+	}
+
+	// top_overdue should be 3 rows, in target_time ASC order (most overdue first).
+	top, ok := d["top_overdue"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("top_overdue missing or wrong type: %T", d["top_overdue"])
+	}
+	if len(top) != 3 {
+		t.Fatalf("top_overdue length: got %d, want 3", len(top))
+	}
+	if reason, _ := top[0]["reason"].(string); reason != "45d overdue (over_1mo)" {
+		t.Errorf("top[0] reason: got %q, want oldest", reason)
+	}
+	if reason, _ := top[1]["reason"].(string); reason != "14d overdue (1w_to_1mo)" {
+		t.Errorf("top[1] reason: got %q, want 14d", reason)
+	}
+	if reason, _ := top[2]["reason"].(string); reason != "3d overdue (1d_to_1w)" {
+		t.Errorf("top[2] reason: got %q, want 3d", reason)
+	}
+}
+
+// TestDigestScheduledWakes_Empty confirms the digest works when no
+// wakes exist — no panic, sensible zero values.
+func TestDigestScheduledWakes_Empty(t *testing.T) {
+	dm := newTestDM(t)
+	d, err := dm.DigestScheduledWakes(5)
+	if err != nil {
+		t.Fatalf("DigestScheduledWakes: %v", err)
+	}
+	if c, _ := d["total_overdue"].(int); c != 0 {
+		t.Errorf("total_overdue: got %d, want 0", c)
+	}
+	if c, _ := d["total_pending_future"].(int); c != 0 {
+		t.Errorf("total_pending_future: got %d, want 0", c)
+	}
+	if _, present := d["oldest_overdue_iso"]; present {
+		t.Error("oldest_overdue_iso should be absent when no overdue wakes")
+	}
+	top, _ := d["top_overdue"].([]map[string]interface{})
+	if len(top) != 0 {
+		t.Errorf("top_overdue: got %d rows, want 0", len(top))
+	}
 }

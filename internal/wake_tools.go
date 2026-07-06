@@ -255,6 +255,128 @@ func (dm *DatabaseManager) ListScheduledWakes(includeFired, overdueOnly bool, li
 	return out, nil
 }
 
+// DigestScheduledWakes returns a compact summary of overdue and pending
+// wakes — designed for the "agent wakes up after a long idle" case where
+// listing every overdue wake individually would blow out context. Returns
+// age-bucket counts, total overdue/pending, oldest overdue timestamp, and
+// the top-N most overdue (by target_time ASC) with their reasons.
+//
+// topN defaults to 5 if <=0. The pending_future count is bounded at 10000
+// (it's a count, not a row dump — high count just means "lots queued").
+//
+// Called by handleDigestWakes in internal/tools/handlers.go.
+func (dm *DatabaseManager) DigestScheduledWakes(topN int) (map[string]interface{}, error) {
+	if topN <= 0 {
+		topN = 5
+	}
+	now := time.Now()
+	nowUnix := now.Unix()
+
+	// Pull all overdue wakes (fired=0, target_time < now). Cap at 1000
+	// for the aggregation; the digest is a SUMMARY, not an enumeration.
+	// If a session ever has >1000 overdue wakes, the system has bigger
+	// problems than this digest can solve — the agent should fire the
+	// oldest first via CheckPendingWakes.
+	rows, err := dm.db.Query(`
+		SELECT id, target_time, reason, theory_id
+		FROM scheduled_wakes
+		WHERE fired = 0 AND target_time < ?
+		ORDER BY target_time ASC
+		LIMIT 1000
+	`, nowUnix)
+	if err != nil {
+		return nil, fmt.Errorf("query overdue wakes: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		bucketUnder1h, bucket1hTo1d, bucket1dTo1w, bucket1wTo1mo, bucketOver1mo int
+		linkedToTheory                                                          int
+		oldestTarget                                                            int64
+		oldestReason                                                            string
+		topOverdue                                                              = []map[string]interface{}{}
+		total                                                                   int
+	)
+	for rows.Next() {
+		var id, reason string
+		var targetTime int64
+		var theoryID *string
+		if err := rows.Scan(&id, &targetTime, &reason, &theoryID); err != nil {
+			return nil, fmt.Errorf("scan overdue wake row: %w", err)
+		}
+		overdueSecs := nowUnix - targetTime
+		if overdueSecs < 0 {
+			overdueSecs = 0
+		}
+
+		switch {
+		case overdueSecs < 3600: // < 1 hour
+			bucketUnder1h++
+		case overdueSecs < 86400: // < 1 day
+			bucket1hTo1d++
+		case overdueSecs < 604800: // < 1 week
+			bucket1dTo1w++
+		case overdueSecs < 2592000: // < 30 days
+			bucket1wTo1mo++
+		default:
+			bucketOver1mo++
+		}
+
+		if theoryID != nil && *theoryID != "" {
+			linkedToTheory++
+		}
+
+		if oldestTarget == 0 || targetTime < oldestTarget {
+			oldestTarget = targetTime
+			oldestReason = reason
+		}
+
+		if len(topOverdue) < topN {
+			topOverdue = append(topOverdue, map[string]interface{}{
+				"reason":        reason,
+				"target_iso":    time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
+				"overdue_secs":  overdueSecs,
+				"theory_id":     nullableString(theoryID),
+			})
+		}
+		total++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate overdue wake rows: %w", err)
+	}
+
+	// Pending future count (fired=0, target_time >= now). Just a count —
+	// the digest doesn't enumerate them.
+	var pendingFuture int
+	if err := dm.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time >= ?`,
+		nowUnix,
+	).Scan(&pendingFuture); err != nil {
+		return nil, fmt.Errorf("count pending future: %w", err)
+	}
+
+	out := map[string]interface{}{
+		"success":            true,
+		"total_overdue":      total,
+		"total_pending_future": pendingFuture,
+		"linked_to_theory":   linkedToTheory,
+		"age_buckets": map[string]int{
+			"under_1h":   bucketUnder1h,
+			"1h_to_1d":   bucket1hTo1d,
+			"1d_to_1w":   bucket1dTo1w,
+			"1w_to_1mo":  bucket1wTo1mo,
+			"over_1mo":   bucketOver1mo,
+		},
+		"top_overdue": topOverdue,
+	}
+	if oldestTarget > 0 {
+		out["oldest_overdue_iso"] = time.Unix(oldestTarget, 0).UTC().Format(time.RFC3339)
+		out["oldest_overdue_secs"] = nowUnix - oldestTarget
+		out["oldest_overdue_reason"] = oldestReason
+	}
+	return out, nil
+}
+
 // ── helpers ────────────────────────────────────────────────────────────
 
 // newWakeID returns a 32-char hex ID with a "wk-" prefix for fast
