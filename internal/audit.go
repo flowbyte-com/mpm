@@ -1,4 +1,5 @@
-// audit.go — System audit log: runtime anomaly capture and query.
+// audit.go — System audit log: runtime anomaly capture + high-stakes
+// event ledger.
 //
 // The system_audit_log table is the cognitive surface for runtime
 // telemetry. It is the database-side counterpart to watchdog.jsonl and
@@ -24,6 +25,15 @@
 //      the gc sweep in runOpsMaintain. We do not use SQLite triggers
 //      because retention is a tunable — different deployments may want
 //      different windows.
+//
+//   5. DUAL-PURPOSE TABLE (since AuditInfo, 2026-07-06).
+//      warn/error/fatal = anomalies (cluster-detected, surfaced in
+//      wake context). info = deliberate state mutations with downstream
+//      blast radius (irrecoverable deletes, cross-agent writes,
+//      theory state transitions). AuditInfo events are written for the
+//      operator's forensic trail but do NOT trigger cluster detection —
+//      see gating in LogAudit and the rationale in
+//      migrateAuditLevelConstraint's commit message.
 package internal
 
 import (
@@ -32,17 +42,35 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
 // AuditLevel classifies how serious a logged event is. The CHECK constraint
 // in schema.go enforces these values at the database level.
+//
+// Two distinct audiences:
+//
+//	* warn/error/fatal — anomalies. Cluster-detected. Surfaced in wake
+//	  context via AuditSummary. The snooze_cluster workflow is the
+//	  operator's tool for triaging this stream.
+//
+//	* info — deliberate state mutations with downstream blast radius
+//	  (irrecoverable deletes, cross-agent writes, theory state
+//	  transitions). Written for the operator's forensic trail only;
+//	  NOT cluster-detected, NOT surfaced in AuditSummary.
+//
+// The split is enforced in LogAudit's cluster-upsert gate, not in the
+// level itself. A future migration could add more levels (debug, audit)
+// without changing this contract; the gate is the only place that
+// interprets "level" as anomaly vs. event.
 type AuditLevel string
 
 const (
-	AuditWarn  AuditLevel = "warn"
-	AuditError AuditLevel = "error"
-	AuditFatal AuditLevel = "fatal"
+	AuditInfo  AuditLevel = "info"  // deliberate, non-anomalous event (forensic trail only)
+	AuditWarn  AuditLevel = "warn"  // recoverable anomaly
+	AuditError AuditLevel = "error" // anomaly with operator-visible impact
+	AuditFatal AuditLevel = "fatal" // would-be-crash, captured
 )
 
 // AuditContext is a free-form JSON blob passed to LogAudit. Keep it small —
@@ -62,7 +90,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 	if dm == nil || dm.db == nil {
 		return
 	}
-	if level != AuditWarn && level != AuditError && level != AuditFatal {
+	if level != AuditInfo && level != AuditWarn && level != AuditError && level != AuditFatal {
 		fmt.Fprintf(os.Stderr, "audit: invalid level %q, skipping\n", level)
 		return
 	}
@@ -92,13 +120,24 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 		return
 	}
 
-	// SECONDARY: cluster counter. Best-effort aggregation. The raw
-	// event is already durably stored above, so a failure here means
-	// only that the cluster count lags by one — the next event in
-	// the same cluster will retry the upsert. NEVER return error
-	// from here: observation must not back-pressure the failing path.
-	if err := dm.upsertClusterCounter(component, message, now); err != nil {
-		fmt.Fprintf(os.Stderr, "audit cluster upsert failed: %v (component=%s) — raw event preserved; will retry on next event\n", err, component)
+	// SECONDARY: cluster counter (anomalies only). Best-effort aggregation.
+	// The raw event is already durably stored above, so a failure here
+	// means only that the cluster count lags by one — the next event in
+	// the same cluster will retry the upsert. NEVER return error from
+	// here: observation must not back-pressure the failing path.
+	//
+	// GATING: AuditInfo events do NOT trigger cluster detection.
+	// Rationale: shred_memory, record_global_rule, promote_to_global,
+	// propose_theory, resolve_theory all log at info and are NOT
+	// anomalies. Three consecutive successful shreds of "theory-X" must
+	// not trip a snooze_cluster investigation; the audit row was written
+	// (so the operator can grep it), but the cluster detector stays
+	// strictly anomaly-focused. Operators querying via query_audit_log
+	// filter by level='info' to surface the deliberate stream.
+	if level != AuditInfo {
+		if err := dm.upsertClusterCounter(component, message, now); err != nil {
+			fmt.Fprintf(os.Stderr, "audit cluster upsert failed: %v (component=%s) — raw event preserved; will retry on next event\n", err, component)
+		}
 	}
 }
 
@@ -223,6 +262,113 @@ func truncateStack(s string, max int) string {
 		return s
 	}
 	return s[:max] + "\n... (truncated)"
+}
+
+// migrateAuditLevelConstraint relaxes the CHECK constraint on
+// system_audit_log.level to also permit 'info'. SQLite does not support
+// altering CHECK constraints (ALTER TABLE only supports ADD/DROP/RENAME
+// COLUMN, never ADD/DROP CONSTRAINT), so the only path is a transactional
+// table recreation:
+//
+//	BEGIN
+//	  CREATE TABLE system_audit_log_new ( ... new CHECK ... )
+//	  INSERT INTO system_audit_log_new SELECT * FROM system_audit_log
+//	  DROP TABLE system_audit_log
+//	  ALTER TABLE system_audit_log_new RENAME TO system_audit_log
+//	COMMIT
+//
+// Idempotent: detects whether the new constraint is already present via
+// the CREATE statement stored in sqlite_master.sql and returns early if
+// so. The substring match is intentional — a full CHECK-parser is
+// overkill for a single-value migration, and the existing DDL always
+// stores the literal 'info' (no quoting variations to worry about).
+//
+// Indices attached to the table are dropped implicitly with DROP TABLE.
+// The CommonIndexes loop in initUnifiedSchema recreates them via
+// CREATE INDEX IF NOT EXISTS, so end-state is identical to a fresh
+// install.
+//
+// IMPORTANT: this function duplicates the column list from
+// schema.go::CommonIndexes (which carries the audit_log CREATE TABLE).
+// Any future column additions to system_audit_log in schema.go MUST
+// also be mirrored here, or this migration will silently drop data
+// on the INSERT SELECT. The DDL duplication is the cost of bypassing
+// SafeMigrations, which is column-ADD only.
+//
+// Called from initUnifiedSchema right after the SafeMigrations loop and
+// before the CommonIndexes loop, so indices get rebuilt onto the
+// renamed table by the existing CREATE INDEX IF NOT EXISTS pass.
+func (dm *DatabaseManager) migrateAuditLevelConstraint() error {
+	if dm == nil || dm.db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+
+	// 1. Read the current CREATE statement for system_audit_log.
+	// sqlite_master.sql is the canonical source for the live schema.
+	var createSQL string
+	err := dm.db.QueryRow(`
+		SELECT sql FROM sqlite_master
+		WHERE type = 'table' AND name = 'system_audit_log'
+	`).Scan(&createSQL)
+	if err == sql.ErrNoRows {
+		// Table doesn't exist yet — CREATE TABLE IF NOT EXISTS in
+		// initUnifiedSchema's CommonIndexes loop will create it with
+		// the up-to-date constraint on first run. No-op.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: read sqlite_master: %w", err)
+	}
+
+	// 2. Idempotency check. If the table's CHECK already lists 'info',
+	// skip the migration entirely.
+	if strings.Contains(createSQL, "'info'") {
+		return nil
+	}
+
+	// 3. Transactional table recreation. The new DDL mirrors the
+	// column list from schema.go with one change: the CHECK expands
+	// from ('warn','error','fatal') to ('info','warn','error','fatal').
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: begin: %w", err)
+	}
+	// safe no-op Rollback after Commit; matters on early returns below.
+	defer func() { _ = tx.Rollback() }()
+
+	const newDDL = `CREATE TABLE system_audit_log_new (
+		id          TEXT PRIMARY KEY,
+		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal')),
+		component   TEXT NOT NULL,
+		message     TEXT NOT NULL,
+		stack_trace TEXT,
+		context     JSON,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`
+	if _, err := tx.Exec(newDDL); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: create new table: %w", err)
+	}
+	// INSERT SELECT — preserves all existing rows including their
+	// stack_trace (NULLable TEXT) and JSON context (NULLable JSON).
+	if _, err := tx.Exec(
+		`INSERT INTO system_audit_log_new
+			(id, level, component, message, stack_trace, context, created_at)
+		SELECT id, level, component, message, stack_trace, context, created_at
+		FROM system_audit_log`,
+	); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: insert select: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE system_audit_log`); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: drop old table: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE system_audit_log_new RENAME TO system_audit_log`); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: rename: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: commit: %w", err)
+	}
+
+	return nil
 }
 
 // upsertClusterCounter is the write-side hook for the cluster detector.
