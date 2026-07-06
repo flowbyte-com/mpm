@@ -119,14 +119,43 @@ Wake context: append a "Global Rules Active" section if any rules exist. Cheap t
 ## Recall scoring (shared boost)
 
 ```
-score = local_score                                          -- existing hybrid scoring
-      + (source == 'shared' ? 0.5 : 0)                      -- rule precedence
-      + (collection == 'rules' ? 0.3 : 0)                    -- explicit rule boost
+local row              → final = combined                          (raw relevance)
+shared row (non-rule)  → final = min(combined * 1.20, 1.0)        (Shared Premium)
+shared rule            → final = min(combined * 1.35, 1.0)        (rules collection)
 ```
 
-Total boost cap: +0.8 (don't let shared rules drown out local context).
+The multiplier scales with relevance: an irrelevant shared row at
+combined=-0.2 stays at -0.24 (still below any local match), while a
+relevant shared row at combined=0.7 promotes to 0.84 and edges out a
+similarly-relevant local row. This avoids the additive-with-cap model
+that fights the BM25+semantic normalisation — see commit `7e886cd`
+for the rationale discussion.
 
-This is **not** a global override — a local memory that scores higher on relevance still wins. The shared boost is only a tiebreaker and a soft floor.
+Why multiplicative, not additive+cap:
+
+- **Additive `+0.5` floors zero-relevance items.** A shared rule
+  with combined=-0.2 (irrelevant) gets forced to +0.3 — which is
+  indistinguishable from a mildly relevant local match. The
+  multiplicative model has zero-relevance items stay at zero, so
+  truly irrelevant shared content cannot artificially promote.
+- **Stacking preserves the two-tier hierarchy.** `1.20×` (shared) and
+  `1.35×` (rules) keeps "house rules > shared decisions > local"
+  as a strict monotone ranking by relevance tier.
+- **The 1.0 cap is a normalisation invariant.** Without it, a
+  near-perfect relevant score compounds unboundedly and breaks the
+  hybrid scoring curve.
+
+Rank order is `final` desc, then `weight` desc, then `collection` asc
+(stable + predictable; ties broken by convention).
+
+Fetch buffer: each side is requested at `limit × 2` before merge so
+the multiplier-induced reordering doesn't truncate at the per-side
+limit. After merge, the combined array is sliced to the requested
+`limit`.
+
+This is **not** a global override — a local memory with clearly
+higher raw relevance still wins. The Shared Premium is a
+relevance-preserving tiebreaker, not an elevation above relevance.
 
 ---
 

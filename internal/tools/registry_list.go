@@ -29,8 +29,8 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_long_term_memory",
-		Description: "Search MPM long-term memory by FTS5 + semantic + reinforcement scoring.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"},"collection":{"type":"string"}},"required":["query"]}`),
+		Description: "Search MPM long-term memory by FTS5 + semantic + reinforcement scoring. Federated across local + shared DBs when scope=all.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"},"collection":{"type":"string"},"scope":{"type":"string","enum":["all","local","shared"],"description":"Recall scope. all (default) merges local + shared with Shared Premium (1.20x shared, 1.35x shared+rules, cap 1.0); local restricts to local tables; shared restricts to shared.memories via FTS5.","default":"all"}},"required":["query"]}`),
 		Handler:     handleQueryLongTermMemory,
 	},
 	{
