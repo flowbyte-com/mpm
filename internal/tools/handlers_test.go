@@ -514,3 +514,297 @@ func TestHandleListActiveClusters_RegistryEntryWired(t *testing.T) {
 		t.Error("list_active_clusters not in Registry — agent will not see this tool")
 	}
 }
+
+// TestHandleCommitMilestone_RegistryEntryWired pins the tool's wiring —
+// the schema guard test additionally checks the over/under-declaration
+// invariant. If the registry entry drifts, this test fails first.
+func TestHandleCommitMilestone_RegistryEntryWired(t *testing.T) {
+	var entry *Tool
+	for i, tool := range Registry {
+		if tool.Name == "commit_milestone" {
+			entry = &Registry[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatal("commit_milestone not in Registry — agent will not see this tool")
+	}
+	if entry.Handler == nil {
+		t.Error("commit_milestone registry entry has nil Handler")
+	}
+	if entry.Description == "" {
+		t.Error("commit_milestone registry entry has empty Description")
+	}
+	if len(entry.Schema) == 0 {
+		t.Error("commit_milestone registry entry has empty Schema")
+	}
+}
+
+// TestHandleCommitMilestone_RequiresSummary pins the floor that
+// `summary` must be non-empty. Trimmed further by the length test below.
+func TestHandleCommitMilestone_RequiresSummary(t *testing.T) {
+	dm := newTestSharedDM(t)
+	_, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		// summary intentionally omitted
+	})
+	if err == nil {
+		t.Fatal("expected error when summary missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "summary is required") {
+		t.Errorf("expected 'summary is required' error, got: %v", err)
+	}
+}
+
+// TestHandleCommitMilestone_RejectsShortSummary pins the 50-char
+// minimum. The threshold encodes "could another agent defend this
+// claim from the summary alone?" — a 20-char string like "shipped
+// scratchpad" fails that test.
+func TestHandleCommitMilestone_RejectsShortSummary(t *testing.T) {
+	dm := newTestSharedDM(t)
+	short := strings.Repeat("a", MinMilestoneSummaryChars-1)
+	_, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": short,
+	})
+	if err == nil {
+		t.Fatal("expected error for summary < 50 chars, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be at least 50") {
+		t.Errorf("expected length-floor error, got: %v", err)
+	}
+	// Just over the floor should succeed (validates boundary).
+	justOver := strings.Repeat("a", MinMilestoneSummaryChars)
+	_, err = handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": justOver,
+	})
+	if err != nil {
+		t.Fatalf("expected success for summary == %d chars, got: %v", MinMilestoneSummaryChars, err)
+	}
+}
+
+// TestHandleCommitMilestone_DefaultFlavorIsShipped verifies that
+// omitting `flavor` defaults to "shipped". The taxonomy is the whole
+// point — silent fallback to "insight" or "" would dilute the signal.
+func TestHandleCommitMilestone_DefaultFlavorIsShipped(t *testing.T) {
+	dm := newTestSharedDM(t)
+	summary := "Closed the morning's MPM mechanical cleanup arc: handoff UPSERT fix + MCP schema gap + stderr allowlist reconciliation + README."
+	out, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	tags, _ := m["tags"].([]string)
+	wantTag := "type:milestone-shipped"
+	found := false
+	for _, t := range tags {
+		if t == wantTag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected tag %q in %v, got none", wantTag, tags)
+	}
+}
+
+// TestHandleCommitMilestone_ExplicitFlavor verifies the taxonomy gate
+// can be overridden explicitly. "insight" milestones are durable
+// learnings (architectural rules, anti-patterns) — different from work
+// shipped.
+func TestHandleCommitMilestone_ExplicitFlavor(t *testing.T) {
+	dm := newTestSharedDM(t)
+	summary := "Lesson learned: an UPSERT's read_at-preserve-on-overwrite is a silent shadow-write; the row is unreadable to the read-side filter for the entire lifetime of the first read. UPSERT must reset read state."
+	out, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+		"flavor":  "insight",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, _ := out.(map[string]interface{})
+	tags, _ := m["tags"].([]string)
+	wantTag := "type:milestone-insight"
+	found := false
+	for _, t := range tags {
+		if t == wantTag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected tag %q in %v, got none", wantTag, tags)
+	}
+}
+
+// TestHandleCommitMilestone_InvalidFlavor pins the enum. Anything
+// outside shipped / insight is rejected — typos here would create
+// un-aggregable tags the wake-context query wouldn't surface.
+func TestHandleCommitMilestone_InvalidFlavor(t *testing.T) {
+	dm := newTestSharedDM(t)
+	summary := strings.Repeat("x", MinMilestoneSummaryChars+10)
+	_, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+		"flavor":  "sh1pped", // typo
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid flavor, got nil")
+	}
+	if !strings.Contains(err.Error(), "flavor must be") {
+		t.Errorf("expected enum rejection error, got: %v", err)
+	}
+}
+
+// TestHandleCommitMilestone_DoublePrefixDedupe pins the dedupe path —
+// a caller who pre-tags with the canonical form should not get two
+// copies in the stored tag list. The dedupe is what keeps the wake-
+// context query symmetric across all milestone tags.
+func TestHandleCommitMilestone_DoublePrefixDedupe(t *testing.T) {
+	dm := newTestSharedDM(t)
+	summary := strings.Repeat("y", MinMilestoneSummaryChars+10)
+	out, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+		"flavor":  "shipped",
+		"tags":    "type:milestone-shipped,custom-tag",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, _ := out.(map[string]interface{})
+	tags, _ := m["tags"].([]string)
+	count := 0
+	for _, t := range tags {
+		if t == "type:milestone-shipped" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 occurrence of type:milestone-shipped, got %d (tags=%v)", count, tags)
+	}
+	// Caller-supplied custom-tag must be preserved.
+	hasCustom := false
+	for _, t := range tags {
+		if t == "custom-tag" {
+			hasCustom = true
+			break
+		}
+	}
+	if !hasCustom {
+		t.Errorf("expected custom-tag in %v, missing", tags)
+	}
+}
+
+// TestHandleCommitMilestone_PersistsThroughWakeContext verifies the
+// full path: commit_milestone writes a memory tagged type:milestone-*,
+// and the wake-context gather picks it up inside the 30d window. This
+// is the integration test the schema-guard test cannot see — the
+// handler and the wake-context query must agree on the tag anchor.
+//
+// The full path is exercised in internal/wake_context_milestones_test.go
+// where `dm.recentMilestones` is in scope. Here in `tools/` we limit
+// the assertion to what's accessible: that the memory row is persisted
+// with the canonical tag, queryable from the same DB the wake-context
+// gather reads from.
+func TestHandleCommitMilestone_PersistsWithCanonicalTag(t *testing.T) {
+	dm := newTestSharedDM(t)
+	summary := "Closing the wake-context narrative-arc gap: added Recent Milestones block (5 strategic slots) carved out of the Recent Memories tactical envelope (10->5); budget held constant."
+	out, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+		"flavor":  "shipped",
+	})
+	if err != nil {
+		t.Fatalf("commit_milestone failed: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		t.Fatal("expected memory id in output, got empty")
+	}
+	// Confirm the row exists with the canonical tag by querying the
+	// DB directly. The wake-context gather uses the same tag anchor
+	// (verified in internal/wake_context_milestones_test.go).
+	var storedTags string
+	err = dm.SQLDB().QueryRow(`SELECT tags FROM memories WHERE id = ?`, id).Scan(&storedTags)
+	if err != nil {
+		t.Fatalf("expected row to exist: %v", err)
+	}
+	if !strings.Contains(storedTags, "type:milestone-shipped") {
+		t.Errorf("milestone row missing canonical tag, tags column: %s", storedTags)
+	}
+}
+
+// TestHandleReadWakeContext_IncludesRecentMilestones pins the wire
+// contract: a milestone written via commit_milestone must surface in
+// the read_wake_context response under the recent_milestones key.
+//
+// This catches the drift pattern where WakeContextData (the internal
+// struct) gains a new field but handleReadWakeContext (the handler
+// that maps struct → JSON response map) silently omits it. The two
+// surfaces had drifted on every other field addition prior to this
+// fix; this test pins the contract going forward.
+func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
+	// Use a hermetic in-memory DB instead of newTestSharedDM so the test
+	// is independent of prod-DB state and independent of test-ordering
+	// races with sibling commit_milestone tests. The newTestSharedDM
+	// helper opens the production DB (mpmPath is hardcoded in
+	// NewDatabaseManager); without hermetic isolation, the LIMIT 5
+	// window can exclude our row when other tests commit in the same
+	// second.
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	// Active state lives in ~/.mpm/active.json (read by readActiveState
+	// during GatherWakeContext). For the in-memory test we don't care
+	// about it; ignore any read errors.
+	summary := "Closing the wake-context narrative-arc gap at the handler layer too: handler copy must match struct, otherwise the wire contract drifts silently — wake context milestone regression test."
+	out0, err := handleCommitMilestone(dm, internal.ActiveContext{}, map[string]interface{}{
+		"summary": summary,
+		"flavor":  "shipped",
+	})
+	if err != nil {
+		t.Fatalf("commit_milestone failed: %v", err)
+	}
+	m0, _ := out0.(map[string]interface{})
+	myID, _ := m0["id"].(string)
+	if myID == "" {
+		t.Fatal("commit_milestone did not return a memory id")
+	}
+
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context failed: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	rawMilestones, exists := m["recent_milestones"]
+	if !exists {
+		t.Fatal("recent_milestones key missing from read_wake_context response — handler copy drifted from WakeContextData struct")
+	}
+	refs, ok := rawMilestones.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected recent_milestones to be []map[string]interface{}, got %T", rawMilestones)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("expected exactly 1 milestone in recent_milestones (hermetic DB), got %d: %+v", len(refs), refs)
+	}
+	if refs[0]["content"] != summary {
+		t.Errorf("milestone content drift:\n got: %s\nwant: %s", refs[0]["content"], summary)
+	}
+	if refs[0]["id"] != myID {
+		t.Errorf("milestone id drift: got %s, want %s", refs[0]["id"], myID)
+	}
+}

@@ -460,6 +460,9 @@ func handleOps(args []string) int {
 	case "changelog":
 		return handleOpsChangelogRoute(subArgs)
 
+	case "milestones":
+		return handleOpsMilestones(subArgs)
+
 	case "init":
 		return handleOpsInit(subArgs)
 
@@ -516,6 +519,7 @@ var opsSubcommandDescs = []struct {
 	{"promote", "XITL: promote ephemeral persona to permanent disk file"},
 	{"confidence show|recompute", "Confidence/evidence engine: snapshot or trigger recompute"},
 	{"changelog build [--since/--until/--version/--legacy/--dry-run]", "Generate CHANGELOG.md + changelog.json from git log"},
+	{"milestones [--flavor/--days/--limit]", "List recent narrative milestones (memories tagged type:milestone-*)"},
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"help", "Show this help"},

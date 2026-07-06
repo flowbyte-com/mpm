@@ -20,8 +20,9 @@ type WakeContextData struct {
 	SessionID      string              `json:"session_id"`
 	ActiveMode     string              `json:"active_mode"`
 	ActivePersona  string              `json:"active_persona"`
-	RecentTopics   []string            `json:"recent_topics"`
-	RecentMemories []WakeContextMemory `json:"recent_memories"`
+	RecentTopics    []string            `json:"recent_topics"`
+	RecentMemories  []WakeContextMemory `json:"recent_memories"`
+	RecentMilestones []WakeContextMemory `json:"recent_milestones"`
 	// AuditSummary is a one-line summary of system_audit_log activity in
 	// the last 24h, or empty if no error/fatal events were logged. The
 	// agent uses this as a signpost — if present, it should call
@@ -125,7 +126,13 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	}
 
 	data.ActiveMode, data.ActivePersona = readActiveState()
-	data.RecentMemories = dm.recentMemories(10)
+	// Budget envelope (locked 2026-07-06): 5 tactical + 5 strategic.
+	// Recent Memories was pulled at limit=10 but the renderer caps at 5,
+	// so the 10→5 swap at the DB layer matches the rendering budget and
+	// reclaims 5 slots for Recent Milestones. The total wake-context
+	// payload size is unchanged.
+	data.RecentMemories = dm.recentMemories(5)
+	data.RecentMilestones = dm.recentMilestones(5)
 	data.RecentTopics = dm.GetRecentUserTopics(5)
 	data.AuditSummary = dm.AuditSummary()
 
@@ -160,6 +167,49 @@ func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
 		ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []WakeContextMemory
+	for rows.Next() {
+		var m WakeContextMemory
+		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// recentMilestones returns up to `limit` non-deleted memories tagged with
+// the type:milestone-* prefix, scoped to a 30-day rolling window. This is
+// the wake-context narrative-arc surface — complementary to recentMemories
+// (tactical: what was I just doing?) with the deliberate commitment-ceremony
+// gate encoded by the milestone tag (strategic: what was the actual
+// narrative arc?).
+//
+// The query uses substring-on-JSON-encoded tags: `type:milestone-%"` where
+// the trailing quote is the JSON string close. This avoids false positives
+// like user-content containing the literal substring 'type:milestone-'.
+//
+// Milestones are session-decoupled by design (a milestone is a cognitive
+// artifact, not an operational log) — there is no session_id filter here.
+// Across all sessions, the agent wakes up seeing the same recent narrative
+// arc regardless of which session_id it is currently in. Cross-session
+// narrative continuity is the whole point of the architecture.
+func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, content, created_at FROM memories
+		WHERE deleted_at IS NULL
+		  AND tags LIKE ?
+		  AND created_at > datetime('now', '-30 days')
+		ORDER BY created_at DESC LIMIT ?`,
+		`%type:milestone-%`+`"`+`%`, limit)
 	if err != nil {
 		return nil
 	}
@@ -254,6 +304,23 @@ func formatWakeContext(d WakeContextData) string {
 			content := m.Content
 			if len(content) > 80 {
 				content = content[:80]
+			}
+			ageSuffix := ""
+			if len(m.CreatedAt) >= 10 {
+				ageSuffix = " (" + m.CreatedAt[:10] + ")"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s%s", content, ageSuffix))
+		}
+	}
+	if len(d.RecentMilestones) > 0 {
+		lines = append(lines, "**Recent Milestones:**")
+		for i, m := range d.RecentMilestones {
+			if i >= 5 {
+				break
+			}
+			content := m.Content
+			if len(content) > 120 {
+				content = content[:120] + "…"
 			}
 			ageSuffix := ""
 			if len(m.CreatedAt) >= 10 {
