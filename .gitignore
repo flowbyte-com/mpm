@@ -6,6 +6,11 @@ __pycache__/
 # Compiled binaries (mpm itself)
 bin/
 
+# Top-level `mpm` symlink (used for go tooling that expects ./mpm
+# in cwd). bin/ ignores its target; git won't ignore the symlink
+# itself without an explicit rule.
+/mpm
+
 # mpm-agent is a sibling project at ../mpm-agent, not a subdir.
 # Its build artifacts live in its own .gitignore. Defensive rule
 # below in case the dir is ever recreated inside mpm/.
@@ -20,6 +25,7 @@ config/
 
 # Backup files
 mpm-backup-*.sql
+src/db/mpm.db.backup-*
 
 # SQLite WAL and shared memory files (runtime artifacts)
 *.db-wal
@@ -44,5 +50,4 @@ mpm_config.json.bak
 src/db/mirror.jsonl
 src/db/mpm.db
 src/db/*.jsonl
-cmd/mpm/src/db/
 cmd/mpm/src/db/
