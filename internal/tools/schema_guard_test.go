@@ -8,24 +8,34 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
-// TestSchemaSupersetOfHandlerPayloadReads guards against the silent
-// drift class closed by c4c16a1 / 633ddf2 (2026-07-05): JSON-Schema
-// properties that fail to expose the keys their handlers actually
-// read from the payload. MCP clients can't supply those keys (schema
-// validation rejects them); CLI callers via `mpm call <tool>` route
-// through the same schema, surface them as runtime errors. Both
-// paths fail silently until a downstream caller exercises the
-// handler — which is why the drift was live for months.
+// TestSchemaSupersetOfHandlerPayloadReads guards against TWO silent
+// drift classes:
+//
+//  (1) Under-declaration: handler reads payload["k"] but the JSON-Schema
+//      doesn't declare property "k". MCP clients can't supply it (schema
+//      validation rejects unknown keys depending on additionalProperties);
+//      CLI callers via `mpm call <tool>` route through the same schema
+//      and surface runtime errors. Both paths fail silently until a
+//      downstream caller exercises the handler — which is why the
+//      original drift (c4c16a1 / 633ddf2) was live for months.
+//
+//  (2) Over-declaration: JSON-Schema declares property "k" but the
+//      handler doesn't read it (no payload["k"], no getString(payload,"k")).
+//      A client supplies the value, schema validates it, the handler
+//      silently drops it. The call "succeeds" but the data is gone —
+//      a lying contract. Surfaced 2026-07-06 by add_evidence schema
+//      advertising source_url / source_path with no DB column, no
+//      EvidenceInput field, no handler read, and no CLI flag.
 //
 // Invariant: ∀ tool ∈ Registry,
-//     schema.properties(tool) ⊇ handler-payload-reads(tool)
+//     schema.properties(tool) = handler-payload-reads(tool)
 //
-// Schemas are allowed to over-declare (advertise keys the handler
-// doesn't use) — that's safe. What schemas MUST NOT do is
-// under-declare, because the schema is the contract exposed to
-// non-CLI callers and the first validator reached on CLI calls.
+// Both directions of drift are now hard-fails: the schema is the
+// single source of truth for what the wire accepts, and any divergence
+// from the handler is a bug to fix, not a hint to relax.
 //
 // Free regression insurance for any tool added to Registry. Lands in
 // internal/tools per the architectural call (frictionless pre-commit,
@@ -39,6 +49,8 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 	}
 
 	failures := 0
+	// First pass: walk handler→schema, catch under-declaration
+	// (handler reads keys the schema doesn't expose).
 	for handlerName, reads := range handlerReads {
 		// Map handler → tool name: strip "handle" prefix + camel-to-snake
 		// (handleAddEvidence → add_evidence, handleLogToChangelog → log_to_changelog, etc.).
@@ -62,13 +74,56 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 		}
 		if len(missing) > 0 {
 			sort.Strings(missing)
-			t.Errorf("%s: handler reads payload keys %v that are not declared in the JSON-Schema",
+			t.Errorf("%s: handler reads payload keys %v that are not declared in the JSON-Schema (under-declaration)",
 				toolName, missing)
 			failures++
 		}
 	}
+
+	// Second pass: walk schema→handler, catch over-declaration
+	// (schema advertises keys the handler silently drops). The
+	// exception is handlers that pass the payload through to another
+	// function (no literal payload[k] / getString in the handler
+	// body); for those the AST extractor sees zero reads and we skip
+	// the over-decl check entirely to avoid false positives. We
+	// detect "passthrough handlers" by checking if the handler has
+	// any property at all in schemaProps — if the schema declares
+	// properties but the handler reads zero of them, it's likely
+	// passthrough or a missing-impl bug, and the over-decl list
+	// would be a false positive cascade.
+	for toolName, props := range schemaProps {
+		// Find the matching handler. handle<PascalCasedToolName>.
+		handlerName := "handle" + snakeToCamel(toolName)
+		reads, ok := handlerReads[handlerName]
+		if !ok {
+			// Different drift class: schema has an entry but no handler.
+			// Skip — the registry roundtrip test catches this.
+			continue
+		}
+		// If the handler reads NOTHING, the AST extractor can't see
+		// into the passthrough. Skip over-decl check to avoid false
+		// positives on the passthrough pattern. Handlers that read
+		// nothing AND the schema has no properties are fine; the
+		// under-decl pass already covered that.
+		if len(reads) == 0 {
+			continue
+		}
+		var phantom []string
+		for k := range props {
+			if !reads[k] {
+				phantom = append(phantom, k)
+			}
+		}
+		if len(phantom) > 0 {
+			sort.Strings(phantom)
+			t.Errorf("%s: JSON-Schema declares properties %v that the handler never reads (over-declaration — clients think they supplied these values but they are silently dropped)",
+				toolName, phantom)
+			failures++
+		}
+	}
+
 	if failures > 0 {
-		t.Logf("(see %d drift(s) above — fix the schema in internal/tools/registry_list.go to declare these properties; schemas are required to superset handler reads.)", failures)
+		t.Logf("(see %d drift(s) above — fix the schema in internal/tools/registry_list.go to declare only what the handler reads, and ensure the handler reads everything the schema declares. Source of truth = handler. Schema = the published contract.)", failures)
 	}
 }
 
@@ -107,6 +162,32 @@ func camelToSnake(s string) string {
 		} else {
 			b.WriteRune(r)
 		}
+	}
+	return b.String()
+}
+
+// snakeToCamel is the inverse of camelToSnake for the simple case
+// used in the test: word-boundary-separated lowercase tokens, first
+// token lowercase, subsequent tokens capitalized. Acronym collapse
+// (XMLHttpRequest → xml_http_request → XmlHttpRequest) is not needed
+// here because the Registry tool names use simple lower-snake form
+// (add_evidence, log_to_changelog). If a tool name ever uses
+// acronyms, this helper will need to grow the same boundary logic
+// camelToSnake uses.
+//
+//   "add_evidence"     → "AddEvidence"
+//   "log_to_changelog" → "LogToChangelog"
+//   "gc_run"           → "GcRun"
+func snakeToCamel(s string) string {
+	parts := strings.Split(s, "_")
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		runes := []rune(p)
+		runes[0] = unicode.ToUpper(runes[0])
+		b.WriteString(string(runes))
 	}
 	return b.String()
 }
