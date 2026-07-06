@@ -92,15 +92,25 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 
 	now := time.Now().UTC()
 
-	// ON CONFLICT(session_id) DO UPDATE — overwrite every mutable column.
+	// ON CONFLICT(session_id) DO UPDATE — overwrite every column except id.
 	// id: preserve the existing id (id = session_handoffs.id refers to
 	//     the row being updated; excluded.id would clobber it). Stable id
 	//     across upserts is required so external references (wake
 	//     context pointers, logs, foreign keys) stay valid as the agent
 	//     writes multiple handoffs per session.
-	// created_at: NOT in the UPDATE clause — it represents when this
-	//     handoff row was first written for this session, and should
-	//     remain stable.
+	// created_at: moves forward to the latest write. The table reader
+	//     should see the most recent closeout as a fresh row — a stale
+	//     created_at (e.g. 12 days before ended_at) is actively
+	//     misleading. A handoff with new content IS a new handoff, and
+	//     the timestamp should reflect that.
+	// read_at + read_by: reset to NULL on every upsert. A handoff with
+	//     new content is, by definition, unread. Without this reset, a
+	//     long-lived session_id whose first handoff was consumed weeks
+	//     ago would silently shadow every subsequent closeout — wake
+	//     context would skip the new content as "already read." (Bug
+	//     surfaced 2026-07-06: 12 days of agent:main:main closeouts
+	//     invisible to wake because the read_at from the row's first
+	//     incarnation carried over across UPSERTs.)
 	// ended_at + content columns: move forward to reflect the new
 	//     final state (last writer wins).
 	_, err = dm.db.Exec(`
@@ -113,7 +123,10 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 			ended_state    = excluded.ended_state,
 			summary        = excluded.summary,
 			commitments    = excluded.commitments,
-			open_questions = excluded.open_questions`,
+			open_questions = excluded.open_questions,
+			created_at     = excluded.created_at,
+			read_at        = NULL,
+			read_by        = NULL`,
 		GenerateID(), sessionID, now.Format("2006-01-02 15:04:05"), endedState, summary,
 		string(commitJSON), string(questionJSON), now.Format("2006-01-02 15:04:05"),
 	)
