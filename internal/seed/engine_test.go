@@ -12,25 +12,16 @@
 package seed
 
 import (
-	"database/sql"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	_ "github.com/mattn/go-sqlite3"
 
 	"mpm/internal"
 )
 
 func newTestDM(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "seed-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := internal.NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return internal.NewTestDM(t)
 }
 
 func TestApplyDirectives_FirstRunCreatesAll(t *testing.T) {

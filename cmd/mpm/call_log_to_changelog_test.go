@@ -11,36 +11,17 @@ package main
 // workspace DB.
 
 import (
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 
-	_ "github.com/mattn/go-sqlite3"
 	"mpm/internal"
 	"mpm/internal/tools"
 )
 
 func newCLILogChangelogDM(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	dsn := "file:cli_logchg_" + hex.EncodeToString(suffix) + "?mode=memory&cache=shared"
-	raw, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	dm := internal.NewDatabaseManagerForDB(raw)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { _ = raw.Close() })
-	return dm
+	return internal.NewTestDM(t)
 }
 
 func TestCallLogToChangelog_HappyPath(t *testing.T) {

@@ -3,7 +3,6 @@ package internal
 import (
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,17 +10,7 @@ import (
 
 func newClusterTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "cluster-resolve-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	dm := NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 // seedCluster inserts a synthetic audit_cluster_proposals row above

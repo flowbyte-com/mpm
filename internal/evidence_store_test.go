@@ -1,13 +1,10 @@
 package internal
 
 import (
-	"database/sql"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -313,18 +310,12 @@ func TestEvidenceStore_ExplainConfidenceRejectsMissingArtifact(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not exist")
 }
 
-// newTestDM creates a DatabaseManager on a temp DB and returns it. The
-// DatabaseManager is closed via t.Cleanup. Follows the freshDB pattern from
-// isolation_test.go so we don't write to the real workspace DB.
+// newTestDM returns a hermetic in-memory DatabaseManager. The consolidation
+// lives in internal/testhelpers.go::NewTestDM so the DSN strategy stays in
+// one place — no per-file drift surface.
 func newTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 // TestEvidenceStore_ExplainConfidenceMatchesRecompute pins the

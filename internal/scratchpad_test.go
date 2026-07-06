@@ -3,26 +3,17 @@ package internal
 import (
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// scratchpadDM opens a fresh isolated DB with the canonical schema.
-// Reuses the same pattern as newTestIsolatedDM in handlers_test.go.
+// scratchpadDM returns a hermetic in-memory DatabaseManager. The
+// consolidation lives in internal/testhelpers.go::NewTestDM — every test
+// in the package that previously opened a fresh tmpfile now goes through
+// that one helper.
 func scratchpadDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "scratchpad-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	dm := NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 func TestScratchpad_FlushCreatesRow(t *testing.T) {

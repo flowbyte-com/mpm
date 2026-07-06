@@ -91,9 +91,10 @@ func TestHandlePromoteToGlobal_RejectsMissingConfirm(t *testing.T) {
 func TestHandlePromoteToGlobal_HappyPath(t *testing.T) {
 	dm := newTestSharedDM(t)
 
-	// Insert a local memory to promote. The id is unique-per-run to
-	// avoid collision with prior runs (the workspace DB persists
-	// across tests).
+	// Insert a local memory to promote. The id is unique-per-run so the
+	// test never collides with prior runs (and never relies on stale
+	// rows in the workspace DB, which the prior version of this test
+	// accidentally did via a hardcoded "local-promote-001" lookup).
 	localPromoteID := fmt.Sprintf("local-promote-%d", time.Now().UnixNano())
 	_, err := dm.SQLDB().Exec(
 		`INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)
@@ -105,15 +106,15 @@ func TestHandlePromoteToGlobal_HappyPath(t *testing.T) {
 	}
 
 	result, err := handlePromoteToGlobal(dm, internal.ActiveContext{}, map[string]interface{}{
-		"memory_id": "local-promote-001",
+		"memory_id": localPromoteID,
 		"confirm":   true,
 	})
 	if err != nil {
 		t.Fatalf("handlePromoteToGlobal: %v", err)
 	}
 	m := result.(map[string]interface{})
-	if m["local_id"] != "local-promote-001" {
-		t.Errorf("local_id mismatch: %v", m["local_id"])
+	if m["local_id"] != localPromoteID {
+		t.Errorf("local_id mismatch: got %v, want %s", m["local_id"], localPromoteID)
 	}
 	if m["shared_id"] == "" || m["shared_id"] == nil {
 		t.Errorf("shared_id empty: %v", m["shared_id"])
@@ -317,24 +318,14 @@ func TestHandleListWakes_DefaultsAndFilters(t *testing.T) {
 // list_active_clusters handler tests
 // ---------------------------------------------------------------------------
 
-// newTestIsolatedDM opens a fresh sqlite3 file in t.TempDir() and runs
-// the canonical MPM schema via NewDatabaseManagerForDB + InitSchema.
-// Unlike newTestSharedDM this does NOT attach the workspace MPM_SHARED_DB,
-// so tests using it cannot pollute the workspace database or read
-// state from prior tests. Use this for tests that need a clean slate.
+// newTestIsolatedDM opens a hermetic in-memory DatabaseManager with the
+// canonical MPM schema. Unlike newTestSharedDM this does NOT attach the
+// workspace MPM_SHARED_DB, so tests using it cannot pollute the workspace
+// database or read state from prior tests. Use this for tests that need
+// a clean slate.
 func newTestIsolatedDM(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "cluster-test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	dm := internal.NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return internal.NewTestDM(t)
 }
 
 // seedClusterRow inserts a row into audit_cluster_proposals directly.

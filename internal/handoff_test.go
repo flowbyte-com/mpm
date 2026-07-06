@@ -1,11 +1,9 @@
 package internal
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	_ "github.com/mattn/go-sqlite3"
 	"database/sql"
 )
 
@@ -188,15 +186,10 @@ func TestHandoff_EndSession_RejectsBadInputs(t *testing.T) {
 	require.Contains(t, err.Error(), "db not initialized")
 }
 
-// newHandoffTestDM is a copy of newTestDM from evidence_store_test.go
-// kept local to this file so the test is self-contained.
+// newHandoffTestDM returns a hermetic in-memory DatabaseManager. All test
+// files in this package share the same NewTestDM helper now (see
+// internal/testhelpers.go) — no copy-paste drift surface per file.
 func newHandoffTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite3", tmp)
-	require.NoError(t, err)
-	dm := NewDatabaseManagerForDB(db)
-	require.NoError(t, dm.InitSchema())
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return NewTestDM(t)
 }

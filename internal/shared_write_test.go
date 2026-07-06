@@ -128,9 +128,10 @@ func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
 	}
 	defer dm.Close()
 
-	// Insert a local memory directly. The id is unique-per-run to
-	// avoid collision with prior runs (the workspace DB persists
-	// across tests).
+	// Insert a local memory directly. The id is unique-per-run so the
+	// test never collides with prior runs (and never relies on stale
+	// rows in the workspace DB, which the prior version of this test
+	// accidentally did via a hardcoded "local-001" lookup).
 	localWriteID := fmt.Sprintf("local-shared-write-%d", time.Now().UnixNano())
 	_, err = dm.SQLDB().Exec(
 		`INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)
@@ -142,20 +143,20 @@ func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
 	}
 
 	// Promote to global.
-	sharedID, err := dm.PromoteToGlobal("local-001")
+	sharedID, err := dm.PromoteToGlobal(localWriteID)
 	if err != nil {
 		t.Fatalf("PromoteToGlobal: %v", err)
 	}
 	if sharedID == "" {
 		t.Fatal("expected non-empty shared id")
 	}
-	if sharedID == "local-001" {
+	if sharedID == localWriteID {
 		t.Error("shared id should differ from local id")
 	}
 
 	// Local memory is preserved.
 	var localContent string
-	dm.SQLDB().QueryRow("SELECT content FROM memories WHERE id = ?", "local-001").Scan(&localContent)
+	dm.SQLDB().QueryRow("SELECT content FROM memories WHERE id = ?", localWriteID).Scan(&localContent)
 	if localContent != "a useful fact about shell scripts" {
 		t.Errorf("local memory was modified: %q", localContent)
 	}
@@ -172,7 +173,7 @@ func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
 		t.Errorf("shared copy content mismatch: %v", rules[0]["content"])
 	}
 	meta, _ := rules[0]["metadata"].(string)
-	if !contains(meta, "derived_from_local_id") || !contains(meta, "local-001") {
+	if !contains(meta, "derived_from_local_id") || !contains(meta, localWriteID) {
 		t.Errorf("shared copy missing lineage metadata: %q", meta)
 	}
 }

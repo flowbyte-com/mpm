@@ -1,36 +1,17 @@
 package internal
 
 import (
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // newTestSynthesisDM returns a per-test in-memory DM with the
-// 'changelog' collection available. Uses a separate DSN prefix
-// from newTestRefDM and newTestChangelogDM so a future global-
-// cache refactor cannot cross-contaminate.
+// 'changelog' collection available. The DSN strategy is now
+// centralized in internal/testhelpers.go::NewTestDM.
 func newTestSynthesisDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	suffix := make([]byte, 8)
-	if _, err := rand.Read(suffix); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	dsn := "file:synth_" + hex.EncodeToString(suffix) + "?mode=memory&cache=shared"
-	raw, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	dm := NewDatabaseManagerForDB(raw)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-	t.Cleanup(func() { _ = raw.Close() })
-	return dm
+	return NewTestDM(t)
 }
 
 // seedChangelogMemory writes a changelog memory tied to a specific

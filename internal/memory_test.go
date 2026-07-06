@@ -3,24 +3,31 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// freshMemoryStore returns a MemoryStore backed by an in-memory
+// DatabaseManager. Routes AddMemory through DM.SaveMemoryWithExtras when
+// available (matching the production path) and exposes the same *sql.DB
+// via store.DB for the few tests that touch the raw connection.
+//
+// Cleanup is automatic via NewTestDM's t.Cleanup; callers do NOT need
+// `defer store.DB.Close()`.
+func freshMemoryStore(t *testing.T) *MemoryStore {
+	t.Helper()
+	dm := NewTestDM(t)
+	return &MemoryStore{
+		DM: dm,
+		DB: &SQLiteConnection{DB: dm.SQLDB()},
+	}
+}
+
 // TestGetByID tests the GetByID function with various scenarios.
 func TestGetByID(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Empty DB — should return nil, nil
 	mem, err := store.GetByID("nonexistent", "memories")
@@ -105,15 +112,7 @@ func TestGetByIDNilDB(t *testing.T) {
 
 // TestSearchSessions tests SearchSessions with the correct collection name.
 func TestSearchSessions(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Add session memories (collection="session" — singular)
 	sessionMem1, err := store.AddMemory("golang programming language", "session", nil, nil, "", "cli")
@@ -170,15 +169,7 @@ func TestSearchSessions(t *testing.T) {
 // TestSearchSessionsCollectionBug verifies the collection='sessions' (plural) bug is fixed.
 // The bug was: SearchSessions queried 'sessions' but AddMemory stores 'session' (singular).
 func TestSearchSessionsCollectionBug(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Directly insert with 'sessions' (plural) — the old buggy collection name
 	// This simulates what the OLD buggy code would have stored
@@ -225,15 +216,7 @@ func TestSearchSessionsCollectionBug(t *testing.T) {
 
 // TestFullTextSearch tests FullTextSearch FTS5 and LIKE fallback paths.
 func TestFullTextSearch(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Add test memories
 	mem1, err := store.AddMemory("golang is a programming language", "memories", []string{"go", "lang"}, nil, "", "cli")
@@ -302,15 +285,7 @@ func TestFullTextSearch(t *testing.T) {
 
 // TestFullTextSearchLIKEFallback tests the LIKE fallback when FTS5 might not work.
 func TestFullTextSearchLIKEFallback(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Add a memory
 	mem, err := store.AddMemory("find me with special characters", "memories", nil, nil, "", "cli")
@@ -337,14 +312,7 @@ func TestFullTextSearchLIKEFallback(t *testing.T) {
 
 // TestGetMemoryTopics tests GetMemoryTopics cross-ref query
 func TestGetMemoryTopics(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	// Create a memory
 	mem, err := store.AddMemory("test content", "memories", nil, nil, "", "test")
@@ -377,7 +345,7 @@ func TestGetMemoryTopics(t *testing.T) {
 		t.Fatalf("Insert membership auto failed: %v", err)
 	}
 
-	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	dm := store.DM
 	topics, err := dm.GetMemoryTopics(mem.ID)
 
 	if err != nil {
@@ -400,14 +368,7 @@ func TestGetMemoryTopics(t *testing.T) {
 
 // TestGetTopicTopMemories tests GetTopicTopMemories cross-ref query
 func TestGetTopicTopMemories(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	topicID := GenerateID()
 	_, err := store.DB.Exec(`INSERT INTO topics (id, name, is_active) VALUES (?, ?, 1)`, topicID, "test-topic")
@@ -435,7 +396,7 @@ func TestGetTopicTopMemories(t *testing.T) {
 		}
 	}
 
-	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	dm := store.DM
 	memories, total, err := dm.GetTopicTopMemories(topicID, 3)
 
 	if err != nil {
@@ -461,14 +422,7 @@ func TestGetTopicTopMemories(t *testing.T) {
 
 // TestGetReferenceDoc tests GetReferenceDoc cross-ref query
 func TestGetReferenceDoc(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dbPath
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite failed: %v", err)
-	}
-	defer store.DB.Close()
+	store := freshMemoryStore(t)
 
 	docID := GenerateID()
 	_, err := store.DB.Exec(`INSERT INTO reference_docs (id, title, file_path, content) VALUES (?, ?, ?, ?)`,
@@ -477,7 +431,7 @@ func TestGetReferenceDoc(t *testing.T) {
 		t.Fatalf("Insert reference_doc failed: %v", err)
 	}
 
-	dm := &DatabaseManager{db: store.DB.DB, dbPath: store.SQLiteDBPath}
+	dm := store.DM
 	doc, err := dm.GetReferenceDoc(docID)
 
 	if err != nil {
