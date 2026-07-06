@@ -1124,6 +1124,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Constraint migration: relax system_audit_log.level CHECK to include
+	// 'info'. One-shot, idempotent (detects existing-new constraint via
+	// sqlite_master.sql). Indices attached to the table get dropped by
+	// the table recreation; the CommonIndexes loop below rebuilds them
+	// via CREATE INDEX IF NOT EXISTS. Lives BEFORE CommonIndexes so the
+	// rebuild runs against the renamed table.
+	if err := dm.migrateAuditLevelConstraint(); err != nil {
+		return fmt.Errorf("migrateAuditLevelConstraint: %w", err)
+	}
+
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
 

@@ -290,14 +290,26 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_lessons_importance ON lessons(importance);`,
 
 	// System audit log — runtime anomalies (errors, warnings, fatal conditions)
-	// from MPM subsystems. The agent queries this via the query_audit_log MCP
-	// tool to surface what went wrong, especially across sessions. A 30-day
-	// TTL is enforced by the gc sweep (see internal/gc.go and the
-	// runOpsMaintain hook) — not by SQLite triggers, because audit retention
-	// is a policy, not an invariant.
+	// AND deliberate state-mutation events (info). The agent queries this via
+	// the query_audit_log MCP tool to surface what went wrong, especially
+	// across sessions. A 30-day TTL is enforced by the gc sweep (see
+	// internal/gc.go and the runOpsMaintain hook) — not by SQLite triggers,
+	// because audit retention is a policy, not an invariant.
+	//
+	// Two audiences share the table:
+	//   * warn/error/fatal — anomalies. Cluster-detected by LogAudit's
+	//     upsertClusterCounter side-effect (gated on level != info).
+	//   * info — deliberate state mutations with downstream blast radius
+	//     (irrecoverable deletes, cross-agent writes, theory state
+	//     transitions). NOT cluster-detected. Forensic trail only.
+	//
+	// For existing databases, the CHECK is relaxed via the one-shot
+	// migration in audit.go::migrateAuditLevelConstraint (called from
+	// initUnifiedSchema). That migration requires the column list here
+	// to stay in sync — see the IMPORTANT note on that function.
 	`CREATE TABLE IF NOT EXISTS system_audit_log (
 		id          TEXT PRIMARY KEY,
-		level       TEXT NOT NULL CHECK (level IN ('warn','error','fatal')),
+		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal')),
 		component   TEXT NOT NULL,
 		message     TEXT NOT NULL,
 		stack_trace TEXT,
