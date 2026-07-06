@@ -517,6 +517,18 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"top_n":{"type":"number","description":"How many top-overdue rows to surface (default 5)"}}}`),
 		Handler:     handleDigestWakes,
 	},
+	{
+		// Phase 5b: self-diagnosis surface. PRAGMA integrity +
+		// page/freelist stats + domain counts (memories_active,
+		// theories_pending, wakes_overdue, evidence_total) +
+		// lifetime SQLITE_BUSY retry counter. Use when the agent
+		// notices latency, timeouts, or wants to confirm the
+		// substrate is healthy before long-running operations.
+		Name:        "health_check",
+		Description: "Self-diagnosis: SQLite integrity + page stats + domain counts + lifetime SQLITE_BUSY retry counter. Returns one compact payload, no parameters.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Handler:     handleHealthCheck,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
