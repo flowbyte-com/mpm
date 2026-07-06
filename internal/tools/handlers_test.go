@@ -3,7 +3,6 @@ package tools
 import (
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,17 +10,12 @@ import (
 	"mpm/internal"
 )
 
-// newTestDM opens a fresh test DM with a temp DB. Caller must Close().
+// newTestSharedDM opens a hermetic local+shared tmpfile DM via the
+// internal test helper. Wrapper kept so callers in this package don't
+// all need to know about the internal package name.
 func newTestSharedDM(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	t.Cleanup(func() { dm.Close() })
-	return dm
+	return internal.NewTestSharedDM(t)
 }
 
 // TestHandleRecordGlobalRule_RejectsMissingConfirm verifies the

@@ -2,9 +2,8 @@ package internal
 
 import (
 	"fmt"
-	"path/filepath"
-	"time"
 	"testing"
+	"time"
 )
 
 // TestRecordGlobalRule_RequiresSharedDB verifies that calling
@@ -13,14 +12,9 @@ import (
 // "no fall-through to local" invariant — global rules have no
 // meaning outside the shared store.
 func TestRecordGlobalRule_RequiresSharedDB(t *testing.T) {
-	t.Setenv("MPM_SHARED_DB", "")
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestLocalOnlyDM(t)
 
-	_, err = dm.RecordGlobalRule("test rule", nil, 10, "")
+	_, err := dm.RecordGlobalRule("test rule", nil, 10, "")
 	if err == nil {
 		t.Fatal("expected error when shared DB not attached, got nil")
 	}
@@ -30,14 +24,7 @@ func TestRecordGlobalRule_RequiresSharedDB(t *testing.T) {
 // then reads it back via QueryGlobalRules. Verifies the write/read
 // round-trip works.
 func TestRecordGlobalRule_HappyPath(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	id, err := dm.RecordGlobalRule("Never expose API keys to the LLM", []string{"security", "house-rule"}, 10, "test")
 	if err != nil {
@@ -66,14 +53,7 @@ func TestRecordGlobalRule_HappyPath(t *testing.T) {
 // check (0-100). Out-of-range weights are a programming error; we
 // reject at write time rather than accept and clamp.
 func TestRecordGlobalRule_RejectsInvalidWeight(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	for _, bad := range []int{-1, 101, 9999} {
 		_, err := dm.RecordGlobalRule("rule", nil, bad, "")
@@ -85,16 +65,9 @@ func TestRecordGlobalRule_RejectsInvalidWeight(t *testing.T) {
 
 // TestRecordGlobalRule_RejectsEmptyContent verifies content is required.
 func TestRecordGlobalRule_RejectsEmptyContent(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.RecordGlobalRule("", nil, 10, "")
+	_, err := dm.RecordGlobalRule("", nil, 10, "")
 	if err == nil {
 		t.Fatal("expected error for empty content, got nil")
 	}
@@ -103,14 +76,9 @@ func TestRecordGlobalRule_RejectsEmptyContent(t *testing.T) {
 // TestPromoteToGlobal_RequiresSharedDB verifies the same no-fall-through
 // invariant for promotion.
 func TestPromoteToGlobal_RequiresSharedDB(t *testing.T) {
-	t.Setenv("MPM_SHARED_DB", "")
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestLocalOnlyDM(t)
 
-	_, err = dm.PromoteToGlobal("any-id")
+	_, err := dm.PromoteToGlobal("any-id")
 	if err == nil {
 		t.Fatal("expected error when shared DB not attached, got nil")
 	}
@@ -119,21 +87,14 @@ func TestPromoteToGlobal_RequiresSharedDB(t *testing.T) {
 // TestPromoteToGlobal_CopiesLocalMemory verifies the promotion flow:
 // local memory is preserved, shared copy is created with lineage metadata.
 func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	// Insert a local memory directly. The id is unique-per-run so the
 	// test never collides with prior runs (and never relies on stale
 	// rows in the workspace DB, which the prior version of this test
 	// accidentally did via a hardcoded "local-001" lookup).
 	localWriteID := fmt.Sprintf("local-shared-write-%d", time.Now().UnixNano())
-	_, err = dm.SQLDB().Exec(
+	_, err := dm.SQLDB().Exec(
 		`INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)
 		 VALUES (?, 'memories', 'a useful fact about shell scripts', 5, NULL, '2026-06-26', '2026-06-26')`,
 		localWriteID,
@@ -180,16 +141,9 @@ func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
 
 // TestPromoteToGlobal_RejectsMissingLocal verifies the not-found path.
 func TestPromoteToGlobal_RejectsMissingLocal(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.PromoteToGlobal("nonexistent-id")
+	_, err := dm.PromoteToGlobal("nonexistent-id")
 	if err == nil {
 		t.Fatal("expected error for missing local memory, got nil")
 	}
