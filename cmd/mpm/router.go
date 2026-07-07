@@ -403,6 +403,10 @@ func handleOps(args []string) int {
 		return handleOpsRebalance(subArgs)
 	case "resolve-contradictions":
 		return handleOpsResolveContradictions(subArgs)
+	case "broadcast":
+		return handleOpsBroadcast(subArgs)
+	case "active-sessions":
+		return handleOpsActiveSessions(subArgs)
 
 	// — Watcher & Web —
 	case "watch":
@@ -529,6 +533,8 @@ var opsSubcommandDescs = []struct {
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
+	{"broadcast <memory_id> [--kind/--rationale/--to/--dry-run/--json]", "Arc 2 fan-out: push an epistemic event to every active session"},
+	{"active-sessions [--json]", "List sessions active within the heartbeat window"},
 	{"help", "Show this help"},
 }
 

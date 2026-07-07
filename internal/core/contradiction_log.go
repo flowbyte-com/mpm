@@ -68,6 +68,11 @@ type ResolutionDecision struct {
 	IsCloseCall   bool   // margin < threshold → propose theory instead
 	Rationale     string // human-readable explanation
 	ResolutionTag string // tag applied to the resolution memory
+	// ResolutionMemoryID is the id of the resolution memory row
+	// written into shared.memories by applyResolution. Populated
+	// after the apply call returns. Used by Arc 2's auto-broadcast
+	// to fan out the resolution event.
+	ResolutionMemoryID string
 }
 
 // ProvenanceThreshold is the |winner_score - loser_score| margin
@@ -304,6 +309,22 @@ func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, a
 		if err := dm.applyResolution(queueID, dec); err != nil {
 			return dec, fmt.Errorf("apply resolution: %w", err)
 		}
+		// Arc 2: auto-broadcast as the side-effect of the operator's
+		// explicit `--apply`. Non-fatal: a broadcast failure does
+		// NOT roll back the resolution (which is already committed).
+		// Resolution is ground truth; broadcast is the notification.
+		// The source_session_id is empty here because the resolution
+		// is applied by an operator CLI/MCP call without a stable
+		// session context — discovery will simply fan out to all
+		// active sessions (which is the right behavior for an
+		// operator-driven resolution).
+		resolutionID := dec.ResolutionMemoryID // populated by applyResolution
+		if resolutionID != "" {
+			_, _ = dm.BroadcastMemory(resolutionID, BroadcastOpts{
+				Kind:        "resolution",
+				SourceAgent: "arc1-resolver",
+			})
+		}
 	}
 	return dec, nil
 }
@@ -447,6 +468,9 @@ func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("applyResolution: commit: %w", err)
 	}
+	// Arc 2: hand the resolution id back to the caller so the
+	// auto-broadcast hook in ResolveOneContradiction can fan out.
+	dec.ResolutionMemoryID = resolutionID
 	return nil
 }
 
@@ -655,6 +679,18 @@ func (dm *DatabaseManager) ResolveArbitrationTheory(theoryID, winnerID, conclusi
 		// Reinforce failure is non-fatal (theory is already
 		// marked resolved); log and continue.
 		_ = err
+	}
+
+	// Arc 2: operator-driven arbitration resolutions are also
+	// epistemic events. Auto-broadcast the resolution memory
+	// (NOT the theory itself) so receiving agents see the
+	// concrete "X survives, Y is slashed" signal. Non-fatal:
+	// a broadcast failure does NOT roll back the resolution.
+	if resID, ok := resolutionResult["resolution_id"].(string); ok && resID != "" {
+		_, _ = dm.BroadcastMemory(resID, BroadcastOpts{
+			Kind:        "arbitration",
+			SourceAgent: "arc1-arbitrator",
+		})
 	}
 
 	// Merge the results.
