@@ -957,6 +957,25 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 			"error", err.Error())
 	}
 
+	// Arc 2: install the shared.sessions, shared.event_wakes, and
+	// shared.agents tables. The active-agent registry powers the
+	// broadcast fan-out target discovery; the event_wakes table is
+	// the fan-out surface itself; the agents cache is the cross-reboot
+	// identity stable enough to aggregate "how often does agent X
+	// broadcast" without collapsing session rows.
+	if _, err := dm.db.Exec(SharedBcastSessionsDDL); err != nil {
+		slog.Warn("shared.sessions DDL failed",
+			"error", err.Error())
+	}
+	if _, err := dm.db.Exec(SharedBcastEventWakesDDL); err != nil {
+		slog.Warn("shared.event_wakes DDL failed",
+			"error", err.Error())
+	}
+	if _, err := dm.db.Exec(SharedBcastAgentsDDL); err != nil {
+		slog.Warn("shared.agents DDL failed",
+			"error", err.Error())
+	}
+
 	// Now run SafeMigrations against the shared schema (tables exist now).
 	// ALTER TABLE in SQLite doesn't accept a schema prefix, so we use
 	// sqlite_master to set the search_path equivalent. For our purposes
