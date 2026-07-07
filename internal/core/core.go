@@ -175,6 +175,7 @@ type CoreDB interface {
 	// ─── Epistemology ────────────────────────────────────────────────
 	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, tags []string) (map[string]interface{}, error)
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
+	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, ac ActiveContext) (map[string]interface{}, error)
 	ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error)
