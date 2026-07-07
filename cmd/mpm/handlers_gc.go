@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"strconv"
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // ============================================================================

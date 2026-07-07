@@ -43,7 +43,8 @@ install: build
 
 # Run tests
 test:
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
+	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
 
 # Clean build artifacts
 clean:

@@ -8,8 +8,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"mpm/internal"
-	"mpm/internal/tools"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 // TestRegistry_RoundTripCLIAndMCP invokes each tool via both surfaces

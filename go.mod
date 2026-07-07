@@ -2,34 +2,31 @@ module mpm
 
 go 1.26.1
 
+replace github.com/flowbyte-com/mpm-core => ./internal/core
+
 require (
-	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/creack/pty v1.1.24
-	github.com/fsnotify/fsnotify v1.9.0
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+	github.com/flowbyte-com/mpm-core v0.0.0-00010101000000-000000000000
+	github.com/mark3labs/mcp-go v0.55.1
 	github.com/mattn/go-sqlite3 v1.14.37
-	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/net v0.52.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
-	github.com/mark3labs/mcp-go v0.54.1 // indirect
-	github.com/rogpeppe/go-internal v1.14.1 // indirect
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
+	github.com/pkoukk/tiktoken-go v0.1.8 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
+	golang.org/x/net v0.52.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
-	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
@@ -51,7 +48,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/sergi/go-diff v1.3.1 // pinned: diff algorithm for mpm diff/versioning
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sys v0.42.0 // indirect

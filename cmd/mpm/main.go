@@ -16,12 +16,12 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"mpm/internal/config"
-	"mpm/internal/logging"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/logging"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/synth"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/synth"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // ============================================================================
@@ -204,16 +204,16 @@ func main() {
 						os.Exit(0)
 					}
 					printSuccess("memory saved (id=%s)", mem.ID)
-					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
-					go func(id, c string) {
-						synthDM, synthErr := mpminternal.NewDatabaseManager("")
-						if synthErr != nil {
-							slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
-							return
-						}
-						defer synthDM.Close()
-						mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
-					}(mem.ID, data)
+				// Fire-and-forget auto-synthesis (same pattern as memory add handler)
+				go func(id, c string) {
+					synthDM, synthErr := getDB().NewSession()
+					if synthErr != nil {
+						slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
+						return
+					}
+					defer synthDM.Close()
+					mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
+				}(mem.ID, data)
 				}
 				os.Exit(0)
 			}

@@ -12,6 +12,9 @@ func (dm *DatabaseManager) SaveLesson(fact, lessonType string, tags []string) (m
 	if lessonType == "" {
 		lessonType = "insight"
 	}
+	if err := ValidateLessonType(lessonType); err != nil {
+		return nil, nil, err
+	}
 	lesson, err := dm.AddLesson(fact, LessonType(lessonType), tags, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("add lesson: %w", err)

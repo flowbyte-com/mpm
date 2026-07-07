@@ -2,11 +2,11 @@ package main
 
 import (
 	"fmt"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"path/filepath"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handleLint implements `mpm ops lint` — proactive defense against the

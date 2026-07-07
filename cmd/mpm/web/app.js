@@ -17,7 +17,9 @@ async function loadToken() {
   const input = prompt('Enter your openclaw auth token (from ~/.openclaw/openclaw.json → gateway.auth.token):');
   if (input) {
     token = input.trim();
-    localStorage.setItem('mpm_token', token);
+    // Use sessionStorage so the token is cleared when the browser tab closes.
+    // Users who need persistent login can set remember=true via localStorage.
+    sessionStorage.setItem('mpm_token', token);
     return true;
   }
   return false;
@@ -25,7 +27,7 @@ async function loadToken() {
 
 function getToken() {
   if (!token) {
-    token = localStorage.getItem('mpm_token') || '';
+    token = sessionStorage.getItem('mpm_token') || localStorage.getItem('mpm_token') || '';
   }
   return token;
 }
@@ -41,6 +43,7 @@ async function apiFetch(path, options = {}) {
     },
   });
   if (res.status === 401) {
+    sessionStorage.removeItem('mpm_token');
     localStorage.removeItem('mpm_token');
     token = '';
     showToast('Authentication required', 'error');
@@ -593,7 +596,7 @@ function closeModal() {
 
 function esc(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // delegatedClickHandler is the single click listener that routes clicks on

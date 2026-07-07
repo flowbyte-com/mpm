@@ -6,16 +6,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
-	"mpm/internal"
-	"mpm/internal/config"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // Package-level singleton DatabaseManager — initialized once per process,
 // shared across all handler calls to avoid connection proliferation.
 var dbManager *internal.DatabaseManager
 var dbManagerInitErr error
+var dbManagerOnce sync.Once
 
 // activeContext holds the mode/persona for the current CLI invocation.
 // Set at the start of each handler via detectActiveContext(), cleared after use.
@@ -151,23 +153,46 @@ func parseModeSelection(line string, modes []string) []string {
 
 // ============================================================================
 
+// closeDB closes the DatabaseManager and logs any error instead of discarding it.
+func closeDB(dm *internal.DatabaseManager) {
+	if dm == nil {
+		return
+	}
+	if err := dm.Close(); err != nil {
+		usererror.Warn("database close error: %v", err)
+	}
+}
+
+// getDB returns the shared DatabaseManager, initializing it once on first call.
+func getDB() internal.CoreDB {
+	dbManagerOnce.Do(func() {
+		dm, err := internal.NewDatabaseManager("")
+		if err != nil {
+			dbManagerInitErr = err
+			return
+		}
+		dbManager = dm
+	})
+	if dbManagerInitErr != nil {
+		usererror.Error("opening database: %v", dbManagerInitErr)
+		return nil
+	}
+	return dbManager
+}
+
 // getMemoryStore returns a MemoryStore backed by the shared database manager.
 // Lazily initializes dbManager if nil.
 func getMemoryStore() *internal.MemoryStore {
-	if dbManager == nil {
-		dm, err := internal.NewDatabaseManager("")
-		if err != nil {
-			usererror.Error("opening database: %v", err)
-			return nil
-		}
-		dbManager = dm
+	dm := getDB()
+	if dm == nil {
+		return nil
 	}
 	// Wrap the shared *sql.DB in a SQLiteConnection to satisfy MemoryStore.DB.
 	// Set DM so that write-heavy paths (DecayWeights, DedupeMemories) route
 	// through DatabaseManager.ExecTracked for WAL-backoff observability.
 	return &internal.MemoryStore{
-		DB:         &internal.SQLiteConnection{DB: dbManager.SQLDB()},
-		DM:         dbManager,
+		DB:         &internal.SQLiteConnection{DB: dm.SQLDB()},
+		DM:         dm,
 		MirrorFile: filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl"),
 	}
 }

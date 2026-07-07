@@ -15,8 +15,8 @@ import (
 	"testing"
 
 
-	"mpm/internal"
-	"mpm/internal/tools"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 func newCLILogChangelogDM(t *testing.T) *internal.DatabaseManager {

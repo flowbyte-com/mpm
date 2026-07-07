@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleSwitch(args []string) int {

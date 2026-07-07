@@ -50,16 +50,14 @@ func TestDatabaseManagerIsOnlyOwnerOfSqlOpen(t *testing.T) {
 		"testhelpers.go":     true, // opens hermetic in-memory DBs for tests; not a production connection
 	}
 
-	dirs := []string{"internal", "cmd/mpm"}
+	// Scan from the internal/core/ package directory. The test runs with
+	// cwd = internal/core/, so "." scans core and "../cmd/mpm" scans the CLI.
+	dirs := []string{".", "../cmd/mpm"}
 	violations := map[string][]string{} // file -> lines
 
 	for _, dir := range dirs {
-		path := dir
-		if dir == "cmd/mpm" {
-			path = "../cmd/mpm"
-		}
 		fset := token.NewFileSet()
-		pkgs, err := parser.ParseDir(fset, path, nil, parser.ParseComments)
+		pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
 		if err != nil {
 			continue
 		}
@@ -100,7 +98,7 @@ func TestDatabaseManagerIsOnlyOwnerOfSqlOpen(t *testing.T) {
 		t.Errorf("sql.Open in %s is not whitelisted. The single-connection rule says "+
 			"DatabaseManager is the only owner of *sql.DB connections. Either:\n"+
 			"  1. Use the existing DatabaseManager via NewDatabaseManager / an injected *DatabaseManager\n"+
-			"  2. Add %q to the whitelist in scanner_coverage_test.go with a justifying comment\n"+
+			"  2. Add %q to the whitelist in sqlopen_owner_test.go with a justifying comment\n"+
 			"Violations at: %s", file, file, strings.Join(sites, ", "))
 	}
 }

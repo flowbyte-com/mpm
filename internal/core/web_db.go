@@ -27,7 +27,8 @@ import (
 // expires_at is stored as a Unix timestamp (REAL) — see SetMemoryTTL. The
 // clause uses strftime('%s','now') so the comparison is numeric; comparing
 // against CURRENT_TIMESTAMP (a string) leaks expired rows because SQLite
-// does lexicographic comparison and 'T' > ' ' in ASCII.
+// does lexicographic comparison and 'T' > ' ' in ASCII. All comparisons
+// against expires_at MUST use strftime('%s','now'), not CURRENT_TIMESTAMP.
 //
 // MemoryExpireClauseM is the alias-qualified variant for queries that
 // SELECT FROM `memories m` (e.g. FTS5 joins).
@@ -1101,7 +1102,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(&ltm)
 	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL`).Scan(&reinforced)
 	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(&neverAccessed)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`).Scan(&expired)
+	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')`).Scan(&expired)
 
 	stats["total"] = total
 	stats["active"] = active

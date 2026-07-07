@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // resolveRouteWorkspace returns the MPM workspace path for `mpm route`.

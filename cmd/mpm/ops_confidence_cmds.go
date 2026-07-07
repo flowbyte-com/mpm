@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func parseOpsConfidenceArgs(args []string) (map[string]interface{}, string, error) {

@@ -6,13 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handleStats shows memory statistics

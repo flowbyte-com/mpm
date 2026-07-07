@@ -10,9 +10,9 @@ import (
 	"os"
 	"time"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/config"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // handleBackfillEmbeddings runs the embedding backfill pipeline.
