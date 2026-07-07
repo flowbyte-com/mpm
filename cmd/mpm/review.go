@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -47,14 +46,18 @@ func handleReview(args []string) int {
 		resultLimit = 20
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	var memories []map[string]interface{}
+
+	// `err` is reused across both branches below (`showPromoted` and the
+	// `GetSpacedReinforcementReview` path). It was previously declared by
+	// `dm, err := mpminternal.NewDatabaseManager("")`; that line is now
+	// the `getDB()` singleton lookup, so declare `err` explicitly.
+	var err error
 
 	if showPromoted {
 		// Default: recently elevated memories for spaced reinforcement review

@@ -20,11 +20,10 @@ func handleHistory(args []string) int {
 
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	revisions, err := dm.GetMemoryRevisions(id)
 	if err != nil {
@@ -62,11 +61,10 @@ func handleDiff(args []string) int {
 		usererror.Error("v2 must be an integer, got %q", args[3])
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Fetch both versions directly from memory_revisions
 	type versionInfo struct {

@@ -42,11 +42,10 @@ func handleSynthesize(args []string) int {
 		}
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	client := synth.NewSynthClient()
 
@@ -104,11 +103,10 @@ func handleSynthesize(args []string) int {
 // watchdog log. There is no in-memory DLQ — the watchdog JSONL is the
 // synthesis event store.
 func handleSynthesizeStatus(limit int) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	ops, err := dm.RecentWatchdogOps(limit, "synthesize_")
 	if err != nil {
@@ -145,11 +143,10 @@ func handleSynthesizeStatus(limit int) int {
 // or a non-empty error field. Useful for "why are my merges not happening?"
 // investigations.
 func handleSynthesizeFailures(limit int) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	ops, err := dm.RecentWatchdogOps(limit, "synthesize_")
 	if err != nil {

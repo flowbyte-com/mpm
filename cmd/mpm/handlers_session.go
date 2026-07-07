@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/config"
-	"github.com/flowbyte-com/mpm-core/usererror"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
@@ -101,11 +100,10 @@ func handleSessionAdd(args []string) int {
 // handleWake returns context from the last active session.
 // Displays mode, persona, recent topics, and recent memories.
 func handleWake(args []string) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Parse --strict flag
 	strictMode := false

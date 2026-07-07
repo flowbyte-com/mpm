@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/flowbyte-com/mpm-core/usererror"
-
-	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleRestore(args []string) int {
@@ -14,15 +12,15 @@ func handleRestore(args []string) int {
 	}
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Fetch current state to preserve is_long_term and avoid overwriting weight
 	var currentIsLTM int
 	var currentWeight int
+	var err error
 	err = dm.SQLDB().QueryRow(
 		`SELECT COALESCE(is_long_term, 0), COALESCE(weight, 1) FROM memories WHERE id = ?`,
 		id,

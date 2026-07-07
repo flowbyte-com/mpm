@@ -56,11 +56,10 @@ func handleAdd(args []string) int {
 	}
 	content := strings.Join(fs.Args(), " ")
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	tags := []string{}
 	if *tag != "" {
@@ -139,11 +138,10 @@ func handleLs(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
@@ -219,11 +217,10 @@ func handleShow(args []string) int {
 
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
@@ -268,11 +265,15 @@ func handleRm(args []string) int {
 
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
+
+	// `err` is reused below; it was previously declared by
+	// `dm, err := mpminternal.NewDatabaseManager("")`; declare explicitly
+	// because the singleton lookup doesn't introduce one.
+	var err error
 
 	// Soft delete by setting deleted_at
 	_, err = dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
@@ -299,11 +300,15 @@ func handlePatchMemory(args []string) int {
 		usererror.Error("patch must be a JSON object string")
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
+
+	// `err` is reused below; it was previously declared by
+	// `dm, err := mpminternal.NewDatabaseManager("")`; declare explicitly
+	// because the singleton lookup doesn't introduce one.
+	var err error
 
 	err = dm.UpdateMemoryMetadata(id, patchJSON)
 	if err != nil {
@@ -323,11 +328,10 @@ func handlePromote(args []string) int {
 
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Clear TTL (make permanent) and reinforce heavily
 	dm.SetMemoryTTL(id, time.Time{})
@@ -353,11 +357,10 @@ func handleFeedback(args []string) int {
 		usererror.Error("invalid delta %q", args[2])
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Check memory exists and challenged status
 	mem, err := dm.GetMemory(id)
@@ -418,11 +421,15 @@ func handleReinforce(args []string) int {
 		}
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
+
+	// `err` is reused below; it was previously declared by
+	// `dm, err := mpminternal.NewDatabaseManager("")`; declare explicitly
+	// because the singleton lookup doesn't introduce one.
+	var err error
 
 	err = dm.ReinforceMemory(id, delta)
 	if err != nil {
@@ -448,12 +455,14 @@ func handleWeaken(args []string) int {
 		}
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
+	// `err` is reused below; declare explicitly because the singleton
+	// lookup (getDB()) doesn't introduce one.
+	var err error
 	err = dm.WeakenMemory(id, delta)
 	if err != nil {
 		usererror.Error("%v", err)
@@ -479,11 +488,10 @@ func handleSetWeight(args []string) int {
 		usererror.Error("weight must be 0-100")
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	_, err = dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ?`, w, id)
 	if err != nil {
@@ -513,11 +521,14 @@ func handleSnooze(args []string) int {
 		}
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
+
+	// `err` is reused below; declare explicitly because the singleton
+	// lookup (getDB()) doesn't introduce one.
+	var err error
 
 	// Bump weight by 1 (cap at 9 to prevent LTM promotion), refresh timestamp
 	_, err = dm.SQLDB().Exec(`
@@ -543,11 +554,10 @@ func handleShredMem(args []string) int {
 
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Fetch memory to extract challenged_theory_id before deletion
 	mem, err := dm.GetMemory(id)
@@ -642,11 +652,10 @@ func handleRefAdd(args []string) int {
 		usererror.Error("--chunk-size must be between 64 and 2048 (got %d)", *chunkSize)
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 	var content string
@@ -800,11 +809,10 @@ func handleRefList(args []string) int {
 	}
 	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	refs, err := dm.ListReferences(50, 0)
 	if err != nil {
@@ -919,11 +927,10 @@ func handleRefShow(args []string) int {
 	}
 
 	id := args[1]
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Pre-scan for --json
 	jsonOutput, _ := ExtractJSONFlag(args[2:])
@@ -1030,11 +1037,10 @@ func handleRefSearch(args []string) int {
 
 	jsonOutput, cleanArgs := ExtractJSONFlag(args[1:])
 	query := strings.Join(cleanArgs, " ")
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {
@@ -1135,12 +1141,14 @@ func handleRefShred(args []string) int {
 	}
 
 	id := args[1]
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
+	// `err` is reused below; declare explicitly because the singleton
+	// lookup (getDB()) doesn't introduce one.
+	var err error
 	err = dm.DeleteReference(id)
 	if err != nil {
 		usererror.Error("Error deleting reference: %v", err)
@@ -1163,11 +1171,14 @@ func handleRefInteractions(args []string) int {
 	}
 	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
+
+	// `err` is reused below; declare explicitly because the singleton
+	// lookup (getDB()) doesn't introduce one.
+	var err error
 
 	var rows []map[string]interface{}
 	if *docID != "" {
@@ -1237,11 +1248,10 @@ func handleRefUsed(args []string) int {
 	}
 	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	rows, err := dm.GetMostUsedReferences(*limit)
 	if err != nil {
@@ -1297,11 +1307,12 @@ func handleRefAdmit(args []string) int {
 	}
 	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	// enrichCandidate takes *DatabaseManager (concrete), not the CoreDB
+	// interface. The singleton is always a *DatabaseManager.
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	candidates, err := dm.FindAdmissionCandidates(*limit)
 	if err != nil {
@@ -1622,13 +1633,12 @@ func GetSystemPrompt() string {
 
 	// Ephemeral persona intercept: fetch from system_config
 	if active.Persona == "ephemeral" {
-		if dm, dmErr := mpminternal.NewDatabaseManager(""); dmErr == nil {
+		if dm := getDBConcrete(); dm != nil {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
 				if fm, fmErr := mpminternal.FormatEphemeralPersonaAsFrontmatter(ep); fmErr == nil {
 					parts = append(parts, "## Active Persona (JIT)\n\n"+fm)
 				}
 			}
-			dm.Close()
 		}
 	} else {
 		personaPath := filepath.Join(config.GetMPMDir(), "persona", active.Persona+".md")
