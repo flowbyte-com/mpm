@@ -3,9 +3,9 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleRestore(args []string) int {

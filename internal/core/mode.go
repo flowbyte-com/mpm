@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 
 	"gopkg.in/yaml.v3"
 )

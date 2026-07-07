@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal"
-	"mpm/internal/config"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // =============================================================================

@@ -28,8 +28,11 @@ make install BIN=mpm                # Install to /usr/local/bin/mpm
 
 **Single test:**
 ```bash
-go test -tags fts5 -v ./internal/... -run TestFunctionName
+go test -tags fts5 -v ./cmd/mpm/... -run TestFunctionName     # Runtime tests (main module)
+cd internal/core && go test -tags fts5 -v ./... -run TestName # Core tests (separate module)
 ```
+
+**The Core module is now standalone** — `internal/core/go.mod` defines `github.com/flowbyte-com/mpm-core`. The main `go.mod` uses a `replace` directive for local development. `make test` runs both modules; reach for `cd internal/core && go test ...` when you want Core in isolation (no watch, no synthesis, no idle_dream goroutines).
 
 **Watch daemon test suite (slow):**
 ```bash
@@ -51,7 +54,7 @@ mpm/
 │   ├── synthesize_cmds.go    # Memory dedup via LLM synthesis
 │   ├── handlers_backup.go    # backup/restore-db (⚠ see Security section)
 │   └── web/                  # Static frontend (app.js, index.html, style.css)
-├── internal/                 # Core packages (no external consumers)
+├── internal/core/            # **Separate Go module** — github.com/flowbyte-com/mpm-core
 │   ├── db.go                 # DatabaseManager — single shared SQLite conn (WAL)
 │   ├── memory.go             # MemoryStore, Memory struct, secret/poison scanner
 │   ├── schema.go             # BaseTables, CommonIndexes, SafeMigrations
@@ -65,10 +68,13 @@ mpm/
 │   ├── reference_new.go      # Reference docs (PDF/EPUB/MD parsing)
 │   ├── embeddings.go         # Embedding provider abstraction
 │   ├── versioning.go         # Memory revisions (point-in-time reconstruction)
-│   └── web_db.go             # Web-API-specific query helpers
+│   ├── web_db.go             # Web-API-specific query helpers
+│   ├── core.go               # CoreDB interface (~130 methods) + compile-time assertion
+│   ├── admission.go          # AdmitResult, AdmitChainEntry (exported)
+│   └── go.mod                # Standalone module; main go.mod has replace directive
 ├── src/db/mpm.db             # Single canonical database (WAL mode)
 ├── mode/ persona/            # JSON / Markdown configs for behavioral modes
-└── docs/                     # security-review, SSE_TELEMETRY, MPM_WISHLIST
+└── docs/                     # ARCHITECTURE_SPLIT.md (shipped retro), external-review-chatgpt-2026-06-28.md, WISHLIST.md
 ```
 
 ## Sibling projects (not under mpm/)
@@ -97,9 +103,9 @@ mpm/
 ```
 
 **Key types:**
-- `DatabaseManager` (`internal/db.go`) — the *only* connection pool. All writes go through it (often via `ExecTracked` for watchdog visibility). Enforces 5s `busy_timeout`, WAL, foreign keys.
-- `MemoryStore` (`internal/memory.go`) — higher-level wrapper. **This is the only code path that runs the 20-pattern secret/poison regex check.** Lower-level `DatabaseManager.SaveMemory` skips it.
-- `SynthesisWorker` (`internal/synthesis_isolation.go`) — isolated goroutine pool (`maxWorkers=3`) with its own event channel, semaphore, and DLQ for failed LLM synth attempts.
+- `DatabaseManager` (`internal/core/db.go`) — the *only* connection pool. All writes go through it (often via `ExecTracked` for watchdog visibility). Enforces 5s `busy_timeout`, WAL, foreign keys.
+- `MemoryStore` (`internal/core/memory.go`) — higher-level wrapper. Note: the 20-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned`) was pushed down into `SaveMemoryNode` in the 2026-07-07 security push, so **all** write paths go through it (not just `MemoryStore.AddMemory`). Coverage is enforced by the static-analysis test `TestScannerCoverage_AllMemoriesWritersScanContent`.
+- `SynthesisWorker` (`internal/core/synthesis_isolation.go`) — isolated goroutine pool (`maxWorkers=3`) with its own event channel, semaphore, and DLQ for failed LLM synth attempts.
 - `SSEBroker` (`cmd/mpm/stream.go`) — singleton; `call.go`, `handlers.go`, `watch.go` all broadcast to it. 50-event ring buffer for `Last-Event-ID` reconnect.
 
 **Relevance scoring** (in `hybrid_search.go`):
@@ -109,7 +115,7 @@ mpm/
 
 ## Database Schema
 
-All tables are defined in `internal/schema.go` as `BaseTables` (DDL), `CommonIndexes` (indexes), and `SafeMigrations` (column additions for upgrade-in-place). The split exists so tests can construct an in-memory DB with just `BaseTables + CommonIndexes`.
+All tables are defined in `internal/core/schema.go` as `BaseTables` (DDL), `CommonIndexes` (indexes), and `SafeMigrations` (column additions for upgrade-in-place). The split exists so tests can construct an in-memory DB with just `BaseTables + CommonIndexes`.
 
 Tables: `memories`, `sessions`, `topics`, `topic_memberships`, `lessons`, `system_config`, `raw_memories`, `external_db_cursors`, `reference_docs`, `reference_chunks`, `memory_revisions`.
 
@@ -117,25 +123,29 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 
 ## Security — Read This Before Touching Write Paths
 
-The 20-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned` in `internal/memory.go`) is **only invoked from `MemoryStore.AddMemory`**. Most other write paths call `DatabaseManager.SaveMemory` directly and **bypass the scan entirely**. See `docs/security-review-2026-06-15.md` for the full audit (24 findings).
+**The 2026-07-07 security audit (`audit.md`) is the source of truth for the current security posture.** It scored 90/100, closed 15 findings, and pushed the scanner down into a centralized location so coverage is structural rather than opt-in. The earlier `docs/security-review-2026-06-15.md` (referenced in pre-audit commits) is superseded by `audit.md`.
 
-**Before adding a new write path, route it through `MemoryStore.AddMemory`, or push the scanner down into `DatabaseManager.SaveMemory`.** The known bypass call sites:
-- `cmd/mpm/watch.go:863, 889, 958` (watch daemon ingest)
-- `cmd/mpm/web_handlers.go:97` (web `POST /api/memories`)
-- `cmd/mpm/simple_cmds.go:97` (`mpm remember`)
-- `cmd/mpm/handlers.go:4633` (`record_decision`)
-- `internal/idle_dream.go:456`, `internal/synthesis_isolation.go:463`, `internal/synthesize.go:631`
+**Where the moat lives now (read these to understand the new guarantees):**
 
-**Other known-bad patterns to avoid:**
-- `authValid()` in `cmd/mpm/stream.go:160` and `withAuth()` in `cmd/mpm/web.go:132` **fail open** when `web_token` is empty (the default). Combined with the bypass above, default `mpm web` on a LAN is fully unauthenticated. Fix in flight per the audit remediation plan.
-- `mpm call add_reference --payload '{"filepath":"…"}'` reads any file the mpm user can read with no allow-list or size cap (`cmd/mpm/call.go:694-721`).
-- `mpm restore-db` pipes a dump to `sqlite3` via stdin — a tampered `.sql` with a leading `.shell` line gets executed as a shell command. Use `mattn/go-sqlite3` `db.Exec(string(content))` instead (`cmd/mpm/handlers_backup.go:166-180`).
-- HTTP server has no timeouts, no body size cap, no security headers, CORS `*` on SSE. See audit items #4, #14, #15, #16.
-- `cmd/mpm/web/app.js` builds HTML via string concat; some `onclick=` interpolations of `m.id` skip the `q()` escape. Future caller-controlled IDs become stored XSS.
+- **Scanner is in `SaveMemoryNode`** (`internal/core/memory.go`). Every write path goes through it. Coverage is enforced by `TestScannerCoverage_AllMemoriesWritersScanContent`. To add a new write path, you do not need to remember the scanner — it is structurally downstream.
+- **Auth is fail-closed by default.** `authValid()` / `withAuth()` reject requests when `web_token` is empty. The `--allow-anonymous` flag is the explicit opt-in for local dev. The pre-audit "fail-open when token empty" footgun is gone.
+- **HTTP body limit is 10 MiB** via `http.MaxBytesReader` on every body-reading handler (`cmd/mpm/web_handlers.go`). `http.Server` has `ReadTimeout: 30s`, `WriteTimeout: 30s`, `IdleTimeout: 60s`.
+- **Browser security headers** are set by `withSecurityHeaders` middleware in `cmd/mpm/web.go`: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, plus CORS `*` + `OPTIONS` preflight.
+- **`mpm restore-db`** reads the SQL dump with `os.ReadFile` and runs it through `db.Exec(string(content))` on `mattn/go-sqlite3` directly. The pre-audit `exec.Command(sqlite3, ".read "+path)` shell-out (which would have honoured `.shell` directives inside a tampered dump) is gone.
+- **Embedding probe cached via `sync.Once`.** `DefaultEmbeddingConfig()` no longer opens a new HTTP client on every CLI invocation — pre-audit, every `mpm add` / `mpm remember` / `mpm propose_theory` blocked up to 2s on the Ollama probe timeout.
+- **`esc()` in `cmd/mpm/web/app.js`** escapes single quotes too. Future entity cards should use `addEventListener` + `textContent` rather than the legacy inline `onclick=` pattern (XSS-by-interpolation class).
+
+**Open items the audit flagged but did not close (low-impact):**
+- No CSRF protection on state-changing endpoints.
+- `innerHTML` still used in some legacy render paths in `app.js` — escaped, but `textContent`-from-data would be safer.
+- No `Content-Security-Policy` header yet.
+- `CURRENT_TIMESTAMP` is still used for *setting* `deleted_at`; `strftime('%s','now')` is used for *comparing* against it (intentional, but worth documenting).
+
+**Before adding a new external surface** (HTTP handler, CLI command, MCP tool, agent-plugins entry), add it to the audit by re-running the relevant section.
 
 ## Configuration
 
-`mpm_config.json` in the workspace root. Loaded by `internal/config/config.go`. Contains:
+`mpm_config.json` in the workspace root. Loaded by `internal/core/config/config.go`. Contains:
 - `memory_dirs`, `sessions_dirs` — watched paths
 - `synth.{model, api_key, base_url, max_tokens, timeout_seconds}` — LLM config for synthesis
 - `web_token` — bearer token for the web/SSE API (optional in current code → unauthenticated default)
@@ -152,16 +162,17 @@ The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775
 
 ## Testing Notes
 
-- `internal/*_test.go` — fast, table-driven, mostly in-memory. Use these for unit changes.
+- `internal/core/*_test.go` — fast, table-driven, mostly in-memory. Use these for unit changes.
 - `cmd/mpm/*_test.go` — integration tests against a temp database. Slower; some (e.g. `watch_lifecycle_test.go`, `recall_test.go`) spawn real goroutines.
 - `reliability_sprint_test.go`, `lifecycle_decay_test.go`, `synthesis_isolation_test.go` — exercise the failure paths (DLQ overflow, SQLite BUSY races, weight-floor split-brain). Read these when changing concurrency or persistence semantics.
 - Tests assume FTS5 is compiled in. CI must export `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5` or tests will panic.
+- Core tests run from `internal/core/` (separate Go module); runtime tests from repo root, using the `replace` directive in `go.mod`.
 
 ## Gotchas
 
 - **Single shared connection.** All goroutines go through one `*sql.DB` with `SetMaxOpenConns(1)`-ish behavior. Don't `sql.Open` new connections inside hot paths — use `DatabaseManager`. The hostile audit (memory: `mpm-hostile-audit-2026-06-03`) had a bug from `RunLifecycleDecayAndArchival` opening a new connection per tick and exhausting the WAL pool.
 
-  **Enforced by** `internal/sqlopen_owner_test.go`: a static-analysis test that fails if `sql.Open` appears outside the whitelist (db.go for the main connection, adapters.go/ingest.go for foreign sqlite files, main.go/route_render.go/handlers_backup.go for read-only opens). Add a new call site only with a justifying comment in the whitelist.
+  **Enforced by** `internal/core/sqlopen_owner_test.go`: a static-analysis test that fails if `sql.Open` appears outside the whitelist (db.go for the main connection, adapters.go/ingest.go for foreign sqlite files, main.go/route_render.go/handlers_backup.go for read-only opens). Add a new call site only with a justifying comment in the whitelist.
 - **Watch daemon** is detached: `mpm watch start --bg` spawns a child that `select{}`s on signals. Parent exits immediately. PID file is `watch.pid` in the workspace.
 - **SSE broker** is a package-level singleton. To broadcast a new event type, add a `Broadcast(...)` helper in `stream.go` — don't instantiate your own broker.
 - **Frontend (`cmd/mpm/web/app.js`)** uses inline `onclick=` attributes and string-concat HTML rendering. If you add new entity types (cards/menus), prefer `addEventListener` + `textContent` from the start; the audit flagged this as a future-XSS hazard.

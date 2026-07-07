@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 
 	"github.com/stretchr/testify/require"
 )

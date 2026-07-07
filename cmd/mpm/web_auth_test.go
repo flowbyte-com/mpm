@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // stubToken saves and restores the webTokenLookup package var.

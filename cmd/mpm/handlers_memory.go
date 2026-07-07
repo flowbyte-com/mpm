@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/synth"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // ============================================================================
@@ -188,11 +188,11 @@ func handleMemoryAdd(args []string) int {
 		suggestions, _ = suggestTopicsForMemory(dm, mem.ID, content, 3, 0.3)
 
 		// Fire-and-forget: check for near-miss candidates and auto-synthesize.
-		// Opens its own DB connection since the enclosing dm will close.
+		// Uses its own session so it doesn't block the caller's connection.
 		go func(id, c string) {
-			synthDM, synthErr := mpminternal.NewDatabaseManager("")
+			synthDM, synthErr := dm.NewSession()
 			if synthErr != nil {
-				slog.Warn("synthesis: failed to open db", "memory_id", id, "error", synthErr)
+				slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
 				return
 			}
 			defer synthDM.Close()

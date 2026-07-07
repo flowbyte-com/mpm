@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mpm/internal/tools"
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 // Sentinels that bracket the generated block in README.md.

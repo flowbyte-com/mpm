@@ -5,31 +5,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
-	"mpm/internal"
-	"mpm/internal/config"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
-const defaultWebPort = "18792"
+const (
+	defaultWebPort     = "18792"
+	defaultHTTPTimeout = 30 * time.Second
+	maxRequestBody    = 10 << 20 // 10 MB max request body
+)
 
 // WebServer holds the HTTP server state
 type WebServer struct {
 	port           string
 	mux            *http.ServeMux
-	db             *internal.DatabaseManager
+	db             internal.CoreDB
 	handler        http.Handler
 	allowAnonymous bool // set when --allow-anonymous was passed; auth is then skipped with a warning header
+	srv            *http.Server
 }
 
 // NewWebServer creates a new web server
-func NewWebServer(port string, db *internal.DatabaseManager) *WebServer {
+func NewWebServer(port string, db internal.CoreDB) *WebServer {
 	ws := &WebServer{
 		port: port,
 		mux:  http.NewServeMux(),
@@ -130,11 +137,36 @@ func (ws *WebServer) setupRoutes() {
 	ws.mux.HandleFunc("/health", ws.handleHealth)
 }
 
-// Start starts the web server
+// Start starts the web server with timeouts and security headers.
 func (ws *WebServer) Start() error {
 	addr := ":" + ws.port
+	ws.srv = &http.Server{
+		Addr:         addr,
+		Handler:      withSecurityHeaders(ws.handler),
+		ReadTimeout:  defaultHTTPTimeout,
+		WriteTimeout: defaultHTTPTimeout,
+		IdleTimeout:  60 * time.Second,
+	}
 	fmt.Printf("🌐 Web UI: http://localhost%s\n", addr)
-	return http.ListenAndServe(addr, ws.handler)
+	return ws.srv.ListenAndServe()
+}
+
+// withSecurityHeaders adds security-relevant HTTP response headers
+// and permissive CORS for local-first development.
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withAuth validates bearer token from mpm_config.json web_token field.
@@ -222,6 +254,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// serverError logs the internal error and sends a generic 500 response to the client.
+// Using this instead of writeError(w, 500, err.Error()) prevents leaking internal
+// details (SQLite queries, schema info, file paths) to API consumers.
+func (ws *WebServer) serverError(w http.ResponseWriter, internalErr error) {
+	slog.Error("api internal error", "error", internalErr.Error())
+	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
 func parseInt(s string, def int) int {
 	if i, err := strconv.Atoi(s); err == nil {
 		return i
@@ -288,8 +328,10 @@ func handleWeb(args []string) int {
 	// Also write to well-known file so mpm call can find the port even if
 	// it wasn't started with MPM_PORT in its environment.
 	portFile := config.GetMPMDir() + "/web.port"
-	os.WriteFile(portFile, []byte(port), 0600)
-	defer os.Remove(portFile)
+	if err := os.MkdirAll(filepath.Dir(portFile), 0755); err == nil {
+		os.WriteFile(portFile, []byte(port), 0600)
+		defer os.Remove(portFile)
+	}
 
 	db, err := internal.NewDatabaseManager("")
 	if err != nil {

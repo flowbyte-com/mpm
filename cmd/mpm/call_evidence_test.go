@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

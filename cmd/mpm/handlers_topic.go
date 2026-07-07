@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleTopic(args []string) int {

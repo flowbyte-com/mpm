@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/synth"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // SaveMemoryWithContext persists a fact to memory, injecting provenance

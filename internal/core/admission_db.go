@@ -100,7 +100,7 @@ func (dm *DatabaseManager) FindAdmissionCandidates(limit int) ([]*AdmissionCandi
 // reference_interactions (which is the retrieval audit, not the
 // admission audit). The two have different semantics and different
 // consumers.
-func (dm *DatabaseManager) RecordAdmissionOutcome(candidate *AdmissionCandidate, result *admitResult, admissionModel string) error {
+func (dm *DatabaseManager) RecordAdmissionOutcome(candidate *AdmissionCandidate, result *AdmitResult, admissionModel string) error {
 	chainJSON, _ := json.Marshal(result.Justification)
 	_, err := dm.db.Exec(`
 		INSERT INTO admission_log (

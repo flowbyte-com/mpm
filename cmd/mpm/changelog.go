@@ -38,8 +38,8 @@ import (
 	"strconv"
 	"strings"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // handleOpsChangelog is the entry point for `mpm ops changelog build`.

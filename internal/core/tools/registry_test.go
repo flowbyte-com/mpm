@@ -9,7 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // TestRegistry_AllEntriesHaveHandlerAndSchema verifies every entry in

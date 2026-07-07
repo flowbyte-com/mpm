@@ -25,8 +25,8 @@ import (
 
 	"time"
 
-	"mpm/internal"
-	"mpm/internal/tools"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 const emptyWakeContext = "Wake context is empty. Ready for context."

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -99,9 +100,23 @@ type EmbeddingConfig struct {
 	ProviderName string // "ollama", "openai", "null"
 }
 
-// DefaultEmbeddingConfig returns a config using environment variables.
+var (
+	defaultEmbedConfigOnce sync.Once
+	defaultEmbedConfig     *EmbeddingConfig
+)
+
+// DefaultEmbeddingConfig returns a cached embedding config using environment variables.
+// The config is probed once and then cached for the lifetime of the process.
 // Checks OLLAMA_ENDPOINT + OLLAMA_MODEL first, falls back to NullProvider.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
+	defaultEmbedConfigOnce.Do(func() {
+		defaultEmbedConfig = probeEmbeddingConfig()
+	})
+	return defaultEmbedConfig
+}
+
+// probeEmbeddingConfig attempts to detect and configure an embedding provider.
+func probeEmbeddingConfig() *EmbeddingConfig {
 	cfg := &EmbeddingConfig{
 		Provider:     NullProvider{},
 		ProviderName: "null",
@@ -117,9 +132,15 @@ func DefaultEmbeddingConfig() *EmbeddingConfig {
 		model = mod
 	}
 
+	// Build probe payload safely using json.Marshal to prevent injection
+	probePayload, _ := json.Marshal(map[string]string{"model": model, "prompt": "test"})
+
 	// Probe: try to reach Ollama
 	client := &http.Client{Timeout: 2 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader([]byte(`{"model":"`+model+`","prompt":"test"}`)))
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(probePayload))
+	if err != nil {
+		return cfg
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {

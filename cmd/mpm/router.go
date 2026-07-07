@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 )
 

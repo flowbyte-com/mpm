@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 func handleLesson(args []string) int {
@@ -111,6 +111,9 @@ func handleLessonAdd(args []string) int {
 	if content == "" {
 		return respond("", "Usage: mpm lesson add <content>", 1)
 	}
+	if err := internal.ValidateLessonType(lessonType); err != nil {
+		return respond("", err.Error(), 1)
+	}
 
 	lessonStore, err := internal.NewLessonStore("")
 	if err != nil {
@@ -153,6 +156,11 @@ func handleLessonList(args []string) int {
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--type=") {
 			lessonType = strings.TrimPrefix(arg, "--type=")
+		}
+	}
+	if lessonType != "" {
+		if err := internal.ValidateLessonType(lessonType); err != nil {
+			return respond("", err.Error(), 1)
 		}
 	}
 

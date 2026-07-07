@@ -16,7 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 func newTestDM(t *testing.T) *internal.DatabaseManager {

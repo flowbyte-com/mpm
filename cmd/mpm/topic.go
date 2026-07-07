@@ -5,7 +5,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // =============================================================================

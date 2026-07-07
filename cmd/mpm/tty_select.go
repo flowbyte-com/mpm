@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"os/exec"
 	"strings"

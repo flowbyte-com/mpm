@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
