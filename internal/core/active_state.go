@@ -131,6 +131,13 @@ type ActiveContext struct {
 	Model string
 	// Agent overrides the default "mpm_call" agent name in provenance.
 	Agent string
+	// SessionID is the runtime session UUID. Used by Arc 2 to pull
+	// shared.event_wakes targeted at this session in the WakesPending
+	// fold. Empty for unit tests that don't run a session.
+	SessionID string
+	// Hostname is reported in the shared.sessions heartbeat for
+	// debugging ("who is awake?"). Empty is fine.
+	Hostname string
 }
 
 // provenanceMeta returns the per-write provenance block. Always emits

@@ -498,6 +498,17 @@ var Registry = []Tool{
 		Handler:     handleCheckWakes,
 	},
 	{
+		// Arc 2: pull incoming epistemic event wakes for the calling
+		// session. Mirrors check_wakes but reads from shared.event_wakes
+		// instead of scheduled_wakes. The target_session is taken from
+		// the ActiveContext (injected by the dispatcher); explicit
+		// session_id is allowed for unit tests.
+		Name:        "check_pending_event_wakes",
+		Description: "Pull all pending event wakes (fired=0) targeting this session, mark them fired, and return them in EventWakesPending. Idempotent across concurrent callers. Use to surface incoming epistemic events (rules, resolutions, arbitrations) without going through the opportunistic fold.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Override target session ID (default: ActiveContext.SessionID)"}}}`),
+		Handler:     handleCheckPendingEventWakes,
+	},
+	{
 		// Phase 5a: inspect the wake queue. Defaults to pending only;
 		// pass include_fired=true for audit, overdue_only=true for the
 		// "what did I forget?" inspection case.

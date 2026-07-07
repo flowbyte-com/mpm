@@ -66,7 +66,25 @@ func handleCall(args []string) int {
 	// the CLI derives it from the active.json file on disk.
 	injectActiveContext()
 	defer clearActiveContext()
-	ac := mpminternal.ActiveContext{Mode: activeMode, Persona: activePersona}
+	ac := mpminternal.ActiveContext{
+		Mode:    activeMode,
+		Persona: activePersona,
+		// SessionID: stable per process. Arc 2 needs this so
+		// shared.event_wakes can target the right session and the
+		// heartbeat can update the right row. Generated lazily on
+		// the first call (see getOrMakeSessionID).
+		SessionID: getOrMakeSessionID(),
+		Agent:     resolveAgentID(),
+		Hostname:  resolveHostname(),
+	}
+
+	// Passive heartbeat (Arc 2): every MPM call that touches the
+	// shared DB silently bumps shared.sessions. Non-fatal: a
+	// heartbeat failure must NOT block the call. The DB call is
+	// a single INSERT OR REPLACE under the hood; in the worst
+	// case the shared DB is busy and we skip the heartbeat this
+	// turn. Discovery window is 24h so transient skips are fine.
+	_ = dm.Heartbeat(ac.SessionID, ac.Agent, ac.Hostname, nil)
 
 	result, err := tool.Handler(dm, ac, payload)
 	if err != nil {
@@ -85,10 +103,20 @@ func handleCall(args []string) int {
 	// SELECT (sub-millisecond on WAL with the scheduled_wakes_due index).
 	// The wake handlers themselves also fold (defense-in-depth + unit-test
 	// visibility when the dispatcher is bypassed).
+	//
+	// Arc 2: also fold EventWakesPending from shared.event_wakes when the
+	// session has an ID. The receiving agent sees incoming epistemic
+	// events alongside its own scheduled tasks.
 	if resultMap, ok := result.(map[string]interface{}); ok {
 		if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
 			resultMap["WakesPending"] = due
 			resultMap["WakesPendingCount"] = len(due)
+		}
+		if ac.SessionID != "" {
+			if eventWakes, eErr := dm.CheckPendingEventWakes(ac.SessionID); eErr == nil && len(eventWakes) > 0 {
+				resultMap["EventWakesPending"] = eventWakes
+				resultMap["EventWakesPendingCount"] = len(eventWakes)
+			}
 		}
 		result = resultMap
 	}

@@ -1336,6 +1336,21 @@ func handleRecordGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 			"is_house_rule": true,
 		},
 	)
+	// Arc 2: auto-broadcast as the side-effect of the explicit
+	// --confirm=true. The rationale comes from the rule's
+	// provenance (which RecordGlobalRule stores verbatim) when
+	// present, otherwise a default "house rule established" string.
+	// Non-fatal: a broadcast failure does NOT roll back the write.
+	broadcastRationale := provenance
+	if broadcastRationale == "" {
+		broadcastRationale = "New house rule established by operator."
+	}
+	_, _ = dm.BroadcastMemory(id, mpminternal.BroadcastOpts{
+		Kind:        "rule",
+		Rationale:   broadcastRationale,
+		SourceAgent: ac.Agent,
+		SourceSessionID: ac.SessionID,
+	})
 	return map[string]interface{}{
 		"success": true,
 		"id":      id,
@@ -1424,16 +1439,28 @@ func splitTags(s string) []string {
 // out as a WakesPending block. Returns the (possibly decorated) out map
 // so callers can do `out := ...; return checkWakesAndFold(dm, out)`.
 // No-op when out is nil or when there are no due wakes.
-func checkWakesAndFold(dm mpminternal.CoreDB, out map[string]interface{}) map[string]interface{} {
+//
+// Arc 2: also folds EventWakesPending from shared.event_wakes when the
+// ActiveContext has a SessionID. The two blocks land separately on the
+// response so receiving agents can distinguish agent-scheduled future
+// tasks (WakesPending) from incoming epistemic events (EventWakesPending).
+func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
 	}
-	due, err := dm.CheckPendingWakes(time.Now())
-	if err != nil || len(due) == 0 {
-		return out
+	if due, err := dm.CheckPendingWakes(time.Now()); err == nil && len(due) > 0 {
+		out["WakesPending"] = due
+		out["WakesPendingCount"] = len(due)
 	}
-	out["WakesPending"] = due
-	out["WakesPendingCount"] = len(due)
+	// Arc 2 fan-out pull. Only meaningful when we have a session ID
+	// (which the CLI dispatcher and MCP server both inject). Unit
+	// tests that don't pass a SessionID skip this branch silently.
+	if ac.SessionID != "" {
+		if eventWakes, err := dm.CheckPendingEventWakes(ac.SessionID); err == nil && len(eventWakes) > 0 {
+			out["EventWakesPending"] = eventWakes
+			out["EventWakesPendingCount"] = len(eventWakes)
+		}
+	}
 	return out
 }
 
@@ -1468,11 +1495,11 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	return checkWakesAndFold(dm, out), nil
+	return checkWakesAndFold(dm, ac, out), nil
 }
 
 func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	out := checkWakesAndFold(dm, map[string]interface{}{
+	out := checkWakesAndFold(dm, ac, map[string]interface{}{
 		"success": true,
 	})
 	if _, ok := out["WakesPending"]; !ok {
@@ -1480,6 +1507,29 @@ func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		out["WakesPendingCount"] = 0
 	}
 	return out, nil
+}
+
+// handleCheckPendingEventWakes (Arc 2): pulls incoming event wakes
+// targeting the calling session. Defaults to ac.SessionID; allows
+// explicit session_id override for unit tests.
+func handleCheckPendingEventWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	sessionID, _ := p["session_id"].(string)
+	if sessionID == "" {
+		sessionID = ac.SessionID
+	}
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id required (set ActiveContext.SessionID or pass session_id param)")
+	}
+	wakes, err := dm.CheckPendingEventWakes(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("check_pending_event_wakes: %w", err)
+	}
+	return map[string]interface{}{
+		"success":             true,
+		"event_wakes_pending": wakes,
+		"count":               len(wakes),
+		"session_id":          sessionID,
+	}, nil
 }
 
 func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1504,7 +1554,7 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	if err != nil {
 		return nil, err
 	}
-	return checkWakesAndFold(dm, map[string]interface{}{
+	return checkWakesAndFold(dm, ac, map[string]interface{}{
 		"success":       true,
 		"wakes":         items,
 		"count":         len(items),

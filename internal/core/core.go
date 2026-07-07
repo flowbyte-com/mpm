@@ -197,6 +197,12 @@ type CoreDB interface {
 	DigestScheduledWakes(topN int) (map[string]interface{}, error)
 	FireStaleFoundationWakes(deletedArtifactID string) (int, error)
 
+	// ─── Arc 2: Active Dissemination ────────────────────────────────
+	BroadcastMemory(memoryID string, opts BroadcastOpts) (*BroadcastReport, error)
+	CheckPendingEventWakes(sessionID string) ([]EventWake, error)
+	Heartbeat(sessionID, agentID, hostname string, metadata map[string]interface{}) error
+	DiscoverActiveSessions() ([]ActiveSession, error)
+
 	// ─── Directives ──────────────────────────────────────────────────
 	ReadDirectives() ([]map[string]interface{}, error)
 	ProactiveRecallHint(conversationText string, maxHints int, minScore float64) ([]map[string]interface{}, error)
