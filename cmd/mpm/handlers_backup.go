@@ -3,14 +3,12 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -22,9 +20,9 @@ import (
 // format produced by `sqlite3 .dump`). Default path is `<db-dir>/mpm-backup-<UTC-timestamp>.sql`.
 // Requires the `sqlite3` CLI to be on PATH (see doctor warning otherwise).
 func handleBackup(args []string) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
 	dbPath := dm.DBPath()
 	dm.Close()
@@ -94,9 +92,9 @@ func handleRestoreDB(args []string) int {
 		return respond("", "Restore aborted.\n", 1)
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
 	dbPath := dm.DBPath()
 	// Close all DB handles BEFORE clearing WAL/SHM so SQLite doesn't fight us.

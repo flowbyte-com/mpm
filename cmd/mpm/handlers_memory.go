@@ -174,9 +174,7 @@ func handleMemoryAdd(args []string) int {
 
 	// Set TTL if --expires-in was provided
 	var suggestions []map[string]interface{}
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err == nil {
-		defer dm.Close()
+	if dm := getDBConcrete(); dm != nil {
 		if expiresIn != "" {
 			dur, parseErr := parseDuration(expiresIn)
 			if parseErr == nil {

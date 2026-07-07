@@ -9,11 +9,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"path/filepath"
-
-	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleOpsShared(args []string) int {
@@ -26,11 +23,10 @@ func handleOpsShared(args []string) int {
 		return 0
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	envPath := os.Getenv("MPM_SHARED_DB")
 	attached := dm.SharedAttached()

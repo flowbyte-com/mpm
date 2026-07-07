@@ -191,11 +191,10 @@ func handleRecall(args []string) int {
 	query = strings.TrimSpace(query)
 	lastQuery = query // captured for the --why provenance helper
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	db := dm.SQLDB()
 	returnedIDs := make(map[string]bool)

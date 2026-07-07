@@ -138,12 +138,12 @@ func handleSelfHeal(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Warn("self-heal: cannot open db: %v", err)
+	// loadSelfHealState / saveSelfHealState take *DatabaseManager (concrete),
+	// not the CoreDB interface. The singleton is always a *DatabaseManager.
+	dm := getDBConcrete()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	// Load prior state. If we're inside the cooldown with the same drift
 	// signature, no-op silently.

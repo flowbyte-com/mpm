@@ -322,11 +322,10 @@ func headOrDefault(s, def string) string {
 // 'legacy backfill' in any sense — they are present-day memories
 // whose join failed.
 func runSynthesis(doc *mpminternal.ChangelogDocument) (*mpminternal.ChangelogSynthesisResult, error) {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return nil, fmt.Errorf("open dm: %w", err)
+	dm := getDB()
+	if dm == nil {
+		return nil, fmt.Errorf("db unavailable: getDB returned nil (singleton init failed)")
 	}
-	defer dm.Close()
 	res, err := mpminternal.SynthesizeChangelog(doc, dm.SQLDB())
 	if err != nil {
 		return nil, err

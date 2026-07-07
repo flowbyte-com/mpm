@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -80,11 +79,10 @@ func handleOpsMilestones(args []string) int {
 		maxRows = MilestoneMaxList
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, tags

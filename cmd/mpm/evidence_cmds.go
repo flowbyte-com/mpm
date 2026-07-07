@@ -76,12 +76,13 @@ func handleEvidenceAdd(args []string) int {
 		printError("%v", err)
 		return 1
 	}
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		printError("open database: %v", err)
+	if getDB() == nil {
 		return 1
 	}
-	defer dm.Close()
+	// AddEvidence takes a concrete *DatabaseManager, not the CoreDB
+	// interface. The singleton is always a *DatabaseManager, so the
+	// type assertion is safe; the nil check above guards it.
+	dm := getDB().(*mpminternal.DatabaseManager)
 	in := mpminternal.EvidenceInput{
 		ArtifactID:         payload["artifact_id"].(string),
 		ArtifactType:       payload["artifact_type"].(string),
@@ -143,12 +144,10 @@ func handleEvidenceList(args []string) int {
 	}
 	artifactID, _ := payload["artifact_id"].(string)
 	artifactType, _ := payload["artifact_type"].(string)
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		printError("open database: %v", err)
+	if getDB() == nil {
 		return 1
 	}
-	defer dm.Close()
+	dm := getDB().(*mpminternal.DatabaseManager)
 	rows, err := mpminternal.ListEvidenceForArtifact(dm, artifactID, artifactType)
 	if err != nil {
 		printError("list evidence: %v", err)

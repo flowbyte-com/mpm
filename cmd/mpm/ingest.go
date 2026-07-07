@@ -132,12 +132,10 @@ func handleIngestSource(args []string) int {
 	}
 	fmt.Printf("  Schema: %s (%s)\n", schema.DBType, schema.Tables[0].Name)
 
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	if dryRun {
 		fmt.Println("  [DRY RUN] No changes written.")
@@ -189,12 +187,10 @@ func handleIngestListSchemas(args []string) int {
 
 // handleIngestStatus shows staging area summary
 func handleIngestStatus(args []string) int {
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	counts, err := dm.GetIngestStatus()
 	if err != nil {
@@ -255,12 +251,10 @@ func handleIngestReview(args []string) int {
 		}
 	}
 
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	// Reset stale reviewing entries
 	reset, _ := dm.ResetStaleReviewing()
@@ -292,12 +286,10 @@ func handleIngestReview(args []string) int {
 
 // handleIngestCleanup expires old pending entries
 func handleIngestCleanup(args []string) int {
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	now := time.Now().Unix()
 
@@ -330,12 +322,10 @@ func handleIngestCleanup(args []string) int {
 
 // handleIngestHistory shows past ingest runs
 func handleIngestHistory(args []string) int {
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	batches, err := dm.ListIngestBatches()
 	if err != nil {
@@ -370,12 +360,10 @@ func handleIngestUndo(args []string) int {
 	}
 	batchID := args[0]
 
-	dm, err := internal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	// Delete raw_memories entries for this batch
 	result, err := dm.SQLDB().Exec(`

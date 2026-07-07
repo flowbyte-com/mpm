@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core"
-
-	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleTopic(args []string) int {
@@ -238,8 +236,7 @@ func handleTopicShow(args []string) int {
 	}
 
 	// Fetch top 3 memories for this topic
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err == nil {
+	if dm := getDBConcrete(); dm != nil {
 		memories, total, _ := dm.GetTopicTopMemories(id, 3)
 		if len(memories) > 0 {
 			bold := "\033[1m"

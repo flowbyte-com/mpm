@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"strings"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/seed"
 )
 
@@ -32,12 +31,10 @@ func handleOpsInitDirectives(args []string) int {
 	// Parse flags. The command currently takes no required args; future
 	// could add --dry-run, --force, --prune (remove directives no
 	// longer in the registry). For now: bare command, prints summary.
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		printError("open database: %v", err)
+	dm := getDB()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	summary, err := seed.ApplyDirectives(dm)
 	if err != nil {

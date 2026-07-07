@@ -16,11 +16,10 @@ func handleChallenge(args []string) int {
 	id := args[0]
 	evidence := strings.Join(args[1:], " ")
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// Verify memory exists
 	mem, err := dm.GetMemory(id)
@@ -104,11 +103,10 @@ func handleChallengeRestore(args []string) int {
 	// args[0] is "restore", args[1] is the memory ID
 	id := args[1]
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {

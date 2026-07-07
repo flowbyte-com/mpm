@@ -180,6 +180,22 @@ func getDB() internal.CoreDB {
 	return dbManager
 }
 
+// getDBConcrete returns the shared *DatabaseManager singleton, suitable
+// for call sites that need the concrete type (e.g. legacy helpers like
+// mpminternal.AddEvidence, mpminternal.HybridSearch, and printStatusDashboard
+// that take *DatabaseManager rather than the CoreDB interface). The CoreDB
+// interface is a per-component ownership abstraction; cmd/mpm's CLI handlers
+// predate that layer and were written against the concrete type.
+//
+// The singleton is always a *DatabaseManager (set inside getDB()'s once
+// initializer), so the type assertion is safe; the nil check guards it.
+func getDBConcrete() *internal.DatabaseManager {
+	if db := getDB(); db != nil {
+		return db.(*internal.DatabaseManager)
+	}
+	return nil
+}
+
 // getMemoryStore returns a MemoryStore backed by the shared database manager.
 // Lazily initializes dbManager if nil.
 func getMemoryStore() *internal.MemoryStore {

@@ -65,9 +65,7 @@ func handleProposeTheory(args []string) int {
 	}
 
 	// Auto-link to theories topic (idempotent via INSERT OR IGNORE)
-	dm, dmErr := mpminternal.NewDatabaseManager("")
-	if dmErr == nil {
-		defer dm.Close()
+	if dm := getDBConcrete(); dm != nil {
 		topicID, tErr := dm.GetOrCreateTopic("theories")
 		if tErr == nil {
 			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
@@ -86,11 +84,10 @@ func handleResolveTheory(args []string) int {
 	id := args[0]
 	conclusion := strings.Join(args[1:], " ")
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	mem, err := dm.GetMemory(id)
 	if err != nil {
@@ -175,9 +172,7 @@ func handleRecordDecision(args []string) int {
 	}
 
 	// Auto-link to decisions topic
-	dm, dmErr := mpminternal.NewDatabaseManager("")
-	if dmErr == nil {
-		defer dm.Close()
+	if dm := getDBConcrete(); dm != nil {
 		topicID, tErr := dm.GetOrCreateTopic("decisions")
 		if tErr == nil {
 			dm.AddMemoryToTopic(mem.ID, topicID, "primary")
@@ -194,11 +189,10 @@ func handleTheories(args []string) int {
 		filter = args[0]
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport("theories", "", "")
 	if err != nil {
@@ -254,11 +248,10 @@ func handleTheories(args []string) int {
 // backfillEpistemologyTopics links existing theories/decisions memories to their topics.
 // Idempotent: AddMemoryToTopic uses INSERT OR IGNORE so it is safe to call repeatedly.
 func backfillEpistemologyTopics() {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
+	dm := getDB()
+	if dm == nil {
 		return
 	}
-	defer dm.Close()
 
 	rows, err := dm.SQLDB().Query(
 		`SELECT id, collection FROM memories WHERE collection IN ('theories', 'decisions') AND deleted_at IS NULL`,
@@ -297,11 +290,10 @@ func backfillEpistemologyTopics() {
 
 // handleDecisions displays the decision ledger with context, choice, and rationale for each entry.
 func handleDecisions(args []string) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport("decisions", "", "")
 	if err != nil {
@@ -384,11 +376,13 @@ func handleHint(args []string) int {
 
 	keywords := internal.ExtractConversationKeywords(conversationText, 50)
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	if getDB() == nil {
+		return 1
 	}
-	defer dm.Close()
+	// FindEpistemologyOverlaps takes a concrete *DatabaseManager, not
+	// the CoreDB interface. The singleton is always a *DatabaseManager,
+	// so the type assertion is safe; the nil check above guards it.
+	dm := getDB().(*mpminternal.DatabaseManager)
 
 	retrievalLimit := maxHints
 	retrievalThreshold := -3.0

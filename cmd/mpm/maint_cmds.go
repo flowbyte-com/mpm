@@ -11,17 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handleStats shows memory statistics
 func handleStats(args []string) int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("Failed to open database: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	stats, err := dm.GetMemoryStats()
 	if err != nil {
@@ -121,11 +118,10 @@ func handlePrune(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("Failed to open database: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	var count int
 	var pruneErr error
@@ -205,11 +201,10 @@ func handleExport(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("Failed to open database: %v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
@@ -293,11 +288,10 @@ func handleMaintain(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	if *review {
 		// Show memories for spaced reinforcement review
