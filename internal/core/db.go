@@ -942,9 +942,19 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	}
 	for _, t := range sharedTriggers {
 		if _, err := dm.db.Exec(t); err != nil {
-			slog.Warn("shared FTS trigger creation failed",
+			slog.Warn("shared FTS trigger installation failed",
 				"sql_prefix", sharedDDLTruncate(t, 60), "error", err.Error())
 		}
+	}
+
+	// Arc 1: install the shared.contradiction_log table. This is the
+	// operator's source of truth for the conflict resolution queue.
+	// mirror.jsonl stays as the forensic detection trail; this table
+	// is the operational state machine that the resolve-contradictions
+	// command reads. The DDL is idempotent (CREATE TABLE IF NOT EXISTS).
+	if _, err := dm.db.Exec(SharedContradictionLogDDL); err != nil {
+		slog.Warn("shared.contradiction_log DDL failed",
+			"error", err.Error())
 	}
 
 	// Now run SafeMigrations against the shared schema (tables exist now).
