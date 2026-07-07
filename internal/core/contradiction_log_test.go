@@ -53,6 +53,7 @@ func newTestDMWithShared(t *testing.T) *DatabaseManager {
 			importance REAL NOT NULL DEFAULT 0.5,
 			confidence REAL NOT NULL DEFAULT 0.8,
 			reinforcement_count INTEGER DEFAULT 0,
+			last_accessed_at DATETIME,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			deleted_at TEXT, dependencies TEXT
 		)`); err != nil {
@@ -62,8 +63,9 @@ func newTestDMWithShared(t *testing.T) *DatabaseManager {
 		CREATE TABLE IF NOT EXISTS shared.evidence (
 			id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL,
 			artifact_type TEXT NOT NULL, type TEXT NOT NULL,
-			source_group TEXT, notes TEXT, created_by TEXT,
-			strength REAL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			source_group TEXT NOT NULL, notes TEXT, created_by TEXT NOT NULL,
+			strength REAL NOT NULL, independence_factor REAL NOT NULL DEFAULT 1.0,
+			created_at INTEGER NOT NULL, expires_at INTEGER
 		)`); err != nil {
 		t.Fatalf("create shared.evidence: %v", err)
 	}
@@ -407,4 +409,213 @@ func queueIDToStr(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// ── Arc 1 Closure: Resolution as Evidence ─────────────────────────────
+
+// TestApplyResolution_WritesEvidenceForWinner: when a decisive
+// resolution lands, the winner gets a shared.evidence row recording
+// that it survived the contradiction. Future agents searching the
+// winner's evidence trail will see this strengthening signal.
+func TestApplyResolution_WritesEvidenceForWinner(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('strong','memories','x',0.95,0.9,0.9,5)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('weak','memories','x',0.10,0.2,0.2,5)`)
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('strong','weak','t',0.9)`)
+	id, _ := res.LastInsertId()
+	row := map[string]interface{}{
+		"id":          queueIDToStr(int(id)),
+		"memory_id_a": "strong",
+		"memory_id_b": "weak",
+	}
+	if _, err := dm.ResolveOneContradiction(row, true); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	// Verify evidence was written for the winner (strong).
+	var evCount int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM shared.evidence WHERE artifact_id = 'strong' AND type = 'resolution_survived'`).Scan(&evCount); err != nil {
+		t.Fatalf("count evidence: %v", err)
+	}
+	if evCount != 1 {
+		t.Errorf("expected 1 evidence row for winner 'strong', got %d", evCount)
+	}
+	// Verify the loser's evidence trail is NOT augmented with this
+	// resolution (only the winner gets the strengthening signal).
+	var loserEvCount int
+	_ = dm.db.QueryRow(`SELECT COUNT(*) FROM shared.evidence WHERE artifact_id = 'weak' AND type = 'resolution_survived'`).Scan(&loserEvCount)
+	if loserEvCount != 0 {
+		t.Errorf("loser should not have resolution_survived evidence, got %d", loserEvCount)
+	}
+	// Verify strength=1.0 and the source_group is keyed by queue ID.
+	var (
+		strength    float64
+		sourceGroup string
+	)
+	_ = dm.db.QueryRow(`SELECT strength, source_group FROM shared.evidence WHERE artifact_id = 'strong' AND type = 'resolution_survived'`).Scan(&strength, &sourceGroup)
+	if strength != 1.0 {
+		t.Errorf("expected strength=1.0, got %f", strength)
+	}
+	expectedSourceGroup := fmt.Sprintf("resolution:%d", id)
+	if sourceGroup != expectedSourceGroup {
+		t.Errorf("expected source_group=%q, got %q", expectedSourceGroup, sourceGroup)
+	}
+}
+
+// ── Arc 1 Closure: Arbitration Auto-Slash ─────────────────────────────
+
+// TestResolveArbitrationTheory_HappyPath: when the operator resolves
+// a PendingTheory with --winner=<id>, the system verifies the
+// winner is in the theory's dependencies, slashes the OTHER one,
+// writes a resolution memory, attaches evidence to the winner, and
+// marks the queue row resolved.
+func TestResolveArbitrationTheory_HappyPath(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	// Set up two memories with equal confidence (close call).
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('mem-A','memories','a',0.5,0.5,0.5,5)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('mem-B','memories','b',0.5,0.5,0.5,5)`)
+	// Queue a contradiction.
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('mem-A','mem-B','t',0.9)`)
+	queueID, _ := res.LastInsertId()
+	// Create a PendingTheory (mimics applyArbitration's output).
+	theoryID := "arbitration-test-1"
+	depsJSON := `["mem-A","mem-B"]`
+	_, err := dm.db.Exec(`
+		INSERT INTO shared.memories
+			(id, collection, content, tags, dependencies, metadata, weight, retrieval_priority, importance, confidence)
+		VALUES (?, 'theories', 'arbitration hypothesis', '["arbitration:contradiction:mem-A-mem-B"]', ?, ?, 1.0, 0.5, 0.5, 0.5)
+	`, theoryID, depsJSON, fmt.Sprintf(`{"status":"pending","arbitration_for_queue_id":%d}`, queueID))
+	if err != nil {
+		t.Fatalf("create theory: %v", err)
+	}
+	// Operator resolves with --winner=mem-A.
+	result, err := dm.ResolveArbitrationTheory(theoryID, "mem-A", "mem-A is the correct version")
+	if err != nil {
+		t.Fatalf("ResolveArbitrationTheory: %v", err)
+	}
+	// Verify result fields.
+	if result["winner_id"] != "mem-A" {
+		t.Errorf("expected winner=mem-A, got %v", result["winner_id"])
+	}
+	if result["loser_id"] != "mem-B" {
+		t.Errorf("expected loser=mem-B, got %v", result["loser_id"])
+	}
+	if result["queue_id"] != queueID {
+		t.Errorf("expected queue_id=%d, got %v", queueID, result["queue_id"])
+	}
+	// Verify the queue row is now resolved.
+	var resolvedAt *string
+	_ = dm.db.QueryRow(`SELECT resolved_at FROM shared.contradiction_log WHERE id = ?`, queueID).Scan(&resolvedAt)
+	if resolvedAt == nil {
+		t.Errorf("queue row should be marked resolved, got nil")
+	}
+	// Verify the resolution memory was created.
+	var resMemID string
+	_ = dm.db.QueryRow(`SELECT resolution_memory_id FROM shared.contradiction_log WHERE id = ?`, queueID).Scan(&resMemID)
+	if resMemID == "" {
+		t.Errorf("queue row should have resolution_memory_id, got empty")
+	}
+	// Verify the loser's metadata was updated with status=challenged.
+	var loserMeta string
+	_ = dm.db.QueryRow(`SELECT metadata FROM shared.memories WHERE id = 'mem-B'`).Scan(&loserMeta)
+	if !strings.Contains(loserMeta, "operator_arbitration") {
+		t.Errorf("loser metadata should be tagged with operator_arbitration, got %q", loserMeta)
+	}
+	// Verify the evidence was written for the winner.
+	var evCount int
+	_ = dm.db.QueryRow(`SELECT COUNT(*) FROM shared.evidence WHERE artifact_id = 'mem-A' AND type = 'resolution_survived'`).Scan(&evCount)
+	if evCount != 1 {
+		t.Errorf("expected 1 evidence row for winner 'mem-A', got %d", evCount)
+	}
+	// Verify the theory itself is now resolved.
+	var theoryStatus string
+	_ = dm.db.QueryRow(`SELECT json_extract(metadata, '$.status') FROM shared.memories WHERE id = ?`, theoryID).Scan(&theoryStatus)
+	if theoryStatus != "resolved" {
+		t.Errorf("expected theory status=resolved, got %q", theoryStatus)
+	}
+}
+
+// TestResolveArbitrationTheory_RejectsNonArbitration: if the theory
+// doesn't have arbitration_for_queue_id in its metadata, the
+// arbitration path refuses and the operator should use the plain
+// resolve path.
+func TestResolveArbitrationTheory_RejectsNonArbitration(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('plain-theory','theories','a regular theory', 1.0, 0.5, 0.5, 0.5)`)
+	_, err := dm.ResolveArbitrationTheory("plain-theory", "mem-A", "winner is mem-A")
+	if err == nil {
+		t.Errorf("expected error for non-arbitration theory, got nil")
+	}
+	if !strings.Contains(err.Error(), "not an arbitration theory") {
+		t.Errorf("expected 'not an arbitration theory' error, got %v", err)
+	}
+}
+
+// TestResolveArbitrationTheory_RejectsBadWinner: if winnerID is
+// not in the theory's dependencies, the operation is rejected. This
+// protects against operator typo / cross-contamination.
+func TestResolveArbitrationTheory_RejectsBadWinner(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('mem-A','memories','a',1.0,0.5,0.5,0.5)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('mem-B','memories','b',1.0,0.5,0.5,0.5)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('mem-Z','memories','z',1.0,0.5,0.5,0.5)`)
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('mem-A','mem-B','t',0.9)`)
+	queueID, _ := res.LastInsertId()
+	_, _ = dm.db.Exec(`
+		INSERT INTO shared.memories (id, collection, content, dependencies, metadata, weight, retrieval_priority, importance, confidence)
+		VALUES ('arbitration-bad-winner', 'theories', 't', '["mem-A","mem-B"]', ?, 1.0, 0.5, 0.5, 0.5)
+	`, fmt.Sprintf(`{"status":"pending","arbitration_for_queue_id":%d}`, queueID))
+	// mem-Z is not in the dependencies — should be rejected.
+	_, err := dm.ResolveArbitrationTheory("arbitration-bad-winner", "mem-Z", "winner is mem-Z")
+	if err == nil {
+		t.Errorf("expected error for non-dependency winner, got nil")
+	}
+	if !strings.Contains(err.Error(), "not in the theory's dependencies") {
+		t.Errorf("expected 'not in dependencies' error, got %v", err)
+	}
+}
+
+// TestResolveArbitrationTheory_RejectsNonTheory: the memory must
+// be in the theories collection. This protects against applying the
+// arbitration slash logic to a regular memory.
+func TestResolveArbitrationTheory_RejectsNonTheory(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('not-a-theory','memories','x',1.0,0.5,0.5,0.5)`)
+	_, err := dm.ResolveArbitrationTheory("not-a-theory", "mem-A", "winner")
+	if err == nil {
+		t.Errorf("expected error for non-theory, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not a theory") {
+		t.Errorf("expected 'is not a theory' error, got %v", err)
+	}
+}
+
+// TestResolveArbitrationTheory_IdempotentOnAlreadyResolvedQueue:
+// if the queue row was already resolved (e.g., the operator ran
+// resolve-contradictions --apply directly), the arbitration path
+// still works (the UPDATE on resolved_at is a no-op), but the
+// theory itself is marked resolved. The resolution memory is still
+// created, providing the audit trail.
+func TestResolveArbitrationTheory_IdempotentOnAlreadyResolvedQueue(t *testing.T) {
+	dm := newTestDMWithShared(t)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('mem-A','memories','a',1.0,0.5,0.5,0.5)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, weight, retrieval_priority, importance, confidence) VALUES ('mem-B','memories','b',1.0,0.5,0.5,0.5)`)
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('mem-A','mem-B','t',0.9)`)
+	queueID, _ := res.LastInsertId()
+	_, _ = dm.db.Exec(`
+		INSERT INTO shared.memories (id, collection, content, dependencies, metadata, weight, retrieval_priority, importance, confidence)
+		VALUES ('arbitration-already-resolved', 'theories', 't', '["mem-A","mem-B"]', ?, 1.0, 0.5, 0.5, 0.5)
+	`, fmt.Sprintf(`{"status":"pending","arbitration_for_queue_id":%d}`, queueID))
+	// Pre-resolve the queue row.
+	_, _ = dm.db.Exec(`UPDATE shared.contradiction_log SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?`, queueID)
+	// Now run arbitration resolution. Should NOT error.
+	_, err := dm.ResolveArbitrationTheory("arbitration-already-resolved", "mem-A", "winner is mem-A")
+	if err != nil {
+		t.Errorf("expected nil error for already-resolved queue, got %v", err)
+	}
+	// Theory is still marked resolved.
+	var theoryStatus string
+	_ = dm.db.QueryRow(`SELECT json_extract(metadata, '$.status') FROM shared.memories WHERE id = 'arbitration-already-resolved'`).Scan(&theoryStatus)
+	if theoryStatus != "resolved" {
+		t.Errorf("expected theory status=resolved, got %q", theoryStatus)
+	}
 }
