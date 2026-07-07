@@ -76,19 +76,71 @@ func handleProposeTheory(args []string) int {
 }
 
 // handleResolveTheory marks a theory as resolved, updating metadata and bumping weight.
+//
+// Arc 1 closure: if --winner=<memory_id> is provided, the theory is
+// treated as an arbitration theory (created by the close-call path
+// of `mpm ops resolve-contradictions`). The system verifies the
+// winner is in the theory's dependencies, slashes the OTHER one,
+// writes a resolution memory, attaches evidence to the winner, and
+// marks the original contradiction queue row as resolved — all in
+// one transaction. If --winner is not provided, the legacy path
+// runs (just mark the theory resolved; no slash).
 func handleResolveTheory(args []string) int {
 	if len(args) < 2 {
-		return respond("", "Usage: mpm resolve_theory <id> <conclusion>", 1)
+		return respond("", "Usage: mpm resolve_theory <id> <conclusion> [--winner=<memory_id>]", 1)
 	}
 
 	id := args[0]
 	conclusion := strings.Join(args[1:], " ")
+	// Strip --winner=<memory_id> from conclusion (it might be at the
+	// end if the operator pasted it there, or interspersed). The
+	// cleanest way is to scan args for the flag and remove it.
+	winnerID := ""
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "--winner=") {
+			winnerID = strings.TrimPrefix(a, "--winner=")
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if len(filtered) >= 2 {
+		id = filtered[0]
+		conclusion = strings.Join(filtered[1:], " ")
+	} else {
+		id = filtered[0]
+		conclusion = ""
+	}
 
 	dm := getDB()
 	if dm == nil {
 		return 1
 	}
 
+	// Arc 1 closure: if --winner is provided, route through the
+	// arbitration auto-slash path. This atomically: (1) slashes
+	// the loser, (2) writes a resolution memory, (3) attaches
+	// evidence to the winner, (4) marks the queue row resolved,
+	// (5) resolves the theory. All in one transaction.
+	if winnerID != "" {
+		result, err := dm.ResolveArbitrationTheory(id, winnerID, conclusion)
+		if err != nil {
+			return respond("", fmt.Sprintf("Failed to resolve arbitration theory: %v\n", err), 1)
+		}
+		// Human-readable confirmation.
+		out := fmt.Sprintf("✅ Arbitration resolved: %s\n", id)
+		out += fmt.Sprintf("   winner: %s (kept)\n", result["winner_id"])
+		out += fmt.Sprintf("   loser:  %s (slashed by %v weight units)\n", result["loser_id"], result["slash_amount"])
+		out += fmt.Sprintf("   resolution memory: %s\n", result["resolution_memory_id"])
+		out += fmt.Sprintf("   evidence for winner: %s\n", result["evidence_id"])
+		out += fmt.Sprintf("   queue row %v marked resolved\n", result["queue_id"])
+		out += fmt.Sprintf("   conclusion: %s\n", conclusion)
+		return respond("", out, 0)
+	}
+
+	// Legacy path: plain theory resolution (no slash). The
+	// metadata patch + weight bump are unchanged from the
+	// pre-Arc-1-closure behavior.
 	mem, err := dm.GetMemory(id)
 	if err != nil {
 		return respond("", fmt.Sprintf("Theory not found: %s\n", id), 1)

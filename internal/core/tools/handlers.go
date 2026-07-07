@@ -211,6 +211,14 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 }
 
 // callResolveTheory marks a theory as proven or disproven.
+//
+// Arc 1 closure: if winnerId is provided in the params, the theory
+// is treated as an arbitration theory (created by the close-call
+// path of `mpm ops resolve-contradictions`). The system routes to
+// ResolveArbitrationTheory which atomically slashes the loser,
+// writes a resolution memory, attaches evidence to the winner, and
+// marks the queue row resolved. If winnerId is absent, the legacy
+// path runs (just mark the theory resolved; no slash).
 func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	theoryID, _ := p["theoryId"].(string)
 	if theoryID == "" {
@@ -220,6 +228,35 @@ func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if conclusion == "" {
 		return nil, fmt.Errorf("conclusion is required")
 	}
+	winnerID, _ := p["winnerId"].(string)
+
+	// Arc 1 closure: arbitration auto-slash path.
+	if winnerID != "" {
+		result, err := dm.ResolveArbitrationTheory(theoryID, winnerID, conclusion)
+		if err != nil {
+			return nil, err
+		}
+		// Forensic log: arbitration resolution is a major state
+		// transition (slash + resolution memory + queue mark) so
+		// we log it at INFO with the full set of IDs.
+		dm.LogAudit(
+			mpminternal.AuditInfo, "epistemology",
+			fmt.Sprintf("arbitration_resolve %s winner=%s loser=%s", theoryID, result["winner_id"], result["loser_id"]), "",
+			mpminternal.AuditContext{
+				"theory_id":            theoryID,
+				"status":               "disproven",
+				"conclusion":           conclusion,
+				"winner_id":            result["winner_id"],
+				"loser_id":             result["loser_id"],
+				"queue_id":             result["queue_id"],
+				"resolution_memory_id": result["resolution_memory_id"],
+				"evidence_id":          result["evidence_id"],
+				"slash_amount":         result["slash_amount"],
+			},
+		)
+		return result, nil
+	}
+
 	newStatus, _ := p["newStatus"].(string)
 	if newStatus != "proven" && newStatus != "disproven" {
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")

@@ -39,7 +39,7 @@ mkdir -p "$MPM_WORKSPACE"
 touch "$MPM_SHARED_DB"
 
 # ── 1. Build with FTS5 support (needed for the shared mem_fts triggers) ─
-echo "=== [1/7] Build mpm binary with FTS5 support ==="
+echo "=== [1/8] Build mpm binary with FTS5 support ==="
 cd "$REPO_ROOT"
 go build -tags sqlite_fts5 -o "$TMPDIR/mpm-bin" ./cmd/mpm 2>&1 | grep -v "no such module: fts5" || true
 test -x "$TMPDIR/mpm-bin" || { echo "❌ binary build failed"; exit 1; }
@@ -47,14 +47,14 @@ echo "   ✓ binary built at $TMPDIR/mpm-bin"
 
 # ── 2. Bootstrap the DM (installs schema, attaches shared DB) ──────────
 echo ""
-echo "=== [2/7] Bootstrap the DM ==="
+echo "=== [2/8] Bootstrap the DM ==="
 "$TMPDIR/mpm-bin" status >/dev/null 2>&1 || true
 test -f "$MPM_WORKSPACE/src/db/mpm.db" || { echo "❌ DM not initialized"; exit 1; }
 echo "   ✓ DM initialized, shared DB attached"
 
 # ── 3. Verify shared.contradiction_log table exists with both indexes ─
 echo ""
-echo "=== [3/7] Verify shared.contradiction_log schema ==="
+echo "=== [3/8] Verify shared.contradiction_log schema ==="
 TABLES=$(sqlite3 "$MPM_SHARED_DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contradiction_log'")
 test "$TABLES" = "1" || { echo "❌ contradiction_log table not found"; exit 1; }
 INDEXES=$(sqlite3 "$MPM_SHARED_DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='contradiction_log'")
@@ -63,7 +63,7 @@ echo "   ✓ contradiction_log + indexes (PK + detected_at + unresolved partial)
 
 # ── 4. Seed decisive contradiction: high-confidence vs low-confidence ─
 echo ""
-echo "=== [4/7] Seed decisive contradiction (mem-strong vs mem-weak) ==="
+echo "=== [4/8] Seed decisive contradiction (mem-strong vs mem-weak) ==="
 sqlite3 "$MPM_SHARED_DB" <<EOF
 INSERT INTO memories (id, collection, content, retrieval_priority, importance, confidence, weight, reinforcement_count, last_accessed_at, is_global, tags)
 VALUES
@@ -82,7 +82,7 @@ echo "   ✓ seeded 1 contradiction (decisive case)"
 
 # ── 5. Run resolve-contradictions --apply (decisive path) ─────────────
 echo ""
-echo "=== [5/7] Run mpm ops resolve-contradictions --apply ==="
+echo "=== [5/8] Run mpm ops resolve-contradictions --apply ==="
 out=$("$TMPDIR/mpm-bin" ops resolve-contradictions --apply 2>&1)
 echo "$out" | grep -q "decisive: mem-strong" || { echo "❌ expected mem-strong to win"; echo "$out"; exit 1; }
 echo "$out" | grep -q "Applied 1 resolutions" || { echo "❌ expected 1 applied"; echo "$out"; exit 1; }
@@ -90,7 +90,7 @@ echo "   ✓ decisive resolution applied (mem-strong won, mem-weak slashed)"
 
 # ── 6. Verify post-state: queue resolved, resolution memory exists ────
 echo ""
-echo "=== [6/7] Verify post-state of the decisive resolution ==="
+echo "=== [6/8] Verify post-state of the decisive resolution ==="
 resolved_at=$(sqlite3 "$MPM_SHARED_DB" "SELECT resolved_at FROM contradiction_log LIMIT 1")
 test -n "$resolved_at" || { echo "❌ queue row not marked resolved"; exit 1; }
 res_mem_id=$(sqlite3 "$MPM_SHARED_DB" "SELECT resolution_memory_id FROM contradiction_log LIMIT 1")
@@ -103,7 +103,7 @@ echo "   ✓ queue marked resolved, resolution memory created, loser metadata up
 
 # ── 7. Verify arbitration path: close call proposes theory ────────────
 echo ""
-echo "=== [7/7] Verify arbitration path (close call proposes theory) ==="
+echo "=== [7/8] Verify arbitration path (close call proposes theory) ==="
 sqlite3 "$MPM_SHARED_DB" <<EOF
 INSERT INTO memories (id, collection, content, retrieval_priority, importance, confidence, weight, is_global, tags)
 VALUES ('mem-equal-A', 'memories', 'a', 0.5, 0.5, 0.5, 1, 0, '[]'),
@@ -124,3 +124,19 @@ echo ""
 echo -e "✅ Arc 1 smoke: conflict resolution loop closed end-to-end."
 echo "   Decisive: slash + resolution memory + queue marked resolved."
 echo "   Close call: arbitration theory proposed, queue stays open for human review."
+# ── 8. Verify the resolution added evidence for the winner (Arc 1 closure) ─
+echo ""
+echo "=== [8/8] Verify resolution added evidence for the winner ==="
+n_evidence=$(sqlite3 "$MPM_SHARED_DB" "SELECT COUNT(*) FROM evidence WHERE artifact_id='mem-strong' AND type='resolution_survived'")
+test "$n_evidence" = "1" || { echo "❌ expected 1 evidence row for mem-strong, got $n_evidence"; exit 1; }
+n_evidence_weak=$(sqlite3 "$MPM_SHARED_DB" "SELECT COUNT(*) FROM evidence WHERE artifact_id='mem-weak' AND type='resolution_survived'")
+test "$n_evidence_weak" = "0" || { echo "❌ loser should not have resolution evidence, got $n_evidence_weak"; exit 1; }
+evidence_strength=$(sqlite3 "$MPM_SHARED_DB" "SELECT strength FROM evidence WHERE artifact_id='mem-strong' AND type='resolution_survived'")
+test "$evidence_strength" = "1.0" || { echo "❌ expected strength=1.0, got $evidence_strength"; exit 1; }
+echo "   ✓ resolution evidence written for winner (strength=1.0, type=resolution_survived)"
+echo "   ✓ loser has no resolution evidence (the signal is asymmetric)"
+
+echo ""
+echo -e "✅ Arc 1 + Arc 1 Closure smoke: full conflict resolution loop + evidence trail proven."
+echo "   Decisive: slash + resolution memory + queue marked resolved + winner gets evidence."
+echo "   Close call: arbitration theory proposed, queue row stays open for human review."
