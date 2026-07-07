@@ -315,6 +315,17 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
 					sim, challengedID, unchallengedID)
 				dm.ChallengeMemory(unchallengedID, 1, evidence)
+				// Arc 1: enqueue in the shared contradiction queue
+				// so the operator can resolve via `mpm ops
+				// resolve-contradictions`. Best-effort: if the
+				// shared DB isn't attached, the slash still
+				// landed; the queue insert is a no-op.
+				_ = dm.EnqueueContradiction(ContradictionEvidence{
+					MemoryA:    challengedID,
+					MemoryB:    unchallengedID,
+					Evidence:   evidence,
+					Similarity: float64(sim),
+				})
 				continue
 			}
 
@@ -343,6 +354,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — resolved in favor of %s",
 					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
 				dm.ChallengeMemory(loserID, slashAmount, evidence)
+				_ = dm.EnqueueContradiction(ContradictionEvidence{
+					MemoryA:    winnerID,
+					MemoryB:    loserID,
+					Evidence:   evidence,
+					Similarity: float64(sim),
+				})
 				continue
 			}
 
@@ -354,6 +371,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
 					sim, scanSet[i].ID, scanSet[j].ID)
 				dm.ChallengeMemory(scanSet[i].ID, 1, evidence)
+				_ = dm.EnqueueContradiction(ContradictionEvidence{
+					MemoryA:    scanSet[i].ID,
+					MemoryB:    scanSet[j].ID,
+					Evidence:   evidence,
+					Similarity: float64(sim),
+				})
 			}
 		}
 	}

@@ -401,6 +401,8 @@ func handleOps(args []string) int {
 		return handleBackfillEmbeddings(subArgs)
 	case "rebalance":
 		return handleOpsRebalance(subArgs)
+	case "resolve-contradictions":
+		return handleOpsResolveContradictions(subArgs)
 
 	// — Watcher & Web —
 	case "watch":
@@ -526,6 +528,7 @@ var opsSubcommandDescs = []struct {
 	{"milestones [--flavor/--days/--limit]", "List recent narrative milestones (memories tagged type:milestone-*)"},
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
+	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
 	{"help", "Show this help"},
 }
 
