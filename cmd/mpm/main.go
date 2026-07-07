@@ -651,12 +651,11 @@ func runDoctorDeepScan(fix bool) {
 // runDoctorExplain runs EXPLAIN QUERY PLAN on the core FTS5 recall query
 // and prints the query plan tree to stdout for index health diagnosis.
 func runDoctorExplain() {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("DB open failed: %v", err)
+	dm := getDBConcrete()
+	if dm == nil {
+		usererror.Error("DB open failed: %v", dbManagerInitErr)
 		return
 	}
-	defer dm.Close()
 
 	query := `
 EXPLAIN QUERY PLAN
@@ -1102,18 +1101,17 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 func runDoctorSecurityChecks(report *DoctorReport) {
 	fmt.Printf("  %s%sSecurity & Telemetry%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
+	dm := getDBConcrete()
+	if dm == nil {
 		report.Checks = append(report.Checks, DoctorCheck{
 			Name: "Synthesis Telemetry", Status: "WARN",
-			Message:  fmt.Sprintf("cannot open db to read watchdog: %v", err),
+			Message:  fmt.Sprintf("cannot open db to read watchdog: %v", dbManagerInitErr),
 			Duration: "0ms",
 		})
 		report.Warnings++
 		report.TotalChecks++
-		fmt.Printf("    [%s] Synthesis Telemetry: %v\n\n", colorYellow("WARN"), err)
+		fmt.Printf("    [%s] Synthesis Telemetry: %v\n\n", colorYellow("WARN"), dbManagerInitErr)
 	} else {
-		defer dm.Close()
 		ops, werr := dm.RecentWatchdogOps(50, "synthesize_")
 		if werr != nil {
 			report.Checks = append(report.Checks, DoctorCheck{

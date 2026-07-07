@@ -45,12 +45,10 @@ func handleOpsConfidence(args []string) int {
 		printError("%v", err)
 		return 1
 	}
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		printError("open database: %v", err)
+	dm := getDBConcrete()
+	if dm == nil {
 		return 1
 	}
-	defer dm.Close()
 
 	artifactID, _ := payload["artifact_id"].(string)
 	artifactType, _ := payload["artifact_type"].(string)

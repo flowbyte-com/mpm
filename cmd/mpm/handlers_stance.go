@@ -42,11 +42,13 @@ func handleStanceAssume(args []string) int {
 		return respond("", fmt.Sprintf("Error: cannot assume stance — %s\n", status.Reason), 1)
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	if getDB() == nil {
+		return 1
 	}
-	defer dm.Close()
+	// DeleteEphemeralPersona takes a concrete *DatabaseManager, not
+	// the CoreDB interface. The singleton is always a *DatabaseManager,
+	// so the type assertion is safe; the nil check above guards it.
+	dm := getDB().(*mpminternal.DatabaseManager)
 
 	// Collision rule: clear any existing ephemeral_persona
 	mpminternal.DeleteEphemeralPersona(dm)
@@ -135,11 +137,10 @@ func handleStanceSynthesize(args []string) int {
 		return respond("", fmt.Sprintf("Error: cannot synthesize stance — %s\n", status.Reason), 1)
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	ep := &mpminternal.EphemeralPersona{
 		Name:         name,
@@ -187,11 +188,10 @@ func handleStanceSynthesize(args []string) int {
 // CLI: mpm ops promote
 // Atomicity: 1) fetch ephemeral_persona 2) write file 3) clear sysconfig 4) update active.json
 func handleOpsPromote() int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	ep, err := mpminternal.GetEphemeralPersona(dm)
 	if err != nil {

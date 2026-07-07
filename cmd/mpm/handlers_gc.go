@@ -46,11 +46,10 @@ func handleGC(args []string) int {
 		}
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 
 	// --shred-negative: hard-delete negative-weight memories that have a proven theory
 	if shredNegative := func() bool {

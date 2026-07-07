@@ -11,11 +11,10 @@ import (
 )
 
 func handleStatus() int {
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
 	}
-	defer dm.Close()
 	printStatusDashboard(dm, startTime)
 	return 0
 }
