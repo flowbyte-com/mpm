@@ -2615,7 +2615,19 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Re-assign to nearest cluster after embedding change. Best-effort
+	// (no-op if no clusters exist; rebalance recovers missing
+	// assignments). The query path's JOIN picks up the new assignment
+	// immediately.
+	if _, assignErr := AssignToCluster(s.DB.DB, id, embedding, ""); assignErr != nil {
+		slog.Warn("MemoryStore.UpdateMemory: IVF re-assignment failed (memory still searchable via brute-force)",
+			"memory_id", id, "error", assignErr.Error())
+	}
+	return nil
 }
 
 // ReinforceMemory increments the reinforcement count and updates importance.
