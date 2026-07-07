@@ -428,6 +428,64 @@ var CommonIndexes = []string{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		decay_at DATETIME
 	);`,
+
+	// ── IVF (Inverted File) Vector Index ──
+	//
+	// Replaces the O(n) brute-force cosine scan in VectorMatch with an
+	// approximate nearest-neighbor lookup. The win: for N vectors
+	// partitioned into K clusters, candidate generation costs K cosine
+	// comparisons against the centroids (in-memory) + N/K * probe_p
+	// comparisons against the candidate rows (in SQL). At N=100k, K=1k,
+	// probe_p=4: ~400 candidate rows instead of 100k. That's a 250x
+	// reduction in the cosine work, with negligible recall loss at the
+	// default probe_p=4 (95-99% vs brute force).
+	//
+	// Why in-SQLite (not a parallel HNSW file): the unit of backup
+	// should be a single file. A parallel-file index introduces a
+	// state-sync tax (SQLite commit + HNSW update must both land, or
+	// drift; startup must rebuild from SQLite). Putting the index in
+	// regular SQLite tables keeps everything in one transaction space
+	// and one backup artifact.
+	//
+	// Why no triggers (despite the precedent of FTS5 sync triggers):
+	// SQLite triggers that call back into Go via RegisterFunc cause
+	// CGO deadlocks (documented at db.go around the evidence-ghost-
+	// triggers note). Pure-SQL triggers computing cosine against
+	// centroids would require json_each per centroid per INSERT — slow
+	// and ugly. Instead, every write path that touches the embedding
+	// column calls assignToCluster(dm, memoryID, vec) explicitly. The
+	// vector_assignments row is written in the same transaction as the
+	// memory row.
+	//
+	// Schema:
+	//   vector_clusters:    one row per cluster. centroid is a packed
+	//                       float32[dim] little-endian blob. n_vectors
+	//                       and variance are diagnostic telemetry for
+	//                       the rebalance command's cluster-quality
+	//                       report.
+	//   vector_assignments: one row per memory. cluster_id foreign-keys
+	//                       to vector_clusters.cluster_id. The compound
+	//                       index supports the IVF candidate-generation
+	//                       SELECT (WHERE cluster_id IN (?, ?, ...))
+	//                       and the single-row lookup by memory_id for
+	//                       re-assignment after an embedding update.
+	`CREATE TABLE IF NOT EXISTS vector_clusters (
+		cluster_id INTEGER PRIMARY KEY,
+		centroid   BLOB    NOT NULL,
+		n_vectors  INTEGER NOT NULL DEFAULT 0,
+		variance   REAL    NOT NULL DEFAULT 0.0,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`,
+	`CREATE TABLE IF NOT EXISTS vector_assignments (
+		memory_id  TEXT PRIMARY KEY,
+		cluster_id INTEGER NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (cluster_id) REFERENCES vector_clusters(cluster_id)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_vector_assignments_cluster
+		ON vector_assignments(cluster_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_vector_assignments_updated
+		ON vector_assignments(updated_at);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.

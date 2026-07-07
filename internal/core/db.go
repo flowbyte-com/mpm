@@ -1842,7 +1842,29 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 
 	_, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance)
-	return id, err
+	if err != nil {
+		return id, err
+	}
+
+	// IVF cluster assignment: best-effort after the memory row is
+	// committed. If no clusters exist yet (fresh DB, no rebalance ever
+	// run), this is a no-op and the memory stays unassigned until
+	// `mpm ops rebalance` populates the index. Failures here are
+	// logged but don't fail the insert — the memory is in the table
+	// either way; missing assignment is recovered by the next
+	// rebalance, not by rejecting the write.
+	//
+	// Uses AssignToClusterNode (DBNode-aware) so the assignment lands
+	// in the same transaction as the INSERT. The centroid load uses
+	// dm.SQLDB() (read-only, session-cached, doesn't need to be in the
+	// tx).
+	if embedding != nil && len(embedding) > 0 {
+		if _, assignErr := AssignToClusterNode(node, dm, id, embedding, ""); assignErr != nil {
+			slog.Warn("SaveMemoryNode: IVF assignment failed (memory is unassigned; rebalance will recover)",
+				"memory_id", id, "error", assignErr.Error())
+		}
+	}
+	return id, nil
 }
 
 // SaveMemoryWithExtras extends SaveMemory with the additional columns that
