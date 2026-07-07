@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"sort"
@@ -484,28 +485,39 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 }
 
 // VectorMatch searches the memories table for vector similarity.
-// This uses the existing in-memory approach (JSON embedding column).
-// DatabaseManager.VectorMatch is the method — this is a top-level wrapper.
+//
+// Strategy:
+//  1. If vector_clusters has rows (operator has run `mpm ops rebalance`),
+//     use IVFSearch — candidate generation scans K centroids + N/K * probe_p
+//     members instead of all N rows. ~250x reduction at typical N.
+//  2. Otherwise (fresh DB, no rebalance yet), fall back to the brute-force
+//     scan with the MPM_MAX_VECTOR_SCAN circuit breaker intact. The cap
+//     protects against accidentally large scans during the bootstrap window
+//     before the operator gets around to running rebalance.
 //
 // schemaPrefix (since Phase 2d, 2026-07-06): empty for local tables,
 // "shared." for ATTACHed shared DB. Constrained to two values; safe
 // to interpolate directly into the table reference.
-//
-// Circuit breaker: MPM_MAX_VECTOR_SCAN caps the un-indexed O(n) cosine
-// scan. VectorMatch reads every row's embedding from disk and unmarshals
-// it in memory before scoring. At 29 rows that's trivial; at 50k+ the
-// scan can OOM, hang, or starve the connection pool. The cap rejects
-// the query with a clear error above the threshold instead of crashing.
-// Default 5000; set MPM_MAX_VECTOR_SCAN=0 to disable (full scan, your
-// funeral). Cap applies BEFORE the query runs so we never even open
-// the rows iterator over an oversized scan.
-//
-// Tracked in WISHLIST.md as the debt arc that motivates a future
-// HNSW/IVF ANN index. The cap buys time; it does not solve scale.
 func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int, schemaPrefix string) ([]VectorMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+
+	// Step 1: try IVFSearch. If clusters exist, this is the fast path.
+	ivfResults, err := IVFSearch(dm.SQLDB(), queryEmbedding, collection,
+		IVFConfig{ProbeP: DefaultIVFConfig().ProbeP, Limit: limit}, schemaPrefix)
+	if err != nil {
+		// IVF errored out (schema missing, malformed centroids, etc.)
+		// — fall through to brute force rather than failing the query.
+		slog.Warn("VectorMatch: IVFSearch failed, falling back to brute force",
+			"error", err.Error())
+	} else if ivfResults != nil {
+		// IVF succeeded and returned candidates. We're done.
+		return ivfResults, nil
+	}
+	// ivfResults == nil means no clusters exist — fall through to brute.
+
+	// Step 2: brute-force fallback with circuit breaker.
 	whereClauses := []string{"embedding IS NOT NULL", "embedding != 'null'", "deleted_at IS NULL" + MemoryExpireClause}
 	args := []interface{}{}
 	if collection != "" {
@@ -514,10 +526,6 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 	memTable := schemaPrefix + "memories"
 
-	// Pre-flight rowcount check against the circuit breaker. The COUNT
-	// query is cheap (SQLite has covering index stats) and prevents the
-	// expensive scan from even starting. MPM_MAX_VECTOR_SCAN=0 means
-	// "no cap, full scan" — same behaviour as before this commit.
 	maxScan := 5000
 	if v := os.Getenv("MPM_MAX_VECTOR_SCAN"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil {
@@ -533,8 +541,7 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 		if rowCount > maxScan {
 			return nil, fmt.Errorf(
 				"vector scan cap exceeded: %d rows in %s (cap=%d via MPM_MAX_VECTOR_SCAN). "+
-					"Refine the query (collection, filter) or raise the cap. "+
-					"For a real fix, see WISHLIST.md: ANN index (HNSW/IVF).",
+					"Run `mpm ops rebalance` to enable IVF (drops scan to N/K * probe_p) or raise the cap.",
 				rowCount, memTable, maxScan)
 		}
 	}

@@ -399,6 +399,8 @@ func handleOps(args []string) int {
 		return handleGC(append([]string{"gc"}, subArgs...))
 	case "backfill-embeddings":
 		return handleBackfillEmbeddings(subArgs)
+	case "rebalance":
+		return handleOpsRebalance(subArgs)
 
 	// — Watcher & Web —
 	case "watch":
