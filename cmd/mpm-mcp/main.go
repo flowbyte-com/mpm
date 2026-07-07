@@ -24,9 +24,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"mpm/internal"
-	"mpm/internal/logging"
-	"mpm/internal/mpmcli"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/logging"
+	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
 
 // router is initialised once at server boot — patterns and anti-patterns

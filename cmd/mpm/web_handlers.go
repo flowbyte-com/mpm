@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // ==================== Memories ====================
@@ -54,7 +54,7 @@ func (ws *WebServer) listMemories(w http.ResponseWriter, r *http.Request) {
 		mems, err = ws.db.QueryMemories(collection, primeOnly, limit, offset)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 
@@ -67,6 +67,7 @@ func (ws *WebServer) listMemories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *WebServer) addMemory(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -96,7 +97,7 @@ func (ws *WebServer) addMemory(w http.ResponseWriter, r *http.Request) {
 	// Convert []string tags to map[string]interface{}
 	id, err := ws.db.SaveMemory(input.Collection, input.Content, "", input.Tags, input.Metadata, nil, false, 1)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 
@@ -118,6 +119,7 @@ func (ws *WebServer) getMemory(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (ws *WebServer) editMemory(w http.ResponseWriter, r *http.Request, id string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -140,14 +142,20 @@ func (ws *WebServer) editMemory(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	content, _ := existing["content"].(string)
+	content, ok := existing["content"].(string)
+	if !ok {
+		content = ""
+	}
 	if input.Content != "" {
 		content = input.Content
 	}
 
-	metadata := existing["metadata"]
+	metadataIface := existing["metadata"]
 	if input.Metadata != "" {
-		json.Unmarshal([]byte(input.Metadata), &metadata)
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(input.Metadata), &parsed); err == nil {
+			metadataIface = parsed
+		}
 	}
 
 	// Convert []string tags to map[string]interface{}
@@ -156,16 +164,23 @@ func (ws *WebServer) editMemory(w http.ResponseWriter, r *http.Request, id strin
 		tagsMap[t] = true
 	}
 
-	metaMap, _ := metadata.(map[string]interface{})
-	ws.db.UpdateMemory(id, content, tagsMap, metaMap)
-	updated, _ := ws.db.GetMemory(id)
+	metaMap, _ := metadataIface.(map[string]interface{})
+	if err := ws.db.UpdateMemory(id, content, tagsMap, metaMap); err != nil {
+		ws.serverError(w, err)
+		return
+	}
+	updated, err := ws.db.GetMemory(id)
+	if err != nil {
+		ws.serverError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (ws *WebServer) deleteMemory(w http.ResponseWriter, r *http.Request, id string) {
 	err := ws.db.ShredMemory(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
@@ -220,7 +235,7 @@ func (ws *WebServer) handleTopicByID(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) listTopics(w http.ResponseWriter, r *http.Request) {
 	topics, err := ws.db.ListTopics()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": topics, "count": len(topics)})
@@ -238,13 +253,14 @@ func (ws *WebServer) getTopic(w http.ResponseWriter, r *http.Request, id string)
 func (ws *WebServer) getTopicMemories(w http.ResponseWriter, r *http.Request, id string) {
 	memories, err := ws.db.GetTopicMemories(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": memories, "count": len(memories)})
 }
 
 func (ws *WebServer) createTopic(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -267,7 +283,7 @@ func (ws *WebServer) createTopic(w http.ResponseWriter, r *http.Request) {
 
 	id, err := ws.db.CreateTopic(input.Name, input.Description, "", "")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 
@@ -278,13 +294,14 @@ func (ws *WebServer) createTopic(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) deleteTopic(w http.ResponseWriter, r *http.Request, id string) {
 	err := ws.db.DeleteTopic(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
 func (ws *WebServer) addMemoryToTopic(w http.ResponseWriter, r *http.Request, topicID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -307,7 +324,7 @@ func (ws *WebServer) addMemoryToTopic(w http.ResponseWriter, r *http.Request, to
 
 	err = ws.db.AddMemoryToTopic(input.MemoryID, topicID, input.Role)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"added": input.MemoryID})
@@ -316,7 +333,7 @@ func (ws *WebServer) addMemoryToTopic(w http.ResponseWriter, r *http.Request, to
 func (ws *WebServer) removeMemoryFromTopic(w http.ResponseWriter, r *http.Request, topicID, memoryID string) {
 	err := ws.db.RemoveMemoryFromTopic(memoryID, topicID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"removed": memoryID})
@@ -353,7 +370,7 @@ func (ws *WebServer) listLessons(w http.ResponseWriter, r *http.Request) {
 	lessonType := r.URL.Query().Get("type")
 	lessons, err := ws.db.ListLessons(lessonType)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"items": lessons, "count": len(lessons)})
@@ -369,6 +386,7 @@ func (ws *WebServer) getLesson(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (ws *WebServer) addLesson(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request")
@@ -393,10 +411,14 @@ func (ws *WebServer) addLesson(w http.ResponseWriter, r *http.Request) {
 	if input.Type == "" {
 		input.Type = "insight"
 	}
+	if err := internal.ValidateLessonType(input.Type); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	lesson, err := ws.db.AddLesson(input.Content, internal.LessonType(input.Type), input.Tags, "")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 
@@ -406,7 +428,7 @@ func (ws *WebServer) addLesson(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) deleteLesson(w http.ResponseWriter, r *http.Request, id string) {
 	err := ws.db.DeleteLesson(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})
@@ -451,7 +473,7 @@ func (ws *WebServer) listReferences(w http.ResponseWriter, r *http.Request) {
 		refs, err = ws.db.ListReferences(limit, offset)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 
@@ -475,7 +497,7 @@ func (ws *WebServer) getReference(w http.ResponseWriter, r *http.Request, id str
 func (ws *WebServer) deleteReference(w http.ResponseWriter, r *http.Request, id string) {
 	err := ws.db.DeleteReference(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		ws.serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": id})

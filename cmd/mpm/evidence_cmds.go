@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // parseEvidenceAddArgs converts a CLI args slice into a map with keys matching

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
 )

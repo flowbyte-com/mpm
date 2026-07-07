@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal"
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleProposeTheory(args []string) int {

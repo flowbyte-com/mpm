@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/tools"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 // openCallDM returns a freshly-opened workspace DatabaseManager and a
@@ -17,7 +17,7 @@ import (
 // temp DB should open one directly and pass it to the registry handler
 // — the registry's HandlerFunc signature takes dm explicitly, so there's
 // no need for a global override.
-func openCallDM() (*mpminternal.DatabaseManager, func(), error) {
+func openCallDM() (mpminternal.CoreDB, func(), error) {
 	dm, err := mpminternal.NewDatabaseManager("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("db: %w", err)

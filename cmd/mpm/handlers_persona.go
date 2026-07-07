@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 func handlePersona(args []string) int {

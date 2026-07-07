@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // NOTE: All code in this file connects through the shared DatabaseManager
@@ -74,7 +74,7 @@ type MemoryStore struct {
 	Collections  []string
 	DB           *SQLiteConnection
 
-	DM *DatabaseManager // optional — when set, writes route through ExecTracked for watchdog
+	DM CoreDB // optional — when set, writes route through ExecTracked for watchdog
 }
 
 // execTracked routes through DatabaseManager.ExecTracked when available,
@@ -1192,8 +1192,8 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if cfg.ExpiredEnabled {
 		result, err := s.execTracked(`
 			DELETE FROM memories
-			WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
-		`, 0)
+		WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
+	`, 0)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
 				totalPruned += int(rows)
@@ -1473,7 +1473,7 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 		       last_accessed_at
 		FROM memories
 		WHERE deleted_at IS NULL
-		  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 	`
 
 	args := []interface{}{}
@@ -2673,7 +2673,7 @@ func (s *MemoryStore) PruneExpired() (int, error) {
 	}
 
 	result, err := s.DB.Exec(`
-		UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+		UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("prune expired failed: %w", err)
@@ -2723,7 +2723,7 @@ func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*M
 		       COALESCE(weight, 1) as weight
 		FROM memories
 		WHERE deleted_at IS NULL
-		  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		  AND (? = '' OR collection = ?)
 		ORDER BY (COALESCE(reinforcement_count, 0) * 2) + (COALESCE(weight, 1) * 1.5) DESC,
 		         COALESCE(last_accessed_at, created_at) DESC

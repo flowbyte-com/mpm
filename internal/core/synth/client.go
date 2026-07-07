@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // SynthClientInterface is the contract the synthesis worker consumes.

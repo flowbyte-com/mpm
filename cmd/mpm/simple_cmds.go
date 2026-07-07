@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/synth"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/synth"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // =============================================================================

@@ -22,9 +22,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"mpm/internal/config"
-	mpminternal "mpm/internal"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/config"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // logFile describes one of the rotatable JSONL logs in the MPM data dir.

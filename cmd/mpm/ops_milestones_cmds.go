@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/usererror"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // MilestoneDaysWindow is the rolling-window scope for the listing.

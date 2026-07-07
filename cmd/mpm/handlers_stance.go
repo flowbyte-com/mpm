@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func handleStance(args []string) int {

@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal/synth"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // Admission is the LLM-based admission function described in decisions
@@ -72,22 +72,22 @@ The justification chain is the model's own reasoning at the moment of decision. 
 
 The output must be valid JSON. No markdown, no explanation, no preamble.`
 
-// admitResult is the JSON structure the admission LLM must return.
-type admitResult struct {
-	Admit         bool              `json:"admit"`
-	Content       string            `json:"content,omitempty"`
-	Justification []admitChainEntry `json:"justification"`
-	Confidence    float64           `json:"confidence,omitempty"`
-	Tags          []string          `json:"tags,omitempty"`
-	Reason        string            `json:"reason,omitempty"`
+// AdmitResult is the JSON structure the admission LLM must return.
+type AdmitResult struct {
+	Admit         bool               `json:"admit"`
+	Content       string             `json:"content,omitempty"`
+	Justification []AdmitChainEntry `json:"justification"`
+	Confidence    float64            `json:"confidence,omitempty"`
+	Tags          []string           `json:"tags,omitempty"`
+	Reason        string             `json:"reason,omitempty"`
 }
 
-// admitChainEntry is one link in the admission justification chain. The
+// AdmitChainEntry is one link in the admission justification chain. The
 // type is intentionally narrow (active_project / existing_theory /
 // capability / novel_pattern) so the chain is queryable and statistically
 // tractable. Strength is 0-1, not a probability — it is the model's own
 // estimate of how strongly this link supports the admission.
-type admitChainEntry struct {
+type AdmitChainEntry struct {
 	Type     string  `json:"type"`
 	Artifact string  `json:"artifact"`
 	Strength float64 `json:"strength"`
@@ -106,7 +106,7 @@ type admitChainEntry struct {
 // free function that takes the client as an argument. Keeps the synth
 // package free of admission concerns and avoids the cross-package method
 // receiver Go restriction.
-func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate *AdmissionCandidate) (*admitResult, error) {
+func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate *AdmissionCandidate) (*AdmitResult, error) {
 	if client.APIKey == "" {
 		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
 	}
@@ -152,7 +152,7 @@ func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate
 	if err != nil {
 		return nil, fmt.Errorf("admission: %w", err)
 	}
-	var result admitResult
+	var result AdmitResult
 	if err := json.Unmarshal(rawResult, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse admission JSON: %w (raw: %s)", err, string(rawResult))
 	}

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"regexp"
 	"sort"
@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 
 	_ "github.com/mattn/go-sqlite3"
 )

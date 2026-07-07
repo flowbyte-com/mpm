@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -720,6 +720,18 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Check and rotate watchdog/mirror logs at startup so operators don't
+	// need to rely solely on manual `mpm ops logs rotate`. Auto-rotation
+	// also happens on each tracked Exec/Query; the startup check catches
+	// the case where the process idles with no DB activity.
+	threshold := logRotateThresholdBytes()
+	if err := rotateLogIfNeeded(filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"), threshold); err != nil {
+		slog.Warn("watchdog log rotation at startup", "error", err.Error())
+	}
+	if err := rotateLogIfNeeded(filepath.Join(filepath.Dir(dbPath), "mirror.jsonl"), threshold); err != nil {
+		slog.Warn("mirror log rotation at startup", "error", err.Error())
+	}
+
 	// Phase 1 of the multi-agent shared-epistemology arc (WISHLIST.md):
 	// if MPM_SHARED_DB is set, ATTACH the shared SQLite database. Failure
 	// to attach is non-fatal — mpm continues in local-only mode. This
@@ -733,6 +745,42 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	}
 
 	return manager, nil
+}
+
+// NewSession opens a new independent connection to the same database file.
+// The caller owns the returned CoreDB and must Close it when done.
+// Intended for background goroutines (synthesis, lifecycle) that need their
+// own connection to avoid blocking the primary session.
+func (dm *DatabaseManager) NewSession() (CoreDB, error) {
+	db, err := sql.Open("sqlite3", dm.dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("new session: open: %w", err)
+	}
+	db.Exec("PRAGMA foreign_keys = ON")
+	db.Exec("PRAGMA journal_mode = WAL")
+	db.Exec("PRAGMA synchronous = NORMAL")
+	db.Exec("PRAGMA cache_size = -64000")
+
+	session := &DatabaseManager{
+		db:           db,
+		dbPath:       dm.dbPath,
+		watchdogPath: filepath.Join(filepath.Dir(dm.dbPath), "watchdog.jsonl"),
+	}
+
+	// Initialize schema (idempotent — CREATE IF NOT EXISTS).
+	if err := session.initUnifiedSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("new session: schema: %w", err)
+	}
+
+	// Attach shared DB if the parent has one.
+	if dm.sharedPath != "" {
+		if err := session.attachShared(dm.sharedPath); err != nil {
+			slog.Warn("session shared DB attach failed", "error", err.Error())
+		}
+	}
+
+	return session, nil
 }
 
 // attachShared ATTACHes sharedPath as the `shared` schema in the current
@@ -2267,6 +2315,22 @@ const (
 	LessonTypeInsight  LessonType = "insight"  // "X leads to Y"
 )
 
+// ValidLessonTypes is the allowlist of valid lesson types.
+var ValidLessonTypes = map[LessonType]bool{
+	LessonTypeWarning:  true,
+	LessonTypePractice: true,
+	LessonTypeInsight:  true,
+}
+
+// ValidateLessonType returns an error if the given lesson type is not in the
+// allowlist. This is the single source of truth for lesson type validation.
+func ValidateLessonType(lt string) error {
+	if !ValidLessonTypes[LessonType(lt)] {
+		return fmt.Errorf("invalid lesson type %q: must be one of warning, practice, or insight", lt)
+	}
+	return nil
+}
+
 // Lesson represents a learned lesson
 type Lesson struct {
 	ID                 string     `json:"id"`
@@ -2283,6 +2347,9 @@ type Lesson struct {
 
 // AddLesson adds a new lesson, checking for duplicates by content hash
 func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
+	if err := ValidateLessonType(string(lessonType)); err != nil {
+		return nil, err
+	}
 	// Check for sensitive content before storing. AddLesson was already
 	// gating on the 20-pattern sensitive-content scanner, but was missing
 	// the poison-phrase check that MemoryStore.AddMemory runs. Without it,

@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mpm/internal/config"
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // ── Runtime active state (the on-disk active.json file) ────────────────────

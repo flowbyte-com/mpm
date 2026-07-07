@@ -21,6 +21,9 @@ src/db/mpm.db
 src/db/mpm.db.old
 src/db/mirror.jsonl
 src/db/watchdog.jsonl
+# Vestigial dev-state path (was tracked via git add in early history;
+# removed 2026-07-07 — see MPM lesson on vestigial cleanup).
+internal/src/db/
 config/
 
 # Backup files
@@ -50,4 +53,6 @@ mpm_config.json.bak
 src/db/mirror.jsonl
 src/db/mpm.db
 src/db/*.jsonl
+# Compressed rotated logs (log-rotation feature ships them next to jsonl).
+src/db/*.gz
 cmd/mpm/src/db/

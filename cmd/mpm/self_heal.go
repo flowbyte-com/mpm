@@ -33,10 +33,10 @@ import (
 	"os"
 	"time"
 
-	"mpm/internal/config"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // SelfHealMaxFix is the upper bound on soft-delete ghosts the autonomous

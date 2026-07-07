@@ -24,8 +24,8 @@ import (
 	"fmt"
 	"strings"
 
-	mpminternal "mpm/internal"
-	"mpm/internal/seed"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/seed"
 )
 
 func handleOpsInitDirectives(args []string) int {

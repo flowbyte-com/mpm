@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // ============================================================================

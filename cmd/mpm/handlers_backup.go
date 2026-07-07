@@ -3,14 +3,15 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"mpm/internal/usererror"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	mpminternal "mpm/internal"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // ============================================================================
@@ -70,9 +71,10 @@ func handleBackup(args []string) int {
 // `mpm backup` (or `sqlite3 .dump`) over the current database. Destructive:
 // any existing rows are replaced by the dump's content.
 //
-// Order matters — close DB connections and clear WAL/SHM before invoking
-// sqlite3, otherwise SQLite may merge WAL pages on top of the imported data
-// and produce an inconsistent state.
+// Reads the dump file and pipes it through mattn/go-sqlite3 directly instead
+// of invoking the sqlite3 CLI. This avoids the shell-injection vector that
+// the previous exec.Command(".read " + path) had — a tampered .sql with a
+// leading .shell line would execute arbitrary shell commands via sqlite3 CLI.
 func handleRestoreDB(args []string) int {
 	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
 		return respond("", "Usage: mpm restore-db <path-to-sql-dump>\n", 1)
@@ -109,14 +111,23 @@ func handleRestoreDB(args []string) int {
 		}
 	}
 
-	sqlitePath, err := exec.LookPath("sqlite3")
+	// Read the dump file content
+	content, err := os.ReadFile(sqlPath)
 	if err != nil {
-		return respond("", "Restore failed: `sqlite3` CLI not found on PATH (see `mpm doctor` for install hint)\n", 1)
+		return respond("", fmt.Sprintf("Restore failed (read): %v\n", err), 1)
 	}
-	cmd := exec.Command(sqlitePath, dbPath, ".read "+sqlPath)
-	out, err := cmd.CombinedOutput()
+
+	// Open a fresh connection and Exec the content directly.
+	// Using mattn/go-sqlite3 directly (no CLI subprocess) prevents the
+	// shell-injection vector present in the old sqlite3 .read approach.
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return respond("", fmt.Sprintf("Restore failed (sqlite3 .read): %v\n%s\n", err, string(out)), 1)
+		return respond("", fmt.Sprintf("Restore failed (open): %v\n", err), 1)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(string(content)); err != nil {
+		return respond("", fmt.Sprintf("Restore failed (exec): %v\n", err), 1)
 	}
 
 	fmt.Printf("Restored from: %s\n", sqlPath)

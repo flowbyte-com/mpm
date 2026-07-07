@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"mpm/internal/synth"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // nearMissCandidate represents a single FTS5 match that is semantically close
@@ -37,7 +37,7 @@ type nearMissCandidate struct {
 // bm25 in SQLite returns negative values where lower (more negative) = more
 // relevant. The threshold of -10 means "at least somewhat relevant". Exact
 // duplicates (same content_hash) are excluded via the newID parameter.
-func DetectNearMiss(dm *DatabaseManager, content string, newID string, threshold float64) ([]nearMissCandidate, error) {
+func DetectNearMiss(dm CoreDB, content string, newID string, threshold float64) ([]nearMissCandidate, error) {
 	words := strings.Fields(content)
 	sanitised := make([]string, 0, len(words))
 	for _, w := range words {
@@ -153,7 +153,7 @@ func hasSynthPair(a, b string) bool {
 // The caller may pass a cancellable ctx. If ctx is cancelled before the API
 // call completes, the write degrades gracefully — the original memory remains
 // in place and the synthesis is silently abandoned.
-func AutoSynthesize(ctx context.Context, dm *DatabaseManager, client *synth.SynthClient, newID, content string) {
+func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, newID, content string) {
 	if client == nil || dm == nil {
 		return
 	}
@@ -325,7 +325,7 @@ func AutoSynthesize(ctx context.Context, dm *DatabaseManager, client *synth.Synt
 // Uses logWatchdogRaw to write a single entry with synthesis-specific fields
 // (op, content, error, new_id, old_ids, timestamp). Does NOT use the
 // watchdogOp format (which is for query timing) to avoid schema fragmentation.
-func logWatchdogOp(dm *DatabaseManager, op string, data map[string]interface{}) {
+func logWatchdogOp(dm CoreDB, op string, data map[string]interface{}) {
 	if dm == nil {
 		return
 	}
@@ -337,7 +337,13 @@ func logWatchdogOp(dm *DatabaseManager, op string, data map[string]interface{}) 
 		entry[k] = v
 	}
 	line, _ := json.Marshal(entry)
-	dm.logWatchdogRaw(line)
+	// Type-assert to access unexported logWatchdogRaw. If the
+	// CoreDB wasn't created by NewDatabaseManager/NewSession,
+	// the watchdog entry is silently dropped — acceptable for
+	// best-effort observability.
+	if dm, ok := dm.(*DatabaseManager); ok {
+		dm.logWatchdogRaw(line)
+	}
 }
 
 func truncatedContent(s string) string {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // newTestSharedDM opens a hermetic local+shared tmpfile DM via the

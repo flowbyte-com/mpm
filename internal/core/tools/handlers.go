@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"mpm/internal"
-	mpminternal "mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handlers.go contains the unified tool handlers that power both
@@ -25,7 +25,7 @@ import (
 //   - Use `ac` for write provenance; do NOT read global mode/persona vars.
 //   - Don't open/close the DB — the dispatcher owns that lifetime.
 
-func handleSaveToMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	if fact == "" {
 		return nil, fmt.Errorf("fact is required")
@@ -75,7 +75,7 @@ const MinMilestoneSummaryChars = 50
 // inherits them at no extra cost. A milestone about "AWS keys found"
 // would fail the scanner; that's the right shape (the milestone should
 // describe the *fact*, not the secret).
-func handleCommitMilestone(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleCommitMilestone(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	summary, _ := p["summary"].(string)
 	if summary == "" {
 		return nil, fmt.Errorf("summary is required")
@@ -122,7 +122,7 @@ func handleCommitMilestone(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 }
 
 // callQueryLongTermMemory searches memory for context.
-func handleQueryLongTermMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -164,7 +164,7 @@ func defaultScope(s string) string {
 }
 
 // callChallengeMemory weakens a memory and creates a pending theory.
-func handleChallengeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleChallengeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	memoryID, _ := p["memoryId"].(string)
 	if memoryID == "" {
 		return nil, fmt.Errorf("memoryId is required")
@@ -175,7 +175,7 @@ func handleChallengeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 }
 
 // callProposeTheory logs a hypothesis with validation criteria.
-func handleProposeTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	hypothesis, _ := p["hypothesis"].(string)
 	if hypothesis == "" {
 		return nil, fmt.Errorf("hypothesis is required")
@@ -211,7 +211,7 @@ func handleProposeTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 }
 
 // callResolveTheory marks a theory as proven or disproven.
-func handleResolveTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	theoryID, _ := p["theoryId"].(string)
 	if theoryID == "" {
 		return nil, fmt.Errorf("theoryId is required")
@@ -246,7 +246,7 @@ func handleResolveTheory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 }
 
 // callRecordDecision logs a decision with context, choice, and rationale.
-func handleRecordDecision(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	choice, _ := p["choice"].(string)
 	if choice == "" {
 		return nil, fmt.Errorf("choice is required")
@@ -282,7 +282,7 @@ func handleRecordDecision(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 // quoting and parse text output — neither works reliably across
 // punctuation-heavy memory ids or non-ASCII content.
 
-func handleShredMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 
 	result, err := dm.ShredMemoryWithCascade(id)
@@ -309,31 +309,31 @@ func handleShredMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 	return result, nil
 }
 
-func handleReinforceMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleReinforceMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	delta := int(internal.ParseFloatOr(p["delta"], 1))
 	return dm.ReinforceMemoryTool(id, delta)
 }
 
-func handleWeakenMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleWeakenMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	delta := int(internal.ParseFloatOr(p["delta"], 1))
 	return dm.WeakenMemoryTool(id, delta)
 }
 
-func handleSnoozeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	days := int(internal.ParseFloatOr(p["days"], 1))
 	return dm.SnoozeMemory(id, days)
 }
 
-func handleSetMemoryWeight(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	weight := int(internal.ParseFloatOr(p["weight"], 0))
 	return dm.SetMemoryWeight(id, weight)
 }
 
-func handlePatchMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handlePatchMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	patch, _ := p["patch"]
 	// patch must be a JSON object (map). The DM layer takes a string,
@@ -346,14 +346,14 @@ func handlePatchMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 	return dm.PatchMemoryMetadata(id, string(patchJSON))
 }
 
-func handlePromoteMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handlePromoteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	return dm.PromoteMemory(id)
 }
 
 // callReviewMemories returns memories due for spaced reinforcement review.
 // Wire-format: {"days": 30, "limit": 20} — both optional with sensible defaults.
-func handleReviewMemories(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleReviewMemories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	days := int(internal.ParseFloatOr(p["days"], 30))
 	limit := int(internal.ParseFloatOr(p["limit"], 20))
 	return dm.ReviewMemories(days, limit)
@@ -362,7 +362,7 @@ func handleReviewMemories(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 // callSynthesizeMemory runs LLM-driven merge synthesis for one memory.
 // Wire-format: {"memory_id": "<id>"}. Lazy SynthClient creation; requires
 // MINIMAX_API_KEY or OPENAI_API_KEY in env to actually invoke the LLM.
-func handleSynthesizeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSynthesizeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	return dm.SynthesizeMemoryFor(context.Background(), id)
 }
@@ -372,7 +372,7 @@ func handleSynthesizeMemory(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 // Callers must explicitly set dry_run=false to mutate state. The full
 // CLI flag surface (--review, --purge, --shred-negative) stays on
 // `mpm gc` because those modes are operationally distinct.
-func handleGCRun(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleGCRun(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	dryRun := parseBoolDefault(p["dry_run"], true) // safe default
 	aggressive := parseBoolDefault(p["aggressive"], false)
 	maxAge := int(internal.ParseFloatOr(p["max_age_hours"], 24))
@@ -428,7 +428,7 @@ func parseBoolDefault(v interface{}, def bool) bool {
 }
 
 // callSaveLesson persists a lesson to MPM.
-func handleSaveLesson(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	if fact == "" {
 		return nil, fmt.Errorf("fact is required")
@@ -444,7 +444,7 @@ func handleSaveLesson(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 }
 
 // callSearchLessons searches lesson content.
-func handleSearchLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -462,7 +462,7 @@ func handleSearchLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 }
 
 // callListLessons lists all lessons, optionally filtered by type.
-func handleListLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	lessonType := internal.ParseStringOr(p["type"], "")
 
 	items, err := dm.ListLessonsFiltered(lessonType)
@@ -477,7 +477,7 @@ func handleListLessons(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 }
 
 // callCreateTopic creates a new topic.
-func handleCreateTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleCreateTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	name, _ := p["name"].(string)
 	if name == "" {
 		return nil, fmt.Errorf("name is required")
@@ -496,7 +496,7 @@ func handleCreateTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 }
 
 // callSearchTopics searches topics by name/description.
-func handleSearchTopics(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSearchTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	limit := int(internal.ParseFloatOr(p["limit"], 20))
 	if limit <= 0 {
@@ -515,7 +515,7 @@ func handleSearchTopics(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 }
 
 // callLinkTopic links a memory to a topic.
-func handleLinkTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	memoryID, _ := p["memory_id"].(string)
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
@@ -536,7 +536,7 @@ func handleLinkTopic(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveConte
 }
 
 // callAddReference ingests a document as a reference.
-func handleAddReference(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleAddReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	filepath, _ := p["filepath"].(string)
 	if filepath == "" {
 		return nil, fmt.Errorf("filepath is required")
@@ -547,7 +547,7 @@ func handleAddReference(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 }
 
 // callSearchReferences searches reference content.
-func handleSearchReferences(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSearchReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -578,7 +578,7 @@ func handleSearchReferences(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 }
 
 // callListReferences lists all ingested reference documents.
-func handleListReferences(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleListReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	limit := int(internal.ParseFloatOr(p["limit"], 50))
 	if limit <= 0 {
 		limit = 50
@@ -602,7 +602,7 @@ func handleListReferences(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 // callReadWakeContext returns the last session's context. Data gathering is
 // delegated to internal.ReadWakeContext (single source of truth shared with
 // the Go MCP server).
-func handleReadWakeContext(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
+func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
 
 	data, err := dm.GatherWakeContext()
 	if err != nil {
@@ -642,7 +642,7 @@ func handleReadWakeContext(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 }
 
 // callReadDirectives returns prime directives.
-func handleReadDirectives(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
+func handleReadDirectives(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
 
 	directives, err := dm.ReadDirectives()
 	if err != nil {
@@ -656,7 +656,7 @@ func handleReadDirectives(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 }
 
 // callProactiveRecallHint checks conversation context for relevant decisions/theories.
-func handleProactiveRecallHint(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleProactiveRecallHint(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	conversationText, _ := p["conversation_text"].(string)
 	if conversationText == "" {
 		return nil, fmt.Errorf("conversation_text is required")
@@ -683,7 +683,7 @@ func handleProactiveRecallHint(dm *mpminternal.DatabaseManager, ac mpminternal.A
 //
 // Unlike mpm route (text), this handler returns errors instead of silently
 // producing empty output. Callers are machines and can handle failures.
-func handleRoute(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleRoute(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	prompt, _ := p["prompt"].(string)
 	if prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
@@ -709,7 +709,7 @@ func handleRoute(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, 
 
 // callAddEvidence inserts a new evidence row and returns the resulting
 // confidence. Thin shim over dm.AddEvidence.
-func handleAddEvidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	artifactType, _ := payload["artifact_type"].(string)
 	if artifactType == "" {
 		artifactType = "memory"
@@ -738,12 +738,12 @@ func handleAddEvidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 
 // callListEvidence returns all evidence rows for an artifact. Thin shim
 // over dm.ListEvidence.
-func handleListEvidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleListEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	return dm.ListEvidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callQueryConfidenceHistory returns the confidence timeline for an artifact.
-func handleQueryConfidenceHistory(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleQueryConfidenceHistory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	limit := 50
 	if l, ok := payload["limit"].(float64); ok && l > 0 {
 		limit = int(l)
@@ -753,7 +753,7 @@ func handleQueryConfidenceHistory(dm *mpminternal.DatabaseManager, ac mpminterna
 
 // callQueryConfidenceChanges returns recent confidence-altering events
 // with delta and trigger.
-func handleQueryConfidenceChanges(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleQueryConfidenceChanges(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	var filter internal.ConfidenceChangesFilter
 	if secs, ok := payload["since_seconds_ago"].(float64); ok && secs > 0 {
 		filter.Since = time.Now().Add(-time.Duration(secs) * time.Second)
@@ -785,7 +785,7 @@ func handleQueryConfidenceChanges(dm *mpminternal.DatabaseManager, ac mpminterna
 // Agents reason better from velocity than from labels.
 //
 // Optional payload: window_days (default 30).
-func handleQueryConfidenceTrend(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleQueryConfidenceTrend(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	windowDays := 30
 	if w, ok := payload["window_days"].(float64); ok && w > 0 {
 		windowDays = int(w)
@@ -794,22 +794,22 @@ func handleQueryConfidenceTrend(dm *mpminternal.DatabaseManager, ac mpminternal.
 }
 
 // callQueryMemoryQuality returns per-creator memory statistics.
-func handleQueryMemoryQuality(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleQueryMemoryQuality(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	return dm.QueryMemoryQuality()
 }
 
 // callShowConfidence returns the current confidence and history for an artifact.
-func handleShowConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleShowConfidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	return dm.ShowConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callRecomputeConfidence forces a manual recompute and returns the snapshot.
-func handleRecomputeConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleRecomputeConfidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	return dm.RecomputeConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
 // callExplainConfidence returns the reasoning trace for an artifact's confidence.
-func handleExplainConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+func handleExplainConfidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	return dm.ExplainConfidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
 }
 
@@ -823,7 +823,7 @@ func handleExplainConfidence(dm *mpminternal.DatabaseManager, ac mpminternal.Act
 // synthesis engine lands, both the MCP tool and this CLI handler
 // will be joined with the git log via the (commit_hash,
 // mpm_memory_id) key in changelog.json.
-func handleLogToChangelog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	commitHash, _ := p["commit_hash"].(string)
 	if fact == "" {
@@ -857,7 +857,7 @@ func handleLogToChangelog(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 //	             "watcher", "security"); default: any
 //	--days       (optional) lookback window in days; default 7
 //	--limit      (optional) max rows; default 20, max 500
-func handleQueryAuditLog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	levelStr := getString(p, "level")
 	component := getString(p, "component")
 	days := 7
@@ -914,7 +914,7 @@ func handleQueryAuditLog(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 // decision (last 30d), or resolved theory. See internal/cluster_proposals.go
 // ActiveClusters() for the dedup logic. One source of truth; the
 // wake_context string formatter and this tool pull from the same helper.
-func handleListActiveClusters(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleListActiveClusters(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	known, unknown, err := dm.ActiveClusters()
 	if err != nil {
 		return nil, err
@@ -953,7 +953,7 @@ func handleListActiveClusters(dm *mpminternal.DatabaseManager, ac mpminternal.Ac
 // handles both. The handler does NOT silently default the cluster_key
 // to "current" — explicit input prevents accidental cross-cluster
 // snoozing when the agent's intent drifts.
-func handleSnoozeCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	clusterKey, _ := p["cluster_key"].(string)
 	if clusterKey == "" {
 		return nil, fmt.Errorf("cluster_key required")
@@ -989,7 +989,7 @@ func handleSnoozeCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveC
 // agent reaches a more refined understanding and overwrites reason
 // with the better explanation. The row's first_seen / count stays
 // intact so historical signal is preserved.
-func handleResolveCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleResolveCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	clusterKey, _ := p["cluster_key"].(string)
 	if clusterKey == "" {
 		return nil, fmt.Errorf("cluster_key required")
@@ -1031,7 +1031,7 @@ func handleResolveCluster(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 // (active → snoozed). Annotating does NOT change surface state at
 // all; the cluster continues to surface (or not) according to its
 // current status.
-func handleAnnotateCluster(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	clusterKey, _ := p["cluster_key"].(string)
 	if clusterKey == "" {
 		return nil, fmt.Errorf("cluster_key required")
@@ -1064,7 +1064,7 @@ func handleAnnotateCluster(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 //	--state          (optional) clean | crashed | interrupted | force_end; default clean
 //	--commitments    (optional) JSON array of strings; things this session committed to do
 //	--open_questions (optional) JSON array of strings; things still unresolved
-func handleSessionEnd(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSessionEnd(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
@@ -1124,7 +1124,7 @@ func handleSessionEnd(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 //	             the wake context's handoff.
 //	--unread    (optional) "true" to return only unread handoffs;
 //	             default false (returns latest regardless of read state)
-func handleSessionHandoff(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleSessionHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	markRead := false
 	if v, ok := p["mark_read"]; ok {
 		if b, ok := v.(bool); ok {
@@ -1178,7 +1178,7 @@ func ptrTime(t time.Time) *time.Time { return &t }
 //
 //	--limit      (optional) max handoffs; default 10, max 500
 //	--unread     (optional) "true" to filter to unread; default false
-func handleListHandoffs(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleListHandoffs(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	limit := 10
 	if v, ok := p["limit"]; ok {
 		switch t := v.(type) {
@@ -1220,7 +1220,7 @@ func handleListHandoffs(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 // result with success=true — the agent should fall back to local
 // recall. This is intentional: shared rules are an additive layer,
 // not a replacement for project-specific memory.
-func handleQueryGlobalRules(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleQueryGlobalRules(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	limit := 50
 	if v, ok := p["limit"]; ok {
@@ -1260,7 +1260,7 @@ func handleQueryGlobalRules(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 //	--weight      (optional) 0-100, default 10 (house-rule weight)
 //	--provenance  (optional) Operator's name / why the rule exists
 //	--confirm     (required) Must be true. Refuses without it.
-func handleRecordGlobalRule(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleRecordGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	confirm, _ := p["confirm"].(bool)
 	if !confirm {
 		return nil, fmt.Errorf("record_global_rule requires confirm=true; house rules should not be written autonomously")
@@ -1314,7 +1314,7 @@ func handleRecordGlobalRule(dm *mpminternal.DatabaseManager, ac mpminternal.Acti
 //
 //	--memory_id  (required) The local memory ID to promote
 //	--confirm    (required) Must be true.
-func handlePromoteToGlobal(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	confirm, _ := p["confirm"].(bool)
 	if !confirm {
 		return nil, fmt.Errorf("promote_to_global requires confirm=true; cross-project promotion should be operator-gated")
@@ -1387,7 +1387,7 @@ func splitTags(s string) []string {
 // out as a WakesPending block. Returns the (possibly decorated) out map
 // so callers can do `out := ...; return checkWakesAndFold(dm, out)`.
 // No-op when out is nil or when there are no due wakes.
-func checkWakesAndFold(dm *mpminternal.DatabaseManager, out map[string]interface{}) map[string]interface{} {
+func checkWakesAndFold(dm mpminternal.CoreDB, out map[string]interface{}) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
 	}
@@ -1400,7 +1400,7 @@ func checkWakesAndFold(dm *mpminternal.DatabaseManager, out map[string]interface
 	return out
 }
 
-func handleScheduleWake(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	reason, _ := p["reason"].(string)
 	if reason == "" {
 		return nil, fmt.Errorf("reason is required")
@@ -1434,7 +1434,7 @@ func handleScheduleWake(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCo
 	return checkWakesAndFold(dm, out), nil
 }
 
-func handleCheckWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	out := checkWakesAndFold(dm, map[string]interface{}{
 		"success": true,
 	})
@@ -1445,7 +1445,7 @@ func handleCheckWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCont
 	return out, nil
 }
 
-func handleListWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	includeFired := false
 	if v, ok := p["include_fired"].(bool); ok {
 		includeFired = v
@@ -1482,7 +1482,7 @@ func handleListWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveConte
 // buckets, top-N most overdue, total counts, and oldest overdue timestamp.
 //
 // Pass top_n (default 5) to control how many top-overdue rows are surfaced.
-func handleDigestWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleDigestWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	topN := 5
 	if v, ok := p["top_n"]; ok {
 		switch n := v.(type) {
@@ -1500,7 +1500,7 @@ func handleDigestWakes(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveCon
 // SQLITE_BUSY retry counter. Designed for self-diagnosis when the
 // agent notices latency, timeouts, or storage pressure. Accepts no
 // parameters — the result is the entire payload.
-func handleHealthCheck(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	return dm.HealthCheck()
 }
 
@@ -1548,7 +1548,7 @@ func normalizeSupporting(raw interface{}) (string, error) {
 // future `mpm ops gc --scratchpads`); updated_at is reset for thesis
 // evolution velocity tracking. The wake-context surface query IGNORES
 // decay_at — orphan-surfacing is the whole point.
-func handleFlushScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleFlushScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	thesis := getString(p, "thesis")
 	if sessionID == "" || thesis == "" {
@@ -1578,7 +1578,7 @@ func handleFlushScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.Activ
 // handleReadScratchpad returns the current scratchpad row for a session.
 // Empty payload errors loudly so the agent can self-correct; we do NOT
 // default to the current session — explicit session_id is the contract.
-func handleReadScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleReadScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
@@ -1606,7 +1606,7 @@ func handleReadScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.Active
 // handleDiscardScratchpad hard-deletes a scratchpad row. No soft-delete
 // overhead — scratchpads are volatile by design. Idempotent: deleting a
 // non-existent row is a no-op (RowsAffected=0, no error).
-func handleDiscardScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleDiscardScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
@@ -1632,7 +1632,7 @@ func handleDiscardScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.Act
 // Lineage: the promoted memory gets the `from-scratchpad:<session_id>` tag
 // automatically, so future queries can trace the memory back to the
 // scratchpad session that produced it.
-func handlePromoteScratchpad(dm *mpminternal.DatabaseManager, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")

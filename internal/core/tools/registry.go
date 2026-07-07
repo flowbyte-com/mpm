@@ -28,7 +28,7 @@ package tools
 import (
 	"encoding/json"
 
-	"mpm/internal"
+	"github.com/flowbyte-com/mpm-core"
 )
 
 // HandlerFunc is the canonical tool-execution signature. Both the CLI
@@ -42,7 +42,7 @@ import (
 //   - (result, nil): success; result is JSON-marshalled for both surfaces.
 //   - (nil, err): failure; CLI exits 1 with the error message; MCP returns
 //     mcp.NewToolResultErrorFromErr(...).
-type HandlerFunc func(dm *internal.DatabaseManager, ac internal.ActiveContext, payload map[string]interface{}) (interface{}, error)
+type HandlerFunc func(dm internal.CoreDB, ac internal.ActiveContext, payload map[string]interface{}) (interface{}, error)
 
 // Tool is one entry in the Registry. The struct is intentionally flat —
 // no nested config, no description vs long_description vs hints. Every
