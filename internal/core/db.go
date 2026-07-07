@@ -838,24 +838,113 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		}
 	}
 
+	// Migration: detect and remove the pre-2026-07-07 schema
+	// (contentless design with `content='memories', content_rowid='rowid'`).
+	// That schema produced tombstone artifacts on DELETE that broke
+	// MATCH against freshly-removed rows. The new design is standalone
+	// FTS5 (no content option), which lets plain DELETE work as
+	// expected. We drop the old table and re-create it below; the
+	// triggers (which are the new sync primitive) will re-populate the
+	// index from the underlying shared.memories rows.
+	//
+	// Detection: query sqlite_master for an entry whose SQL contains
+	// "content='memories'". If found, DROP the old table before
+	// CREATE VIRTUAL TABLE IF NOT EXISTS. The DROP is destructive but
+	// the re-population via triggers is automatic on next open.
+	var hasOldSchema int
+	if err := dm.db.QueryRow(`
+		SELECT COUNT(*) FROM shared.sqlite_master
+		WHERE type = 'table' AND name = 'memories_fts'
+		  AND sql LIKE '%content=''memories''%'
+	`).Scan(&hasOldSchema); err == nil && hasOldSchema > 0 {
+		if _, err := dm.db.Exec(`DROP TABLE shared.memories_fts`); err != nil {
+			slog.Warn("shared FTS5 migration: failed to drop old contentless schema",
+				"error", err.Error())
+		} else {
+			slog.Info("shared FTS5 migration: dropped old contentless schema, recreating as standalone")
+		}
+	}
+
 	// Phase 2b (this commit): also create the FTS5 virtual table for
 	// shared.memories. Phase 1 deferred FTS because the initial schema
 	// was "core tables only"; now that query_global_rules has a real
 	// consumer (Phase 2), keyword search via FTS5 is worth wiring up.
 	//
-	// We create shared.memories_fts mirroring the local memories_fts
-	// schema. We do NOT create triggers (Phase 2b keeps it manual — a
-	// future enhancement could add shared AFTER INSERT triggers).
-	// QueryGlobalRules backfills FTS rows on each call when the index
-	// is empty relative to the underlying table — this keeps the
-	// bootstrap simple without losing keyword search.
+	// We create shared.memories_fts as a STANDALONE FTS5 table (no
+	// `content=` external-content option). FTS5 stores its own copy
+	// of the indexed columns. This is the design that lets plain
+	// DELETE FROM memories_fts WHERE rowid = ... work as expected
+	// without FTS5 tombstone artifacts. The previous "contentless"
+	// design (content='memories', content_rowid='rowid') required
+	// the FTS5 'delete' special command to physically remove deleted
+	// segments — and that command does not work cleanly with the
+	// trigger-in-shared-DB pattern we use here. Standalone FTS5 is
+	// slightly larger on disk but eliminates a class of "deleted row
+	// still matches" bugs that surface only at scale.
+	//
+	// Tokenizer matches the local memories_fts ('porter unicode61')
+	// so keyword stemming behaviour is consistent across local and
+	// shared. The "house rule" use case relies on exact token
+	// matching (e.g., "scanner", "FTS5"); stem differences would
+	// produce false negatives.
+	//
+	// Phase 2b previously kept the FTS sync manual (QueryGlobalRules
+	// would backfill the FTS rows on each call when the index was
+	// empty). That broke the multi-agent contract: a freshly seeded
+	// shared DB returned 0 hits under scope=all until the first read.
+	// The AFTER INSERT/UPDATE/DELETE triggers below restore the
+	// structural invariant "if it is in shared.memories, it is
+	// searchable" — the only sane guarantee for autonomous agents.
 	if _, err := dm.db.Exec(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS shared.memories_fts USING fts5(
 			content, collection, session_id UNINDEXED, tags UNINDEXED,
-			content='memories', content_rowid='rowid'
+			tokenize='porter unicode61'
 		)
 	`); err != nil {
 		slog.Warn("shared FTS5 virtual table creation failed", "error", err.Error())
+	}
+
+	// FTS sync triggers (mirrors the local memories_ai / _ad / _au
+	// pattern in BaseTables, but with the `shared.` schema prefix).
+	// Each trigger is OWNED BY the shared database (created via
+	// "CREATE TRIGGER shared.<name>"), and the body uses BARE table
+	// names that resolve into the shared schema. SQLite forbids
+	// qualified table references inside trigger bodies, AND it
+	// forbids a trigger in the main database from referencing objects
+	// in an attached database. The "CREATE TRIGGER shared.X" form
+	// satisfies both constraints simultaneously.
+	//
+	// Rationale: the multi-agent shared epistemology contract requires
+	// that shared.memories rows be immediately searchable by any agent
+	// the moment they are written. The previous lazy-backfill design
+	// (inside QueryGlobalRules) only fired for that one read path; the
+	// federated scope=all path (HybridSearch) bypassed it entirely.
+	// Triggers eliminate the asymmetry by making the sync structural
+	// rather than call-site-dependent.
+	sharedTriggers := []string{
+		`CREATE TRIGGER shared.shared_memories_ai AFTER INSERT ON shared.memories BEGIN
+			INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+			VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags);
+		END;`,
+		`CREATE TRIGGER shared.shared_memories_ad AFTER DELETE ON shared.memories BEGIN
+			DELETE FROM memories_fts WHERE rowid = old.rowid;
+		END;`,
+		`CREATE TRIGGER shared.shared_memories_au AFTER UPDATE ON shared.memories
+		WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN
+			DELETE FROM memories_fts WHERE rowid = old.rowid;
+		END;`,
+		`CREATE TRIGGER shared.shared_memories_au_content AFTER UPDATE ON shared.memories
+		WHEN NOT (old.deleted_at IS NULL AND new.deleted_at IS NOT NULL) BEGIN
+			DELETE FROM memories_fts WHERE rowid = old.rowid;
+			INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+			VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags);
+		END;`,
+	}
+	for _, t := range sharedTriggers {
+		if _, err := dm.db.Exec(t); err != nil {
+			slog.Warn("shared FTS trigger creation failed",
+				"sql_prefix", sharedDDLTruncate(t, 60), "error", err.Error())
+		}
 	}
 
 	// Now run SafeMigrations against the shared schema (tables exist now).
