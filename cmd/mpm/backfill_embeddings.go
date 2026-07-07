@@ -32,9 +32,17 @@ func handleBackfillEmbeddings(args []string) int {
 		return 1
 	}
 
-	dm, err := mpminternal.NewDatabaseManager("")
-	if err != nil {
-		usererror.Error("%v", err)
+	// Use the shared DM singleton (getDB) instead of opening a fresh
+	// connection via mpminternal.NewDatabaseManager(""). The previous
+	// code created a separate connection per call, which (a) re-ran
+	// the schema migration on every invocation, (b) re-ATTACHed the
+	// shared DB unnecessarily, and (c) bypassed the per-component
+	// connection ownership pattern that CoreDB Phase 2 introduced.
+	// The shared singleton is the canonical entry point: see
+	// getDB() in cmd/mpm/handlers.go.
+	dm := getDB()
+	if dm == nil {
+		return 1
 	}
 	defer dm.Close()
 

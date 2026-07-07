@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -488,22 +490,60 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 // schemaPrefix (since Phase 2d, 2026-07-06): empty for local tables,
 // "shared." for ATTACHed shared DB. Constrained to two values; safe
 // to interpolate directly into the table reference.
+//
+// Circuit breaker: MPM_MAX_VECTOR_SCAN caps the un-indexed O(n) cosine
+// scan. VectorMatch reads every row's embedding from disk and unmarshals
+// it in memory before scoring. At 29 rows that's trivial; at 50k+ the
+// scan can OOM, hang, or starve the connection pool. The cap rejects
+// the query with a clear error above the threshold instead of crashing.
+// Default 5000; set MPM_MAX_VECTOR_SCAN=0 to disable (full scan, your
+// funeral). Cap applies BEFORE the query runs so we never even open
+// the rows iterator over an oversized scan.
+//
+// Tracked in WISHLIST.md as the debt arc that motivates a future
+// HNSW/IVF ANN index. The cap buys time; it does not solve scale.
 func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int, schemaPrefix string) ([]VectorMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	colClause := ""
+	whereClauses := []string{"embedding IS NOT NULL", "embedding != 'null'", "deleted_at IS NULL" + MemoryExpireClause}
 	args := []interface{}{}
 	if collection != "" {
-		colClause = "AND collection = ?"
+		whereClauses = append(whereClauses, "collection = ?")
 		args = append(args, collection)
 	}
 	memTable := schemaPrefix + "memories"
 
+	// Pre-flight rowcount check against the circuit breaker. The COUNT
+	// query is cheap (SQLite has covering index stats) and prevents the
+	// expensive scan from even starting. MPM_MAX_VECTOR_SCAN=0 means
+	// "no cap, full scan" — same behaviour as before this commit.
+	maxScan := 5000
+	if v := os.Getenv("MPM_MAX_VECTOR_SCAN"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			maxScan = parsed
+		}
+	}
+	if maxScan > 0 {
+		countQuery := `SELECT COUNT(*) FROM ` + memTable + ` WHERE ` + strings.Join(whereClauses, " AND ")
+		var rowCount int
+		if err := dm.SQLDB().QueryRow(countQuery, args...).Scan(&rowCount); err != nil {
+			return nil, fmt.Errorf("vector scan preflight count: %w", err)
+		}
+		if rowCount > maxScan {
+			return nil, fmt.Errorf(
+				"vector scan cap exceeded: %d rows in %s (cap=%d via MPM_MAX_VECTOR_SCAN). "+
+					"Refine the query (collection, filter) or raise the cap. "+
+					"For a real fix, see WISHLIST.md: ANN index (HNSW/IVF).",
+				rowCount, memTable, maxScan)
+		}
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, embedding
 		FROM `+memTable+`
-		WHERE embedding IS NOT NULL AND embedding != 'null' AND deleted_at IS NULL`+MemoryExpireClause+` `+colClause,
+		WHERE `+whereSQL,
 		args...)
 	if err != nil {
 		return nil, err

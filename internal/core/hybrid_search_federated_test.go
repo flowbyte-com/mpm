@@ -17,6 +17,7 @@
 package internal
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
@@ -345,3 +346,64 @@ func TestHandleQueryLongTermMemory_ScopeForwarded(t *testing.T) {
 // suppress unused-import lint when the test compiles down to a
 // subset on certain build configs.
 var _ = sort.Strings
+
+// TestVectorMatch_MaxScanCap_Default verifies the circuit breaker in
+// VectorMatch. With MPM_MAX_VECTOR_SCAN=0 (no cap) the existing
+// behaviour holds. With a tiny cap (3 rows) and a corpus larger than
+// the cap, the function MUST error rather than crash, hang, or OOM.
+//
+// This is the regression net for the 2026-07-07 VectorMatch refactor
+// — the un-indexed O(n) cosine scan can OOM at scale; the cap buys
+// time until the ANN index (HNSW/IVF) lands in WISHLIST.md.
+func TestVectorMatch_MaxScanCap_Default(t *testing.T) {
+	dm := NewTestDM(t)
+	// No env var set: default cap (5000) is well above any test
+	// corpus, so VectorMatch should NOT trip on a small dataset.
+	// Empty query embedding: just exercise the cap path with the
+	// default to confirm it doesn't false-positive.
+	vec := make([]float32, 4)
+	_, err := dm.VectorMatch("", vec, 10, "")
+	require.NoError(t, err, "default cap (5000) should not trip on small test corpus")
+}
+
+func TestVectorMatch_MaxScanCap_DisabledByZero(t *testing.T) {
+	dm := NewTestDM(t)
+	t.Setenv("MPM_MAX_VECTOR_SCAN", "0")
+	vec := make([]float32, 4)
+	_, err := dm.VectorMatch("", vec, 10, "")
+	require.NoError(t, err, "MPM_MAX_VECTOR_SCAN=0 must disable the cap (full scan, your funeral)")
+}
+
+func TestVectorMatch_MaxScanCap_TripsAboveThreshold(t *testing.T) {
+	dm := NewTestDM(t)
+	// Set the cap to 0. With 0 we expect... actually the test was
+	// for "trips ABOVE threshold". With MPM_MAX_VECTOR_SCAN=1 we'd
+	// require the corpus to be empty. A more honest test: insert
+	// a few rows, then set cap=1, expect error.
+	t.Setenv("MPM_MAX_VECTOR_SCAN", "1")
+	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
+		VALUES ('cap-1', 'memories', 'first', '[0.1, 0.2, 0.3, 0.4]', 1, NULL)`)
+	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
+		VALUES ('cap-2', 'memories', 'second', '[0.2, 0.3, 0.4, 0.5]', 1, NULL)`)
+	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
+		VALUES ('cap-3', 'memories', 'third', '[0.3, 0.4, 0.5, 0.6]', 1, NULL)`)
+	vec := []float32{0.1, 0.2, 0.3, 0.4}
+	_, err := dm.VectorMatch("", vec, 10, "")
+	require.Error(t, err, "cap=1 with 3 rows in scope MUST trip the circuit breaker")
+	require.Contains(t, err.Error(), "vector scan cap exceeded")
+	require.Contains(t, err.Error(), "MPM_MAX_VECTOR_SCAN")
+}
+
+func TestVectorMatch_MaxScanCap_AllowsAtThreshold(t *testing.T) {
+	dm := NewTestDM(t)
+	t.Setenv("MPM_MAX_VECTOR_SCAN", "5")
+	// Insert exactly 5 rows; cap is inclusive at the threshold.
+	for i := 0; i < 5; i++ {
+		_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
+			VALUES (?, 'memories', ?, ?, 1, NULL)`,
+			fmt.Sprintf("at-cap-%d", i), fmt.Sprintf("content %d", i), "[0.1, 0.2, 0.3, 0.4]")
+	}
+	vec := []float32{0.1, 0.2, 0.3, 0.4}
+	_, err := dm.VectorMatch("", vec, 10, "")
+	require.NoError(t, err, "5 rows with cap=5 should NOT trip (5 ≤ 5)")
+}

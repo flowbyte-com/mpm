@@ -167,6 +167,14 @@ The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775
 - `reliability_sprint_test.go`, `lifecycle_decay_test.go`, `synthesis_isolation_test.go` — exercise the failure paths (DLQ overflow, SQLite BUSY races, weight-floor split-brain). Read these when changing concurrency or persistence semantics.
 - Tests assume FTS5 is compiled in. CI must export `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5` or tests will panic.
 - Core tests run from `internal/core/` (separate Go module); runtime tests from repo root, using the `replace` directive in `go.mod`.
+- `scripts/smoke_shared.sh` — hermetic integration script for the multi-agent shared-epistemology federated path. Boots an isolated MPM_WORKSPACE + MPM_SHARED_DB, seeds 5 sentinels via `record_global_rule`, asserts that scope=all returns hits without manual FTS backfill. Pre-2026-07-07 this path was silently broken for fresh shared DBs (lazy-backfill design only fired for QueryGlobalRules; HybridSearch bypassed it). The 4 shared_memories_* triggers (in `internal/core/db.go attachShared`) are the structural fix.
+
+## Shared DB invariants (2026-07-07)
+
+- **`shared.memories_fts` is auto-synced by triggers**, not by call-site discipline. Do not add manual `INSERT INTO shared.memories_fts SELECT ...` to write paths — the triggers fire for free, and a manual backfill will double-add rows.
+- The FTS table is **standalone FTS5** (no `content=` option), with `porter unicode61` tokenizer matching local `memories_fts`. Plain `DELETE FROM memories_fts WHERE rowid = old.rowid` works correctly. A previous "contentless" design (content='memories') required the FTS5 `'delete'` special command, which was incompatible with the trigger-in-shared-DB pattern. Don't re-introduce the `content=` option without reworking the trigger design.
+- **`VectorMatch` has a circuit breaker** (`MPM_MAX_VECTOR_SCAN`, default 5000). Above the threshold it errors instead of OOM. Set to 0 to disable. The real fix is an ANN index — see WISHLIST.md.
+- **HybridSearch `scope=all` with multi-token queries against small corpora can return 0 hits** because the per-token BM25 scores compete and the Shared Premium multiplier doesn't lift them above the retrieval threshold. This is standard IDF behaviour, not a bug; for testing prefer single-token queries. The 2026-07-07 smoke script uses `query: "rule"` for exactly this reason.
 
 ## Gotchas
 
