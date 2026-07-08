@@ -489,11 +489,20 @@ func resolveTargetTime(s string, now time.Time) (int64, error) {
 		}
 		return n, nil
 	}
-	d, err := parseDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("target_time %q: %w (expected unix epoch or relative like '24h', '30m', '7d')", s, err)
+	if d, err := parseDuration(s); err == nil {
+		return now.Add(d).Unix(), nil
 	}
-	return now.Add(d).Unix(), nil
+	// ISO 8601 absolute timestamp — same contract every other MPM time
+	// field honors (snooze_until, since). RFC3339Nano covers the "Z"
+	// suffix, RFC3339 covers explicit offsets, and the space form covers
+	// SQLite-style datetimes. This is the fallback that makes the wake
+	// scheduler consistent with parseClusterSnoozeUntil.
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Unix(), nil
+		}
+	}
+	return 0, fmt.Errorf("target_time %q: unrecognized (expected unix epoch, relative like '24h'/'30m'/'7d', or ISO-8601 timestamp)", s)
 }
 
 func parseInt64(s string) (int64, error) {
