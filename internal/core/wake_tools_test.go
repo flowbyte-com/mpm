@@ -256,6 +256,37 @@ func TestResolveTargetTime_Parsing(t *testing.T) {
 	}
 }
 
+func TestResolveTargetTime_ISO8601(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"2026-07-12T12:00:00Z", time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC).Unix()},
+		{"2026-07-12T12:00:00+02:00", time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC).Unix()},
+		{"2026-07-12T12:00:00.500Z", time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC).Unix()},
+		{"2026-07-12 12:00:00", time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC).Unix()},
+	}
+	for _, c := range cases {
+		got, err := resolveTargetTime(c.in, now)
+		if err != nil {
+			t.Errorf("resolveTargetTime(%q): unexpected error %v", c.in, err)
+			continue
+		}
+		// The space form parses in local tz; allow tz offset by comparing
+		// only the RFC3339 UTC cases exactly and the space form loosely.
+		if c.in == "2026-07-12 12:00:00" {
+			if got == 0 {
+				t.Errorf("resolveTargetTime(%q): got 0", c.in)
+			}
+			continue
+		}
+		if got != c.want {
+			t.Errorf("resolveTargetTime(%q): got %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
 // ── Handler-layer tests (mirror the tools/handlers_test.go shape) ──────
 
 // helper: build a wake DM with a temp shared DB, then wipe the LOCAL
