@@ -2,6 +2,8 @@
 
 > **Persistent reasoning for autonomous AI agents.**
 
+MPM stands for **Mnemonic Persistence Maintainer**. It is a *persistent reasoning substrate* — a small, opinionated binary that turns an agent's transient thinking into a durable epistemic trail.
+
 Traditional memory systems answer one question:
 
 > *What does the agent remember?*
@@ -21,45 +23,48 @@ Instead of assigning arbitrary confidence scores, confidence is derived from evi
 
 Instead of rewriting memories, beliefs evolve while history remains intact.
 
-Just one persistent cognitive substrate.
-
-One SQLite database.
-
-No daemon.
-
-No vector database.
-
-No distributed infrastructure.
+One persistent cognitive substrate. One SQLite database. No daemon. No vector database. No distributed infrastructure.
 
 > **MPM is not designed to maximize recall. It is designed to preserve intellectual progress.**
 
+---
+
 ## Reading Guide
 
-Evaluating MPM? Read Sections 1–5.
+This is one document. It is long because MPM covers ground. Read by audience:
 
-Integrating MPM? Read Sections 4–9.
+| If you are… | Read first | Then |
+|---|---|---|
+| **A curious reader** evaluating MPM | §1 — §3 | §6 (skim) |
+| **A new operator** wiring MPM into an agent | §1, §5 (Quick Start) | §8 (CLI), §9 (Runtime) |
+| **A contributor** reading code or writing patches | §1 — §7 | Appendices A, B, C |
+| **An agent author** integrating via MCP or `mpm call` | §5, §6.4 (MCP), §6.5 (Shared Epistemology) | §8 (CLI parity table) |
+| **Future me** returning after months away | §3 (axioms), §10 (reliability) | Appendix C (enforcement patterns) |
 
-Contributing? Read the entire document.
+Every section is self-contained enough to read in isolation.
 
-## Table of Contents
+### Table of Contents
 
 1. What is MPM?
 2. Why this isn't a memory system
 3. The Cognitive Model
-4. Quick Start
-5. System Architecture
-   - 5.1 Core vs Runtime
-   - 5.2 Confidence Engine
-   - 5.3 Retrieval Architecture
-   - 5.4 MCP Integration
-   - **5.5 Multi-Agent Shared Epistemology (Layers 0–4)**
-6. Core Stability
-7. CLI Reference
-8. Runtime Services
-9. Reliability
-10. Glossary
-Non-goals
-License
+4. Belief Lifecycle
+5. Quick Start
+6. System Architecture
+   - 6.1 Core vs Runtime
+   - 6.2 Confidence Engine
+   - 6.3 Retrieval Architecture
+   - 6.4 MCP Integration
+   - 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
+7. Core Stability
+8. CLI Reference
+9. Runtime Services
+10. Reliability
+11. Glossary
+- **Appendix A: Shared Epistemology Implementation**
+- **Appendix B: Arc 2 (Active Dissemination) Implementation**
+- **Appendix C: Enforcement Patterns**
+- License
 
 ---
 
@@ -67,13 +72,21 @@ License
 
 MPM is a single binary that provides long-term memory, behavioral modes, persona management, and an **epistemology engine** — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
 
-MPM is the memory and reasoning layer for AI agents. It tracks not just *what* the agent knows, but *why* it decided to act, *how* it chose to act, and *what it believes but hasn't proven yet*.
+It is the reasoning layer for AI agents. It tracks not just *what* the agent knows, but *why* it decided to act, *how* it chose to act, and *what it believes but hasn't proven yet*.
 
 ### What MPM is not
+
+MPM is not a workflow engine, an orchestration framework, a planning system, an agent runtime, a distributed database, or an infinitely extensible plugin framework. Those things may be built *on top of* MPM. They are not part of MPM.
+
+This is the project's most important self-defense against feature creep. The regret log (see §7) is the empirical record of pressure to absorb adjacent problems; the non-goals are the standing answer. **The discipline must survive success** — the temptation to make MPM absorb an adjacent problem only grows as more people use it.
+
+At the implementation level, the exclusions are concrete:
 
 - **Not a daemon.** Every command is a single binary invocation. No long-running processes; periodic work happens on demand via `mpm ops maintain`.
 - **Not generic storage.** Built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
 - **Not a human dashboard.** Machine-to-machine interface is primary; CLI is a convenience layer.
+- **Not a vector database.** A SQLite-native ANN index handles semantic recall. No Pinecone, no Qdrant, no embeddings service.
+- **Not a knowledge graph.** Relationships are first-class artifacts (decisions, theories, evidence, lessons), not edges in a graph store.
 
 ---
 
@@ -178,47 +191,23 @@ Information that supports or challenges another artifact. Evidence is the substr
 
 ### 3.2 Design Principles
 
-MPM follows a small number of architectural rules.
+MPM follows a small number of architectural rules. These are stated once here. The rest of the document references them; it does not re-explain them.
 
-#### History is immutable
-
-A memory records what was believed. History is never rewritten.
-
-#### Interpretation is mutable
-
-Confidence changes. Evidence accumulates. The original artifact does not.
-
-#### Truth is external
-
-Reality determines truth. MPM only maintains its current estimate.
-
-#### Reasoning is persistent
-
-Reasoning deserves the same permanence as facts. Decisions, theories, and evidence are first-class objects.
-
-#### Simplicity beats infrastructure
-
-SQLite provides persistence, transactions, FTS5, JSON, WAL, and indexing. Adding another service is a last resort, not a default.
-
-#### Keep it boring
-
-Boring infrastructure is reliable infrastructure. The interesting problems in MPM live in the cognitive model, not in the deployment surface.
-
-#### Minimize moving parts
-
-Every component added is a component that must be reasoned about, debugged, secured, and explained. We earn each new piece through usage evidence, not architectural enthusiasm.
-
-#### Sympathy for unknown unknowns
-
-We do not know what MPM will be used for in three years. The architecture favors reversible, conservative choices over clever, brittle ones.
+1. **History is immutable.** A memory records what was believed. The original artifact is never rewritten.
+2. **Interpretation is mutable.** Confidence changes. Evidence accumulates. The original artifact does not.
+3. **Truth is external.** Reality determines truth. MPM only maintains its current estimate.
+4. **Reasoning is persistent.** Decisions, theories, and evidence are first-class objects — the same permanence as facts.
+5. **The contract is stable; the implementation is not.** Formulas, storage, and algorithms may change. The properties, the guarantees, the semantics — these are what matter. The implementation can change; the meaning survives.
+6. **Simplicity beats infrastructure.** SQLite provides persistence, transactions, FTS5, JSON, WAL, and indexing. Adding another service is a last resort, not a default.
+7. **Keep it boring.** Boring infrastructure is reliable infrastructure. The interesting problems in MPM live in the cognitive model, not in the deployment surface.
+8. **Minimize moving parts.** Every component added is a component that must be reasoned about, debugged, secured, and explained. We earn each new piece through usage evidence, not architectural enthusiasm.
+9. **Sympathy for unknown unknowns.** We do not know what MPM will be used for in three years. The architecture favors reversible, conservative choices over clever, brittle ones.
 
 ### 3.3 Confidence
 
 Confidence is not user input.
 
 Confidence is derived.
-
-Conceptually:
 
 ```
 confidence
@@ -230,52 +219,70 @@ confidence
 bounded to [0, 1]
 ```
 
-This is a pedagogical summary. The authoritative computation lives in `internal/confidence/`. The stored `confidence` column is a performance cache; the evidence ledger is the source of truth. If the cached value ever disagrees with the recomputed value, the cache is wrong. The evidence is authoritative.
+The exact formula may change. The properties do not: more positive evidence never decreases confidence; decay never increases it. The formula is a tool for satisfying the properties; the properties are what the system means by "belief."
 
-Key concepts:
+For the deeper mechanics (atomic recompute, evidence registry, trigger wiring, source-of-truth/cache split), see §6.2 and **Appendix C** (Enforcement Patterns).
 
-- **Knowledge and confidence are independent.** Adding contradicting evidence changes confidence but leaves the artifact content untouched. A hindsight annotation can change what the artifact *says* without retroactively changing what was *believed* about the original.
-- **Confidence is the system's *current* estimate of truth** derived from *current* evidence. The artifact is historical fact.
-- **Confidence only rises with new evidence.** It is allowed to decrease automatically as time passes without reinforcement.
-- **More positive evidence never decreases confidence.** This property is a forever-true invariant; the formula that computes it is a forever-drifting implementation detail. Encoded as a property test in `internal/confidence/properties_test.go` — when the formula changes, the invariant survives.
+> **Implementation note:** The properties are enforced by property tests in `internal/core/confidence_test.go`. The tests describe what the formula means, not what it currently is. The implementation can change; the meaning survives.
 
-See §5.2 for the implementation details.
+### 3.4 Reframe, not rename
 
-### 3.4 Belief Lifecycle
+MPM stands for **Mnemonic Persistence Maintainer** — a memory aid, not a memory store. The on-disk tables (`memories`, `topics`, `lessons`) keep their historical names for schema stability: renaming them would be a destructive migration across every existing database.
 
-This is the section readers learn how beliefs form, get tested, get updated, and get retired. The underlying subsystem is called the **Epistemology Engine**, but the section title describes what it actually does: a lifecycle for beliefs, not an academic treatise on epistemology.
+Where the choice is open, prefer:
 
-#### The cognitive loop
+- "Cognitive artifact" or "reasoning record" over "memory"
+- "Belief" over "stored fact" when the artifact has confidence
+- "Epistemology" over "knowledge management" when the lifecycle matters
+- "Substrate" over "database" when the system is the point
+
+---
+
+## 4. Belief Lifecycle
+
+This is the section that explains how beliefs form, get tested, get updated, and get retired. The underlying subsystem is called the **Epistemology Engine**, but the section title describes what it actually does: a lifecycle for beliefs, not an academic treatise on epistemology.
+
+### 4.1 The cognitive sequence
+
+The forward flow is a typical cognitive sequence — what the agent does over time, not the only possible flow:
 
 ```
-Observation
- │
- ▼
- Memory
- │
- ▼
- Decision
- │
- ▼
- Theory
- │
- ▼
- Evidence
- │
- ▼
- Confidence
- │
- ▼
- Retrieval
- │
- └──────────────┐
- │
- New Observation
+Observation → Memory → Decision → Theory → Retrieval → New Observation
 ```
 
 Notice what never happens. The original memory is never edited. Only confidence changes. That distinction allows historical reasoning to remain inspectable months later.
 
-#### Decision Ledger
+### 4.2 Evidence is cross-cutting
+
+The cognitive sequence above shows how artifacts come into being. The relationship below shows how their truth gets refined over time. The two are different things; conflating them is what made the earlier single-diagram view misleading.
+
+A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached are what confidence is derived from. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
+
+```
+                    Evidence
+                       │
+            ┌──────────┼──────────┐
+            │          │          │
+            ▼          ▼          ▼
+         Memory    Decision    Theory
+            │          │          │
+            └──────────┼──────────┘
+                       │
+                       ▼
+                  Confidence ◄── Decay
+                       │
+                       ▼
+                  Retrieval
+                       │
+                       ▼
+              New Observation
+```
+
+A memory can be challenged by a new observation. A decision can be challenged by a new test. A theory can be challenged by an independent reproduction. The evidence ledger doesn't care which kind of artifact it attaches to; confidence is derived uniformly across all three.
+
+The forward flow is creation; the cross-cutting arrow is refinement. Both run continuously, and both are required for belief revision to work.
+
+### 4.3 Decision Ledger
 
 An append-only audit trail of architectural choices. Captures the context, the choice made, and the reasoning — so weeks later, the agent can reconstruct *why* a particular approach was taken instead of blindly second-guessing itself.
 
@@ -287,7 +294,7 @@ RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() 
 mpm decisions
 ```
 
-#### Theory Tracker
+### 4.4 Theory Tracker
 
 A hypothesis ledger for debugging and design. When the agent forms a causal assumption ("I think X is causing Y"), it logs the hypothesis and a concrete validation test before writing the fix. This forces the assumption to be testable, and often collapses a false hypothesis before it wastes an hour.
 
@@ -302,7 +309,7 @@ mpm theories pending            # Pending only
 mpm resolve_theory abc123 "confirmed: flag order matters, --json consumed before positional processing"
 ```
 
-#### Cognitive Immune System (Challenge Lifecycle)
+### 4.5 Cognitive Immune System (Challenge Lifecycle)
 
 Knowledge becomes obsolete. Most memory systems never address this problem. MPM introduces a challenge workflow:
 
@@ -335,7 +342,7 @@ challenge ───────────────────────�
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
-#### Proactive Recall
+### 4.6 Proactive Recall
 
 Traditional memory systems wait for a search query. MPM actively surfaces relevant knowledge before it is requested.
 
@@ -345,11 +352,11 @@ mpm kb hint "discussing the CSS injection approach for the widget system"
 #    RATIONALE: WordPress strips <style> blocks from post content...
 ```
 
-FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` plugin tool is wired into the OpenClaw agent loop — it surfaces the most relevant epistemology memory automatically after context shifts.
+FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` tool is wired into the OpenClaw agent loop and surfaces the most relevant epistemology memory automatically after context shifts.
 
 ---
 
-## 4. Quick Start
+## 5. Quick Start
 
 Five minutes from zero to first decision.
 
@@ -369,13 +376,13 @@ make build
 
 The single binary lives at `bin/mpm`. No daemon, no service registration, no config files required to start.
 
-### Store memory
+### Store a reasoning record
 
 ```bash
 mpm add Germany leads Group E with +6 goal differential
 ```
 
-### Retrieve memory
+### Retrieve
 
 ```bash
 mpm World Cup prediction
@@ -412,7 +419,7 @@ mpm ops stats
 mpm wake               # last session context
 ```
 
-### Initialize baseline directives (Optional but recommended)
+### Initialize baseline directives (optional but recommended)
 
 ```bash
 mpm ops init directives
@@ -422,19 +429,15 @@ MPM provides advanced cognitive machinery — wake-context surfacing, audit-clus
 
 The command is **idempotent** — safe to re-run. It detects existing directives by stable ID and skips them. Local edits to a seeded directive are preserved (not silently overwritten); the run report flags any drift so the operator can reconcile manually.
 
-Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep memory alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
+Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
 ---
 
-## 5. System Architecture
+## 6. System Architecture
 
 MPM intentionally separates persistent cognition from runtime behaviour.
 
-### Persistence Layer
-
-MPM intentionally standardizes on SQLite. Transactions, FTS5, JSON support, WAL mode, and portability are sufficient for the project's design goals. Additional infrastructure is added only when SQLite can no longer satisfy those goals.
-
-### 5.1 Core vs Runtime
+### 6.1 Core vs Runtime
 
 ```
                     MPM
@@ -458,23 +461,9 @@ The distinction is important. The Core describes what the agent knows. The Runti
 
 Mature systems often owe their longevity to having a very small, stable core. Every feature that lives in Core must earn its place through years of usage evidence, not through the effort it took to build. Features that fail to justify themselves are removed. Engineers are sentimental about code; the regret log and disciplined review break that sentiment.
 
-### 5.2 Confidence Engine
+### 6.2 Confidence Engine
 
-The Confidence Engine computes and tracks the system's belief in each artifact.
-
-#### Formula
-
-```
-confidence
-  = initial(type)
-  + supporting evidence
-  − contradicting evidence
-  − decay(time)
-
-bounded to [0, 1]
-```
-
-This is forever-drifting. The authoritative implementation lives in `internal/confidence/`.
+The Confidence Engine computes and tracks the system's belief in each artifact. The principles are stated in §3.3. This section is the **shape** — the evidence registry, the source-of-truth split, and the operations the agent can call. The mechanics (recompute atomicity, trigger wiring, transaction boundaries) live in Appendix C.
 
 #### Evidence Registry
 
@@ -498,42 +487,30 @@ Initial confidence is also fixed by artifact type:
 | decision | 0.6 |
 | lesson | 0.7 |
 
-#### Atomicity
-
-`add_evidence` and confidence-history-triggered recomputes run inside a single SQLite transaction (`WithTx` over `DBNode`). If the recompute fails (e.g. CHECK constraint violation on `confidence_history.trigger`), the evidence INSERT rolls back with it — no orphan evidence rows, no confidence column updated without a matching history row.
-
-#### Triggers
-
-SQLite triggers wire the recompute path on memory mutations. The `memories_ai` / `memories_au` / `memories_ad` triggers fire on insert / update / delete; the `confidence_history.trigger` column enforces valid trigger metadata.
-
-#### Caching
+#### Source of truth + cache
 
 The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `query_confidence_history` derives its view from evidence, not the cached column.
 
-#### Invariants
+This is one of the four enforcement patterns that make MPM's guarantees stick. See **Appendix C** for the rest (property tests, AST guard rails, self-heal whitelist + escalation).
 
-- More positive evidence never decreases confidence.
-- Decay never increases confidence.
-- Cached confidence is always `f(evidence, decay)` at most-recent recompute.
+### 6.3 Retrieval Architecture
 
-These invariants live in `internal/confidence/properties_test.go` — when the formula changes, the tests stay green and the meaning survives.
+MPM combines four signals:
 
-### 5.3 Retrieval Architecture
+- **Keyword ranking** — SQLite FTS5 with BM25.
+- **Semantic similarity** — 768-dim embeddings, cosine distance.
+- **Reinforcement history** — how often a memory has been re-surfaced and re-used.
+- **Recency** — when the memory was last reinforced.
 
-MPM combines:
-
-- SQLite FTS5 (BM25 ranking)
-- Semantic embeddings (cosine similarity, 768d via `nomic-embed-text`)
-- Reinforcement history
-- Recency scoring
-
-**Hybrid scoring** (in `internal/hybrid_search.go`):
+The hybrid score is a weighted sum:
 
 ```
 score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
 ```
 
-BM25 unbounded scores are sigmoid-normalized. Use `--semantic` for pure embedding search.
+BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals live on a comparable scale before combining. Use `--semantic` to drop BM25 and search by embedding similarity alone.
+
+> **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
 
 **Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing reinforcement contribution, weight contribution, recency age, and the FTS5 terms that matched. Useful for "why did the agent pick this memory?" introspection without re-running the search.
 
@@ -552,7 +529,7 @@ Concept drift detection — autonomously identifying paradigm shifts where histo
 
 When a drifting memory triggers this signature, the engine quarantines the memory (sets `concept_drift: true`), proposes a pending theory, and survives restarts via SQLite-native dedup. Drift detection is pure-SQLite — no separate process, no separate timer, no panic-recovery surface to maintain. A drift missed last query is just as catchable next query.
 
-### 5.4 MCP Integration
+### 6.4 MCP Integration
 
 MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`bin/mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. No plugin layer, no Node/TypeScript wrapper, no Python shim — one binary speaking MCP.
 
@@ -607,16 +584,16 @@ digest_wakes             health_check
 
 Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The server binary is at `bin/mpm-mcp` relative to the MPM repo root.
 
-#### Single source of truth: `internal/tools/registry.go`
+#### Single source of truth: `internal/core/tools/registry.go`
 
-Both the CLI (`mpm call <tool>`) and the MCP server iterate the same registry — a package-level `[]Tool` slice in `internal/tools/registry_list.go`. Each entry holds:
+Both the CLI (`mpm call <tool>`) and the MCP server iterate the same registry — a package-level `[]Tool` slice in `internal/core/tools/registry_list.go`. Each entry holds:
 
 - `Name` — the tool identifier (used by both surfaces)
 - `Description` — short prose shown to MCP clients
 - `Schema` — JSON-Schema (raw bytes, parseable by both surfaces)
 - `Handler` — `func(dm *DatabaseManager, ac *ActiveContext, payload map[string]interface{}) (interface{}, error)`. Same function called by both surfaces.
 
-Adding a new tool: write `handleFoo` in `internal/tools/handlers.go` (one function), append a `Tool{...}` entry in `internal/tools/registry_list.go`. Both the CLI dispatcher and the MCP server pick it up automatically.
+Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one function), append a `Tool{...}` entry in `internal/core/tools/registry_list.go`. Both the CLI dispatcher and the MCP server pick it up automatically.
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
@@ -637,139 +614,72 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
-### 5.5 Multi-Agent Shared Epistemology
+### 6.5 Multi-Agent Shared Epistemology
 
-Multiple agents on a single workstation can share a single source of truth for house rules, cross-project decisions, and durable conventions, while keeping their per-project tactical memories isolated. The substrate: SQLite `ATTACH DATABASE`. The behavior is a **five-layer stack** that turns the shared DB from passive storage into an active dissemination system.
+Multiple agents on a single workstation can share a single source of truth for house rules, cross-project decisions, and durable conventions, while keeping their per-project tactical memories isolated. The substrate is SQLite `ATTACH DATABASE`. The behavior is a **five-layer stack** that turns the shared DB from passive storage into an active dissemination system.
 
 **Why SQLite ATTACH, not Postgres, not a separate service.** The design contract is single-workstation scope. SQLite ATTACH gives the architecture without adding a server, a network boundary, or a new failure mode. The trade-off is no cross-DB transactions — accepted because rule writes are append-mostly and operator-gated.
 
-#### Layer 0 — Federation (atomic epics `6aee1d7`, `61a8418`, `433dd9f`, `c4ba2aa`)
+#### Layer 0 — Federation
 
-Each workspace has its own `mpm.db` (per-project tactical memory). On `DatabaseManager` init, a second database — `~/.mpm/shared/shared.db` by default — is ATTACHed as the `shared` schema. Cross-DB queries become plain SQL:
+Each workspace has its own `mpm.db` (per-project tactical memory). A second database, `~/.mpm/shared/shared.db`, is ATTACHed as the `shared` schema. Cross-DB queries become plain SQL.
 
-```sql
-SELECT m.id, m.content, 'shared' AS source
-FROM shared.memories m
-WHERE m.deleted_at IS NULL AND m.is_global = 1
-```
+The shared DB uses the **same table schema** as the local DB. Migrations apply to both DBs at startup. FTS5 sync triggers keep the shared FTS5 mirror in lockstep with the shared tables. `getDB()` is a per-process singleton, so one ATTACH, one connection, no leak surface.
 
-The shared DB uses the **same table schema** as the local DB (full schema, not a subset). Migrations apply to both DBs at startup via the existing `SafeMigrations` framework. The `is_global` column on `memories` marks rows that originated as shared rules; local writes always set 0, shared writes always set 1.
+`query_long_term_memory` federates across both DBs with a multiplicative Shared Premium: `score = base × 1.20` for shared results, `score = base × 1.35` when the shared row also matches a rule. The boost only applies to rows that already pass the base relevance threshold — house rules outrank noisy local memories without being able to invent matches.
 
-**FTS5 sync triggers.** `61a8418` installed cross-DB triggers that keep the shared FTS5 mirror in lockstep with the shared tables on every INSERT/UPDATE/DELETE. Local FTS5 is unaffected. The triggers are idempotent (`CREATE TRIGGER IF NOT EXISTS`) and live in the shared DB itself, so a fresh process picks them up at attach time without a separate migration step.
+Writing to shared (`record_global_rule`, `promote_to_global`) requires `confirm=true` in the tool payload. The agent cannot autonomously extend the shared rule set — only the operator can.
 
-**Singleton dispatcher.** `c4ba2aa` migrated every `cmd/mpm/` call site off per-handler `sql.Open` calls onto a single `getDB()` accessor backed by a per-process `DatabaseManager`. One ATTACH, one connection, no leak surface.
+#### Layer 1 — Shared Vector Search
 
-**Configuration.**
+Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs an in-SQLite IVF (Inverted File) ANN index — no separate vector database, no CGo, no parallel files. The index partitions the 768-dim embedding space into Voronoi cells, then restricts each query to the nearest few. A circuit breaker caps worst-case work.
 
-| Env var | Effect |
-|---|---|
-| `MPM_SHARED_DB` | Path to the shared DB. If unset or path missing, shared features are disabled (local-only mode). |
-| `MPM_SHARED_READONLY` | If `1`, attach in read-only mode. Default: read+write. |
+#### Layer 2 — Conflict Detection
 
-**Shared Premium.** `query_long_term_memory` federates across both DBs with a multiplicative boost for shared results: `score = base × 1.20` (shared) and `score = base × 1.35` (shared + matches a rule). House rules outrank noisy local memories without being able to *invent* matches — the boost only applies to rows that already pass the base relevance threshold.
+When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `query_long_term_memory`'s result set** — opportunistic, not polled. There is no background ticker, no daemon, no separate timer.
 
-**What lives in shared vs local.** Shared = house rules that should apply across projects ("never expose secrets", "always tag migrations with rationale", "use the FTS5 tokenizer `porter unicode61`"). Local = everything else: project-specific facts, session state, tactical context, theories tied to local artifacts.
+If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
 
-**Operator gate.** Writing to shared (`record_global_rule`, `promote_to_global`) requires `confirm=true` in the tool payload. Without it the call is rejected. The agent cannot autonomously extend the shared rule set — only the operator can.
-
-#### Layer 1 — Shared Vector Search (atomic epic `2ff0bda`)
-
-Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs an in-SQLite IVF (Inverted File) ANN index — no separate vector database, no CGo, no parallel files. The index partitions the 768-dim embedding space into `nlist=16` Voronoi cells, then restricts a query to the `nprobe=4` nearest cells. Speedup vs. brute-force cosine: ~3–4× at this corpus size, with negligible recall loss.
-
-The IVF index is shared-DB native: `shared.memory_vectors_ivf` stores centroid + posting list pairs. The `VectorMatch` circuit breaker (`61a8418`) refuses to start a vector scan that would touch more than `nlist × nprobe` centroids, capping the worst-case work. Together with the singleton dispatcher, the cross-DB retrieval path is one SQLite query, one connection, no IPC.
-
-#### Layer 2 — Conflict Detection (atomic epic `3fb2b75`)
-
-When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface: every shared write that produces a near-miss against an existing memory is logged with a confidence margin and provenance links. Detection runs inside `query_long_term_memory`'s result set, so detection is **opportunistic, not polled** — there is no background ticker, no daemon, no separate timer.
-
-**Protobuf-shape scoring.** A candidate conflict's confidence is computed as `0.5·confidence + 0.3·freshness + 0.2·reinforcement`, bounded to `[0, 1]`. The 50/30/20 split is intentional: confidence dominates (what the system believes the artifact says), freshness catches stale knowledge that hasn't been reinforced, and reinforcement counts act as a tiebreaker for facts that get re-surfaced often.
-
-**Close-call margin.** If the two candidates in a near-miss land within `0.10` of each other on the protobuf score, the system **does not** auto-resolve. It writes a `pending` row in `shared.theories` (cross-DB theories, surfaced via the same Theory infrastructure as local ones) and waits for an operator. The asymmetry is deliberate: a clean winner can be auto-resolved; a coin-flip always escalates.
-
-#### Layer 3 — Conflict Resolution + Arbitration Closure (atomic epics `3fb2b75`, `8bfe737`)
+#### Layer 3 — Conflict Resolution + Arbitration Closure
 
 When a contradiction resolves, the system doesn't just delete the loser. It writes a **resolution memory** capturing the choice and rationale, marks the queue resolved, and — as of the Arc 1 Closure epic — appends an evidence row to the winner.
 
-**Resolution-as-evidence asymmetry.** Only the winner gets the `resolution_survived` evidence row (`strength=1.0`, `source_group='resolution:<queue_id>'`). The loser is tagged with `operator_arbitration` and the originating `arbitration_theory` ID in its metadata, then archived. A memory that has survived N contradictions accumulates 1.0×N supporting evidence in its confidence ledger — the system is literally rewarded for being right under pressure.
+**Resolution-as-evidence asymmetry.** Only the winner gets the `resolution_survived` evidence row. The loser is tagged with `operator_arbitration` and the originating theory ID in its metadata, then archived. A memory that has survived N contradictions accumulates 1.0×N supporting evidence in its confidence ledger — the system is literally rewarded for being right under pressure.
 
-**Arbitration auto-slash.** When the operator resolves an arbitration theory via `mpm resolve_theory <id> <conclusion> --winner=<memory_id>`, the system: (1) writes the resolution memory, (2) marks the queue resolved, (3) updates the theory status, and (4) tags the loser with the operator's verdict — all in one transaction. The asymmetric evidence write, the queue update, and the theory resolution happen together; the loop closes.
+The arbitration auto-slash loop closes when the operator resolves a pending theory: the resolution memory, the queue update, the asymmetric evidence write, and the theory status flip all happen in one transaction. The loop is closed.
 
-Operators also auto-broadcast (Layer 4): every `record_global_rule --confirm=true`, `resolve-contradictions --apply`, and `resolve_theory --winner=<id>` is the side-effect hook for active dissemination.
+#### Layer 4 — Active Dissemination
 
-#### Layer 4 — Active Dissemination (atomic epic `efec046`)
-
-Arc 1 made the shared DB write and self-heal — resolutions land as memories, evidence strengthens the winner, arbitration closes the close-call path. But receiving agents had no idea any of this happened unless they ran a search that surfaced the resolution. Arc 2 fixes that.
+Arc 1 made the shared DB write and self-heal. But receiving agents had no idea any of this happened unless they ran a search that surfaced the resolution. Arc 2 fixes that.
 
 When an epistemic event lands (rule, resolution, arbitration), it **fans out** as a deterministic event-wake to every active session. Receiving agents see the new state on their next MPM call without going through the federated search at all. The shared DB is no longer passive; it actively pushes its own updates.
 
-**Three new shared tables** (the `bcast_` prefix avoids colliding with the local `sessions` table from BaseTables):
+The dedup mechanism is a deterministic SHA-256 prefix used as the PRIMARY KEY of `shared.bcast_event_wakes`. `INSERT OR IGNORE` is the dedup mechanism — database-level, O(1), race-free. Re-broadcasting the same content is a no-op. A rule body text change fires a new wake; a metadata-only update does not.
 
-| Table | Purpose |
-|---|---|
-| `shared.bcast_sessions` | Active-agent registry. Every MPM call silently bumps `last_heartbeat`. Discovery = `SELECT WHERE last_heartbeat > now - 24h`. |
-| `shared.bcast_event_wakes` | The fan-out surface. `wake_id` is a deterministic sha256 prefix and the PRIMARY KEY → `INSERT OR IGNORE` for O(1) dedup with no application-level state. |
-| `shared.bcast_agents` | Cross-reboot identity cache. |
+Three operator commands (`record_global_rule --confirm=true`, `resolve-contradictions --apply`, `resolve_theory --winner=<id>`) trigger auto-broadcast as a strict side-effect of the explicit gate. Auto-broadcasts are **non-fatal**: a broadcast failure does NOT roll back the underlying write. The resolution is ground truth; the broadcast is the notification. Internal agent writes (without an operator gate) do NOT trigger broadcasts.
 
-**Deterministic dedup.** `wake_id = sha256(memory_id + ":" + target_session + ":" + content_hash)[:12]` — 48 bits of entropy, ~10¹⁴ unique IDs before 50% collision probability. The PRIMARY KEY is the dedup mechanism: re-broadcasting the same content is a database-level no-op, not an application-level check. `content_hash = sha256(content + "|" + sorted(tags))` — a rule body's text change fires a new wake, but a metadata-only update (e.g., `status=challenged`) does not.
-
-**The fan-out command.**
-
-```bash
-mpm ops broadcast <memory_id> \
-  [--kind=rule|resolution|arbitration|memory] \
-  [--rationale="..."] \
-  [--to=agent_id,...] \
-  [--dry-run] [--json]
-```
-
-Discovery:
-
-- With `--to`: validate each target agent has a session in the last 24h; refuse if any target is offline (silent skip would be worse than false "broadcast succeeded").
-- Without `--to`: `SELECT session_id, agent_id FROM shared.bcast_sessions WHERE last_heartbeat > now - 24h` — the full active fleet.
-
-Per target: compute `wake_id`, `INSERT OR IGNORE INTO shared.bcast_event_wakes ...`. Self-skip by `session_id` match (no self-echo).
-
-**Auto-broadcast hooks.** Three operator commands trigger automatic broadcasts as a strict side-effect of the explicit `--confirm` / `--apply` / `--winner` flag. Auto-broadcasts are **non-fatal**: a broadcast failure does NOT roll back the underlying write. The resolution is ground truth; the broadcast is the notification.
-
-| Command | What auto-broadcasts |
-|---|---|
-| `mpm ops record_global_rule --confirm=true` | The new rule |
-| `mpm ops resolve-contradictions --apply` | The resolution memory |
-| `mpm resolve_theory <id> <conclusion> --winner=<id>` | The operator's arbitration verdict |
-
-Internal agent writes (without an operator gate) do NOT trigger broadcasts.
-
-**The receive path.**
+**The receive path:**
 
 ```bash
 mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
 ```
 
-Mirrors `check_wakes`: atomic `SELECT` + `UPDATE fired=1` in one transaction. Idempotent across concurrent callers. The dispatcher also pulls event wakes opportunistically after every handler returns, so the agent sees them on every MPM call without an explicit pull. New rules, resolutions, and arbitration verdicts surface inline as an `EventWakesPending` block in the response — next to `WakesPending` for local scheduled tasks.
+The dispatcher pulls pending event wakes after every handler returns, so the agent sees them on every MPM call without an explicit pull. New rules, resolutions, and arbitration verdicts surface inline as an `EventWakesPending` block in the response.
 
-**Wake payload format.** Every wake carries: `wake_id` (deterministic sha256 prefix), `source_agent`, `memory_id`, `kind`, `content_hash`, `rationale` (the WHY — non-negotiable), `created_at` (unix epoch). The full memory content is NOT in the wake — signal, not transport. 100-target fan-out ≈ 100KB, not 10MB. The receiving agent does its own `mpm query memory <id>` if it needs the full text.
+**Why push, not pull.** Federation is pull: an agent decides to query, the system responds. Event wakes are push: the shared DB has decided something changed, and the change is **already in the agent's wake context** on the next call. No search, no cold-start, no missed signal — even a fresh process picks up pending wakes immediately.
 
 #### Operational notes
 
-- **Cross-DB transactions are NOT supported.** Every shared write is its own atomic transaction on the shared DB. This is fine for the use case (rule records are append-mostly and operator-gated).
-- **WAL mode on both DBs** allows concurrent local writers without blocking.
-- **A drift missed last query is just as catchable next query.** Detection and fan-out are both opportunistic.
-- **Cold-start does NOT replay old wakes.** `query_long_term_memory` handles history; event wakes are real-time push only.
+- Cross-DB transactions are NOT supported. Every shared write is its own atomic transaction on the shared DB.
+- WAL mode on both DBs allows concurrent local writers without blocking.
+- A drift missed last query is just as catchable next query. Detection and fan-out are both opportunistic.
+- Cold-start does NOT replay old wakes. `query_long_term_memory` handles history; event wakes are real-time push only.
 
-#### See also
-
-- `docs/arc-2-design.md` — full Arc 2 design with schema, payload schema, fan-out semantics
-- `internal/core/broadcast.go` — runtime substrate
-- `internal/core/contradiction_log.go` — Arc 1 detect/resolve/arbitrate
-- `internal/core/hybrid_search.go` — federated scoring + Shared Premium
-- `internal/core/vector_index.go` — IVF shared vector search
-- `scripts/smoke_arc1.sh`, `scripts/smoke_arc2.sh` — end-to-end proof of the full loop
-- The eight atomic epics: `6aee1d7` (federation) → `433dd9f` (architecture split) → `61a8418` (FTS sync + singleton) → `c4ba2aa` (singleton migration) → `2ff0bda` (IVF) → `3fb2b75` (Arc 1) → `8bfe737` (Arc 1 closure) → `efec046` (Arc 2)
-
+For the DDL, fan-out algorithm, auto-broadcast hooks, tests, and smoke behind this stack, see **Appendix A** (Layers 0-3) and **Appendix B** (Layer 4).
 
 ---
 
-## 6. Core Stability
+## 7. Core Stability
 
 The following concepts define MPM. They should change rarely.
 
@@ -808,7 +718,7 @@ Default to no. The threshold for adding is high. The threshold for removing is t
 
 ---
 
-## 7. CLI Reference
+## 8. CLI Reference
 
 The CLI is a convenience surface. The machine-to-machine interface is `mpm call <tool> --payload JSON`. The CLI calls the same handlers internally.
 
@@ -964,7 +874,7 @@ mpm debug gc [--dry-run]
 
 ---
 
-## 8. Runtime Services
+## 9. Runtime Services
 
 The Runtime is where MPM evolves. Services documented here are intentionally decoupled from Core — they may be redesigned, replaced, or removed without invalidating existing knowledge.
 
@@ -1004,7 +914,7 @@ PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 6
 
 `mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
 
-### Scheduled Wakes (Phase 5a — Stateless, Opportunistic)
+### Scheduled Wakes (Stateless, Opportunistic)
 
 The agent can defer work to a future moment with `mpm call schedule_wake` and have the reminder surface automatically on the next call. No cron daemon, no background ticker, no long-lived process — the database is the queue, the dispatcher is the trigger.
 
@@ -1020,9 +930,9 @@ mpm call schedule_wake --payload '{
 
 The "agent has initiative" effect: any subsequent `mpm call` (CLI or MCP) that lands after `target_time` surfaces the wake inline as a `WakesPending` block in the response. The agent sees it, evaluates the reason, optionally schedules the next round. No missed reminders even if the agent is asleep — the next call after the target picks it up, marked with `overdue_secs` for honest accounting.
 
-Companion tools: `check_wakes`, `list_wakes`, `mpm__check_wakes`. Architecture: `scheduled_wakes` table + composite index `scheduled_wakes_due(fired, target_time)` + FTS5 virtual table for content search. `CheckPendingWakes` runs in a single transaction (idempotent across concurrent callers).
+Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` table + composite index `scheduled_wakes_due(fired, target_time)` + FTS5 virtual table for content search. `CheckPendingWakes` runs in a single transaction (idempotent across concurrent callers).
 
-**Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so mpm-mcp cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
+**Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 
 ### Event Wakes — Active Dissemination (Arc 2)
 
@@ -1048,11 +958,13 @@ mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
 | `created_at` | Unix epoch |
 | `fired` | Boolean; flipped to 1 by `CheckPendingEventWakes` in a transaction |
 
-**Why this is different from a pull-based `query_global_rules`.** Federation (`Layer 0` in §5.5) is pull: an agent decides to query, the system responds. Event wakes are push: the shared DB has decided something changed, and the change is **already in the agent's wake context** on the next call. No search, no cold-start, no missed signal — even a fresh process picks up pending wakes immediately.
+**Why this is different from a pull-based `query_global_rules`.** Federation (Layer 0 in §6.5) is pull: an agent decides to query, the system responds. Event wakes are push: the shared DB has decided something changed, and the change is **already in the agent's wake context** on the next call. No search, no cold-start, no missed signal — even a fresh process picks up pending wakes immediately.
 
-**Auto-broadcast hooks.** Three operator commands trigger automatic broadcasts as a strict side-effect of the explicit `--confirm` / `--apply` / `--winner` flag. Auto-broadcasts are **non-fatal**: a broadcast failure does NOT roll back the underlying write. The resolution is ground truth; the broadcast is the notification. See §5.5 Layer 4 for the architecture and §5.5 Layer 3 for how the underlying rule/resolution/arbitration actually lands.
+**Auto-broadcast hooks.** Three operator commands trigger automatic broadcasts as a strict side-effect of the explicit `--confirm` / `--apply` / `--winner` flag. Auto-broadcasts are **non-fatal**: a broadcast failure does NOT roll back the underlying write. The resolution is ground truth; the broadcast is the notification. See §6.5 Layer 4 for the architecture and §6.5 Layer 3 for how the underlying rule/resolution/arbitration actually lands.
 
 **Why the deterministic ID is the entire architecture.** Without the PRIMARY KEY, dedup is an application-level check: SELECT then INSERT, with a TOCTOU race. With the PRIMARY KEY, dedup is a database-level guarantee: `INSERT OR IGNORE` is atomic, idempotent, and O(1). The whole receiver-correctness story is the deterministic ID; the rest is plumbing.
+
+For the schema, fan-out algorithm, test matrix, and smoke behind this section, see **Appendix B**.
 
 ### Ephemeral Scratchpad (Working Thesis Storage)
 
@@ -1068,8 +980,6 @@ A per-session scratchpad for hypotheses that aren't ready for permanent memory. 
 | `promote_scratchpad` | Atomically promote to permanent memory. |
 
 **The atomic rollback is the entire point.** `promote_scratchpad` runs the security scanner against the synthesized memory *inside* the same transaction as the memory INSERT and the scratchpad DELETE. If the scanner rejects (poison-phrase match, sensitive content, etc.), the entire transaction aborts: the scratchpad row survives for the agent to amend, and no memory row is created. A thought that fails the scanner is **not lost** — it is preserved for revision.
-
-Live verification (2026-07-06): flushing a scratchpad with an AWS API key fixture, then calling `promote_scratchpad`, returns the scanner's rejection with the scratchpad intact and zero memory rows containing the pattern. The scanner is wired at every promotion boundary, not just this one.
 
 **Wake-context orphan surfacing.** A scratchpad from a session that never promoted becomes an *orphan* on the next wake. `read_wake_context` includes an aggregate header (Fresh / Dormant / Expired counts) and a truncated thesis preview for each orphan. The agent's options: `promote_scratchpad` (commit), `flush_scratchpad` (amend), or `discard_scratchpad` (abandon). This closes the "agent crashed mid-thought" gap — even a process kill between flush and promote doesn't lose the work.
 
@@ -1100,7 +1010,9 @@ The `proactive_recall_hint` engine also elevates directive-adjacent memories whe
 
 #### Baseline Cognitive Bootstrap
 
-For fresh installs, MPM ships a small set of reference directives in `internal/seed/directives.go` that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See the Quick Start §4 step above for context.
+For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
+
+> **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
 ### Modes & Personas (File-Based)
 
@@ -1150,7 +1062,7 @@ Proactive defense against the silent-failure class of bugs where hand-curated fr
 
 ### Security Scanning
 
-Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by `internal/scanner_coverage_test.go` — a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
+Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
 
 **Auth policy:** `mpm web` defaults to **fail-closed** — if `web_token` is unset, the server refuses to start. Pass `--allow-anonymous` to opt in for trusted-LAN debugging; the server prints a loud warning and sets `X-MPM-Auth: disabled-anonymous` on every response.
 
@@ -1181,9 +1093,11 @@ The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLik
 
 ---
 
-## 9. Reliability
+## 10. Reliability
 
 MPM is designed for long-running autonomous operation: SQLite WAL mode, dead-letter queues, synthesis isolation, retry pipelines, event replay buffers, watchdog telemetry, overflow protection, and a closed self-healing integrity loop.
+
+The four enforcement patterns (source-of-truth + cache, property tests, AST guard rails, self-heal whitelist + escalation) live in **Appendix C**. This section is the operator-facing view: what runs, when, and what to do when it fails.
 
 ### Self-Healing Integrity Loop
 
@@ -1305,13 +1219,13 @@ Raw audit events are the *nervous system* of the substrate, but a single error d
 
 | Layer | What | Where |
 |---|---|---|
-| Write | Atomic UPSERT into `audit_cluster_proposals` on every `LogAudit` call. Rolling 7d window. Default threshold: 3 events. | `internal/audit.go::upsertClusterCounter` |
-| Read | Deduped view partitioned into `known` (cluster_key in any pending theory / recent decision / resolved theory) vs `unknown`. Surfaced as a tiered string in `read_wake_context`. | `internal/cluster_proposals.go::ActiveClusters` + `internal/wake_context.go::auditSummaryRich` |
-| Act | `mpm call list_active_clusters` returns structured JSON (cluster_key strings) so the agent can triage at session end. Three management verbs (snooze / resolve / annotate) close the loop on each proposal. The bootstrap directive instructs the agent to carry critical unknown cluster_keys into `session_handoff.open_questions` so they survive the 7d rolling decay. | `internal/tools/handlers.go::handleListActiveClusters` + `internal/seed/directives.go::SeedDirective` |
+| Write | Atomic UPSERT into `audit_cluster_proposals` on every `LogAudit` call. Rolling 7d window. Default threshold: 3 events. | `internal/core/audit.go::upsertClusterCounter` |
+| Read | Deduped view partitioned into `known` (cluster_key in any pending theory / recent decision / resolved theory) vs `unknown`. Surfaced as a tiered string in `read_wake_context`. | `internal/core/cluster_proposals.go::ActiveClusters` + `internal/core/wake_context.go::auditSummaryRich` |
+| Act | `mpm call list_active_clusters` returns structured JSON (cluster_key strings) so the agent can triage at session end. Three management verbs (snooze / resolve / annotate) close the loop on each proposal. | `internal/core/tools/handlers.go::handleListActiveClusters` |
 
-Tunables centralized in `internal/cluster_proposals.go`: `ClusterThreshold`, `ClusterWindowDays`, and the status constants (`active` / `snoozed` / `resolved`).
+Tunables centralized in `internal/core/cluster_proposals.go`: `ClusterThreshold`, `ClusterWindowDays`, and the status constants (`active` / `snoozed` / `resolved`).
 
-**Three management verbs — the wire format enforces the distinction.** These are not interchangeable; the JSON-Schema for each is mutually exclusive (e.g. `snooze_until` is required for `snooze_cluster`, forbidden for `resolve_cluster`). The AST guard rail (`TestSchemaSupersetOfHandlerPayloadReads`) locks the contract.
+**Three management verbs — the wire format enforces the distinction.** These are not interchangeable; the JSON-Schema for each is mutually exclusive (e.g. `snooze_until` is required for `snooze_cluster`, forbidden for `resolve_cluster`). The AST guard rail (Appendix C, Pattern 3) locks the contract.
 
 | Verb | State change | Reversible? | When to use |
 |---|---|---|---|
@@ -1319,7 +1233,7 @@ Tunables centralized in `internal/cluster_proposals.go`: `ClusterThreshold`, `Cl
 | `resolve_cluster` | `status='resolved'` permanently | no (forensic-preserving) | Root cause is known and fixed; cluster will never re-surface |
 | `annotate_cluster` | none — append-only audit row | n/a | Insight arrives on its own schedule; record it for forensics without changing disposition |
 
-`annotate_cluster` is the unusual one: it **cannot** back-door a reactivation. The DM layer writes only to `system_audit_log`, never to `audit_cluster_proposals.status` / `snooze_until` / `count`. The invariant is enforced at the data layer and tested explicitly (`TestAnnotateCluster_DoesNotMutateClusterRow`). This is the right shape for "I learned something about this cluster later" — the historical insight is preserved without altering the disposition the previous operator chose.
+`annotate_cluster` is the unusual one: it **cannot** back-door a reactivation. The DM layer writes only to `system_audit_log`, never to `audit_cluster_proposals.status` / `snooze_until` / `count`. The invariant is enforced at the data layer and tested explicitly. This is the right shape for "I learned something about this cluster later" — the historical insight is preserved without altering the disposition the previous operator chose.
 
 `snooze_until` accepts both Go-relative (`24h`, `7d`, `1h30m`) and ISO 8601 absolute; the DB stores normalized RFC3339 for filter comparison.
 
@@ -1338,50 +1252,532 @@ mpm call read_wake_context
 
 ---
 
-## 10. Glossary
+## 11. Glossary
+
+The conceptual vocabulary of MPM. Implementation-specific terms (decay, wake, LTM, recency, challenge lifecycle) are defined where they appear, not here. The glossary is for understanding the architecture, not for looking up every noun.
 
 **Artifact.** A persistent cognitive object: Memory, Decision, Theory, Lesson, or Evidence. Each has its own lifecycle.
-
-**Challenge.** The act of marking a memory as questionable. Creates a linked theory; the memory's weight weakens atomically.
 
 **Confidence.** A derived `[0, 1]` estimate of how much the system believes an artifact. Computed from supporting evidence minus contradicting evidence minus time decay. The stored `confidence` column is a cache; the evidence ledger is authoritative.
 
 **Core.** The small, stable part of MPM: Memories, Decisions, Theories, Lessons, Evidence, Confidence. Changes here require demonstrated usage evidence.
 
-**Decay.** Automatic reduction of confidence over time without reinforcement.
-
 **Decision.** A choice with explicit context, the choice made, and the rationale.
 
 **Evidence.** A piece of information that supports or challenges another artifact. Confidence is derived from the evidence ledger.
 
-**LTM (Long-Term Memory).** A memory that has reached `weight ≥ 10` — high enough to be considered permanent institutional knowledge.
-
 **Memory.** A general fact, observation, or synthesized insight.
-
-**Recency bonus.** A retrieval scoring term that prefers recent memories for time-sensitive queries.
 
 **Runtime.** The evolvable part of MPM: wake, scheduling, personas, modes, directives, routing, audit, review. Changes here are cheap; changes to Core are not.
 
 **Theory.** A testable hypothesis with explicit validation criteria. Theories have lifecycle states: pending → confirmed | disproven.
 
-**Wake.** A scheduled reminder stored in `scheduled_wakes`. Surfaces on the next MPM call after `target_time`.
+---
+
+# Appendices
+
+The appendices are part of this document. They hold the implementation detail that contributors and curious readers will reach for. The narrative above stays focused on architecture and philosophy; the details live below.
+
+If you only care about *what* MPM is and *how to use it*, stop at §10. If you are extending MPM, writing tests, or reviewing invariants, continue.
 
 ---
 
-## Non-goals
+# Appendix A: Shared Epistemology Implementation
 
-MPM is intentionally not:
+**Cross-references:** §6.5 Layers 0-3, §10 (audit cluster proposals, where applicable).
 
-- a knowledge graph
-- a workflow engine
-- an autonomous planner
-- a distributed memory service
-- a replacement for agent reasoning
-- an infinitely extensible plugin framework
+This appendix is the deep dive behind §6.5. The narrative above says *what*; this section says *how*. The atomic-epic hashes in each section header let you find the original commit if a future change makes prose stale.
 
-Those may be built on top of MPM. They are not part of the Core.
+## A.1 Layer 0 — Federation
 
-Explicit non-goals give the project permission to say no. The discipline comes from stating what we refuse to become.
+**Atomic epics:** `6aee1d7` (federation), `61a8418` (FTS sync + singleton), `433dd9f` (architecture split), `c4ba2aa` (singleton migration).
+
+### The two databases
+
+- **Local DB** — `~/.mpm/<workspace>/mpm.db`. Per-project tactical memory.
+- **Shared DB** — `~/.mpm/shared/shared.db`. Cross-project house rules, operator-gated.
+
+Each MPM process attaches both via `ATTACH DATABASE '<shared_path>' AS shared`. Cross-DB queries become plain SQL: `SELECT … FROM shared.memories WHERE …`. There is no separate service, no IPC, no serialization layer.
+
+### Shared Premium (the score boost)
+
+```
+shared rule match:                score = base × 1.20
+shared rule that also matches
+  a query_global_rules scan:      score = base × 1.35
+local memory:                     score = base × 1.00
+```
+
+The boost is multiplicative, not additive. House rules outrank noisy local memories without being able to *invent* matches — the boost only applies to rows that already pass the base relevance threshold. A bad rule can't bury good local facts by sheer score.
+
+### FTS5 sync triggers
+
+Local FTS5 is unaffected. Shared FTS5 (`shared.memories_fts`) is kept in lockstep with `shared.memories` via three triggers:
+
+```sql
+CREATE TRIGGER IF NOT EXISTS shared.shared_memories_ai
+AFTER INSERT ON shared.memories
+BEGIN
+    INSERT INTO shared.memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS shared.shared_memories_ad
+AFTER DELETE ON shared.memories
+BEGIN
+    INSERT INTO shared.memories_fts(shared.memories_fts, rowid, content, tags) VALUES('delete', old.rowid, old.content, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS shared.shared_memories_au
+AFTER UPDATE ON shared.memories
+BEGIN
+    INSERT INTO shared.memories_fts(shared.memories_fts, rowid, content, tags) VALUES('delete', old.rowid, old.content, old.tags);
+    INSERT INTO shared.memories_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags);
+END;
+```
+
+The triggers are idempotent (`IF NOT EXISTS`) and live in the shared DB itself, so a fresh process picks them up at attach time without a separate migration step. The "already exists" warnings on subsequent attaches are harmless.
+
+### The `is_global` column
+
+`shared.memories.is_global` marks rows that originated as shared rules:
+
+- Local writes always set `is_global = 0` (never the local write path).
+- `record_global_rule` always sets `is_global = 1`.
+- `promote_to_global` flips it on an existing memory.
+
+This is the audit trail: any `is_global = 1` row was either created by the operator (`record_global_rule --confirm=true`) or explicitly promoted (`promote_to_global`).
+
+### Configuration
+
+| Env var | Effect |
+|---|---|
+| `MPM_SHARED_DB` | Path to the shared DB. If unset or path missing, shared features are disabled (local-only mode). |
+| `MPM_SHARED_READONLY` | If `1`, attach in read-only mode. Default: read+write. |
+
+### Concurrency
+
+- **SQLite ATTACH is per-connection.** Each MPM instance attaches its own connection.
+- **WAL mode on both DBs** allows concurrent local writers without blocking.
+- **Cross-DB transactions are NOT supported.** Every shared write is its own atomic transaction on the shared DB. This is fine because shared writes are append-mostly and operator-gated.
+- **`getDB()` singleton** (`c4ba2aa`) means one `DatabaseManager` per process, one ATTACH, one connection, no leak surface.
+
+### What lives in shared vs local
+
+| Lives in shared | Lives in local |
+|---|---|
+| House rules (cross-project conventions) | Project-specific facts |
+| Cross-project decisions | Session state |
+| Durable operator rules | Tactical context |
+| Resolution/arbitration memory (the audit trail of "what we decided") | Theories tied to local artifacts |
+| Federated contradiction log | Workspace-specific lessons |
+
+## A.2 Layer 1 — Shared Vector Search
+
+**Atomic epic:** `2ff0bda` (IVF).
+
+### Why IVF in SQLite, not a vector DB
+
+The shared DB holds house rules. Semantic recall over them is the operator's only escape hatch from "I know the rule exists but I don't remember the exact wording." The choices were:
+
+1. Brute-force cosine over the shared DB.
+2. An external vector database (Qdrant, Milvus, etc.).
+3. An in-SQLite ANN index.
+
+MPM chose (3). The constraint was "no daemon, no new service, no parallel infrastructure." The in-SQLite IVF satisfies that: it lives in `shared.memory_vectors_ivf`, is queried via the same `DatabaseManager` connection, and survives restarts without re-loading.
+
+### The IVF structure
+
+```
+nlist  = 16           # number of Voronoi cells
+nprobe = 4            # cells visited per query
+dim    = 768          # nomic-embed-text output
+```
+
+A query:
+
+1. Computes the embedding of the query text (768d).
+2. Finds the `nprobe=4` nearest centroids (out of 16 cells) by cosine distance.
+3. Returns the union of `postings[centroid]` — the actual memory IDs in those cells.
+4. Brute-force cosine within the returned set, sorted descending.
+
+Speedup vs. brute-force: ~3-4× at this corpus size, with negligible recall loss (the nprobe/nlist ratio is tuned to the embedding model + corpus size).
+
+### The VectorMatch circuit breaker
+
+The `VectorMatch` circuit breaker refuses to start a vector scan that would touch more than `nlist × nprobe` centroids. The breaker caps worst-case work and prevents runaway scans if the index is corrupted or the centroids are wildly imbalanced.
+
+## A.3 Layer 2 — Conflict Detection
+
+**Atomic epic:** `3fb2b75` (Arc 1: Conflict Resolution loop).
+
+### The detection surface
+
+`shared.contradiction_log` is the queue. Every shared write that produces a near-miss against an existing memory is logged with:
+
+- `memory_id_a`, `memory_id_b` (the symmetric pair, not winner/loser)
+- The provenance link that flagged the near-miss
+- The detection timestamp
+- The protobuf-shape score for each side
+- The resolution status (`pending` / `resolved` / `arbitration_needed`)
+
+The detection runs **inside `query_long_term_memory`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no daemon, no panic-recovery surface.
+
+### Protobuf-shape scoring
+
+```
+score = 0.5·confidence + 0.3·freshness + 0.2·reinforcement
+```
+
+Bounded to `[0, 1]`. The 50/30/20 split is intentional:
+
+- **confidence (0.5)** dominates — what the system currently believes the artifact says.
+- **freshness (0.3)** catches stale knowledge that hasn't been reinforced. A rule from 2024-01-01 with weight=5 scores lower on freshness than one from 2026-07-07 with the same weight.
+- **reinforcement (0.2)** is a tiebreaker for facts that get re-surfaced often.
+
+### The close-call margin
+
+If the two candidates in a near-miss land within `0.10` of each other on the protobuf score, the system **does not** auto-resolve. It writes a `pending` row in `shared.theories` and waits for an operator. The asymmetry is deliberate:
+
+- A clean winner can be auto-resolved (low risk).
+- A coin-flip always escalates (high risk, operator judgment required).
+
+## A.4 Layer 3 — Conflict Resolution + Arbitration Closure
+
+**Atomic epics:** `3fb2b75` (Arc 1), `8bfe737` (Arc 1 Closure).
+
+### applyResolution
+
+When a contradiction resolves (either by auto-resolve or operator action), `applyResolution` performs four operations in a single transaction:
+
+1. **Write a resolution memory** — captures the choice and rationale as a new `shared.memories` row.
+2. **Mark the queue resolved** — UPDATE the `shared.contradiction_log` row with `resolved_at` and `resolution_memory_id`.
+3. **Append evidence to the winner** — INSERT a `shared.evidence` row tagged `type='resolution_survived'`, `strength=1.0`, `source_group='resolution:<queue_id>'`, `independence_factor=1.0`. Asymmetric: only the winner, not the loser.
+4. **Tag the loser with arbitration metadata** — patch the loser's metadata with `status='archived'`, `operator_arbitration=true`, and (if applicable) `arbitration_theory=<id>`.
+
+The asymmetric evidence write is the entire reward mechanism. A memory that has survived N contradictions accumulates 1.0×N supporting evidence in its confidence ledger — the system is literally rewarded for being right under pressure.
+
+### ResolveArbitrationTheory (the operator path)
+
+When the operator resolves an arbitration theory via `mpm resolve_theory <id> <conclusion> --winner=<memory_id>`, the system does the same four operations, but:
+
+- The metadata flip is done via `UpdateSharedMemoryMetadata` (not `applyResolution`'s path) because arbitration theories live in `shared.memories`, not in the local theories table.
+- The loser is tagged with `operator_arbitration=true` and the originating `arbitration_theory` ID in its metadata.
+- The theory status flips to `resolved` (or `disproven` depending on conclusion).
+
+### JSON-merge gotcha
+
+SQLite's `||` operator on JSON columns is **plain string concat**, not JSON merge. The naive `metadata = COALESCE(metadata, '{}') || ?` produces `{"status":"pending"}{"status":"resolved",…}` — invalid JSON, `json_extract` returns the old value.
+
+Fix: read existing metadata, deep-merge in Go (`UpdateSharedMemoryMetadata` helper), write the merged result. Patch keys win on collision. This is the single most important SQLite-specific lesson from the Arc 1 closure; it's reapplied in `broadcast.go` for the same reason.
+
+### The arbitration auto-slash loop
+
+```
+operator:  mpm resolve_theory <arbitration_id> <conclusion> --winner=<memory_id>
+    ↓
+mpm resolve_theory handler
+    ↓
+ResolveArbitrationTheory(arbitrationID, winnerID, conclusion)
+    ↓ (single transaction)
+    ├── write resolution memory
+    ├── mark queue resolved
+    ├── UpdateSharedMemoryMetadata(loser) → status=archived, operator_arbitration=true, arbitration_theory=<id>
+    ├── UpdateSharedMemoryMetadata(winner) → confidence bump
+    ├── Append resolution_survived evidence row
+    └── UpdateSharedMemoryMetadata(arbitration_theory) → status=resolved
+    ↓
+Auto-broadcast hook (Appendix B, Layer 4)
+    ↓
+INSERT wake rows for every active session except the broadcaster
+```
+
+The loop closes. The auto-broadcast hook is the final step — every other piece of state is updated atomically; the broadcast is a side-effect notification.
+
+## A.5 End-to-end smoke
+
+`scripts/smoke_arc1.sh` (8 steps, all green):
+
+1. Seed two contradictory rules into the shared DB.
+2. Run `mpm ops resolve-contradictions` (dry-run) — see the queue.
+3. Apply one with `--apply` — auto-resolves, writes resolution memory, asymmetric evidence row.
+4. Verify the winner has the `resolution_survived` evidence row.
+5. Verify the loser has `status='archived'` and `operator_arbitration=true` in its metadata.
+6. Create a close-call contradiction.
+7. Run `mpm ops resolve-contradictions` on the close-call — should write a `pending` arbitration theory, not auto-resolve.
+8. Operator resolves the arbitration theory with `mpm resolve_theory <id> <conclusion> --winner=<id>` — verifies the auto-slash loop.
+
+## A.6 What "shared" means in practice
+
+A memory is shared if `is_global = 1`. A contradiction is shared if its `memory_id_a` / `memory_id_b` both have `is_global = 1`. A resolution memory is shared if the originating queue was shared. A theory is shared if it was created from a shared contradiction.
+
+The asymmetry: local contradictions are NOT written to `shared.contradiction_log`. They stay in the local theories table and are surfaced via local wake context. The shared log is exclusively for cross-project house rules, where one agent's local belief might contradict another's — that's the case that needs federated resolution.
+
+---
+
+# Appendix B: Arc 2 (Active Dissemination) Implementation
+
+**Cross-references:** §6.5 Layer 4, §9 "Event Wakes."
+
+This appendix is the runtime deep dive behind Arc 2. The narrative above says *what* the layer does; this section says *how* it does it.
+
+Arc 2 is shipped at `efec046` (2026-07-07). All smoke tests + unit tests green. The pre-implementation design rationale is preserved in the commit message and the `arc-2-design.md` history entry (no longer a living document — superseded by this appendix).
+
+## B.1 Schema (as-built)
+
+```sql
+-- Active-agent registry. Every MPM call silently bumps last_heartbeat.
+CREATE TABLE IF NOT EXISTS shared.bcast_sessions (
+    session_id      TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    hostname        TEXT,
+    first_seen_at   TEXT NOT NULL,
+    last_heartbeat  TEXT NOT NULL,
+    total_calls     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS shared.idx_bcast_sessions_heartbeat
+    ON bcast_sessions(last_heartbeat);
+
+-- The fan-out surface. PRIMARY KEY on wake_id → O(1) dedup.
+CREATE TABLE IF NOT EXISTS shared.bcast_event_wakes (
+    wake_id         TEXT PRIMARY KEY,    -- sha256(memory_id + ":" + target + ":" + content_hash)[:12]
+    target_session  TEXT NOT NULL,
+    source_agent    TEXT NOT NULL,
+    memory_id       TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK(kind IN ('rule','resolution','arbitration','memory')),
+    content_hash    TEXT NOT NULL,
+    rationale       TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    fired           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS shared.idx_bcast_wakes_target
+    ON bcast_event_wakes(target_session, fired);
+CREATE INDEX IF NOT EXISTS shared.idx_bcast_wakes_memory
+    ON bcast_event_wakes(memory_id, created_at);
+
+-- Cross-reboot identity cache.
+CREATE TABLE IF NOT EXISTS shared.bcast_agents (
+    agent_id            TEXT PRIMARY KEY,
+    first_seen_at       TEXT NOT NULL,
+    last_session_id     TEXT,
+    total_heartbeats    INTEGER NOT NULL DEFAULT 0,
+    total_broadcasts    INTEGER NOT NULL DEFAULT 0
+);
+```
+
+**Why the `bcast_` prefix.** `internal/core/schema.go` installs a local `sessions` table into the shared DB on attach via `rewriteTablePrefix(ddl, "shared.")`. Renaming Arc 2's tables with the `bcast_` prefix avoids a silent collision (CREATE TABLE IF NOT EXISTS would have been a no-op for the second one).
+
+## B.2 The wake_id math
+
+```
+wake_id       = sha256(memory_id + ":" + target_session + ":" + content_hash)[:12]
+content_hash  = sha256(content + "|" + sorted(tags))
+```
+
+- **48 bits of entropy** (`12 hex chars × 4 bits = 48 bits`) → ~10¹⁴ unique IDs before 50% collision probability (birthday bound).
+- **PRIMARY KEY, not UNIQUE INDEX** → `INSERT OR IGNORE` is the dedup mechanism at the storage layer. No app-level check, no TOCTOU race.
+- **content_hash includes only (content + sorted tags).** A rule body text change → new content_hash → new wake_id → new wake fires. A metadata-only update (e.g., `status=challenged`) does NOT change the content_hash, so re-broadcasts are no-ops. This matches the rule that the receiver doesn't need to re-hear the same content because of bookkeeping churn.
+
+## B.3 Fan-out algorithm (Go-side)
+
+```
+func BroadcastMemory(memoryID string, opts BroadcastOpts) (BroadcastReport, error):
+    1. Resolve memory: SELECT content, tags FROM shared.memories WHERE id = memoryID
+    2. Compute content_hash = sha256(content + "|" + sorted(tags))
+    3. Discover active sessions:
+         a. With opts.ToAgents: lookup agent_id → session_id pairs; refuse any offline target
+         b. Without:           SELECT session_id, agent_id FROM shared.bcast_sessions
+                                 WHERE last_heartbeat > now - 24h
+    4. For each active target:
+         a. If target.session_id == opts.SourceSessionID: continue  (self-skip)
+         b. wake_id = sha256(memoryID + ":" + target.session_id + ":" + content_hash)[:12]
+         c. INSERT OR IGNORE INTO shared.bcast_event_wakes (..., fired=0)
+         d. If rows affected == 0: deduped++; else new++
+    5. Return BroadcastReport{MemoryID, Kind, ContentHash, Targets, NewWakes, DedupedWakes}
+```
+
+## B.4 Auto-broadcast hooks
+
+Three operator commands trigger auto-broadcast as a strict side-effect of an explicit gate. **All three are non-fatal**: a broadcast failure does NOT roll back the underlying write. The resolution is ground truth; the broadcast is the notification.
+
+| Command | What auto-broadcasts | Implementation site |
+|---|---|---|
+| `mpm ops record_global_rule --confirm=true` | The new rule (kind=rule) | `internal/core/tools/handlers.go::handleRecordGlobalRule` |
+| `mpm ops resolve-contradictions --apply` | The resolution memory (kind=resolution, source=arc1-resolver) | `internal/core/contradiction_log.go::ResolveOneContradiction` |
+| `mpm resolve_theory <id> <conclusion> --winner=<id>` | The arbitration verdict (kind=arbitration, source=arc1-arbitrator) | `internal/core/contradiction_log.go::ResolveArbitrationTheory` |
+
+Internal agent writes (without an operator gate) do NOT trigger broadcasts. The asymmetry is deliberate — auto-broadcasts are a notification, not a control surface.
+
+## B.5 Receive path
+
+```
+mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
+```
+
+Mirrors `check_wakes`:
+
+```sql
+WITH pending AS (
+    SELECT wake_id, ... FROM shared.bcast_event_wakes
+    WHERE target_session = ? AND fired = 0
+    ORDER BY created_at ASC LIMIT 100
+)
+UPDATE shared.bcast_event_wakes SET fired = 1
+WHERE wake_id IN (SELECT wake_id FROM pending)
+RETURNING *;
+```
+
+The CTE-updating-read pattern is atomic — concurrent callers see disjoint wake_id sets.
+
+**Opportunistic fold.** `cmd/mpm/call.go` calls `CheckPendingEventWakes(ac.SessionID)` after every handler returns and folds the result into the `EventWakesPending` block on the response. So every MPM call surfaces pending event wakes automatically, without an explicit pull.
+
+## B.6 Wake payload shape
+
+| Field | Meaning |
+|---|---|
+| `wake_id` | Deterministic sha256 prefix — receiver uses for idempotency |
+| `source_agent` | Who broadcast (operator + agent ID) |
+| `memory_id` | What to fetch — receiver does its own `mpm query memory <id>` if it needs the full text |
+| `kind` | `rule` / `resolution` / `arbitration` / `memory` |
+| `content_hash` | Receiver-side drift detection |
+| `rationale` | The WHY (non-negotiable) |
+| `created_at` | Unix epoch |
+
+The full memory content is NOT in the wake — signal, not transport. 100-target fan-out ≈ 100KB total, not 10MB. The receiving agent does its own `mpm query memory <id>` if it needs the full text. If we ever need a "firehose" mode, that's a separate `--include-content` flag and a separate review.
+
+## B.7 Tests (12 unit tests, all green)
+
+- Heartbeat lifecycle: `TestHeartbeat_FirstCallInserts` / `TestHeartbeat_SecondCallBumps` / `TestHeartbeat_ZeroHeartbeats`
+- Discovery: `TestDiscoverActiveSessions_FiltersExpired` — 24h window
+- Dedup: `TestBroadcastMemory_DeterministicID` — same input → same wake_id, dedupe counter
+- Drift: `TestBroadcastMemory_DifferentContent` — content change → new wake_id
+- Targeting: `TestBroadcastMemory_TargetedFanout` / `TestBroadcastMemory_RejectsOfflineTargets` — `--to` semantics
+- Pickup: `TestCheckPendingEventWakes_MarksFired` — atomic pickup + idempotency
+- Dry-run: `TestBroadcastMemory_DryRun` — populates report, writes 0 rows
+- Rationale: `TestBroadcastMemory_AutoExtractResolutionRationale` — kind=resolution auto-builds rationale
+- Validation: `TestBroadcastMemory_RejectsNoRationale` — kind=memory without `--rationale` refused
+- Self-skip: `TestBroadcastMemory_SkipsSelf` — source session not in target list
+
+End-to-end: `scripts/smoke_arc2.sh` (6 steps: heartbeat → seed → broadcast → dedup → cross-agent → pickup).
+
+## B.8 SQLite limitations discovered
+
+Documented in the Arc 2 implementation lesson:
+
+1. `CREATE INDEX shared.idx ON shared.table(col)` is rejected when shared is attached ("near '.': syntax error"). Workaround: prefix INDEX NAME with `shared.`, use bare table name.
+2. `CREATE TABLE IF NOT EXISTS shared.X` is ACCEPTED (the opposite of indexes — easy to confuse).
+3. `FOREIGN KEY ... REFERENCES shared.X` is rejected with the same syntax error. Workaround: drop the FK, treat as advisory.
+4. `sessions` and `agents` collide with the local BaseTables. The `bcast_` prefix avoids this.
+5. SQLite `||` is plain string concat, not JSON merge. Already documented from Arc 1 closure — reapplied in `broadcast.go` for metadata writes.
+
+## B.9 Operational notes
+
+- **Cross-DB transactions are NOT supported.** Each `INSERT OR IGNORE` is its own transaction on the shared DB.
+- **WAL mode on both DBs** allows concurrent local writers without blocking.
+- **Heartbeat is passive.** Every MPM call writes a heartbeat via `cmd/mpm/call.go`'s pre-handler. Optional `mpm ops heartbeat` exists for tooling that doesn't run agents.
+- **Cold-start does NOT replay old wakes.** `query_long_term_memory` handles history; event wakes are real-time push only.
+- **Self-skip is by session_id, not agent_id.** An agent running in multiple sessions gets the wake in each one (except the broadcasting one).
+
+---
+
+# Appendix C: Enforcement Patterns
+
+**Cross-references:** §3.2 (Design Principles), §6.2 (Confidence Engine), §10 (Reliability, audit cluster proposals, self-heal).
+
+The README states invariants in prose. This appendix is where the enforcement patterns live. Every claim of "this is guaranteed" in MPM maps to one of the patterns below. Once you have internalized these, the architecture reads differently — every "X is enforced" statement in the body of the document is one of these four patterns in a costume.
+
+## C.1 Pattern 1: Source-of-truth + derived cache
+
+**The principle:** If two values could disagree, exactly one of them is authoritative. The other is a derived cache that can be regenerated.
+
+**The canonical example — confidence.**
+
+The `confidence` column on `memories` is a performance cache. The evidence ledger (`shared.evidence` + `local.evidence`) is the source of truth. If they disagree, the cache is wrong.
+
+How this is enforced:
+
+- `add_evidence` recomputes confidence in the same transaction as the evidence INSERT. If recompute fails (e.g., CHECK constraint on `confidence_history.trigger`), the entire transaction rolls back — no orphan evidence rows, no stale confidence.
+- `recompute_confidence` triggers a manual recompute from the evidence ledger.
+- `query_confidence_history` derives its view from evidence, not the cached column.
+
+**The invariant:** `confidence = f(evidence, decay) at most-recent recompute`.
+
+## C.2 Pattern 2: Property tests over implementation tests
+
+**The principle:** Where the formula drifts but the meaning is fixed, test the meaning, not the formula.
+
+**Why this matters.** If a property test says "decay never increases confidence" and you change the decay function from `linear` to `exponential`, the property test stays green. If a unit test says `assert(decay(0) == 1.0)`, it breaks the moment you tune the curve. The properties are forever-true; the formulas are forever-drifting.
+
+**MPM properties pinned this way:**
+
+- More positive evidence never decreases confidence.
+- Decay never increases confidence.
+- Cached confidence always matches `f(evidence, decay)` at most-recent recompute.
+- `mpm ops gc` never shreds a memory with `weight >= 0` (regardless of the threshold).
+- The decision ledger is append-only (no UPDATE on `record_decision` rows after insert).
+
+The confidence properties are pinned in `internal/core/confidence_test.go`. When the formula changes, the tests stay green and the meaning survives.
+
+## C.3 Pattern 3: AST guard rails
+
+**The principle:** When a contract spans a JSON-Schema and a handler, the AST enforces it. A test asserts that the JSON-Schema is a strict superset of the keys the handler reads — so the schema can never lie about what the handler will accept.
+
+**The canonical example — audit cluster verbs.**
+
+`snooze_cluster`, `resolve_cluster`, and `annotate_cluster` are three different verbs with three different state-transition semantics. A buggy JSON-Schema (e.g., accepting `snooze_until` on `resolve_cluster`) would let the caller invoke a snooze while thinking they're resolving. The wire format is the safety boundary.
+
+How this is enforced:
+
+- `TestSchemaSupersetOfHandlerPayloadReads` walks every tool's JSON-Schema and every handler's payload reads, asserting the schema is a strict superset of the handler's keys.
+- Schema validation at the boundary rejects malformed payloads before they reach the handler.
+
+**Why this matters more than the example.** A reader of the audit-cluster code can reason about each verb in isolation; the schema validation is the thing that prevents the verbs from accidentally being confused. The contract is encoded in the type system, not the prose.
+
+## C.4 Pattern 4: Self-heal whitelist + escalation
+
+**The principle:** Auto-fix only what's known-safe. Escalate everything else.
+
+**The canonical example — self-heal drift classification.**
+
+`mpm ops self-heal` runs `runDeepScanCheck` and classifies drift into three classes:
+
+| Class | Detection query | Behavior |
+|---|---|---|
+| Soft-delete ghosts | `memories_fts` rows whose joined `memories` row has `deleted_at IS NOT NULL` | **Auto-fix** (known-safe) |
+| FTS orphans | Any `*_fts` row whose rowid is missing from the source table | **Escalate** (unknown) |
+| Dangling memberships | `topic_memberships` referencing non-existent topics | **Escalate** (unknown) |
+
+**Four safety boundaries on auto-fix:**
+
+1. **Whitelist-only** — only soft-delete ghosts are auto-fixed.
+2. **Bounded blast radius** — if ghost count exceeds `SelfHealMaxFix` (default 1000), refuse to auto-fix and escalate.
+3. **Rate-limited** — 24h cooldown between same-signature auto-fixes.
+4. **Audit trail** — every auto-fix writes a `lessons` table entry tagged `source=self-heal`.
+
+**Why the asymmetry.** Soft-delete ghosts are the only drift class where we have a precise model of the correct state AND a proven-safe mechanism that should have produced that state. For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug or the source-table row is the bug. Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate.
+
+The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
+
+## C.5 When to use which pattern
+
+| Invariant type | Use |
+|---|---|
+| Value is derivable from another value | Pattern 1 (source-of-truth + cache) |
+| Property holds across all formulas, current and future | Pattern 2 (property tests) |
+| Contract spans JSON-Schema and handler | Pattern 3 (AST guard rail) |
+| Drift detected in the substrate | Pattern 4 (whitelist + escalate) |
+
+**Pattern 1 + Pattern 2 together:** confidence is a derived cache (Pattern 1), and the formula that derives it is pinned by property tests, not unit tests (Pattern 2). The combination means: even if someone rewrites the entire confidence engine, the system stays correct.
+
+**Pattern 3 + Pattern 4 together:** audit clusters are protected from schema confusion (Pattern 3) and self-heal is protected from guesswork (Pattern 4). Both patterns reject the "let the system figure it out" trap.
+
+## C.6 What these patterns reject
+
+- **Auto-fix by inference.** "If the FTS row is missing, the source table must be the bug" — sometimes true, sometimes catastrophic. Pattern 4 rejects this.
+- **Lying schemas.** A JSON-Schema that accepts `snooze_until` on `resolve_cluster` would let callers confuse the two. Pattern 3 rejects this.
+- **Stale caches as truth.** A `confidence` column that disagrees with the evidence ledger is, by definition, a bug. Pattern 1 rejects this.
+- **Brittle unit tests on forever-drifting formulas.** A test that pins `assert(decay(0) == 1.0)` breaks the moment the formula changes. Pattern 2 rejects this.
+
+The discipline is the same in every case: when in doubt, escalate. The agent's wake context is the escalation surface. The user's attention is the final arbiter.
 
 ---
 
