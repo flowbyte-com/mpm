@@ -484,7 +484,7 @@ var Registry = []Tool{
 		// "30m", "7d"). recurring_rule is stored as a hint; the agent
 		// itself is responsible for re-scheduling (no daemon parses it).
 		Name:        "schedule_wake",
-		Description: "Schedule a future wake: writes a row to scheduled_wakes. Any subsequent MPM call after target_time surfaces it as WakesPending in the response. Stateless — no daemon, no cron. Use theory_id to bind the wake to a pending theory.",
+		Description: "Schedule a future wake: writes a row to scheduled_wakes. Any subsequent MPM call after target_time surfaces it as WakesPending in the response. Stateless — no daemon, no cron. target_time accepts a unix epoch (seconds), a relative duration ('24h', '30m', '7d', '1d'), or an ISO-8601 timestamp ('2026-07-12T12:00:00Z'). Use theory_id to bind the wake to a pending theory.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"},"target_time":{"type":"string"},"theory_id":{"type":"string"},"recurring_rule":{"type":"string"},"metadata":{"type":"object"}},"required":["reason","target_time"]}`),
 		Handler:     handleScheduleWake,
 	},
