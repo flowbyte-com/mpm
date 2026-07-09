@@ -664,7 +664,11 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		})
 	}
 
-	return map[string]interface{}{
+	// Cold-start sweep: check for wakes that came due while the system
+	// was offline. The agent sees these immediately on boot — no need to
+	// wait for the next tool call to trigger the opportunistic fold.
+	wakes, wErr := dm.CheckPendingWakes(time.Now())
+	result := map[string]interface{}{
 		"success":            true,
 		"session_id":         data.SessionID,
 		"active_mode":        data.ActiveMode,
@@ -675,7 +679,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		"audit_summary":      data.AuditSummary,
 		"last_handoff":       data.LastHandoff,
 		"scratchpad_orphans": data.ScratchpadOrphans,
-	}, nil
+	}
+	if wErr == nil && len(wakes) > 0 {
+		result["wakes_pending"] = wakes
+		result["wakes_pending_count"] = len(wakes)
+	}
+	_ = wErr // CheckPendingWakes errors are non-fatal here
+
+	return result, nil
 }
 
 // callReadDirectives returns prime directives.
