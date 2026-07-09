@@ -25,7 +25,7 @@ import (
 
 	"time"
 
-	"github.com/flowbyte-com/mpm-core"
+	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
 )
 
@@ -39,7 +39,7 @@ const emptyWakeContext = "Wake context is empty. Ready for context."
 // This replaces the previous 35-line s.AddTool(...) block plus 30
 // handle*() adapter functions — both have been moved to the registry
 // or the single mcpAdapter closure below.
-func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac internal.ActiveContext, router *internal.Router) {
+func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router) {
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {
 			continue // registered below with the live router closure
@@ -82,7 +82,7 @@ func RegisterAllTools(s *server.MCPServer, dm *internal.DatabaseManager, ac inte
 //
 // No arg-rewriting, no type assertions, no per-tool boilerplate. The
 // 30+ previous handle*() functions collapsed to this single closure.
-func mcpAdapter(dm *internal.DatabaseManager, ac internal.ActiveContext, handler tools.HandlerFunc) server.ToolHandlerFunc {
+func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.HandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		payload := req.GetArguments()
 		if payload == nil {
@@ -92,18 +92,56 @@ func mcpAdapter(dm *internal.DatabaseManager, ac internal.ActiveContext, handler
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
 		}
-		// Opportunistic wake fold (Phase 5a): mirror the CLI dispatcher's
-		// fold at the MCP adapter so MCP clients see the same wake
-		// surfacing behavior. Without this, MCP clients would have to
-		// call check_wakes explicitly between every other call.
+
+		// Opportunistic wake fold (Phase 5a): check for due wakes and append
+		// a visually distinct XML notification block. Uses the raw JSON text
+		// for the primary content so any client that doesn't understand the
+		// wake block still gets clean machine-readable output.
+		var jsonText string
 		if resultMap, ok := result.(map[string]interface{}); ok {
-			if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
-				resultMap["WakesPending"] = due
-				resultMap["WakesPendingCount"] = len(due)
+			b, jErr := json.Marshal(resultMap)
+			if jErr != nil {
+				jsonText = fmt.Sprintf("%q", fmt.Sprintf("%v", result))
+			} else {
+				jsonText = string(b)
 			}
-			result = resultMap
+		} else {
+			b, jErr := json.Marshal(result)
+			if jErr != nil {
+				jsonText = fmt.Sprintf("%q", fmt.Sprintf("%v", result))
+			} else {
+				jsonText = string(b)
+			}
 		}
-		return jsonResult(result), nil
+
+		// Build the content array: [wake notification?, json result]
+		//
+		// Block order matters: the wake notification (if any) is prepended
+		// as Block 1 so it is the first thing the LLM reads, never lost
+		// to truncation or "lost in the middle" syndrome when a tool
+		// returns a large payload. The JSON tool result is Block 2.
+		content := []mcp.Content{
+			mcp.TextContent{
+				Type: mcp.ContentTypeText,
+				Text: jsonText,
+			},
+		}
+
+		if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
+			notification := core.FormatWakeNotification(due)
+			// Prepend the notification as Block 1 so it is the very
+			// first content the LLM sees. Build a new slice rather than
+			// inserting at index 0 to keep the code obvious.
+			prepended := make([]mcp.Content, 0, len(content)+1)
+			prepended = append(prepended, mcp.TextContent{
+				Type: mcp.ContentTypeText,
+				Text: notification,
+			})
+			prepended = append(prepended, content...)
+			content = prepended
+		}
+
+		return &mcp.CallToolResult{Content: content}, nil
 	}
 }
 
@@ -111,7 +149,7 @@ func mcpAdapter(dm *internal.DatabaseManager, ac internal.ActiveContext, handler
 // route closes over the *Router (constructed once at server boot),
 // which is not in the registry because the registry has no router
 // reference. Every other tool uses the generic mcpAdapter.
-func makeRouteHandler(router *internal.Router) server.ToolHandlerFunc {
+func makeRouteHandler(router *core.Router) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		prompt, _ := req.GetArguments()["prompt"].(string)
 		if prompt == "" {
