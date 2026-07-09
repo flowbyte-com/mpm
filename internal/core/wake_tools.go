@@ -560,3 +560,46 @@ func nullableInt64(p *int64) interface{} {
 	}
 	return *p
 }
+
+// FormatWakeNotification renders due/overdue wakes as an XML system notification
+// block. LLMs parse bounded XML-style markers reliably, keeping the wake signal
+// visually distinct from the tool's actual output without requiring custom
+// per-client annotation parsing.
+//
+// Each wake entry includes: id (truncated), reason (up to 80 chars), and
+// overdue_secs so the agent can autonomously triage (alert immediately,
+// archive as stale, etc.).
+func FormatWakeNotification(wakes []map[string]interface{}) string {
+	if len(wakes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n<system_wake_notification>\n")
+	b.WriteString("Scheduled tasks now due:")
+	b.WriteString("\n")
+	for _, w := range wakes {
+		id := maxRunes(w["id"].(string), 8)
+		reason := ""
+		if r, ok := w["reason"].(string); ok {
+			reason = maxRunes(r, 80)
+		}
+		overdueSecs := int64(0)
+		if o, ok := w["overdue_secs"].(int64); ok {
+			overdueSecs = o
+		} else if o, ok := w["overdue_secs"].(float64); ok {
+			overdueSecs = int64(o)
+		}
+		b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n", id, reason, overdueSecs))
+	}
+	b.WriteString("</system_wake_notification>\n")
+	return b.String()
+}
+
+// maxBytes truncates s to max rune count, appending U+2026 if trimmed.
+func maxRunes(s string, max int) string {
+	// runes: count in actual characters, not bytes
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
