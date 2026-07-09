@@ -19,8 +19,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
 	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -35,7 +41,26 @@ import (
 
 func main() {
 	logging.Setup()
-	slog.Info("mpm-mcp starting")
+
+	// Acquire the single-instance lock before opening the database.
+	// If another mpm-mcp already holds the lock, we are an orphan
+	// from a previous gateway cycle and must yield the slot — exit
+	// 0 silently so the gateway does not interpret this as a crash.
+	pidfilePath := PidfilePath()
+	if err := AcquirePidfile(pidfilePath); err != nil {
+		if errors.Is(err, ErrOrphan) {
+			slog.Info("mpm-mcp: another live instance holds the lock; exiting", "err", err)
+			os.Exit(0)
+		}
+		log.Fatalf("mpm-mcp: pidfile: %v", err)
+	}
+	// Release the lock on any exit path: graceful shutdown via
+	// signal, panic, or normal return. The PID check inside
+	// ReleasePidfile means we only ever remove a file we own.
+	pidfileAcquired = true
+	defer ReleasePidfileOnExit(pidfilePath)
+
+	slog.Info("mpm-mcp starting", "pidfile", pidfilePath)
 	workspace := mpmcli.ResolveWorkspace()
 
 	dm, err := internal.NewDatabaseManager(workspace)
@@ -55,7 +80,34 @@ func main() {
 	s := server.NewMCPServer("mpm-mcp", "0.1.0")
 	RegisterAllTools(s, dm, ac, router)
 
-	if err := server.ServeStdio(s); err != nil {
+	// Translate SIGTERM/SIGINT into a context cancellation so the
+	// stdio server can shut down cleanly. The defer above releases
+	// the pidfile; the order matters — we want the lock removed
+	// AFTER the database is closed.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	if err := server.ServeStdio(s); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("mpm-mcp: serve stdio: %v", err)
+	}
+	_ = ctx
+}
+
+// pidfileAcquired is the package-level latch set by main() once
+// AcquirePidfile succeeds. ReleasePidfileOnExit reads it to decide
+// whether the defer chain actually holds a lock to release — this
+// prevents a defer that runs before the acquire from trying to
+// remove a pidfile we never wrote.
+var pidfileAcquired bool
+
+// ReleasePidfileOnExit is the deferred helper called on every exit
+// path. It is a no-op if AcquirePidfile did not succeed, and on
+// success it removes the pidfile only if it still points at us.
+func ReleasePidfileOnExit(path string) {
+	if !pidfileAcquired {
+		return
+	}
+	if err := ReleasePidfile(path); err != nil {
+		fmt.Fprintf(os.Stderr, "mpm-mcp: release pidfile: %v\n", err)
 	}
 }
