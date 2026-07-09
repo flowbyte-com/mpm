@@ -95,6 +95,27 @@ var SeedDirectives = []SeedDirective{
 		Tags:     []string{"prime_directive", "cluster", "auditing", "session_lifecycle", "2026-07-02"},
 		Content: "Before session_end: call list_active_clusters. For each unknown cluster that represents an unresolved critical failure, include its cluster_key and a one-line context note in the open_questions payload of session_end. This is how clusters survive the 7-day rolling-window decay — the agent explicitly carries forward what matters across session boundaries (and across vacations). Do NOT carry forward clusters that are snoozed (status=snoozed), resolved (status=resolved), or whose cluster_key appears in an active theory/decision (those are already tracked; re-mentioning is noise). Do NOT mix cluster_keys into commitments — commitments are promises of future labor, clusters are unresolved state of the system. The two fields have different semantics.",
 	},
+	{
+		// The wake-triage directive. Closed-loop: CheckPendingWakes
+		// runs on every tool call (and on read_wake_context at boot),
+		// surfacing due/overdue scheduled tasks as a prepended
+		// <system_wake_notification> block in the MCP Content array.
+		// Without an explicit triage rule the agent has no deterministic
+		// way to decide whether to alert the user about a wake that
+		// fired while the system was offline — or whether to silently
+		// archive it. The default policy below is a 24-hour staleness
+		// threshold; below the threshold the wake is timely and should
+		// interrupt the user, above it the wake is stale and should be
+		// archived via mpm call record_global_rule (with a brief note
+		// to the user that it expired). Critical wakes (marked with
+		// a 'critical' or 'urgent' tag in the reason) bypass the
+		// staleness threshold and always interrupt — see decision
+		// memory 0de920abbef2c6f9 for the original Spain WC theory
+		// that motivated the wake infrastructure.
+		StableID: "mpm-seed-wake-triage-policy",
+		Tags:     []string{"prime_directive", "wake", "triage", "notification", "2026-07-09"},
+		Content: "When receiving a <system_wake_notification> block in any MCP tool response (it is always Block 1, prepended before the tool's JSON result):\n\n1. Parse each entry. Each entry has id, reason, and overdue_secs.\n\n2. Triage rule: if overdue_secs <= 86400 (24 hours), alert the user IMMEDIATELY before continuing whatever they were doing. The wake is timely. Include the wake reason verbatim or paraphrased.\n\n3. If overdue_secs > 86400, the wake is stale. DO NOT interrupt the user with the obsolete notification. Silently archive it by calling mpm call record_global_rule with a brief fact explaining why it expired (e.g. \"Spain WC theory wake fired 5 days late; resolved manually as theory is now in active tracking\"). Then continue the conversation as if the wake had not fired.\n\n4. Exception: if the wake's reason text contains the words 'critical', 'urgent', or 'immediate' (case-insensitive), it bypasses the 24-hour threshold and ALWAYS interrupts the user, regardless of overdue_secs. These are time-sensitive operational signals, not background reminders.\n\n5. The <system_wake_notification> is delivered on EVERY tool call, not just scheduled_wake-related ones. This is the opportunistic fold: any user interaction surfaces due wakes. Do not be confused into thinking the wake is part of the tool's actual output — the XML block is a system interrupt prepended to the response.",
+	},
 }
 
 // ContentHash returns a stable SHA-256 fingerprint of the directive's
