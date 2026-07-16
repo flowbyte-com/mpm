@@ -92,6 +92,28 @@ systemctl --user status mpm-scheduler    # verify
 mpm ops init directives
 ```
 
+The **Baseline Cognitive Bootstrap** is MPM's internal "operating manual" — a
+set of prime directives that close MPM's cognitive loops:
+
+- Read `wake_context` on every session start (no amnesia).
+- Triage `list_active_clusters` at session end (vacation-proof audit survival).
+- Triage wake notifications deterministically (don't surprise the user; don't
+  silently drop).
+- Use `mpm call save_to_memory` / `query_long_term_memory` for persistent
+  cognition rather than re-deriving from scratch.
+
+Without these directives, MPM's advanced machinery (audit-cluster detection,
+wake-context surfacing, theory-driven repair) has no behavioral hooks and
+silently no-ops. The command is **idempotent** — safe to re-run; existing
+directives are detected by stable ID and skipped. Local edits to a seeded
+directive are preserved; the run report flags drift so you can reconcile
+manually.
+
+These directives live in MPM's SQLite database (`directives` table),
+distinct from the OpenClaw workspace files (`AGENTS.md`, `SOUL.md`, etc.)
+covered in §4. Both need to be set up for the full closed loop. See
+`internal/core/seed/directives.go` for the canonical seed registry.
+
 ---
 
 ## 3. Wire MPM into OpenClaw
@@ -181,6 +203,15 @@ layers:
 Use `MEMORY.md` for "who am I and what do I know about my user". Use MPM for
 "what does the agent believe, why, and with what evidence". They complement
 each other — neither replaces the other.
+
+**There's also a third layer: MPM's prime directives** — seeded by
+`mpm ops init directives` (see §2). These live in MPM's database
+(`directives` table) and surface via `mpm call read_directives` on every
+wake. They're MPM-internal "operating manual" — the cognitive hooks that
+make wake_context, cluster triage, and wake notification handling actually
+fire. The full agent stack has all three layers: workspace files (who the
+agent is) + MPM directives (how MPM's machinery hooks in) + MPM memories
+(what the agent believes).
 
 ---
 
