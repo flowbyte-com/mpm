@@ -14,7 +14,7 @@ Core capabilities (the "Epistemology Engine"):
 - **Sessions** — operational context for resuming work
 - **Challenges** — workflow for self-correcting stale knowledge
 
-Everything lives in a single SQLite database (`src/db/mpm.db`) — no server, no daemon, no external services. The binary is the database.
+Everything lives in a single SQLite database (`src/db/mpm.db`). `mpm` is a headless daemon — a hardened SQLite data plane with an autonomous 03:00 UTC diagnostic critic and an MCP server (`mpm-mcp`) for machine-to-machine integration. No external services, no vector database.
 
 ## Build & Test
 
