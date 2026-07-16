@@ -65,7 +65,7 @@ mpm/
 │   ├── reference_new.go      # Reference docs (PDF/EPUB/MD parsing)
 │   ├── embeddings.go         # Embedding provider abstraction
 │   ├── versioning.go         # Memory revisions (point-in-time reconstruction)
-│   ├── web_db.go             # Web-API-specific query helpers
+│   ├── web_db.go             # Shared query helpers (CLI + MCP consumers)
 │   ├── core.go               # CoreDB interface (~130 methods) + compile-time assertion
 │   ├── admission.go          # AdmitResult, AdmitChainEntry (exported)
 │   └── go.mod                # Standalone module; main go.mod has replace directive
