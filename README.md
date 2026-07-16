@@ -27,6 +27,8 @@ One persistent cognitive substrate. One SQLite database. One headless daemon. No
 
 `mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. The CLI is an operational convenience for inspecting the daemon's state — not a human-facing application.
 
+MPM models reasoning processes — belief formation, evidence weighting, theory tracking, self-correction. It does not claim to reproduce human cognition. "Cognitive" describes *what kind of object is being persisted*, not a claim about machine minds.
+
 > **MPM is not designed to maximize recall. It is designed to preserve intellectual progress.**
 
 ---
@@ -356,6 +358,24 @@ mpm kb hint "discussing the CSS injection approach for the widget system"
 
 FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` tool is wired into the OpenClaw agent loop and surfaces the most relevant epistemology memory automatically after context shifts.
 
+### 4.7 What happens when MPM is wrong?
+
+MPM models reasoning under uncertainty. Mistakes happen. The system is designed around explicit recovery — every bad outcome has a paper trail and a documented path back. Nothing is silently overwritten.
+
+Five canonical failure modes and the mechanism that handles each:
+
+**Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` weakens the memory's weight by 3, atomically creates a back-linked theory in pending status, and preserves the original artifact. The memory is not deleted — its history is, by design, immutable. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
+
+**Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
+
+**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* every shared write produces a near-miss scan against existing rules via `shared.contradiction_log`. Detection runs opportunistically inside `query_long_term_memory` — no separate ticker. Near-misses carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
+
+**Confidence decay drift.** A memory's weight decayed to a wrong value because the lifecycle sweep ran in an unexpected state, or because the underlying evidence ledger had a bug. *Recovery:* §10.1 Self-Healing Integrity Loop. Concept-drift detection quarantines affected memories (`concept_drift: true`), proposes pending theories, and survives restarts via SQLite-native dedup. The system errs on the side of *escalating to a theory* rather than silently fixing — wrong weight corrections are far more dangerous than visible ones.
+
+**Embedding model change.** Operator upgrades from one embedding model to another; cosine similarities shift; "similar to X" links become noisy. *Recovery:* this is the hardest case. Mitigations: (1) BM25 keyword search is independent of embeddings, so the recall path still works for exact-term queries; (2) embedding backfill is a separate phase (`mpm ops backfill-embeddings`) and can be re-run on demand; (3) the hybrid score weights keyword ranking alongside semantic recall, so semantic noise degrades gracefully rather than breaking recall outright. There is no automatic re-embedding-on-model-change — this remains an operator-driven migration.
+
+The common pattern: every recovery path leaves a theory, a log entry, or a `concept_drift` flag. History is the system.
+
 ---
 
 ## 5. Quick Start
@@ -434,6 +454,8 @@ The command is **idempotent** — safe to re-run. It detects existing directives
 Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
 ---
+
+> **From here on, the document describes how the system is built.** §1–§5 cover what MPM is, why it isn't a memory system, the cognitive model, the belief lifecycle, and how to operate it. The remaining sections and appendices explain how it works — for readers writing patches or evaluating the architecture.
 
 ## 6. System Architecture
 
@@ -637,7 +659,7 @@ Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs 
 
 #### Layer 2 — Conflict Detection
 
-When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `query_long_term_memory`'s result set** — opportunistic, not polled. There is no background ticker, no daemon, no separate timer.
+When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `query_long_term_memory`'s result set** — opportunistic, not polled. There is no background ticker, no separate timer.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
 
@@ -1373,7 +1395,7 @@ The shared DB holds house rules. Semantic recall over them is the operator's onl
 2. An external vector database (Qdrant, Milvus, etc.).
 3. An in-SQLite ANN index.
 
-MPM chose (3). The constraint was "no daemon, no new service, no parallel infrastructure." The in-SQLite IVF satisfies that: it lives in `shared.memory_vectors_ivf`, is queried via the same `DatabaseManager` connection, and survives restarts without re-loading.
+MPM chose (3). The constraint was to avoid parallel infrastructure — no new service, no second storage surface to back up, no second connection to coordinate. The in-SQLite IVF satisfies that: it lives in `shared.memory_vectors_ivf`, is queried via the same `DatabaseManager` connection, and survives restarts without re-loading.
 
 ### The IVF structure
 
@@ -1410,7 +1432,7 @@ The `VectorMatch` circuit breaker refuses to start a vector scan that would touc
 - The protobuf-shape score for each side
 - The resolution status (`pending` / `resolved` / `arbitration_needed`)
 
-The detection runs **inside `query_long_term_memory`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no daemon, no panic-recovery surface.
+The detection runs **inside `query_long_term_memory`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no panic-recovery surface.
 
 ### Protobuf-shape scoring
 
