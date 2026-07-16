@@ -84,7 +84,7 @@ This is the project's most important self-defense against feature creep. The reg
 
 At the implementation level, the exclusions are concrete:
 
-- **Not a daemon.** Every command is a single binary invocation. No long-running processes; periodic work happens on demand via `mpm ops maintain`.
+- **Not an HTTP server.** No request/response REST surface; machine integration is stdio-only via `mpm-mcp`. The CLI is for operators, not for serving web traffic.
 - **Not generic storage.** Built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
 - **Not a human dashboard.** Machine-to-machine interface is primary; CLI is a convenience layer.
 - **Not a vector database.** A SQLite-native ANN index handles semantic recall. No Pinecone, no Qdrant, no embeddings service.
@@ -1073,9 +1073,9 @@ The MPM file-watcher daemon (`mpm watch start|stop|status`, fsnotify goroutine, 
 
 | Watcher capability | Replacement |
 |---|---|
-| 5-min decay sweep | `mpm ops maintain` on demand |
+| 5-min decay sweep | `mpm ops maintain` on demand (also runs autonomously in the daemon) |
 | External SQLite polling | `mpm ops ingest --source <path>` one-shot |
-| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand |
+| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand (also runs autonomously in the daemon) |
 | Topic clustering | `mpm ops synthesize` (synthesis pass) |
 | Filesystem auto-ingest | Obsolete — `mpm call save_to_memory` covers it |
 
