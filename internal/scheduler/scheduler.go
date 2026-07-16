@@ -75,34 +75,40 @@ type Scheduler struct {
 	mu       sync.RWMutex
 }
 
-// New opens the MPM database and returns a Scheduler ready for handlers.
-// Caller owns the lifecycle via Run(ctx, interval).
-func New(dbPath string, log *slog.Logger) (*Scheduler, error) {
+// New returns a Scheduler bound to the given *sql.DB. The caller owns
+// the database lifecycle (typically a *DatabaseManager from mpm-core)
+// and is responsible for closing it.
+//
+// Architectural note: scheduler.New does NOT open or own the database.
+// Connection lifecycle lives at the construction site so the DatabaseManager
+// remains the singleton owner of *sql.DB. This is the F-007 fix — scheduler
+// participates in DatabaseManager's connection management rather than
+// bypassing it. The sqlopen_owner_test static-analysis guard covers this
+// invariant and will fail if any future code opens a separate handle.
+func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is required (caller must construct via DatabaseManager)")
+	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL")
-	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
-	}
 	if err := db.Ping(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	return &Scheduler{
 		db:       db,
-		dbPath:   dbPath,
+		dbPath:   "<managed-by-DatabaseManager>",
 		log:      log,
 		handlers: make(map[string]HandlerFunc),
 	}, nil
 }
 
-// Close releases the database connection.
+// Close is a no-op on the scheduler's bound *sql.DB. The DatabaseManager
+// owns connection lifecycle; close it at the construction site, not here.
+// Kept as part of the public surface for symmetry and to give tests a
+// deterministic tear-down without depending on the caller.
 func (s *Scheduler) Close() error {
-	if s.db == nil {
-		return nil
-	}
-	return s.db.Close()
+	return nil
 }
 
 // Register attaches a HandlerFunc for the given wake kind. Registering
@@ -325,7 +331,11 @@ func truncate(s string, n int) string {
 // sqlite3 .backup. Replaces pre_critic_snapshot.sh. Writes to the same
 // backups/critic-pre/ directory the legacy shell script used.
 //
-// metadata.label: optional filename suffix (default: epoch).
+// metadata.label: optional filename suffix (default: epoch). The label
+// is restricted to [A-Za-z0-9._-] because it is interpolated into a
+// SQL string literal passed to sqlite3; an unconstrained label could
+// inject SQL or escape the path. Untrusted labels are dropped to the
+// epoch default rather than failing the snapshot.
 func SnapshotHandler(w Wake) error {
 	dbPath := defaultDBPath()
 	backupDir := filepath.Join(filepath.Dir(dbPath), "..", "..", "backups", "critic-pre")
@@ -338,7 +348,9 @@ func SnapshotHandler(w Wake) error {
 
 	label := fmt.Sprintf("%d", time.Now().Unix())
 	if l, ok := w.Metadata["label"].(string); ok && l != "" {
-		label = l
+		if safe := sanitizeSnapshotLabel(l); safe != "" {
+			label = safe
+		}
 	}
 	snapshot := filepath.Join(backupDir, fmt.Sprintf("mpm_pre_critic_%s.db", label))
 
@@ -356,6 +368,35 @@ func SnapshotHandler(w Wake) error {
 	}
 
 	return rotateSnapshots(backupDir, 7)
+}
+
+// sanitizeSnapshotLabel restricts a wake-metadata label to a safe
+// filename suffix. Returns "" for any input containing characters
+// outside [A-Za-z0-9._-] (the snapshot falls back to the epoch
+// default in that case rather than failing the snapshot). The
+// restriction prevents two injection paths:
+//
+//  1. SQL injection via the sqlite3 .backup string literal (the
+//     label flows into `.backup '...mpm_pre_critic_<label>.db'`).
+//  2. Path traversal via ../ (the label becomes part of the
+//     destination filename).
+//
+// Length is capped at 64 chars to keep filenames bounded.
+func sanitizeSnapshotLabel(s string) string {
+	if len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return ""
+		}
+	}
+	return s
 }
 
 // CriticAuditHandler shells out to the mpm-critic binary for one audit

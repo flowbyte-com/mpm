@@ -93,16 +93,21 @@ type Audit struct {
 	cli   CLIRunner
 }
 
-// New returns an Audit ready to Run. The hunts list is initialized with
-// the three primary hunters; poison pill is gated on cycle % 5 inside
-// Run, not registered as a separate hunt.
-func New(dbPath string, log *slog.Logger) (*Audit, error) {
+// New returns an Audit bound to the given *sql.DB. The caller owns the
+// database lifecycle (typically a *DatabaseManager from mpm-core) and
+// is responsible for closing it.
+//
+// Architectural note: critic.New does NOT open or own the database.
+// Connection lifecycle lives at the construction site so the
+// DatabaseManager remains the singleton owner of *sql.DB. This is the
+// F-007 fix — critic participates in DatabaseManager's connection
+// management rather than bypassing it.
+func New(db *sql.DB, log *slog.Logger) (*Audit, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is required (caller must construct via DatabaseManager)")
+	}
 	if log == nil {
 		log = slog.Default()
-	}
-	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL")
-	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
 	}
 	a := &Audit{
 		db:    db,
@@ -118,12 +123,10 @@ func New(dbPath string, log *slog.Logger) (*Audit, error) {
 	return a, nil
 }
 
-// Close releases the database connection.
+// Close is a no-op on the audit's bound *sql.DB. The DatabaseManager
+// owns connection lifecycle; close it at the construction site.
 func (a *Audit) Close() error {
-	if a.db == nil {
-		return nil
-	}
-	return a.db.Close()
+	return nil
 }
 
 // Run executes one full audit cycle. Each hunt runs sequentially;

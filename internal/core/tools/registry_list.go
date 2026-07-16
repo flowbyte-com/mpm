@@ -54,7 +54,7 @@ var Registry = []Tool{
 	{
 		Name:        "resolve_theory",
 		Description: "Resolve a pending theory as confirmed or disproven.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"theoryId":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"newStatus":{"type":"string","enum":["proven","disproven"]}},"required":["theoryId","conclusion","newStatus"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"theoryId":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"newStatus":{"type":"string","enum":["proven","disproven"]},"winnerId":{"type":"string","description":"Arc 1 closure: when present, treats the theory as an arbitration theory from resolve-contradictions and routes to the auto-slash path. Absent = legacy path (mark resolved, no slash)."}},"required":["theoryId","conclusion","newStatus"]}`),
 		Handler:     handleResolveTheory,
 	},
 	{

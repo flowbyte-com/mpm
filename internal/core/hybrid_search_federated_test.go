@@ -238,13 +238,9 @@ func TestFederated_HybridSearchMemoriesScope(t *testing.T) {
 		VALUES ('shared-alpha', 'rules', 'alpha bravo — house rule', '[]', 10, 1, NULL)`)
 	require.NoError(t, err)
 
-	// Lazy FTS5 backfill is triggered inside QueryGlobalRules. Make
-	// sure it's populated for scope=local's search too — the local
-	// memories_fts is auto-populated via triggers from insert, but
-	// shared.memories_fts relies on lazy backfill. Trigger it once.
-	_, err = dm.db.Exec(`INSERT INTO shared.memories_fts(rowid, content, tags)
-		SELECT rowid, content, tags FROM shared.memories WHERE deleted_at IS NULL`)
-	require.NoError(t, err)
+	// shared.memories_fts is auto-synced by triggers in attachShared;
+	// no manual backfill needed (and adding one would double-insert
+	// rows against the FTS5 primary-key constraint).
 
 	// scope=local: only local row.
 	localItems, err := dm.HybridSearchMemories("alpha", "", 5, "local")
