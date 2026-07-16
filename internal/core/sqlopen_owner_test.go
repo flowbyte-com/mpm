@@ -45,7 +45,8 @@ func TestDatabaseManagerIsOnlyOwnerOfSqlOpen(t *testing.T) {
 		"adapters.go":        true, // opens foreign sqlite files for ingest
 		"ingest.go":          true, // opens foreign sqlite files for ingest
 		"main.go":            true, // read-only opens for doctor deep-scan
-		"handlers_backup.go": true, // read-only opens for backup integrity check
+		"handlers_backup.go":       true, // read-only opens for backup integrity check
+		"sql_dump_validator.go":    true, // read-only opens for restore-db schema introspection (C-2)
 		"route_render.go":    true, // read-only opens for wake-context route rendering
 		"testhelpers.go":     true, // opens hermetic in-memory DBs for tests; not a production connection
 	}
