@@ -14,8 +14,7 @@ import (
 //
 //  1. A real DB exists with baseline data.
 //  2. A tampered dump is loaded from disk.
-//  3. The validator is built from the live DB's sqlite_master and runs
-//     Prepare() on the tampered dump.
+//  3. The canonical validator runs Prepare() on the tampered dump.
 //  4. Prepare() rejects — no statements returned.
 //  5. The DB is verified untouched: baseline data intact, no
 //     'evil' attachment created, no mass overwrite happened.
@@ -51,11 +50,8 @@ func TestDumpValidator_E2E_RestoreAbortsOnTamperedDump(t *testing.T) {
 				t.Fatalf("read fixture: %v", err)
 			}
 
-			// 3. Build validator from the live DB.
-			validator, err := NewDumpValidatorFromDB(dbPath)
-			if err != nil {
-				t.Fatalf("build validator: %v", err)
-			}
+			// 3. Use the canonical validator (production code path).
+			validator := NewCanonicalDumpValidator()
 
 			// 4. Prepare should reject — no statements returned.
 			statements, err := validator.Prepare(string(tampered))
