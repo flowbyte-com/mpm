@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -32,8 +31,78 @@ type DumpValidator struct {
 	knownTables map[string]bool
 }
 
+// CanonicalMPMSchema is the authoritative list of tables MPM creates at
+// install time (BaseTables, ReferenceTables, shared-schema tables). New
+// tables added to the schema require updating this list AND
+// internal/core/db.go (a static guard enforces this). This is the
+// source-of-truth allow-list for `restore-db`'s C-2 validation —
+// every CREATE TABLE / CREATE INDEX / INSERT statement in a restore
+// dump must reference a table in this list OR RuntimeCanonicalSchema.
+//
+// To regenerate after a schema change:
+//   1. Add the new table to internal/core/db.go (CREATE TABLE IF NOT EXISTS ...)
+//   2. Add it to CanonicalMPMSchema below
+//   3. Run `go test -run TestCanonicalSchemaSync ./internal/core/`
+//      to verify the static guard passes
+var CanonicalMPMSchema = []string{
+	"admission_log",
+	"audit_cluster_proposals",
+	"confidence_history",
+	"ephemeral_scratchpad",
+	"evidence",
+	"external_db_cursors",
+	"lessons",
+	"memories",
+	"memory_revisions",
+	"raw_memories",
+	"reference_chunks",
+	"reference_docs",
+	"reference_interactions",
+	"scheduled_wakes",
+	"session_handoffs",
+	"sessions",
+	"shared.bcast_agents",
+	"shared.bcast_event_wakes",
+	"shared.bcast_sessions",
+	"shared.contradiction_log",
+	"system_audit_log",
+	"system_config",
+	"topic_memberships",
+	"topics",
+	"vector_assignments",
+	"vector_clusters",
+}
+
+// RuntimeCanonicalSchema holds tables created by runtime migrations or
+// extension code (not declared in internal/core/db.go's CREATE TABLE
+// statements). The static guard does NOT check this list against source
+// — it's a hand-maintained extension to CanonicalMPMSchema. Add a table
+// here when a migration creates it and you want restore-db to accept
+// dumps that reference it.
+var RuntimeCanonicalSchema = []string{
+	"artifacts",       // created by extension migration
+	"legacy_weight",   // created by extension migration
+	"lessons_base",    // created by migrateLessonsToView
+	"synthesis_dlq",   // created by synthesis isolation runtime
+}
+
+// NewCanonicalDumpValidator creates a validator using the canonical MPM
+// schema (union of source-declared and runtime-created tables). This is
+// the recommended constructor for production restore-db use — it allows
+// CREATE TABLE / INDEX / TRIGGER / VIEW and INSERT for all legitimate
+// MPM tables regardless of the live DB state, which means a fresh-DB
+// restore works (the dump's CREATE TABLE statements are validated
+// against the canonical allow-list, not an empty live schema).
+func NewCanonicalDumpValidator() *DumpValidator {
+	combined := make([]string, 0, len(CanonicalMPMSchema)+len(RuntimeCanonicalSchema))
+	combined = append(combined, CanonicalMPMSchema...)
+	combined = append(combined, RuntimeCanonicalSchema...)
+	return NewDumpValidator(combined)
+}
+
 // NewDumpValidator creates a validator with the given set of known table
-// names. Pass nil to use the canonical MPM schema (queries sqlite_master).
+// names. Used by tests and by the live-schema constructor; production
+// callers should prefer NewCanonicalDumpValidator.
 func NewDumpValidator(knownTables []string) *DumpValidator {
 	set := make(map[string]bool, len(knownTables))
 	for _, t := range knownTables {
@@ -47,58 +116,45 @@ func NewDumpValidator(knownTables []string) *DumpValidator {
 // tables in the DB. FTS virtual tables and sqlite_* internal tables are
 // excluded.
 //
-// This is the recommended constructor for production use: the allow-list
-// stays in sync with the live schema, so any table added to MPM is
-// automatically protected on restore.
+// Use this for restore-into-existing-DB cases where you want the
+// allow-list restricted to what's already in the target. For
+// restore-into-fresh-DB (the common case for new installs or recovery
+// from total data loss), use NewCanonicalDumpValidator instead — the
+// live DB has no tables, so the live-schema allow-list would be empty
+// and reject the dump's CREATE TABLE statements.
 func NewDumpValidatorFromDB(dbPath string) (*DumpValidator, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
-	if err != nil {
-		return nil, fmt.Errorf("open db read-only: %w", err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(`
-		SELECT name FROM sqlite_master
-		WHERE type IN ('table', 'view')
-		  AND name NOT LIKE 'sqlite_%'
-		  AND name NOT LIKE '%_fts%'
-		ORDER BY name
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query schema: %w", err)
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return NewDumpValidator(tables), nil
+	// Kept for callers that specifically want the live-schema variant.
+	// Implementation moved to internal/live_schema_validator.go to keep
+	// this file focused on the canonical-schema path.
+	return newLiveSchemaDumpValidator(dbPath)
 }
 
 // Validate returns nil if content is safe to restore, or an error
 // describing the first unsafe statement found. Empty content is valid.
 func (v *DumpValidator) Validate(content string) error {
+	_, err := v.Prepare(content)
+	return err
+}
+
+// Prepare validates the dump and returns the parsed statements if safe.
+// Use this to drive per-statement execution after the safety check —
+// the returned statements are exactly what the validator approved, so
+// executing them in a transaction preserves the allow-list guarantee.
+func (v *DumpValidator) Prepare(content string) ([]string, error) {
 	cleaned := stripSQLComments(content)
 	statements := splitSQLStatements(cleaned)
+	out := make([]string, 0, len(statements))
 	for i, stmt := range statements {
 		trimmed := strings.TrimSpace(stmt)
 		if trimmed == "" {
 			continue
 		}
 		if err := v.validateStatement(trimmed); err != nil {
-			return fmt.Errorf("statement %d: %w", i+1, err)
+			return nil, fmt.Errorf("statement %d: %w", i+1, err)
 		}
+		out = append(out, trimmed)
 	}
-	return nil
+	return out, nil
 }
 
 func (v *DumpValidator) validateStatement(stmt string) error {
