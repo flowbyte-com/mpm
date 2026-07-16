@@ -371,7 +371,7 @@ Or build from source:
 ```bash
 git clone https://github.com/yourorg/mpm
 cd mpm
-make build
+make build     # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
 ```
 
 The single binary lives at `bin/mpm`. No daemon, no service registration, no config files required to start.
@@ -933,6 +933,10 @@ The "agent has initiative" effect: any subsequent `mpm call` (CLI or MCP) that l
 Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` table + composite index `scheduled_wakes_due(fired, target_time)` + FTS5 virtual table for content search. `CheckPendingWakes` runs in a single transaction (idempotent across concurrent callers).
 
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
+
+### Autonomous wake execution (mpm-scheduler + mpm-critic)
+
+For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
 
 ### Event Wakes — Active Dissemination (Arc 2)
 
