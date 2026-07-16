@@ -124,7 +124,7 @@ func doOpsBroadcast(args []string, dryRun, jsonOut bool) int {
 				}
 			}
 		default:
-			fmt.Fprintln(os.Stderr, usererror.Error(fmt.Sprintf("unknown flag %q", a)))
+			fmt.Fprintln(os.Stderr, usererror.Errorf(fmt.Sprintf("unknown flag %q", a)))
 			return 1
 		}
 	}
@@ -139,7 +139,7 @@ func doOpsBroadcast(args []string, dryRun, jsonOut bool) int {
 		SourceSessionID: getOrMakeSessionID(),
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, usererror.Error(err.Error()))
+		fmt.Fprintln(os.Stderr, usererror.Errorf(err.Error()))
 		return 1
 	}
 
@@ -173,7 +173,7 @@ func doOpsActiveSessions(jsonOut bool) int {
 	dm := getDB()
 	sessions, err := dm.DiscoverActiveSessions()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, usererror.Error(err.Error()))
+		fmt.Fprintln(os.Stderr, usererror.Errorf(err.Error()))
 		return 1
 	}
 
