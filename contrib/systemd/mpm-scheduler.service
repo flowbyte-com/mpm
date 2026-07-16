@@ -1,0 +1,31 @@
+[Unit]
+Description=MPM universal wake executor
+# MPM is a headless cognitive substrate. See the project README:
+#   https://github.com/yourorg/mpm#52-run-it-as-a-daemon
+After=default.target
+
+[Service]
+Type=simple
+# Default layout assumes the project lives at ~/projects/mpm. Override via:
+#   1. Drop-in:    systemctl --user edit mpm-scheduler
+#                  (writes to ~/.config/systemd/user/mpm-scheduler.service.d/override.conf)
+#   2. Env file:   write ~/.config/mpm/mpm.env (sourced as EnvironmentFile below)
+WorkingDirectory=%h/projects/mpm
+ExecStart=%h/projects/mpm/bin/mpm-scheduler --interval 60s --log-level info
+EnvironmentFile=-%h/.config/mpm/mpm.env
+
+# Hardening (light — tighten further as your security model demands)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Allow writes only to the project directory and the runtime state dir
+ReadWritePaths=%h/projects/mpm %h/.mpm
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mpm-scheduler
+
+[Install]
+WantedBy=default.target
