@@ -60,3 +60,9 @@ mpm-mcp
 *.pid
 *.lock
 backups/
+
+# Working notes / plan docs (subagent-driven-development workflow).
+# Plan docs under docs/superpowers/plans/ are ephemeral scaffolding for
+# in-flight refactors — the git log narrates the outcome, not the plan.
+# Keep the dir local; regenerate per refactor as needed.
+docs/superpowers/
