@@ -6,10 +6,17 @@ __pycache__/
 # Compiled binaries (mpm itself)
 bin/
 
-# Top-level `mpm` symlink (used for go tooling that expects ./mpm
-# in cwd). bin/ ignores its target; git won't ignore the symlink
-# itself without an explicit rule.
+# Top-level `mpm` symlinks (used for go tooling that expects ./mpm
+# in cwd). bin/ ignores its target; git won't ignore the symlinks
+# themselves without explicit rules.
+#
+# 2026-07-16: extended from /mpm to /mpm-critic and /mpm-scheduler
+# after `make build` started dropping those symlinks at the project
+# root alongside the existing /mpm symlink. Without these rules,
+# git status surfaces them as Untracked every build.
 /mpm
+/mpm-critic
+/mpm-scheduler
 
 # mpm-agent is a sibling project at ../mpm-agent, not a subdir.
 # Its build artifacts live in its own .gitignore. Defensive rule
