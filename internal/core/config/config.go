@@ -16,7 +16,6 @@ type Config struct {
 	SessionsDirs   []string          `json:"sessions_dirs,omitempty"`
 	ExternalDbs    []ExternalDB      `json:"external_dbs,omitempty"`
 	OpenClawDBPath string            `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
-	WebToken       string            `json:"web_token,omitempty"`        // Optional bearer token for web UI auth
 	Synth          *SynthConfig      `json:"synth,omitempty"`
 	Aliases        map[string]string `json:"aliases,omitempty"` // CLI command aliases: "mem" → "recall --collection memories"
 }
@@ -266,5 +265,3 @@ func ResolveEnvPath(path string) string {
 	// Absolute path - return as-is
 	return path
 }
-
-

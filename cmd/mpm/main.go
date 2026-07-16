@@ -204,16 +204,16 @@ func main() {
 						os.Exit(0)
 					}
 					printSuccess("memory saved (id=%s)", mem.ID)
-				// Fire-and-forget auto-synthesis (same pattern as memory add handler)
-				go func(id, c string) {
-					synthDM, synthErr := getDB().NewSession()
-					if synthErr != nil {
-						slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
-						return
-					}
-					defer synthDM.Close()
-					mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
-				}(mem.ID, data)
+					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
+					go func(id, c string) {
+						synthDM, synthErr := getDB().NewSession()
+						if synthErr != nil {
+							slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
+							return
+						}
+						defer synthDM.Close()
+						mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
+					}(mem.ID, data)
 				}
 				os.Exit(0)
 			}
@@ -1095,7 +1095,6 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 
 // runDoctorSecurityChecks covers security-relevant runtime state:
 //   - synthesis telemetry: are LLM synth attempts succeeding or failing?
-//   - auth configuration: is web_token set? is the server fail-open?
 //   - scanner coverage: a sanity ping of the static audit so the doctor
 //     report itself can flag if a new write path bypasses the scanner.
 func runDoctorSecurityChecks(report *DoctorReport) {
@@ -1141,27 +1140,6 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 		}
 		report.TotalChecks++
 	}
-
-	// Auth config — check that web_token is set so `mpm web` doesn't
-	// refuse to start. (Fail-closed is the safe default; warn when unset
-	// so the operator knows the server will require --allow-anonymous.)
-	cfg, _ := config.LoadConfig()
-	if cfg == nil || cfg.WebToken == "" {
-		report.Checks = append(report.Checks, DoctorCheck{
-			Name: "Auth Token", Status: "WARN",
-			Message:  "web_token is empty — `mpm web` will require --allow-anonymous flag (this is safe, not fail-open)",
-			Duration: "0ms",
-		})
-		report.Warnings++
-		fmt.Printf("    [%s] Auth Token: web_token empty (fail-closed default active)\n\n", colorYellow("WARN"))
-	} else {
-		report.Checks = append(report.Checks, DoctorCheck{
-			Name: "Auth Token", Status: "PASS",
-			Message: "web_token is configured", Duration: "0ms",
-		})
-		fmt.Printf("    [%s] Auth Token: web_token set\n\n", colorizeStatus("PASS"))
-	}
-	report.TotalChecks++
 
 	// Scanner coverage is enforced by the test suite (internal/scanner_coverage_test.go).
 	// The doctor report notes its existence so operators know to run `go test` if
@@ -1324,7 +1302,6 @@ func printHelp() {
 		{"call <tool>", "Universal machine interface", false},
 		{"wake", "Show last session context", false},
 		{"status", "System status dashboard", false},
-		{"web", "Start web UI server", false},
 		{"version", "Show version info", false},
 		{"help", "Show this help", false},
 	})
@@ -1345,7 +1322,7 @@ func printHelp() {
 		{"mode | persona", "", false},
 		{"wake | directives | switch | status", "", false},
 		{"doctor | maintain | gc | prune", "", false},
-		{"watch | web | review", "", false},
+		{"watch | review", "", false},
 		{"stats | export | synthesize", "", false},
 		{"backup | restore-db | ingest", "", false},
 		{"backfill-embeddings", "", false},

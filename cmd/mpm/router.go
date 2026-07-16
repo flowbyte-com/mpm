@@ -55,7 +55,6 @@ func NewRouter() *CommandRouter {
 
 		// Feature commands
 		"watch":     {Name: "watch", Description: "File watcher for memory ingestion"},
-		"web":       {Name: "web", Description: "Start web UI server", MinArgs: 0},
 		"switch":    {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
 		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
 		"topic":     {Name: "topic", Description: "Topic management", MinArgs: 1},
@@ -65,16 +64,16 @@ func NewRouter() *CommandRouter {
 
 		"ingest": {Name: "ingest", Description: "Import memories from external SQLite sources"},
 
-		"mode":                {Name: "mode", Description: "Mode operations"},
-		"wake":                {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
-		"gc":                  {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
-		"lint":                {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
-		"backup":              {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
-		"restore":             {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
-		"restore-db":          {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
-		"directives":          {Name: "directives", Description: "Show behavioral directives"},
-		"persona":             {Name: "persona", Description: "Persona operations"},
-		"ops":                 {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
+		"mode":       {Name: "mode", Description: "Mode operations"},
+		"wake":       {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
+		"gc":         {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+		"lint":       {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
+		"backup":     {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
+		"restore":    {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
+		"restore-db": {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
+		"directives": {Name: "directives", Description: "Show behavioral directives"},
+		"persona":    {Name: "persona", Description: "Persona operations"},
+		"ops":        {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
 		// Proactive Recall Hint
 		"hint":  {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
@@ -84,7 +83,7 @@ func NewRouter() *CommandRouter {
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
 		"resolve_theory":  {Name: "resolve_theory", Description: "Mark a theory as resolved", MinArgs: 2},
 		"record_decision": {Name: "record_decision", Description: "Record a decision with context, choice, and rationale", MinArgs: 1},
-		"challenge":      {Name: "challenge", Description: "Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)", MinArgs: 1, MaxArgs: 2},
+		"challenge":       {Name: "challenge", Description: "Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)", MinArgs: 1, MaxArgs: 2},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "Show decision ledger", MinArgs: 0},
 		"call":            {Name: "call", Description: "Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 1},
@@ -180,8 +179,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleMaintain(args)
 	case "review":
 		return handleReview(args)
-	case "web":
-		return handleWeb(args)
 	case "lint":
 		return handleLint(args)
 	case "watch":
@@ -408,11 +405,9 @@ func handleOps(args []string) int {
 	case "active-sessions":
 		return handleOpsActiveSessions(subArgs)
 
-	// — Watcher & Web —
+	// — Watcher —
 	case "watch":
 		return handleWatch(subArgs)
-	case "web":
-		return handleWeb(append([]string{"web"}, subArgs...))
 
 	// — Review & Stats —
 	case "review":
@@ -504,7 +499,6 @@ var opsSubcommandDescs = []struct {
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
 	{"watch", "Start/stop/status watcher daemon"},
-	{"web", "Start web UI server"},
 	{"review", "Spaced reinforcement review"},
 	{"stats", "Memory statistics"},
 	{"prune", "Prune expired memories"},
