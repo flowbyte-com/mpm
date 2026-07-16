@@ -380,76 +380,97 @@ The common pattern: every recovery path leaves a theory, a log entry, or a `conc
 
 ## 5. Quick Start
 
-Five minutes from zero to first decision.
+Five minutes from zero to first decision. Choose your depth:
 
-### Install
+- **§5.1 Try it** — CLI only, no daemons. Best for evaluating MPM or one-off scripting.
+- **§5.2 Run it as a daemon** — full autonomous operation: opportunistic wake dispatch, system-kind scheduled tasks (critic audits, snapshots, GC, broadcasts), and machine-to-machine integration via MCP.
+- **§5.3 First commands** — the cognitive loop in eight lines.
+
+### 5.1 Try it (CLI only — no daemons)
 
 ```bash
 go install github.com/yourorg/mpm/cmd/mpm@latest
 ```
 
-Or build from source:
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (The companion daemons `mpm-mcp` and `mpm-scheduler` install separately when you want autonomous operation — see §5.2.)
+
+### 5.2 Run it as a daemon
+
+For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
 git clone https://github.com/yourorg/mpm
 cd mpm
-make build     # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
+make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
+make install         # optional — copies all four to /usr/local/bin
 ```
 
-The single binary lives at `bin/mpm`. No daemon, no service registration, no config files required to start.
-
-### Store a reasoning record
+**Install the scheduler as a systemd user service:**
 
 ```bash
-mpm add Germany leads Group E with +6 goal differential
+make service-scheduler                              # copies unit to ~/.config/systemd/user/
+systemctl --user daemon-reload                      # (make service-scheduler already does this)
+systemctl --user enable --now mpm-scheduler         # enable + start
+systemctl --user status mpm-scheduler               # verify
+journalctl --user -u mpm-scheduler -f               # follow logs
 ```
 
-### Retrieve
+The default unit assumes `~/projects/mpm` layout. Override via either:
 
-```bash
-mpm World Cup prediction
-mpm recall --semantic "为什么德国队表现这么好"
-```
+- **Drop-in** (preferred for path changes): `systemctl --user edit mpm-scheduler`
+- **Env file** (preferred for DB / backup paths): write `~/.config/mpm/mpm.env` with `MPM_DB_PATH=...`, `MPM_BACKUP_DIR=...`, `MPM_CRITIC_BIN=...` — it's sourced as `EnvironmentFile=-` in the unit.
 
-### Record a decision
-
-```bash
-mpm record_decision "CONTEXT: We need CSS injection that survives wp_kses filtering
-CHOICE: Store widget CSS in wp_options
-RATIONALE: WordPress strips inline style tags from post content"
-```
-
-### Propose a theory
-
-```bash
-mpm propose_theory "HYPOTHESIS: passing --json before the positional arg causes the parse bug
-VALIDATION_CRITERIA: unit test — invoke mpm with --json flag first vs positional-first
-STATUS: pending"
-```
-
-### Challenge a memory
-
-```bash
-mpm challenge <id> "recent data contradicts this — see new measurements"
-```
-
-### System status
-
-```bash
-mpm status
-mpm ops stats
-mpm wake               # last session context
-```
-
-### Initialize baseline directives (optional but recommended)
+**Seed the baseline cognitive directives** (recommended once after install):
 
 ```bash
 mpm ops init directives
 ```
 
-MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. If a user wants the self-healing loop to work out of the box, they run this command once. If a user is building a completely custom agent workflow and doesn't want MPM's default event triage, they skip it.
+MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. Without them, the scheduler will dispatch wakes but the cognitive loop won't close. Idempotent — safe to re-run; local edits are preserved.
 
-The command is **idempotent** — safe to re-run. It detects existing directives by stable ID and skips them. Local edits to a seeded directive are preserved (not silently overwritten); the run report flags any drift so the operator can reconcile manually.
+**Wire up the MCP host** (Claude Code, OpenClaw, etc.). `mpm-mcp` is spawned by the host as a stdio child process — no separate service to manage. Example `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mpm": {
+      "command": "/path/to/mpm/bin/mpm-mcp",
+      "env": {
+        "MPM_DB_PATH": "/path/to/mpm/src/db/mpm.db"
+      }
+    }
+  }
+}
+```
+
+### 5.3 First commands
+
+```bash
+# Store
+mpm add Germany leads Group E with +6 goal differential
+
+# Retrieve
+mpm World Cup prediction
+mpm recall --semantic "为什么德国队表现这么好"
+
+# Decide
+mpm record_decision "CONTEXT: ...
+CHOICE: ...
+RATIONALE: ..."
+
+# Theorize
+mpm propose_theory "HYPOTHESIS: ...
+VALIDATION_CRITERIA: ...
+STATUS: pending"
+
+# Challenge
+mpm challenge <id> "recent data contradicts this"
+
+# Status
+mpm status
+mpm ops stats
+mpm wake               # last session context
+```
 
 Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
@@ -928,9 +949,9 @@ PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 6
 
 `mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
 
-### Scheduled Wakes (Stateless, Opportunistic)
+### Scheduled Wakes (Stateless, Opportunistic by Default)
 
-The agent can defer work to a future moment with `mpm call schedule_wake` and have the reminder surface automatically on the next call. No cron daemon, no background ticker, no long-lived process — the database is the queue, the dispatcher is the trigger.
+The agent can defer work to a future moment with `mpm call schedule_wake` and have the reminder surface automatically on the next call. The database is the queue, the next call is the dispatcher — no scheduler process required for this path.
 
 ```
 mpm call schedule_wake --payload '{

@@ -2,17 +2,23 @@
 # Usage: make <target>
 #
 # Targets:
-#   make build   - Build bin/mpm and bin/mpm-mcp
-#   make install - Install both to $(PREFIX)/bin
-#   make clean   - Remove bin/
-#   make test    - Run tests
-#   make help    - Show this help
+#   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
+#   make install             - Install all four to $(PREFIX)/bin
+#   make service-scheduler   - Install mpm-scheduler systemd user unit (prints enable command)
+#   make service             - Alias for service-scheduler
+#   make clean               - Remove bin/
+#   make test                - Run tests
+#   make help                - Show this help
 
 BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
+CRITIC_BINARY := mpm-critic
 BUILD_DIR   := bin
 PREFIX      ?= /usr/local
+SERVICE_NAME := mpm-scheduler
+SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service
+SERVICE_DST := $(HOME)/.config/systemd/user/$(SERVICE_NAME).service
 
 # Find go: prefer $PATH, fall back to common install locations.
 # Allows `make` to work in non-interactive shells (CI, subshells) where
@@ -23,26 +29,57 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
-.PHONY: all build install clean test help
+.PHONY: all build install service-scheduler service uninstall-service clean test help
 
 all: build
 
-# Build canonical binaries to bin/mpm and bin/mpm-mcp
-# Requires CGO for mattn/go-sqlite3 with FTS5 support
+# Build canonical binaries to bin/.
+# Requires CGO for mattn/go-sqlite3 with FTS5 support.
+# mpm-critic is invoked by mpm-scheduler as a payload handler
+# (kind=critic_audit) — built alongside the other daemons so a
+# single `make build` produces a complete installable set.
 build:
 	@mkdir -p $(BUILD_DIR)
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/mpm
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY) ./cmd/mpm-mcp
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), and $(BUILD_DIR)/$(SCHED_BINARY) (mpm-std)"
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-std)"
 
-# Install all three binaries to PREFIX/bin
+# Install all four binaries to PREFIX/bin (system-wide, requires sudo).
 install: build
-	@echo "🚀 Installing mpm, mpm-mcp, and mpm-scheduler to $(PREFIX)/bin/..."
-	@sudo install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(PREFIX)/bin/$(BINARY_NAME)
-	@sudo install -Dm755 $(BUILD_DIR)/$(MCP_BINARY)  $(PREFIX)/bin/$(MCP_BINARY)
-	@sudo install -Dm755 $(BUILD_DIR)/$(SCHED_BINARY) $(PREFIX)/bin/$(SCHED_BINARY)
+	@echo "🚀 Installing mpm, mpm-mcp, mpm-scheduler, and mpm-critic to $(PREFIX)/bin/..."
+	@sudo install -Dm755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME)
+	@sudo install -Dm755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY)
+	@sudo install -Dm755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY)
+	@sudo install -Dm755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY)
 	@echo "✓ Installation complete!"
+
+# Install the mpm-scheduler systemd user service.
+# The unit is templated for the standard ~/projects/mpm layout; override
+# paths via:
+#   1. Drop-in:  systemctl --user edit mpm-scheduler
+#   2. Env file: ~/.config/mpm/mpm.env  (sourced as EnvironmentFile=-)
+# mpm-mcp is intentionally NOT shipped as a systemd unit — it's spawned
+# by MCP hosts (Claude Code, OpenClaw) as a stdio child process.
+service-scheduler:
+	@install -Dm644 $(SERVICE_SRC) $(SERVICE_DST)
+	@systemctl --user daemon-reload
+	@echo "✓ Installed $(SERVICE_DST)"
+	@echo ""
+	@echo "  Next steps:"
+	@echo "    systemctl --user enable --now $(SERVICE_NAME)"
+	@echo "    systemctl --user status $(SERVICE_NAME)"
+	@echo "    journalctl --user -u $(SERVICE_NAME) -f"
+
+# Alias for the common case.
+service: service-scheduler
+
+# Remove the installed systemd user unit. Safe to run even if not installed.
+uninstall-service:
+	@rm -f $(SERVICE_DST)
+	-@systemctl --user daemon-reload
+	@echo "✓ Removed $(SERVICE_DST) (if it existed)"
 
 # Run tests
 test:
@@ -60,10 +97,13 @@ help:
 	@echo "mpm Makefile"
 	@echo ""
 	@echo "  Targets:"
-	@echo "    make build   - Build bin/mpm and bin/mpm-mcp"
-	@echo "    make install - Install both to \$$(PREFIX)/bin/"
-	@echo "    make test    - Run go tests"
-	@echo "    make clean   - Remove bin/"
-	@echo "    make help    - Show this help"
+	@echo "    make build               - Build all four binaries"
+	@echo "    make install             - Install all four to \$$(PREFIX)/bin/"
+	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
+	@echo "    make service             - Alias for service-scheduler"
+	@echo "    make uninstall-service   - Remove the installed systemd user unit"
+	@echo "    make test                - Run go tests"
+	@echo "    make clean               - Remove bin/"
+	@echo "    make help                - Show this help"
 	@echo ""
 	@echo "  Version: $(VERSION)"
