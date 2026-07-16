@@ -29,7 +29,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -178,24 +177,27 @@ func overwritePidfile(path string, data []byte) error {
 // still resolves to an mpm-mcp binary. The second check defends
 // against PID reuse: if the kernel recycled the pid onto a different
 // process, we must not consider the lock held.
+//
+// On Linux, /proc/<pid>/comm gives the short process name. On other
+// platforms we shell out to `ps -p <pid> -o comm=` (a portable POSIX
+// fallback). The platform-specific shell helpers live in
+// pidfile_procname_linux.go and pidfile_procname_other.go.
 func isLiveMcpProcess(pid int) bool {
 	if pid <= 0 || pid == os.Getpid() {
 		return false
 	}
 	// Signal 0 = existence check, no actual signal delivered.
 	if err := syscall.Kill(pid, 0); err != nil {
-		return false // ESRCH = no such process; EPERM = exists but not ours (treat as live to be safe)
+		return false // ESRCH = no such process.
 	}
-	// Defensive: verify the binary path or comm still looks like mpm-mcp.
-	// Read /proc/<pid>/comm (Linux) — short process name. If we cannot
-	// read it, assume the lock is still held to avoid clobbering.
-	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	name, err := readProcComm(pid)
 	if err != nil {
-		// /proc not available (non-Linux) or pid gone between kill and read.
-		// Err on the side of "live" to avoid the exact race we are
-		// trying to prevent.
+		// Cannot determine binary identity (no /proc on Linux, no ps,
+		// or pid gone between kill and read). Err on the side of
+		// "live" to avoid the exact race we are trying to prevent —
+		// clobbering a live holder is worse than leaving a stale
+		// pidfile for the operator to inspect.
 		return true
 	}
-	name := strings.TrimSpace(string(comm))
 	return name == "mpm-mcp"
 }

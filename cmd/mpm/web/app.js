@@ -2,6 +2,7 @@
 
 const API = '/api';
 let token = '';
+let csrfToken = '';  // server-side CSRF nonce; included in all mutating requests
 let currentView = 'search';
 let memOffset = 0;
 let memLimit = 50;
@@ -11,7 +12,12 @@ let memLimit = 50;
 async function loadToken() {
   try {
     const res = await fetch('/api/status');
-    if (res.ok) return true;
+    if (res.ok) {
+      // Authenticated — load CSRF token from the status response.
+      const data = await res.json();
+      csrfToken = data.csrf_token || '';
+      return true;
+    }
   } catch {}
   // Prompt for token if not authenticated
   const input = prompt('Enter your openclaw auth token (from ~/.openclaw/openclaw.json → gateway.auth.token):');
@@ -20,6 +26,16 @@ async function loadToken() {
     // Use sessionStorage so the token is cleared when the browser tab closes.
     // Users who need persistent login can set remember=true via localStorage.
     sessionStorage.setItem('mpm_token', token);
+    // Fetch CSRF token now that we have auth.
+    try {
+      const res = await fetch('/api/status', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        csrfToken = data.csrf_token || '';
+      }
+    } catch {}
     return true;
   }
   return false;
@@ -34,11 +50,16 @@ function getToken() {
 
 async function apiFetch(path, options = {}) {
   const t = getToken();
+  // For mutating methods, include the CSRF token. The server validates it
+  // server-side; omitting it causes a 403 Forbidden.
+  const isMutating = options.method && ['POST','PUT','PATCH','DELETE'].includes(options.method.toUpperCase());
   const res = await fetch(API + path, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       ...(t ? { 'Authorization': 'Bearer ' + t } : {}),
+      // CSRF token required on all mutating requests.
+      ...(isMutating && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
       ...(options.headers || {}),
     },
   });
@@ -46,7 +67,12 @@ async function apiFetch(path, options = {}) {
     sessionStorage.removeItem('mpm_token');
     localStorage.removeItem('mpm_token');
     token = '';
+    csrfToken = '';
     showToast('Authentication required', 'error');
+    return null;
+  }
+  if (res.status === 403) {
+    showToast('Request forbidden (CSRF token missing)', 'error');
     return null;
   }
   if (!res.ok) {
