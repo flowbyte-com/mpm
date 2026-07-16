@@ -1,0 +1,5 @@
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+SELECT * FROM memories;
+INSERT INTO memories VALUES(1, 'hello', 50, 1700000000);
+COMMIT;
