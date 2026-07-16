@@ -814,10 +814,6 @@ mpm call session_end --payload '{"session_id":"...","summary":"...","commitments
 mpm call session_handoff [--unread|--mark_read]
 mpm call list_handoffs [--limit|--unread]
 
-# UI
-mpm ops web [--port <n>]
-mpm ops review [--promoted|--stale]
-
 # Diagnostics
 mpm ops stats
 mpm ops status
