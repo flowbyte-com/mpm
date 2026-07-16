@@ -48,12 +48,9 @@ mpm/
 │   ├── router.go             # Command → handler registry (~80 commands)
 │   ├── handlers*.go          # Per-command handler implementations
 │   ├── call.go               # `mpm call <tool> --payload <json>` universal machine interface
-│   ├── web.go / web_handlers.go   # HTTP server + REST API
-│   ├── stream.go             # SSE broker (live telemetry)
 │   ├── watch.go              # fsnotify-based file ingestion daemon
 │   ├── synthesize_cmds.go    # Memory dedup via LLM synthesis
-│   ├── handlers_backup.go    # backup/restore-db (⚠ see Security section)
-│   └── web/                  # Static frontend (app.js, index.html, style.css)
+│   └── handlers_backup.go    # backup/restore-db (⚠ see Security section)
 ├── internal/core/            # **Separate Go module** — github.com/flowbyte-com/mpm-core
 │   ├── db.go                 # DatabaseManager — single shared SQLite conn (WAL)
 │   ├── memory.go             # MemoryStore, Memory struct, secret/poison scanner
@@ -95,8 +92,6 @@ mpm/
 │    • SynthesisWorker ──▶ DatabaseManager        │
 │    • idle_dream        (single SQLite conn,     │
 │    • lifecycle decay    WAL, FTS5, busy_timeout)│
-│                               │                 │
-│  web server (:18792)  ───────┘                 │
 └─────────────────────────────┬───────────────────┘
                               ▼
                        src/db/mpm.db
@@ -106,7 +101,6 @@ mpm/
 - `DatabaseManager` (`internal/core/db.go`) — the *only* connection pool. All writes go through it (often via `ExecTracked` for watchdog visibility). Enforces 5s `busy_timeout`, WAL, foreign keys.
 - `MemoryStore` (`internal/core/memory.go`) — higher-level wrapper. Note: the 20-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned`) was pushed down into `SaveMemoryNode` in the 2026-07-07 security push, so **all** write paths go through it (not just `MemoryStore.AddMemory`). Coverage is enforced by the static-analysis test `TestScannerCoverage_AllMemoriesWritersScanContent`.
 - `SynthesisWorker` (`internal/core/synthesis_isolation.go`) — isolated goroutine pool (`maxWorkers=3`) with its own event channel, semaphore, and DLQ for failed LLM synth attempts.
-- `SSEBroker` (`cmd/mpm/stream.go`) — singleton; `call.go`, `handlers.go`, `watch.go` all broadcast to it. 50-event ring buffer for `Last-Event-ID` reconnect.
 
 **Relevance scoring** (in `hybrid_search.go`):
 `score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus`
@@ -128,27 +122,20 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 **Where the moat lives now (read these to understand the new guarantees):**
 
 - **Scanner is in `SaveMemoryNode`** (`internal/core/memory.go`). Every write path goes through it. Coverage is enforced by `TestScannerCoverage_AllMemoriesWritersScanContent`. To add a new write path, you do not need to remember the scanner — it is structurally downstream.
-- **Auth is fail-closed by default.** `authValid()` / `withAuth()` reject requests when `web_token` is empty. The `--allow-anonymous` flag is the explicit opt-in for local dev. The pre-audit "fail-open when token empty" footgun is gone.
-- **HTTP body limit is 10 MiB** via `http.MaxBytesReader` on every body-reading handler (`cmd/mpm/web_handlers.go`). `http.Server` has `ReadTimeout: 30s`, `WriteTimeout: 30s`, `IdleTimeout: 60s`.
-- **Browser security headers** are set by `withSecurityHeaders` middleware in `cmd/mpm/web.go`: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, plus CORS `*` + `OPTIONS` preflight.
+- **No HTTP server in mpm.** The compiled binary is CLI-only; HTTP/MCP surfaces belong to consumer binaries (`mpm-agent`, future `mpm-mcp`, etc.) and they implement their own auth and transport limits at the protocol boundary. Do not add HTTP handlers, body-size limits, or auth middleware here.
 - **`mpm restore-db`** reads the SQL dump with `os.ReadFile` and runs it through `db.Exec(string(content))` on `mattn/go-sqlite3` directly. The pre-audit `exec.Command(sqlite3, ".read "+path)` shell-out (which would have honoured `.shell` directives inside a tampered dump) is gone.
 - **Embedding probe cached via `sync.Once`.** `DefaultEmbeddingConfig()` no longer opens a new HTTP client on every CLI invocation — pre-audit, every `mpm add` / `mpm remember` / `mpm propose_theory` blocked up to 2s on the Ollama probe timeout.
-- **`esc()` in `cmd/mpm/web/app.js`** escapes single quotes too. Future entity cards should use `addEventListener` + `textContent` rather than the legacy inline `onclick=` pattern (XSS-by-interpolation class).
 
 **Open items the audit flagged but did not close (low-impact):**
-- No CSRF protection on state-changing endpoints.
-- `innerHTML` still used in some legacy render paths in `app.js` — escaped, but `textContent`-from-data would be safer.
-- No `Content-Security-Policy` header yet.
 - `CURRENT_TIMESTAMP` is still used for *setting* `deleted_at`; `strftime('%s','now')` is used for *comparing* against it (intentional, but worth documenting).
 
-**Before adding a new external surface** (HTTP handler, CLI command, MCP tool, agent-plugins entry), add it to the audit by re-running the relevant section.
+**Before adding a new external surface** (CLI command, MCP tool, agent-plugins entry), add it to the audit by re-running the relevant section.
 
 ## Configuration
 
 `mpm_config.json` in the workspace root. Loaded by `internal/core/config/config.go`. Contains:
 - `memory_dirs`, `sessions_dirs` — watched paths
 - `synth.{model, api_key, base_url, max_tokens, timeout_seconds}` — LLM config for synthesis
-- `web_token` — bearer token for the web/SSE API (optional in current code → unauthenticated default)
 
 The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775` and a real `synth.api_key`. **Never commit a populated `mpm_config.json`.** Only `mpm_config.json.example` (template) is safe in git.
 
@@ -182,7 +169,5 @@ The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775
 
   **Enforced by** `internal/core/sqlopen_owner_test.go`: a static-analysis test that fails if `sql.Open` appears outside the whitelist (db.go for the main connection, adapters.go/ingest.go for foreign sqlite files, main.go/route_render.go/handlers_backup.go for read-only opens). Add a new call site only with a justifying comment in the whitelist.
 - **Watch daemon** is detached: `mpm watch start --bg` spawns a child that `select{}`s on signals. Parent exits immediately. PID file is `watch.pid` in the workspace.
-- **SSE broker** is a package-level singleton. To broadcast a new event type, add a `Broadcast(...)` helper in `stream.go` — don't instantiate your own broker.
-- **Frontend (`cmd/mpm/web/app.js`)** uses inline `onclick=` attributes and string-concat HTML rendering. If you add new entity types (cards/menus), prefer `addEventListener` + `textContent` from the start; the audit flagged this as a future-XSS hazard.
 - **Memory scoring uses `reinforcement_count` and `weight` independently** — bumping one doesn't bump the other. `mpm reinforce` and `mpm set-weight` are separate commands for a reason.
 - **`call.go`** is the universal machine interface. Adding a new tool? Register it in `call.go` so other processes (mpm-agent, OpenClaw, hermes, opencode) can invoke it via `mpm call <name> --payload <json>`.
