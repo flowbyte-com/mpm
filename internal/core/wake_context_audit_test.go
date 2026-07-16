@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -88,7 +89,10 @@ func TestAuditSummary_EmptyWhenNoEvents(t *testing.T) {
 
 func TestAuditSummary_HeadlineIncludesErrorAndWarningCounts(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	// Anchor the events to "now" so they fall inside the 7-day window
+	// the production query checks against; a hardcoded date drifts
+	// outside the window as the wall clock advances.
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	seedAuditEvent(t, dm, "error", "relay", "e1", now)
 	seedAuditEvent(t, dm, "error", "relay", "e2", now)
 	seedAuditEvent(t, dm, "warn", "relay", "w1", now)

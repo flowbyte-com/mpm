@@ -15,7 +15,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+
+	mpmcore "github.com/flowbyte-com/mpm-core"
 
 	"mpm/internal/critic"
 )
@@ -23,15 +26,11 @@ import (
 func main() {
 	var (
 		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
-			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db)")
+			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
 		logLevel = flag.String("log-level", "info",
 			"Log level: debug, info, warn, error")
 	)
 	flag.Parse()
-
-	if *dbPath == "" {
-		*dbPath = "src/db/mpm.db"
-	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: parseLevel(*logLevel),
@@ -41,9 +40,25 @@ func main() {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	a, err := critic.New(*dbPath, logger)
+	// Open the MPM database via the canonical DatabaseManager (F-007).
+	projectRoot := "."
+	if *dbPath != "" {
+		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
+	}
+	dm, err := mpmcore.NewDatabaseManager(projectRoot)
 	if err != nil {
-		logger.Error("critic init failed", "db", *dbPath, "err", err)
+		logger.Error("database open failed", "project_root", projectRoot, "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := dm.Close(); err != nil {
+			logger.Error("database close failed", "err", err)
+		}
+	}()
+
+	a, err := critic.New(dm.SQLDB(), logger)
+	if err != nil {
+		logger.Error("critic init failed", "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -52,7 +67,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("mpm-critic starting", "db", *dbPath)
+	logger.Info("mpm-critic starting")
 	if err := a.Run(ctx); err != nil {
 		logger.Error("critic run failed", "err", err)
 		os.Exit(1)

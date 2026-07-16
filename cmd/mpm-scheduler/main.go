@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	mpmcore "github.com/flowbyte-com/mpm-core"
+
 	"mpm/internal/scheduler"
 )
 
@@ -30,7 +32,7 @@ func main() {
 		interval = flag.Duration("interval", 60*time.Second,
 			"Ticker interval for wake polling (min 1s)")
 		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
-			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db)")
+			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
 		lockPath = flag.String("lock", defaultLockPath(),
 			"flock path for singleton enforcement (default ~/.mpm/scheduler.lock)")
 		logLevel = flag.String("log-level", "info",
@@ -56,14 +58,30 @@ func main() {
 	}()
 	logger.Info("singleton lock acquired", "path", *lockPath)
 
-	db := *dbPath
-	if db == "" {
-		db = "src/db/mpm.db"
+	// Open the MPM database via the canonical DatabaseManager. F-007
+	// fix: the scheduler does NOT own the *sql.DB handle. Construction
+	// site enforces the singleton invariant; sqlopen_owner_test will
+	// fail if any future code introduces a separate handle.
+	projectRoot := ""
+	if *dbPath != "" {
+		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
+	} else {
+		projectRoot = "."
 	}
-
-	s, err := scheduler.New(db, logger)
+	dm, err := mpmcore.NewDatabaseManager(projectRoot)
 	if err != nil {
-		logger.Error("scheduler init failed", "db", db, "err", err)
+		logger.Error("database open failed", "project_root", projectRoot, "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := dm.Close(); err != nil {
+			logger.Error("database close failed", "err", err)
+		}
+	}()
+
+	s, err := scheduler.New(dm.SQLDB(), logger)
+	if err != nil {
+		logger.Error("scheduler init failed", "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -93,7 +111,7 @@ func main() {
 
 	logger.Info("mpm-scheduler starting",
 		"interval", interval.String(),
-		"db", db,
+		"db", *dbPath,
 		"pid", os.Getpid())
 
 	if err := s.Run(ctx, *interval); err != nil {

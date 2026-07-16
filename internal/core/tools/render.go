@@ -122,14 +122,20 @@ func RenderToolSurface() string {
 			continue
 		}
 		// 3 tools per row, padded to 24 chars. Trailing whitespace is
-		// trimmed per-line to keep the diff readable.
+		// trimmed per-line to keep the diff readable. Clamp the pad to
+		// >=0 so a tool name longer than 24 chars does not panic
+		// strings.Repeat with a negative count.
 		for i := 0; i < len(tools); i++ {
 			name := tools[i].Name
 			end := i + 1
 			isLast := end == len(tools)
 			if !isLast && end%3 != 0 {
+				pad := 24 - len(name)
+				if pad < 0 {
+					pad = 0
+				}
 				b.WriteString(name)
-				b.WriteString(strings.Repeat(" ", 24-len(name)))
+				b.WriteString(strings.Repeat(" ", pad))
 				b.WriteString(" ")
 			} else {
 				b.WriteString(name)

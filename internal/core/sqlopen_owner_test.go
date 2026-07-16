@@ -52,7 +52,12 @@ func TestDatabaseManagerIsOnlyOwnerOfSqlOpen(t *testing.T) {
 
 	// Scan from the internal/core/ package directory. The test runs with
 	// cwd = internal/core/, so "." scans core and "../cmd/mpm" scans the CLI.
-	dirs := []string{".", "../cmd/mpm"}
+	//
+	// 2026-07-16 F-007 expansion: added ../scheduler and ../critic which
+	// both follow the F-007 contract — they accept a *sql.DB via New()
+	// and never call sql.Open directly. Any future regression that re-opens
+	// the workspace DB in those packages will fail this test.
+	dirs := []string{".", "../cmd/mpm", "../scheduler", "../critic"}
 	violations := map[string][]string{} // file -> lines
 
 	for _, dir := range dirs {
