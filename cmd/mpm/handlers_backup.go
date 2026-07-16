@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // ============================================================================
@@ -124,6 +126,20 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore failed (read): %v\n", err), 1)
 	}
 
+	// SECURITY (C-2): Validate the dump against an allow-list before executing.
+	// The canonical validator rejects ATTACH / DETACH / SELECT / DELETE /
+	// UPDATE / DROP / ALTER / CREATE VIRTUAL TABLE / non-foreign_keys PRAGMA /
+	// etc. and any INSERT or CREATE against a non-canonical table. Fails
+	// CLOSED on the first unsafe statement. The canonical schema is the
+	// hand-maintained allow-list (CanonicalMPMSchema + RuntimeCanonicalSchema);
+	// a static guard (TestCanonicalSchemaSync) keeps it in sync with the
+	// source code's CREATE TABLE statements.
+	validator := mpminternal.NewCanonicalDumpValidator()
+	statements, err := validator.Prepare(string(content))
+	if err != nil {
+		return respond("", fmt.Sprintf("Restore rejected (unsafe dump): %v\n", err), 1)
+	}
+
 	// Open a fresh connection. Using mattn/go-sqlite3 directly (no CLI subprocess)
 	// prevents the shell-injection vector present in the old sqlite3 .read approach.
 	db, err := sql.Open("sqlite3", dbPath)
@@ -141,12 +157,32 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore failed (begin tx): %v\n", err), 1)
 	}
 
-	// Execute the dump content. mattn/go-sqlite3 supports multi-statement strings
-	// natively. We pass the full dump to Exec inside the transaction so that
-	// statement-level errors abort the entire restore atomically.
-	if _, err := tx.Exec(string(content)); err != nil {
-		tx.Rollback()
-		return respond("", fmt.Sprintf("Restore failed (exec): %v\n", err), 1)
+	// SECURITY (H-3 side-effect): execute statements one at a time. The
+	// validator already approved each statement against the allow-list; per-
+	// statement execution ensures: (a) a NULL byte or partial write in the
+	// dump yields a precise error rather than undefined behaviour from a
+	// monolithic Exec; (b) the failure point is observable in the error
+	// message; (c) defence-in-depth — even if a future bypass gets past
+	// Validate, per-statement execution makes the failure atomic and the
+	// transaction rolls back cleanly.
+	//
+	// Skip BEGIN/COMMIT/ROLLBACK/END statements — they would conflict with
+	// the outer Go transaction (database/sql refuses nested transactions).
+	// The validator already approved these as safe transaction-control
+	// statements; the outer Go tx serves the same atomicity guarantee.
+	for i, stmt := range statements {
+		upper := strings.ToUpper(strings.TrimSpace(stmt))
+		first := strings.Fields(upper)
+		if len(first) > 0 {
+			switch first[0] {
+			case "BEGIN", "COMMIT", "ROLLBACK", "END":
+				continue
+			}
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			tx.Rollback()
+			return respond("", fmt.Sprintf("Restore failed at statement %d: %v\n", i+1, err), 1)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
