@@ -300,3 +300,51 @@ The DB hasn't been initialized. Run any `mpm` command first
 - [README.md](README.md) — start here for the cognitive model
 - [OpenClaw docs](https://docs.openclaw.ai) — full platform reference
 - [docs/audit-2026-07-16.md](docs/audit-2026-07-16.md) — security review
+
+---
+
+## Doc maintenance
+
+This section is for future-me (or anyone maintaining the install story). New
+installers can skip it; it's about the doc architecture, not the install
+sequence.
+
+**The install story lives in two places, by design:**
+
+- **`INSTALL.md`** (this file, ~300 lines) — *action doc*. Sequence for
+  installers, troubleshooting for fresh-install friction. Optimized for
+  "type these commands and you're running."
+- **`README §5 Quick Start`** (~80 lines) — *reference doc*. Install options,
+  trade-offs, full surface. Optimized for "I want to understand all the
+  install paths and choose deliberately."
+
+The 5-command daemon install block (§2 here, §5.2 in README) is duplicated
+intentionally — minimum viable command surface. Don't try to deduplicate;
+the small duplication is cheaper than the cross-reference complexity.
+
+**When fixing install friction, atomic updates are mandatory:**
+
+1. Capture the finding in `docs/superpowers/install-friction-2026-07-16.md`
+   (gitignored — local working notes). Include the symptom, the diagnosis,
+   the fix, and the commit SHA that resolved it.
+2. Update **both** `INSTALL.md` and `README §5` in the same commit. Don't
+   land a fix in one and forget the other — readers use both paths.
+3. Update `contrib/systemd/mpm-scheduler.service` if the systemd surface
+   changes (paths, env vars, hardening flags).
+4. Update the Makefile (`service-scheduler` / `service` / `uninstall-service`
+   targets) if install/deploy semantics change.
+5. The friction log entry references the commit SHA, so a future `git log
+   --grep` finds the resolution.
+
+**When adding a new install path or option:**
+
+- Add to both docs (the action sequence in INSTALL.md; the reference entry
+  in README §5).
+- The action doc shows the canonical path. The reference doc shows all
+  paths with trade-offs. Different jobs, same source of truth.
+
+**Heath Robinson check:** if a fix needs to scatter across more than two
+docs, that's a signal the architecture has drifted. Pause, reconsider
+whether the new content belongs in one of the existing docs or in a new
+specialized doc (e.g., `docs/INSTALL_PROXY.md` for a deployment variant).
+Don't pile into INSTALL.md.
