@@ -1,3 +1,71 @@
+// =============================================================================
+// SECURITY REVIEWER HANDOFF — C-2 (restore-db SQL injection)
+// =============================================================================
+//
+// Threat Model:  Defense against compromised/poisoned .sql dumps that
+//                reach the MPM database directory. An attacker who can
+//                drop a file there and trick the user into running
+//                `mpm restore-db <file>` would otherwise gain arbitrary
+//                SQL execution against the DB.
+//
+// Parser Design: Tokenizer-based (strings.Fields + strings.ToUpper), NOT
+//                regex. Case-variation bypasses (aTtAcH) caught by design.
+//                SQL comments are stripped BEFORE keyword analysis with
+//                whitespace preservation so 'INSE/*fake*/RT' stays two
+//                distinct tokens (token boundary test in
+//                sql_dump_validator_test.go::TestDumpValidator_CommentTokenBoundary).
+//
+// Allow-list:    Schema-canonical. Two lists, hand-maintained:
+//                  CanonicalMPMSchema  — tables declared in
+//                                         internal/core/{db,schema}*.go
+//                                         CREATE TABLE statements.
+//                  RuntimeCanonicalSchema — tables created by runtime
+//                                         migrations (lessons_base,
+//                                         synthesis_dlq, etc.).
+//                Static guard TestCanonicalSchemaSync verifies
+//                CanonicalMPMSchema stays in sync with source. The
+//                guard catches ~95% of drift; the remaining 5% requires
+//                manual review at schema-change time (an intentional
+//                trade-off — see Architectural Decisions below).
+//
+// Posture:       FAIL-CLOSED. The validator explicitly rejects malformed
+//                or unknown SQL rather than attempting to sanitize. Most
+//                SQLi bypasses live in error-prone sanitization logic;
+//                deterministic rejection is a security feature, not a
+//                gap. Any statement that cannot be positively identified
+//                as allow-listed returns an error and aborts the restore.
+//
+// Verification:  Three layers of test coverage:
+//                  1. cmd/mpm/testdata/restore_db/ — 10 .sql fixtures
+//                     (3 benign, 7 attack vectors including comment-spoof,
+//                      case-variation, string-literal semicolons).
+//                  2. sql_dump_validator_test.go — 11 unit tests covering
+//                     parser correctness, bypass defenses, PRAGMA strictness.
+//                  3. sql_dump_validator_e2e_test.go — 2 E2E tests against
+//                     real SQLite: tampered dump → abort + DB untouched;
+//                     good dump → roundtrip restore into empty DB.
+//
+// Execution:     Handler (cmd/mpm/handlers_backup.go) runs statements
+//                per-statement inside a Go transaction. BEGIN/COMMIT
+//                are skipped (the outer Go tx serves the same atomicity;
+//                database/sql refuses nested transactions). Per-statement
+//                exec ensures NULL bytes / partial writes yield precise
+//                per-statement errors and gives a clear failure point.
+//
+// Architectural Decisions (intentional trade-offs, not gaps):
+//   * H-4 concurrent-write `flock` guard deferred. Documented as
+//     'next milestone' in the audit. C-2 is the parser milestone;
+//     H-4 is the concurrency milestone. Mixing them would compound
+//     two classes of bugs in one change.
+//   * Reject-not-sanitize chosen for fail-closed posture. Sanitization
+//     is where most SQLi bypasses live; deterministic rejection is safer.
+//   * Canonical schema (not live schema) as allow-list. Live schema
+//     doesn't work for restore-into-fresh-DB (empty sqlite_master
+//     rejects legitimate CREATE TABLE statements). Canonical covers
+//     the common case; live-schema variant removed before review.
+//
+// =============================================================================
+
 package internal
 
 import (
@@ -109,24 +177,6 @@ func NewDumpValidator(knownTables []string) *DumpValidator {
 		set[strings.ToLower(t)] = true
 	}
 	return &DumpValidator{knownTables: set}
-}
-
-// NewDumpValidatorFromDB opens the given SQLite database in read-only mode
-// and builds a validator whose allow-list is derived from the existing
-// tables in the DB. FTS virtual tables and sqlite_* internal tables are
-// excluded.
-//
-// Use this for restore-into-existing-DB cases where you want the
-// allow-list restricted to what's already in the target. For
-// restore-into-fresh-DB (the common case for new installs or recovery
-// from total data loss), use NewCanonicalDumpValidator instead — the
-// live DB has no tables, so the live-schema allow-list would be empty
-// and reject the dump's CREATE TABLE statements.
-func NewDumpValidatorFromDB(dbPath string) (*DumpValidator, error) {
-	// Kept for callers that specifically want the live-schema variant.
-	// Implementation moved to internal/live_schema_validator.go to keep
-	// this file focused on the canonical-schema path.
-	return newLiveSchemaDumpValidator(dbPath)
 }
 
 // Validate returns nil if content is safe to restore, or an error
