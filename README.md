@@ -1,6 +1,6 @@
 # MPM
 
-> **Persistent reasoning for autonomous AI agents.**
+> **A persistent reasoning substrate for AI agents.**
 
 MPM stands for **Mnemonic Persistence Maintainer**. It is a *persistent reasoning substrate* — a small, opinionated binary that turns an agent's transient thinking into a durable epistemic trail.
 
@@ -537,6 +537,10 @@ BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
 
 **Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing reinforcement contribution, weight contribution, recency age, and the FTS5 terms that matched. Useful for "why did the agent pick this memory?" introspection without re-running the search.
+
+> **Retrieval ranking determines what is surfaced. Confidence determines what is believed.** A frequently retrieved artifact is not necessarily a trusted artifact.
+>
+> The hybrid score above ranks by relevance; it says nothing about how strongly the system believes the surfaced artifact. Confidence is derived from the evidence ledger (§6.2) and evolves through the challenge lifecycle (§4.5). An artifact can be top of the recall list with low confidence, or low in the list with high confidence — both states are common and correct. Conflating the two axes is the most common read of retrieval output; it is also wrong.
 
 **LTM promotion:** `weight ≥ 10` OR explicit `mpm promote` OR auto-ingested `.md` file.
 
@@ -1109,7 +1113,18 @@ The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLik
 
 MPM is designed for long-running autonomous operation: SQLite WAL mode, dead-letter queues, synthesis isolation, retry pipelines, event replay buffers, watchdog telemetry, overflow protection, and a closed self-healing integrity loop.
 
-The four enforcement patterns (source-of-truth + cache, property tests, AST guard rails, self-heal whitelist + escalation) live in **Appendix C**. This section is the operator-facing view: what runs, when, and what to do when it fails.
+> **The Reliability Model.** MPM's guarantees are not aspirational — they are encoded in four repeating patterns:
+>
+> - **Source-of-truth + cache.** If two values could disagree, exactly one is authoritative; the other is a derivable cache. (§6.2 example: `confidence` is a cache; the evidence ledger is the source of truth.)
+> - **Property tests, not implementation tests.** Pin the *meaning*, not the *formula*. The decay function can change shape forever; "decay never increases confidence" stays true forever.
+> - **AST guard rails.** Contracts that span JSON-Schema and a handler are enforced by the type system, not the prose — the schema is a strict superset of the keys the handler reads.
+> - **Self-heal whitelist + escalation.** Auto-fix only what is known-safe. Everything else escalates to a pending theory for operator review.
+>
+> These patterns are documented in depth in **Appendix C**. Every "this is guaranteed" claim in the body of this document maps to one of them.
+>
+> These patterns exist because the next architectural threat is no longer bad design — it is implementation debt. Too many artifact types, too many lifecycle states, too many special cases, too much intelligence expected from the substrate. The antidote is the same as §7's: strict enums, invariants pinned by property tests, append-only records, boring storage. Default to no.
+
+This section is the operator-facing view of the same model: what runs, when, and what to do when it fails.
 
 ### Self-Healing Integrity Loop
 
