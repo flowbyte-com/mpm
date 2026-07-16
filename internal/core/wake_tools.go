@@ -121,6 +121,11 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time) ([]map[string]interf
 		`SELECT id, target_time, reason, theory_id, recurring_rule, created_by, metadata, created_at
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?
+		   AND (
+		     metadata IS NULL OR metadata = ''
+		     OR json_extract(metadata, '$.kind') IS NULL
+		     OR json_extract(metadata, '$.kind') = 'notification'
+		   )
 		 ORDER BY target_time ASC`,
 		nowUnix,
 	)
