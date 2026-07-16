@@ -90,11 +90,23 @@ func (ws *WebServer) addMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap individual memory size at 1 MB. The overall request body is
+	// already capped at maxRequestBody (10 MB), but a single memory taking
+	// the whole envelope leaves no room for tags/metadata, exhausts FTS5
+	// tokenisation, and amplifies denial-of-service impact. Real memory
+	// content is small text; anything larger is almost certainly input
+	// mistake or abuse.
+	if len(input.Content) > (1 << 20) {
+		writeError(w, http.StatusRequestEntityTooLarge, "content exceeds 1 MB")
+		return
+	}
+
 	if input.Collection == "" {
 		input.Collection = "memories"
 	}
 
-	// Convert []string tags to map[string]interface{}
+	// tags []string is forwarded to SaveMemory, which internally converts
+	// to a map[string]bool for storage. See internal/core/memory.go.
 	id, err := ws.db.SaveMemory(input.Collection, input.Content, "", input.Tags, input.Metadata, nil, false, 1)
 	if err != nil {
 		ws.serverError(w, err)
@@ -150,6 +162,13 @@ func (ws *WebServer) editMemory(w http.ResponseWriter, r *http.Request, id strin
 		content = input.Content
 	}
 
+	// Match addMemory's 1 MB content cap so repeated edits cannot grow a
+	// single memory past the limit.
+	if len(content) > (1 << 20) {
+		writeError(w, http.StatusRequestEntityTooLarge, "content exceeds 1 MB")
+		return
+	}
+
 	metadataIface := existing["metadata"]
 	if input.Metadata != "" {
 		var parsed interface{}
@@ -158,7 +177,7 @@ func (ws *WebServer) editMemory(w http.ResponseWriter, r *http.Request, id strin
 		}
 	}
 
-	// Convert []string tags to map[string]interface{}
+	// tags []string → map[string]bool for storage.
 	tagsMap := make(map[string]interface{})
 	for _, t := range input.Tags {
 		tagsMap[t] = true

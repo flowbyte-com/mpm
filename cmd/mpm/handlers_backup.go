@@ -79,6 +79,22 @@ func handleRestoreDB(args []string) int {
 	}
 	sqlPath := args[1]
 
+	// Security: canonicalize the path and validate it stays within the
+	// database directory. This prevents path traversal (e.g. ../../etc/passwd)
+	// and restricts the operation to intentional backup files only.
+	dm := getDB()
+	if dm == nil {
+		return 1
+	}
+	dbDir := filepath.Dir(dm.DBPath())
+	dbPath := dm.DBPath()
+	dm.Close()
+
+	cleanPath := filepath.Clean(sqlPath)
+	if !strings.HasPrefix(cleanPath, dbDir+string(filepath.Separator)) {
+		return respond("", fmt.Sprintf("Restore path must be inside the database directory (%s): %s\n", dbDir, sqlPath), 1)
+	}
+
 	if _, err := os.Stat(sqlPath); err != nil {
 		return respond("", fmt.Sprintf("Cannot read %s: %v\n", sqlPath, err), 1)
 	}
@@ -92,14 +108,7 @@ func handleRestoreDB(args []string) int {
 		return respond("", "Restore aborted.\n", 1)
 	}
 
-	dm := getDB()
-	if dm == nil {
-		return 1
-	}
-	dbPath := dm.DBPath()
 	// Close all DB handles BEFORE clearing WAL/SHM so SQLite doesn't fight us.
-	dm.Close()
-
 	// Clear WAL/SHM siblings — they may contain writes newer than the dump.
 	walPath := dbPath + "-wal"
 	shmPath := dbPath + "-shm"
@@ -115,17 +124,33 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore failed (read): %v\n", err), 1)
 	}
 
-	// Open a fresh connection and Exec the content directly.
-	// Using mattn/go-sqlite3 directly (no CLI subprocess) prevents the
-	// shell-injection vector present in the old sqlite3 .read approach.
+	// Open a fresh connection. Using mattn/go-sqlite3 directly (no CLI subprocess)
+	// prevents the shell-injection vector present in the old sqlite3 .read approach.
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return respond("", fmt.Sprintf("Restore failed (open): %v\n", err), 1)
 	}
 	defer db.Close()
 
-	if _, err := db.Exec(string(content)); err != nil {
+	// Wrap the entire restore in a transaction. On any statement error, the
+	// transaction rolls back and the database is left untouched. This prevents
+	// the "partial restore" failure mode where some statements execute and
+	// others fail, leaving the DB in an inconsistent state.
+	tx, err := db.Begin()
+	if err != nil {
+		return respond("", fmt.Sprintf("Restore failed (begin tx): %v\n", err), 1)
+	}
+
+	// Execute the dump content. mattn/go-sqlite3 supports multi-statement strings
+	// natively. We pass the full dump to Exec inside the transaction so that
+	// statement-level errors abort the entire restore atomically.
+	if _, err := tx.Exec(string(content)); err != nil {
+		tx.Rollback()
 		return respond("", fmt.Sprintf("Restore failed (exec): %v\n", err), 1)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return respond("", fmt.Sprintf("Restore failed (commit): %v\n", err), 1)
 	}
 
 	fmt.Printf("Restored from: %s\n", sqlPath)
