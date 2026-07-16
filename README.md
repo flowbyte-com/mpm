@@ -2,6 +2,8 @@
 
 > **A persistent reasoning substrate for AI agents.**
 
+> **Looking to install?** See [INSTALL.md](INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
+
 MPM stands for **Mnemonic Persistence Maintainer**. It is a *persistent reasoning substrate* — a small, opinionated binary that turns an agent's transient thinking into a durable epistemic trail.
 
 Traditional memory systems answer one question:
