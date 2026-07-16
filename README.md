@@ -23,7 +23,9 @@ Instead of assigning arbitrary confidence scores, confidence is derived from evi
 
 Instead of rewriting memories, beliefs evolve while history remains intact.
 
-One persistent cognitive substrate. One SQLite database. No daemon. No vector database. No distributed infrastructure.
+One persistent cognitive substrate. One SQLite database. One headless daemon. No vector database. No distributed infrastructure. No web UI.
+
+`mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. The CLI is an operational convenience for inspecting the daemon's state — not a human-facing application.
 
 > **MPM is not designed to maximize recall. It is designed to preserve intellectual progress.**
 
