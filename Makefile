@@ -10,6 +10,7 @@
 
 BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
+SCHED_BINARY := mpm-scheduler
 BUILD_DIR   := bin
 PREFIX      ?= /usr/local
 
@@ -32,19 +33,22 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/mpm
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY) ./cmd/mpm-mcp
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME) and $(BUILD_DIR)/$(MCP_BINARY) (mpm-std)"
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), and $(BUILD_DIR)/$(SCHED_BINARY) (mpm-std)"
 
-# Install both binaries to PREFIX/bin
+# Install all three binaries to PREFIX/bin
 install: build
-	@echo "🚀 Installing mpm and mpm-mcp to $(PREFIX)/bin/..."
+	@echo "🚀 Installing mpm, mpm-mcp, and mpm-scheduler to $(PREFIX)/bin/..."
 	@sudo install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(PREFIX)/bin/$(BINARY_NAME)
 	@sudo install -Dm755 $(BUILD_DIR)/$(MCP_BINARY)  $(PREFIX)/bin/$(MCP_BINARY)
+	@sudo install -Dm755 $(BUILD_DIR)/$(SCHED_BINARY) $(PREFIX)/bin/$(SCHED_BINARY)
 	@echo "✓ Installation complete!"
 
 # Run tests
 test:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 
 # Clean build artifacts
 clean:
