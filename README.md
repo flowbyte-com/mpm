@@ -476,6 +476,52 @@ mpm wake               # last session context
 
 Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
+### 5.4 Customize your agent's core files
+
+The cognitive machinery in §5.2 runs without customization. But the agent
+that runs it is generic — it doesn't know who you are, what you prefer, or
+how you like to work. The workspace files at `~/.openclaw/workspace/` turn
+a generic assistant into one that's yours.
+
+| File | What it shapes | When to edit |
+|---|---|---|
+| `IDENTITY.md` | Name, sigil, color, emoji — who the agent _is_ | During bootstrap; revisit when the persona evolves |
+| `SOUL.md` | Persona, tone, boundaries, vibe — how the agent _behaves_ | During bootstrap; refine as patterns emerge |
+| `AGENTS.md` | Operating instructions, memory workflow, red lines | As the workflow stabilizes — this is the agent's operating manual |
+| `USER.md` | Who you are, how to address you, your preferences | Once you know what the agent should remember about you |
+| `TOOLS.md` | Local tool conventions (cameras, SSH hosts, TTS voices, etc.) | When you start using tools the agent doesn't know about |
+| `HEARTBEAT.md` | Periodic check tasks (or empty to skip heartbeats) | When you want scheduled checks |
+| `MEMORY.md` | Curated long-term memory — durable facts, preferences, decisions | Continuously, as the agent learns things worth keeping |
+| `memory/YYYY-MM-DD.md` | Daily logs of what happened | Daily, raw session notes |
+
+**Start simple. Iterate as the agent does work.** You don't need to fill
+these in upfront — they co-evolve with the agent over sessions:
+
+1. Run the agent for a week on default files.
+2. Notice where it's _generic_ (no opinions, no preferences, no knowledge of you).
+3. Edit the relevant file to capture the gap.
+4. Repeat.
+
+**SOUL.md is the highest-leverage file.** Loaded every session, sets the tone.
+See the [SOUL.md personality guide](https://docs.openclaw.ai/concepts/soul)
+for what good ones look like. Defaults are friendly-but-generic; an
+opinionated SOUL.md (with stance, no preamble, sharp entrances) is the
+difference between a chatbot and an assistant that feels like a colleague.
+
+**Three memory layers, three different jobs.** The full agent stack has:
+
+- **Workspace files** — who the agent _is_ (OpenClaw-side, markdown in
+  `~/.openclaw/workspace/`)
+- **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in
+  the `directives` table, seeded by `mpm ops init directives`)
+- **MPM memories** — what the agent _believes_ (DB-side,
+  `save_to_memory` / `query_long_term_memory`, scales to thousands of rows)
+
+Use `MEMORY.md` for "who am I and what do I know about my user". Use MPM
+directives for "how does MPM's machinery actually fire". Use MPM memories
+for "what does the agent believe, why, and with what evidence". All three
+required for the closed cognitive loop.
+
 ---
 
 > **From here on, the document describes how the system is built.** §1–§5 cover what MPM is, why it isn't a memory system, the cognitive model, the belief lifecycle, and how to operate it. The remaining sections and appendices explain how it works — for readers writing patches or evaluating the architecture.

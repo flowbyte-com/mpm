@@ -74,3 +74,4 @@ mpm status                  # confirm: DB reachable, counts populated
 - [README §5 Quick Start](README.md#5-quick-start) — install paths (CLI-only, daemon, custom)
 - [OpenClaw docs](https://docs.openclaw.ai) — platform reference
 - [OpenClaw Agent Workspace](https://docs.openclaw.ai/concepts/agent-workspace) — customize your agent's identity, persona, memory files
+- [README §5.4](README.md#54-customize-your-agents-core-files) — workspace file reference (what each file shapes, three memory layers)
