@@ -610,7 +610,6 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 | `mpm ops gc --review` / `--purge` / `--shred-negative` | Destructive mass operations; core safe `gc_run` IS exposed |
 | `mpm ops changelog build` | Release engineering; not an agent task |
 | `mpm ops maintain` | Maintenance wrapper; individual ops below are exposed |
-| `mpm web` | Long-running HTTP server; can't be a tool call |
 
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
@@ -735,7 +734,6 @@ mpm rm <id>        # Soft delete
 mpm wake           # Last session context (mode, persona, topics, recent memories)
 mpm call <tool>    # Universal machine interface (JSON payload)
 mpm status         # System status dashboard
-mpm web [--port <n>] [--allow-anonymous]  # Start web UI server (fail-closed; requires web_token)
 mpm version        # Version info
 mpm help           # Full help
 ```
@@ -881,14 +879,6 @@ The Runtime is where MPM evolves. Services documented here are intentionally dec
 ### Embedding Pipeline
 
 Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops backfill-embeddings` provides batched, resume-safe backfill for existing memories. tiktoken (`cl100k_base`) drives token-aware chunking.
-
-### SSE Live Telemetry Stream
-
-The web UI server includes a live Server-Sent Events (SSE) stream at `GET /api/stream` — no polling, no refresh. Every state-changing operation fans out the same event to all connected browser tabs.
-
-Architecture: package-level `SSEBroker` singleton, 50-slot ring buffer for `Last-Event-ID` replay, dual injection paths (agent/CLI via `/api/internal/broadcast` relay, human/web via direct `Broker().Broadcast()`), 15s heartbeat to prevent proxy idle-kill, 256-buffered client channels (slow consumers skip, never block).
-
-Events: `tool_exec`, `memory_saved`, `immune_slash`, `theory_proposed`, `theory_resolved`, `lesson_saved`, `ping`.
 
 ### Memory Versioning
 
@@ -1067,8 +1057,6 @@ Proactive defense against the silent-failure class of bugs where hand-curated fr
 ### Security Scanning
 
 Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
-
-**Auth policy:** `mpm web` defaults to **fail-closed** — if `web_token` is unset, the server refuses to start. Pass `--allow-anonymous` to opt in for trusted-LAN debugging; the server prints a loud warning and sets `X-MPM-Auth: disabled-anonymous` on every response.
 
 ### Fsnotify Reconciliation
 
