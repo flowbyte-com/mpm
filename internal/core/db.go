@@ -1011,28 +1011,43 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 }
 
 // rewriteTablePrefix prepends `prefix.` to the table name in a CREATE TABLE
-// statement. Naive — assumes the table name is the only bare identifier
-// (no embedded "table.column" references in the column list, which is
-// true for our BaseTables DDL).
+// statement. Safe against quoted strings in CHECK constraints: finds the
+// first '(' that is NOT inside a single-quoted string literal, which marks
+// the end of the table-name token. This is sufficient for BaseTables DDL
+// (no column names contain "CREATE TABLE"). A future DDL with a column
+// named e.g. "create_table" would still be safe since we scan for '('.
 func rewriteTablePrefix(ddl, prefix string) string {
-	// "CREATE TABLE IF NOT EXISTS foo (" -> "CREATE TABLE IF NOT EXISTS shared.foo ("
-	// Find the start of the table name (after "CREATE TABLE" and optional "IF NOT EXISTS").
 	const marker = "CREATE TABLE "
 	idx := strings.Index(ddl, marker)
 	if idx < 0 {
 		return ddl
 	}
 	afterMarker := idx + len(marker)
+
 	// Skip "IF NOT EXISTS " if present.
 	rest := ddl[afterMarker:]
 	if strings.HasPrefix(rest, "IF NOT EXISTS ") || strings.HasPrefix(rest, "IF NOT EXISTS\t") {
 		afterMarker += len("IF NOT EXISTS ")
 	}
-	// Find the next space, tab, newline, or '(' — the table name ends there.
+
+	// Find the first '(' that is not inside a single-quoted string literal.
+	// This correctly handles CHECK constraints like:
+	//   CHECK (column_name != 'CREATE TABLE' OR condition)
+	// which would confuse a naive "scan for '('" approach.
 	cutAt := -1
 	for i := afterMarker; i < len(ddl); i++ {
 		c := ddl[i]
-		if c == ' ' || c == '\t' || c == '\n' || c == '(' {
+		if c == '\'' {
+			// Skip the rest of this string literal (no nesting, no escapes in our DDL).
+			for i++; i < len(ddl); i++ {
+				if ddl[i] == '\'' {
+					i++
+					break
+				}
+			}
+			continue
+		}
+		if c == '(' {
 			cutAt = i
 			break
 		}
