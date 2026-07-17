@@ -1573,7 +1573,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 	// FTS5 is available. Use unicode61+porter for broad compatibility.
 	ftsStatements := []string{
 		`CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(content, session_id, content_hash UNINDEXED, tokenize='porter unicode61');`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags UNINDEXED, tokenize='porter unicode61');`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
@@ -1591,7 +1591,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
 
-		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
+						`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_au_content AFTER UPDATE ON memories WHEN NOT (old.deleted_at IS NULL AND new.deleted_at IS NOT NULL) BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
@@ -1653,6 +1653,53 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_ai AFTER INSERT ON scheduled_wakes BEGIN INSERT INTO scheduled_wakes_fts(rowid, reason, theory_id) VALUES (new.rowid, new.reason, COALESCE(new.theory_id,'')); END;`,
 		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_ad AFTER DELETE ON scheduled_wakes BEGIN DELETE FROM scheduled_wakes_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS scheduled_wakes_au AFTER UPDATE ON scheduled_wakes BEGIN DELETE FROM scheduled_wakes_fts WHERE rowid = old.rowid; INSERT INTO scheduled_wakes_fts(rowid, reason, theory_id) VALUES (new.rowid, new.reason, COALESCE(new.theory_id,'')); END;`,
+	}
+
+	// FTS5 migration (2026-07-17): index the tags column in
+	// memories_fts. The original schema declared tags UNINDEXED,
+	// which meant tag queries fell through FTS5 with no match even
+	// when matching rows existed. Hermes's diagnostic surfaced this
+	// gap: 6 saves landed with proper tags (post the write-path fix
+	// e2e18d6) but query_long_term_memory returned 0 for tag strings.
+	//
+	// Detection: check sqlite_master for the old UNINDEXED schema.
+	// Migration: drop the old table, recreate with tags indexed,
+	// backfill from memories. Triggers re-populate the new rows on
+	// subsequent writes.
+	//
+	// Idempotent: on a fresh install, the new schema is already in
+	// place (the CREATE TABLE IF NOT EXISTS above), so this block
+	// does nothing. On an existing install with the old schema, this
+	// runs once and rebuilds the index.
+	ftsNeedsMigration := false
+	if err := dm.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts' AND sql LIKE '%tags UNINDEXED%'`,
+	).Scan(&ftsNeedsMigration); err == nil && ftsNeedsMigration {
+		slog.Info("mpm: FTS5 migration detected (memories_fts with tags UNINDEXED); rebuilding with tags indexed")
+		// Drop the old FTS table. Triggers reference it and will
+		// re-fire on subsequent writes; backfill below catches
+		// existing rows.
+		if _, err := dm.db.Exec(`DROP TABLE memories_fts`); err != nil {
+			slog.Warn("mpm: FTS5 migration failed to drop old table", "error", err.Error())
+		} else {
+			// Recreate with the new schema (tags indexed, no UNINDEXED).
+			if _, err := dm.db.Exec(
+				`CREATE VIRTUAL TABLE memories_fts USING fts5(content, collection, session_id UNINDEXED, tags, tokenize='porter unicode61')`,
+			); err != nil {
+				slog.Warn("mpm: FTS5 migration failed to recreate", "error", err.Error())
+			} else {
+				// Backfill: insert every non-deleted memory into the new FTS table.
+				// Triggers already cover new writes; this catches existing rows.
+				if _, err := dm.db.Exec(
+					`INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
+					 SELECT id, content, collection, session_id, tags FROM memories WHERE deleted_at IS NULL`,
+				); err != nil {
+					slog.Warn("mpm: FTS5 migration backfill failed", "error", err.Error())
+				} else {
+					slog.Info("mpm: FTS5 migration complete; tag tokens now searchable")
+				}
+			}
+		}
 	}
 
 	for _, sqlQuery := range ftsStatements {
