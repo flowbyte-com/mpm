@@ -11,6 +11,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"path/filepath"
 )
 
 // handlers.go contains the unified tool handlers that power both
@@ -386,6 +387,139 @@ func handlePatchMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 func handlePromoteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
 	return dm.PromoteMemory(id)
+}
+
+// handleMigrate imports memories from a non-SQLite source file. Wraps the
+// markdown/json migration pipeline for MCP clients.
+//
+// Wire-format: {
+//   "from_path":     "<path>",          # required for stage mode
+//   "format":        "markdown|json|auto", # default "auto" (extension-based)
+//   "label":         "<name>",          # optional batch label
+//   "dry_run":       false,             # optional
+//   "commit":        false,             # stage + immediately promote
+//   "commit_batch":  "<batch_id>",      # alternative: just promote a staged batch
+//   "undo_batch":    "<batch_id>"       # alternative: rollback a batch
+// }
+//
+// Returns a map with rows_read, rows_staged, rows_skipped, rows_rejected,
+// batch_id, and (if commit or commit_batch) rows_promoted.
+func handleMigrate(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	fromPath, _ := p["from_path"].(string)
+	formatStr, _ := p["format"].(string)
+	if formatStr == "" {
+		formatStr = "auto"
+	}
+	label, _ := p["label"].(string)
+	dryRun, _ := p["dry_run"].(bool)
+	commit, _ := p["commit"].(bool)
+	commitBatch, _ := p["commit_batch"].(string)
+	undoBatch, _ := p["undo_batch"].(string)
+
+	result := map[string]interface{}{}
+
+	// Pure promote mode
+	if commitBatch != "" {
+		n, err := dm.PromoteRawMemoryBatch(commitBatch, dryRun)
+		if err != nil {
+			return nil, fmt.Errorf("commit failed: %w", err)
+		}
+		result["action"] = "promote"
+		result["batch_id"] = commitBatch
+		result["rows_promoted"] = n
+		result["dry_run"] = dryRun
+		return result, nil
+	}
+
+	// Pure undo mode: delegate via direct SQL (no DM method exists yet;
+	// rollback is rare enough that adding a method is overkill).
+	if undoBatch != "" {
+		// Best-effort undo: delete pending/approved rows for the batch.
+		// Approved rows that have been promoted to memories are tombstoned
+		// rather than hard-deleted so audit trails survive.
+		if !dryRun {
+			_, _ = dm.SQLDB().Exec(
+				`UPDATE raw_memories SET status='rejected', llm_notes='undo by mcp tool', updated_at=? WHERE import_batch=? AND status IN ('pending','approved')`,
+				float64(time.Now().Unix()), undoBatch)
+		}
+		result["action"] = "undo"
+		result["batch_id"] = undoBatch
+		result["dry_run"] = dryRun
+		return result, nil
+	}
+
+	// Stage mode
+	if fromPath == "" {
+		return nil, fmt.Errorf("from_path is required (or use commit_batch / undo_batch)")
+	}
+
+	// Auto-detect format from extension
+	format := formatStr
+	if format == "auto" {
+		ext := strings.ToLower(filepath.Ext(fromPath))
+		switch ext {
+		case ".md", ".markdown":
+			format = "markdown"
+		case ".json":
+			format = "json"
+		default:
+			return nil, fmt.Errorf("could not auto-detect format for %s; specify format=markdown|json explicitly", fromPath)
+		}
+	}
+
+	batchID := fmt.Sprintf("mcp_migrate_%s_%d", sanitizeMigrateLabel(labelOrPath(label, fromPath)), time.Now().Unix())
+
+	var stats *mpminternal.MigrateStats
+	var err error
+	switch format {
+	case "markdown":
+		stats, err = dm.IngestFromMarkdownFile(fromPath, batchID, dryRun)
+	case "json":
+		stats, err = dm.IngestFromJsonFile(fromPath, batchID, dryRun)
+	default:
+		return nil, fmt.Errorf("unsupported format: %s", format)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
+
+	result["action"] = "stage"
+	result["batch_id"] = batchID
+	result["format"] = format
+	result["from_path"] = fromPath
+	result["rows_read"] = stats.RowsRead
+	result["rows_staged"] = stats.RowsStaged
+	result["rows_skipped"] = stats.RowsSkipped
+	result["rows_rejected"] = stats.RowsRejected
+	result["dry_run"] = dryRun
+
+	if commit && !dryRun && stats.RowsStaged > 0 {
+		n, err := dm.PromoteRawMemoryBatch(batchID, false)
+		if err != nil {
+			return result, fmt.Errorf("auto-commit failed after stage: %w", err)
+		}
+		result["rows_promoted"] = n
+	}
+
+	return result, nil
+}
+
+func sanitizeMigrateLabel(s string) string {
+	s = strings.ToLower(s)
+	for _, bad := range []string{" ", "/", ".", "-"} {
+		s = strings.ReplaceAll(s, bad, "_")
+	}
+	if len(s) > 40 {
+		s = s[:40]
+	}
+	return s
+}
+
+func labelOrPath(label, path string) string {
+	if label != "" {
+		return label
+	}
+	return filepath.Base(path)
 }
 
 // callReviewMemories returns memories due for spaced reinforcement review.

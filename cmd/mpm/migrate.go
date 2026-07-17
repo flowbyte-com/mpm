@@ -146,9 +146,7 @@ func handleMigrate(args []string) int {
 	case "markdown":
 		stats, err = dm.IngestFromMarkdownFile(fromPath, batchID, dryRun)
 	case "json":
-		// TODO: implement ParseJsonFacts + IngestFromJSONFile
-		usererror.Error("JSON migration not yet implemented — markdown only for now")
-		return 1
+		stats, err = dm.IngestFromJsonFile(fromPath, batchID, dryRun)
 	default:
 		usererror.Error("unsupported format: %s", format)
 		return 1

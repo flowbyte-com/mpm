@@ -167,6 +167,7 @@ type CoreDB interface {
 	IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)
 	IngestFromAdapter(dbPath string, adapter SchemaAdapter, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)
 	IngestFromMarkdownFile(sourcePath, importBatch string, dryRun bool) (*MigrateStats, error)
+	IngestFromJsonFile(sourcePath, importBatch string, dryRun bool) (*MigrateStats, error)
 	PromoteRawMemoryBatch(importBatch string, dryRun bool) (int, error)
 	GetRawMemoriesByStatus(status string, limit int) ([]*RawMemory, error)
 	ResetStaleReviewing() (int, error)
