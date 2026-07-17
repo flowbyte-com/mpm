@@ -21,10 +21,8 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"log/slog"
-	"os"
 	"os/signal"
 	"syscall"
 
@@ -42,25 +40,26 @@ import (
 func main() {
 	logging.Setup()
 
-	// Acquire the single-instance lock before opening the database.
-	// If another mpm-mcp already holds the lock, we are an orphan
-	// from a previous gateway cycle and must yield the slot — exit
-	// 0 silently so the gateway does not interpret this as a crash.
-	pidfilePath := PidfilePath()
-	if err := AcquirePidfile(pidfilePath); err != nil {
-		if errors.Is(err, ErrOrphan) {
-			slog.Info("mpm-mcp: another live instance holds the lock; exiting", "err", err)
-			os.Exit(0)
-		}
-		log.Fatalf("mpm-mcp: pidfile: %v", err)
-	}
-	// Release the lock on any exit path: graceful shutdown via
-	// signal, panic, or normal return. The PID check inside
-	// ReleasePidfile means we only ever remove a file we own.
-	pidfileAcquired = true
-	defer ReleasePidfileOnExit(pidfilePath)
-
-	slog.Info("mpm-mcp starting", "pidfile", pidfilePath)
+	// No single-instance lock. mpm-mcp is a stdio MCP server — one
+	// process per MCP host (each host gets its own stdin/stdout pair).
+	// Multiple hosts (OpenClaw gateway + concurrent Hermes sessions)
+	// can spawn their own mpm-mcp concurrently without contention.
+	//
+	// Concurrent writes to mpm.db are safe via SQLite WAL mode +
+	// 5s busy_timeout (see internal/core/db.go init). The previous
+	// pidfile singleton was a workaround for OpenClaw's broken
+	// respawn behavior (it spawned new mpm-mcp children without
+	// reaping the old ones), but it broke multi-host MCP usage:
+	// whichever host acquired the lock first won, the others got
+	// silent "another live instance holds the lock" failures and
+	// ran with no mcp__mpm tools at all.
+	//
+	// The old failure mode (stale OpenClaw children holding open
+	// mpm.db handles) is now harmless: WAL serializes writes, OS
+	// reaps processes on parent death, and the worst case is
+	// N idle mpm-mcp children holding memory — not SQLITE_BUSY
+	// errors.
+	slog.Info("mpm-mcp starting (no pidfile singleton; stdio-per-host model)")
 	workspace := mpmcli.ResolveWorkspace()
 
 	dm, err := internal.NewDatabaseManager(workspace)
@@ -93,21 +92,3 @@ func main() {
 	_ = ctx
 }
 
-// pidfileAcquired is the package-level latch set by main() once
-// AcquirePidfile succeeds. ReleasePidfileOnExit reads it to decide
-// whether the defer chain actually holds a lock to release — this
-// prevents a defer that runs before the acquire from trying to
-// remove a pidfile we never wrote.
-var pidfileAcquired bool
-
-// ReleasePidfileOnExit is the deferred helper called on every exit
-// path. It is a no-op if AcquirePidfile did not succeed, and on
-// success it removes the pidfile only if it still points at us.
-func ReleasePidfileOnExit(path string) {
-	if !pidfileAcquired {
-		return
-	}
-	if err := ReleasePidfile(path); err != nil {
-		fmt.Fprintf(os.Stderr, "mpm-mcp: release pidfile: %v\n", err)
-	}
-}
