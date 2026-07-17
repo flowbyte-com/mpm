@@ -256,25 +256,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	// semantic collisions. Added 2026-07-17 after the c0d7c5807 vs
 	// 077e9b207aa6be1e false positive (both started with "CHOICE: CHOICE:",
 	// cosine=0.88, unrelated content).
-	isStructuralPrefix := func(s string) bool {
-		s = strings.TrimSpace(s)
-		if len(s) < 5 {
-			return false
-		}
-		prefixes := []string{
-			"CHOICE:", "CHOICE :", "## ", "### ", "#### ",
-			"Fact:", "Note:", "Decision:", "Update:",
-			"TODO:", "FIXME:", "WARNING:", "ERROR:",
-			"INFO:", "DEBUG:", "ISSUE:", "PR:", "RFC:",
-			"v:", "V:", "USER:",
-		}
-		for _, p := range prefixes {
-			if strings.HasPrefix(s, p) {
-				return true
-			}
-		}
-		return false
-	}
+
 	// Phase 2d: build the contradiction lookup once with the schema prefix.
 	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
 	contradictionTable := cfg.SchemaPrefix + "memories"
@@ -325,7 +307,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			// Structural-prefix discount: if both candidates start with the same
 			// template marker (e.g. "CHOICE: CHOICE:") the cosine score is
 			// inflated by shared tokens. Halve it before the threshold check.
-			if isStructuralPrefix(ci.content) && isStructuralPrefix(cj.content) {
+			if IsStructuralPrefix(ci.content) && IsStructuralPrefix(cj.content) {
 				sim = sim * 0.5
 			}
 			if sim < 0.85 {
@@ -645,4 +627,39 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 		results = results[:limit]
 	}
 	return results, rows.Err()
+}
+
+
+// IsStructuralPrefix returns true when content starts with a template
+// marker that dominates embedding similarity without carrying semantic
+// signal (CHOICE:, ##, Fact:, etc.). When two memories share such a
+// prefix, the embedding model returns a high cosine score based on
+// template tokens rather than the underlying claim — the contradiction
+// detector halves the score in that case to avoid false-positive flags.
+//
+// Extracted from hybrid_search.go so the predicate is testable in
+// isolation. See scorer_discount_test.go for coverage.
+
+// structuralPrefixes is the set of template markers that, when shared
+// between two memories, inflate the cosine similarity score without
+// adding semantic signal.
+var structuralPrefixes = []string{
+	"CHOICE:", "CHOICE :", "## ", "### ", "#### ",
+	"Fact:", "Note:", "Decision:", "Update:",
+	"TODO:", "FIXME:", "WARNING:", "ERROR:",
+	"INFO:", "DEBUG:", "ISSUE:", "PR:", "RFC:",
+	"v:", "V:", "USER:",
+}
+
+func IsStructuralPrefix(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 5 {
+		return false
+	}
+	for _, p := range structuralPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
