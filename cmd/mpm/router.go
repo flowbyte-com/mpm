@@ -62,7 +62,8 @@ func NewRouter() *CommandRouter {
 		"lesson":    {Name: "lesson", Description: "Lesson operations", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Memory operations", MinArgs: 1},
 
-		"ingest": {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"ingest":   {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"migrate":  {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
 
 		"mode":       {Name: "mode", Description: "Mode operations"},
 		"wake":       {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
@@ -169,6 +170,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRecall(args)
 	case "ingest":
 		return handleIngest(args)
+	case "migrate":
+		return handleMigrate(args)
 	case "stats":
 		return handleStats(args)
 	case "prune":
@@ -422,6 +425,8 @@ func handleOps(args []string) int {
 	// — Backup & Restore & Ingest —
 	case "ingest":
 		return handleIngest(append([]string{"ingest"}, subArgs...))
+	case "migrate":
+		return handleMigrate(append([]string{"migrate"}, subArgs...))
 
 	// — Interactive & Identity —
 	case "switch":
@@ -506,6 +511,7 @@ var opsSubcommandDescs = []struct {
 	{"backup [path]", "Database backup (.sql dump)"},
 	{"restore-db <path>", "Restore database from .sql dump"},
 	{"ingest", "Import memories from external SQLite"},
+	{"migrate", "Import memories from markdown/JSON files"},
 	{"switch", "Interactive persona/mode switcher"},
 	{"directives", "Show behavioral directives"},
 	{"mode", "Mode operations"},

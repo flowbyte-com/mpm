@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"encoding/hex"
 )
 
 // NOTE: All code in this file connects through the shared DatabaseManager
@@ -477,10 +478,16 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 		sessID = sessionID
 	}
 
+	// Compute content_hash so dedup (memories.content_hash = ?) works at insert time.
+	// Without this, dedup silently fails for every row — historical backfill alone
+	// isn't enough for migration workflows that need to skip already-staged content.
+	contentHashBytes := sha256.Sum256([]byte(content))
+	contentHash := hex.EncodeToString(contentHashBytes[:])
+
 	_, err := s.DB.Exec(`
-		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAt, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight)
+		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight, content_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAt, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
 	return id, err
 }
 
