@@ -30,7 +30,7 @@ var Registry = []Tool{
 	{
 		Name:        "save_to_memory",
 		Description: "Persist a fact, lesson, or decision to MPM long-term memory. Weight accepts both the legacy 0.0-1.0 float scale (multiplied by 10) AND the 0-100 integer scale (used directly) — values > 1.0 are auto-detected as integer-scale and stored verbatim. Default weight is 5 (mid-low confidence) when omitted.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"type":"string"},"weight":{"type":"number"},"ttl":{"type":"string"},"collection":{"type":"string"}},"required":["fact"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"weight":{"type":"number"},"ttl":{"type":"string"},"collection":{"type":"string"}},"required":["fact"]}`),
 		Handler:     handleSaveToMemory,
 	},
 	{
@@ -48,13 +48,13 @@ var Registry = []Tool{
 	{
 		Name:        "commit_milestone",
 		Description: "Commit a deliberate narrative milestone. Thin wrapper over save_to_memory with a type:milestone-* tag for wake-context surfacing. summary must be ≥50 chars and defensible from the summary alone.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":50,"description":"The milestone claim. Must be ≥50 chars and stand alone — another agent should be able to defend it from the summary text without surrounding context."},"flavor":{"type":"string","enum":["shipped","insight"],"default":"shipped","description":"Type of milestone. 'shipped' = work done (e.g. shipped a feature, fixed a class of bug, closed a debt arc). 'insight' = durable learning (e.g. architectural rule discovered, anti-pattern identified, principle earned)."},"tags":{"type":"string","description":"Optional additional tags as comma-separated or JSON list. The handler always injects type:milestone-<flavor>; do not double-prefix."}},"required":["summary"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":50,"description":"The milestone claim. Must be ≥50 chars and stand alone — another agent should be able to defend it from the summary text without surrounding context."},"flavor":{"type":"string","enum":["shipped","insight"],"default":"shipped","description":"Type of milestone. 'shipped' = work done (e.g. shipped a feature, fixed a class of bug, closed a debt arc). 'insight' = durable learning (e.g. architectural rule discovered, anti-pattern identified, principle earned)."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings. The handler always injects type:milestone-<flavor>; do not double-prefix."}},"required":["summary"]}`),
 		Handler:     handleCommitMilestone,
 	},
 	{
 		Name:        "propose_theory",
 		Description: "Create a pending theory row in the memories table (collection='theories'). Pass dependencies as a JSON array of artifact IDs (memories, lessons, theories) that this theory's reasoning depends on; deletion of any dependency fires a 'stale foundation' wake so the agent can re-evaluate.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"},"description":"Artifact IDs (memories/lessons/theories) this theory depends on. Deletion fires a stale-foundation wake."}},"required":["hypothesis"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"hypothesis":{"type":"string"},"validation_criteria":{"type":"string"},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"dependencies":{"type":"array","items":{"type":"string"},"description":"Artifact IDs (memories/lessons/theories) this theory depends on. Deletion fires a stale-foundation wake."}},"required":["hypothesis"]}`),
 		Handler:     handleProposeTheory,
 	},
 	{
@@ -66,13 +66,13 @@ var Registry = []Tool{
 	{
 		Name:        "record_decision",
 		Description: "Record an architectural decision with context, choice, and rationale.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"outcome":{"type":"string","description":"Optional. Out-of-band learning captured about the decision's eventual outcome; visible to future-me via search_references."},"tags":{"type":"string"}},"required":["context","choice","rationale"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"outcome":{"type":"string","description":"Optional. Out-of-band learning captured about the decision's eventual outcome; visible to future-me via search_references."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["context","choice","rationale"]}`),
 		Handler:     handleRecordDecision,
 	},
 	{
 		Name:        "save_lesson",
 		Description: "Persist a lesson learned (warning / practice / insight).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"type":"string"}},"required":["fact"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["fact"]}`),
 		Handler:     handleSaveLesson,
 	},
 	{
@@ -403,7 +403,7 @@ var Registry = []Tool{
 	{
 		Name:        "log_to_changelog",
 		Description: "Self-report agent work as a changelog entry tied to a git commit SHA.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"commit_hash":{"type":"string"},"tags":{"type":"string"}},"required":["fact","commit_hash"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"commit_hash":{"type":"string"},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["fact","commit_hash"]}`),
 		Handler:     handleLogToChangelog,
 	},
 	{
@@ -475,7 +475,7 @@ var Registry = []Tool{
 	{
 		Name:        "record_global_rule",
 		Description: "Operator-gated: write a memory to the shared DB with is_global=1. Requires confirm=true. Without confirm the call is rejected. CLI and MCP both gate on this; agents should not write house rules autonomously.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"type":"string"},"weight":{"type":"number"},"provenance":{"type":"string"},"confirm":{"type":"boolean"}},"required":["fact","confirm"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"weight":{"type":"number"},"provenance":{"type":"string"},"confirm":{"type":"boolean"}},"required":["fact","confirm"]}`),
 		Handler:     handleRecordGlobalRule,
 	},
 	{
