@@ -51,12 +51,29 @@ func ParseMarkdownFacts(content, sourcePath string) []MigratedFact {
 	var facts []MigratedFact
 	sourceCounter := 0
 
-	// Normalize line endings; collapse blank-line runs.
+	// Normalize line endings.
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
 
-	// Primary split: `## ` headings. Each section includes its heading line.
-	sections := strings.Split(content, "\n## ")
+	// Primary split: `## ` headings at line start, KEEPING the `## ` attached
+	// to subsequent sections so heading detection below works on each one.
+	// Manual scan (not strings.Split) because Split consumes the delimiter.
+	var sections []string
+	lines := strings.Split(content, "\n")
+	var current []string
+	flush := func() {
+		if len(current) > 0 {
+			sections = append(sections, strings.Join(current, "\n"))
+		}
+		current = current[:0]
+	}
+	for _, line := range lines {
+		if (strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "# ")) && len(current) > 0 {
+			flush()
+		}
+		current = append(current, line)
+	}
+	flush()
 
 	for _, raw := range sections {
 		raw = strings.TrimSpace(raw)
@@ -73,21 +90,19 @@ func ParseMarkdownFacts(content, sourcePath string) []MigratedFact {
 		}
 
 		// Split on § to get atomic sub-facts within this section.
-		subParts := strings.Split(raw, "\n§\n")
-		if len(subParts) == 1 {
-			subParts = strings.Split(raw, "§\n")
-		}
-		if len(subParts) == 1 {
-			subParts = strings.Split(raw, "\n§")
-		}
-		if len(subParts) == 1 {
-			// Fall back to paragraph-split (blank-line) if no § present.
-			subParts = strings.Split(raw, "\n\n")
+		// The hermes-style § separator is the primary atomic boundary.
+		// Without §, the whole ## section is one atomic fact — metadata
+		// (Tags:/Weight:/TTL: lines) stays attached to the body.
+		var subParts []string
+		if strings.Contains(raw, "§") {
+			subParts = strings.Split(raw, "§")
+		} else {
+			subParts = []string{raw}
 		}
 
 		for i, part := range subParts {
 			part = strings.TrimSpace(part)
-			if len(part) < 20 {
+			if strings.TrimSpace(part) == "" {
 				continue
 			}
 
@@ -103,7 +118,7 @@ func ParseMarkdownFacts(content, sourcePath string) []MigratedFact {
 				}
 			}
 
-			if len(part) < 20 {
+			if strings.TrimSpace(part) == "" {
 				continue
 			}
 
@@ -337,25 +352,40 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 	}
 	query += ` ORDER BY ingested_at ASC`
 
+	// Collect rows first, then close (release connection) before per-row writes.
+	// Iterating rows from dm.db.Query holds the connection for streaming,
+	// which deadlocks against dm.db.Exec inside the loop on the same
+	// connection. Bug surfaced via the RejectsSensitiveContent test where
+	// promote returned n=1 but raw_memories status stayed pending.
+	type pending struct {
+		id, sourceID, sourceDB, contentHash, text, metaJSON string
+	}
+	var pendings []pending
 	rows, err := dm.db.Query(query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("query pending: %w", err)
 	}
-	defer rows.Close()
-
-	promoted := 0
 	for rows.Next() {
-		var id, sourceID, sourceDB, contentHash, text, metaJSON string
-		if err := rows.Scan(&id, &sourceID, &sourceDB, &contentHash, &text, &metaJSON); err != nil {
+		var p pending
+		if err := rows.Scan(&p.id, &p.sourceID, &p.sourceDB, &p.contentHash, &p.text, &p.metaJSON); err != nil {
 			continue
 		}
+		pendings = append(pendings, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate pending: %w", err)
+	}
+
+	promoted := 0
+	for _, p := range pendings {
 
 		var meta map[string]interface{}
-		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		if err := json.Unmarshal([]byte(p.metaJSON), &meta); err != nil {
 			// Malformed metadata — reject with note
 			if !dryRun {
-				dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes='malformed metadata', updated_at=? WHERE id=?`,
-					float64(time.Now().Unix()), id)
+				_, _ = dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes='malformed metadata', updated_at=? WHERE id=?`,
+					float64(time.Now().Unix()), p.id)
 			}
 			continue
 		}
@@ -387,15 +417,15 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 			continue
 		}
 
-		_, _, err := dm.SaveMemoryWithContext(text, "memories", tags, float64(weight), ttl, ActiveContext{})
+		_, _, err := dm.SaveMemoryWithContext(p.text, "memories", tags, float64(weight), ttl, ActiveContext{})
 		if err != nil {
-			dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes=?, updated_at=? WHERE id=?`,
-				fmt.Sprintf("save failed: %v", err), float64(time.Now().Unix()), id)
+			_, _ = dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes=?, updated_at=? WHERE id=?`,
+				fmt.Sprintf("save failed: %v", err), float64(time.Now().Unix()), p.id)
 			continue
 		}
 
-		dm.db.Exec(`UPDATE raw_memories SET status='approved', updated_at=? WHERE id=?`,
-			float64(time.Now().Unix()), id)
+		_, _ = dm.db.Exec(`UPDATE raw_memories SET status='approved', updated_at=? WHERE id=?`,
+			float64(time.Now().Unix()), p.id)
 		promoted++
 	}
 
