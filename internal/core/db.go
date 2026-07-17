@@ -1884,8 +1884,17 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 		created = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	_, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance)
+	// Compute content_hash so dedup (memories.content_hash = ?) works at insert
+	// time on the production SaveMemoryNode path. The addMemoryDirect fallback
+	// was patched in commit 885705c but SaveMemoryNode is the dominant path
+	// (used by SaveMemoryWithContext → AddMemoryWithWeight). Without this,
+	// every freshly-saved memory has NULL content_hash and dedup silently
+	// misses matches. Compute once and pass in the VALUES list.
+	contentHashBytes := sha256.Sum256([]byte(content))
+	contentHash := hex.EncodeToString(contentHashBytes[:])
+
+	_, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance, contentHash)
 	if err != nil {
 		return id, err
 	}

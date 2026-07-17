@@ -22,6 +22,12 @@ import "encoding/json"
 // as a directory of capabilities.
 var Registry = []Tool{
 	{
+		Name:        "migrate",
+		Description: "Import memories from a non-SQLite source (markdown/JSON). Stage mode: parses source and inserts into raw_memories (pending). Commit mode: promotes a previously-staged batch to memories. Undo mode: rejects all rows for a batch. Format auto-detected from extension; pass format='markdown' or 'json' to override.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"from_path":{"type":"string","description":"Source file path"},"format":{"type":"string","enum":["markdown","json","auto"],"default":"auto"},"label":{"type":"string","description":"Batch label (used in batch_id)"},"dry_run":{"type":"boolean","default":false},"commit":{"type":"boolean","default":false,"description":"After staging, immediately promote the batch to memories"},"commit_batch":{"type":"string","description":"Promote a previously-staged batch (alternative to from_path)"},"undo_batch":{"type":"string","description":"Rollback a batch (alternative to from_path)"}}}`),
+		Handler:     handleMigrate,
+	},
+	{
 		Name:        "save_to_memory",
 		Description: "Persist a fact, lesson, or decision to MPM long-term memory. Weight accepts both the legacy 0.0-1.0 float scale (multiplied by 10) AND the 0-100 integer scale (used directly) — values > 1.0 are auto-detected as integer-scale and stored verbatim. Default weight is 5 (mid-low confidence) when omitted.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"type":"string"},"weight":{"type":"number"},"ttl":{"type":"string"},"collection":{"type":"string"}},"required":["fact"]}`),
