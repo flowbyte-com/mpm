@@ -240,8 +240,40 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	// Load embeddings + provenance for pairwise cosine similarity
 	type candidateInfo struct {
 		embedding    []float32
+		content      string
 		isChallenged bool
 		metadataJSON string
+	}
+
+	// isStructuralPrefix returns true when content starts with a template
+	// marker that dominates embedding similarity without carrying semantic
+	// signal. The CHOICE:/## /Fact:/Note:/Decision: family are how decision
+	// records, log entries, and section headings start — when two unrelated
+	// memories share the same prefix, the embedding model returns a high
+	// cosine score based on the template tokens, not the underlying claim.
+	// Halving the similarity score in this case prevents the contradiction
+	// detector from false-flagging unrelated decisions/logs/sections as
+	// semantic collisions. Added 2026-07-17 after the c0d7c5807 vs
+	// 077e9b207aa6be1e false positive (both started with "CHOICE: CHOICE:",
+	// cosine=0.88, unrelated content).
+	isStructuralPrefix := func(s string) bool {
+		s = strings.TrimSpace(s)
+		if len(s) < 5 {
+			return false
+		}
+		prefixes := []string{
+			"CHOICE:", "CHOICE :", "## ", "### ", "#### ",
+			"Fact:", "Note:", "Decision:", "Update:",
+			"TODO:", "FIXME:", "WARNING:", "ERROR:",
+			"INFO:", "DEBUG:", "ISSUE:", "PR:", "RFC:",
+			"v:", "V:", "USER:",
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		}
+		return false
 	}
 	// Phase 2d: build the contradiction lookup once with the schema prefix.
 	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
@@ -249,14 +281,15 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	candMap := make(map[string]candidateInfo, scanLimit)
 	for _, c := range scanSet {
 		var embStr string
+		var contentStr string
 		err := dm.SQLDB().QueryRow(
-			fmt.Sprintf(`SELECT embedding, COALESCE(metadata, '{}') FROM %s WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`, contradictionTable),
+			fmt.Sprintf(`SELECT embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`, contradictionTable),
 			c.ID,
-		).Scan(&embStr, &c.Metadata)
+		).Scan(&embStr, &contentStr, &c.Metadata)
 		if err == nil && embStr != "" {
 			var emb []float32
 			if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-				candMap[c.ID] = candidateInfo{embedding: emb, isChallenged: c.IsChallenged, metadataJSON: c.Metadata}
+				candMap[c.ID] = candidateInfo{embedding: emb, content: contentStr, isChallenged: c.IsChallenged, metadataJSON: c.Metadata}
 			}
 		}
 	}
@@ -289,6 +322,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 				continue
 			}
 			sim := cosineSimilarity(ci.embedding, cj.embedding)
+			// Structural-prefix discount: if both candidates start with the same
+			// template marker (e.g. "CHOICE: CHOICE:") the cosine score is
+			// inflated by shared tokens. Halve it before the threshold check.
+			if isStructuralPrefix(ci.content) && isStructuralPrefix(cj.content) {
+				sim = sim * 0.5
+			}
 			if sim < 0.85 {
 				continue
 			}
