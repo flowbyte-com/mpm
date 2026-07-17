@@ -13,6 +13,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,18 @@ func parseStringSliceAny(v interface{}) []string {
 		return out
 	}
 	if s, ok := v.(string); ok && s != "" {
+		// Defensive decode: if the MCP framework coerced an array
+		// argument to a JSON-encoded string (because the tool schema
+		// declared tags as string when the caller sent an array),
+		// we get here with s like `["a","b","c"]`. Splitting that on
+		// commas produces `["a"`, `"b"`, `"c"]` — three strings with
+		// escaped quotes that get re-marshaled into the stored JSON.
+		// Try to decode as a JSON array first; fall back to the
+		// legacy comma-split if that fails.
+		var arr []string
+		if err := json.Unmarshal([]byte(s), &arr); err == nil && len(arr) > 0 {
+			return arr
+		}
 		return strings.Split(s, ",")
 	}
 	return nil
