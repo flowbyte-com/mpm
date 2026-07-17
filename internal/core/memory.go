@@ -354,11 +354,50 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 	return mem, nil
 }
 
+// normalizeWeightToColumn accepts the legacy 0.0-1.0 float API and the
+// newer 0-100 integer scale transparently. Detection rule: weight > 1.0
+// means the caller used the integer scale and the value should be used
+// directly. weight <= 1.0 means the caller used the legacy float scale
+// and we apply the historical *10 conversion. Both paths clamp to
+// [1, 100] to match the column constraint. This dual-scale handling
+// was added on 2026-07-17 after yesterday's scale-bug surfaced — the
+// column migrated to 0-100 but the API surface silently clamped any
+// caller that had switched to the new scale. Auto-detect preserves
+// backward compatibility for every existing caller (SaveMemoryWithContext,
+// admission path, changelog tool, milestone tool) while honoring the
+// intent of new callers passing 0-100 values.
+func normalizeWeightToColumn(weight float64) int {
+	if weight <= 0 {
+		return 5 // historical default (0.5 * 10)
+	}
+	if weight > 1.0 {
+		// 0-100 scale: use directly
+		i := int(weight)
+		if i < 1 {
+			return 1
+		}
+		if i > 100 {
+			return 100
+		}
+		return i
+	}
+	// 0-1 float scale: apply legacy *10 conversion
+	i := int(weight * 10)
+	if i < 1 {
+		return 1
+	}
+	if i > 100 {
+		return 100
+	}
+	return i
+}
+
 // AddMemoryWithWeight persists a memory with an explicit caller-supplied
-// weight (float64, 0.0-1.0). Same shape as AddMemory but writes the weight
-// column instead of relying on the schema default. The float is encoded as
-// int(weight*10) clamped to [1, 100], matching the existing weight scale used
-// by ReinforceMemory/WeakenMemory and the metadata.weight_intent convention.
+// weight. Accepts BOTH the legacy 0.0-1.0 float scale AND the 0-100 integer
+// scale (see normalizeWeightToColumn for the auto-detection rule). Same shape
+// as AddMemory but writes the weight column directly. The column is INTEGER
+// 1-100; ReinforceMemory/WeakenMemory increment by small deltas against this
+// same scale, so all callers stay in one continuous range.
 func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string, weight float64) (*Memory, error) {
 	if collection == "" {
 		collection = "memories"
@@ -369,19 +408,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		}
 	}
 
-	if weight <= 0 {
-		weight = 0.5
-	}
-	if weight > 1.0 {
-		weight = 1.0
-	}
-	intWeight := int(weight * 10)
-	if intWeight < 1 {
-		intWeight = 1
-	}
-	if intWeight > 100 {
-		intWeight = 100
-	}
+	intWeight := normalizeWeightToColumn(weight)
 
 	embedding := EmbedText(content)
 	createdAt := time.Now().UTC().Format(time.RFC3339)
