@@ -403,6 +403,17 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	}
 
 	// ── Phase 5: In-Memory Provenance Preamble + Warning Prepend ─────────
+	// ── Phase 5b: Correction-chain discount ──────────────────────────────
+	// Memories tagged "superseded" are intermediate steps in a correction
+	// chain — they were correct at the time but later refined. The chain's
+	// final reading is what users want. We discount superseded memories
+	// (combined score * 0.25) so they don't outrank the final reading in
+	// retrieval, while still surfacing them when the chain context is the
+	// best match (e.g. someone explicitly asks about the iteration).
+	//
+	// The "superseded-by" tag (if present) is preserved in the metadata
+	// for traceability — callers can fetch the full chain via the linked
+	// supersession pointer.
 	for i := range combined {
 		if preamble := ProvenancePreamble(combined[i].Metadata); preamble != "" {
 			combined[i].Content = preamble + "\n" + combined[i].Content
@@ -411,6 +422,9 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			combined[i].Content = conceptDriftWarning + "\n" + combined[i].Content
 		} else if combined[i].IsChallenged {
 			combined[i].Content = challengeWarning + "\n" + combined[i].Content
+		}
+		if isSupersededTagsString(combined[i].Tags) {
+			combined[i].CombinedScore *= 0.25
 		}
 	}
 
@@ -658,6 +672,45 @@ func IsStructuralPrefix(s string) bool {
 	}
 	for _, p := range structuralPrefixes {
 		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSuperseded returns true when a memory is tagged as an intermediate
+// step in a correction chain. Superseded memories are still retrievable
+// for audit and chain-context queries, but the hybrid search discounts
+// their combined score so the chain's final reading surfaces first.
+//
+// Tag conventions:
+//   "superseded"               — generic: this memory was refined by a later one
+//   "superseded-by:<id>"      — points at the chain's final reading
+//
+// Generalized form covers any domain where a value gets refined over time
+// (calibration corrections, API version migrations, schema evolution).
+// The discount is intentionally aggressive (0.25x) so the final reading
+// wins decisively in retrieval without outright hiding the intermediate.
+func IsSuperseded(tags []string) bool {
+	for _, t := range tags {
+		if t == "superseded" || strings.HasPrefix(t, "superseded-by:") {
+			return true
+		}
+	}
+	return false
+}
+
+
+// isSupersededTagsString is the tags-as-string variant of IsSuperseded.
+// HybridResult.Tags is a comma-separated string (not a slice), so we
+// split here. Cheap — runs only on top candidates.
+func isSupersededTagsString(tags string) bool {
+	if tags == "" {
+		return false
+	}
+	for _, t := range strings.Split(tags, ",") {
+		t = strings.TrimSpace(t)
+		if t == "superseded" || strings.HasPrefix(t, "superseded-by:") {
 			return true
 		}
 	}
