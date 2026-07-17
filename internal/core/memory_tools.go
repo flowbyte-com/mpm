@@ -22,8 +22,11 @@ import (
 )
 
 // SaveMemoryWithContext persists a fact to memory, injecting provenance
-// and active context into metadata. weight (0–1 float) is recorded in
-// meta.weight_intent since MemoryStore.AddMemory has no weight param.
+// and active context into metadata. weight accepts BOTH the legacy 0.0-1.0
+// float scale AND the 0-100 integer scale — see normalizeWeightToColumn
+// in memory.go for the auto-detection rule. The caller's raw value is also
+// recorded as meta.weight_intent for forensic tracing (what scale was the
+// caller thinking in?).
 func (dm *DatabaseManager) SaveMemoryWithContext(
 	fact, collection string,
 	tags []string,

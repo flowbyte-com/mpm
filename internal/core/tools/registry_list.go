@@ -23,7 +23,7 @@ import "encoding/json"
 var Registry = []Tool{
 	{
 		Name:        "save_to_memory",
-		Description: "Persist a fact, lesson, or decision to MPM long-term memory.",
+		Description: "Persist a fact, lesson, or decision to MPM long-term memory. Weight accepts both the legacy 0.0-1.0 float scale (multiplied by 10) AND the 0-100 integer scale (used directly) — values > 1.0 are auto-detected as integer-scale and stored verbatim. Default weight is 5 (mid-low confidence) when omitted.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"tags":{"type":"string"},"weight":{"type":"number"},"ttl":{"type":"string"},"collection":{"type":"string"}},"required":["fact"]}`),
 		Handler:     handleSaveToMemory,
 	},
