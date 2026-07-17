@@ -478,6 +478,17 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 	// FTS5 bm25() requires the virtual table's full qualified name.
 	ftsTable := schemaPrefix + "memories_fts"
 	memTable := schemaPrefix + "memories"
+
+	// FTS5 query sanitization (2026-07-17, surfaced by hermes diagnostic).
+	// Bare hyphenated queries like "memory-test" get parsed by FTS5 as
+	// column-filter syntax: "memory" is treated as a column name and
+	// "-test" as an exclusion term. The result is either "no such
+	// column" errors or silent zero-result queries. Wrapping in double
+	// quotes forces MATCH to parse as a phrase, after which the
+	// unicode61 tokenizer splits on hyphens and the indexed tokens
+	// match the query tokens. Same outcome as before for non-hyphenated
+	// queries (the tokenizer handles whitespace the same way).
+	safeQuery := `"\` + strings.ReplaceAll(strings.ReplaceAll(query, `\`, `\\`), `"`, `\"`) + `"`
 	sqlQuery := `
 		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
 		       m.created_at, m.reinforcement_count, m.weight,
@@ -489,7 +500,7 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 		  AND (? = '' OR m.collection = ?)
 		ORDER BY score
 		LIMIT ?`
-	rows, err := db.Query(sqlQuery, query, collection, collection, limit)
+	rows, err := db.Query(sqlQuery, safeQuery, collection, collection, limit)
 	if err != nil {
 		return nil, err
 	}
