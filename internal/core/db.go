@@ -692,7 +692,19 @@ func (dm *DatabaseManager) getSharedStore() (*MemoryStore, error) {
 // The database is ALWAYS at mpm/src/db/mpm.db regardless of projectRoot.
 // projectRoot is kept for API compatibility but is ignored for path resolution.
 func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
-	mpmDir := config.GetMPMDir()
+	// Honour the caller's projectRoot argument when supplied. The legacy
+	// implementation ignored it and fell back to config.GetMPMDir() — which
+	// silently dropped system-level service paths into ~/.mpm on hosts where
+	// the user lacks write access (e.g. systemd User=v runs as the operator,
+	// not root, and /home/v/.mpm may be unwritable in hardened setups).
+	// Callers who pass "" continue to get the env-driven behaviour via
+	// GetMPMDir() so test helpers and ad-hoc CLI invocations keep working.
+	var mpmDir string
+	if projectRoot != "" {
+		mpmDir = projectRoot
+	} else {
+		mpmDir = config.GetMPMDir()
+	}
 	dbDir := filepath.Join(mpmDir, "src", "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)

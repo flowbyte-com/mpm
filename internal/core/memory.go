@@ -936,8 +936,38 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 	return memories, nil
 }
 
-// appendToMirror appends a memory to the JSONL mirror file
+// appendToMirror appends a memory to the JSONL mirror file.
+//
+// Mirror collection gate (read this before debugging "why isn't X in the
+// mirror"): the mirror at src/db/mirror.jsonl is the source-of-truth audit
+// trail for sync/sharing decisions. Only the following collections are
+// mirrored, because only those are the "source-of-truth" rows that a
+// downstream consumer needs:
+//
+//	changelog, memories, theories, decisions, knowledge,
+//	directives, mpm-projects, world-cup-2026.
+//
+// Skipped collections (NOT in the mirror, by design):
+//
+//   - lessons — cognitive-process trace; the lessons table is its own
+//     source. Mirroring lessons would double-write every lesson to JSONL
+//     and bloat the audit trail with rows that have no canonical join key
+//     on the consumer side. The lesson's own index is the contract.
+//   - scratchpad_orphans — ephemeral by definition; lives in
+//     ephemeral_scratchpad, not memories. Never reaches this function.
+//
+// This list must be kept in sync with the doc-comment on
+// handleSaveToMemory (tools/handlers.go) so future agents don't burn
+// cycles diagnosing a non-bug. If you add a collection here, also add
+// it to handleSaveToMemory's mirror contract block.
 func (s *MemoryStore) appendToMirror(mem *Memory) error {
+	if !isMirroredCollection(mem.Collection) {
+		slog.Debug("mirror skip",
+			"collection", mem.Collection,
+			"id", mem.ID,
+			"reason", "collection not in mirror allow-list")
+		return nil
+	}
 	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -947,6 +977,30 @@ func (s *MemoryStore) appendToMirror(mem *Memory) error {
 	data, _ := json.Marshal(mem)
 	_, err = f.WriteString(string(data) + "\n")
 	return err
+}
+
+// mirroredCollections is the allow-list for src/db/mirror.jsonl writes.
+// Keep in sync with the doc-comment on appendToMirror and on
+// handleSaveToMemory (tools/handlers.go). The set is intentionally small:
+// mirror = audit trail for sync/sharing decisions, not a generic log.
+//
+// If a new collection needs to appear in the mirror, add it here AND in
+// handleSaveToMemory's mirror contract block, then update both tests.
+var mirroredCollections = map[string]bool{
+	"changelog":      true,
+	"memories":       true,
+	"theories":       true,
+	"decisions":      true,
+	"knowledge":      true,
+	"directives":     true,
+	"mpm-projects":   true,
+	"world-cup-2026": true,
+}
+
+// isMirroredCollection returns true iff the given collection is in the
+// mirror allow-list. See appendToMirror's doc-comment for the rationale.
+func isMirroredCollection(collection string) bool {
+	return mirroredCollections[collection]
 }
 
 // appendBlockedAttempt logs a blocked content attempt to the mirror file

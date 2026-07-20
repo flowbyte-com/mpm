@@ -219,25 +219,23 @@ func GetOpenClawDBPath() string {
 }
 
 // GetMPMDir returns the absolute path to the MPM data directory.
+//
 // Resolution order:
-// 1. MPM_WORKSPACE environment variable (explicit override)
-// 2. ~/.mpm (user's home directory — standard cross-platform fallback)
-// 3. Current working directory (absolute last resort)
+//  1. MPM_WORKSPACE environment variable (explicit override; required
+//     for all production deployments)
+//
+// The legacy ~/.mpm fallback was removed when MPM migrated to
+// system-level paths (/var/lib/mpm) on 2026-07-18. Silently writing
+// to the operator's home directory caused permission errors under
+// systemd User=v where the unit ran before login or lacked write
+// access to /home. Callers that omit MPM_WORKSPACE now get cwd,
+// which is the right behaviour for tests (t.Setenv redirects it)
+// and loud enough for ad-hoc CLI use to surface the misconfig.
 func GetMPMDir() string {
-	// 1. Explicit override
 	if envPath := os.Getenv("MPM_WORKSPACE"); envPath != "" {
 		os.MkdirAll(envPath, 0755)
 		return envPath
 	}
-
-	// 2. Standard user home directory (~/.mpm)
-	if home, err := os.UserHomeDir(); err == nil {
-		mpmDir := filepath.Join(home, ".mpm")
-		os.MkdirAll(mpmDir, 0755)
-		return mpmDir
-	}
-
-	// 3. Absolute last resort
 	cwd, _ := os.Getwd()
 	return cwd
 }

@@ -26,6 +26,23 @@ import (
 //   - Use `ac` for write provenance; do NOT read global mode/persona vars.
 //   - Don't open/close the DB — the dispatcher owns that lifetime.
 
+// handleSaveToMemory persists a memory row.
+//
+// Mirror contract (read this before debugging "why isn't my fact in
+// mirror.jsonl"): the JSONL mirror at src/db/mirror.jsonl is appended to
+// ONLY for these collections: changelog, memories, theories, decisions,
+// knowledge, directives, mpm-projects, world-cup-2026. Collections NOT
+// mirrored include:
+//
+//   - lessons  — lessons are cognitive-process trace, not source-of-truth
+//                memory; the lesson's own index table is the source.
+//   - scratchpad_orphans — ephemeral by definition; lives in
+//                          ephemeral_scratchpad, not memories.
+//
+// If you need a new collection mirrored, append to the write-side filter
+// in db.go:ChallengeMemoryAsync / contradiction_log.go and add the new
+// collection to the doc-comment here so future agents don't burn cycles
+// diagnosing a non-bug.
 func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	if fact == "" {
