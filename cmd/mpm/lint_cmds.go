@@ -59,7 +59,8 @@ Checks:
      the router uses at load time
 
 Defaults:
-  Scans ~/.mpm/persona/ and ~/.mpm/mode/ if no --dir is given
+  Scans $MPM_WORKSPACE/persona/ and $MPM_WORKSPACE/mode/ if no --dir is given
+  (falls back to ~/.mpm/{persona,mode} for pre-migration workspaces)
 
 Flags:
   --dir <path>     Add a directory to scan (can be repeated)
@@ -84,11 +85,20 @@ linter defends against.`)
 	if len(dirs) == 0 {
 		mpmDir := os.Getenv("MPM_DIR")
 		if mpmDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				usererror.Error("cannot determine home dir: %v", err)
+			// Honour MPM_WORKSPACE (canonical), then the canonical MPM
+			// home location, then fall back to ~/.mpm/persona + ~/.mpm/mode
+			// for backward compatibility with pre-migration workspaces.
+			// The ~/.mpm fallback here is the lint path only — runtime
+			// paths use GetMPMDir() which no longer falls back.
+			if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
+				mpmDir = ws
+			} else {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					usererror.Error("cannot determine home dir: %v", err)
+				}
+				mpmDir = filepath.Join(home, ".mpm")
 			}
-			mpmDir = filepath.Join(home, ".mpm")
 		}
 		dirs = []string{
 			filepath.Join(mpmDir, "persona"),

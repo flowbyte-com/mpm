@@ -3,12 +3,19 @@
 #
 # Targets:
 #   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
-#   make install             - Install all four to $(PREFIX)/bin
-#   make service-scheduler   - Install mpm-scheduler systemd user unit (prints enable command)
+#   make install             - Install all four to $(PREFIX)/bin (system-wide, requires sudo)
+#   make service-scheduler   - [LEGACY/OPT-IN] Install mpm-scheduler systemd USER unit
+#                              (fails on encrypted home dirs — use scripts/install.sh instead)
 #   make service             - Alias for service-scheduler
 #   make clean               - Remove bin/
 #   make test                - Run tests
 #   make help                - Show this help
+#
+# RECOMMENDED INSTALL PATH:
+#   sudo scripts/install.sh
+# This single command builds, installs binaries + wrapper, creates /var/lib/mpm,
+# installs the SYSTEM-level systemd unit, registers with OpenClaw if present,
+# and validates end-to-end. See INSTALL.md for full details.
 
 BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
@@ -19,6 +26,8 @@ PREFIX      ?= /usr/local
 SERVICE_NAME := mpm-scheduler
 SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service
 SERVICE_DST := $(HOME)/.config/systemd/user/$(SERVICE_NAME).service
+SYSTEM_SERVICE_SRC := contrib/systemd/$(SERVICE_NAME).service.system
+SYSTEM_SERVICE_DST := /etc/systemd/system/$(SERVICE_NAME).service
 
 # Find go: prefer $PATH, fall back to common install locations.
 # Allows `make` to work in non-interactive shells (CI, subshells) where
@@ -29,7 +38,7 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
-.PHONY: all build install service-scheduler service uninstall-service clean test help
+.PHONY: all build install service-scheduler service install-system-service uninstall-service clean test help
 
 all: build
 
@@ -62,7 +71,15 @@ install: build
 #   2. Env file: ~/.config/mpm/mpm.env  (sourced as EnvironmentFile=-)
 # mpm-mcp is intentionally NOT shipped as a systemd unit — it's spawned
 # by MCP hosts (Claude Code, OpenClaw) as a stdio child process.
+#
+# ⚠ OPT-IN ONLY: this installs a USER-level service which silently fails
+# on hosts with encrypted home directories (eCryptfs/LUKS). For the
+# default SYSTEM-level install, use `sudo scripts/install.sh`.
 service-scheduler:
+	@echo "⚠  This target installs a USER-level systemd unit."
+	@echo "   It silently fails on encrypted home directories."
+	@echo "   For the default system-level install, use: sudo scripts/install.sh"
+	@echo ""
 	@install -Dm644 $(SERVICE_SRC) $(SERVICE_DST)
 	@systemctl --user daemon-reload
 	@echo "✓ Installed $(SERVICE_DST)"
@@ -80,6 +97,20 @@ uninstall-service:
 	@rm -f $(SERVICE_DST)
 	-@systemctl --user daemon-reload
 	@echo "✓ Removed $(SERVICE_DST) (if it existed)"
+
+# Install the SYSTEM-level systemd unit. Requires sudo.
+# Use scripts/install.sh instead — it does this and more (binaries,
+# wrapper, /var/lib/mpm, MCP registration, validation).
+install-system-service:
+	@echo "⚠  For full install use: sudo scripts/install.sh"
+	@echo "   This target only installs the system unit."
+	@sudo install -Dm644 $(SYSTEM_SERVICE_SRC) $(SYSTEM_SERVICE_DST)
+	@sudo systemctl daemon-reload
+	@echo "✓ Installed $(SYSTEM_SERVICE_DST)"
+	@echo ""
+	@echo "  Next steps:"
+	@echo "    sudo systemctl enable --now $(SERVICE_NAME)"
+	@echo "    systemctl status $(SERVICE_NAME)"
 
 # Run tests
 test:

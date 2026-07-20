@@ -34,9 +34,13 @@ func main() {
 		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
 			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
 		lockPath = flag.String("lock", defaultLockPath(),
-			"flock path for singleton enforcement (default ~/.mpm/scheduler.lock)")
+			"flock path for singleton enforcement (default $MPM_WORKSPACE/scheduler.lock)")
 		logLevel = flag.String("log-level", "info",
 			"Log level: debug, info, warn, error")
+		heartbeat = flag.Uint64("heartbeat", 100,
+			"Emit a heartbeat log line every N ticks (0 = disabled). "+
+				"At default 60s interval, 100 ticks = ~100 min. "+
+				"Surfaces daemon liveness without journal grep gymnastics.")
 	)
 	flag.Parse()
 
@@ -84,6 +88,8 @@ func main() {
 		logger.Error("scheduler init failed", "err", err)
 		os.Exit(1)
 	}
+	s.SetHeartbeat(*heartbeat)
+	logger.Info("scheduler heartbeat configured", "every_n_ticks", *heartbeat)
 	defer func() {
 		if err := s.Close(); err != nil {
 			logger.Error("scheduler close failed", "err", err)
@@ -138,9 +144,11 @@ func defaultLockPath() string {
 	if env := os.Getenv("MPM_SCHEDULER_LOCK"); env != "" {
 		return env
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/mpm-scheduler.lock"
+	// Legacy fallback (HOME/.mpm/scheduler.lock) was removed with the
+	// migration to system-level paths. /var/lib/mpm is the canonical
+	// runtime location; /tmp is the ad-hoc fallback for manual runs.
+	if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
+		return filepath.Join(ws, "scheduler.lock")
 	}
-	return filepath.Join(home, ".mpm", "scheduler.lock")
+	return "/tmp/mpm-scheduler.lock"
 }
