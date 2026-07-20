@@ -22,6 +22,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -73,6 +74,19 @@ type Scheduler struct {
 	log      *slog.Logger
 	handlers map[string]HandlerFunc
 	mu       sync.RWMutex
+
+	// tickCount increments on every ticker fire (including idle ticks).
+	// heartbeatEvery controls how often a heartbeat log line is emitted
+	// (0 = disabled; default 100 ticks = ~100 min at 60s interval).
+	// SetHeartbeat overrides the default at startup.
+	tickCount      uint64
+	heartbeatEvery uint64
+
+	// captureBuf/captureMu are test-only fields for capturing slog output.
+	// Production code never reads them; tests set them via
+	// newTestSchedulerWithCaptureLogger and retrieve via s.captureLogs().
+	captureBuf *bytes.Buffer
+	captureMu  *sync.Mutex
 }
 
 // New returns a Scheduler bound to the given *sql.DB. The caller owns
@@ -96,11 +110,22 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	return &Scheduler{
-		db:       db,
-		dbPath:   "<managed-by-DatabaseManager>",
-		log:      log,
-		handlers: make(map[string]HandlerFunc),
+		db:             db,
+		dbPath:         "<managed-by-DatabaseManager>",
+		log:            log,
+		handlers:       make(map[string]HandlerFunc),
+		heartbeatEvery: 100, // ~100 min at 60s interval; override with SetHeartbeat
 	}, nil
+}
+
+// SetHeartbeat overrides the default heartbeat cadence. Pass 0 to disable.
+// A heartbeat is a single "scheduler heartbeat" INFO log line every N
+// ticks — useful for confirming daemon liveness without journal grep
+// gymnastics (silence ≠ stuck when idle).
+func (s *Scheduler) SetHeartbeat(every uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatEvery = every
 }
 
 // Close is a no-op on the scheduler's bound *sql.DB. The DatabaseManager
@@ -233,6 +258,11 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 
 // executeOne runs a single wake's handler under a goroutine, with context
 // timeout so a hung handler cannot pin a tick indefinitely.
+//
+// Logs both an "executing wake" line on entry and a "wake completed" line
+// on exit (with duration_ms and err if non-nil). The exit log is the
+// trace that proves a handler ran end-to-end — the entry log alone doesn't
+// distinguish a fast success from a hung handler killed by ctx.
 func (s *Scheduler) executeOne(ctx context.Context, w Wake) error {
 	s.mu.RLock()
 	h, ok := s.handlers[w.Kind()]
@@ -243,12 +273,32 @@ func (s *Scheduler) executeOne(ctx context.Context, w Wake) error {
 	s.log.Info("executing wake",
 		"wake_id", w.ID, "kind", w.Kind(), "reason", truncate(w.Reason, 80))
 
+	start := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- h(w) }()
 	select {
 	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			s.log.Error("wake completed",
+				"wake_id", w.ID,
+				"kind", w.Kind(),
+				"duration_ms", elapsed.Milliseconds(),
+				"err", err)
+		} else {
+			s.log.Info("wake completed",
+				"wake_id", w.ID,
+				"kind", w.Kind(),
+				"duration_ms", elapsed.Milliseconds())
+		}
 		return err
 	case <-ctx.Done():
+		elapsed := time.Since(start)
+		s.log.Error("wake cancelled",
+			"wake_id", w.ID,
+			"kind", w.Kind(),
+			"duration_ms", elapsed.Milliseconds(),
+			"err", ctx.Err())
 		return fmt.Errorf("handler context cancelled: %w", ctx.Err())
 	}
 }
@@ -286,6 +336,16 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 			s.log.Info("scheduler stopping", "reason", ctx.Err())
 			return nil
 		case <-t.C:
+			s.tickCount++
+			s.mu.RLock()
+			hb := s.heartbeatEvery
+			s.mu.RUnlock()
+			if hb > 0 && s.tickCount%hb == 0 {
+				s.log.Info("scheduler heartbeat",
+					"tick", s.tickCount,
+					"interval", interval.String(),
+					"uptime_ticks", s.tickCount)
+			}
 			if n, err := s.Tick(ctx); err != nil {
 				s.log.Error("tick failed", "err", err)
 			} else if n > 0 {

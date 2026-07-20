@@ -386,6 +386,13 @@ func fetchTopDirectives(workspace string, limit int) string {
 // The function is read-only and tolerant: missing files return "" rather than
 // erroring. We use the first match in priority order.
 func resolveMPMDatabase(workspace string) string {
+	// Empty workspace means "don't resolve" — returning a relative path
+	// would let os.Stat probe CWD accidentally and pick up a fixture
+	// file (e.g. when tests run from the repo root). The caller treats
+	// "" as "no DB" and skips the read-only scan.
+	if workspace == "" {
+		return ""
+	}
 	candidates := []string{
 		filepath.Join(workspace, "mpm.db"),
 		filepath.Join(workspace, "mpm.sqlite"),
