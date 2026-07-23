@@ -546,6 +546,31 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
 		Handler:     handleHealthCheck,
 	},
+
+	// ── Scheduled Tasks (Agentic Cron) ──────────────────────────────
+	// Three split tools following the existing wake / lesson pattern
+	// (schedule_wake / list_wakes / check_wakes are all separate
+	// tools, not a multiplexed CRUD). The agent reads each tool's
+	// schema to learn the required fields; no guessing.
+
+	{
+		Name:        "upsert_scheduled_task",
+		Description: "Create or update a recurring Agentic Cron task. The mpm-scheduler daemon polls scheduled_tasks on a 60s tick loop, injects a standard scheduled_wakes row at each fire, and rolls over next_run_at automatically — you do not need to manually reschedule. Required: id (semantic slug, re-using updates), name (human label), cron_expr (standard 5-field cron, parsed by robfig/cron/v3, e.g. '0 3 * * *' = daily 03:00 UTC), directive_id (the directive the agent reads when it wakes; the handler runs a fail-fast lookup to confirm the directive exists before accepting the upsert — better to catch a typo at 2 PM than have the daemon silently drop the wake at 3 AM), status ('active' or 'paused'). To stop a recurring task without deleting it, call upsert again with status='paused'.",
+		Schema:      json.RawMessage(`{"type":"object","required":["id","name","cron_expr","directive_id","status"],"properties":{"id":{"type":"string","description":"Semantic slug (e.g., 'epistemic-compaction'). Re-using an ID updates the existing row."},"name":{"type":"string"},"cron_expr":{"type":"string","description":"Standard 5-field cron expression."},"directive_id":{"type":"string","description":"ID of an existing directive in the 'directives' collection; the handler validates it exists."},"status":{"type":"string","enum":["active","paused"]}}}`),
+		Handler:     handleUpsertScheduledTask,
+	},
+	{
+		Name:        "list_scheduled_tasks",
+		Description: "List all scheduled tasks ordered by next_run_at ASC. Returns id, name, cron_expr, directive_id, status, last_run_at, next_run_at, created_at, updated_at for each task. Use to inspect what's queued and what fired last.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Handler:     handleListScheduledTasks,
+	},
+	{
+		Name:        "delete_scheduled_task",
+		Description: "Hard-delete a scheduled task by id. Most operators should set status='paused' via upsert_scheduled_task instead — paused rows are kept for forensics and re-enableable. Use delete only when you want permanent removal.",
+		Schema:      json.RawMessage(`{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"Semantic slug of the task to delete."}}}`),
+		Handler:     handleDeleteScheduledTask,
+	},
 }
 
 // ByName returns the tool with the given name, or false.

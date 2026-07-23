@@ -68,6 +68,7 @@ func NewRouter() *CommandRouter {
 		"mode":       {Name: "mode", Description: "Mode operations"},
 		"wake":       {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":         {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+		"tasks":      {Name: "tasks", Description: "Manage Agentic Cron tasks (upsert|list|delete)", MinArgs: 0},
 		"lint":       {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":     {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":    {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
@@ -155,6 +156,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
+	case "tasks":
+		return handleTasksCommand(args[1:])
 	case "backup":
 		return handleBackup(args)
 	case "restore":

@@ -200,6 +200,14 @@ type CoreDB interface {
 	DigestScheduledWakes(topN int) (map[string]interface{}, error)
 	FireStaleFoundationWakes(deletedArtifactID string) (int, error)
 
+	// ─── Scheduled Tasks (Agentic Cron) ─────────────────────────────
+	// Recurring agentic workflows. The mpm-scheduler daemon's 60s tick
+	// loop polls these via ProcessScheduledTasks, injects a standard
+	// scheduled_wakes row at each fire, and rolls over next_run_at.
+	UpsertScheduledTask(task ScheduledTask) error
+	ListScheduledTasks() ([]ScheduledTask, error)
+	DeleteScheduledTask(id string) error
+
 	// ─── Arc 2: Active Dissemination ────────────────────────────────
 	BroadcastMemory(memoryID string, opts BroadcastOpts) (*BroadcastReport, error)
 	CheckPendingEventWakes(sessionID string) ([]EventWake, error)

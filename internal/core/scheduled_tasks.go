@@ -28,6 +28,7 @@
 package internal
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -153,8 +154,19 @@ func (dm *DatabaseManager) UpsertScheduledTask(task ScheduledTask) error {
 // Returns the count of tasks processed. Cron expressions that fail to
 // parse at rollover time cause the offending task to be paused (not
 // deleted) — better to halt than to spin a poison-pill task.
+//
+// This is the *DatabaseManager convenience wrapper. The scheduler daemon
+// (which holds its own *sql.DB) calls ProcessScheduledTasks directly
+// to avoid importing the entire DatabaseManager struct.
 func (dm *DatabaseManager) ProcessDueTasks() (int, error) {
-	tx, err := dm.db.Begin()
+	return ProcessScheduledTasks(dm.db)
+}
+
+// ProcessScheduledTasks is the underlying polling engine, callable on any
+// *sql.DB connection. The scheduler uses this to keep the daemon package
+// free of DatabaseManager imports (which would create a cycle).
+func ProcessScheduledTasks(db *sql.DB) (int, error) {
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
