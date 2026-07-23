@@ -479,16 +479,26 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 	ftsTable := schemaPrefix + "memories_fts"
 	memTable := schemaPrefix + "memories"
 
-	// FTS5 query sanitization (2026-07-17, surfaced by hermes diagnostic).
-	// Bare hyphenated queries like "memory-test" get parsed by FTS5 as
-	// column-filter syntax: "memory" is treated as a column name and
-	// "-test" as an exclusion term. The result is either "no such
-	// column" errors or silent zero-result queries. Wrapping in double
-	// quotes forces MATCH to parse as a phrase, after which the
-	// unicode61 tokenizer splits on hyphens and the indexed tokens
-	// match the query tokens. Same outcome as before for non-hyphenated
-	// queries (the tokenizer handles whitespace the same way).
-	safeQuery := `"\` + strings.ReplaceAll(strings.ReplaceAll(query, `\`, `\\`), `"`, `\"`) + `"`
+	// FTS5 query construction (2026-07-23, builds on 2026-07-17 fix).
+	// The 2026-07-17 fix wrapped the user query in double quotes to
+	// dodge the hyphen-as-column-name parser quirk. That worked at the
+	// syntax level but introduced a new silent bug: phrase queries
+	// (`"lazy start"`) only match the literal two-word phrase, while
+	// the porter unicode61 tokenizer stores "lazy-start" as the
+	// separate tokens "lazy" and "start". Wrapping in quotes hid the
+	// hyphen crash but traded it for silent zero-result queries.
+	//
+	// BuildFTS5Query tokenizes the query the same way the index does
+	// (split on whitespace + hyphens + underscores + dots), applies
+	// prefix wildcard per token, and joins with whitespace (FTS5
+	// implicit AND). This makes hyphenated, multi-word, and partial
+	// keyword queries all work via the same code path.
+	safeQuery := BuildFTS5Query(query)
+	if safeQuery == "" {
+		// Empty query — FTS5 MATCH "" raises an error; return empty
+		// so the caller can short-circuit.
+		return nil, nil
+	}
 	sqlQuery := `
 		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
 		       m.created_at, m.reinforcement_count, m.weight,
