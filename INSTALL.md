@@ -166,6 +166,17 @@ MPM_BACKUP_DIR=/custom/path/backups
 
 ---
 
+> **⚠️ Encrypted `/home` caveat.** The scheduler unit is queued at
+> `default.target` but does NOT auto-start when `/home` is eCryptfs-encrypted.
+> The auto-generated `home-$USER.mount` activates ~30–60s after the user
+> manager reaches `default.target`; the unit's `After=home-$USER.mount`
+> dependency never re-evaluates after that late activation. Symptom:
+> `systemctl --user is-active mpm-scheduler` returns `inactive` after every
+> reboot, despite `enable --now` having succeeded earlier. The agent's
+> `AGENTS.md` Session Startup step 2 catches this and starts the daemon on
+> wake — if you cannot rely on the agent path (e.g. cron-driven unattended
+> system tasks), see the Troubleshooting row below for a drop-in workaround.
+
 ## 3. Wire to your host
 
 > **Pick one.** OpenClaw and Hermes are the two supported hosts as of
@@ -275,13 +286,19 @@ without losing agent state; runtime data persists across `git pull`.
 |---------|---------------|-----|
 | Install fails: "Go not found" | `go version` | Install Go 1.26+ or add to PATH |
 | Install fails: "systemd required" | `systemctl --version` | Install systemd (most distros have it) |
+| `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `sudo loginctl enable-linger $USER` (set `Linger=yes`) |
 | Service won't start: "permission denied" on `/var/lib/mpm/` | `ls -la /var/lib/mpm/` | `sudo chown -R $USER:$USER /var/lib/mpm` |
 | Service won't start after reboot on encrypted home | `findmnt /home` | Use `sudo ./scripts/install.sh` (system service) instead of `make service-scheduler` (user service) |
+| `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
+| `mpm-scheduler` is `inactive` after every reboot | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | Encrypted `/home` (eCryptfs) + systemd user instance: `home-$USER.mount` activates after the unit's `After=` dependency is evaluated. The agent wake layer fixes this at `AGENTS.md` Session Startup step 2. For non-agent callers (cron), add a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to wait for the mount before starting. |
 | CLI fails: "no such file: mpm.real" | `ls -la /usr/local/bin/mpm*` | Re-run `sudo ./scripts/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 /usr/local/bin/mpm` | `/usr/local/bin/mpm` must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
+| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l $HOME/projects/mpm/bin/mpm-mcp` | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
 | MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path; restart gateway |
 | `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
-| `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run init. |
+| OpenClaw: agent doesn't see MPM tools in chat | `openclaw mcp list \| grep mpm` | `openclaw gateway restart` (Gateway caches MCP servers at startup) |
+| Hermes: agent doesn't see MPM tools in chat | `hermes mcp list \| grep mpm` | Confirm `mcp` toolset in `~/.hermes/config.yaml:toolsets`. Restart session (`/reset`) — config changes don't apply mid-conversation. |
+| `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run `mpm ops init directives`. |
 | MCP tools load but `read_wake_context` returns empty | `mpm ops stats` | DB may be empty. Confirm `MPM_WORKSPACE` matches the canonical db path prime directive. |
 | Legacy user unit conflicts with system unit | `systemctl --user status mpm-scheduler`; `systemctl status mpm-scheduler` | Disable the legacy one: `systemctl --user disable --now mpm-scheduler; rm ~/.config/systemd/user/mpm-scheduler.service` |
 
