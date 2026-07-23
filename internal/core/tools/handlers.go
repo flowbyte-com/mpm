@@ -1744,6 +1744,109 @@ func handleDigestWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	return dm.DigestScheduledWakes(topN)
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled Tasks (Agentic Cron)
+// ---------------------------------------------------------------------------
+//
+// Three split tools following the existing wake / lesson pattern
+// (schedule_wake, list_wakes, check_wakes are all separate). CRUD
+// overloaded onto one tool forces the agent to guess which fields
+// are required for which operation; discrete tools make the JSON
+// schema self-documenting.
+//
+// Fail-fast on upsert: the handler runs a single index lookup against
+// `memories WHERE id = ? AND collection = 'directives'` BEFORE writing.
+// If the directive doesn't exist, the upsert is rejected. Better to
+// catch a typo at 2 PM than have the daemon silently drop the wake
+// at 3 AM.
+
+// handleUpsertScheduledTask creates or updates a recurring agentic
+// workflow. Computes next_run_at from the cron expression (UTC) and
+// stores it; the daemon never parses cron on the hot path.
+func handleUpsertScheduledTask(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id := internal.ParseStringOr(p["id"], "")
+	name := internal.ParseStringOr(p["name"], "")
+	cronExpr := internal.ParseStringOr(p["cron_expr"], "")
+	directiveID := internal.ParseStringOr(p["directive_id"], "")
+	status := internal.ParseStringOr(p["status"], internal.ScheduledTaskActive)
+
+	if id == "" || name == "" || cronExpr == "" || directiveID == "" {
+		return nil, fmt.Errorf("id, name, cron_expr, directive_id are all required")
+	}
+	if status != internal.ScheduledTaskActive && status != internal.ScheduledTaskPaused {
+		return nil, fmt.Errorf("invalid status %q: must be %q or %q",
+			status, internal.ScheduledTaskActive, internal.ScheduledTaskPaused)
+	}
+
+	// Fail-fast: confirm directive_id actually exists in the
+	// directives collection. A lightning-fast indexed lookup; the
+	// agent catches the typo at upsert time, not at 3 AM.
+	sqlDB := dm.SQLDB()
+	if sqlDB == nil {
+		return nil, fmt.Errorf("db not available")
+	}
+	var foundID string
+	row := sqlDB.QueryRow(
+		`SELECT id FROM memories WHERE id = ? AND collection = 'directives' AND deleted_at IS NULL LIMIT 1`,
+		directiveID,
+	)
+	if err := row.Scan(&foundID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("directive_id %q not found in memories where collection='directives'", directiveID)
+		}
+		return nil, fmt.Errorf("validate directive_id: %w", err)
+	}
+
+	task := internal.ScheduledTask{
+		ID:          id,
+		Name:        name,
+		CronExpr:    cronExpr,
+		DirectiveID: directiveID,
+		Status:      status,
+	}
+	if err := dm.UpsertScheduledTask(task); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"task_id": id,
+		"status":  status,
+	}, nil
+}
+
+// handleListScheduledTasks returns all scheduled tasks ordered by
+// next_run_at ASC. Use to inspect what's queued and what fired last.
+func handleListScheduledTasks(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	tasks, err := dm.ListScheduledTasks()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"tasks":   tasks,
+		"count":   len(tasks),
+	}, nil
+}
+
+// handleDeleteScheduledTask hard-deletes a task by id. Most
+// operators should set status='paused' via upsert instead so the
+// schedule is preserved for forensics; delete is for permanent
+// removal.
+func handleDeleteScheduledTask(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id := internal.ParseStringOr(p["id"], "")
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	if err := dm.DeleteScheduledTask(id); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"task_id": id,
+		"deleted": true,
+	}, nil
+}
+
 // handleHealthCheck returns compact operational status for the agent:
 // PRAGMA integrity + SQLite page stats + domain counts + lifetime
 // SQLITE_BUSY retry counter. Designed for self-diagnosis when the
