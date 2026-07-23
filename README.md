@@ -348,6 +348,8 @@ challenge ───────────────────────�
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
+**Auto-resolution on memory save (the implicit path).** Theories can also be closed out without an explicit `mpm resolve_theory` call. When `save_to_memory` writes a memory carrying the tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), the theory is atomically resolved in the same transaction as the memory insert. The result envelope returns `theory_resolutions_applied: ["<id>"]` when this fires; the resolved theory row carries `resolved_by=save_to_memory:theory_resolve_hook` as the forensic marker. This is the preferred path for closing out a theory you've just verified — the evidence and the conclusion land in the same row, and the audit trail is the row itself rather than a separate `mpm resolve_theory` invocation.
+
 ### 4.6 Proactive Recall
 
 Traditional memory systems wait for a search query. MPM actively surfaces relevant knowledge before it is requested.
@@ -416,6 +418,8 @@ systemctl --user enable --now mpm-scheduler         # enable + start
 systemctl --user status mpm-scheduler               # verify
 journalctl --user -u mpm-scheduler -f               # follow logs
 ```
+
+> **⚠️ Encrypted `/home` caveat.** The scheduler service does NOT auto-start after reboot when `/home` is eCryptfs-encrypted. systemd queues the unit at `default.target`, but the auto-generated `home-$USER.mount` activates ~30–60s later — the `After=` dependency never re-evaluates after that late activation. Symptom: `systemctl --user is-active mpm-scheduler` returns `inactive` after every reboot, despite `enable --now` having succeeded earlier. The wake-layer fix (lesson `24be03ec71a5981f`) is the agent's `AGENTS.md` Session Startup step 2 — it detects a dead daemon and starts it on the next agent wake. For unattended system tasks outside the agent loop, see the INSTALL.md Troubleshooting row for a drop-in workaround.
 
 The default unit assumes `~/projects/mpm` layout. Override via either:
 
@@ -602,6 +606,8 @@ score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
 ```
 
 BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals live on a comparable scale before combining. Use `--semantic` to drop BM25 and search by embedding similarity alone.
+
+> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `search_lessons` / `query_long_term_memory` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
 
@@ -1346,6 +1352,29 @@ mpm call read_wake_context
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
 
+### Supply-Chain Identity (Commit Signing)
+
+Every commit to the MPM repo ships GPG-signed by default (`commit.gpgsign=true` is configured in `.git/config`). The signing key identity is the substrate's cryptographic commit author — not just a "developer" label. Without commit signatures, supply-chain attacks (compromised dev box, replayed commits) are undetectable at the substrate level.
+
+A clean run of `git log --pretty=format:"%G? %h %s"` should show `G` (good signature) on every commit since signing was enabled. Anything else is a forensic event:
+
+| Flag | Meaning | Action |
+|---|---|---|
+| `G` | Good signature | Trust as normal |
+| `B` | Bad signature (key mismatch or tampered commit) | Do NOT merge; investigate |
+| `N` | No signature | Pre-signing-era commit, or commit was forced without `--no-gpg-sign` |
+
+**Verify a key against its expected identity** before trusting a clone:
+
+```bash
+git config --get user.signingkey                  # short key ID (e.g. 3C049C8EF8936F94)
+gpg --list-keys --keyid-format=long <short-id>    # full fingerprint + uid
+```
+
+The uid on the key should match the project's documented author identity. A mismatch is either a config drift, a key rotation that wasn't documented, or an active impersonation attempt — investigate before pulling.
+
+**Why this matters for an autonomous substrate:** the agent writes code that other agents and humans will eventually load. Combined with the four enforcement patterns above (source-of-truth + cache, property tests, AST guard rails, self-heal whitelist), commit identity closes the loop on *who* wrote the substrate, not just *what* it does.
+
 ---
 
 ## 11. Glossary
@@ -1390,7 +1419,7 @@ This appendix is the deep dive behind §6.5. The narrative above says *what*; th
 
 ### The two databases
 
-- **Local DB** — `~/.mpm/<workspace>/mpm.db`. Per-project tactical memory.
+- **Local DB** — `~/.mpm/src/db/mpm.db`. Single canonical tactical-memory DB. Override the workspace root via `MPM_WORKSPACE` (the DB lives at `$MPM_WORKSPACE/src/db/mpm.db`). There is no `<workspace>` subdirectory tier — each MPM process opens one DB per workspace.
 - **Shared DB** — `~/.mpm/shared/shared.db`. Cross-project house rules, operator-gated.
 
 Each MPM process attaches both via `ATTACH DATABASE '<shared_path>' AS shared`. Cross-DB queries become plain SQL: `SELECT … FROM shared.memories WHERE …`. There is no separate service, no IPC, no serialization layer.
