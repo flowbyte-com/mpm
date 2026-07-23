@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS scheduled_wakes (
     metadata        JSON
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);
+CREATE TABLE scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    cron_expr TEXT NOT NULL,
+    directive_id TEXT NOT NULL,
+    status TEXT CHECK (status IN ('active', 'paused')),
+    last_run_at DATETIME,
+    next_run_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);
 `
 
 // newTestScheduler returns a Scheduler backed by a temp file DB with the
