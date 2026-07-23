@@ -31,7 +31,10 @@ src/db/watchdog.jsonl
 # Vestigial dev-state path (was tracked via git add in early history;
 # removed 2026-07-07 — see MPM lesson on vestigial cleanup).
 internal/src/db/
-config/
+# Scoped to repo root — the bare `config/` pattern previously also
+# matched internal/core/config/, which silently excluded new config
+# tests from commits.
+/config/
 
 # Backup files
 mpm-backup-*.sql

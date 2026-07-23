@@ -107,9 +107,9 @@ const MPMDataDir = "mpm"
 
 // GetWorkspace determines the base workspace directory using a cascading priority system:
 // 1. CLI Flag (--workspace) via environment variable (os.Getenv)
-// 2. Environment Variable (os.Getenv)
-// 3. Executable Relative (os.Executable() + symai parent)
-// 4. Current Working Directory (os.Getwd)
+// 2. $HOME/.mpm — canonical default for a personal memory substrate
+// 3. Current Working Directory (os.Getwd) — absolute last resort; the prototype DB
+//    is created in cwd if missing, which is the ghost-DB shape; surface loudly.
 //
 // This enables portable installations - the same binary can work from any directory.
 // All MPM runtime data resides within workspace/flowbyte/mpm/ (src/, mode/, persona/)
@@ -132,70 +132,21 @@ func GetWorkspace() string {
 		return workspace
 	}
 
-	// 2. Resolve relative to executable location
-	execPath, err := os.Executable()
-	if err == nil {
-		// Get the directory containing the binary
-		execDir := filepath.Dir(execPath)
-
-		// Check if we're in a "bin/" directory (standard layout)
-		if filepath.Base(execDir) == "bin" {
-			parent := filepath.Dir(execDir) // e.g. .../flowbyte/mpm or .../projects
-			parentBase := filepath.Base(parent)
-			// If parent is projects/ or workspace/, workspace is the grandparent
-			if parentBase == "projects" || parentBase == "workspace" {
-				return filepath.Dir(parent)
-			}
-			// Parent is the project root (e.g. flowbyte/mpm or symai).
-			// Workspace IS the project root, not the grandparent.
-			if parentBase == "mpm" || parentBase == "symai" || parentBase == "desp" {
-				return parent
-			}
-			// Generic project dir — workspace is the grandparent
-			return filepath.Dir(parent)
-		}
-
-		// If we're already in symai/, return it
-		base := filepath.Base(execDir)
-		if base == "symai" {
-			return execDir
-		}
-
-		// If we're in projects/, return parent (symai)
-		if base == "projects" {
-			return execDir
-		}
-
-		// Fallback: look for parent symai directory
-		parent := filepath.Dir(execDir)
-		parentBase := filepath.Base(parent)
-		if parentBase == "symai" {
-			return parent
-		}
-
-		// If we're in projects/, return parent
-		if parentBase == "projects" {
-			return filepath.Dir(parent)
-		}
-
-		// Fallback: return current working directory
-		cwd, _ := os.Getwd()
-
-		// For system-installed binaries (e.g. /usr/local/bin/mpm), the walk-up
-		// from /usr/local/bin finds nothing useful. Check if the OpenClaw
-		// workspace pattern exists: ~/.openclaw/workspace/projects/mpm
-		if home := os.Getenv("HOME"); home != "" {
-			openclawWS := filepath.Join(home, ".openclaw", "workspace", "projects", "mpm")
-			dbPath := filepath.Join(openclawWS, "src", "db", "mpm.db")
-			if _, err := os.Stat(dbPath); err == nil {
-				return openclawWS
-			}
-		}
-
-		return cwd
+	// 2. Default to $HOME/.mpm. Stricter than the previous fallback chain
+	// (which probed CWD and the binary's exec path). The ghost-DB
+	// incident of 2026-07-21 (lesson 59fe3f8ff3e1549e) showed that CWD
+	// probing silently creates bogus DBs in unrelated dirs; the binary
+	// walk-up also brittle (catches unrelated projects with similar
+	// names). Home is the canonical default for a personal memory
+	// substrate. Tests like TestGetWorkspace_DefaultsToHomeMpm pin this.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".mpm")
 	}
 
-	// Fallback: use current working directory
+	// 3. Absolute last resort (no $HOME available). CWD is the only
+	// fallback left, but the prototype DB is created in cwd if missing —
+	// which is the ghost-DB shape. Surface loudly: do not silently
+	// create a DB here.
 	cwd, _ := os.Getwd()
 	return cwd
 }
