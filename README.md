@@ -419,7 +419,19 @@ systemctl --user status mpm-scheduler               # verify
 journalctl --user -u mpm-scheduler -f               # follow logs
 ```
 
-> **⚠️ Encrypted `/home` caveat.** The scheduler service does NOT auto-start after reboot when `/home` is eCryptfs-encrypted. systemd queues the unit at `default.target`, but the auto-generated `home-$USER.mount` activates ~30–60s later — the `After=` dependency never re-evaluates after that late activation. Symptom: `systemctl --user is-active mpm-scheduler` returns `inactive` after every reboot, despite `enable --now` having succeeded earlier. The wake-layer fix (lesson `24be03ec71a5981f`) is the agent's `AGENTS.md` Session Startup step 2 — it detects a dead daemon and starts it on the next agent wake. For unattended system tasks outside the agent loop, see the INSTALL.md Troubleshooting row for a drop-in workaround.
+> **Lazy-Start Architecture (encrypted `/home`).** When `/home` is eCryptfs-encrypted,
+> the scheduler daemon is **designed to stay dead at boot**. The lockfile lives inside
+> the encrypted tree (`~/.mpm/scheduler.lock`); starting the daemon before `/home`
+> is decrypted would either fail (inaccessible path) or risk writing to the wrong
+> location. The architecture treats *boot + locked home* as the SAFE state and
+> expects the agent's first wake context (`AGENTS.md` Session Startup step 2) to
+> spin the daemon up *after* decryption is complete. This isolates the daemon's
+> first write to a moment when the substrate is verifiably writable. **It is a
+> security feature, not a bug.** Lesson `24be03ec71a5981f` codifies the rationale.
+>
+> Operators on systems without an agent wake path (cron-driven unattended tasks,
+> headless deployments) can opt out via the drop-in documented in INSTALL.md
+> Troubleshooting.
 
 The default unit assumes `~/projects/mpm` layout. Override via either:
 
