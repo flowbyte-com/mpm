@@ -262,7 +262,7 @@ Notice what never happens. The original memory is never edited. Only confidence 
 
 The cognitive sequence above shows how artifacts come into being. The relationship below shows how their truth gets refined over time. The two are different things; conflating them is what made the earlier single-diagram view misleading.
 
-A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached are what confidence is derived from. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
+A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached accumulate that evidence over time. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
 
 ```
                     Evidence
@@ -284,7 +284,7 @@ A piece of evidence can support or challenge **any** artifact — memory, decisi
               New Observation
 ```
 
-A memory can be challenged by a new observation. A decision can be challenged by a new test. A theory can be challenged by an independent reproduction. The evidence ledger doesn't care which kind of artifact it attaches to; confidence is derived uniformly across all three.
+A memory can be challenged by a new observation. A decision can be challenged by a new test. A theory can be challenged by an independent reproduction. The evidence ledger doesn't care which kind of artifact it attaches to.
 
 The forward flow is creation; the cross-cutting arrow is refinement. Both run continuously, and both are required for belief revision to work.
 
@@ -368,7 +368,7 @@ MPM models reasoning under uncertainty. Mistakes happen. The system is designed 
 
 Five canonical failure modes and the mechanism that handles each:
 
-**Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` weakens the memory's weight by 3, atomically creates a back-linked theory in pending status, and preserves the original artifact. The memory is not deleted — its history is, by design, immutable. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
+**Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` weakens the memory's weight by 3, atomically creates a back-linked theory in pending status, and preserves the original artifact. The memory is not deleted — the original artifact is preserved. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
 
 **Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
 
@@ -548,6 +548,8 @@ MPM intentionally separates persistent cognition from runtime behaviour.
 
 ### 6.1 Core vs Runtime
 
+*The architectural boundary between what the agent knows (stable) and how it behaves (evolvable).*
+
 ```
                     MPM
                      │
@@ -571,6 +573,8 @@ The distinction is important. The Core describes what the agent knows. The Runti
 Mature systems often owe their longevity to having a very small, stable core. Every feature that lives in Core must earn its place through years of usage evidence, not through the effort it took to build. Features that fail to justify themselves are removed. Engineers are sentimental about code; the regret log and disciplined review break that sentiment.
 
 ### 6.2 Confidence Engine
+
+*How the system derives belief from evidence rather than arbitrary LLM scoring.*
 
 The Confidence Engine computes and tracks the system's belief in each artifact. The principles are stated in §3.3. This section is the **shape** — the evidence registry, the source-of-truth split, and the operations the agent can call. The mechanics (recompute atomicity, trigger wiring, transaction boundaries) live in Appendix C.
 
@@ -603,6 +607,8 @@ The stored `confidence` column is a performance cache. The evidence ledger is th
 This is one of the four enforcement patterns that make MPM's guarantees stick. See **Appendix C** for the rest (property tests, AST guard rails, self-heal whitelist + escalation).
 
 ### 6.3 Retrieval Architecture
+
+*Combines lexical, semantic, reinforcement, and recency signals into a single ranking — because no single signal is sufficient.*
 
 MPM combines four signals:
 
@@ -645,6 +651,8 @@ Concept drift detection — autonomously identifying paradigm shifts where histo
 When a drifting memory triggers this signature, the engine quarantines the memory (sets `concept_drift: true`), proposes a pending theory, and survives restarts via SQLite-native dedup. Drift detection is pure-SQLite — no separate process, no separate timer, no panic-recovery surface to maintain. A drift missed last query is just as catchable next query.
 
 ### 6.4 MCP Integration
+
+*Bridges JSON-RPC from any host (OpenClaw, Hermes, Claude Code) to the CoreDB contract — agents see tools, not SQL.*
 
 MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`bin/mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. No plugin layer, no Node/TypeScript wrapper, no Python shim — one binary speaking MCP.
 
@@ -729,6 +737,8 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
 ### 6.5 Multi-Agent Shared Epistemology
+
+*Federates house rules across operators via a separate DB — five layers from local cache to global arbitration, no IPC invented.*
 
 Multiple agents on a single workstation can share a single source of truth for house rules, cross-project decisions, and durable conventions, while keeping their per-project tactical memories isolated. The substrate is SQLite `ATTACH DATABASE`. The behavior is a **five-layer stack** that turns the shared DB from passive storage into an active dissemination system.
 
