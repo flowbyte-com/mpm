@@ -1039,6 +1039,82 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 
 For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
 
+### Agentic Cron (Recurring Tasks)
+
+For work that should run **on a schedule** rather than once, `scheduled_tasks` is the registry of recurring agentic workflows. The `mpm-scheduler` daemon's 60s tick loop polls `scheduled_tasks WHERE status='active' AND next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes` row in the same transaction as the `next_run_at` rollover. A daemon crash between injection and rollover cannot double-fire. The injected wake surfaces to the agent on its next MCP call via the standard opportunistic fold.
+
+```
+mpm tasks upsert epistemic-compaction \
+  "Nightly epistemic compaction" \
+  "0 3 * * *" \
+  mpm-seed-epistemic-compaction active
+
+mpm tasks list
+mpm tasks delete epistemic-compaction
+```
+
+Three split tools (matches the `schedule_wake` / `list_wakes` pattern — discrete beats multiplexed):
+
+| Tool | What |
+|---|---|
+| `upsert_scheduled_task` | Create or update a recurring task. **Fails fast** if `directive_id` does not exist in `memories WHERE collection='directives'` — a single indexed SELECT catches the typo at upsert time rather than silently dropping the wake at 3 AM. |
+| `list_scheduled_tasks` | Read all tasks ordered by `next_run_at ASC`. |
+| `delete_scheduled_task` | Hard-delete. Most operators should set `status='paused'` via upsert for soft-stop. |
+
+**Five-field cron syntax.** Standard format (`minute hour dom month dow`). `0 3 * * *` = daily 03:00 UTC, `0 0 * * 1` = weekly Monday midnight, `*/15 * * * *` = every 15 minutes. Parsed at upsert time by `github.com/robfig/cron/v3`; the daemon never parses cron on the hot path — it just reads the pre-computed `next_run_at` from the index.
+
+**Re-upsert semantics.** Calling `upsert_scheduled_task` with an existing id recalculates `next_run_at` from now and updates the cron/directive/status. The existing row's `created_at` and `last_run_at` are preserved. Status='paused' for six months then status='active' does NOT backfill missed fires — it waits for the next cron occurrence from the unpause moment.
+
+**Poison-pill handling.** If `CalculateNextRun` fails at rollover time (operator typo, mid-flight cron corruption), the offending task is `paused` rather than deleted, and the loop continues. Better to halt than to spin.
+
+**Atomic transactional pattern.** The polling function wraps three operations in a single SQLite transaction:
+
+```sql
+BEGIN;
+  -- 1. SELECT due tasks
+  SELECT id, cron_expr, directive_id FROM scheduled_tasks
+    WHERE status='active' AND next_run_at <= ?;
+  -- 2. INSERT wake rows (one per due task)
+  INSERT INTO scheduled_wakes (id, target_time, reason, created_by, metadata)
+    VALUES (?, ?, 'cron:<task_id>', 'mpm-scheduler',
+            '{"source":"cron","task_id":"<id>","directive_id":"<id>"}');
+  -- 3. ROLLOVER next_run_at
+  UPDATE scheduled_tasks
+    SET last_run_at=?, next_run_at=?, updated_at=?
+    WHERE id=?;
+COMMIT;
+```
+
+The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={source:'cron', task_id, directive_id}`. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
+
+**Companion schema** (for the database-design curious):
+
+```sql
+CREATE TABLE scheduled_tasks (
+  id           TEXT PRIMARY KEY,        -- semantic slug (e.g., 'epistemic-compaction')
+  name         TEXT NOT NULL,            -- human label
+  cron_expr    TEXT NOT NULL,            -- '0 3 * * *'
+  directive_id TEXT NOT NULL,            -- FK target: memories.id where collection='directives'
+  status       TEXT CHECK (status IN ('active','paused')),
+  last_run_at  DATETIME,
+  next_run_at  DATETIME NOT NULL,        -- pre-computed; daemon polls on this column
+  created_at   DATETIME,
+  updated_at   DATETIME
+);
+CREATE INDEX idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);
+```
+
+The composite index on `(status, next_run_at)` is the daemon's hot path: a single indexed lookup, never a table scan, even with thousands of registered tasks.
+
+**Architecture choice — why pre-compute `next_run_at`.** Three options were considered:
+1. **Compute `next_run_at` at upsert, query it on the hot path** ← chosen
+2. Store `cron_expr`, parse and evaluate on every tick — simple but blocks the daemon on cron parsing
+3. Cache `next_run_at` but invalidate on cron change — adds a "stale read" code path
+
+Option 1 wins because the hot path is a single indexed lookup; option 2 wastes CPU on every tick; option 3 introduces cache invalidation correctness concerns. The cost is that re-upserting a task recomputes the schedule from now (documented behavior, not a bug).
+
+**Migration note.** The existing `scheduled_wakes` table has a dormant `recurring_rule TEXT` column that was accepted by `schedule_wake` but never honored by any daemon code path. Recurring workflows now live in `scheduled_tasks`; `recurring_rule` is preserved for backward compatibility with the `Wake.RecurringRule` struct field but documented as superseded. A future schema-version bump can drop it cleanly when no callers remain.
+
 ### Event Wakes — Active Dissemination (Arc 2)
 
 Local scheduled wakes (above) are **self-directed** — the agent schedules a reminder for itself. **Event wakes** are **other-directed** — when an epistemic event lands (a new house rule, a contradiction resolution, an arbitration verdict), the shared DB pushes a wake to every other active session on the fleet.
