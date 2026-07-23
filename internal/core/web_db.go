@@ -30,6 +30,12 @@ import (
 // does lexicographic comparison and 'T' > ' ' in ASCII. All comparisons
 // against expires_at MUST use strftime('%s','now'), not CURRENT_TIMESTAMP.
 //
+// deleted_at follows the same convention as expires_at — INTEGER Unix
+// epoch. The two are unified so SQLite comparisons are always numeric and
+// never mix types (INTEGER < TEXT is always TRUE in SQLite, which would
+// shred migrated rows on rollback — see audit.md 2026-07-23 finding 1
+// for the rollback procedure).
+//
 // MemoryExpireClauseM is the alias-qualified variant for queries that
 // SELECT FROM `memories m` (e.g. FTS5 joins).
 const (

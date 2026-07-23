@@ -51,6 +51,15 @@ var BaseTables = []string{
 		config_snapshot JSON
 	);`,
 
+	// Schema migrations table - sentinel rows mark which one-shot data
+	// migrations have already run. Used by MigrateDeletedAtToUnixEpoch
+	// (deleted_at_unified_v1) and any future data migrations that need
+	// to be idempotent across restarts.
+	`CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY,
+		applied_at INTEGER NOT NULL
+	);`,
+
 	// Lessons table - stores learned lessons (insights, warnings, practices)
 	`CREATE TABLE IF NOT EXISTS lessons (
 		id TEXT PRIMARY KEY,
@@ -542,7 +551,7 @@ var SafeMigrations = [][3]string{
 	{"topics", "parent_topic_id", "TEXT"},
 	{"topics", "embedding", "BLOB"},
 	{"memories", "embedding", "BLOB"},
-	{"memories", "deleted_at", "TEXT"},
+	{"memories", "deleted_at", "INTEGER"},
 	{"memories", "reference_id", "TEXT"},
 	{"memories", "content_hash", "TEXT"},
 	{"memories", "is_prime_directive", "INTEGER DEFAULT 0"},

@@ -30,7 +30,7 @@ CREATE TABLE memories (
     tags JSON,
     metadata JSON,
     confidence REAL NOT NULL DEFAULT 0.8,
-    deleted_at TEXT,
+    deleted_at INTEGER,
     updated_at INTEGER
 );
 `

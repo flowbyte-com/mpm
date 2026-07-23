@@ -1339,6 +1339,24 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
 
+	// Data migration: convert legacy TEXT deleted_at values to INTEGER
+	// Unix epoch, matching the expires_at convention. Wrapped in its own
+	// transaction so the backfill UPDATE and sentinel INSERT are atomic.
+	// Runs BEFORE any handler executes — this is why it sits in
+	// initUnifiedSchema rather than a CLI command. Idempotent via the
+	// schema_migrations sentinel.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	if err := MigrateDeletedAtToUnixEpoch(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("migrate deleted_at: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+
 	// Use shared index definitions. Skip any index that targets a view — SQLite
 	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
 	for _, sql := range CommonIndexes {
@@ -3134,7 +3152,7 @@ func (dm *DatabaseManager) ArchiveStaleMemories(archiveDays int) (int, error) {
 	}
 	result, err := dm.db.Exec(`
 		UPDATE memories
-		SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+		SET deleted_at = strftime('%s','now')
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE weight = 1
