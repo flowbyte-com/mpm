@@ -154,12 +154,23 @@ func handleGC(args []string) int {
 	// Atomic update succeeded — we have the lock. Proceed with GC.
 	// Note: all subsequent work happens AFTER this atomic check-and-set.
 
-	// Purge mode: hard delete old reviewed memories and exit
+	// Purge mode: hard delete old reviewed memories and exit.
+	//
+	// deleted_at is stored as INTEGER Unix epoch (matches expires_at).
+	// Comparison is integer-vs-integer via strftime('%s','now', ...).
+	// ROLLBACK WARNING: SQLite compares INTEGER < TEXT as TRUE regardless
+	// of value. If you revert the Go binary that writes deleted_at as
+	// integer, FIRST run the reverse migration or every soft-deleted row
+	// in the database will be shredded by this sweep:
+	//
+	//   UPDATE memories
+	//   SET deleted_at = datetime(deleted_at, 'unixepoch')
+	//   WHERE typeof(deleted_at) = 'integer';
 	if purge {
 		result, err := dm.SQLDB().Exec(`
 			DELETE FROM memories
 			WHERE deleted_at IS NOT NULL
-			AND deleted_at < datetime('now', '-30 days')
+			AND deleted_at < strftime('%s','now', '-30 days')
 		`)
 		if err != nil {
 			usererror.Error("%v", err)
@@ -309,12 +320,12 @@ func handleGC(args []string) int {
 	// Also catches existing zombies (weight <= 0 from previous GC runs that were never cleaned).
 	if review && !dryRun {
 		for _, m := range deadMemories {
-			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, m["id"]); err != nil {
+			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, m["id"]); err != nil {
 				slog.Warn("gc soft-delete failed", "id", m["id"], "error", err)
 			}
 		}
 		// Clean any lingering zombies not caught by this pass
-		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
+		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
 			slog.Warn("gc zombie cleanup failed", "error", err)
 		}
 		if len(deadMemories) > 0 {

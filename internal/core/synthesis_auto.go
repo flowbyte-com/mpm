@@ -309,9 +309,9 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	// 11. Soft-delete originals (candidates + triggering memory)
 	for _, c := range toMerge {
-		dm.SQLDB().Exec("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", c.ID)
+		dm.SQLDB().Exec("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID)
 	}
-	dm.SQLDB().Exec("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", newID)
+	dm.SQLDB().Exec("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID)
 
 	// 12. Log success to watchdog
 	logWatchdogOp(dm, "synthesize", map[string]interface{}{
