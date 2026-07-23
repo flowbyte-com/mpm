@@ -9,6 +9,7 @@
 #   make service             - Alias for service-scheduler
 #   make clean               - Remove bin/
 #   make test                - Run tests
+#   make lint                - Run golangci-lint (advisory; not CI-gated)
 #   make help                - Show this help
 #
 # RECOMMENDED INSTALL PATH:
@@ -38,7 +39,7 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
-.PHONY: all build install service-scheduler service install-system-service uninstall-service clean test help
+.PHONY: all build install service-scheduler service install-system-service uninstall-service clean test lint help
 
 all: build
 
@@ -118,6 +119,12 @@ test:
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 
+# Run golangci-lint (advisory only — does not gate CI).
+# Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; exit 1; }
+	golangci-lint run ./...
+
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)
@@ -134,6 +141,7 @@ help:
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
 	@echo "    make test                - Run go tests"
+	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
 	@echo "    make clean               - Remove bin/"
 	@echo "    make help                - Show this help"
 	@echo ""

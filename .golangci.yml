@@ -1,0 +1,22 @@
+# golangci-lint configuration for mpm.
+#
+# Status: advisory — running `make lint` does NOT gate CI or fail `make build`.
+# We ship this to discover the noise floor on the current codebase before
+# promoting any of these linters to gating status. See audit.md
+# (2026-07-23) "Recommended Next Steps" #3 for the rationale.
+#
+# Install: https://golangci-lint.run/welcome/install/
+#   go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Run:     make lint
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # deferred Close() error handling (catches LOW-03-class bugs)
+    - govet         # standard go vet checks
+    - ineffassign   # unused assignments
+    - unused        # dead code
+    - staticcheck   # extended static analysis (SA1xxx checks)
+
+run:
+  timeout: 5m
+  tests: true
