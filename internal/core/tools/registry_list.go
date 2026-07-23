@@ -35,7 +35,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_long_term_memory",
-		Description: "Search MPM long-term memory by FTS5 + semantic + reinforcement scoring. Federated across local + shared DBs when scope=all.",
+		Description: "Searches local + shared memories by FTS5 lexical matching + semantic similarity + reinforcement scoring. Hyphenated words are split into separate tokens (e.g., 'lazy-start' becomes tokens 'lazy' AND 'start'), so natural-language hyphenated queries work correctly. Use broad keywords rather than literal phrases — the FTS5 contract is implicit-AND across all tokens, with prefix wildcards applied per token. Special FTS5 characters (\", (, ), *, +, :, -) are stripped from query input; pass natural-language strings, not raw FTS5 syntax. Federated across DBs: scope='all' (default) merges local + shared with Shared Premium scoring (1.20x shared, 1.35x shared+rules, capped at 1.0); 'local' restricts to local tables; 'shared' restricts to shared.memories via FTS5. Use collection to narrow to a specific collection (theories, decisions, lessons, memories, etc.). Pass empty query to return no results (not all memories).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"},"collection":{"type":"string"},"scope":{"type":"string","enum":["all","local","shared"],"description":"Recall scope. all (default) merges local + shared with Shared Premium (1.20x shared, 1.35x shared+rules, cap 1.0); local restricts to local tables; shared restricts to shared.memories via FTS5.","default":"all"}},"required":["query"]}`),
 		Handler:     handleQueryLongTermMemory,
 	},
@@ -59,13 +59,13 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "resolve_theory",
-		Description: "Resolve a pending theory as confirmed or disproven.",
+		Description: "Resolve a pending theory. NOTE: this explicit tool exists but is now the FALLBACK path. The PREFERRED path is the implicit auto-resolution hook: save a memory carrying tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), and the theory row flips status in the same transaction as the memory insert. Use this explicit resolve_theory call only when you don't have a memory to anchor the resolution to. Required: theoryId, conclusion (enum: 'confirmed' or 'disproven'). Optional: newStatus (defaults to match conclusion — 'proven' for confirmed, 'disproven' for rejected). Forensics: the implicit hook sets resolved_by='save_to_memory:theory_resolve_hook'; this explicit tool sets resolved_by='mcp:resolve_theory'.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"theoryId":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"newStatus":{"type":"string","enum":["proven","disproven"]},"winnerId":{"type":"string","description":"Arc 1 closure: when present, treats the theory as an arbitration theory from resolve-contradictions and routes to the auto-slash path. Absent = legacy path (mark resolved, no slash)."}},"required":["theoryId","conclusion","newStatus"]}`),
 		Handler:     handleResolveTheory,
 	},
 	{
 		Name:        "record_decision",
-		Description: "Record an architectural decision with context, choice, and rationale.",
+		Description: "Record an architectural decision. STRICTLY REQUIRED fields: context (the situation that triggered the decision), choice (what was decided), rationale (why this choice over alternatives — the substrate rejects empty rationale as a malformed record). The rationale field is non-bypassable: an agent must always articulate why the choice was made, even if briefly. Optional but recommended: outcome (post-hoc learning about the decision's eventual outcome, surfaced via search_references for future-me), tags (semantic territory for proactive_recall_hint), dependencies (JSON array of memory/theory/decision IDs this decision builds on).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"outcome":{"type":"string","description":"Optional. Out-of-band learning captured about the decision's eventual outcome; visible to future-me via search_references."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["context","choice","rationale"]}`),
 		Handler:     handleRecordDecision,
 	},
@@ -77,7 +77,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "search_lessons",
-		Description: "Search MPM lessons by content query.",
+		Description: "Searches lessons by FTS5 lexical matching. Hyphenated words are split into separate tokens (e.g., 'lazy-start' becomes tokens 'lazy' AND 'start'), so natural-language hyphenated queries work correctly. Use broad keywords rather than literal phrases — the FTS5 contract is implicit-AND across all tokens, with prefix wildcards applied per token. Special FTS5 characters (\", (, ), *, +, :, -) are stripped from query input; pass natural-language strings, not raw FTS5 syntax. Examples: query 'lazy-start' matches lessons containing 'lazy' AND 'start'; query 'go test' matches lessons containing 'go' AND 'test'. Pass empty query to return no results (not all lessons).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		Handler:     handleSearchLessons,
 	},
@@ -408,7 +408,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "shred_memory",
-		Description: "Hard-delete a memory and its mirror file.",
+		Description: "Hard-delete a memory or lesson by ID. Lesson-aware: passing a lesson ID (from list_lessons / search_lessons / save_lesson) cascades through lessons_base AND lessons_fts atomically in a single transaction; passing a memory ID soft-deletes from memories (sets deleted_at) and cascades to topic_memberships + challenged_theories. The result map reports `lesson_id` vs `memory_id` to disambiguate which path fired. Success:true means the row is actually gone — for lessons this includes the FTS5 index row; for memories this is a soft-delete with audit trail. Idempotent: shredding a non-existent ID returns success:true (no-op). Required field: memory_id (accepts either memory OR lesson IDs).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
 		Handler:     handleShredMemory,
 	},
