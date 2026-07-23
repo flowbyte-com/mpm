@@ -997,35 +997,43 @@ mpm debug gc [--dry-run]
 
 The Runtime is where MPM evolves. Services documented here are intentionally decoupled from Core — they may be redesigned, replaced, or removed without invalidating existing knowledge.
 
-### Embedding Pipeline
+Three groups organize the runtime substrate: **Persistence** (how artifacts are stored and found), **Scheduling** (when system work fires), **Behaviour** (the agent cognition-time surfaces). External interface surfaces (MCP, CLI, registry) live in §6.4 and §8.
+
+### Persistence
+
+#### Embedding Pipeline
 
 Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops backfill-embeddings` provides batched, resume-safe backfill for existing memories. tiktoken (`cl100k_base`) drives token-aware chunking.
 
-### Memory Versioning
+
+#### Memory Versioning
 
 Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions. Terminal state is captured in `memory_revisions` for `--as-of` time-travel.
 
-### Topic Auto-Suggestion
+
+#### Topic Auto-Suggestion
 
 On `mpm add`, the system automatically suggests linking to semantically related existing topics. Topics are also auto-created for epistemology collections (`decisions`, `theories`).
 
-### Cross-Reference Linking
+
+#### Cross-Reference Linking
 
 Bounded bidirectional Memory↔Topic↔Reference cross-refs. Links are created on save and surfaced on recall.
 
-### Synthesis Deduplication
+
+#### Synthesis Deduplication
 
 Context-aware deduplication: synthesis deletes the triggering memory after LTM save, preserves oldest `created_at`, transfers topic_memberships, excludes epistemology collections, quality gate requires ≥2 candidates.
 
-### Reference Library
+
+#### Reference Library
 
 PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 64–2048 tokens, default 512). Sources are diff-keyed by content hash: re-ingesting an unchanged document costs zero embedding work. Embedding is a separate phase from chunk insert, so slow embed calls never block ingest. Reference docs are a *shelf*, not a memory: they live in SQLite, are indexed for full-text and semantic search, and are surfaced to agents on demand. Admission (whether a pattern from a consulted reference is worth promoting to long-term memory) is a per-consult decision, not an ingest-time gate.
 
-### Session Memory Context (`wake`)
 
-`mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
+### Scheduling
 
-### Scheduled Wakes (Stateless, Opportunistic by Default)
+#### Scheduled Wakes (Stateless, Opportunistic by Default)
 
 The agent can defer work to a future moment with `mpm call schedule_wake` and have the reminder surface automatically on the next call. The database is the queue, the next call is the dispatcher — no scheduler process required for this path.
 
@@ -1045,11 +1053,13 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 
-### Autonomous wake execution (mpm-scheduler + mpm-critic)
+
+#### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
 For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
 
-### Agentic Cron (Recurring Tasks)
+
+#### Agentic Cron (Recurring Tasks)
 
 For work that should run **on a schedule** rather than once, `scheduled_tasks` is the registry of recurring agentic workflows. The `mpm-scheduler` daemon's 60s tick loop polls `scheduled_tasks WHERE status='active' AND next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes` row in the same transaction as the `next_run_at` rollover. A daemon crash between injection and rollover cannot double-fire. The injected wake surfaces to the agent on its next MCP call via the standard opportunistic fold.
 
@@ -1125,7 +1135,8 @@ Option 1 wins because the hot path is a single indexed lookup; option 2 wastes C
 
 **Migration note.** The existing `scheduled_wakes` table has a dormant `recurring_rule TEXT` column that was accepted by `schedule_wake` but never honored by any daemon code path. Recurring workflows now live in `scheduled_tasks`; `recurring_rule` is preserved for backward compatibility with the `Wake.RecurringRule` struct field but documented as superseded. A future schema-version bump can drop it cleanly when no callers remain.
 
-### Event Wakes — Active Dissemination (Arc 2)
+
+#### Event Wakes — Active Dissemination (Arc 2)
 
 Local scheduled wakes (above) are **self-directed** — the agent schedules a reminder for itself. **Event wakes** are **other-directed** — when an epistemic event lands (a new house rule, a contradiction resolution, an arbitration verdict), the shared DB pushes a wake to every other active session on the fleet.
 
@@ -1157,7 +1168,45 @@ mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
 
 For the schema, fan-out algorithm, test matrix, and smoke behind this section, see **Appendix B**.
 
-### Ephemeral Scratchpad (Working Thesis Storage)
+
+#### Fsnotify Reconciliation
+
+30s startup delay + 10-min periodic sweep (25 file/sweep cap) reconciles the filesystem state. `source_path` metadata check prevents re-ingestion of already-processed files. (Residual from the deprecated watcher; consolidated into on-demand ops.)
+
+
+#### Spaced Reinforcement Review
+
+```bash
+mpm ops review --promoted   # Show recently elevated LTM memories
+mpm ops review --stale      # Surface forgotten LTM memories
+```
+
+
+#### Watcher Deprecation (2026-06-26)
+
+The MPM file-watcher daemon (`mpm watch start|stop|status`, fsnotify goroutine, worker pool, 5-min decay loop) was deprecated and removed on 2026-06-26. Its original purpose — auto-ingest of files written by pre-MCP agents — is obsolete now that `save_to_memory` is a native MCP tool. Replacement matrix:
+
+| Watcher capability | Replacement |
+|---|---|
+| 5-min decay sweep | `mpm ops maintain` on demand (also runs autonomously in the daemon) |
+| External SQLite polling | `mpm ops ingest --source <path>` one-shot |
+| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand (also runs autonomously in the daemon) |
+| Topic clustering | `mpm ops synthesize` (synthesis pass) |
+| Filesystem auto-ingest | Obsolete — `mpm call save_to_memory` covers it |
+
+The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLikeFact`, `extractKeywords`, `parseSessionsSnapshot`, `readJSONLines`) was preserved in `cmd/mpm/parsers.go` for future one-shot filesystem tooling.
+
+---
+
+
+### Behaviour
+
+#### Session Memory Context (`wake`)
+
+`mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
+
+
+#### Ephemeral Scratchpad (Working Thesis Storage)
 
 A per-session scratchpad for hypotheses that aren't ready for permanent memory. Single-row-per-session, 24h decay, atomic promote. The scratchpad sits between "thought I had this turn" and "memory I'm willing to defend."
 
@@ -1178,13 +1227,16 @@ A per-session scratchpad for hypotheses that aren't ready for permanent memory. 
 
 **Trade-off vs. auto-promote-on-flush:** `flush` never auto-creates a memory. The agent must explicitly `promote_scratchpad` and pass the scanner. This is the right friction: tentative thoughts should be deliberate before they become permanent knowledge. A flush that auto-promoted would silently double the agent's memory-write surface, bypassing the scanner's intent.
 
-### XITL Stance Hot-Swap
+
+#### XITL Stance Hot-Swap
 
 `mpm ops stance assume <mode> <persona> <rationale>` switches mode/persona at runtime with no restart. The new directive prints to stdout — OpenClaw captures it and injects into session chat history, so the agent reads and adopts it on the very next turn. `mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt; `mpm ops stance promote` flushes it to a permanent `.md` file.
 
-### Directives (Prime Operating Principles)
+
+#### Directives (Prime Operating Principles)
 
 Directives are the agent's **prime directives** — non-negotiable behavioral principles that govern how it operates. Unlike modes (which govern retrieval parameters) and personas (which govern tone), directives are the hard rules: the things the agent must and must not do on every turn.
+
 
 #### Reflex Engine — two-tier behavioral rules
 
@@ -1199,13 +1251,15 @@ Elevation: `mpm call save_to_memory --payload '{"fact": "Always verify before ac
 
 The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
 
+
 #### Baseline Cognitive Bootstrap
 
 For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
 
 > **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
-### Modes & Personas (File-Based)
+
+#### Modes & Personas (File-Based)
 
 Modes and personas are `.md` files with YAML frontmatter. **No database, no compile step.** Filename is the identity. Each mode specifies retrieval parameters:
 
@@ -1216,6 +1270,7 @@ Modes and personas are `.md` files with YAML frontmatter. **No database, no comp
 | `architect` | 10 | −1.5 |
 | `programming` | 5 | −2.0 |
 | `standard` | 7 | −1.5 |
+
 
 #### Auto-Selection (`route` tool)
 
@@ -1247,41 +1302,21 @@ Frontmatter schema (every `mode/*.md` and `persona/*.md`):
 
 Scoring: modes use threshold filtering (multi-select); personas use max-pooling (single-select, highest score wins, no implicit `default` fallback). Hot reload: directory mtimes monitored, no server restart needed.
 
+
 #### Router Frontmatter Linter (`mpm ops lint`)
 
 Proactive defense against the silent-failure class of bugs where hand-curated frontmatter compiles but never matches. Checks: YAML parses, regex compiles with `(?i)` prefix, raw-form `domain_out:` compiles without `regexp.QuoteMeta`. Wired into the pre-commit hook. 9 unit tests pin the contract.
 
-### Security Scanning
+
+#### Security Scanning
 
 Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
 
-### Fsnotify Reconciliation
 
-30s startup delay + 10-min periodic sweep (25 file/sweep cap) reconciles the filesystem state. `source_path` metadata check prevents re-ingestion of already-processed files. (Residual from the deprecated watcher; consolidated into on-demand ops.)
 
-### Spaced Reinforcement Review
+### Interfaces
 
-```bash
-mpm ops review --promoted   # Show recently elevated LTM memories
-mpm ops review --stale      # Surface forgotten LTM memories
-```
-
-### Watcher Deprecation (2026-06-26)
-
-The MPM file-watcher daemon (`mpm watch start|stop|status`, fsnotify goroutine, worker pool, 5-min decay loop) was deprecated and removed on 2026-06-26. Its original purpose — auto-ingest of files written by pre-MCP agents — is obsolete now that `save_to_memory` is a native MCP tool. Replacement matrix:
-
-| Watcher capability | Replacement |
-|---|---|
-| 5-min decay sweep | `mpm ops maintain` on demand (also runs autonomously in the daemon) |
-| External SQLite polling | `mpm ops ingest --source <path>` one-shot |
-| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand (also runs autonomously in the daemon) |
-| Topic clustering | `mpm ops synthesize` (synthesis pass) |
-| Filesystem auto-ingest | Obsolete — `mpm call save_to_memory` covers it |
-
-The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLikeFact`, `extractKeywords`, `parseSessionsSnapshot`, `readJSONLines`) was preserved in `cmd/mpm/parsers.go` for future one-shot filesystem tooling.
-
----
-
+MCP server surface is documented in §6.4 (JSON-RPC integration). CLI command catalogue is documented in §8 (CLI Reference). No interface surface lives in this section; the runtime exposes them, this section documents what runs underneath.
 ## 10. Reliability
 
 MPM is designed for long-running autonomous operation: SQLite WAL mode, dead-letter queues, synthesis isolation, retry pipelines, event replay buffers, watchdog telemetry, overflow protection, and a closed self-healing integrity loop.
