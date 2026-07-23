@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,19 @@ import (
 // in memory.go for the auto-detection rule. The caller's raw value is also
 // recorded as meta.weight_intent for forensic tracing (what scale was the
 // caller thinking in?).
+//
+// Theory-resolve hook (2026-07-23, supersedes the 2026-07-22 phantom):
+// after the memory insert lands, detect `theory:<id>` + `outcome:<proven|
+// disproven>` tags (or `Theory <id> resolved PROVEN|DISPROVEN` content
+// regex) and apply the corresponding UPDATE to the theories row. The
+// hook is best-effort: failures are logged + skipped, the memory insert
+// is never rolled back. Atomicity is sacrificed for simplicity — the
+// previous session's "WithTx + SaveMemoryNode" design was never wired in
+// (the hook file existed but SaveMemoryWithContext did not call it). The
+// 2026-07-23 wiring is non-atomic; production-grade atomicity is a future
+// refactor that requires moving SaveMemoryWithContext from AddMemoryWithWeight
+// to a WithTx + SaveMemoryNode path. The hook returns the IDs of theories
+// it actually resolved in result["theory_resolutions_applied"].
 func (dm *DatabaseManager) SaveMemoryWithContext(
 	fact, collection string,
 	tags []string,
@@ -65,13 +79,77 @@ func (dm *DatabaseManager) SaveMemoryWithContext(
 		}
 	}
 
-	return map[string]interface{}{
+	// Theory-resolve hook: detect references in this payload and apply
+	// resolutions. Best-effort: log + skip on failure, never roll back
+	// the memory insert.
+	applied, _ := dm.applyTheoryResolutions(fact, tags)
+
+	result := map[string]interface{}{
 		"success": true,
 		"id":      mem.ID,
 		"content": mem.Content,
 		"weight":  mem.Weight,
 		"tags":    mem.Tags,
-	}, mem, nil
+	}
+	if len(applied) > 0 {
+		result["theory_resolutions_applied"] = applied
+	}
+	return result, mem, nil
+}
+
+// applyTheoryResolutions detects theory references in the payload and
+// applies them. Detects via detectTheoryResolutions, pre-flights via
+// lookupTheoryStatus (only attempt on pending theories), resolves via
+// resolveTheoryOnNode. Returns the IDs of theories that were successfully
+// resolved. Best-effort: any error path is logged and skipped.
+func (dm *DatabaseManager) applyTheoryResolutions(content string, tags []string) ([]string, error) {
+	resolutions := detectTheoryResolutions(content, tags)
+	if len(resolutions) == 0 {
+		return nil, nil
+	}
+
+	var applied []string
+	for _, r := range resolutions {
+		status, found, err := dm.lookupTheoryStatus(r.theoryID)
+		if err != nil {
+			slog.Warn("theory-resolve hook: pre-flight lookup failed",
+				"theory_id", r.theoryID, "error", err.Error())
+			continue
+		}
+		if !found {
+			slog.Warn("theory-resolve hook: theory not found",
+				"theory_id", r.theoryID)
+			continue
+		}
+		if status != "pending" {
+			slog.Debug("theory-resolve hook: theory already resolved, skipping",
+				"theory_id", r.theoryID, "status", status)
+			continue
+		}
+
+		// Map outcome to (conclusion, newStatus).
+		var conclusion, newStatus string
+		switch r.outcome {
+		case "proven":
+			conclusion = "confirmed"
+			newStatus = "proven"
+		case "disproven":
+			conclusion = "rejected"
+			newStatus = "disproven"
+		default:
+			slog.Warn("theory-resolve hook: unknown outcome",
+				"theory_id", r.theoryID, "outcome", r.outcome)
+			continue
+		}
+
+		if err := resolveTheoryOnNode(dm, r.theoryID, conclusion, newStatus); err != nil {
+			slog.Warn("theory-resolve hook: resolve failed",
+				"theory_id", r.theoryID, "error", err.Error())
+			continue
+		}
+		applied = append(applied, r.theoryID)
+	}
+	return applied, nil
 }
 
 // HybridSearchMemories runs hybrid (BM25 + semantic) search with FTS fallback.
@@ -326,9 +404,35 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 // challenged_theory_id orphaned. The CLI's handleShredMem has been doing
 // the cascade manually since 2026-06-26; this method captures the same
 // logic in the DM API so MCP/`mpm call` tools don't have to reinvent it.
+//
+// 2026-07-23: collection-aware routing. If the id is a lesson, route
+// through the lessons view (which fires the INSTEAD OF DELETE trigger
+// and removes from lessons_base + lessons_fts atomically) and return
+// `lesson_id` in the result map. Otherwise fall through to the existing
+// memory-cascade path. The 2026-07-22 session claimed this fix was
+// shipped but the production code was missing — the lesson-handling
+// tests (shred_lesson_aware_test.go, shred_cascade_test.go) were
+// untracked and the cascade wrapper silently no-op'd on lesson IDs.
 func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]interface{}, error) {
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
+	}
+
+	// Probe lessons_base first. If the id is a lesson, route through
+	// the lessons view (lessons_cascade test) and return lesson_id.
+	var lessonCount int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, memoryID).Scan(&lessonCount); err != nil {
+		return nil, fmt.Errorf("shred: probe lessons_base: %w", err)
+	}
+	if lessonCount > 0 {
+		if _, err := dm.db.Exec(`DELETE FROM lessons WHERE id = ?`, memoryID); err != nil {
+			return nil, fmt.Errorf("shred: delete from lessons: %w", err)
+		}
+		return map[string]interface{}{
+			"success":   true,
+			"lesson_id": memoryID,
+			"shredded":  true,
+		}, nil
 	}
 
 	// Pull the challenged_theory_id out of metadata BEFORE deleting the
