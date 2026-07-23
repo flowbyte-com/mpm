@@ -759,10 +759,16 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	return manager, nil
 }
 
-// NewSession opens a new independent connection to the same database file.
+// NewSession opens an independent connection to the same database file.
+//
+// Background workers (synthesis, lifecycle, critic) need an isolated
+// connection so their long-running queries don't block the primary
+// session's hot path. WAL mode + busy_timeout=5000 keep contention
+// bounded — see audit.md (2026-07-23) finding 4 for the rationale.
+//
+// This pattern is allowed by sqlopen_owner_test.go's whitelist.
+//
 // The caller owns the returned CoreDB and must Close it when done.
-// Intended for background goroutines (synthesis, lifecycle) that need their
-// own connection to avoid blocking the primary session.
 func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 	db, err := sql.Open("sqlite3", dm.dbPath)
 	if err != nil {
