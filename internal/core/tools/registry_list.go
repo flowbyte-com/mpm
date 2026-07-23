@@ -89,7 +89,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "create_topic",
-		Description: "Create a topic in MPM.",
+		Description: "Create a topic in MPM — a named semantic cluster for grouping related memories. Required: name (short slug; e.g., '2026-world-cup', 'openclaw-mcp'). Optional: description (longer prose describing the theme). Returns the topic ID; use link_topic to attach memories. Topics organize multi-memory themes independently of collection (lessons, decisions, memories) — the same memory can belong to multiple topics; the same topic can hold memories across collections.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"}},"required":["name"]}`),
 		Handler:     handleCreateTopic,
 	},
@@ -101,7 +101,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "link_topic",
-		Description: "Link a memory to a topic.",
+		Description: "Link a memory to a topic. Required: memoryId, topicId. Optional: relevance (float 0.0-1.0; default 1.0 — how central the memory is to the topic; surfaces in retrieval ordering). One memory can belong to many topics; one topic can hold many memories. When a memory linked to a topic is recalled, the topic surfaces adjacent linked memories too — topics are how the agent builds multi-memory context windows. Idempotent: re-linking with the same relevance is a no-op.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"topic_id":{"type":"string"}},"required":["memory_id","topic_id"]}`),
 		Handler:     handleLinkTopic,
 	},
@@ -119,7 +119,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "list_references",
-		Description: "List reference documents.",
+		Description: "List reference documents (long-form source material ingested via add_reference). Optional: limit (default 50), offset (default 0; for pagination beyond the first page). Returns rows with id, title, filepath, indexed_at, and chunk_count. Reference docs live in a separate 'shelf' from memories — they don't decay and aren't auto-promoted to long-term, but they ARE searchable via search_references. Use for the 'what source material have we ingested?' inspection case.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":50},"offset":{"type":"number","default":0,"description":"Optional. Pagination offset; default 0."}}}`),
 		Handler:     handleListReferences,
 	},
@@ -200,7 +200,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_memory_quality",
-		Description: "Per-source memory quality statistics.",
+		Description: "Per-source memory quality statistics. No parameters required. Returns aggregate stats grouped by source (call, migrate, seed, web, etc.): counts, average weight, average confidence, confidence distribution histogram, weight distribution histogram. Use to spot a source that's degrading (e.g., a migrate import that brought in low-quality rows) or to audit LTM proportions across sources. Results are point-in-time — re-run periodically to track drift between sessions.",
 		Schema:      json.RawMessage(`{"type":"object"}`),
 		Handler:     handleQueryMemoryQuality,
 	},
@@ -245,7 +245,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_audit_log",
-		Description: "Query the runtime anomaly ledger.",
+		Description: "Query the runtime anomaly ledger. Filters (all optional, combined with AND): level (enum: 'warn' | 'error' | 'fatal'), component (enum: 'relay' | 'synthesis' | 'watcher' | 'security' | 'cluster'), days (integer; default 1 — last N days). Optional: limit (default 50). Returns rows newest-first. Standard shapes: `{'level':'error','days':7}` for all errors in the last week; `{'component':'cluster'}` for cluster-related entries; `{'days':30,'limit':200}` for the deep-scan shape. Use filter examples as a starting point; the underlying query is plain SQL.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"level":{"type":"string"},"component":{"type":"string"},"days":{"type":"number"},"limit":{"type":"number"}}}`),
 		Handler:     handleQueryAuditLog,
 	},
@@ -396,7 +396,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "list_handoffs",
-		Description: "List session handoff history.",
+		Description: "List session handoff history. Optional: limit (default 10), unread (boolean; default false — set true to surface only handoffs not yet consumed by the wake_context system). Returns rows newest-first with session_id, summary, ended_at, state, and the unread flag. Use when the wake context summary is too short to diagnose a thread: 'what did the previous session hand forward, and is it still unread?'",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number"},"unread":{"type":"boolean"}}}`),
 		Handler:     handleListHandoffs,
 	},
@@ -414,19 +414,19 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "reinforce_memory",
-		Description: "Increment reinforcement count and bump weight.",
+		Description: "Increment reinforcement count and bump weight. Required: memoryId. Optional: delta (integer; default 1 — how much to increment reinforcement_count and add to the weight column). Use when a memory has been useful and should rise in retrieval ranking. Successive calls accumulate: calling twice with delta=1 produces a total delta of 2. The weight change cascades through hybrid-search scoring; reinforcement_count feeds proactive_recall_hint.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"delta":{"type":"number"}},"required":["memory_id"]}`),
 		Handler:     handleReinforceMemory,
 	},
 	{
 		Name:        "weaken_memory",
-		Description: "Decrement reinforcement count and reduce weight.",
+		Description: "Decrement reinforcement count and reduce weight. Required: memoryId. Optional: delta (integer; default 1 — how much to decrement reinforcement_count and subtract from the weight column). Use when a memory has been misleading or contradicted. Once weight drops below 0 the row is eligible for `gc_run --shred-negative` (only if a proven theory exists; the theory provides the evidence chain — negative weight alone is never sufficient). Successive calls accumulate.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"delta":{"type":"number"}},"required":["memory_id"]}`),
 		Handler:     handleWeakenMemory,
 	},
 	{
 		Name:        "snooze_memory",
-		Description: "Temporarily suppress a memory from retrieval.",
+		Description: "Temporarily suppress a memory from retrieval. Required: memoryId. Optional: days (integer; default 1 — how many days to suppress before the row reappears in query results). The row stays in the DB; only retrieval is filtered. Use when a memory is technically true but actively distracting in current context. Successive calls RESET the snooze window — calling twice with days=1 produces a total snooze of 1 day, not 2 (use days=N if you need a longer window).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"days":{"type":"number","default":1,"description":"Optional. Snooze duration in days; default 1."}},"required":["memory_id"]}`),
 		Handler:     handleSnoozeMemory,
 	},
@@ -438,13 +438,13 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "patch_memory",
-		Description: "Patch metadata on an existing memory via JSON-Patch ops.",
+		Description: "Patch metadata on an existing memory via JSON-Patch (RFC 6902) ops. Required: memoryId. Required: patch (array of JSON-Patch ops). Supported ops: add, remove, replace, move, copy, test. Path uses JSON Pointer syntax (e.g., '/metadata/key', '/tags/0'). Example payload: `{'memoryId':'abc123','patch':[{'op':'replace','path':'/tags','value':['new-tag']}]}`. Use for surgical metadata updates; for weight changes use set_memory_weight; for soft-delete use shred_memory.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"patch":{"type":"object"}},"required":["memory_id","patch"]}`),
 		Handler:     handlePatchMemory,
 	},
 	{
 		Name:        "promote_memory",
-		Description: "Promote a memory to long-term (LTM) status.",
+		Description: "Promote a memory to long-term (LTM) status by setting `is_long_term=1`. Required: memoryId. Use when a memory has proven durable value — referenced multiple times across sessions, contains an architectural decision, or has survived validation. The flag exempts the row from standard decay sweeps in `gc_run`. Promotion does NOT bypass eviction logic for lessons (lessons have their own LTM gate). Idempotent: re-promoting an LTM row is a no-op, returns success:true. The promotion is recorded in metadata.promoted_at for forensic tracing.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
 		Handler:     handlePromoteMemory,
 	},
