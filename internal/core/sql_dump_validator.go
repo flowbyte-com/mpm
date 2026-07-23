@@ -127,6 +127,7 @@ var CanonicalMPMSchema = []string{
 	"reference_docs",
 	"reference_interactions",
 	"scheduled_wakes",
+	"scheduled_tasks",
 	"session_handoffs",
 	"sessions",
 	"shared.bcast_agents",
