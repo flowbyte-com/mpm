@@ -38,6 +38,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	core "github.com/flowbyte-com/mpm-core"
 )
 
 // Wake is the projected view of a scheduled_wakes row.
@@ -199,6 +201,18 @@ func (s *Scheduler) MarkFired(id string, lastError string) error {
 // Tick runs one scheduler iteration. Pulls due wakes, dispatches each
 // according to its kind. Returns the number of system wakes executed.
 func (s *Scheduler) Tick(ctx context.Context) (int, error) {
+	// Phase 1: poll scheduled_tasks (Agentic Cron). Any task whose
+	// next_run_at has passed gets a standard scheduled_wakes row
+	// injected in the same transaction as its next_run_at rollover —
+	// so a daemon crash between injection and rollover cannot
+	// double-fire. Log only when work actually happened; quiet ticks
+	// stay quiet.
+	if n, err := core.ProcessScheduledTasks(s.db); err != nil {
+		s.log.Error("cron poll failed", "err", err)
+	} else if n > 0 {
+		s.log.Info("cron injected wakes", "count", n)
+	}
+
 	wakes, err := s.QueryDueWakes(time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("query due: %w", err)
