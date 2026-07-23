@@ -180,6 +180,52 @@ MPM_BACKUP_DIR=/custom/path/backups
 > headless deployments) can opt out by adding the drop-in documented in the
 > Troubleshooting row below.
 
+### 2.1. Agentic Cron (recurring tasks, optional)
+
+> **Skip this subsection if:** self-scheduled one-off wakes via `schedule_wake`
+> are enough. The Agentic Cron adds a registry of recurring tasks the daemon
+> polls on its 60s tick — nightly compactions, weekly security audits, etc.
+> Single-agent workflows that don't need a fixed cadence can skip this.
+
+Once the daemon is running, recurring tasks are managed via `mpm tasks`:
+
+```bash
+mpm tasks upsert <id> <name> <cron_expr> <directive_id> [status]
+mpm tasks list
+mpm tasks delete <id>    # or pass 'rm'; prefer status='paused' for soft-stop
+```
+
+**Example: nightly epistemic compaction at 03:00 UTC.** The directive_id
+must already exist in `memories` where `collection='directives'` — the
+handler runs a fail-fast index lookup before writing, so a typo is caught
+at upsert time, not at 3 AM as a silent wake drop.
+
+```bash
+# Create the directive first (one-time)
+mpm call save_to_memory --payload '{
+  "fact": "Compact last week's memories tagged \"scratchpad\" into a durable lesson. Shred the originals.",
+  "collection": "directives",
+  "tags": ["prime_directive", "epistemic-compaction", "2026-07-23"]
+}'    # note the returned id, e.g. abc123...
+
+# Then schedule the task
+mpm tasks upsert epistemic-compaction \
+  "Nightly epistemic compaction" \
+  "0 3 * * *" \
+  abc123... active
+```
+
+The daemon's tick loop polls `scheduled_tasks WHERE status='active' AND
+next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes`
+row in the same transaction as the `next_run_at` rollover. A daemon crash
+between injection and rollover cannot double-fire. The agent sees the
+injected wake on its next MCP call and reads the directive.
+
+**Three MCP tools** mirror the CLI for agent-driven automation:
+`upsert_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task`.
+Architecture and edge cases (re-upsert semantics, poison-pill handling,
+why pre-compute `next_run_at`) documented in [README §9.3](README.md#agentic-cron-recurring-tasks).
+
 ## 3. Wire to your host
 
 > **Pick one.** OpenClaw and Hermes are the two supported hosts as of
