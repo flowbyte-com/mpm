@@ -724,7 +724,7 @@ Multiple agents on a single workstation can share a single source of truth for h
 
 #### Layer 0 — Federation
 
-Each workspace has its own `mpm.db` (per-project tactical memory). A second database, `~/.mpm/shared/shared.db`, is ATTACHed as the `shared` schema. Cross-DB queries become plain SQL.
+Each workspace has its own `mpm.db` (per-project tactical memory). An optional shared database, identified by the `MPM_SHARED_DB` environment variable, is ATTACHed as the `shared` schema when that env var is set. There is NO default path — if `MPM_SHARED_DB` is unset, mpm runs in local-only mode with no shared schema. Cross-DB queries become plain SQL. The convention `~/.mpm/shared/shared.db` is a reasonable default for operators who want one, but it must be opted into via the env var.
 
 The shared DB uses the **same table schema** as the local DB. Migrations apply to both DBs at startup. FTS5 sync triggers keep the shared FTS5 mirror in lockstep with the shared tables. `getDB()` is a per-process singleton, so one ATTACH, one connection, no leak surface.
 
@@ -1420,7 +1420,7 @@ This appendix is the deep dive behind §6.5. The narrative above says *what*; th
 ### The two databases
 
 - **Local DB** — `~/.mpm/src/db/mpm.db`. Single canonical tactical-memory DB. Override the workspace root via `MPM_WORKSPACE` (the DB lives at `$MPM_WORKSPACE/src/db/mpm.db`). There is no `<workspace>` subdirectory tier — each MPM process opens one DB per workspace.
-- **Shared DB** — `~/.mpm/shared/shared.db`. Cross-project house rules, operator-gated.
+- **Shared DB** — `$MPM_SHARED_DB` if set; no default path. Cross-project house rules, operator-gated. If the env var is unset (or the file at that path is missing), mpm runs in local-only mode. The convention `~/.mpm/shared/shared.db` is suggested but not enforced.
 
 Each MPM process attaches both via `ATTACH DATABASE '<shared_path>' AS shared`. Cross-DB queries become plain SQL: `SELECT … FROM shared.memories WHERE …`. There is no separate service, no IPC, no serialization layer.
 
