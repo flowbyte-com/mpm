@@ -997,51 +997,7 @@ mpm debug gc [--dry-run]
 
 The Runtime is where MPM evolves. Services documented here are intentionally decoupled from Core — they may be redesigned, replaced, or removed without invalidating existing knowledge.
 
-Four groups organize the runtime substrate: **Persistence** (how artifacts are stored and found), **Scheduling** (when system work fires), **Behaviour — Active State** (what the agent holds dynamically), **Configuration — Declarative Bounds** (the static guardrails). External interface surfaces (MCP, CLI, registry) live in §6.4 and §8.
-
-### Persistence
-
-#### Embedding Pipeline
-
-*Auto-embeds on save so retrieval works without manual prep — no batch-of-one-by-one friction.*
-
-Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops backfill-embeddings` provides batched, resume-safe backfill for existing memories. tiktoken (`cl100k_base`) drives token-aware chunking.
-
-
-#### Memory Versioning
-
-*Append-only revisions with `--as-of` time travel so claims are auditable, not silently rewritten.*
-
-Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions. Terminal state is captured in `memory_revisions` for `--as-of` time-travel.
-
-
-#### Topic Auto-Suggestion
-
-*Links new memories to existing topics automatically so the graph grows without bookkeeping.*
-
-On `mpm add`, the system automatically suggests linking to semantically related existing topics. Topics are also auto-created for epistemology collections (`decisions`, `theories`).
-
-
-#### Cross-Reference Linking
-
-*Bounded bidirectional Memory↔Topic↔Reference edges — one source of truth, not three indexes to keep in sync.*
-
-Bounded bidirectional Memory↔Topic↔Reference cross-refs. Links are created on save and surfaced on recall.
-
-
-#### Synthesis Deduplication
-
-*Near-duplicate memories collapse into the older one with provenance preserved — quality wins over quantity.*
-
-Context-aware deduplication: synthesis deletes the triggering memory after LTM save, preserves oldest `created_at`, transfers topic_memberships, excludes epistemology collections, quality gate requires ≥2 candidates.
-
-
-#### Reference Library
-
-*A separate shelf of long-form sources, not promoted to memory on ingest — the operator decides what to commit.*
-
-PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 64–2048 tokens, default 512). Sources are diff-keyed by content hash: re-ingesting an unchanged document costs zero embedding work. Embedding is a separate phase from chunk insert, so slow embed calls never block ingest. Reference docs are a *shelf*, not a memory: they live in SQLite, are indexed for full-text and semantic search, and are surfaced to agents on demand. Admission (whether a pattern from a consulted reference is worth promoting to long-term memory) is a per-consult decision, not an ingest-time gate.
-
+Three groups organize the runtime substrate: **Scheduling** (when system work fires), **Behaviour** (what governs and holds the agent at runtime), **Infrastructure** (the substrate plumbing that the other two depend on). External interface surfaces (MCP, CLI, registry) live in §6.4 and §8.
 
 ### Scheduling
 
@@ -1066,15 +1022,11 @@ The "agent has initiative" effect: any subsequent `mpm call` (CLI or MCP) that l
 Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` table + composite index `scheduled_wakes_due(fired, target_time)` + FTS5 virtual table for content search. `CheckPendingWakes` runs in a single transaction (idempotent across concurrent callers).
 
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
-
-
 #### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
 *System-kind wakes (snapshot, critic, GC, broadcast) fire unattended via the 60s ticker — for the tasks the agent would forget.*
 
 For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
-
-
 #### Agentic Cron (Recurring Tasks)
 
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*
@@ -1152,8 +1104,6 @@ The composite index on `(status, next_run_at)` is the daemon's hot path: a singl
 Option 1 wins because the hot path is a single indexed lookup; option 2 wastes CPU on every tick; option 3 introduces cache invalidation correctness concerns. The cost is that re-upserting a task recomputes the schedule from now (documented behavior, not a bug).
 
 **Migration note.** The existing `scheduled_wakes` table has a dormant `recurring_rule TEXT` column that was accepted by `schedule_wake` but never honored by any daemon code path. Recurring workflows now live in `scheduled_tasks`; `recurring_rule` is preserved for backward compatibility with the `Wake.RecurringRule` struct field but documented as superseded. A future schema-version bump can drop it cleanly when no callers remain.
-
-
 #### Event Wakes — Active Dissemination (Arc 2)
 
 *Other-directed pushes (rule bodies, resolutions, arbitration verdicts) propagate via the shared DB — pull becomes push for known events.*
@@ -1187,15 +1137,11 @@ mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
 **Why the deterministic ID is the entire architecture.** Without the PRIMARY KEY, dedup is an application-level check: SELECT then INSERT, with a TOCTOU race. With the PRIMARY KEY, dedup is a database-level guarantee: `INSERT OR IGNORE` is atomic, idempotent, and O(1). The whole receiver-correctness story is the deterministic ID; the rest is plumbing.
 
 For the schema, fan-out algorithm, test matrix, and smoke behind this section, see **Appendix B**.
-
-
 #### Fsnotify Reconciliation
 
 *Periodic filesystem sweep as fallback — auto-ingest is intentionally deprecated (see Watcher Deprecation below).*
 
 30s startup delay + 10-min periodic sweep (25 file/sweep cap) reconciles the filesystem state. `source_path` metadata check prevents re-ingestion of already-processed files. (Residual from the deprecated watcher; consolidated into on-demand ops.)
-
-
 #### Spaced Reinforcement Review
 
 *Surface forgotten LTM memories for re-touch — knowledge decays if not exercised.*
@@ -1204,8 +1150,6 @@ For the schema, fan-out algorithm, test matrix, and smoke behind this section, s
 mpm ops review --promoted   # Show recently elevated LTM memories
 mpm ops review --stale      # Surface forgotten LTM memories
 ```
-
-
 #### Watcher Deprecation (2026-06-26)
 
 *The file-watcher daemon was removed on 2026-06-26 because `save_to_memory` covers its use case natively — one ingestion path, not two.*
@@ -1225,7 +1169,7 @@ The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLik
 ---
 
 
-### Behaviour (Active State)
+### Behaviour
 
 #### Session Memory Context (`wake`)
 
@@ -1264,8 +1208,6 @@ A per-session scratchpad for hypotheses that aren't ready for permanent memory. 
 *20 regex patterns gate every memory write — blocked content goes to the mirror log but never reaches the database.*
 
 Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
-### Configuration (Declarative Bounds)
-
 #### Directives (Prime Operating Principles)
 
 *Prime operating principles stored as memories — non-negotiable behavioral rules that govern every turn.*
@@ -1333,6 +1275,40 @@ Scoring: modes use threshold filtering (multi-select); personas use max-pooling 
 #### Router Frontmatter Linter (`mpm ops lint`)
 
 Proactive defense against the silent-failure class of bugs where hand-curated frontmatter compiles but never matches. Checks: YAML parses, regex compiles with `(?i)` prefix, raw-form `domain_out:` compiles without `regexp.QuoteMeta`. Wired into the pre-commit hook. 9 unit tests pin the contract.
+
+
+### Infrastructure
+
+#### Embedding Pipeline
+
+*Auto-embeds on save so retrieval works without manual prep — no batch-of-one-by-one friction.*
+
+Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops backfill-embeddings` provides batched, resume-safe backfill for existing memories. tiktoken (`cl100k_base`) drives token-aware chunking.
+#### Memory Versioning
+
+*Append-only revisions with `--as-of` time travel so claims are auditable, not silently rewritten.*
+
+Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions. Terminal state is captured in `memory_revisions` for `--as-of` time-travel.
+#### Topic Auto-Suggestion
+
+*Links new memories to existing topics automatically so the graph grows without bookkeeping.*
+
+On `mpm add`, the system automatically suggests linking to semantically related existing topics. Topics are also auto-created for epistemology collections (`decisions`, `theories`).
+#### Cross-Reference Linking
+
+*Bounded bidirectional Memory↔Topic↔Reference edges — one source of truth, not three indexes to keep in sync.*
+
+Bounded bidirectional Memory↔Topic↔Reference cross-refs. Links are created on save and surfaced on recall.
+#### Synthesis Deduplication
+
+*Near-duplicate memories collapse into the older one with provenance preserved — quality wins over quantity.*
+
+Context-aware deduplication: synthesis deletes the triggering memory after LTM save, preserves oldest `created_at`, transfers topic_memberships, excludes epistemology collections, quality gate requires ≥2 candidates.
+#### Reference Library
+
+*A separate shelf of long-form sources, not promoted to memory on ingest — the operator decides what to commit.*
+
+PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 64–2048 tokens, default 512). Sources are diff-keyed by content hash: re-ingesting an unchanged document costs zero embedding work. Embedding is a separate phase from chunk insert, so slow embed calls never block ingest. Reference docs are a *shelf*, not a memory: they live in SQLite, are indexed for full-text and semantic search, and are surfaced to agents on demand. Admission (whether a pattern from a consulted reference is worth promoting to long-term memory) is a per-consult decision, not an ingest-time gate.
 
 ## 10. Reliability
 
