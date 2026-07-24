@@ -17,6 +17,7 @@ bin/
 /mpm
 /mpm-critic
 /mpm-scheduler
+/gen-cli
 
 # mpm-agent is a sibling project at ../mpm-agent, not a subdir.
 # Its build artifacts live in its own .gitignore. Defensive rule

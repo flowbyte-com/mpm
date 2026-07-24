@@ -39,7 +39,15 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
+<<<<<<< HEAD
+<<<<<<< HEAD
 .PHONY: all build install service-scheduler service install-system-service uninstall-service clean test lint help
+=======
+.PHONY: all build install service-scheduler service uninstall-service gen-cli clean test lint help
+>>>>>>> 93a47fd (feat(docs): CLI auto-gen catalogue via go/ast — walks r.Commands, injects into README §8)
+=======
+.PHONY: all build install service-scheduler service uninstall-service gen-cli clean test lint help
+>>>>>>> 93a47fd (feat(docs): CLI auto-gen catalogue via go/ast — walks r.Commands, injects into README §8)
 
 all: build
 
@@ -113,6 +121,12 @@ install-system-service:
 	@echo "    sudo systemctl enable --now $(SERVICE_NAME)"
 	@echo "    systemctl status $(SERVICE_NAME)"
 
+# Regenerate the CLI command catalogue in README.md (sent-injected
+# auto-generated block in §8). Walks r.Commands via go/ast — no
+# reflection, no runtime import, source-level extraction. Idempotent.
+gen-cli:
+	$(GO) run ./cmd/gen-cli
+
 # Run tests
 test:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
@@ -140,6 +154,7 @@ help:
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
+	@echo "    make gen-cli             - Regenerate the CLI catalogue in README.md §8"
 	@echo "    make test                - Run go tests"
 	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
 	@echo "    make clean               - Remove bin/"
