@@ -260,3 +260,39 @@ func TestChangelogEntry_ShapeForSynthesis(t *testing.T) {
 		t.Error("MPMMemoryIDs must be a slice (possibly empty), not nil — agents joining by index need a stable shape")
 	}
 }
+
+func TestValidateGitRef(t *testing.T) {
+	cases := []struct {
+		name    string
+		ref     string
+		wantErr bool
+	}{
+		// Empty is allowed (treats as "no bound").
+		{"empty", "", false},
+		// Normal refs.
+		{"semver", "v1.2.3", false},
+		{"branch", "main", false},
+		{"branch-with-slash", "feature/foo", false},
+		{"commit-hash", "abc1234", false},
+		{"underscore-dot", "release_1.0.0", false},
+		// Injection vectors — must reject.
+		{"semicolon", "v1.0.0; rm -rf /", true},
+		{"command-substitution", "$(whoami)", true},
+		{"backticks", "`whoami`", true},
+		{"newline", "v1.0.0\nrm -rf /", true},
+		{"ampersand", "v1.0.0 && echo pwned", true},
+		{"pipe", "v1.0.0 | cat /etc/passwd", true},
+		{"space-injection", "v1.0.0 ;id", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateGitRef(tc.ref)
+			if tc.wantErr && err == nil {
+				t.Errorf("validateGitRef(%q) = nil, want error", tc.ref)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateGitRef(%q) = %v, want nil", tc.ref, err)
+			}
+		})
+	}
+}

@@ -128,6 +128,9 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 		}
 		mems = append(mems, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return mems, nil
 }
 
@@ -221,6 +224,9 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 			m["promoted_at"] = *promotedAt
 		}
 		mems = append(mems, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return mems, nil
 }
@@ -717,6 +723,9 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 			"created_at":    createdAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return refs, nil
 }
 
@@ -814,6 +823,9 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 				"created_at":   createdAt,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return refs, nil
 }
@@ -1090,6 +1102,9 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 			"created_at": createdAt, "tags": tags,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return topics, nil
 }
 
@@ -1139,7 +1154,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	// By tag (top 20)
 	rows, err = dm.db.Query(`
 		SELECT json_each.value as tag, COUNT(*) as count
-		FROM memories, json_each(memory.tags)
+		FROM memories, json_each(memories.tags)
 		WHERE deleted_at IS NULL
 		GROUP BY json_each.value
 		ORDER BY count DESC
@@ -1375,6 +1390,9 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 			"expires_at":          expiresAt,
 		}
 		memories = append(memories, mem)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return memories, nil
 }

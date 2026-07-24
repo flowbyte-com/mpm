@@ -933,6 +933,10 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		memories = append(memories, &mem)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return memories, nil
 }
 
@@ -1388,6 +1392,10 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 			m.tags = tags
 			memories = append(memories, m)
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 
 	// Find clusters of similar memories (simplified: same tags or similar content)
