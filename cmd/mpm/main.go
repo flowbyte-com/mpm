@@ -1048,31 +1048,27 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 	// Check for common optional tools
 	tools := []struct {
 		name     string
-		command  string
 		required bool
 	}{
-		{"fzf", "fzf --version", false},
-		{"sqlite3", "sqlite3 --version", false},
-		{"git", "git --version", false},
+		{"fzf", false},
+		{"sqlite3", false},
+		{"git", false},
 	}
 
 	for _, tool := range tools {
-		_, err := exec.LookPath(tool.command)
+		_, err := exec.LookPath(tool.name)
 		if err != nil {
-			status := "WARN"
 			report.Warnings++
-			fmt.Printf("    [%s] %s\n", colorYellow(status), tool.name)
+			fmt.Printf("    [%s] %s\n", colorYellow("WARN"), tool.name)
 			fmt.Printf("          Not found (optional)\n\n")
-			check := DoctorCheck{
+			report.Checks = append(report.Checks, DoctorCheck{
 				Name:     tool.name,
-				Status:   status,
+				Status:   "WARN",
 				Message:  "Not found (optional)",
 				Duration: "0ms",
-			}
-			report.Checks = append(report.Checks, check)
+			})
 			report.TotalChecks++
 		} else {
-			// Get version
 			out, _ := exec.Command(tool.name, "--version").Output()
 			version := strings.TrimSpace(string(out))
 			if len(version) > 50 {
@@ -1082,13 +1078,12 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 			report.TotalChecks++
 			fmt.Printf("    [%s] %s\n", colorGreen("PASS"), tool.name)
 			fmt.Printf("          %s\n\n", version)
-			check := DoctorCheck{
+			report.Checks = append(report.Checks, DoctorCheck{
 				Name:     tool.name,
 				Status:   "PASS",
 				Message:  version,
 				Duration: "0ms",
-			}
-			report.Checks = append(report.Checks, check)
+			})
 		}
 	}
 }
