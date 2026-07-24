@@ -195,7 +195,7 @@ type CoreDB interface {
 
 	// ─── Wakes ───────────────────────────────────────────────────────
 	ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error)
-	CheckPendingWakes(now time.Time) ([]map[string]interface{}, error)
+	CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error)
 	ListScheduledWakes(includeFired, overdueOnly bool, limit int) ([]map[string]interface{}, error)
 	DigestScheduledWakes(topN int) (map[string]interface{}, error)
 	FireStaleFoundationWakes(deletedArtifactID string) (int, error)

@@ -108,7 +108,7 @@ func handleCall(args []string) int {
 	// session has an ID. The receiving agent sees incoming epistemic
 	// events alongside its own scheduled tasks.
 	if resultMap, ok := result.(map[string]interface{}); ok {
-		if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
+		if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
 			resultMap["WakesPending"] = due
 			resultMap["WakesPendingCount"] = len(due)
 		}

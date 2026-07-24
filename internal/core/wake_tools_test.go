@@ -17,6 +17,7 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestCheckPendingWakes_TransactionalIdempotency(t *testing.T) {
 			t.Fatalf("ScheduleWake %d: %v", i, err)
 		}
 	}
-	first, err := dm.CheckPendingWakes(time.Now())
+	first, err := dm.CheckPendingWakes(time.Now(), nil)
 	if err != nil {
 		t.Fatalf("first check: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestCheckPendingWakes_TransactionalIdempotency(t *testing.T) {
 		t.Errorf("first check: got %d wakes, want 3", len(first))
 	}
 	// Concurrent callers must not see the same wake twice.
-	second, err := dm.CheckPendingWakes(time.Now())
+	second, err := dm.CheckPendingWakes(time.Now(), nil)
 	if err != nil {
 		t.Fatalf("second check: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestCheckPendingWakes_NotDueYet(t *testing.T) {
 	if _, err := dm.ScheduleWake("future wake", fmt.Sprintf("%d", future), "", "", "test-agent", nil); err != nil {
 		t.Fatalf("ScheduleWake: %v", err)
 	}
-	got, err := dm.CheckPendingWakes(time.Now())
+	got, err := dm.CheckPendingWakes(time.Now(), nil)
 	if err != nil {
 		t.Fatalf("CheckPendingWakes: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestCheckPendingWakes_MarksFiredWithTimestamp(t *testing.T) {
 		t.Fatalf("ScheduleWake: %v", err)
 	}
 	id, _ := out["id"].(string)
-	got, err := dm.CheckPendingWakes(time.Now())
+	got, err := dm.CheckPendingWakes(time.Now(), nil)
 	if err != nil {
 		t.Fatalf("CheckPendingWakes: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestListScheduledWakes_IncludeFired(t *testing.T) {
 	if _, err := dm.ScheduleWake("to be fired", fmt.Sprintf("%d", past), "", "", "test-agent", nil); err != nil {
 		t.Fatalf("ScheduleWake: %v", err)
 	}
-	if _, err := dm.CheckPendingWakes(time.Now()); err != nil {
+	if _, err := dm.CheckPendingWakes(time.Now(), nil); err != nil {
 		t.Fatalf("CheckPendingWakes: %v", err)
 	}
 	// Default: not include_fired → empty
@@ -437,5 +438,177 @@ func TestDigestScheduledWakes_Empty(t *testing.T) {
 	top, _ := d["top_overdue"].([]map[string]interface{})
 	if len(top) != 0 {
 		t.Errorf("top_overdue: got %d rows, want 0", len(top))
+	}
+}
+
+// ── kinds filter (Option B for unified wake view) ────────────────────
+//
+// Three wake kinds in scheduled_wakes.metadata.kind:
+//   - "notification" (default; user-scheduled alerts)
+//   - "cron" (injected by daemon's Agentic Cron poll)
+//   - "*" sentinel in check_wakes → surface everything
+//
+// Backward compat: nil/empty kinds → notification-only filter (existing
+// behavior preserved). Explicit kinds=["notification"] matches default.
+// Explicit kinds=["cron"] surfaces only cron-injected. Mixed list or "*"
+// short-circuits to no kind filter.
+
+func TestCheckPendingWakes_KindsFilter_DefaultIsNotificationOnly(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	// Inject three wakes via direct SQL — one notification, one cron, one untagged.
+	now := time.Now().Unix()
+	mustInsert := func(reason, metaJSON string) {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata) VALUES (?, ?, ?, 0, 'test', ?)`,
+			fmt.Sprintf("wk-%s", reason), now-60, reason, metaJSON,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", reason, err)
+		}
+	}
+	mustInsert("notif", `{"kind":"notification"}`)
+	mustInsert("cron", `{"kind":"cron","directive_id":"test"}`)
+	mustInsert("untagged", `{"foo":"bar"}`)
+
+	// Default (nil kinds) → notification-only (matches existing MCP-fold
+// behavior — wakes without an explicit kind tag fall through).
+	got, err := dm.CheckPendingWakes(time.Now(), nil)
+	if err != nil {
+		t.Fatalf("CheckPendingWakes: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("default filter: got %d wakes, want 2 (notification + untagged, cron excluded)", len(got))
+	}
+	reasons := make([]string, 0, len(got))
+	for _, w := range got {
+		reasons = append(reasons, w["reason"].(string))
+	}
+	sort.Strings(reasons)
+	if reasons[0] != "notif" || reasons[1] != "untagged" {
+		t.Errorf("default filter: got reasons=%v, want [notif,untagged]", reasons)
+	}
+}
+
+func TestCheckPendingWakes_KindsFilter_SpecificKinds(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+	mustInsert := func(reason, metaJSON string) {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata) VALUES (?, ?, ?, 0, 'test', ?)`,
+			fmt.Sprintf("wk-%s", reason), now-60, reason, metaJSON,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", reason, err)
+		}
+	}
+	mustInsert("notif", `{"kind":"notification"}`)
+	mustInsert("cron", `{"kind":"cron","directive_id":"test"}`)
+	mustInsert("untagged", `{"foo":"bar"}`)
+
+	// kinds=["cron"] → only cron-injected.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"cron"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kinds=[cron]: got %d wakes, want 1", len(got))
+	}
+	if got[0]["reason"] != "cron" {
+		t.Errorf("kinds=[cron]: got reason=%q, want %q", got[0]["reason"], "cron")
+	}
+}
+
+func TestCheckPendingWakes_KindsFilter_StarSentinel(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+	mustInsert := func(reason, metaJSON string) {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata) VALUES (?, ?, ?, 0, 'test', ?)`,
+			fmt.Sprintf("wk-%s", reason), now-60, reason, metaJSON,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", reason, err)
+		}
+	}
+	mustInsert("notif", `{"kind":"notification"}`)
+	mustInsert("cron", `{"kind":"cron","directive_id":"test"}`)
+	mustInsert("untagged", `{"foo":"bar"}`)
+	mustInsert("snapshot", `{"kind":"snapshot"}`)
+
+	// kinds=["*"] → surface every pending wake regardless of kind.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"*"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("kinds=[*]: got %d wakes, want 4", len(got))
+	}
+}
+
+func TestCheckPendingWakes_KindsFilter_MultipleKinds(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+	mustInsert := func(reason, metaJSON string) {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata) VALUES (?, ?, ?, 0, 'test', ?)`,
+			fmt.Sprintf("wk-%s", reason), now-60, reason, metaJSON,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", reason, err)
+		}
+	}
+	mustInsert("notif", `{"kind":"notification"}`)
+	mustInsert("cron", `{"kind":"cron","directive_id":"test"}`)
+	mustInsert("snapshot", `{"kind":"snapshot"}`)
+	mustInsert("untagged", `{"foo":"bar"}`)
+
+	// kinds=["notification","cron"] → exactly those two.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"notification", "cron"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("kinds=[notification,cron]: got %d wakes, want 2", len(got))
+	}
+	reasons := []string{got[0]["reason"].(string), got[1]["reason"].(string)}
+	sort.Strings(reasons)
+	if reasons[0] != "cron" || reasons[1] != "notif" {
+		t.Errorf("kinds=[notification,cron]: got reasons=%v, want [cron,notif]", reasons)
+	}
+}
+
+func TestCheckPendingWakes_KindsFilter_StarShortCircuitsList(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+	mustInsert := func(reason, metaJSON string) {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata) VALUES (?, ?, ?, 0, 'test', ?)`,
+			fmt.Sprintf("wk-%s", reason), now-60, reason, metaJSON,
+		)
+		if err != nil {
+			t.Fatalf("insert %s: %v", reason, err)
+		}
+	}
+	mustInsert("a", `{"kind":"x"}`)
+	mustInsert("b", `{"kind":"y"}`)
+	mustInsert("c", `{"kind":"z"}`)
+
+	// "*" mixed with other kinds → short-circuit to no filter.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"notification", "*", "cron"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("kinds=[notification,*,cron]: got %d, want 3 (star short-circuits)", len(got))
 	}
 }
