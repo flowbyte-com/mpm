@@ -160,6 +160,43 @@ func TestEpistemicPressure_ThresholdOverride(t *testing.T) {
 	}
 }
 
+// TestEpistemicPressure_LastCompactedAtEmpty verifies the field is
+// empty string when no compaction has happened. Agents branch on
+// non-empty; an absent (NULL) row in system_config must surface
+// as "" rather than "null" or a missing field.
+func TestEpistemicPressure_LastCompactedAtEmpty(t *testing.T) {
+	dm := NewTestDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM system_config WHERE key='compaction.last_run'`)
+
+	got := dm.gatherEpistemicPressure()
+	if got.LastCompactedAt != "" {
+		t.Errorf("LastCompactedAt: got %q, want empty string", got.LastCompactedAt)
+	}
+}
+
+// TestEpistemicPressure_LastCompactedAtSet verifies the field surfaces
+// the RFC3339 timestamp from system_config.compaction.last_run when
+// present. Independent of the rest of the pressure surface — tests
+// that the wake_context gather reads both the gauge and the ledger
+// without coupling.
+func TestEpistemicPressure_LastCompactedAtSet(t *testing.T) {
+	dm := NewTestDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM system_config WHERE key='compaction.last_run'`)
+
+	timestamp := "2026-07-24T19:31:00Z"
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO system_config (key, raw_json, content_hash)
+		VALUES ('compaction.last_run', ?, '')
+	`, `{"last_run_at":"`+timestamp+`","lesson_id":"les-abc","raw_marked":50}`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got := dm.gatherEpistemicPressure()
+	if got.LastCompactedAt != timestamp {
+		t.Errorf("LastCompactedAt: got %q, want %q", got.LastCompactedAt, timestamp)
+	}
+}
+
 // TestEpistemicPressure_RatioWithLessons verifies the secondary
 // signal (raw:lesson density) computes correctly when both counts
 // are non-zero.

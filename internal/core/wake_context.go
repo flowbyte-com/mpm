@@ -68,11 +68,17 @@ type WakeContextData struct {
 // no joins, no cluster extraction (that's deferred to the
 // compact_epistemology tool in Phase 2 of the compaction pipeline).
 type EpistemicPressureData struct {
-	RawCount    int     `json:"raw_count"`
-	LessonCount int     `json:"lesson_count"`
-	Ratio       float64 `json:"ratio"`
-	Threshold   int     `json:"threshold"`
-	Exceeded    bool    `json:"exceeded"`
+	RawCount        int     `json:"raw_count"`
+	LessonCount     int     `json:"lesson_count"`
+	Ratio           float64 `json:"ratio"`
+	Threshold       int     `json:"threshold"`
+	Exceeded        bool    `json:"exceeded"`
+	// LastCompactedAt is the RFC3339 timestamp of the most recent
+	// compact_epistemology commit. Empty string when no compaction
+	// has happened yet — agent can branch on that without a separate
+	// "is this field present?" check. Set via system_config.compaction
+	// .last_run by the compact tool after each successful commit.
+	LastCompactedAt string `json:"last_compacted_at"`
 }
 
 // Scratchpad age-tag thresholds. Tunable from one place. The
@@ -230,6 +236,16 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 		return EpistemicPressureData{Threshold: 100}
 	}
 
+	// Last compaction timestamp. Read separately so a missing
+	// system_config row doesn't kill the whole gauge read. Empty
+	// string when no compaction has happened — agents branch on
+	// non-empty rather than parsing the string.
+	var lastCompacted string
+	_ = dm.SQLDB().QueryRow(`
+		SELECT COALESCE(json_extract(raw_json, '$.last_run_at'), '')
+		FROM system_config WHERE key = 'compaction.last_run'
+	`).Scan(&lastCompacted)
+
 	// Divide-by-zero guard. With LessonCount == 0 the ratio is undefined;
 	// emit 0.0 so the JSON marshaller produces a valid number instead of
 	// NaN or +Inf that downstream parsers reject. RawCount alone is the
@@ -240,11 +256,12 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 	}
 
 	return EpistemicPressureData{
-		RawCount:    rawCount,
-		LessonCount: lessonCount,
-		Ratio:       ratio,
-		Threshold:   threshold,
-		Exceeded:    rawCount > threshold,
+		RawCount:        rawCount,
+		LessonCount:     lessonCount,
+		Ratio:           ratio,
+		Threshold:       threshold,
+		Exceeded:        rawCount > threshold,
+		LastCompactedAt: lastCompacted,
 	}
 }
 
