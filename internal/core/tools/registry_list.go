@@ -499,8 +499,8 @@ var Registry = []Tool{
 		// Folds any due wakes into the response as WakesPending. Useful
 		// at session start or after a passive poll.
 		Name:        "check_wakes",
-		Description: "Pull all due wakes (fired=0 AND target_time<=now), mark them fired, and return them in WakesPending. Idempotent across concurrent callers (transactional mark).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Description: "Pull due wakes (fired=0 AND target_time<=now), mark them fired, return in WakesPending. Idempotent across concurrent callers. Pass `kinds` to filter by metadata.kind; default is notification-only (backward compatible). Use `kinds: [\"*\"]` to surface every pending wake regardless of kind (cron-injected, system, etc.); use `kinds: [\"notification\", \"cron\"]` for a specific subset.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"kinds":{"type":"array","items":{"type":"string"},"description":"Wake kinds to surface. Default (omitted): notification-only. Pass [\"*\"] for all kinds, or specific kinds like [\"notification\", \"cron\"]. The literal string \"*\" short-circuits to no kind filter."}}}`),
 		Handler:     handleCheckWakes,
 	},
 	{
