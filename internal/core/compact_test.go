@@ -477,3 +477,62 @@ func TestCompactEpistemology_ForceBypassesThreshold(t *testing.T) {
 // handleCompactEpistemology — if either name drifts, build fails).
 // The orchestrator behavior is the load-bearing surface; that's what
 // the rest of this file pins.
+// ── 9. last_compacted_at wiring ───────────────────────────────────────
+
+// TestCompactEpistemology_RecordsLastCompactedEvent verifies that a
+// successful compact_epistemology commit propagates to the wake_context
+// surface as LastCompactedAt. The end-to-end "did I just compact?"
+// signal: agent calls tool, sees it return, sees wake_context on next
+// session reflect the timestamp. Closed loop.
+func TestCompactEpistemology_RecordsLastCompactedEvent(t *testing.T) {
+	dm := NewTestDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM memories`)
+	if _, err := dm.SQLDB().Exec(`DELETE FROM lessons_base`); err != nil {
+		t.Fatalf("clear lessons: %v", err)
+	}
+	_, _ = dm.SQLDB().Exec(`DELETE FROM system_config WHERE key='compaction.last_run'`)
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO system_config (key, raw_json, content_hash)
+		VALUES ('compaction', '{"raw_threshold":1}', '')
+	`); err != nil {
+		t.Fatalf("set threshold: %v", err)
+	}
+
+	const seedCount = 5
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := 0; i < seedCount; i++ {
+		if _, err := dm.SQLDB().Exec(`
+			INSERT INTO memories (id, collection, content, created_at, updated_at)
+			VALUES (?, 'memories', 'seed', ?, ?)
+		`, "raw-"+time.Now().Format("150405.000000")+"-"+string(rune('a'+i%26)), now, now); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		lesson := CompactLesson{Title: "X", Body: "Y", Tags: []string{"z"}}
+		b, _ := json.Marshal(lesson)
+		return string(b), nil
+	})
+
+	pre := dm.gatherEpistemicPressure()
+	if pre.LastCompactedAt != "" {
+		t.Fatalf("pre-condition: LastCompactedAt should be empty, got %q", pre.LastCompactedAt)
+	}
+
+	res, err := dm.CompactEpistemology(context.Background(), false)
+	if err != nil {
+		t.Fatalf("CompactEpistemology: %v", err)
+	}
+	if res.LessonID == "" {
+		t.Fatal("LessonID empty after commit")
+	}
+
+	post := dm.gatherEpistemicPressure()
+	if post.LastCompactedAt == "" {
+		t.Fatal("LastCompactedAt empty after compaction — recordCompactionEvent failed")
+	}
+	if _, err := time.Parse(time.RFC3339, post.LastCompactedAt); err != nil {
+		t.Errorf("LastCompactedAt %q does not parse as RFC3339: %v", post.LastCompactedAt, err)
+	}
+}

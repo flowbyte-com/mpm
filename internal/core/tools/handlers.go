@@ -850,11 +850,12 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// than int — this matches what json.Marshal would produce on the
 	// wire and avoids type-coercion surprises for downstream parsers.
 	result["epistemic_pressure"] = map[string]interface{}{
-		"raw_count":    float64(data.EpistemicPressure.RawCount),
-		"lesson_count": float64(data.EpistemicPressure.LessonCount),
-		"ratio":        data.EpistemicPressure.Ratio,
-		"threshold":    float64(data.EpistemicPressure.Threshold),
-		"exceeded":     data.EpistemicPressure.Exceeded,
+		"raw_count":         float64(data.EpistemicPressure.RawCount),
+		"lesson_count":      float64(data.EpistemicPressure.LessonCount),
+		"ratio":             data.EpistemicPressure.Ratio,
+		"threshold":         float64(data.EpistemicPressure.Threshold),
+		"exceeded":          data.EpistemicPressure.Exceeded,
+		"last_compacted_at": data.EpistemicPressure.LastCompactedAt,
 	}
 
 	return result, nil
