@@ -68,6 +68,13 @@ const CronWakePrefix = "cron:"
 // Lets the agent distinguish cron fires from user/agent-scheduled wakes.
 const CronSource = "cron"
 
+// CronWakeKind is the metadata.kind value set on cron-injected wakes.
+// Aligns with the check_wakes kinds taxonomy so `kinds: ["cron"]` matches
+// as expected. Distinct from CronSource by intent (kind = taxonomy tag
+// for the MCP fold; source = daemon provenance marker) even though both
+// carry the literal value "cron".
+const CronWakeKind = "cron"
+
 // CronCreatedBy is the created_by value set on cron-injected wakes.
 // The daemon has no agent identity, so it claims itself.
 const CronCreatedBy = "mpm-scheduler"
@@ -214,12 +221,15 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 			return 0, fmt.Errorf("generate wake id for task %s: %w", t.id, err)
 		}
 		reason := CronWakePrefix + t.id
-		// JSON metadata so the agent can discover the directive_id
-		// at wake-time without an extra lookup. Using fmt.Sprintf
-		// with hex-escaped strings is sufficient — directive IDs and
-		// task IDs are constrained to safe-character sets.
-		metadata := fmt.Sprintf(`{"source":%q,"task_id":%q,"directive_id":%q}`,
-			CronSource, t.id, t.directiveID)
+		// JSON metadata so the agent can discover the directive_id at
+		// wake-time without an extra lookup. Both "kind" and "source"
+		// are set: "kind" aligns with the check_wakes kinds taxonomy
+		// (so `kinds: ["cron"]` matches as expected), "source" is the
+		// daemon's internal provenance marker. Using fmt.Sprintf with
+		// hex-escaped strings is sufficient — directive IDs and task
+		// IDs are constrained to safe-character sets.
+		metadata := fmt.Sprintf(`{"kind":%q,"source":%q,"task_id":%q,"directive_id":%q}`,
+			CronWakeKind, CronSource, t.id, t.directiveID)
 
 		_, err = tx.Exec(`
 			INSERT INTO scheduled_wakes

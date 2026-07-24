@@ -278,6 +278,12 @@ func TestProcessDueTasks_InjectsAndRollsOver(t *testing.T) {
 	if meta["source"] != CronSource {
 		t.Errorf("metadata.source should be %q, got %v", CronSource, meta["source"])
 	}
+	// kind must also be set so check_wakes {kinds:["cron"]} matches.
+	// CronSource and CronWakeKind share the literal value but are
+	// semantically distinct (taxonomy tag vs provenance marker).
+	if meta["kind"] != CronWakeKind {
+		t.Errorf("metadata.kind should be %q, got %v", CronWakeKind, meta["kind"])
+	}
 	if meta["directive_id"] != "mpm-seed-test" {
 		t.Errorf("metadata.directive_id should be mpm-seed-test, got %v", meta["directive_id"])
 	}
@@ -403,4 +409,61 @@ func countWakes(t *testing.T, dm *DatabaseManager) int {
 		t.Fatalf("count wakes: %v", err)
 	}
 	return n
+}
+
+// TestProcessDueTasks_CronWakeDiscoversByKind is the end-to-end proof
+// that the cron-daemon's metadata.kind="cron" tag makes the injected
+// wake discoverable via check_wakes {kinds:["cron"]}. Before this fix,
+// cron wakes used source="cron" only and kinds=["cron"] silently
+// matched nothing — a documentation/architecture trap documented in
+// the 2026-07-24 handoff. This test fails if anyone reverts the kind
+// tag in scheduled_tasks.go's metadata string.
+func TestProcessDueTasks_CronWakeDiscoversByKind(t *testing.T) {
+	dm := newScheduledTaskDM(t)
+
+	// Seed a task due in the past so ProcessDueTasks will pick it up
+	// on the very next call (no time mocking needed).
+	past := time.Now().UTC().Add(-1 * time.Minute)
+	if _, err := dm.db.Exec(`
+		INSERT INTO scheduled_tasks
+		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, "disc-cron", "discoverability cron", "0 3 * * *", "mpm-seed-disc",
+		ScheduledTaskActive, past, past, past); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, err := dm.ProcessDueTasks(); err != nil {
+		t.Fatalf("ProcessDueTasks: %v", err)
+	}
+
+	// The wake is now in scheduled_wakes with target_time = past (already
+	// due). CheckPendingWakes with kinds=["cron"] MUST return it.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"cron"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes kinds=[cron]: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kinds=[cron] should surface the cron-injected wake, got %d (the kinds taxonomy is broken if zero)", len(got))
+	}
+	if got[0]["reason"] != "cron:disc-cron" {
+		t.Errorf("wake reason: got %q, want %q", got[0]["reason"], "cron:disc-cron")
+	}
+
+	// Conversely, kinds=["notification"] MUST NOT match the cron wake
+	// (the kind field is the discriminator; without it, the default
+	// filter would have included cron wakes, masking the bug).
+	notif, err := dm.CheckPendingWakes(time.Now().Add(1*time.Hour), []string{"notification"})
+	if err != nil {
+		t.Fatalf("CheckPendingWakes kinds=[notification]: %v", err)
+	}
+	// The wake from the first CheckPendingWakes was already marked
+	// fired=1 (above). So this second call with kinds=[notification]
+	// against time.Now()+1h should see 0 cron-related wakes; any
+	// notification-kind wakes would surface here but we didn't seed any.
+	for _, w := range notif {
+		if r, ok := w["reason"].(string); ok && strings.HasPrefix(r, CronWakePrefix) {
+			t.Errorf("kinds=[notification] should not surface cron-injected wake, but got reason=%q", r)
+		}
+	}
 }
