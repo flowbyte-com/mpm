@@ -547,6 +547,29 @@ var Registry = []Tool{
 		Handler:     handleHealthCheck,
 	},
 
+	{
+		// Phase 2 of the epistemic compaction pipeline. Reflex to the
+		// epistemic_pressure trigger on every wake_context: when the
+		// agent sees exceeded=true, it calls this tool to drain a
+		// bounded batch of raw memories into a durable lesson.
+		//
+		// Wire-format contract:
+		//   - Returns {compacted, lessons_created, raw_marked, lesson_id}
+		//     on commit; {skipped_reason} on no-op (no raw / below
+		//     threshold).
+		//   - Atomicity: lesson insert + raw mark share one transaction.
+		//     LLM failure → zero DB writes (no partial state).
+		//   - Schema violation (model returns invalid JSON) surfaces
+		//     as model_schema_violation error; data plane untouched.
+		//
+		// force=true bypasses the pressure threshold (rare; mostly for
+		// tests). Default is false — the agent respects the gauge.
+		Name:        "compact_epistemology",
+		Description: "Compact a batch of raw memories into a durable lesson. Reads its own state from the epistemic_pressure view; bails cheaply when there is nothing to compact. Atomic transaction ensures no partial state. force=true bypasses the pressure threshold.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"force":{"type":"boolean","default":false,"description":"Bypass the pressure threshold (rare; mostly for tests)."}}}`),
+		Handler:     handleCompactEpistemology,
+	},
+
 	// ── Scheduled Tasks (Agentic Cron) ──────────────────────────────
 	// Three split tools following the existing wake / lesson pattern
 	// (schedule_wake / list_wakes / check_wakes are all separate
