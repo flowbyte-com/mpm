@@ -97,6 +97,35 @@ var BaseTables = []string{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
 
+	// Epistemic pressure view — powers the wake_context surface. Two
+	// scalar counts: raw_count (memories in the 'memories' collection
+	// not yet marked as rolled-up into a lesson) and lesson_count
+	// (durable lessons currently in the substrate).
+	//
+	// Convention: a raw memory is "compacted" once it has
+	//   metadata.compacted_into = <lesson_id>
+	// set on its row. Missing/null/empty metadata AND metadata without
+	// that key both count as raw (the conservative default — better to
+	// over-count than to assume compaction that never happened).
+	//
+	// Lessons are hard-deleted (no deleted_at column on lessons_base),
+	// so COUNT(*) on the lessons view naturally excludes shredded
+	// lessons — no filter needed.
+	//
+	// Used by internal.GatherWakeContext to surface the
+	// epistemic_pressure block on every wake. Cheap: two indexed
+	// COUNT(*) queries against the (collection, deleted_at, ...) and
+	// lessons views. Sub-millisecond at realistic substrate sizes.
+	`CREATE VIEW IF NOT EXISTS epistemic_pressure_v AS
+	SELECT
+	  (SELECT COUNT(*) FROM memories
+	   WHERE collection = 'memories'
+	     AND deleted_at IS NULL
+	     AND (metadata IS NULL OR metadata = ''
+	          OR json_extract(metadata, '$.compacted_into') IS NULL)
+	  ) AS raw_count,
+	  (SELECT COUNT(*) FROM lessons) AS lesson_count`,
+
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
