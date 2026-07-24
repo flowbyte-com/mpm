@@ -794,6 +794,59 @@ func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
 	}
 }
 
+// TestHandleReadWakeContext_IncludesEpistemicPressure pins the
+// proprioception contract at the handler boundary: every
+// read_wake_context response must surface an `epistemic_pressure`
+// block with raw_count, lesson_count, ratio, threshold, and exceeded.
+// The handler is the wire-format layer; if it drops the field,
+// the agent loses its cognitive-load signal without any error.
+//
+// This is the structural companion to TestEpistemicPressure_* in
+// internal/core — those tests pin the SQL/logic, this test pins
+// the handler copy. Pattern matches the recent_milestones regression
+// test above: same hermetic in-memory DB, same field-presence check.
+func TestHandleReadWakeContext_IncludesEpistemicPressure(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	epRaw, exists := m["epistemic_pressure"]
+	if !exists {
+		t.Fatal("epistemic_pressure key missing from read_wake_context response — proprioception contract broken")
+	}
+	ep, ok := epRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("epistemic_pressure should be a map, got %T", epRaw)
+	}
+	for _, k := range []string{"raw_count", "lesson_count", "ratio", "threshold", "exceeded"} {
+		if _, present := ep[k]; !present {
+			t.Errorf("epistemic_pressure missing sub-field %q", k)
+		}
+	}
+	// Cold-start: ratio must be 0.0 (not NaN, not +Inf) when lesson_count
+	// is 0. Catches a regression in the divide-by-zero guard.
+	if r, _ := ep["ratio"].(float64); r != 0.0 {
+		t.Errorf("cold-start ratio: got %v, want 0.0 (divide-by-zero guard)", r)
+	}
+	if thr, _ := ep["threshold"].(float64); int(thr) != 100 {
+		t.Errorf("default threshold: got %v, want 100", thr)
+	}
+}
+
 // ── health_check tool ──────────────────────────────────────────────────
 
 // TestHandleHealthCheck_PassesThrough verifies the tool-layer wrapper

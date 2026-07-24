@@ -51,6 +51,28 @@ type WakeContextData struct {
 	// (promote_scratchpad), amend (flush_scratchpad with same
 	// session_id), or discard (discard_scratchpad).
 	ScratchpadOrphans string `json:"scratchpad_orphans,omitempty"`
+	// EpistemicPressure summarises the substrate's cognitive load:
+	// raw memories pending compaction vs durable lessons present.
+	// Surfaced on every wake so the agent feels its own cognitive
+	// pressure without polling (proprioception). Threshold lives in
+	// system_config under key "compaction.raw_threshold" (default 100).
+	// Exceeded=true is the agent's signal that a compact_epistemology
+	// call is warranted; Ratio is a secondary signal (raw:lesson
+	// density) clamped to 0 when LessonCount == 0 to avoid
+	// divide-by-zero NaN/Inf in the JSON response.
+	EpistemicPressure EpistemicPressureData `json:"epistemic_pressure"`
+}
+
+// EpistemicPressureData is the structured payload of the substrate's
+// cognitive load surface. All fields are scalar and cheap to compute;
+// no joins, no cluster extraction (that's deferred to the
+// compact_epistemology tool in Phase 2 of the compaction pipeline).
+type EpistemicPressureData struct {
+	RawCount    int     `json:"raw_count"`
+	LessonCount int     `json:"lesson_count"`
+	Ratio       float64 `json:"ratio"`
+	Threshold   int     `json:"threshold"`
+	Exceeded    bool    `json:"exceeded"`
 }
 
 // Scratchpad age-tag thresholds. Tunable from one place. The
@@ -136,6 +158,15 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.RecentTopics = dm.GetRecentUserTopics(5)
 	data.AuditSummary = dm.AuditSummary()
 
+	// Epistemic pressure — single COUNT query against the view plus
+	// the system_config threshold lookup, folded into one sub-millisecond
+	// SELECT. Defaults are non-fatal: a missing compaction key in
+	// system_config falls back to 100; a view query failure is logged
+	// to audit and the field is left as the zero value (the agent
+	// sees absent → no compaction pressure, which is the safe
+	// default).
+	data.EpistemicPressure = dm.gatherEpistemicPressure()
+
 	// Phase 2c (this commit): surface shared global rules in wake
 	// context. Cheap to query (lazy-backfilled FTS) and high-signal —
 	// every agent on the workstation sees the same house rules on
@@ -159,6 +190,62 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.ScratchpadOrphans = dm.ScratchpadOrphansSummary()
 
 	return data, nil
+}
+
+// gatherEpistemicPressure returns the cognitive-load snapshot the agent
+// sees on every wake. Single SELECT against the epistemic_pressure_v
+// view, joined with a subquery on system_config for the threshold.
+// Designed to be sub-millisecond at realistic substrate sizes (the
+// two COUNT(*) subqueries in the view hit the (collection, deleted_at,
+// ...) composite index on memories and the lessons view directly).
+//
+// Threshold default: 100 (configurable via system_config.compaction.raw_threshold).
+// Ratio default when LessonCount == 0: 0.0 (not NaN, not +Inf — those
+// break downstream JSON parsers). The 0.0 represents "no ratio
+// information" — a fresh agent has no lessons, but the metric is
+// still meaningful via RawCount alone.
+func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
+	var (
+		rawCount    int
+		lessonCount int
+		threshold   int
+	)
+	err := dm.SQLDB().QueryRow(`
+		SELECT
+		  raw_count,
+		  lesson_count,
+		  COALESCE(
+		    (SELECT CAST(json_extract(raw_json, '$.raw_threshold') AS INTEGER)
+		     FROM system_config WHERE key = 'compaction'),
+		    100
+		  ) AS threshold
+		FROM epistemic_pressure_v
+	`).Scan(&rawCount, &lessonCount, &threshold)
+	if err != nil {
+		// Non-fatal: log to audit and return zero value. The agent sees
+		// absent pressure (raw_count=0, exceeded=false) which is the
+		// safe default — no spurious compaction triggers from a
+		// substrate glitch.
+		dm.LogAudit(AuditWarn, "wake_context", "epistemic_pressure read failed: "+err.Error(), "", AuditContext{})
+		return EpistemicPressureData{Threshold: 100}
+	}
+
+	// Divide-by-zero guard. With LessonCount == 0 the ratio is undefined;
+	// emit 0.0 so the JSON marshaller produces a valid number instead of
+	// NaN or +Inf that downstream parsers reject. RawCount alone is the
+	// signal the agent acts on; ratio is a secondary density metric.
+	ratio := 0.0
+	if lessonCount > 0 {
+		ratio = float64(rawCount) / float64(lessonCount)
+	}
+
+	return EpistemicPressureData{
+		RawCount:    rawCount,
+		LessonCount: lessonCount,
+		Ratio:       ratio,
+		Threshold:   threshold,
+		Exceeded:    rawCount > threshold,
+	}
 }
 
 // recentMemories returns up to `limit` non-deleted memories ordered newest first.

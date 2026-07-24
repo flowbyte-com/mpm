@@ -821,22 +821,41 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// Pass nil kinds for backward-compatible default (notification-only).
 	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
 	result := map[string]interface{}{
-		"success":            true,
-		"session_id":         data.SessionID,
-		"active_mode":        data.ActiveMode,
-		"active_persona":     data.ActivePersona,
-		"recent_topics":      data.RecentTopics,
-		"recent_memories":    memRefs,
-		"recent_milestones":  milestoneRefs,
-		"audit_summary":      data.AuditSummary,
-		"last_handoff":       data.LastHandoff,
-		"scratchpad_orphans": data.ScratchpadOrphans,
+		"success":             true,
+		"session_id":          data.SessionID,
+		"active_mode":         data.ActiveMode,
+		"active_persona":      data.ActivePersona,
+		"recent_topics":       data.RecentTopics,
+		"recent_memories":     memRefs,
+		"recent_milestones":   milestoneRefs,
+		"audit_summary":       data.AuditSummary,
+		"last_handoff":        data.LastHandoff,
+		"scratchpad_orphans":  data.ScratchpadOrphans,
+		"epistemic_pressure":  data.EpistemicPressure,
 	}
 	if wErr == nil && len(wakes) > 0 {
 		result["wakes_pending"] = wakes
 		result["wakes_pending_count"] = len(wakes)
 	}
 	_ = wErr // CheckPendingWakes errors are non-fatal here
+
+	// Epistemic pressure — same shape contract as the other fields:
+	// struct → map[string]interface{} for the JSON wire. The struct
+	// itself has json tags (raw_count, lesson_count, ratio, threshold,
+	// exceeded) but the rest of the handler surface is map-shaped, so
+	// convert for consistency. Marshalling/unmarshalling here would
+	// also work but introduces a JSON round-trip cost on every wake.
+	//
+	// Numeric fields are emitted as float64 (JSON's number type) rather
+	// than int — this matches what json.Marshal would produce on the
+	// wire and avoids type-coercion surprises for downstream parsers.
+	result["epistemic_pressure"] = map[string]interface{}{
+		"raw_count":    float64(data.EpistemicPressure.RawCount),
+		"lesson_count": float64(data.EpistemicPressure.LessonCount),
+		"ratio":        data.EpistemicPressure.Ratio,
+		"threshold":    float64(data.EpistemicPressure.Threshold),
+		"exceeded":     data.EpistemicPressure.Exceeded,
+	}
 
 	return result, nil
 }
