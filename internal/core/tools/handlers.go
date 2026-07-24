@@ -1907,6 +1907,44 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	return dm.HealthCheck()
 }
 
+// handleCompactEpistemology is the reflex to epistemic_pressure.
+// Reads its own state (raw_count, threshold) from the pressure view,
+// batches the oldest 50 raw memories, calls the LLM for a strict-JSON
+// lesson, validates, and commits atomically. See internal/core.CompactEpistemology
+// for the orchestration details.
+//
+// Optional `force` flag bypasses the pressure threshold — used by
+// agents who want to compact proactively even when the gauge reads
+// below_threshold (rare; mostly for tests and one-off cleanups).
+func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	force := parseBoolDefault(p["force"], false)
+
+	result, err := dm.CompactEpistemology(context.Background(), force)
+	if err != nil {
+		return nil, err
+	}
+
+	// No-op path (skipped_reason set): return as-is.
+	if result.SkippedReason != "" {
+		return map[string]interface{}{
+			"success":        true,
+			"compacted":       0,
+			"lessons_created": 0,
+			"raw_marked":      0,
+			"skipped_reason":  result.SkippedReason,
+		}, nil
+	}
+
+	// Commit path: lesson inserted, raw memories marked.
+	return map[string]interface{}{
+		"success":         true,
+		"compacted":        result.Compacted,
+		"lessons_created":  result.LessonsCreated,
+		"raw_marked":      result.RawMarked,
+		"lesson_id":        result.LessonID,
+	}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Ephemeral Scratchpad
 // ---------------------------------------------------------------------------

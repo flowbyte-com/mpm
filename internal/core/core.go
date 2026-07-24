@@ -76,6 +76,7 @@ type CoreDB interface {
 	PromoteMemory(memoryID string) (map[string]interface{}, error)
 	PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error)
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
+	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
 	PruneExpired() (int, error)
 	PruneOlderThan(before time.Time) (int, error)
 	PruneNeverAccessed() (int, error)
