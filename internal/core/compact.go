@@ -302,7 +302,46 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit: %w", err)
 	}
+
+	// Record the compaction event so wake_context can surface
+	// last_compacted_at on future wakes. Non-fatal: the lesson and
+	// raw-mark are already committed, so a write failure here just
+	// means the timestamp won't surface next session. The agent
+	// will still see the lesson via query_lessons / mcp stats; the
+	// \"when did I last compact?\" signal is informational, not
+	// load-bearing for correctness.
+	if err := dm.recordCompactionEvent(ctx, lessonID, len(rawIDs)); err != nil {
+		dm.LogAudit(AuditWarn, "compact_epistemology", "record event failed: "+err.Error(), "", AuditContext{})
+	}
+
 	return lessonID, nil
+}
+
+// recordCompactionEvent writes a one-line ledger entry to system_config
+// under key 'compaction.last_run'. The wake_context gather reads this on
+// every wake to surface last_compacted_at. UPSERT semantics — repeated
+// calls overwrite the previous event (only the most recent matters).
+//
+// Schema: {last_run_at: <RFC3339>, lesson_id: <id>, raw_marked: <count>}.
+// Kept minimal — detailed lesson content is in the lessons table; this
+// is just the \"did compaction happen recently?\" signal.
+func (dm *DatabaseManager) recordCompactionEvent(ctx context.Context, lessonID string, rawMarked int) error {
+	payload, err := json.Marshal(map[string]interface{}{
+		"last_run_at": time.Now().UTC().Format(time.RFC3339),
+		"lesson_id":   lessonID,
+		"raw_marked":  rawMarked,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	_, err = dm.db.ExecContext(ctx, `
+		INSERT INTO system_config (key, raw_json, content_hash)
+		VALUES ('compaction.last_run', ?, '')
+		ON CONFLICT(key) DO UPDATE SET
+		  raw_json = excluded.raw_json,
+		  updated_at = CURRENT_TIMESTAMP
+	`, string(payload))
+	return err
 }
 
 // Compile-time guard: compactSynthesizeFunc signature matches the
