@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,17 @@ type HybridConfig struct {
 	Origin string
 }
 
+// safeSchemaPrefixPattern validates SQL-safe schema prefixes.
+var safeSchemaPrefixPattern = regexp.MustCompile(`^$|^[a-zA-Z_][a-zA-Z0-9_]*\.$`)
+
+// ValidateSchemaPrefix returns an error if the prefix contains unsafe chars.
+func ValidateSchemaPrefix(prefix string) error {
+	if !safeSchemaPrefixPattern.MatchString(prefix) {
+		return fmt.Errorf("invalid schema prefix: %q must match %s", prefix, safeSchemaPrefixPattern.String())
+	}
+	return nil
+}
+
 // DefaultHybridConfig returns sensible defaults.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
@@ -88,6 +100,9 @@ type HybridResult struct {
 // FTS5 results that lack embeddings are still returned (graceful degradation).
 // Vector results that FTS5 would rank higher are boosted.
 func HybridSearch(dm *DatabaseManager, query string, collection string, cfg HybridConfig) ([]HybridResult, error) {
+	if err := ValidateSchemaPrefix(cfg.SchemaPrefix); err != nil {
+		return nil, err
+	}
 	if cfg.Limit <= 0 {
 		cfg.Limit = 15
 	}
@@ -578,6 +593,9 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 // "shared." for ATTACHed shared DB. Constrained to two values; safe
 // to interpolate directly into the table reference.
 func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int, schemaPrefix string) ([]VectorMatch, error) {
+	if err := ValidateSchemaPrefix(schemaPrefix); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}

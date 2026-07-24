@@ -1217,6 +1217,9 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 			"source":              "shared",
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -2179,6 +2182,9 @@ func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, erro
 			"snapshot":     snapshot,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return configs, nil
 }
 
@@ -2806,6 +2812,9 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 		lessons = append(lessons, &lesson)
 	}
 	if len(lessons) > 0 {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return lessons, nil
 	}
 	return dm.searchLessonsLike(query, limit)
@@ -2839,7 +2848,7 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 		}
 		lessons = append(lessons, &lesson)
 	}
-	return lessons, nil
+	return lessons, rows.Err()
 }
 
 // DeleteLesson removes a lesson
