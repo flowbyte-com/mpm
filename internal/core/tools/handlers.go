@@ -818,7 +818,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// Cold-start sweep: check for wakes that came due while the system
 	// was offline. The agent sees these immediately on boot — no need to
 	// wait for the next tool call to trigger the opportunistic fold.
-	wakes, wErr := dm.CheckPendingWakes(time.Now())
+	// Pass nil kinds for backward-compatible default (notification-only).
+	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
 	result := map[string]interface{}{
 		"success":            true,
 		"session_id":         data.SessionID,
@@ -1606,11 +1607,14 @@ func splitTags(s string) []string {
 // ActiveContext has a SessionID. The two blocks land separately on the
 // response so receiving agents can distinguish agent-scheduled future
 // tasks (WakesPending) from incoming epistemic events (EventWakesPending).
-func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}) map[string]interface{} {
+//
+// kinds is forwarded to CheckPendingWakes — see that function for the
+// semantics. nil = backward-compatible default (notification-only).
+func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}, kinds []string) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
 	}
-	if due, err := dm.CheckPendingWakes(time.Now()); err == nil && len(due) > 0 {
+	if due, err := dm.CheckPendingWakes(time.Now(), kinds); err == nil && len(due) > 0 {
 		out["WakesPending"] = due
 		out["WakesPendingCount"] = len(due)
 	}
@@ -1657,18 +1661,46 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	return checkWakesAndFold(dm, ac, out), nil
+	return checkWakesAndFold(dm, ac, out, nil), nil
 }
 
 func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	kinds := readKindsParam(p)
 	out := checkWakesAndFold(dm, ac, map[string]interface{}{
 		"success": true,
-	})
+	}, kinds)
 	if _, ok := out["WakesPending"]; !ok {
 		out["WakesPending"] = []map[string]interface{}{}
 		out["WakesPendingCount"] = 0
 	}
 	return out, nil
+}
+
+// readKindsParam extracts the optional kinds array from a tool payload.
+// Returns nil if absent, malformed, or empty — nil triggers the
+// backward-compatible default (notification-only) in CheckPendingWakes.
+func readKindsParam(p map[string]interface{}) []string {
+	if p == nil {
+		return nil
+	}
+	raw, ok := p["kinds"]
+	if !ok || raw == nil {
+		return nil
+	}
+	arr, ok := raw.([]interface{})
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	kinds := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok && s != "" {
+			kinds = append(kinds, s)
+		}
+	}
+	if len(kinds) == 0 {
+		return nil
+	}
+	return kinds
 }
 
 // handleCheckPendingEventWakes (Arc 2): pulls incoming event wakes
@@ -1722,7 +1754,7 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"count":         len(items),
 		"include_fired": includeFired,
 		"overdue_only":  overdueOnly,
-	}), nil
+	}, nil), nil
 }
 
 // handleDigestWakes returns a compact summary of overdue + pending wakes.
