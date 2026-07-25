@@ -62,6 +62,25 @@ sudo install -Dm755 bin/mpm-mcp /usr/local/bin/mpm-mcp
 echo "==> Restarting OpenClaw gateway (picks up new binary)..."
 openclaw gateway restart
 
+# 3a. mpm-scheduler runs under user-level systemd — NOT a child of the
+# gateway. The gateway restart doesn't propagate here, but the
+# scheduler binary on disk just changed, so we need a separate restart
+# for any deploy that touches scheduler code (ProcessScheduledTasks,
+# HandlerFuncs, etc). Caught the 2026-07-24 case where the install
+# landed but the scheduler kept running stale code. Bake it in.
+echo "==> Restarting user-level mpm-scheduler (independent of gateway)..."
+systemctl --user restart mpm-scheduler
+
+# 3b. Verify both services are healthy before claiming "live".
+sleep 1
+GATEWAY_UP=$(openclaw gateway status 2>/dev/null | grep -c 'active\|running' || true)
+SCHED_ACTIVE=$(systemctl --user is-active mpm-scheduler 2>/dev/null || echo "unknown")
+if [[ "$SCHED_ACTIVE" != "active" ]]; then
+  echo "!! mpm-scheduler not active after restart (got: $SCHED_ACTIVE)" >&2
+  echo "   check: systemctl --user status mpm-scheduler, journalctl --user -u mpm-scheduler" >&2
+  exit 1
+fi
+
 # 4. Verify ────────────────────────────────────────────────────────────
 sleep 1
 LIVE_PID=$(pgrep -f /usr/local/bin/mpm-mcp | head -1 || true)
