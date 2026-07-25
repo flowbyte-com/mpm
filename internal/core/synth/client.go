@@ -140,7 +140,7 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+sc.APIKey)
+	req.Header.Set("X-Api-Key", sc.APIKey)
 
 	var resp *http.Response
 	var respBody []byte

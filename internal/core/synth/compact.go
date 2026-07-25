@@ -87,7 +87,7 @@ func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories 
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+sc.APIKey)
+	req.Header.Set("X-Api-Key", sc.APIKey)
 
 	var respBody []byte
 	for attempt := 0; attempt <= 1; attempt++ {
