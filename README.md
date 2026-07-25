@@ -1014,6 +1014,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`kb`** — Knowledge base: memory, topic, lesson, session, reference
 - **`lesson`** — Lesson operations
 - **`lint`** — Validate persona/mode router frontmatter (YAML + regex compile)
+- **`list-skills`** — List skills (scope: all|local|shared)
 - **`ls`** — List memories
 - **`maintain`** — Run self-maintenance (decay, consolidate, prune)
 - **`memory`** — Memory operations
@@ -1025,6 +1026,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`promote`** — Make memory LTM
 - **`propose_theory`** — Record a hypothesis with validation criteria
 - **`prune`** — Prune old/expired memories
+- **`read-skill`** — Read a skill by name (or id) and optional version
 - **`recall`** _(aliases: s)_ — Search memories for context
 - **`record_decision`** — Record a decision with context, choice, and rationale
 - **`reference`** — Reference library
@@ -1035,6 +1037,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`review`** — Spaced reinforcement review
 - **`rm`** — Delete a memory
 - **`route`** — Render mode+persona for a prompt (Claude Code hook input)
+- **`save-skill`** — Save a skill from a markdown file (--file, --name, --version, --force)
 - **`session`** — Session operations
 - **`set-weight`** — Set memory weight
 - **`show`** — Show memory details
