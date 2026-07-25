@@ -238,6 +238,13 @@ type CoreDB interface {
 
 	// ─── Misc ────────────────────────────────────────────────────────
 	WipeRecord(tier, id string) error
+
+	// ─── Skills (procedural memory) ─────────────────────────────────
+	ReadSkill(nameOrID, version string) (*Skill, error)
+	ListSkills(scope string) ([]SkillSummary, error)
+	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
+	PromoteSkillToGlobal(skillID string, confirm bool) error
+	ShredSkill(skillID string) error
 }
 
 // Compile-time assertion that *DatabaseManager satisfies CoreDB.
