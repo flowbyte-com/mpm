@@ -78,6 +78,16 @@ body`, name, version)
 	if collection != "skills" {
 		t.Errorf("collection = %q, want skills", collection)
 	}
+
+	// Don't leave the row in the developer's real workspace DB. The
+	// pre-clean above handles prior-run collisions; this cleanup
+	// handles the row *this* run inserted so the test is hermetic.
+	t.Cleanup(func() {
+		if _, err := dm.SQLDB().Exec(
+			`DELETE FROM memories WHERE id = ?`, id); err != nil {
+			t.Logf("cleanup delete: %v", err)
+		}
+	})
 }
 
 // sanitizeForSkillID strips characters the skill-naming rules reject
