@@ -594,6 +594,22 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"Semantic slug of the task to delete."}}}`),
 		Handler:     handleDeleteScheduledTask,
 	},
+
+	// --- Skills layer (collection='skills') --------------------------------
+	//
+	// Skills are markdown documents with YAML frontmatter describing a
+	// procedure: when_to_use, constraints, and an ordered set of steps.
+	// The full contract is in internal/core/skill.go; MPM stores each
+	// skill as a memory row (collection='skills') so the existing FTS5
+	// index, retrieval, and decay paths apply unchanged. The
+	// `proactive_recall_hint` and `read_wake_context` surfaces surface
+	// the latest version of each skill for the active agent.
+	{
+		Name:        "save_skill",
+		Description: "Persist a new skill or update an existing version. The skill is a markdown document with YAML frontmatter describing a procedure (when_to_use, constraints, steps). MPM stores it as a row in collection='skills', indexed for FTS5 search and surfaced via list_skills + read_skill + proactive_recall_hint. Saving the same (name, version) requires force=true. Required: name, version, content. Optional: author, force.",
+		Schema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Stable skill name (e.g. 'agentshell')"},"version":{"type":"string","description":"Semver version (e.g. '2.0.0')"},"content":{"type":"string","description":"Full markdown document including YAML frontmatter"},"author":{"type":"string","description":"Agent name for metadata (default: active context agent)"},"force":{"type":"boolean","description":"Overwrite existing skill with same name+version","default":false}},"required":["name","version","content"]}`),
+		Handler:     handleSaveSkill,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
