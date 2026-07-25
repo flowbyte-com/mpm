@@ -1065,6 +1065,65 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	}, nil
 }
 
+// handleSaveSkill persists a new skill or updates an existing version.
+// Skills are markdown documents with YAML frontmatter (name, version,
+// when_to_use, constraints, steps) stored as memory rows in
+// collection='skills'. The full contract lives in internal/core/skill.go;
+// this handler is a thin shim over dm.SaveSkill that adds the
+// payload-parsing and frontmatter-validation pass.
+//
+// Args:
+//   - name (string, required)        — the skill's stable name
+//   - version (string, required)     — semver, e.g. "2.0.0"
+//   - content (string, required)     — full markdown incl. frontmatter
+//   - author (string, optional)      — agent name for metadata
+//   - force (bool, optional)         — overwrite when name+version exists
+//
+// Validation order is deliberate: SkillIDForNameAndVersion first (cheap
+// arg-shape check) so the caller gets a precise error message before
+// the more expensive frontmatter parse. ParseSkillFrontmatter runs
+// next so the DM never sees malformed YAML — keeping rejection at the
+// boundary rather than mid-transaction. dm.SaveSkill re-runs both for
+// defence-in-depth, but a front-end rejection here saves a DB round
+// trip and produces a tighter error string.
+func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	name := internal.ParseStringOr(p["name"], "")
+	version := internal.ParseStringOr(p["version"], "")
+	content := internal.ParseStringOr(p["content"], "")
+	author := internal.ParseStringOr(p["author"], ac.Agent)
+	force := false
+	if v, ok := p["force"].(bool); ok {
+		force = v
+	}
+	if name == "" || version == "" || content == "" {
+		return nil, fmt.Errorf("name, version, and content are required")
+	}
+
+	// Validate name+version shape before parsing frontmatter so the
+	// caller gets the cheaper rejection first. The same call also
+	// runs inside dm.SaveSkill, so this is a UX optimisation, not a
+	// security gate.
+	if _, err := internal.SkillIDForNameAndVersion(name, version); err != nil {
+		return nil, err
+	}
+
+	// Validate frontmatter before persisting.
+	if _, _, err := internal.ParseSkillFrontmatter(content); err != nil {
+		return nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+
+	id, err := dm.SaveSkill(name, version, content, author, force)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"id":      id,
+		"name":    name,
+		"version": version,
+	}, nil
+}
+
 // callQueryAuditLog returns recent entries from system_audit_log. The
 // agent uses this to investigate what went wrong, especially across
 // sessions — the wake context surface only shows a count, the details
