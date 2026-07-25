@@ -81,6 +81,11 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 
 	meta := parseJSONMeta(metaJSON)
 	isLatest, _ := meta["is_latest"].(bool)
+	// content_hash is written by SaveSkill into metadata; surface it on
+	// the read-side Skill struct so callers (dedup, drift checks) don't
+	// have to reach into the metadata map. Matches the `is_latest`
+	// extraction pattern immediately above. Absent hash → empty string.
+	contentHash, _ := meta["content_hash"].(string)
 
 	return &Skill{
 		ID:          id,
@@ -99,6 +104,7 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 		Steps:       fm.Steps,
 		Frontmatter: fm,
 		Body:        body,
+		ContentHash: contentHash,
 	}, nil
 }
 
@@ -284,11 +290,17 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 
 	if exists && force {
 		// In-place overwrite: same id, same row — no version flip, no new
-		// row. Author/weight reset to the seed defaults so a force-overwrite
-		// doesn't drag stale authorship forward.
+		// row. "force" means overwrite content/metadata; it must NOT reset
+		// weight or reinforcement_count, because those columns encode the
+		// skill's retrieval trajectory (how often it has been useful). A
+		// force-overwrite that dropped weight from 13→5 would silently
+		// destroy the prior reinforcement signal and bury a battle-tested
+		// skill under newer-looking alternatives. SQLite preserves columns
+		// omitted from the SET clause, so we update only the content
+		// triple + updated_at and leave weight/reinforcement_count alone.
 		_, err = db.Exec(`
 			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, weight = 5,
+			SET content = ?, tags = ?, metadata = ?,
 			    updated_at = CURRENT_TIMESTAMP
 			WHERE id = ? AND deleted_at IS NULL
 		`, content, string(tagsJSON), string(metaJSON), id)
