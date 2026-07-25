@@ -35,9 +35,9 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 
 	var (
 		id, content, tagsJSON, metaJSON, collection, createdAt string
-		isGlobal, isPrime                                     int
-		weight                                                int
-		deletedAt                                             sql.NullString
+		isGlobal, isPrime                                      int
+		weight                                                 int
+		deletedAt                                              sql.NullString
 	)
 
 	// Try exact-id lookup first.
@@ -78,12 +78,16 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 		return nil, fmt.Errorf("parse skill %s frontmatter: %w", id, parseErr)
 	}
 
+	meta := parseJSONMeta(metaJSON)
+	isLatest, _ := meta["is_latest"].(bool)
+
 	return &Skill{
 		ID:          id,
 		Collection:  collection,
 		Tags:        parseJSONTags(tagsJSON),
-		Metadata:    parseJSONMeta(metaJSON),
+		Metadata:    meta,
 		IsGlobal:    isGlobal == 1,
+		IsLatest:    isLatest,
 		Weight:      weight,
 		CreatedAt:   createdAt,
 		Name:        fm.Name,
@@ -98,7 +102,8 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 }
 
 // ListSkills returns the latest version of each skill in scope.
-// scope: "local" | "shared" | "all" — default "all".
+// scope: "local" | "shared" | "all".
+// scope defaults to "all" when empty.
 func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 	if scope == "" {
 		scope = "all"
@@ -122,7 +127,7 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 		SELECT id, content, is_global, weight
 		FROM memories
 		WHERE collection = 'skills' AND deleted_at IS NULL
-		  `+scopeClause+`
+		  ` + scopeClause + `
 		ORDER BY id DESC
 	`)
 	if err != nil {
@@ -161,6 +166,7 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 	// Deduplicate by name, keeping the highest version (lexicographic
 	// order on the id string is sufficient because semver sorts when
 	// equal-width, e.g. 1.0.0 < 2.0.0 < 10.0.0).
+	// Future-proofing note: if a future version uses unequal width, fix the parser, not the sort.
 	byName := make(map[string]parsedRow)
 	for _, r := range all {
 		cur, ok := byName[r.name]
