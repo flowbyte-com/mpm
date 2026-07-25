@@ -17,8 +17,125 @@
 package internal
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestSaveSkill_NewSkill(t *testing.T) {
+	dm := NewTestDM(t)
+
+	content := "---\nname: agentshell\nversion: 2.0.0\nwhen_to_use: agentshell\n---\nbody"
+	id, err := dm.SaveSkill("agentshell", "2.0.0", content, "test-agent", false)
+	if err != nil {
+		t.Fatalf("SaveSkill: %v", err)
+	}
+	if id != "skill:agentshell-v2.0.0" {
+		t.Errorf("id = %q, want skill:agentshell-v2.0.0", id)
+	}
+
+	// Verify the row exists and is marked is_latest.
+	got, err := dm.ReadSkill("agentshell", "")
+	if err != nil {
+		t.Fatalf("ReadSkill: %v", err)
+	}
+	if got.Version != "2.0.0" {
+		t.Errorf("version = %q, want 2.0.0", got.Version)
+	}
+	if !got.IsLatest {
+		t.Errorf("IsLatest = false, want true")
+	}
+}
+
+func TestSaveSkill_VersionBumpFlipsIsLatest(t *testing.T) {
+	dm := NewTestDM(t)
+
+	id1, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody v1", "test-agent", false)
+	if err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+	id2, err := dm.SaveSkill("agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody v2", "test-agent", false)
+	if err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+
+	// ReadSkill(name) should resolve to v2.0.0.
+	latest, err := dm.ReadSkill("agentshell", "")
+	if err != nil {
+		t.Fatalf("ReadSkill: %v", err)
+	}
+	if latest.ID != id2 {
+		t.Errorf("latest = %s, want %s", latest.ID, id2)
+	}
+	if !latest.IsLatest {
+		t.Errorf("latest IsLatest = false, want true")
+	}
+
+	// Old version should still be queryable by exact id and marked not-latest.
+	old, err := dm.ReadSkill(id1, "")
+	if err != nil {
+		t.Fatalf("ReadSkill v1: %v", err)
+	}
+	if old.Version != "1.0.0" {
+		t.Errorf("v1 version = %q, want 1.0.0", old.Version)
+	}
+	if old.IsLatest {
+		t.Errorf("v1 IsLatest = true, want false after v2.0.0 bump")
+	}
+}
+
+func TestSaveSkill_DuplicateVersionRejected(t *testing.T) {
+	dm := NewTestDM(t)
+
+	_, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody", "test-agent", false)
+	if err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	_, err = dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody v2", "test-agent", false)
+	if err == nil {
+		t.Fatal("expected error for duplicate version without force")
+	}
+}
+
+func TestSaveSkill_DuplicateVersionWithForce(t *testing.T) {
+	dm := NewTestDM(t)
+
+	id1, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nORIGINAL", "test-agent", false)
+	if err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	id2, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nOVERWRITTEN", "test-agent", true)
+	if err != nil {
+		t.Fatalf("force save: %v", err)
+	}
+	if id1 != id2 {
+		t.Errorf("force should overwrite same id, got %s vs %s", id1, id2)
+	}
+
+	// Read back to confirm in-place overwrite. The body substring check
+	// (rather than full equality) avoids coupling to the frontmatter
+	// parser's whitespace handling — what we're verifying here is that
+	// the second write's content reached the row, not body extraction
+	// details that belong to ParseSkillFrontmatter's own test suite.
+	over, err := dm.ReadSkill(id1, "")
+	if err != nil {
+		t.Fatalf("ReadSkill after force: %v", err)
+	}
+	if over.Version != "1.0.0" {
+		t.Errorf("version = %q, want 1.0.0", over.Version)
+	}
+	if !strings.Contains(over.Body, "OVERWRITTEN") {
+		t.Errorf("body = %q, want to contain OVERWRITTEN (force overwrite should update body)", over.Body)
+	}
+	if strings.Contains(over.Body, "ORIGINAL") {
+		t.Errorf("body = %q still contains ORIGINAL (force overwrite should not retain old content)", over.Body)
+	}
+}
 
 func insertRawSkill(t *testing.T, dm *DatabaseManager, id, name, version, content string) {
 	t.Helper()
