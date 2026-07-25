@@ -109,3 +109,37 @@ func ParseNameAndVersionFromID(id string) (string, string, error) {
 	}
 	return name, version, nil
 }
+
+// Skill is the read-side view of a skill row. Body is the markdown
+// after the frontmatter is stripped; Frontmatter is the parsed YAML.
+type Skill struct {
+	ID          string
+	Collection  string
+	Tags        []string
+	Metadata    map[string]interface{}
+	IsGlobal    bool
+	IsLatest    bool
+	Weight      int
+	CreatedAt   string
+	Name        string
+	Version     string
+	WhenToUse   string
+	Domain      string
+	Constraints []string
+	Steps       []SkillStep
+	Frontmatter SkillFrontmatter
+	Body        string
+	ContentHash string
+}
+
+// SkillSummary is the lightweight projection used by list_skills and
+// the wake-context <available_skills> block. Avoids pulling the full
+// markdown body for inventory queries.
+type SkillSummary struct {
+	ID        string
+	Name      string
+	Version   string
+	WhenToUse string
+	IsGlobal  bool
+	Weight    int
+}
