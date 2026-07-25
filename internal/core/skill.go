@@ -129,7 +129,7 @@ type Skill struct {
 	Steps       []SkillStep
 	Frontmatter SkillFrontmatter
 	Body        string
-	ContentHash string // Populated by SaveSkill (Task 3); zero on read path until then.
+	ContentHash string // Populated by SaveSkill and projected from metadata.content_hash by ReadSkill.
 }
 
 // SkillSummary is the lightweight projection used by list_skills and

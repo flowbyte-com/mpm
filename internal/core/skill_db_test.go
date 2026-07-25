@@ -137,6 +137,45 @@ func TestSaveSkill_DuplicateVersionWithForce(t *testing.T) {
 	}
 }
 
+func TestSaveSkill_ForcePreservesWeight(t *testing.T) {
+	dm := NewTestDM(t)
+
+	id, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody", "test-agent", false)
+	if err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+
+	// Simulate prior reinforcement: a battle-tested skill that has been
+	// useful 8 times and accumulated weight=13. Force-overwrite must
+	// preserve both columns — weight encodes retrieval trajectory, and
+	// resetting it to the seed default of 5 would silently bury the
+	// skill under newer-looking alternatives.
+	_, err = dm.db.Exec(`UPDATE memories SET weight = 13, reinforcement_count = 8 WHERE id = ?`, id)
+	if err != nil {
+		t.Fatalf("set weight/reinforcement: %v", err)
+	}
+
+	_, err = dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody updated", "test-agent", true)
+	if err != nil {
+		t.Fatalf("force save: %v", err)
+	}
+
+	// Re-read directly from the DB to assert the columns survived.
+	var weight, reinforcement int
+	err = dm.db.QueryRow(`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id).Scan(&weight, &reinforcement)
+	if err != nil {
+		t.Fatalf("re-read columns: %v", err)
+	}
+	if weight != 13 {
+		t.Errorf("weight after force-overwrite = %d, want 13 (preserved)", weight)
+	}
+	if reinforcement != 8 {
+		t.Errorf("reinforcement_count after force-overwrite = %d, want 8 (preserved)", reinforcement)
+	}
+}
+
 func insertRawSkill(t *testing.T, dm *DatabaseManager, id, name, version, content string) {
 	t.Helper()
 	_, err := dm.db.Exec(`
@@ -185,6 +224,27 @@ func TestReadSkill_IsLatestFromMetadata(t *testing.T) {
 	}
 	if !skill.IsLatest {
 		t.Error("IsLatest = false, want true from metadata.is_latest")
+	}
+}
+
+func TestReadSkill_ContentHash(t *testing.T) {
+	dm := NewTestDM(t)
+
+	insertRawSkill(t, dm, "skill:agentshell-v2.0.0", "agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody")
+	const wantHash = "abc123def456"
+	_, err := dm.db.Exec(`UPDATE memories SET metadata = ? WHERE id = 'skill:agentshell-v2.0.0'`,
+		`{"is_latest":true,"content_hash":"`+wantHash+`"}`)
+	if err != nil {
+		t.Fatalf("set content_hash metadata: %v", err)
+	}
+
+	skill, err := dm.ReadSkill("skill:agentshell-v2.0.0", "")
+	if err != nil {
+		t.Fatalf("ReadSkill: %v", err)
+	}
+	if skill.ContentHash != wantHash {
+		t.Errorf("ContentHash = %q, want %q", skill.ContentHash, wantHash)
 	}
 }
 
