@@ -65,6 +65,11 @@ func NewRouter() *CommandRouter {
 		"ingest":   {Name: "ingest", Description: "Import memories from external SQLite sources"},
 		"migrate":  {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
 
+		// Skills — versioned procedure rows with frontmatter + body
+		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
+		"list-skills": {Name: "list-skills", Description: "List skills (scope: all|local|shared)", MinArgs: 0, MaxArgs: 1},
+		"read-skill":  {Name: "read-skill", Description: "Read a skill by name (or id) and optional version", MinArgs: 1, MaxArgs: 2},
+
 		"mode":       {Name: "mode", Description: "Mode operations"},
 		"wake":       {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":         {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
@@ -261,6 +266,12 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleCall(args[1:])
 	case "evidence":
 		return handleEvidence(args[1:])
+	case "save-skill":
+		return handleSaveSkill(args[1:])
+	case "list-skills":
+		return handleListSkills(args[1:])
+	case "read-skill":
+		return handleReadSkill(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
