@@ -10,6 +10,7 @@ package internal
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,14 +19,13 @@ import (
 // are populated from the frontmatter block; non-frontmatter is the
 // body markdown.
 type SkillFrontmatter struct {
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description"`
-	WhenToUse   string            `yaml:"when_to_use"`
-	Domain      string            `yaml:"domain"`
-	Version     string            `yaml:"version"`
-	Constraints []string          `yaml:"constraints"`
-	Steps       []SkillStep       `yaml:"steps"`
-	Extra       map[string]string `yaml:",inline"`
+	Name        string      `yaml:"name"`
+	Description string      `yaml:"description"`
+	WhenToUse   string      `yaml:"when_to_use"`
+	Domain      string      `yaml:"domain"`
+	Version     string      `yaml:"version"`
+	Constraints []string    `yaml:"constraints"`
+	Steps       []SkillStep `yaml:"steps"`
 }
 
 // SkillStep is one ordered step in a skill's procedure.
@@ -43,6 +43,7 @@ func ParseSkillFrontmatter(content string) (SkillFrontmatter, string, error) {
 		return SkillFrontmatter{}, "", fmt.Errorf("frontmatter missing: must start with %q", fence)
 	}
 	rest := strings.TrimPrefix(content, fence+"\n")
+	// Like mode and persona parsing, this treats the first delimiter as closing.
 	idx := strings.Index(rest, "\n"+fence)
 	if idx < 0 {
 		return SkillFrontmatter{}, "", fmt.Errorf("frontmatter unterminated")
@@ -66,8 +67,27 @@ func ParseSkillFrontmatter(content string) (SkillFrontmatter, string, error) {
 
 // SkillIDForNameAndVersion builds the canonical id for a skill row.
 // Format: skill:<name>-v<semver>
-func SkillIDForNameAndVersion(name, version string) string {
-	return fmt.Sprintf("skill:%s-v%s", name, version)
+func SkillIDForNameAndVersion(name, version string) (string, error) {
+	if err := validateSkillNameAndVersion(name, version); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("skill:%s-v%s", name, version), nil
+}
+
+func validateSkillNameAndVersion(name, version string) error {
+	if name == "" {
+		return fmt.Errorf("skill name must not be empty")
+	}
+	if version == "" {
+		return fmt.Errorf("skill version must not be empty")
+	}
+	if strings.ContainsRune(name, ':') || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("invalid skill name %q: must not contain colons or whitespace", name)
+	}
+	if strings.ContainsRune(version, ':') || strings.IndexFunc(version, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("invalid skill version %q: must not contain colons or whitespace", version)
+	}
+	return nil
 }
 
 // ParseNameAndVersionFromID extracts the (name, version) pair from a
@@ -83,5 +103,9 @@ func ParseNameAndVersionFromID(id string) (string, string, error) {
 	if idx < 0 {
 		return "", "", fmt.Errorf("id %q missing -v<version> suffix", id)
 	}
-	return rest[:idx], rest[idx+2:], nil
+	name, version := rest[:idx], rest[idx+2:]
+	if err := validateSkillNameAndVersion(name, version); err != nil {
+		return "", "", fmt.Errorf("invalid skill id %q: %w", id, err)
+	}
+	return name, version, nil
 }
