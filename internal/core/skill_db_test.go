@@ -52,6 +52,25 @@ func TestReadSkill_ByExactID(t *testing.T) {
 	}
 }
 
+func TestReadSkill_IsLatestFromMetadata(t *testing.T) {
+	dm := NewTestDM(t)
+
+	insertRawSkill(t, dm, "skill:agentshell-v2.0.0", "agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody")
+	_, err := dm.db.Exec(`UPDATE memories SET metadata = '{"is_latest":true}' WHERE id = 'skill:agentshell-v2.0.0'`)
+	if err != nil {
+		t.Fatalf("set is_latest metadata: %v", err)
+	}
+
+	skill, err := dm.ReadSkill("skill:agentshell-v2.0.0", "")
+	if err != nil {
+		t.Fatalf("ReadSkill: %v", err)
+	}
+	if !skill.IsLatest {
+		t.Error("IsLatest = false, want true from metadata.is_latest")
+	}
+}
+
 func TestReadSkill_ByNameLatestVersion(t *testing.T) {
 	dm := NewTestDM(t)
 
@@ -125,5 +144,59 @@ func TestListSkills_LocalScopeExcludesGlobal(t *testing.T) {
 	}
 	if len(local) != 0 {
 		t.Errorf("local scope should exclude global, got %d", len(local))
+	}
+}
+
+func TestListSkills_SharedScopeIncludesGlobal(t *testing.T) {
+	dm := NewTestDM(t)
+
+	insertRawSkill(t, dm, "skill:local-v1.0.0", "local", "1.0.0",
+		"---\nname: local\nversion: 1.0.0\n---\nbody")
+	insertRawSkill(t, dm, "skill:global-v1.0.0", "global", "1.0.0",
+		"---\nname: global\nversion: 1.0.0\n---\nbody")
+	_, err := dm.db.Exec(`UPDATE memories SET is_global = 1 WHERE id = 'skill:global-v1.0.0'`)
+	if err != nil {
+		t.Fatalf("mark global: %v", err)
+	}
+
+	shared, err := dm.ListSkills("shared")
+	if err != nil {
+		t.Fatalf("ListSkills shared: %v", err)
+	}
+	if len(shared) != 1 {
+		t.Fatalf("shared scope got %d skills, want 1", len(shared))
+	}
+	if shared[0].ID != "skill:global-v1.0.0" {
+		t.Errorf("shared skill = %q, want global skill", shared[0].ID)
+	}
+}
+
+func TestListSkills_EmptyScopeDefaultsToAll(t *testing.T) {
+	dm := NewTestDM(t)
+
+	insertRawSkill(t, dm, "skill:local-v1.0.0", "local", "1.0.0",
+		"---\nname: local\nversion: 1.0.0\n---\nbody")
+	insertRawSkill(t, dm, "skill:global-v1.0.0", "global", "1.0.0",
+		"---\nname: global\nversion: 1.0.0\n---\nbody")
+	_, err := dm.db.Exec(`UPDATE memories SET is_global = 1 WHERE id = 'skill:global-v1.0.0'`)
+	if err != nil {
+		t.Fatalf("mark global: %v", err)
+	}
+
+	all, err := dm.ListSkills("all")
+	if err != nil {
+		t.Fatalf("ListSkills all: %v", err)
+	}
+	defaulted, err := dm.ListSkills("")
+	if err != nil {
+		t.Fatalf("ListSkills empty scope: %v", err)
+	}
+	if len(defaulted) != len(all) {
+		t.Fatalf("empty scope got %d skills, all got %d", len(defaulted), len(all))
+	}
+	for i := range all {
+		if defaulted[i] != all[i] {
+			t.Errorf("skill %d differs: empty scope = %+v, all = %+v", i, defaulted[i], all[i])
+		}
 	}
 }
