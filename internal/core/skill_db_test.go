@@ -17,7 +17,6 @@
 package internal
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -117,11 +116,9 @@ func TestSaveSkill_DuplicateVersionWithForce(t *testing.T) {
 		t.Errorf("force should overwrite same id, got %s vs %s", id1, id2)
 	}
 
-	// Read back to confirm in-place overwrite. The body substring check
-	// (rather than full equality) avoids coupling to the frontmatter
-	// parser's whitespace handling — what we're verifying here is that
-	// the second write's content reached the row, not body extraction
-	// details that belong to ParseSkillFrontmatter's own test suite.
+	// Read back to confirm in-place overwrite. The body should be the
+	// full markdown after the closing fence, with a leading newline
+	// stripped (matching ParseSkillFrontmatter's contract).
 	over, err := dm.ReadSkill(id1, "")
 	if err != nil {
 		t.Fatalf("ReadSkill after force: %v", err)
@@ -129,11 +126,8 @@ func TestSaveSkill_DuplicateVersionWithForce(t *testing.T) {
 	if over.Version != "1.0.0" {
 		t.Errorf("version = %q, want 1.0.0", over.Version)
 	}
-	if !strings.Contains(over.Body, "OVERWRITTEN") {
-		t.Errorf("body = %q, want to contain OVERWRITTEN (force overwrite should update body)", over.Body)
-	}
-	if strings.Contains(over.Body, "ORIGINAL") {
-		t.Errorf("body = %q still contains ORIGINAL (force overwrite should not retain old content)", over.Body)
+	if over.Body != "OVERWRITTEN" {
+		t.Errorf("body = %q, want OVERWRITTEN (force overwrite should replace body)", over.Body)
 	}
 }
 

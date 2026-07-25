@@ -49,7 +49,7 @@ func ParseSkillFrontmatter(content string) (SkillFrontmatter, string, error) {
 		return SkillFrontmatter{}, "", fmt.Errorf("frontmatter unterminated")
 	}
 	yamlBlock := rest[:idx]
-	after := rest[idx+len(fence):]
+	after := rest[idx+len("\n"+fence):]
 	body := strings.TrimPrefix(after, "\n")
 
 	var fm SkillFrontmatter
