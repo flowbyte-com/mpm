@@ -147,6 +147,9 @@ func handleReadSkill(args []string) int {
 		fmt.Printf("\nSteps:\n")
 		for i, s := range skill.Steps {
 			fmt.Printf("  %d. %s\n", i+1, s.Call)
+			if s.ArgsFrom != "" {
+				fmt.Printf("     args_from: %s\n", s.ArgsFrom)
+			}
 		}
 	}
 	fmt.Printf("\n%s\n", skill.Body)
