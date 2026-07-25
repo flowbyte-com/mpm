@@ -75,9 +75,34 @@ func TestParseSkillFrontmatter_Malformed(t *testing.T) {
 }
 
 func TestSkillIDForNameAndVersion(t *testing.T) {
-	id := SkillIDForNameAndVersion("agentshell", "2.0.0")
+	id, err := SkillIDForNameAndVersion("agentshell", "2.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if id != "skill:agentshell-v2.0.0" {
 		t.Errorf("got %q, want skill:agentshell-v2.0.0", id)
+	}
+}
+
+func TestSkillIDForNameAndVersion_RejectsInvalidInputs(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+	}{
+		{"", "1.0.0"},
+		{"agentshell", ""},
+		{"agent:shell", "1.0.0"},
+		{"agent shell", "1.0.0"},
+		{"agentshell", "1:0.0"},
+		{"agentshell", "1.0.0\nattack"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+tc.version, func(t *testing.T) {
+			if _, err := SkillIDForNameAndVersion(tc.name, tc.version); err == nil {
+				t.Errorf("expected error for name %q and version %q", tc.name, tc.version)
+			}
+		})
 	}
 }
 
@@ -88,5 +113,22 @@ func TestParseNameAndVersionFromID(t *testing.T) {
 	}
 	if name != "agentshell" || ver != "2.0.0" {
 		t.Errorf("got (%q, %q), want (agentshell, 2.0.0)", name, ver)
+	}
+}
+
+func TestParseNameAndVersionFromID_RejectsInvalidInputs(t *testing.T) {
+	ids := []string{
+		"skill:-v1.0.0",
+		"skill:agentshell-v",
+		"skill:agent shell-v1.0.0",
+		"skill:agentshell-v1:0.0",
+	}
+
+	for _, id := range ids {
+		t.Run(id, func(t *testing.T) {
+			if _, _, err := ParseNameAndVersionFromID(id); err == nil {
+				t.Errorf("expected error for id %q", id)
+			}
+		})
 	}
 }
