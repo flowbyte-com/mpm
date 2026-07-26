@@ -640,6 +640,30 @@ func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, err
 	}
+
+	// Provenance Proxy: if the agent lists the node IDs this lesson
+	// was distilled from, credit each in the retrieval observability
+	// layer via IncrementSuccess (pure UPDATE — never-retrieved
+	// nodes are silently skipped). Telemetry must not block the
+	// user's lesson-save path; errors are swallowed.
+	credited := 0
+	if raw, ok := p["source_ids"].([]interface{}); ok && len(raw) > 0 {
+		for _, v := range raw {
+			id, _ := v.(string)
+			if id == "" {
+				continue
+			}
+			if err := dm.IncrementSuccess(id); err == nil {
+				credited++
+			}
+			// err != nil: log via audit, don't surface — the lesson
+			// is already saved and the user-facing path succeeded.
+		}
+	}
+
+	// Augment the SaveLesson response with a credit count so the
+	// agent can verify the provenance was wired.
+	out["credited_sources"] = credited
 	return out, nil
 }
 

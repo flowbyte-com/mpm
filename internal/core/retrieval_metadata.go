@@ -71,6 +71,34 @@ func (dm *DatabaseManager) RecordRetrievalSuccess(nodeID, nodeType string) error
 	return nil
 }
 
+// IncrementSuccess bumps success_count by 1 for a node via a pure
+// UPDATE — no INSERT path. Used by the save_lesson handler to credit
+// source_ids when an agent distils a lesson from prior retrievals.
+//
+// Pure UPDATE is deliberate: a node that was never retrieved cannot
+// have succeeded. The provenance proxy records "this retrieval led to
+// durable knowledge", and that signal only exists for nodes with a
+// prior retrieval row. Incrementing success_count for an unseen node
+// would fabricate telemetry.
+//
+// Returns nil even when no row matches (UPDATE matches zero rows is
+// not an error). Errors come from the driver only.
+func (dm *DatabaseManager) IncrementSuccess(nodeID string) error {
+	if nodeID == "" {
+		return fmt.Errorf("IncrementSuccess: node_id is empty")
+	}
+	_, err := dm.db.Exec(`
+		UPDATE retrieval_metadata
+		SET success_count = success_count + 1,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE node_id = ?
+	`, nodeID)
+	if err != nil {
+		return fmt.Errorf("IncrementSuccess(%q): %w", nodeID, err)
+	}
+	return nil
+}
+
 // GetRetrievalMetadata fetches the metadata row for a node, returning
 // a zero-valued RetrievalMetadata when the row does not exist. Used by
 // the explain_retrieval MCP tool to render per-node diagnostics.
