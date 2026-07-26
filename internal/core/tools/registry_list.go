@@ -491,6 +491,12 @@ var Registry = []Tool{
 		Handler:     handlePromoteSkillToGlobal,
 	},
 	{
+		Name:        "delete_skill",
+		Description: "Soft-delete a skill by id. The row stays in the DB for forensics (deleted_at is set); read_skill and list_skills filter it out. Idempotent: deleting an unknown id is a no-op. Required: skill_id.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"skill_id":{"type":"string"}},"required":["skill_id"]}`),
+		Handler:     handleDeleteSkill,
+	},
+	{
 		// Phase 5a: opportunistic scheduler. target_time accepts an
 		// absolute unix epoch OR a relative duration string ("24h", "2h",
 		// "30m", "7d"). recurring_rule is stored as a hint; the agent
