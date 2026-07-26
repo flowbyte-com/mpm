@@ -71,8 +71,8 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "save_lesson",
-		Description: "Persist a lesson learned (warning / practice / insight).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["fact"]}`),
+		Description: "Persist a lesson learned (warning / practice / insight). Optional `source_ids` array credits the listed node IDs with a success_count increment in the retrieval observability layer (only nodes that were previously retrieved receive the credit; never-retrieved nodes are silently skipped, not fabricated). Use this when the lesson is distilled from prior retrievals so the Provenance Proxy can trace durable knowledge back to its source nodes.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"source_ids":{"type":"array","items":{"type":"string"},"description":"Optional list of node IDs (memories, skills, lessons) that this lesson was distilled from. Each id receives a success_count increment in the retrieval observability layer; ids that have never been retrieved are silently skipped."}},"required":["fact"]}`),
 		Handler:     handleSaveLesson,
 	},
 	{

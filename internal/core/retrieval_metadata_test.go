@@ -138,3 +138,86 @@ func (blendedRanker) Score(ftsScore float64, meta RetrievalMetadata) float64 {
 	}
 	return ftsScore
 }
+// TestIncrementSuccess_PureUpdate verifies that IncrementSuccess only
+// fires for nodes with a prior retrieval row — a never-retrieved
+// node must not receive a fabricated success_count. This is the
+// semantic that distinguishes "the agent saw this and learned from
+// it" (real success) from "the agent mentioned this id but never
+// looked at it" (no success signal).
+func TestIncrementSuccess_PureUpdate(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Pre-record a retrieval so the row exists.
+	if err := dm.RecordRetrieval("mem-real", "memory"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// IncrementSuccess on a retrieved node bumps success_count.
+	if err := dm.IncrementSuccess("mem-real"); err != nil {
+		t.Fatalf("IncrementSuccess on retrieved: %v", err)
+	}
+	meta, _ := dm.GetRetrievalMetadata("mem-real")
+	if meta.SuccessCount != 1 {
+		t.Errorf("SuccessCount = %d, want 1", meta.SuccessCount)
+	}
+
+	// Second IncrementSuccess bumps again.
+	_ = dm.IncrementSuccess("mem-real")
+	meta, _ = dm.GetRetrievalMetadata("mem-real")
+	if meta.SuccessCount != 2 {
+		t.Errorf("after second IncrementSuccess, SuccessCount = %d, want 2", meta.SuccessCount)
+	}
+
+	// IncrementSuccess on a NEVER-RETRIEVED node: no row created,
+	// no error, no fabricated success_count. GetRetrievalMetadata
+	// still returns zero-valued because the row does not exist.
+	if err := dm.IncrementSuccess("mem-never-retrieved"); err != nil {
+		t.Fatalf("IncrementSuccess on unknown: %v", err)
+	}
+	meta, _ = dm.GetRetrievalMetadata("mem-never-retrieved")
+	if meta.SuccessCount != 0 {
+		t.Errorf("never-retrieved SuccessCount = %d, want 0 (must not fabricate)", meta.SuccessCount)
+	}
+}
+
+// TestSaveLessonSourceIds_CreditsSuccessCount is the Provenance Proxy
+// contract: when an agent distills a lesson and lists the source_ids,
+// each previously-retrieved source receives a success_count bump.
+// The lesson's own row is unaffected. Never-retrieved sources are
+// silently skipped.
+func TestSaveLessonSourceIds_CreditsSuccessCount(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Seed: three memories, two retrieved, one never.
+	_ = dm.RecordRetrieval("mem-source-A", "memory")
+	_ = dm.RecordRetrieval("mem-source-B", "memory")
+
+	// Call IncrementSuccess directly to simulate what the handler
+	// does (handler is exercised through the registry/handler test
+	// path; the IncrementSuccess unit test pins the contract).
+	_ = dm.IncrementSuccess("mem-source-A")
+	_ = dm.IncrementSuccess("mem-source-A")
+	_ = dm.IncrementSuccess("mem-source-B")
+	_ = dm.IncrementSuccess("mem-source-never") // no-op
+
+	metaA, _ := dm.GetRetrievalMetadata("mem-source-A")
+	if metaA.SuccessCount != 2 {
+		t.Errorf("mem-source-A SuccessCount = %d, want 2", metaA.SuccessCount)
+	}
+	metaB, _ := dm.GetRetrievalMetadata("mem-source-B")
+	if metaB.SuccessCount != 1 {
+		t.Errorf("mem-source-B SuccessCount = %d, want 1", metaB.SuccessCount)
+	}
+	metaNever, _ := dm.GetRetrievalMetadata("mem-source-never")
+	if metaNever.SuccessCount != 0 {
+		t.Errorf("mem-source-never SuccessCount = %d, want 0", metaNever.SuccessCount)
+	}
+}
+
+// TestIncrementSuccess_RejectsEmptyArg pins the defensive contract.
+func TestIncrementSuccess_RejectsEmptyArg(t *testing.T) {
+	dm := NewTestDM(t)
+	if err := dm.IncrementSuccess(""); err == nil {
+		t.Error("IncrementSuccess with empty nodeID: got nil error, want error")
+	}
+}
