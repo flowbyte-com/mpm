@@ -1285,6 +1285,30 @@ The `Exit Criteria` line is the discipline that prevents context crunch: without
 **Decision boundary vs `save_to_memory`:** the scratchpad is for *tentative* thoughts — working hypotheses, half-formed theories, intermediate conclusions that may need revision. `save_to_memory` is for *committed* facts. The promote path is the gate: if you're not ready to defend a thought against the security scanner and future challenges, it belongs on the scratchpad first.
 
 **Trade-off vs. auto-promote-on-flush:** `flush` never auto-creates a memory. The agent must explicitly `promote_scratchpad` and pass the scanner. This is the right friction: tentative thoughts should be deliberate before they become permanent knowledge. A flush that auto-promoted would silently double the agent's memory-write surface, bypassing the scanner's intent.
+#### Retrieval Observability Layer & Provenance Proxy
+
+*Per-node telemetry for adaptive retrieval — reuse and success counts credited automatically when nodes are pulled into agent working memory or cited as lesson sources.*
+
+The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory, Lesson, Decision, Theory, Skill). It tracks two signals: how often a node was surfaced into agent working memory (`reuse_count`, `last_retrieved_at`), and how often it actively helped produce durable knowledge (`success_count`). The schema is observability only — search ranking, FTS sorting, and cognitive-object schemas are unchanged. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today `DefaultRanker` returns the FTS score unchanged.
+
+**Automatic instrumentation.** The agent never manages these stats explicitly. Every `read_wake_context` boot, every `query_long_term_memory` result, every `search_lessons` result, and every `read_skill` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
+
+**Provenance Proxy via `save_lesson`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+
+```json
+{
+  "fact": "When SaveSkill is force-overwriting an older version, the semver comparison must run — hardcoded is_latest=true via the metadata init was the production bug.",
+  "type": "warning",
+  "tags": ["mpm", "skills", "semver"],
+  "source_ids": ["skill:agentshell-v1.0.0", "skill:agentshell-v2.0.0"]
+}
+```
+
+The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`, `memory:`, `dec-`, `theory:` / `the-`) and falls back to `memory` for unknown formats. The response includes a `credited_sources` count so the agent can verify the provenance was wired.
+
+**Diagnose with `explain_retrieval`.** The new MCP tool runs a standard FTS search and returns a per-node diagnostic markdown block: Base FTS Match score, Reuse Count, Last Retrieved timestamp, Success Count. The retrieval ordering is identical to `query_long_term_memory` — the FTS `bm25()` rank is preserved bit-for-bit. `explain_retrieval` layers observability on top; it does not alter ranking.
+
+**Why observability first, ranking later.** The system records retrieval patterns for a month before any ranker consults them. Today, `reuse_count` and `success_count` are facts the operator can read; tomorrow, a future ranker can use the same data to promote frequently-cited memories and demote never-reused ones. The schema, the instrumentation, and the UPSERT path are the durable substrate; the ranker is the consumer that hasn't shipped yet.
 #### XITL Stance Hot-Swap
 
 *Runtime mode/persona switching without restart — the directive prints to stdout, OpenClaw injects, the agent adopts on next turn.*

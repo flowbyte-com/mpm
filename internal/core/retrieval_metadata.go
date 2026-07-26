@@ -71,30 +71,39 @@ func (dm *DatabaseManager) RecordRetrievalSuccess(nodeID, nodeType string) error
 	return nil
 }
 
-// IncrementSuccess bumps success_count by 1 for a node via a pure
-// UPDATE — no INSERT path. Used by the save_lesson handler to credit
-// source_ids when an agent distils a lesson from prior retrievals.
+// IncrementSuccess bumps success_count by 1 for a node via INSERT
+// ... ON CONFLICT DO UPDATE. Used by the save_lesson handler to
+// credit source_ids when an agent distils a lesson from prior
+// retrievals.
 //
-// Pure UPDATE is deliberate: a node that was never retrieved cannot
-// have succeeded. The provenance proxy records "this retrieval led to
-// durable knowledge", and that signal only exists for nodes with a
-// prior retrieval row. Incrementing success_count for an unseen node
-// would fabricate telemetry.
+// The UPSERT form (not pure UPDATE) accommodates citations for
+// nodes that haven't been retrieved via the read hooks in this
+// turn: an agent may legitimately cite a node by id from prior-
+// session memory without having surfaced it via ReadSkill /
+// query_long_term_memory / etc. Pure UPDATE would silently skip
+// those citations; UPSERT records them as first-time successes.
 //
-// Returns nil even when no row matches (UPDATE matches zero rows is
-// not an error). Errors come from the driver only.
-func (dm *DatabaseManager) IncrementSuccess(nodeID string) error {
+// nodeType is the cognitive-object type for the citation (memory,
+// lesson, skill, decision, theory). When the caller doesn't know
+// the type, pass "memory" — the schema's NOT NULL constraint
+// requires a value, and the alternative is fabricating a sentinel
+// like "unknown" that pollutes the telemetry taxonomy.
+func (dm *DatabaseManager) IncrementSuccess(nodeID, nodeType string) error {
 	if nodeID == "" {
 		return fmt.Errorf("IncrementSuccess: node_id is empty")
 	}
+	if nodeType == "" {
+		nodeType = "memory"
+	}
 	_, err := dm.db.Exec(`
-		UPDATE retrieval_metadata
-		SET success_count = success_count + 1,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE node_id = ?
-	`, nodeID)
+		INSERT INTO retrieval_metadata (node_id, node_type, reuse_count, last_retrieved_at, success_count)
+		VALUES (?, ?, 0, NULL, 1)
+		ON CONFLICT(node_id) DO UPDATE SET
+			success_count = retrieval_metadata.success_count + 1,
+			updated_at = CURRENT_TIMESTAMP
+	`, nodeID, nodeType)
 	if err != nil {
-		return fmt.Errorf("IncrementSuccess(%q): %w", nodeID, err)
+		return fmt.Errorf("IncrementSuccess(%q, %q): %w", nodeID, nodeType, err)
 	}
 	return nil
 }
