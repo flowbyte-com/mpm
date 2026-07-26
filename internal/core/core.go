@@ -253,6 +253,7 @@ type CoreDB interface {
 	// fail the user-facing path.
 	RecordRetrieval(nodeID, nodeType string) error
 	RecordRetrievalSuccess(nodeID, nodeType string) error
+	IncrementSuccess(nodeID string) error
 	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
 }
 
