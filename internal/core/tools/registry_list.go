@@ -340,7 +340,29 @@ var Registry = []Tool{
 	// across the surface and matches the AST guard rail's expectation.
 	{
 		Name:        "flush_scratchpad",
-		Description: "Save or update a volatile working thesis for a session. Use this to explicitly checkpoint reasoning that isn't ready for permanent memory. Idempotent per session_id.",
+		Description: `Overwrites the ephemeral scratchpad.
+
+CRITICAL USAGE RULE: This is your Working Context. Use this to avoid context crunch during multi-step tasks.
+You must maintain your execution state here. Do not append infinitely; overwrite to keep it concise.
+
+When starting a complex task, scaffold your state using this exact markdown template:
+
+Working Context
+Goal: [What are we trying to achieve?]
+Current State: [What was the last action taken?]
+Completed:
+
+[x] Step 1
+Next Actions:
+
+[ ] Step 2
+Open Questions:
+
+[Unknowns to resolve]
+Relevant Context: [IDs of memories/skills in use]
+Exit Criteria: [What constitutes completion? When do we wipe this?]
+
+When the Exit Criteria is met, you MUST wipe this scratchpad clean (pass an empty string). If you learned something durable during the task, use save_lesson before wiping.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -354,7 +376,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "read_scratchpad",
-		Description: "Read the current ephemeral scratchpad for a specific session.",
+		Description: "Read the agent's current Working Context (ephemeral scratchpad) for a specific session. Use this at session start to recover state from a prior session's flush_scratchpad, or mid-task to verify the latest checkpoint.",
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
