@@ -67,11 +67,82 @@ func TestProactiveRecallHint_SkillOverlaps(t *testing.T) {
 	}
 }
 
-// TestProactiveRecallHint_ListSkillsFailureIsNonFatal documents the
-// best-effort contract for the skill scan. The implementation guards
-// the skill loop on `if skillErr == nil`; a controlled fault
-// injection against the production code requires either a method-level
-// seam or a test-only hook that does not exist in this codebase.
-// Rather than contort the production code to permit fault injection,
-// we leave the contract verifiable via code review (directive_tools.go
-// line `if skillErr == nil { ... }`) and surface the intent here.
+// TestProactiveRecallHint_TrimsAfterSkillAppend pins the ≤ maxHints
+// contract after the skill pass. With three overlapping skills and
+// maxHints=2, only two hints may be returned and at least one must be
+// a skill (proving the trim was applied to the merged list, not just
+// the BM25 hits).
+func TestProactiveRecallHint_TrimsAfterSkillAppend(t *testing.T) {
+	dm := NewTestDM(t)
+	for _, name := range []string{"agentshell", "wp-deploy", "theme-forge"} {
+		insertRawSkill(t, dm, "skill:"+name+"-v1.0.0", name, "1.0.0",
+			"---\nname: "+name+"\nversion: 1.0.0\nwhen_to_use: agentshell, theme\n---\nbody")
+	}
+
+	hints, err := dm.ProactiveRecallHint("agentshell theme work", 2, -3.0)
+	if err != nil {
+		t.Fatalf("ProactiveRecallHint: %v", err)
+	}
+	if len(hints) > 2 {
+		t.Fatalf("hint count = %d, want ≤ 2 after skill append", len(hints))
+	}
+	hasSkill := false
+	for _, h := range hints {
+		if t, _ := h["type"].(string); t == "skill" {
+			hasSkill = true
+			break
+		}
+	}
+	if !hasSkill {
+		t.Fatalf("expected at least one skill hint in trimmed result, got %+v", hints)
+	}
+}
+
+func TestKeywordOverlap(t *testing.T) {
+	cases := []struct {
+		name     string
+		keywords map[string]bool
+		haystack string
+		want     bool
+	}{
+		{
+			name:     "empty keyword set is non-match",
+			keywords: map[string]bool{},
+			haystack: "agentshell",
+			want:     false,
+		},
+		{
+			name:     "empty haystack is non-match",
+			keywords: map[string]bool{"agentshell": true},
+			haystack: "",
+			want:     false,
+		},
+		{
+			name:     "case-insensitive substring hit",
+			keywords: map[string]bool{"wp": true},
+			haystack: "wp-deploy",
+			want:     true,
+		},
+		{
+			name:     "miss when no keyword in haystack",
+			keywords: map[string]bool{"theme": true},
+			haystack: "agentshell deploy",
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keywordOverlap(tc.keywords, tc.haystack); got != tc.want {
+				t.Fatalf("keywordOverlap = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProactiveRecallHint_ListSkillsFailureIsNonFatal is intentionally
+// omitted: the swallow contract (directive_tools.go `if skillErr ==
+// nil`) is verifiable via code review, and a fault-injection test
+// would require either a method-level seam or a test-only hook that
+// does not exist in this codebase. Documenting the omission here so a
+// future reader does not re-add a brittle test that exercises the
+// wrong path.

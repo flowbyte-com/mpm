@@ -91,18 +91,22 @@ func (dm *DatabaseManager) ProactiveRecallHint(conversationText string, maxHints
 				"type":    "skill",
 				"name":    s.Name,
 				"version": s.Version,
-				// 0.5 is a sentinel, not a relevance signal: the
-				// keyword overlap pass has no BM25 analogue and
-				// shouldn't pretend to. Consumers that re-rank by
+				// SkillHintScoreSentinel is a sentinel, not a relevance
+				// signal: the keyword overlap pass has no BM25 analogue
+				// and shouldn't pretend to. Consumers that re-rank by
 				// score should treat skill hints as boolean triggers,
 				// not comparable to BM25-decision/theory hits.
-				"score": 0.5,
+				"score": SkillHintScoreSentinel,
 			})
 		}
 	}
 
-	// Appending skills after the epistemology pass may push past
-	// maxHints; trim so the contract (≤ maxHints items) still holds.
+	// Trim to maxHints. Appending skills after the BM25-ranked
+	// decision/theory hits can displace the tail of the BM25 ranking
+	// when more overlapping skills exist than the budget allows; that
+	// displacement is intentional — `when_to_use` is author-curated
+	// taxonomy and a stronger signal than BM25 on short documents, so
+	// surfaced skills take priority over low-ranked BM25 hits.
 	if len(overlaps) > maxHints {
 		overlaps = overlaps[:maxHints]
 	}
@@ -134,3 +138,10 @@ func keywordOverlap(keywords map[string]bool, haystack string) bool {
 func FormatSkillHint(s SkillSummary) string {
 	return fmt.Sprintf("skill %q (v%s) applies here. when_to_use: %s. Read with mpm call read_skill.", s.Name, s.Version, s.WhenToUse)
 }
+
+// SkillHintScoreSentinel is the score assigned to skill hints surfaced
+// by ProactiveRecallHint. It is NOT a relevance signal — see the
+// package doc. Exported so consumers can grep for the sentinel value
+// and treat skill hints as boolean triggers rather than re-ranking by
+// score.
+const SkillHintScoreSentinel = 0.5
