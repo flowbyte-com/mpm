@@ -1,11 +1,8 @@
 // skill_db.go — DB methods for the skills collection.
 //
 // Read path mirrors directive_tools.go: indexed lookup, single-statement
-// queries, no LLM calls on the hot path. The full save / promote / shred
-// surface lands in Tasks 3, 10, and 12; this file owns only the read side
-// for now (and the three stub methods required to satisfy the CoreDB
-// interface contract — they return an explicit "not yet implemented" error
-// until their owning tasks ship).
+// queries, no LLM calls on the hot path. SaveSkill, PromoteSkillToGlobal,
+// and ShredSkill are the only writers.
 
 package internal
 
@@ -13,17 +10,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 )
-
-// ErrSkillNotImplemented is returned by the save / promote / shred
-// methods that ship in Tasks 3, 10, and 12. Surfaced here so consumers
-// that import the CoreDB interface (CLI, MCP) get a typed error rather
-// than a generic one when they accidentally call a not-yet-implemented
-// method on a build that omits the later tasks.
-var ErrSkillNotImplemented = errors.New("skill method not yet implemented (see Skills layer plan)")
 
 // ReadSkill fetches a skill by id (exact) or name (latest version).
 // version is ignored when name is given; pass exact id (skill:<name>-v<ver>)
@@ -404,10 +393,32 @@ func (dm *DatabaseManager) PromoteSkillToGlobal(skillID string, confirm bool) er
 	return nil
 }
 
-// ShredSkill hard-deletes a skill row. Stubbed here; real implementation
-// lands in Task 12.
+// ShredSkill soft-deletes a skill by setting deleted_at. The row stays
+// in the DB for forensics; ReadSkill and ListSkills exclude it via the
+// deleted_at IS NULL clause already present in those queries.
+//
+// Silent on missing id (zero rows affected), matching the
+// delete-by-mark pattern: the caller already knows the skill exists
+// to want to delete it, and a missing id is not an error condition.
+// A row that is already soft-deleted is also a no-op (the
+// `deleted_at IS NULL` guard) — shredding is idempotent.
+//
+// The collection='skills' guard mirrors PromoteSkillToGlobal: this
+// surface shouldn't be able to delete a non-skill row by accident.
 func (dm *DatabaseManager) ShredSkill(skillID string) error {
-	return fmt.Errorf("ShredSkill(%q): %w", skillID, ErrSkillNotImplemented)
+	db := dm.SQLDB()
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	_, err := db.Exec(`
+		UPDATE memories
+		SET deleted_at = strftime('%s','now')
+		WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL
+	`, skillID)
+	if err != nil {
+		return fmt.Errorf("shred skill: %w", err)
+	}
+	return nil
 }
 
 // parseJSONTags and parseJSONMeta are thin wrappers around encoding/json
