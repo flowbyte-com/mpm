@@ -179,16 +179,38 @@ func GetOpenClawDBPath() string {
 // system-level paths (/var/lib/mpm) on 2026-07-18. Silently writing
 // to the operator's home directory caused permission errors under
 // systemd User=v where the unit ran before login or lacked write
-// access to /home. Callers that omit MPM_WORKSPACE now get cwd,
-// which is the right behaviour for tests (t.Setenv redirects it)
-// and loud enough for ad-hoc CLI use to surface the misconfig.
+// access to /home. With the Lazy-Start Architecture in place
+// (AGENTS.md Session Startup step 2 starts the daemon post-`/home`
+// mount), that permission concern is no longer a hazard — `$HOME`
+// is always available when `GetMPMDir` runs from an agent wake,
+// and for non-agent callers the systemd-user `ExecStartPre`
+// delay-start drop-in keeps the daemon from running before the
+// mount is up. Falling back to CWD was the wrong trade: a daemon
+// launched from /var/log or /tmp would initialize the SQLite data
+// plane there, silently losing the entire procedural memory layer
+// on reboot. `$HOME/.mpm` is the only sane default for a
+// persistent background service.
 func GetMPMDir() string {
 	if envPath := os.Getenv("MPM_WORKSPACE"); envPath != "" {
 		os.MkdirAll(envPath, 0755)
 		return envPath
 	}
-	cwd, _ := os.Getwd()
-	return cwd
+
+	// os.UserHomeDir() handles the cross-platform nuances (sudo,
+	// containers, init systems where $HOME may be stripped or
+	// malformed). Cwd is the ultimate failsafe if even HOME is
+	// unreachable — it keeps the daemon from crashing on a truly
+	// broken environment, but the user will see the misconfig on
+	// next invocation.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		cwd, _ := os.Getwd()
+		return cwd
+	}
+
+	defaultPath := filepath.Join(home, ".mpm")
+	os.MkdirAll(defaultPath, 0755)
+	return defaultPath
 }
 
 // GetToxicPhrasesPath constructs the full path to the toxic phrases file
