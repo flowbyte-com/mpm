@@ -138,13 +138,14 @@ func (blendedRanker) Score(ftsScore float64, meta RetrievalMetadata) float64 {
 	}
 	return ftsScore
 }
-// TestIncrementSuccess_PureUpdate verifies that IncrementSuccess only
-// fires for nodes with a prior retrieval row — a never-retrieved
-// node must not receive a fabricated success_count. This is the
-// semantic that distinguishes "the agent saw this and learned from
-// it" (real success) from "the agent mentioned this id but never
-// looked at it" (no success signal).
-func TestIncrementSuccess_PureUpdate(t *testing.T) {
+// TestIncrementSuccess_UpsertBehavior pins the INSERT ... ON CONFLICT
+// DO UPDATE semantic. The 2026-07-26 spec change moved from pure
+// UPDATE to UPSERT so the Provenance Proxy can credit nodes that the
+// agent cites from prior-session memory without having surfaced them
+// via the read hooks in this turn. A citation is a legitimate
+// signal of utility even when the current session hasn't read the
+// node.
+func TestIncrementSuccess_UpsertBehavior(t *testing.T) {
 	dm := NewTestDM(t)
 
 	// Pre-record a retrieval so the row exists.
@@ -153,7 +154,7 @@ func TestIncrementSuccess_PureUpdate(t *testing.T) {
 	}
 
 	// IncrementSuccess on a retrieved node bumps success_count.
-	if err := dm.IncrementSuccess("mem-real"); err != nil {
+	if err := dm.IncrementSuccess("mem-real", "memory"); err != nil {
 		t.Fatalf("IncrementSuccess on retrieved: %v", err)
 	}
 	meta, _ := dm.GetRetrievalMetadata("mem-real")
@@ -162,29 +163,68 @@ func TestIncrementSuccess_PureUpdate(t *testing.T) {
 	}
 
 	// Second IncrementSuccess bumps again.
-	_ = dm.IncrementSuccess("mem-real")
+	_ = dm.IncrementSuccess("mem-real", "memory")
 	meta, _ = dm.GetRetrievalMetadata("mem-real")
 	if meta.SuccessCount != 2 {
 		t.Errorf("after second IncrementSuccess, SuccessCount = %d, want 2", meta.SuccessCount)
 	}
 
-	// IncrementSuccess on a NEVER-RETRIEVED node: no row created,
-	// no error, no fabricated success_count. GetRetrievalMetadata
-	// still returns zero-valued because the row does not exist.
-	if err := dm.IncrementSuccess("mem-never-retrieved"); err != nil {
+	// IncrementSuccess on a NEVER-RETRIEVED node: row is created
+	// with success_count=1, reuse_count=0, last_retrieved_at=NULL.
+	// This is the key semantic shift from the prior UPDATE-only
+	// implementation — the agent may legitimately cite a node from
+	// prior-session memory without having read it this turn.
+	if err := dm.IncrementSuccess("mem-never-retrieved", "memory"); err != nil {
 		t.Fatalf("IncrementSuccess on unknown: %v", err)
 	}
 	meta, _ = dm.GetRetrievalMetadata("mem-never-retrieved")
-	if meta.SuccessCount != 0 {
-		t.Errorf("never-retrieved SuccessCount = %d, want 0 (must not fabricate)", meta.SuccessCount)
+	if meta.SuccessCount != 1 {
+		t.Errorf("never-retrieved SuccessCount = %d, want 1 (UPSERT inserts first-time citations)", meta.SuccessCount)
+	}
+	if meta.ReuseCount != 0 {
+		t.Errorf("never-retrieved ReuseCount = %d, want 0", meta.ReuseCount)
+	}
+	if meta.LastRetrievedAt != "" {
+		t.Errorf("never-retrieved LastRetrievedAt = %q, want empty (never retrieved)", meta.LastRetrievedAt)
+	}
+	if meta.NodeType != "memory" {
+		t.Errorf("never-retrieved NodeType = %q, want memory", meta.NodeType)
+	}
+
+	// A second IncrementSuccess on the new row increments.
+	_ = dm.IncrementSuccess("mem-never-retrieved", "memory")
+	meta, _ = dm.GetRetrievalMetadata("mem-never-retrieved")
+	if meta.SuccessCount != 2 {
+		t.Errorf("after second IncrementSuccess on first-time row, SuccessCount = %d, want 2", meta.SuccessCount)
+	}
+}
+
+// TestIncrementSuccess_DefaultsNodeType pins the defensive contract
+// that an empty node_type falls back to "memory" — the schema's
+// NOT NULL constraint requires a value, and an unknown id format
+// must not block the citation path.
+func TestIncrementSuccess_DefaultsNodeType(t *testing.T) {
+	dm := NewTestDM(t)
+
+	if err := dm.IncrementSuccess("some-uuid", ""); err != nil {
+		t.Fatalf("IncrementSuccess with empty type: %v", err)
+	}
+	meta, _ := dm.GetRetrievalMetadata("some-uuid")
+	if meta.NodeType != "memory" {
+		t.Errorf("NodeType = %q, want memory (default for empty type)", meta.NodeType)
 	}
 }
 
 // TestSaveLessonSourceIds_CreditsSuccessCount is the Provenance Proxy
 // contract: when an agent distills a lesson and lists the source_ids,
-// each previously-retrieved source receives a success_count bump.
-// The lesson's own row is unaffected. Never-retrieved sources are
-// silently skipped.
+// each source receives a success_count bump. Previously-retrieved
+// sources see their existing count incremented; never-retrieved
+// sources get a fresh row with success_count=1.
+//
+// The handler invokes IncrementSuccess per source_id with the
+// inferred node_type; this test exercises the same path through
+// IncrementSuccess directly so the contract is pinned without
+// taking on the full handler/MCP test burden.
 func TestSaveLessonSourceIds_CreditsSuccessCount(t *testing.T) {
 	dm := NewTestDM(t)
 
@@ -192,13 +232,11 @@ func TestSaveLessonSourceIds_CreditsSuccessCount(t *testing.T) {
 	_ = dm.RecordRetrieval("mem-source-A", "memory")
 	_ = dm.RecordRetrieval("mem-source-B", "memory")
 
-	// Call IncrementSuccess directly to simulate what the handler
-	// does (handler is exercised through the registry/handler test
-	// path; the IncrementSuccess unit test pins the contract).
-	_ = dm.IncrementSuccess("mem-source-A")
-	_ = dm.IncrementSuccess("mem-source-A")
-	_ = dm.IncrementSuccess("mem-source-B")
-	_ = dm.IncrementSuccess("mem-source-never") // no-op
+	// Simulate the handler's per-source-id iteration.
+	_ = dm.IncrementSuccess("mem-source-A", "memory")
+	_ = dm.IncrementSuccess("mem-source-A", "memory")
+	_ = dm.IncrementSuccess("mem-source-B", "memory")
+	_ = dm.IncrementSuccess("mem-source-never", "memory") // first-time citation
 
 	metaA, _ := dm.GetRetrievalMetadata("mem-source-A")
 	if metaA.SuccessCount != 2 {
@@ -209,15 +247,15 @@ func TestSaveLessonSourceIds_CreditsSuccessCount(t *testing.T) {
 		t.Errorf("mem-source-B SuccessCount = %d, want 1", metaB.SuccessCount)
 	}
 	metaNever, _ := dm.GetRetrievalMetadata("mem-source-never")
-	if metaNever.SuccessCount != 0 {
-		t.Errorf("mem-source-never SuccessCount = %d, want 0", metaNever.SuccessCount)
+	if metaNever.SuccessCount != 1 {
+		t.Errorf("mem-source-never SuccessCount = %d, want 1 (UPSERT inserts first-time citation)", metaNever.SuccessCount)
 	}
 }
 
 // TestIncrementSuccess_RejectsEmptyArg pins the defensive contract.
 func TestIncrementSuccess_RejectsEmptyArg(t *testing.T) {
 	dm := NewTestDM(t)
-	if err := dm.IncrementSuccess(""); err == nil {
+	if err := dm.IncrementSuccess("", "memory"); err == nil {
 		t.Error("IncrementSuccess with empty nodeID: got nil error, want error")
 	}
 }
