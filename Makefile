@@ -39,15 +39,7 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-.PHONY: all build install service-scheduler service install-system-service uninstall-service clean test lint help
-=======
-.PHONY: all build install service-scheduler service uninstall-service gen-cli clean test lint help
->>>>>>> 93a47fd (feat(docs): CLI auto-gen catalogue via go/ast — walks r.Commands, injects into README §8)
-=======
-.PHONY: all build install service-scheduler service uninstall-service gen-cli clean test lint help
->>>>>>> 93a47fd (feat(docs): CLI auto-gen catalogue via go/ast — walks r.Commands, injects into README §8)
+.PHONY: all build install service-scheduler service install-system-service uninstall-service gen-cli clean test lint help
 
 all: build
 
