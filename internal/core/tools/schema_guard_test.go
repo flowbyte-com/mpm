@@ -370,3 +370,72 @@ func TestSchemaGuard_SaveSkill(t *testing.T) {
 		}
 	}
 }
+
+// TestSchemaGuard_ReadSkill locks read_skill: name must be required, and
+// the optional version/scope fields must remain present so the contract
+// stays wider than just "name".
+func TestSchemaGuard_ReadSkill(t *testing.T) {
+	var found *Tool
+	for i := range Registry {
+		if Registry[i].Name == "read_skill" {
+			found = &Registry[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("read_skill not registered")
+	}
+	var schema map[string]interface{}
+	if err := json.Unmarshal(found.Schema, &schema); err != nil {
+		t.Fatalf("schema not valid JSON: %v", err)
+	}
+	requiredRaw, ok := schema["required"].([]interface{})
+	if !ok {
+		t.Fatalf("read_skill schema missing 'required' array of strings (got %T)", schema["required"])
+	}
+	if !contains(requiredRaw, "name") {
+		t.Errorf("required missing %q", "name")
+	}
+}
+
+// TestSchemaGuard_ListSkills locks list_skill's scope enum so a future
+// edit can't silently drop local|shared|all or change the contract to
+// a free-form string. The test also confirms the tool is registered at
+// all (catches removal).
+func TestSchemaGuard_ListSkills(t *testing.T) {
+	var found *Tool
+	for i := range Registry {
+		if Registry[i].Name == "list_skills" {
+			found = &Registry[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("list_skills not registered")
+	}
+	var schema map[string]interface{}
+	if err := json.Unmarshal(found.Schema, &schema); err != nil {
+		t.Fatalf("schema not valid JSON: %v", err)
+	}
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("list_skills schema missing 'properties' object (got %T)", schema["properties"])
+	}
+	scope, ok := props["scope"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("list_skills schema missing 'scope' property (got %T)", props["scope"])
+	}
+	enumRaw, ok := scope["enum"].([]interface{})
+	if !ok {
+		t.Fatalf("list_skills scope property missing 'enum' array (got %T)", scope["enum"])
+	}
+	want := []string{"local", "shared", "all"}
+	if len(enumRaw) != len(want) {
+		t.Fatalf("list_skills scope enum length = %d, want %d", len(enumRaw), len(want))
+	}
+	for i, v := range want {
+		if enumRaw[i] != v {
+			t.Errorf("list_skills scope enum[%d] = %v, want %q", i, enumRaw[i], v)
+		}
+	}
+}
