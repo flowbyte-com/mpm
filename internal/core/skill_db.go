@@ -300,7 +300,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		// triple + updated_at and leave weight/reinforcement_count alone.
 		_, err = db.Exec(`
 			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?,
+			SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
 			    updated_at = CURRENT_TIMESTAMP
 			WHERE id = ? AND deleted_at IS NULL
 		`, content, string(tagsJSON), string(metaJSON), id)
