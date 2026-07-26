@@ -371,3 +371,65 @@ func TestListSkills_EmptyScopeDefaultsToAll(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveSkill_OutOfOrderSavesKeepHighestAsLatest pins the
+// semver-driven is_latest contract. Saving v2 before v1 must NOT
+// cause v1 to inherit the is_latest flag — semver wins over save order.
+// Regression test for the production incident: agentshell-v2.0.0 saved
+// at 19:36:45 with is_latest=0 because v1 was saved later at 19:38:13
+// and the unconditional flip-prior clobbered the correct flag.
+func TestSaveSkill_OutOfOrderSavesKeepHighestAsLatest(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Save v2 FIRST. With the old (save-order-driven) logic this would
+	// be is_latest=true until v1 came along and flipped it.
+	id2, err := dm.SaveSkill("agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody v2", "test-agent", false)
+	if err != nil {
+		t.Fatalf("save v2 first: %v", err)
+	}
+
+	v2, err := dm.ReadSkill(id2, "")
+	if err != nil {
+		t.Fatalf("ReadSkill v2: %v", err)
+	}
+	if !v2.IsLatest {
+		t.Errorf("after v2 save: IsLatest = false, want true (v2 is currently the max)")
+	}
+
+	// Now save v1 SECOND. The bug: old logic flips v2's flag and stamps
+	// v1 as latest. The fix: v1 is older, must insert as is_latest=false
+	// and leave v2 untouched.
+	id1, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody v1", "test-agent", false)
+	if err != nil {
+		t.Fatalf("save v1 second: %v", err)
+	}
+
+	v1, err := dm.ReadSkill(id1, "")
+	if err != nil {
+		t.Fatalf("ReadSkill v1: %v", err)
+	}
+	if v1.IsLatest {
+		t.Errorf("after v1 save (out of order): v1 IsLatest = true, want false (v2 is the max)")
+	}
+
+	// v2 must STILL be flagged latest — this is the core assertion
+	// the old code violated.
+	v2After, err := dm.ReadSkill(id2, "")
+	if err != nil {
+		t.Fatalf("ReadSkill v2 (post-v1-save): %v", err)
+	}
+	if !v2After.IsLatest {
+		t.Errorf("after v1 save: v2 IsLatest = false, want true (out-of-order save must not flip the higher version)")
+	}
+
+	// Name-latest lookup must resolve to v2 (the semver max), not v1.
+	latest, err := dm.ReadSkill("agentshell", "")
+	if err != nil {
+		t.Fatalf("ReadSkill by name: %v", err)
+	}
+	if latest.ID != id2 {
+		t.Errorf("name-latest = %s, want %s (semver max)", latest.ID, id2)
+	}
+}
