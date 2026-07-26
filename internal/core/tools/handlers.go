@@ -1726,6 +1726,38 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 	}, nil
 }
 
+// handleDeleteSkill soft-deletes a skill by id. The row stays in the DB
+// for forensics (deleted_at is set); read_skill and list_skills filter
+// it out. Idempotent: deleting an unknown id is a no-op (matches
+// ShredSkill's silent-on-missing contract). No confirm gate — a
+// soft-delete is recoverable from the row, unlike hard shredding; if
+// that changes, the gate mirrors promote_to_global /
+// promote_skill_to_global.
+//
+// Args:
+//
+//	--skill_id  (required) The skill id to delete (e.g. "skill:agentshell-v1.0.0")
+func handleDeleteSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	skillID := internal.ParseStringOr(p["skill_id"], "")
+	if skillID == "" {
+		return nil, fmt.Errorf("skill_id is required")
+	}
+	if err := dm.ShredSkill(skillID); err != nil {
+		return nil, err
+	}
+	// Forensic log — soft-delete is recoverable, so audit-only (no "shared_db"
+	// component like the promote paths).
+	dm.LogAudit(
+		mpminternal.AuditInfo, "skill",
+		fmt.Sprintf("delete_skill %s", skillID), "",
+		mpminternal.AuditContext{"skill_id": skillID},
+	)
+	return map[string]interface{}{
+		"success":  true,
+		"skill_id": skillID,
+	}, nil
+}
+
 // splitTags is a small helper that turns a comma-separated tag string
 // into a []string. Empty input returns nil.
 func splitTags(s string) []string {
