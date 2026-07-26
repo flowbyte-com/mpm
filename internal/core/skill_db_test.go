@@ -17,6 +17,8 @@
 package internal
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -431,5 +433,123 @@ func TestSaveSkill_OutOfOrderSavesKeepHighestAsLatest(t *testing.T) {
 	}
 	if latest.ID != id2 {
 		t.Errorf("name-latest = %s, want %s (semver max)", latest.ID, id2)
+	}
+}
+
+// TestValidateSkillNameAndVersion_RejectsDashVInName pins the parser-
+// ambiguity guard. A skill name containing "-v" would collide with
+// the skill:<name>-v<version> id format and mis-split on
+// strings.Index(rest, "-v") in ParseNameAndVersionFromID.
+//
+// Regression test for the 06:39 reviewer's concern (4th item):
+// "ParseNameAndVersionFromID uses strings.Index(rest, -v) which is
+// ambiguous if name contains -v".
+func TestValidateSkillNameAndVersion_RejectsDashVInName(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		wantErr string
+	}{
+		{"agentshell", "1.0.0", ""},
+		{"my-vskill", "1.0.0", "-v"},
+		{"foo-vbar-vbaz", "1.0.0", "-v"},
+		{"-v", "1.0.0", "-v"},
+		{"valid-name", "1.0.0", ""},
+		{"name_with_underscore", "1.0.0", ""},
+		{"nameWithPercent", "1.0.0", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := NewTestDM(t)
+			content := fmt.Sprintf("---\nname: %s\nversion: %s\n---\nbody", tc.name, tc.version)
+			_, err := dm.SaveSkill(tc.name, tc.version, content, "test-agent", false)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SaveSkill(%q, %q) error = %v, want nil", tc.name, tc.version, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("SaveSkill(%q, %q) error = nil, want substring %q", tc.name, tc.version, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("SaveSkill(%q, %q) error = %q, want substring %q", tc.name, tc.version, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSaveSkill_ForceOverwriteOlderKeepsIsLatestFalse pins the
+// force-overwrite edge case that the original implementation missed:
+// after saving v2 (which correctly flagged is_latest=true), force-
+// overwriting v1 must NOT re-stamp v1 as latest — it stays at
+// is_latest=false. Same contract as the new-row path.
+func TestSaveSkill_ForceOverwriteOlderKeepsIsLatestFalse(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Save v2 first — it correctly claims is_latest=true.
+	if _, err := dm.SaveSkill("agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody v2", "test-agent", false); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+
+	// Save v1 (newer-first is fine; semver handles it).
+	if _, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody v1", "test-agent", false); err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+
+	// Force-overwrite v1 with new content. The bug would stamp v1 as
+	// is_latest=true (because force path hardcoded it via metadata
+	// init). The fix queries max version and compares semver.
+	if _, err := dm.SaveSkill("agentshell", "1.0.0",
+		"---\nname: agentshell\nversion: 1.0.0\n---\nbody v1 updated", "test-agent", true); err != nil {
+		t.Fatalf("force v1: %v", err)
+	}
+
+	// v1 must still be flagged NOT-latest — v2 wins on semver.
+	v1, err := dm.ReadSkill("skill:agentshell-v1.0.0", "")
+	if err != nil {
+		t.Fatalf("ReadSkill v1: %v", err)
+	}
+	if v1.IsLatest {
+		t.Errorf("after force-overwrite of v1 (v2 still exists): v1 IsLatest = true, want false (v2 is semver max)")
+	}
+
+	// v2 must STILL be flagged latest — force-overwriting v1 must
+	// not disturb v2's flag.
+	v2, err := dm.ReadSkill("skill:agentshell-v2.0.0", "")
+	if err != nil {
+		t.Fatalf("ReadSkill v2: %v", err)
+	}
+	if !v2.IsLatest {
+		t.Errorf("after force-overwrite of v1: v2 IsLatest = false, want true (untouched)")
+	}
+}
+
+// TestSaveSkill_ForceOverwriteHighestKeepsIsLatestTrue: when force-
+// overwriting the highest semver version (and no other versions
+// exist), is_latest must stay true. Regression guard against the
+// semver-aware logic accidentally demoting the current max.
+func TestSaveSkill_ForceOverwriteHighestKeepsIsLatestTrue(t *testing.T) {
+	dm := NewTestDM(t)
+
+	if _, err := dm.SaveSkill("agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody v2", "test-agent", false); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+
+	// Force-overwrite v2 (it's the only version, must stay latest).
+	if _, err := dm.SaveSkill("agentshell", "2.0.0",
+		"---\nname: agentshell\nversion: 2.0.0\n---\nbody v2 updated", "test-agent", true); err != nil {
+		t.Fatalf("force v2: %v", err)
+	}
+
+	v2, err := dm.ReadSkill("skill:agentshell-v2.0.0", "")
+	if err != nil {
+		t.Fatalf("ReadSkill v2: %v", err)
+	}
+	if !v2.IsLatest {
+		t.Errorf("force-overwrite of only version: IsLatest = false, want true")
 	}
 }
