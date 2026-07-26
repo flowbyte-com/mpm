@@ -1163,6 +1163,7 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		"scope":   scope,
 	}, nil
 }
+
 // agent uses this to investigate what went wrong, especially across
 // sessions — the wake context surface only shows a count, the details
 // come from this tool.
