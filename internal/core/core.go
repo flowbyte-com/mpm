@@ -245,6 +245,15 @@ type CoreDB interface {
 	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
 	PromoteSkillToGlobal(skillID string, confirm bool) error
 	ShredSkill(skillID string) error
+
+	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
+	// Fire-and-forget telemetry for adaptive retrieval. Called from
+	// MCP read handlers and wake_context after a successful retrieval.
+	// Implementations must be cheap (single-row UPSERT) and must not
+	// fail the user-facing path.
+	RecordRetrieval(nodeID, nodeType string) error
+	RecordRetrievalSuccess(nodeID, nodeType string) error
+	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
 }
 
 // Compile-time assertion that *DatabaseManager satisfies CoreDB.
