@@ -610,6 +610,18 @@ var Registry = []Tool{
 		Schema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Stable skill name (e.g. 'agentshell')"},"version":{"type":"string","description":"Semver version (e.g. '2.0.0')"},"content":{"type":"string","description":"Full markdown document including YAML frontmatter"},"author":{"type":"string","description":"Agent name for metadata (default: active context agent)"},"force":{"type":"boolean","description":"Overwrite existing skill with same name+version","default":false}},"required":["name","version","content"]}`),
 		Handler:     handleSaveSkill,
 	},
+	{
+		Name:        "read_skill",
+		Description: "Fetch a skill by name (latest version) or full id (skill:<name>-v<version>). Returns the parsed frontmatter (name, when_to_use, constraints, steps) plus the markdown body. Use when the agent has decided a specific skill applies and needs its full content. Required: name. Optional: version.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"version":{"type":"string"}},"required":["name"]}`),
+		Handler:     handleReadSkill,
+	},
+	{
+		Name:        "list_skills",
+		Description: "Inventory of available skills. Returns name, version, when_to_use, is_global, weight for each skill (latest version only). Use at session start to know the catalogue, or before read_skill to confirm a name exists. Optional: scope (local|shared|all, default all).",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"scope":{"type":"string","enum":["local","shared","all"]}}}`),
+		Handler:     handleListSkills,
+	},
 }
 
 // ByName returns the tool with the given name, or false.

@@ -1124,7 +1124,45 @@ func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}, nil
 }
 
-// callQueryAuditLog returns recent entries from system_audit_log. The
+// handleReadSkill fetches a skill by name (latest version) or exact id.
+func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	name := internal.ParseStringOr(p["name"], "")
+	version := internal.ParseStringOr(p["version"], "")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	skill, err := dm.ReadSkill(name, version)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"id":          skill.ID,
+		"name":        skill.Name,
+		"version":     skill.Version,
+		"when_to_use": skill.WhenToUse,
+		"domain":      skill.Domain,
+		"constraints": skill.Constraints,
+		"steps":       skill.Steps,
+		"body":        skill.Body,
+		"is_global":   skill.IsGlobal,
+	}, nil
+}
+
+// handleListSkills returns the latest version of each skill in scope.
+func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	scope := internal.ParseStringOr(p["scope"], "all")
+	skills, err := dm.ListSkills(scope)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"skills":  skills,
+		"count":   len(skills),
+		"scope":   scope,
+	}, nil
+}
 // agent uses this to investigate what went wrong, especially across
 // sessions — the wake context surface only shows a count, the details
 // come from this tool.
