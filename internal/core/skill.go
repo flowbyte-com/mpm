@@ -87,6 +87,13 @@ func validateSkillNameAndVersion(name, version string) error {
 	if strings.ContainsRune(version, ':') || strings.IndexFunc(version, unicode.IsSpace) >= 0 {
 		return fmt.Errorf("invalid skill version %q: must not contain colons or whitespace", version)
 	}
+	// Reject `-v` in skill names — it would collide with the
+	// `skill:<name>-v<version>` id format and ParseNameAndVersionFromID's
+	// strings.Index(rest, "-v") lookup would mis-split. Force authors to
+	// pick names that round-trip through the id parser unambiguously.
+	if strings.Contains(name, "-v") {
+		return fmt.Errorf("invalid skill name %q: must not contain %q (collides with id format)", name, "-v")
+	}
 	return nil
 }
 
