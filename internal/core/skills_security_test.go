@@ -19,6 +19,8 @@ package internal
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestPromoteSkillToGlobal_RequiresConfirm(t *testing.T) {
@@ -87,4 +89,29 @@ func TestPromoteSkillToGlobal_RejectsNonSkillID(t *testing.T) {
 	if isGlobal != 0 {
 		t.Errorf("is_global = %d, want 0 (non-skill row must not be promoted)", isGlobal)
 	}
+}
+
+// TestScannerCoverage_SkillsWritePaths is the Tier-2 runtime check for
+// SaveSkill's scanner integration. The static test
+// TestScannerCoverage_AllMemoriesWritersScanContent walks the AST and
+// catches any new write path that bypasses the scanner; this test pins
+// the actual end-to-end behaviour: a poisoned submission is rejected
+// with an error, so the scanner is structurally downstream of SaveSkill.
+//
+// If SaveSkill is ever refactored to bypass ScanContentForWrite, this
+// test catches it.
+//
+// The poisoned string matches the Generic Secret Key pattern
+// (`sk-[a-zA-Z0-9_-]{20,}` in internal/core/memory.go). The spec example
+// `sk-1234567890abcdef` (16 chars after `sk-`) is too short — that
+// pattern requires 20+ chars to match. The longer string below is what
+// actually trips the scanner.
+func TestScannerCoverage_SkillsWritePaths(t *testing.T) {
+	dm := NewTestDM(t)
+
+	poisoned := "---\nname: poisoned\nversion: 1.0.0\n---\nbody with sk-abcdef1234567890abcdef12"
+	_, err := dm.SaveSkill("poisoned", "1.0.0", poisoned, "test", false)
+	require.Error(t, err, "scanner must reject content carrying the Generic Secret Key pattern")
+	require.Contains(t, err.Error(), "sensitive content",
+		"rejection must come from the secret scanner, not some other validation path")
 }
