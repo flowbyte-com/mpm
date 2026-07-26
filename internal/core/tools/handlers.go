@@ -627,6 +627,27 @@ func parseBoolDefault(v interface{}, def bool) bool {
 	return def
 }
 
+// inferNodeType best-effort classifies a citation id into one of the
+// cognitive-object types (memory / lesson / skill / decision / theory)
+// by inspecting the id prefix. Falls back to "memory" when the prefix
+// is unfamiliar — the save_lesson Provenance Proxy must not block on
+// unknown id formats and the schema's NOT NULL constraint on
+// node_type requires a value.
+func inferNodeType(id string) string {
+	switch {
+	case strings.HasPrefix(id, "skill:"):
+		return "skill"
+	case strings.HasPrefix(id, "lesson:"), strings.HasPrefix(id, "les-"):
+		return "lesson"
+	case strings.HasPrefix(id, "dec-"):
+		return "decision"
+	case strings.HasPrefix(id, "theory:"), strings.HasPrefix(id, "the-"):
+		return "theory"
+	default:
+		return "memory"
+	}
+}
+
 // callSaveLesson persists a lesson to MPM.
 func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
@@ -643,9 +664,11 @@ func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 
 	// Provenance Proxy: if the agent lists the node IDs this lesson
 	// was distilled from, credit each in the retrieval observability
-	// layer via IncrementSuccess (pure UPDATE — never-retrieved
-	// nodes are silently skipped). Telemetry must not block the
-	// user's lesson-save path; errors are swallowed.
+	// layer via IncrementSuccess. INSERT-or-UPDATE semantic: a node
+	// that was never retrieved this turn can still receive a credit
+	// when the agent cites it from prior-session memory. Telemetry
+	// must not block the user's lesson-save path; errors are
+	// swallowed.
 	credited := 0
 	if raw, ok := p["source_ids"].([]interface{}); ok && len(raw) > 0 {
 		for _, v := range raw {
@@ -653,7 +676,7 @@ func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 			if id == "" {
 				continue
 			}
-			if err := dm.IncrementSuccess(id); err == nil {
+			if err := dm.IncrementSuccess(id, inferNodeType(id)); err == nil {
 				credited++
 			}
 			// err != nil: log via audit, don't surface — the lesson
