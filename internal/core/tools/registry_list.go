@@ -485,6 +485,12 @@ var Registry = []Tool{
 		Handler:     handlePromoteToGlobal,
 	},
 	{
+		Name:        "promote_skill_to_global",
+		Description: "Operator-gated: mark a skill row as shared (is_global=1) and stamp metadata.derived_from_skill_id for lineage. Requires confirm=true.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"skill_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["skill_id","confirm"]}`),
+		Handler:     handlePromoteSkillToGlobal,
+	},
+	{
 		// Phase 5a: opportunistic scheduler. target_time accepts an
 		// absolute unix epoch OR a relative duration string ("24h", "2h",
 		// "30m", "7d"). recurring_rule is stored as a hint; the agent

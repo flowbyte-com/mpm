@@ -352,10 +352,56 @@ func contentHash(s string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// PromoteSkillToGlobal moves a local skill into the shared DB so other
-// agents can read it. Stubbed here; real implementation lands in Task 10.
+// PromoteSkillToGlobal marks a skill as shared (is_global=1). The
+// confirm flag mirrors record_global_rule and promote_to_global:
+// agents cannot promote without explicit operator consent.
+//
+// Divergence from PromoteToGlobal (intentional, per plan): that path
+// COPIES a local memory into shared.memories under a fresh GenerateID()
+// row. Skills cannot do that — their id is the deterministic contract
+// `skill:<name>-v<semver>` that ReadSkill/SaveSkill resolve against, so
+// a copy under a random id would be unreachable by name. Instead we flip
+// is_global on the canonical row in place. derived_from_skill_id points
+// at the row's own id purely as a promotion marker (not a copy pointer).
+//
+// The collection='skills' guard on both statements is a privilege gate:
+// without it any memory id (a decision, a raw session row) could be
+// elevated to is_global=1 through this "skill" path and recorded in the
+// audit log as a skill promotion.
 func (dm *DatabaseManager) PromoteSkillToGlobal(skillID string, confirm bool) error {
-	return fmt.Errorf("PromoteSkillToGlobal(%q): %w", skillID, ErrSkillNotImplemented)
+	if !confirm {
+		return fmt.Errorf("promote_skill_to_global requires confirm=true (no silent mutations)")
+	}
+	db := dm.SQLDB()
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+
+	// Verify the row exists AND is actually a skill.
+	var existing string
+	err := db.QueryRow(`SELECT id FROM memories WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL`, skillID).Scan(&existing)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("skill %s not found", skillID)
+	}
+	if err != nil {
+		return fmt.Errorf("lookup skill: %w", err)
+	}
+
+	// Flip is_global and stamp the promotion marker. The collection guard
+	// is repeated here so a row that stops being a skill between the check
+	// and the write can't slip through.
+	_, err = db.Exec(`
+		UPDATE memories
+		SET is_global = 1,
+		    metadata = json_set(COALESCE(metadata, '{}'),
+		                        '$.derived_from_skill_id', ?,
+		                        '$.promoted_at', strftime('%s','now'))
+		WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL
+	`, skillID, skillID)
+	if err != nil {
+		return fmt.Errorf("promote: %w", err)
+	}
+	return nil
 }
 
 // ShredSkill hard-deletes a skill row. Stubbed here; real implementation
