@@ -17,11 +17,11 @@ import (
 // backward compatibility with the Python plugin; the MCP server returns a
 // pre-formatted string).
 type WakeContextData struct {
-	SessionID      string              `json:"session_id"`
-	ActiveMode     string              `json:"active_mode"`
-	ActivePersona  string              `json:"active_persona"`
-	RecentTopics    []string            `json:"recent_topics"`
-	RecentMemories  []WakeContextMemory `json:"recent_memories"`
+	SessionID        string              `json:"session_id"`
+	ActiveMode       string              `json:"active_mode"`
+	ActivePersona    string              `json:"active_persona"`
+	RecentTopics     []string            `json:"recent_topics"`
+	RecentMemories   []WakeContextMemory `json:"recent_memories"`
 	RecentMilestones []WakeContextMemory `json:"recent_milestones"`
 	// AuditSummary is a one-line summary of system_audit_log activity in
 	// the last 24h, or empty if no error/fatal events were logged. The
@@ -61,6 +61,11 @@ type WakeContextData struct {
 	// density) clamped to 0 when LessonCount == 0 to avoid
 	// divide-by-zero NaN/Inf in the JSON response.
 	EpistemicPressure EpistemicPressureData `json:"epistemic_pressure"`
+	// AvailableSkills is the lightweight catalogue of skills the agent
+	// has access to. Top 20 by weight, plus a total count surfaced in
+	// the wake context. Populated by GatherWakeContext when the skill
+	// feature is enabled; empty otherwise.
+	AvailableSkills []SkillSummary `json:"available_skills,omitempty"`
 }
 
 // EpistemicPressureData is the structured payload of the substrate's
@@ -68,11 +73,11 @@ type WakeContextData struct {
 // no joins, no cluster extraction (that's deferred to the
 // compact_epistemology tool in Phase 2 of the compaction pipeline).
 type EpistemicPressureData struct {
-	RawCount        int     `json:"raw_count"`
-	LessonCount     int     `json:"lesson_count"`
-	Ratio           float64 `json:"ratio"`
-	Threshold       int     `json:"threshold"`
-	Exceeded        bool    `json:"exceeded"`
+	RawCount    int     `json:"raw_count"`
+	LessonCount int     `json:"lesson_count"`
+	Ratio       float64 `json:"ratio"`
+	Threshold   int     `json:"threshold"`
+	Exceeded    bool    `json:"exceeded"`
 	// LastCompactedAt is the RFC3339 timestamp of the most recent
 	// compact_epistemology commit. Empty string when no compaction
 	// has happened yet — agent can branch on that without a separate
@@ -194,6 +199,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	}
 
 	data.ScratchpadOrphans = dm.ScratchpadOrphansSummary()
+	data.AvailableSkills = populateAvailableSkills(dm, "all")
 
 	return data, nil
 }
@@ -448,6 +454,16 @@ func formatWakeContext(d WakeContextData) string {
 	}
 	if d.ScratchpadOrphans != "" {
 		lines = append(lines, d.ScratchpadOrphans)
+	}
+	if len(d.AvailableSkills) > 0 {
+		lines = append(lines, fmt.Sprintf("**Available Skills (count=%d):**", len(d.AvailableSkills)))
+		for _, s := range d.AvailableSkills {
+			marker := ""
+			if s.IsGlobal {
+				marker = " [shared]"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s v%s: %s%s", s.Name, s.Version, s.WhenToUse, marker))
+		}
 	}
 	if d.LastHandoff != nil {
 		lines = append(lines, formatHandoff(d.LastHandoff))
