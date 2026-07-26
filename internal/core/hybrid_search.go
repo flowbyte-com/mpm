@@ -472,6 +472,14 @@ type ftsEntry struct {
 	LastAccessedAt     *string
 	ReferenceID        *string
 	Score              float64
+	// Retrieval metadata (Observability Layer, 2026-07-26).
+	// Populated by a LEFT JOIN against retrieval_metadata; today these
+	// fields are observability-only and do not influence Score or
+	// ORDER BY. A future RetrievalRanker implementation may consult
+	// these to blend a reuse-adjusted score per row.
+	ReuseCount      int
+	LastRetrievedAt *string
+	SuccessCount    int
 }
 
 type vecEntry struct {
@@ -518,9 +526,13 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
 		       m.created_at, m.reinforcement_count, m.weight,
 		       m.last_accessed_at, m.reference_id,
-		       bm25(` + ftsTable + `) AS score
+		       bm25(` + ftsTable + `) AS score,
+		       COALESCE(rm.reuse_count, 0) AS reuse_count,
+		       rm.last_retrieved_at AS last_retrieved_at,
+		       COALESCE(rm.success_count, 0) AS success_count
 		FROM ` + ftsTable + `
 		JOIN ` + memTable + ` m ON ` + ftsTable + `.rowid = m.rowid
+		LEFT JOIN retrieval_metadata rm ON rm.node_id = m.id
 		WHERE ` + ftsTable + ` MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 		  AND (? = '' OR m.collection = ?)
 		ORDER BY score
@@ -538,14 +550,18 @@ func searchLike(db *sql.DB, query, collection string, limit int, schemaPrefix st
 	likePat := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
 	memTable := schemaPrefix + "memories"
 	sqlQuery := `
-		SELECT id, content, collection, tags, metadata,
-		       created_at, reinforcement_count, weight,
-		       last_accessed_at, reference_id,
-		       0.0 AS score
-		FROM ` + memTable + `
-		WHERE content LIKE ? AND deleted_at IS NULL` + MemoryExpireClause + `
-		  AND (? = '' OR collection = ?)
-		ORDER BY created_at DESC
+		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
+		       m.created_at, m.reinforcement_count, m.weight,
+		       m.last_accessed_at, m.reference_id,
+		       0.0 AS score,
+		       COALESCE(rm.reuse_count, 0) AS reuse_count,
+		       rm.last_retrieved_at AS last_retrieved_at,
+		       COALESCE(rm.success_count, 0) AS success_count
+		FROM ` + memTable + ` m
+		LEFT JOIN retrieval_metadata rm ON rm.node_id = m.id
+		WHERE m.content LIKE ? AND m.deleted_at IS NULL` + MemoryExpireClause + `
+		  AND (? = '' OR m.collection = ?)
+		ORDER BY m.created_at DESC
 		LIMIT ?`
 	rows, err := db.Query(sqlQuery, likePat, collection, collection, limit)
 	if err != nil {
@@ -559,10 +575,12 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 	var results []ftsEntry
 	for rows.Next() {
 		var e ftsEntry
-		var nullableTags, nullableMetadata, nullableLastAccessed, nullableRefID sql.NullString
+		var nullableTags, nullableMetadata, nullableLastAccessed, nullableRefID,
+			nullableMetaLastRetrieved sql.NullString
 		if err := rows.Scan(&e.ID, &e.Content, &e.Collection, &nullableTags, &nullableMetadata,
 			&e.CreatedAt, &e.ReinforcementCount, &e.Weight,
-			&nullableLastAccessed, &nullableRefID, &e.Score); err != nil {
+			&nullableLastAccessed, &nullableRefID, &e.Score,
+			&e.ReuseCount, &nullableMetaLastRetrieved, &e.SuccessCount); err != nil {
 			continue
 		}
 		e.Tags = nullableTags.String
@@ -572,6 +590,10 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 		}
 		if nullableRefID.Valid {
 			e.ReferenceID = &nullableRefID.String
+		}
+		if nullableMetaLastRetrieved.Valid {
+			s := nullableMetaLastRetrieved.String
+			e.LastRetrievedAt = &s
 		}
 		results = append(results, e)
 	}

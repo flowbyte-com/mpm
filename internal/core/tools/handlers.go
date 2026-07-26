@@ -159,6 +159,18 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	if err != nil {
 		return nil, err
 	}
+	// Observability Layer: every result in a memory search is a node
+	// the agent is about to consume. Record each. Collection name in
+	// the database is the canonical node_type — pass through.
+	for _, item := range items {
+		if id, _ := item["id"].(string); id != "" {
+			coll, _ := item["collection"].(string)
+			if coll == "" {
+				coll = "memory"
+			}
+			_ = dm.RecordRetrieval(id, coll)
+		}
+	}
 	return map[string]interface{}{
 		"success":  true,
 		"memories": items,
@@ -642,6 +654,12 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if err != nil {
 		return nil, err
 	}
+	// Observability Layer: each lesson search result is a retrieval.
+	for _, item := range items {
+		if id, _ := item["id"].(string); id != "" {
+			_ = dm.RecordRetrieval(id, "lesson")
+		}
+	}
 	return map[string]interface{}{
 		"success": true,
 		"results": items,
@@ -804,6 +822,10 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"content":    m.Content,
 			"created_at": m.CreatedAt,
 		})
+		// Observability Layer: every node pulled into the boot prompt
+		// is "retrieved". Fire-and-forget; telemetry must not block
+		// the wake surface. Errors are swallowed.
+		_ = dm.RecordRetrieval(m.ID, "memory")
 	}
 
 	milestoneRefs := make([]map[string]interface{}, 0, len(data.RecentMilestones))
@@ -813,6 +835,7 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"content":    m.Content,
 			"created_at": m.CreatedAt,
 		})
+		_ = dm.RecordRetrieval(m.ID, "memory")
 	}
 
 	// Cold-start sweep: check for wakes that came due while the system
@@ -1135,6 +1158,8 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	if err != nil {
 		return nil, err
 	}
+	// Observability Layer: skill reads are retrievals.
+	_ = dm.RecordRetrieval(skill.ID, "skill")
 	return map[string]interface{}{
 		"success":     true,
 		"id":          skill.ID,
@@ -2312,4 +2337,89 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 		"lineage":   lineage,
 	}, nil
 
+}
+
+// handleExplainRetrieval runs a standard FTS search and returns a
+// diagnostic breakdown per result: base FTS score, reuse count, last
+// retrieved timestamp, success count. The intent is observability —
+// the agent (or operator) can see WHY a result ranked where it did,
+// and how often it has been surfaced before.
+//
+// The search ranking itself is NOT modified. explain_retrieval reads
+// the same HybridSearchMemories path that query_long_term_memory uses,
+// then layers retrieval_metadata on top via GetRetrievalMetadata per
+// row. The retrieval_metadata is joined in the SQL path (so future
+// rankers can use it) but today DefaultRanker passes ftsScore through
+// unchanged.
+func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	query := internal.ParseStringOr(p["query"], "")
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	limit := int(internal.ParseFloatOr(p["limit"], 10))
+	if limit <= 0 {
+		limit = 10
+	}
+	collection := internal.ParseStringOr(p["collection"], "")
+	scope := internal.ParseStringOr(p["scope"], "all")
+
+	items, err := dm.HybridSearchMemories(query, collection, limit, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Retrieval Diagnostic\n\n")
+	sb.WriteString("**Query:** ")
+	sb.WriteString(query)
+	sb.WriteString("\n\n")
+	if len(items) == 0 {
+		sb.WriteString("_No results._\n")
+		return map[string]interface{}{
+			"success":    true,
+			"query":      query,
+			"diagnostic": sb.String(),
+			"count":      0,
+		}, nil
+	}
+	sb.WriteString(fmt.Sprintf("**%d result(s).** Retrieval ordering follows FTS `bm25()` rank — identical to `query_long_term_memory`. Retrieval metadata is observability only and does NOT influence ranking today (see `DefaultRanker` in retrieval_ranker.go).\n\n", len(items)))
+
+	for _, item := range items {
+		id, _ := item["id"].(string)
+		if id == "" {
+			continue
+		}
+		meta, _ := dm.GetRetrievalMetadata(id)
+
+		// FTS / combined score — combined_score is the post-hybrid
+		// blend when present; fall back to weight for items without it.
+		var ftsScore interface{} = item["weight"]
+		if cs, ok := item["combined_score"]; ok {
+			ftsScore = cs
+		}
+
+		sb.WriteString("## Diagnostic: ")
+		sb.WriteString(id)
+		sb.WriteString("\n")
+		sb.WriteString("- Base FTS Match: ")
+		sb.WriteString(fmt.Sprintf("%v", ftsScore))
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- Reuse Count: %d\n", meta.ReuseCount))
+		lastRetrieved := meta.LastRetrievedAt
+		if lastRetrieved == "" {
+			lastRetrieved = "_never_"
+		}
+		sb.WriteString("- Last Retrieved: ")
+		sb.WriteString(lastRetrieved)
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- Success Count: %d\n", meta.SuccessCount))
+		sb.WriteString("\n")
+	}
+
+	return map[string]interface{}{
+		"success":    true,
+		"query":      query,
+		"diagnostic": sb.String(),
+		"count":      len(items),
+	}, nil
 }

@@ -126,6 +126,7 @@ var CanonicalMPMSchema = []string{
 	"reference_chunks",
 	"reference_docs",
 	"reference_interactions",
+	"retrieval_metadata",
 	"scheduled_wakes",
 	"scheduled_tasks",
 	"schema_migrations",
