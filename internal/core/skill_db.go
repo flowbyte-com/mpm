@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	"golang.org/x/mod/semver"
 )
 
 // ReadSkill fetches a skill by id (exact) or name (latest version).
@@ -267,6 +269,11 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		"promoted_at":      nil,
 		"decay_floor_days": 90,
 		"content_hash":     contentHash(content),
+		// Mirror version into metadata so SaveSkill's semver-compare path
+		// can read it back without re-parsing the frontmatter. (The id
+		// also encodes it, but json_extract on a JSON column is cleaner
+		// than string surgery on skill:<name>-v<version>.)
+		"version":          version,
 	}
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -302,20 +309,75 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// New row path. Transaction so the flip-prior + insert stays atomic —
 	// a crash between the two would leave two is_latest=true rows for the
 	// same name, which ReadSkill would resolve nondeterministically.
+	//
+	// is_latest is semver-driven, not save-order-driven. We find the
+	// current max-version row for this name within the tx and only flip
+	// it when the incoming version strictly exceeds it. Saving an older
+	// version (e.g. v1 after v2) inserts with is_latest=false and leaves
+	// the higher existing row untouched.
 	tx, err := db.Begin()
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`
-		UPDATE memories
-		SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
+	// Find the current max-version row for this name. ORDER BY id DESC is
+	// a proxy for highest semver because skill ids are skill:<name>-v<semver>
+	// with equal-width semver; if v10.0.0 ever lands this needs a proper
+	// semver ORDER BY via a generated column.
+	var (
+		existingID      string
+		existingVersion string
+	)
+	err = tx.QueryRow(`
+		SELECT id, json_extract(metadata, '$.version')
+		FROM memories
 		WHERE collection = 'skills' AND deleted_at IS NULL
 		  AND id LIKE ('skill:' || ? || '-v%')
-	`, name)
+		ORDER BY id DESC
+		LIMIT 1
+	`, name).Scan(&existingID, &existingVersion)
+
+	hasExisting := err == nil
+	if err != nil && err != sql.ErrNoRows {
+		return "", fmt.Errorf("lookup max version: %w", err)
+	}
+
+	// semver.Compare requires the 'v' prefix on both arguments. The DB
+	// stores version without the prefix (YAML convention); we add it
+	// here. Prepending unconditionally is safe: the frontmatter parser
+	// already validated the semver shape, and an empty version would
+	// have failed upstream.
+	newIsLatest := true
+	if hasExisting {
+		cmp := semver.Compare("v"+version, "v"+existingVersion)
+		switch {
+		case cmp > 0:
+			// Incoming version strictly higher — flip the prior max to false.
+			_, err = tx.Exec(`
+				UPDATE memories
+				SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
+				WHERE id = ? AND deleted_at IS NULL
+			`, existingID)
+			if err != nil {
+				return "", fmt.Errorf("flip prior is_latest: %w", err)
+			}
+		case cmp == 0:
+			// Existence check above should have caught this. Defensive.
+			return "", fmt.Errorf("save skill: version %s already exists for %s (id=%s)", version, name, existingID)
+		default:
+			// cmp < 0: incoming version is older than current max — keep
+			// the higher existing row as latest, insert this one as
+			// not-latest.
+			newIsLatest = false
+		}
+	}
+
+	// Rebuild metadata with the comparison-correct is_latest flag.
+	metadata["is_latest"] = newIsLatest
+	metaJSON, err = json.Marshal(metadata)
 	if err != nil {
-		return "", fmt.Errorf("flip prior is_latest: %w", err)
+		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
 	_, err = tx.Exec(`
@@ -330,6 +392,16 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	}
 	return id, nil
 }
+
+// TODO(follow-up): force-overwrite path at line ~281 hardcodes
+// metadata.is_latest=true via the initial map. Edge case: if an older
+// version (e.g. v1) is force-overwritten AFTER a higher version (v2)
+// already exists, the overwrite will incorrectly stamp v1 as latest.
+// The fix is to call the same semver-compare logic above before the
+// UPDATE so is_latest reflects current max, not the row's identity.
+// Tracked separately because it's a different transaction shape
+// (single UPDATE vs. tx with flip+insert) and the test surface is
+// orthogonal to the out-of-order-saves test this commit ships.
 
 // contentHash returns the hex SHA-256 of s. The plan's placeholder
 // (fmt.Sprintf("%x", len(s))) is deterministic but two distinct skill
