@@ -191,6 +191,10 @@ Theories create a structured workflow for experimentation and debugging.
 
 Reusable knowledge that survives across tasks — best practices, warnings, patterns, and insights.
 
+#### Skill
+
+Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, proactive_recall_hint). See §9 for the full authoring and discovery surface.
+
 #### Evidence
 
 Information that supports or challenges another artifact. Evidence is the substrate from which confidence is derived, never an artifact-level assertion of truth.
@@ -1295,6 +1299,83 @@ The `proactive_recall_hint` engine also elevates directive-adjacent memories whe
 For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
 
 > **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
+
+#### Skills (Procedural Memory)
+
+*Markdown-frontmatter procedures stored as `collection='skills'` rows — discoverable via list / read / proactive_recall_hint, shareable to shared DB with operator consent.*
+
+Skills are the fourth cognitive collection (alongside memories, lessons, directives). Where a directive says "always log contradictions as evidence" (a *rule*), a skill says "to handle an agentshell config update, call `agentshell_get_config`, then `agentshell_set_css_var`" (a *procedure*). Skills do not run on their own — the agent reads the steps and interprets them.
+
+##### Format
+
+A skill is a single markdown document with YAML frontmatter. Only `name` and `version` are required; the rest are surfaced to discovery tiers.
+
+```markdown
+---
+name: agentshell
+version: 2.0.0
+description: Configure the AgentShell WordPress theme.
+when_to_use: agentshell, theme, MCP config
+domain: wordpress
+constraints:
+  - never edit header.php directly
+  - always read get_config before writing
+steps:
+  - call: agentshell_get_config
+  - call: agentshell_set_css_var
+---
+# AgentShell
+
+Full markdown body. The agent reads the body for context; the steps
+in frontmatter are guidance, not a workflow engine — the agent
+interprets and adapts.
+```
+
+The complete frontmatter contract: `name` (required), `version` (required semver), `description`, `when_to_use` (discovery hook), `domain`, `constraints`, `steps` (each is `{call: string, args_from?: string}`). Invalid frontmatter (missing name or version, unterminated YAML block) is rejected at save time.
+
+##### Authoring
+
+Three paths, all routed through the secret/poison scanner — no write path bypasses `ScanContentForWrite`, enforced by both `TestScannerCoverage_AllMemoriesWritersScanContent` (static AST walk) and `TestScannerCoverage_SkillsWritePaths` (runtime end-to-end check):
+
+| Path | Use case |
+|---|---|
+| `mpm call save_skill --payload '{"name":"...","version":"...","content":"...","author_agent":"..."}'` | Programmatic creation by the agent or operator |
+| `mpm save-skill --file path/to/SKILL.md` | Operator curation from terminal |
+| File ingestion: drop a `.md` with `kind: skill` frontmatter into a watched dir | Organic capture from a project workspace |
+
+Saving the same `(name, version)` pair requires `force=true` — silent overwrites are rejected. Saving a new version for an existing name flips the prior version's `is_latest` to `0` in the same transaction and stamps `supersedes` linkage, so older versions remain queryable but no longer advertise themselves as current.
+
+##### Discovery
+
+Three tiers, in increasing specificity:
+
+1. **Inventory** — `mpm call list_skills` (CLI: `mpm list-skills`). Returns one row per name with the highest-version row's id, name, version, when_to_use, is_global, weight. Used by wake context to render an `<available_skills>` block bounded to the top 20 by weight.
+2. **Read** — `mpm call read_skill --payload '{"name":"agentshell"}'` (or `"skill_id":"skill:agentshell-v2.0.0"`). Returns the full Skill struct with parsed frontmatter and body.
+3. **Proactive** — `proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + reinforcement + recency + Shared Premium for `is_global=1` rows.
+
+##### Versioning
+
+Skill names are stable identifiers; versions are slug-suffixed in the row id. Saving `agentshell` v1.0.0 produces the row id `skill:agentshell-v1.0.0`; v2.0.0 produces `skill:agentshell-v2.0.0`. The id format `skill:<name>-v<semver>` is deterministic — re-running the save with the same args hits the same row, which is how `mpm ops init skills` detects drift (it computes `contentHash(seed)` and compares against the existing row's stored `metadata.content_hash`).
+
+##### Sharing
+
+`mpm call promote_skill_to_global --payload '{"skill_id":"skill:agentshell-v2.0.0","confirm":true}` flips `is_global=1` on the canonical row in place. **Operator-gated**: `confirm` must be `true`; the privilege-escalation guard (`collection='skills'` filter on the existence check and UPDATE) prevents a non-skill id from being elevated through this path. The metadata patch stamps `derived_from_skill_id` and `promoted_at` for forensic tracing. Shared skills appear in `list_skills` with `scope="shared"` and get the Shared Premium boost (1.20× shared, 1.35× shared+rules) in hybrid-search scoring.
+
+Removal is the soft-delete `delete_skill` (`shred_memory`-style): sets `deleted_at` on the row. The scanner treats `deleted_at IS NULL` as the live-row gate everywhere, so the row vanishes from every list/read/proactive path atomically without breaking foreign keys.
+
+##### LTM by default
+
+Skills are written with `is_long_term=1` so the existing long-term decay machinery (slow 0.01×days rate, floor at weight 1) applies — this IS the 90-day decay floor documented in the metadata's `decay_floor_days`. The floor lives in the LTM rate rather than a skill-specific sweep because (a) the same retrieval paths that already handle directives and lessons stay correct without special-casing, and (b) skill rows remain discoverable through the same query paths. The runtime test `TestSaveSkill_SetsIsLongTerm` pins the contract; `TestDecayFloor_SkillsSurviveAggressiveDecay` pins the decay behaviour.
+
+#### Baseline Skill Library
+
+For fresh installs, MPM ships a small set of reference skills that close the substrate's most-used procedural loops (status reporting, health diagnostics). Seed them once with:
+
+```bash
+mpm ops init skills
+```
+
+Idempotent. Local edits to a seeded skill are preserved and surfaced as drift in the report (Created / Skipped / Drifted buckets, same shape as the directives bootstrap). The reference registry lives in `internal/core/seed/skills.go`; the engine in `internal/core/seed/engine.go` routes new rows through `dm.SaveSkill(...)` so every seeded row passes through the scanner. Re-running is a no-op.
 #### Modes & Personas (File-Based)
 
 *File-based retrieval parameters with auto-selection — no database, no compile step, hot-reload on mtime change.*
