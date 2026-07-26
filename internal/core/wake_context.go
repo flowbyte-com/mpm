@@ -62,9 +62,9 @@ type WakeContextData struct {
 	// divide-by-zero NaN/Inf in the JSON response.
 	EpistemicPressure EpistemicPressureData `json:"epistemic_pressure"`
 	// AvailableSkills is the lightweight catalogue of skills the agent
-	// has access to. Top 20 by weight, plus a total count surfaced in
-	// the wake context. Populated by GatherWakeContext when the skill
-	// feature is enabled; empty otherwise.
+	// has access to. At most TopSkillsInWake entries are surfaced in
+	// weight order. Populated by GatherWakeContext when the skill feature
+	// is enabled; empty otherwise.
 	AvailableSkills []SkillSummary `json:"available_skills,omitempty"`
 }
 
