@@ -1681,6 +1681,51 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}, nil
 }
 
+// handlePromoteSkillToGlobal marks a skill row as shared (is_global=1)
+// and stamps metadata.derived_from_skill_id so the promoted row is
+// traceable. The third operator-gated shared-DB promotion path
+// alongside record_global_rule and promote_to_global.
+//
+// Unlike promote_to_global, no separate shared row is created: the skill
+// keeps its deterministic id and is flipped in place (see
+// PromoteSkillToGlobal). So there is no "local -> shared id" lineage to
+// report — the audit note records the single id that was elevated.
+//
+// Args:
+//
+//	--skill_id  (required) The skill id to promote (e.g. "skill:agentshell-v1.0.0")
+//	--confirm   (required) Must be true. Refuses without it.
+func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("promote_skill_to_global requires confirm=true; cross-project promotion should be operator-gated")
+	}
+	skillID := internal.ParseStringOr(p["skill_id"], "")
+	if skillID == "" {
+		return nil, fmt.Errorf("skill_id is required")
+	}
+
+	// Forward the validated confirm rather than a literal true, so the
+	// value the operator supplied is the value the gate sees end to end.
+	if err := dm.PromoteSkillToGlobal(skillID, confirm); err != nil {
+		return nil, err
+	}
+	// Forensic log — skill→shared promotion. Records which skill id was
+	// elevated so other agents can audit the shared surface.
+	dm.LogAudit(
+		mpminternal.AuditInfo, "shared_db",
+		fmt.Sprintf("promote_skill_to_global %s", skillID), "",
+		mpminternal.AuditContext{
+			"skill_id": skillID,
+		},
+	)
+	return map[string]interface{}{
+		"success":   true,
+		"skill_id":  skillID,
+		"is_global": true,
+	}, nil
+}
+
 // splitTags is a small helper that turns a comma-separated tag string
 // into a []string. Empty input returns nil.
 func splitTags(s string) []string {
