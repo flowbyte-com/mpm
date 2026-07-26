@@ -1245,20 +1245,38 @@ The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLik
 *The bootstrap surface — `mpm wake` returns mode, persona, topics, recent memories so the agent starts each session with full context.*
 
 `mpm wake` surfaces the last session's mode, persona, topics, and recent memories — the agent's bootstrap context on startup.
-#### Ephemeral Scratchpad (Working Thesis Storage)
+#### Ephemeral Scratchpad (Working Context)
 
-*Per-session working thesis with security-scanner-gated promotion — tentative thoughts survive in a protected space until they’re ready to defend.*
+*Per-session Working Context with security-scanner-gated promotion — tentative thoughts survive in a protected space until they’re ready to defend.*
 
-A per-session scratchpad for hypotheses that aren't ready for permanent memory. Single-row-per-session, 24h decay, atomic promote. The scratchpad sits between "thought I had this turn" and "memory I'm willing to defend."
+A per-session Working Context for hypotheses, intermediate state, and execution tracking that aren't ready for permanent memory. Single-row-per-session, 24h decay, atomic promote. The scratchpad sits between "thought I had this turn" and "memory I'm willing to defend." Convention enforced via the `flush_scratchpad` MCP tool description (survives fresh install without a database-resident skill).
 
 **The four verbs:**
 
 | Verb | What it does |
 |---|---|
-| `flush_scratchpad` | Write or update the thesis for a session. Idempotent on `session_id`. |
-| `read_scratchpad` | Peek at the current thesis. |
+| `flush_scratchpad` | Overwrite the Working Context for a session. Idempotent on `session_id`. The convention is to overwrite (not append) to keep the context concise and avoid context crunch. |
+| `read_scratchpad` | Retrieve the agent's current Working Context. Use at session start to recover state, mid-task to verify the latest checkpoint. |
 | `discard_scratchpad` | Hard-delete the scratchpad without promoting. |
-| `promote_scratchpad` | Atomically promote to permanent memory. |
+| `promote_scratchpad` | Atomically promote the Working Context into a permanent memory. |
+
+**Working Context template.** When starting a multi-step task, scaffold the scratchpad using this exact markdown structure so the next agent (or your future self after a context refresh) can pick up cleanly:
+
+```
+Working Context
+Goal: [What are we trying to achieve?]
+Current State: [What was the last action taken?]
+Completed:
+  - [x] Step 1
+Next Actions:
+  - [ ] Step 2
+Open Questions:
+  - [Unknowns to resolve]
+Relevant Context: [IDs of memories/skills in use]
+Exit Criteria: [What constitutes completion? When do we wipe this?]
+```
+
+The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `save_lesson` before wiping.
 
 **The atomic rollback is the entire point.** `promote_scratchpad` runs the security scanner against the synthesized memory *inside* the same transaction as the memory INSERT and the scratchpad DELETE. If the scanner rejects (poison-phrase match, sensitive content, etc.), the entire transaction aborts: the scratchpad row survives for the agent to amend, and no memory row is created. A thought that fails the scanner is **not lost** — it is preserved for revision.
 
