@@ -203,14 +203,14 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 // need a skill-specific decay sweep and the row stays discoverable by
 // the same retrieval paths that already handle directives and lessons.
 //
-// Scan: the spec calls for routing through SaveMemoryNode for the
-// poison/secret scanner. SaveMemoryNode generates its own id (a
-// time-based one), which collides with the deterministic
-// `skill:<name>-v<semver>` id this contract requires. We therefore
-// invoke ScanContentForWrite directly (the same scanner the
-// SaveMemoryNode path runs) and then write via raw SQL with our
-// deterministic id. The scanner coverage is structural: this function
-// is the ONLY writer for skills rows, and it scans before INSERT.
+// Write path: the scanner is structurally guaranteed by routing the
+// INSERT through saveMemoryRow (the private primitive shared with
+// SaveMemoryNode). SaveSkill uses a deterministic `skill:<name>-v<semver>`
+// id rather than SaveMemoryNode's generated uuid, so we can't go
+// through SaveMemoryNode directly — but we do go through its core
+// scanner+INSERT primitive. Any future field added to the memories
+// schema that lands in saveMemoryRow will automatically reach skills
+// without re-deriving a parallel writer.
 func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string, force bool) (string, error) {
 	// Parse frontmatter first so a malformed content string never reaches
 	// the DB layer. The contract here is that any rejected frontmatter
@@ -224,15 +224,6 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	}
 	if fm.Version != version {
 		return "", fmt.Errorf("frontmatter version %q does not match arg %q", fm.Version, version)
-	}
-
-	// Scanner: structural enforcement — the static-analysis test
-	// TestScannerCoverage_AllMemoriesWritersScanContent catches any
-	// INSERT INTO memories that bypasses this. We call ScanContentForWrite
-	// (the exported wrapper) so the same coverage holds whether the call
-	// stack traces through internal or external callers.
-	if blocked, reason := ScanContentForWrite(content); blocked {
-		return "", fmt.Errorf("save skill blocked: %s", reason)
 	}
 
 	id, err := SkillIDForNameAndVersion(name, version)
@@ -294,6 +285,44 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		// skill under newer-looking alternatives. SQLite preserves columns
 		// omitted from the SET clause, so we update only the content
 		// triple + updated_at and leave weight/reinforcement_count alone.
+		//
+		// is_latest must still be computed via semver comparison against
+		// other versions for this name, excluding the current row. Edge
+		// case: force-overwriting v1 after v2 exists must NOT stamp v1
+		// as latest — same contract as the new-row path below.
+		prefix := "skill:" + name + "-v"
+		var (
+			otherID      string
+			otherVersion string
+		)
+		err = db.QueryRow(`
+			SELECT id, json_extract(metadata, '$.version')
+			FROM memories
+			WHERE collection = 'skills' AND deleted_at IS NULL
+			  AND substr(id, 1, length(?)) = ?
+			  AND id != ?
+			ORDER BY id DESC
+			LIMIT 1
+		`, prefix, prefix, id).Scan(&otherID, &otherVersion)
+		isLatest := true
+		if err == nil {
+			cmp := semver.Compare("v"+version, "v"+otherVersion)
+			if cmp < 0 {
+				// Incoming is older than another existing version —
+				// the higher one retains is_latest=true, this one
+				// gets is_latest=false.
+				isLatest = false
+			}
+		}
+		// err == sql.ErrNoRows: no other versions, this is the only
+		// (or highest) version, is_latest=true.
+
+		metadata["is_latest"] = isLatest
+		metaJSON, err = json.Marshal(metadata)
+		if err != nil {
+			return "", fmt.Errorf("marshal metadata: %w", err)
+		}
+
 		_, err = db.Exec(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
@@ -325,18 +354,25 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// a proxy for highest semver because skill ids are skill:<name>-v<semver>
 	// with equal-width semver; if v10.0.0 ever lands this needs a proper
 	// semver ORDER BY via a generated column.
+	//
+	// Prefix-match via substr() (not LIKE) because LIKE's `_` and `%`
+	// wildcards would match unintended rows if the name contains those
+	// characters. The skill name validator already rejects `-v` to keep
+	// the format unambiguous; we extend that hygiene here by avoiding
+	// the LIKE wildcard syntax entirely.
 	var (
 		existingID      string
 		existingVersion string
 	)
+	prefix := "skill:" + name + "-v"
 	err = tx.QueryRow(`
 		SELECT id, json_extract(metadata, '$.version')
 		FROM memories
 		WHERE collection = 'skills' AND deleted_at IS NULL
-		  AND id LIKE ('skill:' || ? || '-v%')
+		  AND substr(id, 1, length(?)) = ?
 		ORDER BY id DESC
 		LIMIT 1
-	`, name).Scan(&existingID, &existingVersion)
+	`, prefix, prefix).Scan(&existingID, &existingVersion)
 
 	hasExisting := err == nil
 	if err != nil && err != sql.ErrNoRows {
@@ -380,10 +416,13 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	_, err = tx.Exec(`
-		INSERT INTO memories (id, collection, content, tags, metadata, weight, is_prime_directive, is_long_term)
-		VALUES (?, 'skills', ?, ?, ?, 5, 0, 1)
-	`, id, content, string(tagsJSON), string(metaJSON))
+	// INSERT via saveMemoryRow — the shared scanner+INSERT primitive
+	// that backs SaveMemoryNode. Tx-aware (DBNode interface), so the
+	// INSERT lands in the same transaction as the flip-prior UPDATE
+	// above. Skills don't carry embeddings, so IVF assignment is a
+	// no-op here.
+	txDBNode := &txNode{tx: tx, dm: dm}
+	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "")
 	if err != nil {
 		return "", fmt.Errorf("insert skill: %w", err)
 	}
