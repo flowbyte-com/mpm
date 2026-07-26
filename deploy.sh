@@ -21,6 +21,19 @@
 
 set -euo pipefail
 
+# `sudo` resets the PATH to a secure default (typically /usr/bin:/bin),
+# which makes `openclaw` invisible to the post-install restart step on
+# hosts where it lives under ~/.local/bin. Restore the invoking user's
+# PATH so the gateway restart finds the binary. Fall back to a sensible
+# default if sudo's env_reset stripped $SUDO_USER.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+if [[ -n "${SUDO_USER:-}" ]]; then
+    USER_BIN=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [[ -n "$USER_BIN" && -d "$USER_BIN/.local/bin" ]]; then
+        export PATH="$USER_BIN/.local/bin:$PATH"
+    fi
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
