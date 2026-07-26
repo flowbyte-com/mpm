@@ -67,34 +67,54 @@ func TestProactiveRecallHint_SkillOverlaps(t *testing.T) {
 	}
 }
 
-// TestProactiveRecallHint_TrimsAfterSkillAppend pins the ≤ maxHints
-// contract after the skill pass. With three overlapping skills and
-// maxHints=2, only two hints may be returned and at least one must be
-// a skill (proving the trim was applied to the merged list, not just
-// the BM25 hits).
+// TestProactiveRecallHint_TrimsAfterSkillAppend pins the merge-and-
+// rebalance contract: when BM25 hits and skill hints compete for the
+// same budget, the trim applies to the merged list, not just the
+// BM25 slice. The seed includes one decision memory and three skills
+// whose when_to_use overlaps the conversation; with maxHints=2 the
+// final result must contain both a decision and a skill — proving
+// skills were appended before the trim and were not silently dropped.
+//
+// Conversation text is kept to a single keyword so FTS5's implicit-
+// AND across multi-token queries doesn't accidentally filter out the
+// directive row. This is the realistic shape: most agent messages
+// share one or two salient tokens with the directive.
 func TestProactiveRecallHint_TrimsAfterSkillAppend(t *testing.T) {
 	dm := NewTestDM(t)
+	if _, err := dm.db.Exec(`
+		INSERT INTO memories (id, collection, content, is_prime_directive, tags, metadata, weight, is_global, deleted_at)
+		VALUES ('mem-directive', 'decisions', 'agentshell scaffolding note', 0, '[]', '{}', 5, 0, NULL)
+	`); err != nil {
+		t.Fatalf("seed directive: %v", err)
+	}
 	for _, name := range []string{"agentshell", "wp-deploy", "theme-forge"} {
 		insertRawSkill(t, dm, "skill:"+name+"-v1.0.0", name, "1.0.0",
 			"---\nname: "+name+"\nversion: 1.0.0\nwhen_to_use: agentshell, theme\n---\nbody")
 	}
 
-	hints, err := dm.ProactiveRecallHint("agentshell theme work", 2, -3.0)
+	hints, err := dm.ProactiveRecallHint("agentshell", 2, 0.5)
 	if err != nil {
 		t.Fatalf("ProactiveRecallHint: %v", err)
 	}
 	if len(hints) > 2 {
-		t.Fatalf("hint count = %d, want ≤ 2 after skill append", len(hints))
+		t.Fatalf("hint count = %d, want ≤ 2 after merge+trim", len(hints))
 	}
-	hasSkill := false
+
+	hasDecision, hasSkill := false, false
 	for _, h := range hints {
-		if t, _ := h["type"].(string); t == "skill" {
+		switch t, _ := h["type"].(string); t {
+		case "skill":
 			hasSkill = true
-			break
+		}
+		if c, _ := h["collection"].(string); c == "decisions" {
+			hasDecision = true
 		}
 	}
 	if !hasSkill {
 		t.Fatalf("expected at least one skill hint in trimmed result, got %+v", hints)
+	}
+	if !hasDecision {
+		t.Fatalf("expected at least one decision hint in trimmed result (merge+trim path), got %+v", hints)
 	}
 }
 
