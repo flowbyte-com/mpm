@@ -1926,6 +1926,21 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 // is attributed to the txNode, so watchdog.jsonl entries from inside a tx
 // carry the same shape as standalone queries.
 func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+	id := GenerateID()
+	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
+}
+
+// saveMemoryRow is the shared INSERT primitive that backs both
+// SaveMemoryNode (which generates a random id) and SaveSkill (which
+// uses a deterministic skill:<name>-v<version> id). Routing both
+// writers through this single function makes the security scanner
+// structurally guaranteed for every memories row, including the
+// deterministic-id skills path that previously had its own INSERT.
+//
+// Watchdog telemetry, IVF cluster assignment, content_hash, and all
+// other insert-time invariants live here so future fields added to
+// the memories schema automatically reach every caller.
+func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
 			"reason":    reason,
@@ -1941,7 +1956,6 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 
-	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 
@@ -2002,7 +2016,7 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 	// tx).
 	if embedding != nil && len(embedding) > 0 {
 		if _, assignErr := AssignToClusterNode(node, dm, id, embedding, ""); assignErr != nil {
-			slog.Warn("SaveMemoryNode: IVF assignment failed (memory is unassigned; rebalance will recover)",
+			slog.Warn("saveMemoryRow: IVF assignment failed (memory is unassigned; rebalance will recover)",
 				"memory_id", id, "error", assignErr.Error())
 		}
 	}
