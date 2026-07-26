@@ -244,6 +244,21 @@ var Registry = []Tool{
 		Handler: handleExplainConfidence,
 	},
 	{
+		Name:        "explain_retrieval",
+		Description: "Run a standard FTS search and return a per-node diagnostic breakdown: Base FTS Match score, Reuse Count (how often the node has been surfaced into agent working memory), Last Retrieved timestamp, and Success Count. The retrieval ordering is identical to query_long_term_memory — the FTS bm25() rank is preserved bit-for-bit. This tool layers observability on top, it does NOT alter ranking. Use this when you want to understand WHY a result ranked where it did, or how often it has been consumed before.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"query":      {"type": "string", "description": "The FTS query string (same contract as query_long_term_memory)."},
+				"limit":      {"type": "number", "description": "Max results to diagnose (default 10)."},
+				"collection": {"type": "string", "description": "Optional collection filter (memories, lessons, decisions, theories, skills)."},
+				"scope":      {"type": "string", "enum": ["all", "local", "shared"], "default": "all"}
+			},
+			"required": ["query"]
+		}`),
+		Handler: handleExplainRetrieval,
+	},
+	{
 		Name:        "query_audit_log",
 		Description: "Query the runtime anomaly ledger. Filters (all optional, combined with AND): level (enum: 'warn' | 'error' | 'fatal'), component (enum: 'relay' | 'synthesis' | 'watcher' | 'security' | 'cluster'), days (integer; default 1 — last N days). Optional: limit (default 50). Returns rows newest-first. Standard shapes: `{'level':'error','days':7}` for all errors in the last week; `{'component':'cluster'}` for cluster-related entries; `{'days':30,'limit':200}` for the deep-scan shape. Use filter examples as a starting point; the underlying query is plain SQL.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"level":{"type":"string"},"component":{"type":"string"},"days":{"type":"number"},"limit":{"type":"number"}}}`),

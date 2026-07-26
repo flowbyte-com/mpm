@@ -72,6 +72,24 @@ var BaseTables = []string{
 		content_hash TEXT
 	);`,
 
+	// Retrieval metadata — Observability Layer for "Adaptive Retrieval"
+	// (2026-07-26). 1:1 mapping with any cognitive node (Memory,
+	// Lesson, Decision, Theory, Skill). Tracks how often each node is
+	// surfaced into agent working memory. Search ranking is NOT altered
+	// by this table; the data is observability only until a future
+	// ranker chooses to consume it. See retrieval_ranker.go for the
+	// RetrievalRanker interface and DefaultRanker (preserves today's
+	// ftsScore pass-through behavior bit-for-bit).
+	`CREATE TABLE IF NOT EXISTS retrieval_metadata (
+		node_id TEXT PRIMARY KEY,
+		node_type TEXT NOT NULL,
+		reuse_count INTEGER DEFAULT 0,
+		last_retrieved_at DATETIME,
+		success_count INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+
 	// Raw memories table - for v6 ingest workflow
 	`CREATE TABLE IF NOT EXISTS raw_memories (
 		id            TEXT PRIMARY KEY,
