@@ -32,19 +32,54 @@ func handleStatus(args []string) int {
 // the text dashboard (printStatusDashboard) and the JSON output
 // (printStatusJSON). Single source of truth so the two views cannot drift.
 type statusData struct {
-	uptime       string
-	modeLine     string
-	personaLine  string
-	memTotal     int
-	memLTM       int
-	theoryTotal  int
-	theoryPend   int
-	theoryResolv int
-	decisions    int
-	watcher      string
-	synthMerged  int
-	synthLast    string
-	recentEvents []watchdogEvent
+	uptime        string
+	modeState     string   // none | one | many | auto
+	modeValues    []string // empty when state="none", one entry when "one"/"auto", many when "many"
+	personaState  string   // none | one | auto
+	personaValues []string // empty when "none", one entry when "one"/"auto"
+	memTotal      int
+	memLTM        int
+	theoryTotal   int
+	theoryPend    int
+	theoryResolv  int
+	decisions     int
+	watcher       string
+	synthMerged   int
+	synthLast     string
+	recentEvents  []watchdogEvent
+}
+
+// stateForMode classifies active.json's modes slice into a {state, values}
+// pair. state ∈ {none, one, many, auto} — the auto state means the user
+// has handed off mode selection to the substrate (current code keeps "auto"
+// as the literal first-slot value).
+func stateForMode(activeModes []string) (state string, values []string) {
+	switch len(activeModes) {
+	case 0:
+		return "none", []string{}
+	case 1:
+		if activeModes[0] == "auto" {
+			return "auto", []string{"auto"}
+		}
+		return "one", activeModes
+	default:
+		return "many", activeModes
+	}
+}
+
+// stateForPersona classifies active.json's persona string into a {state, values}
+// pair. state ∈ {none, one, auto}. "ephemeral" is surfaced as state="auto"
+// with values=["ephemeral"] — it's a kind of auto-loaded persona, not a
+// separate cardinality.
+func stateForPersona(activePersona string) (state string, values []string) {
+	switch activePersona {
+	case "":
+		return "none", []string{}
+	case "auto", "ephemeral":
+		return "auto", []string{activePersona}
+	default:
+		return "one", []string{activePersona}
+	}
 }
 
 func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statusData {
@@ -60,36 +95,60 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
-	// Default to explicit "(none)" — always show mode/persona line so the
-	// absence of an active selection is visible, not silent. Overridden
-	// below if a real value is found.
-	d.modeLine = "Mode: (none)"
-	d.personaLine = "Persona: (none)"
+	// Default to "none" — the absence of an active selection is always
+	// visible (never silent). Overridden below if a real value is found
+	// or if LoadActiveJSON fails (in which case the defaults persist).
+	d.modeState, d.modeValues = "none", []string{}
+	d.personaState, d.personaValues = "none", []string{}
 
 	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
-		if len(active.Modes) > 0 && active.Modes[0] == "auto" {
-			d.modeLine = "Mode: auto (loaded: auto)"
-		} else if len(active.Modes) > 0 {
-			d.modeLine = fmt.Sprintf("Mode: %s", strings.Join(active.Modes, ", "))
-		}
-		if active.Persona == "auto" {
-			d.personaLine = "Persona: auto (loaded: auto)"
-		} else if active.Persona == "ephemeral" {
+		d.modeState, d.modeValues = stateForMode(active.Modes)
+		d.personaState, d.personaValues = stateForPersona(active.Persona)
+	}
+	return d
+}
+
+// formatModeLine renders the dashboard's "Mode: ..." line from a
+// {state, values} pair. Cardinality is explicit in the text so a
+// reader doesn't have to count entries.
+func formatModeLine(state string, values []string) string {
+	switch state {
+	case "none":
+		return "Mode: none"
+	case "one":
+		return fmt.Sprintf("Mode: one (%s)", values[0])
+	case "many":
+		return fmt.Sprintf("Mode: many (%s)", strings.Join(values, ", "))
+	case "auto":
+		return "Mode: auto (loaded: auto)"
+	}
+	return fmt.Sprintf("Mode: %s", state)
+}
+
+// formatPersonaLine renders the dashboard's "Persona: ..." line.
+// For auto-state with ephemeral values, looks up the ephemeral persona's
+// display name to give the operator a more useful "loaded:" hint.
+func formatPersonaLine(state string, values []string, dm *mpminternal.DatabaseManager) string {
+	switch state {
+	case "none":
+		return "Persona: none"
+	case "one":
+		return fmt.Sprintf("Persona: one (%s)", values[0])
+	case "auto":
+		if len(values) > 0 && values[0] == "ephemeral" {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
 				displayName := ep.Name
 				if ep.Title != "" {
 					displayName = ep.Title
 				}
-				d.personaLine = fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
-			} else {
-				d.personaLine = "Persona: auto (loaded: ephemeral)"
+				return fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
 			}
-		} else if active.Persona != "" {
-			d.personaLine = fmt.Sprintf("Persona: %s", active.Persona)
+			return "Persona: auto (loaded: ephemeral)"
 		}
+		return "Persona: auto (loaded: auto)"
 	}
-	return d
+	return fmt.Sprintf("Persona: %s", state)
 }
 
 func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
@@ -98,12 +157,8 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	fmt.Println("⚡ MPM · System Status")
 	fmt.Println("────────────────────────────────────")
 	fmt.Printf("Uptime:    %s\n", d.uptime)
-	if d.modeLine != "" {
-		fmt.Printf("  %s\n", d.modeLine)
-	}
-	if d.personaLine != "" {
-		fmt.Printf("  %s\n", d.personaLine)
-	}
+	fmt.Printf("  %s\n", formatModeLine(d.modeState, d.modeValues))
+	fmt.Printf("  %s\n", formatPersonaLine(d.personaState, d.personaValues, dm))
 	fmt.Printf("Memories:  %d total | %d LTM\n", d.memTotal, d.memLTM)
 	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", d.theoryTotal, d.theoryPend, d.theoryResolv)
 	fmt.Printf("Decisions: %d total\n", d.decisions)
@@ -121,10 +176,23 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	fmt.Println("Run `mpm ops help` for engine room.")
 }
 
+// modeStateJSON / personaStateJSON are the wire shape for the
+// status JSON output. Both use the {state, values} form so consumers
+// can branch on cardinality without parsing the string.
+type modeStateJSON struct {
+	State  string   `json:"state"`
+	Values []string `json:"values"`
+}
+
+type personaStateJSON struct {
+	State  string   `json:"state"`
+	Values []string `json:"values"`
+}
+
 // printStatusJSON emits the status dashboard as a JSON object.
-// Field names mirror the dashboard labels where reasonable; values
-// are emitted with `omitempty` so empty optional fields (mode,
-// persona, recent_events) are skipped rather than emitted as "".
+// Mode and persona are first-class {state, values} objects —
+// cardinality (none|one|many|auto for mode, none|one|auto for persona)
+// is the discriminator; values carry the actual selections.
 func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 	d := buildStatusData(dm, startTime)
 
@@ -133,19 +201,19 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		Detail string `json:"detail"`
 	}
 	out := struct {
-		Uptime       string      `json:"uptime"`
-		Mode         string      `json:"mode"`
-		Persona      string      `json:"persona"`
-		Memories     memCounts   `json:"memories"`
-		Theories     thCounts    `json:"theories"`
-		Decisions    int         `json:"decisions"`
-		Watcher      string      `json:"watcher"`
-		Synthesis    synthCounts `json:"synthesis"`
-		RecentEvents []jsonEvent `json:"recent_events,omitempty"`
+		Uptime       string           `json:"uptime"`
+		Mode         modeStateJSON    `json:"mode"`
+		Persona      personaStateJSON `json:"persona"`
+		Memories     memCounts        `json:"memories"`
+		Theories     thCounts         `json:"theories"`
+		Decisions    int              `json:"decisions"`
+		Watcher      string           `json:"watcher"`
+		Synthesis    synthCounts      `json:"synthesis"`
+		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
 	}{
 		Uptime:    d.uptime,
-		Mode:      stripPrefix(d.modeLine, "Mode: "),
-		Persona:   stripPrefix(d.personaLine, "Persona: "),
+		Mode:      modeStateJSON{State: d.modeState, Values: d.modeValues},
+		Persona:   personaStateJSON{State: d.personaState, Values: d.personaValues},
 		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
 		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
 		Decisions: d.decisions,
@@ -162,16 +230,6 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		return usererror.Error("json encode failed: %v", err)
 	}
 	return 0
-}
-
-// stripPrefix removes `prefix` from `s` if present. Used to peel the
-// "Mode: " / "Persona: " label off the dashboard's pre-formatted lines
-// so the JSON view exposes the bare value.
-func stripPrefix(s, prefix string) string {
-	if strings.HasPrefix(s, prefix) {
-		return strings.TrimPrefix(s, prefix)
-	}
-	return s
 }
 
 type memCounts struct {
