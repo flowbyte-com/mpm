@@ -1048,6 +1048,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`shred`** — Secure delete memory
 - **`snooze`** — Bump memory relevance
 - **`stats`** — Show memory statistics
+- **`status`** — System status dashboard
 - **`switch`** — Interactive UI to change persona/mode
 - **`synthesize`** — Merge near-duplicate memories via LLM synthesis
 - **`tasks`** — Manage Agentic Cron tasks (upsert|list|delete)

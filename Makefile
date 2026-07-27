@@ -36,7 +36,7 @@ SYSTEM_SERVICE_DST := /etc/systemd/system/$(SERVICE_NAME).service
 GO := $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 
 VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
-BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
+BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
 .PHONY: all build install service-scheduler service install-system-service uninstall-service gen-cli clean test lint help
