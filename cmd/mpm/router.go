@@ -226,7 +226,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "directives":
 		return handlePrimeDirectives()
 	case "status":
-		return handleStatus()
+		return handleStatus(args[1:])
 	case "memory":
 		return handleMemory(args[1:])
 	case "mode":
@@ -497,7 +497,7 @@ func handleOps(args []string) int {
 		return handleSelfHeal(subArgs)
 
 	case "status":
-		return handleStatus()
+		return handleStatus(subArgs)
 
 		// — Help —
 	case "help":
