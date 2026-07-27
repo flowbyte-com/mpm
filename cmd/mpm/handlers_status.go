@@ -8,83 +8,181 @@ import (
 	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
-func handleStatus() int {
+// handleStatus shows the system status dashboard. Supports --json / -j
+// for machine-readable output; the JSON shape mirrors the text dashboard
+// field-for-field.
+func handleStatus(args []string) int {
 	dm := getDBConcrete()
 	if dm == nil {
 		return 1
+	}
+	jsonOutput, _ := ExtractJSONFlag(args)
+	if jsonOutput {
+		return printStatusJSON(dm, startTime)
 	}
 	printStatusDashboard(dm, startTime)
 	return 0
 }
 
-func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
-	uptime := formatUptime(time.Since(startTime))
-	totalMemories, _ := countMemories(dm, "")
-	ltmCount, _ := countMemories(dm, "weight >= 10")
-	theoriesCount, _ := countMemories(dm, "collection = 'theories'")
-	decisionsCount, _ := countMemories(dm, "collection = 'decisions'")
-	activeTheories, _ := countTheoriesByStatus(dm, "pending")
-	resolvedTheories, _ := countTheoriesByStatus(dm, "resolved")
+// statusData is the canonical view of the daemon's state used by both
+// the text dashboard (printStatusDashboard) and the JSON output
+// (printStatusJSON). Single source of truth so the two views cannot drift.
+type statusData struct {
+	uptime       string
+	modeLine     string
+	personaLine  string
+	memTotal     int
+	memLTM       int
+	theoryTotal  int
+	theoryPend   int
+	theoryResolv int
+	decisions    int
+	watcher      string
+	synthMerged  int
+	synthLast    string
+	recentEvents []watchdogEvent
+}
 
-	daemonStatus := getDaemonStatus()
+func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statusData {
+	var d statusData
+	d.uptime = formatUptime(time.Since(startTime))
+	d.memTotal, _ = countMemories(dm, "")
+	d.memLTM, _ = countMemories(dm, "weight >= 10")
+	d.theoryTotal, _ = countMemories(dm, "collection = 'theories'")
+	d.decisions, _ = countMemories(dm, "collection = 'decisions'")
+	d.theoryPend, _ = countTheoriesByStatus(dm, "pending")
+	d.theoryResolv, _ = countTheoriesByStatus(dm, "resolved")
+	d.watcher = getDaemonStatus()
+	d.synthMerged, d.synthLast = getSynthesisStats(dm)
+	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
-	synthCount, lastSynth := getSynthesisStats(dm)
-
-	recentEvents := getRecentWatchdogEvents(dm, 3)
-
-	// Auto-mode transparency
-	modeLine := ""
-	personaLine := ""
+	// Mode/persona — same parsing as the dashboard's pre-refactor inline logic.
 	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
 		if len(active.Modes) > 0 && active.Modes[0] == "auto" {
-			modeLine = "Mode: auto (loaded: auto)"
+			d.modeLine = "Mode: auto (loaded: auto)"
 		} else if len(active.Modes) > 0 {
-			modeLine = fmt.Sprintf("Mode: %s", strings.Join(active.Modes, ", "))
+			d.modeLine = fmt.Sprintf("Mode: %s", strings.Join(active.Modes, ", "))
 		}
 		if active.Persona == "auto" {
-			personaLine = "Persona: auto (loaded: auto)"
+			d.personaLine = "Persona: auto (loaded: auto)"
 		} else if active.Persona == "ephemeral" {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
 				displayName := ep.Name
 				if ep.Title != "" {
 					displayName = ep.Title
 				}
-				personaLine = fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
+				d.personaLine = fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
 			} else {
-				personaLine = "Persona: auto (loaded: ephemeral)"
+				d.personaLine = "Persona: auto (loaded: ephemeral)"
 			}
 		} else if active.Persona != "" {
-			personaLine = fmt.Sprintf("Persona: %s", active.Persona)
+			d.personaLine = fmt.Sprintf("Persona: %s", active.Persona)
 		}
 	}
+	return d
+}
+
+func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
+	d := buildStatusData(dm, startTime)
 
 	fmt.Println("⚡ MPM · System Status")
 	fmt.Println("────────────────────────────────────")
-	fmt.Printf("Uptime:    %s\n", uptime)
-	if modeLine != "" {
-		fmt.Printf("  %s\n", modeLine)
+	fmt.Printf("Uptime:    %s\n", d.uptime)
+	if d.modeLine != "" {
+		fmt.Printf("  %s\n", d.modeLine)
 	}
-	if personaLine != "" {
-		fmt.Printf("  %s\n", personaLine)
+	if d.personaLine != "" {
+		fmt.Printf("  %s\n", d.personaLine)
 	}
-	fmt.Printf("Memories:  %d total | %d LTM\n", totalMemories, ltmCount)
-	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", theoriesCount, activeTheories, resolvedTheories)
-	fmt.Printf("Decisions: %d total\n", decisionsCount)
-	fmt.Printf("Watcher:   %s\n", daemonStatus)
-	fmt.Printf("Synthesis: %d merged | last: %s\n", synthCount, lastSynth)
-	if len(recentEvents) > 0 {
+	fmt.Printf("Memories:  %d total | %d LTM\n", d.memTotal, d.memLTM)
+	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", d.theoryTotal, d.theoryPend, d.theoryResolv)
+	fmt.Printf("Decisions: %d total\n", d.decisions)
+	fmt.Printf("Watcher:   %s\n", d.watcher)
+	fmt.Printf("Synthesis: %d merged | last: %s\n", d.synthMerged, d.synthLast)
+	if len(d.recentEvents) > 0 {
 		fmt.Println("────────────────────────────────────")
 		fmt.Println("Recent events:")
-		for _, e := range recentEvents {
+		for _, e := range d.recentEvents {
 			fmt.Printf("  %s %s\n", e.op, e.detail)
 		}
 	}
 	fmt.Println("────────────────────────────────────")
 	fmt.Println("Run `mpm help` for daily commands.")
 	fmt.Println("Run `mpm ops help` for engine room.")
+}
+
+// printStatusJSON emits the status dashboard as a JSON object.
+// Field names mirror the dashboard labels where reasonable; values
+// are emitted with `omitempty` so empty optional fields (mode,
+// persona, recent_events) are skipped rather than emitted as "".
+func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
+	d := buildStatusData(dm, startTime)
+
+	type jsonEvent struct {
+		Op     string `json:"op"`
+		Detail string `json:"detail"`
+	}
+	out := struct {
+		Uptime       string      `json:"uptime"`
+		Mode         string      `json:"mode,omitempty"`
+		Persona      string      `json:"persona,omitempty"`
+		Memories     memCounts   `json:"memories"`
+		Theories     thCounts    `json:"theories"`
+		Decisions    int         `json:"decisions"`
+		Watcher      string      `json:"watcher"`
+		Synthesis    synthCounts `json:"synthesis"`
+		RecentEvents []jsonEvent `json:"recent_events,omitempty"`
+	}{
+		Uptime:    d.uptime,
+		Mode:      stripPrefix(d.modeLine, "Mode: "),
+		Persona:   stripPrefix(d.personaLine, "Persona: "),
+		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
+		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
+		Decisions: d.decisions,
+		Watcher:   d.watcher,
+		Synthesis: synthCounts{Merged: d.synthMerged, Last: d.synthLast},
+	}
+	for _, e := range d.recentEvents {
+		out.RecentEvents = append(out.RecentEvents, jsonEvent{Op: e.op, Detail: e.detail})
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return usererror.Error("json encode failed: %v", err)
+	}
+	return 0
+}
+
+// stripPrefix removes `prefix` from `s` if present. Used to peel the
+// "Mode: " / "Persona: " label off the dashboard's pre-formatted lines
+// so the JSON view exposes the bare value.
+func stripPrefix(s, prefix string) string {
+	if strings.HasPrefix(s, prefix) {
+		return strings.TrimPrefix(s, prefix)
+	}
+	return s
+}
+
+type memCounts struct {
+	Total int `json:"total"`
+	LTM   int `json:"ltm"`
+}
+
+type thCounts struct {
+	Total    int `json:"total"`
+	Pending  int `json:"pending"`
+	Resolved int `json:"resolved"`
+}
+
+type synthCounts struct {
+	Merged int    `json:"merged"`
+	Last   string `json:"last"`
 }
 
 func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {

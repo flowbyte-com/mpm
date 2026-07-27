@@ -54,7 +54,7 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-std)"
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-alpha)"
 
 # Install all four binaries to PREFIX/bin (system-wide, requires sudo).
 install: build
