@@ -62,8 +62,8 @@ func NewRouter() *CommandRouter {
 		"lesson":    {Name: "lesson", Description: "Lesson operations", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Memory operations", MinArgs: 1},
 
-		"ingest":   {Name: "ingest", Description: "Import memories from external SQLite sources"},
-		"migrate":  {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
+		"ingest":  {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"migrate": {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
 
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
@@ -79,6 +79,7 @@ func NewRouter() *CommandRouter {
 		"restore":    {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
 		"restore-db": {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
+		"status":     {Name: "status", Description: "System status dashboard", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Persona operations"},
 		"ops":        {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
@@ -224,6 +225,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRef(args[1:])
 	case "directives":
 		return handlePrimeDirectives()
+	case "status":
+		return handleStatus()
 	case "memory":
 		return handleMemory(args[1:])
 	case "mode":
