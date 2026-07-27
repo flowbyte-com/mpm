@@ -60,7 +60,12 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
-	// Mode/persona — same parsing as the dashboard's pre-refactor inline logic.
+	// Default to explicit "(none)" — always show mode/persona line so the
+	// absence of an active selection is visible, not silent. Overridden
+	// below if a real value is found.
+	d.modeLine = "Mode: (none)"
+	d.personaLine = "Persona: (none)"
+
 	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
 		if len(active.Modes) > 0 && active.Modes[0] == "auto" {
@@ -129,8 +134,8 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 	}
 	out := struct {
 		Uptime       string      `json:"uptime"`
-		Mode         string      `json:"mode,omitempty"`
-		Persona      string      `json:"persona,omitempty"`
+		Mode         string      `json:"mode"`
+		Persona      string      `json:"persona"`
 		Memories     memCounts   `json:"memories"`
 		Theories     thCounts    `json:"theories"`
 		Decisions    int         `json:"decisions"`
