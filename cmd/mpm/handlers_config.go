@@ -185,8 +185,10 @@ func handleConfigShow(c *config.Config) int {
 	}
 
 	// Legacy synth block — still surfaced for operators with the
-	// pre-profiles config (or who haven't migrated).
-	if c.Synth != nil {
+	// pre-profiles config (or who haven't migrated). Only show when
+	// there's actual legacy content to migrate (not an empty struct
+	// after the key was removed from the JSON).
+	if c.Synth != nil && (c.Synth.Model != "" || c.Synth.APIKey != "" || c.Synth.BaseURL != "") {
 		s := c.Synth
 		fmt.Println()
 		fmt.Println("  Legacy synth block (migrate via 'mpm config profile add')")
