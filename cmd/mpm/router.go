@@ -54,7 +54,6 @@ func NewRouter() *CommandRouter {
 		"review": {Name: "review", Description: "Spaced reinforcement review", MinArgs: 0},
 
 		// Feature commands
-		"watch":     {Name: "watch", Description: "File watcher for memory ingestion"},
 		"switch":    {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
 		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
 		"topic":     {Name: "topic", Description: "Topic management", MinArgs: 1},
@@ -193,8 +192,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleReview(args)
 	case "lint":
 		return handleLint(args)
-	case "watch":
-		return handleWatch(args[1:])
 	case "switch":
 		return r.handleSwitch()
 	case "add":
@@ -339,10 +336,6 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	var helpFunc func() int
 
 	switch helpCmd {
-	case "watch":
-		// handleWatch is now a deprecation stub that prints its own help —
-		// route through it instead of a dedicated helpFunc.
-		return handleWatch(args[1:])
 	case "mode":
 		helpFunc = handleModeHelp
 	case "persona":
@@ -424,10 +417,6 @@ func handleOps(args []string) int {
 		return handleOpsBroadcast(subArgs)
 	case "active-sessions":
 		return handleOpsActiveSessions(subArgs)
-
-	// — Watcher —
-	case "watch":
-		return handleWatch(subArgs)
 
 	// — Review & Stats —
 	case "review":
@@ -520,7 +509,6 @@ var opsSubcommandDescs = []struct {
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
-	{"watch", "Start/stop/status watcher daemon"},
 	{"review", "Spaced reinforcement review"},
 	{"stats", "Memory statistics"},
 	{"prune", "Prune expired memories"},
