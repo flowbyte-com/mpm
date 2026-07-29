@@ -43,7 +43,6 @@ type statusData struct {
 	theoryPend    int
 	theoryResolv  int
 	decisions     int
-	watcher       string
 	synthMerged   int
 	synthLast     string
 	recentEvents  []watchdogEvent
@@ -91,7 +90,6 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.decisions, _ = countMemories(dm, "collection = 'decisions'")
 	d.theoryPend, _ = countTheoriesByStatus(dm, "pending")
 	d.theoryResolv, _ = countTheoriesByStatus(dm, "resolved")
-	d.watcher = getDaemonStatus()
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
@@ -162,7 +160,6 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	fmt.Printf("Memories:  %d total | %d LTM\n", d.memTotal, d.memLTM)
 	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", d.theoryTotal, d.theoryPend, d.theoryResolv)
 	fmt.Printf("Decisions: %d total\n", d.decisions)
-	fmt.Printf("Watcher:   %s\n", d.watcher)
 	fmt.Printf("Synthesis: %d merged | last: %s\n", d.synthMerged, d.synthLast)
 	if len(d.recentEvents) > 0 {
 		fmt.Println("────────────────────────────────────")
@@ -207,7 +204,6 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		Memories     memCounts        `json:"memories"`
 		Theories     thCounts         `json:"theories"`
 		Decisions    int              `json:"decisions"`
-		Watcher      string           `json:"watcher"`
 		Synthesis    synthCounts      `json:"synthesis"`
 		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
 	}{
@@ -217,7 +213,6 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
 		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
 		Decisions: d.decisions,
-		Watcher:   d.watcher,
 		Synthesis: synthCounts{Merged: d.synthMerged, Last: d.synthLast},
 	}
 	for _, e := range d.recentEvents {
@@ -268,14 +263,6 @@ func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int,
 		AND json_extract(metadata, '$.status') = ?`
 	err := dm.SQLDB().QueryRow(query, status).Scan(&count)
 	return count, err
-}
-
-// getDaemonStatus returns the watcher daemon status. Deprecated 2026-06-26 —
-// the watcher is gone, so this always reports "not running". Kept as a stable
-// string contract for the status dashboard so callers don't have to special-case
-// a missing function.
-func getDaemonStatus() string {
-	return "not running (watcher deprecated 2026-06-26)"
 }
 
 func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {

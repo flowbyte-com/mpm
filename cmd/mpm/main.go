@@ -1317,7 +1317,6 @@ func printHelp() {
 		{"mode | persona", "", false},
 		{"wake | directives | switch | status", "", false},
 		{"doctor | maintain | gc | prune", "", false},
-		{"watch | review", "", false},
 		{"stats | export | synthesize", "", false},
 		{"backup | restore-db | ingest", "", false},
 		{"backfill-embeddings", "", false},
