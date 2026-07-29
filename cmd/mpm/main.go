@@ -1329,13 +1329,28 @@ func PrintQuicklinks() {
 	// effect policy).
 	items := ReadReadiness(dm)
 	allOK := readinessOverall(items)
+
+	// First-run UX: when the substrate has no AI provider
+	// configured yet (fresh install or user hasn't run
+	// 'mpm config'), replace the standard 'MPM Ready' header
+	// with a friendly 'Welcome to MPM' that points at the
+	// wizard. The substrate is technically still ready at the
+	// readiness layer (the scheduler runs, db is open, etc.)
+	// but the cognitive system can't actually DO anything
+	// without an LLM, so we treat that as a soft unready.
 	header := "MPM Ready"
-	if !allOK {
-		header = "MPM Not ready — see below"
+	if c, err := config.LoadConfig(); err == nil && !isProviderConfigured(c) {
+		header = "Welcome to MPM \u2014 no AI provider configured"
+	} else if !allOK {
+		header = "MPM Not ready \u2014 see below"
 	}
 	fmt.Println(header)
 	fmt.Println(divider)
 	fmt.Println()
+	if header != "MPM Ready" {
+		fmt.Println(" Run `mpm config` to configure your first model.")
+		fmt.Println()
+	}
 	for _, item := range items {
 		marker := "✓"
 		if !item.OK {
@@ -1525,6 +1540,24 @@ func indexOfNewline(s string) int {
 		}
 	}
 	return -1
+}
+
+// isProviderConfigured reports whether the substrate has an
+// AI provider wired up. Used by the first-run UX on 'mpm' (no
+// args) to detect fresh installs and surface a 'run mpm config'
+// prompt instead of a generic 'MPM Ready' header.
+//
+// Specifically: Model is non-empty AND (APIKey OR BaseURL is
+// non-empty). Ollama uses base_url with no key, so either is
+// acceptable. The strict check is 'any one of the three fields
+// is filled', but real-world fresh installs tend to have neither,
+// so we err on the side of 'show the wizard prompt.'
+func isProviderConfigured(c *config.Config) bool {
+	if c == nil || c.Synth == nil {
+		return false
+	}
+	s := c.Synth
+	return s.Model != "" || s.APIKey != "" || s.BaseURL != ""
 }
 
 // withThousands formats an n-string with a thousands separator.
