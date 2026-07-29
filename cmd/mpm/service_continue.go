@@ -171,15 +171,20 @@ func (s *ContinueService) composeWakeContext(now time.Time) DashboardSection {
 // composeMemoryStats builds a tiny memory-store snapshot section.
 // The full status belongs in `mpm status`; this is the dashboard
 // one-liner.
+//
+// Source-of-truth key names verified against internal/core/web_db.go's
+// GetMemoryStats. Decisions and theories live in their own collections;
+// the GetMemoryStats map doesn't surface per-collection counts. We
+// fall back to a direct SQL count for those.
 func (s *ContinueService) composeMemoryStats(now time.Time) DashboardSection {
 	stats, err := s.dm.GetMemoryStats()
 	if err != nil {
 		return errorSection("Memory Stats", err)
 	}
-	total := formatStatInt(stats, "total_memories")
-	ltm := formatStatInt(stats, "long_term")
-	theories := formatStatInt(stats, "theories")
-	decisions := formatStatInt(stats, "decisions")
+	total := formatStatInt(stats, "total")
+	ltm := formatStatInt(stats, "ltm")
+	theories := formatStatIntRaw(s.dm, "theories", "deleted_at IS NULL")
+	decisions := formatStatIntRaw(s.dm, "decisions", "deleted_at IS NULL")
 	body := fmt.Sprintf("  total      : %s\n  long-term  : %s\n  theories   : %s\n  decisions  : %s",
 		total, ltm, theories, decisions)
 	return DashboardSection{
@@ -249,5 +254,25 @@ func formatStatInt(m map[string]interface{}, key string) string {
 		}
 	}
 	return "(unknown)"
+}
+
+// formatStatIntRaw runs a SELECT COUNT(*) against the memories table
+// filtered by collection + optional where clause. Returns "(error)"
+// on failure so dashboard rendering continues.
+func formatStatIntRaw(dm *mpminternal.DatabaseManager, collection, where string) string {
+	if dm == nil {
+		return "(no db)"
+	}
+	query := "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND collection = ?"
+	args := []interface{}{collection}
+	if where != "" {
+		query += " AND " + where
+	}
+	var n int
+	row := dm.QueryRowTracked(query, args...)
+	if err := row.Scan(&n); err != nil {
+		return "(error)"
+	}
+	return fmt.Sprintf("%d", n)
 }
 

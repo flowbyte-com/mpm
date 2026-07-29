@@ -66,6 +66,7 @@ func NewRouter() *CommandRouter {
 
 		// Working Context (cognitive-interface RFC Wave 1)
 		"work": {Name: "work", Description: "Working Context (ephemeral execution state) — status|show|clear|promote"},
+		"continue": {Name: "continue", Description: "Session resumption dashboard — composes working context, wake context, decisions, skills, theories"},
 
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
@@ -185,6 +186,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleMigrate(args)
 	case "work":
 		return handleWork(args[1:])
+	case "continue":
+		return handleContinue(args[1:])
 	case "stats":
 		return handleStats(args)
 	case "prune":
