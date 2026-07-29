@@ -332,17 +332,53 @@ func (r *CommandRouter) handleVersion() int {
 	return 0
 }
 
-// handleHelp routes help requests to specific help functions or prints general help
+// handleHelp routes help requests per the cognitive-interface RFC §4
+// progressive-disclosure principle. Order:
+//
+//   1. No args → cognitive default (~22 commands across 5 sections).
+//   2. --all → full operator-interface catalogue (all 56+ commands).
+//   3. <known-section> → expanded section help (knowledge, runtime,
+//                         maintenance, reflection, work, explain).
+//   4. <known-command> → existing per-command help (mode, persona, etc.).
+//   5. Anything else → "no help available" + cognitive default.
+//
+// Stage 3 keeps existing per-command help reachable so scripts that
+// depended on `mpm help mode` etc. continue to work.
 func (r *CommandRouter) handleHelp(args []string) int {
 	if len(args) == 0 {
-		PrintHelp()
+		printCognitiveHelp()
 		return 0
 	}
 
-	// Route to specific help based on command
-	helpCmd := args[0]
-	var helpFunc func() int
+	// Pull out --all before matching against command names. Operators
+	// can also use `mpm help <section> --all` if they want a flat dump
+	// from a section context.
+	all := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--all" {
+			all = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
 
+	// `mpm help --all` (no other args) → full catalogue.
+	if all && len(filtered) == 0 {
+		printHelpAll()
+		return 0
+	}
+
+	// At this point we have at least one positional arg.
+	helpCmd := filtered[0]
+
+	// 3. Section-name help (progressive disclosure).
+	if printSectionHelp(helpCmd) {
+		return 0
+	}
+
+	// 4. Per-command help (existing dispatch).
+	var helpFunc func() int
 	switch helpCmd {
 	case "mode":
 		helpFunc = handleModeHelp
@@ -365,10 +401,19 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
 		return 0
+	case "ops":
+		printOpsHelp()
+		return 0
+	case "work":
+		printWorkHelp()
+		return 0
 	default:
-		// Fall back to general help
+		// 5. Unknown: stay explicit rather than dumping the cognitive
+		// default. Operator asked for a specific help page; tell them
+		// if we don't have one. They can then run `mpm help` for the
+		// cognitive default.
 		r.errorf("[!] Error: no help available for '%s'\n", helpCmd)
-		PrintHelp()
+		fmt.Println("Try one of: mpm help, mpm help --all, mpm help knowledge, mpm help work")
 		return 1
 	}
 
