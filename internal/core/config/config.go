@@ -17,8 +17,48 @@ type Config struct {
 	SessionsDirs   []string          `json:"sessions_dirs,omitempty"`
 	ExternalDbs    []ExternalDB      `json:"external_dbs,omitempty"`
 	OpenClawDBPath string            `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
-	Synth          *SynthConfig      `json:"synth,omitempty"`
-	Aliases        map[string]string `json:"aliases,omitempty"` // CLI command aliases: "mem" → "recall --collection memories"
+	Synth          *SynthConfig      `json:"synth,omitempty"` // Legacy single-profile config; superseded by Profiles + Components
+	Profiles       map[string]Profile `json:"profiles,omitempty"`    // Named execution profiles; preferred surface
+	Components     map[string]string `json:"components,omitempty"`   // substrate-component → profile-name bindings
+	Aliases        map[string]string `json:"aliases,omitempty"`  // Cli command aliases: "mem" → "recall --collection memories"
+}
+
+// Profile describes one execution profile: a (provider, model,
+// parameters) tuple that any number of substrate components can
+// bind to. Profiles are pure data — they hold no behaviour.
+// Substrate callers ask the config for a profile by component name
+// (Config.ProfileFor); they do not pick providers or models
+// directly. This lets operators route different cognitive
+// functions to different models via `mpm config component set`.
+//
+// Field semantics:
+//
+//   Provider    — vendor identifier. Free-form string ("openai",
+//                 "anthropic", "ollama", "minimax", "custom",
+//                 "lmstudio", "openrouter", etc.). The substrate's
+//                 HTTP client branches on provider name; new
+//                 providers land in the substrate, not the schema.
+//   Model       — model name. Vendor-specific string ("gpt-4o",
+//                 "claude-3-5-sonnet", "qwen3:8b").
+//   BaseURL     — API endpoint. Defaulted by the substrate
+//                 (per-provider) when empty.
+//   APIKey      — credential. Empty for local Ollama.
+//   Temperature — sampling temperature 0.0-2.0. Substrate
+//                 defaults when nil.
+//   MaxTokens   — per-request cap. Substrate defaults when 0.
+//   TimeoutSecs — request timeout. Substrate defaults when 0.
+//   Reasoning   — optional effort hint ("low", "medium", "high").
+//                 Substrate-specific.
+type Profile struct {
+	Name        string  `json:"name,omitempty"`
+	Provider    string  `json:"provider"`
+	Model       string  `json:"model"`
+	BaseURL     string  `json:"base_url,omitempty"`
+	APIKey      string  `json:"api_key,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
+	TimeoutSecs int     `json:"timeout_seconds,omitempty"`
+	Reasoning   string  `json:"reasoning,omitempty"`
 }
 
 // ExternalDB describes an external SQLite database to poll for memories.
@@ -131,6 +171,101 @@ func SaveConfig(c *Config) error {
 		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
 	return nil
+}
+
+// ProfileFor resolves the Profile to use for a substrate component.
+//
+// Resolution order:
+//
+//  1. Explicit binding in Config.Components[component]:
+//     e.g. Components["critic"] = "review" → returns Profiles["review"].
+//  2. Fallback to the "default" profile (Profiles["default"]).
+//  3. Fallback to the legacy Synth block as a one-shot migration
+//     path — operators with the pre-profiles config still get a
+//     working substrate. The Synth-derived profile is reported
+//     as Name="default".
+//  4. Returns nil when nothing can be resolved.
+//
+// Substrate callers should ask by component name — never pick
+// provider/model themselves. The `profiles` map and the
+// `components` map are the operator-facing routing surface; new
+// components (Planner, Researcher, etc.) just add a new binding.
+//
+// Returns a defensive copy so callers cannot mutate the in-memory
+// profile via pointer. Returns nil when nothing can be resolved —
+// callers must handle that explicitly (e.g. "no model configured"
+// error paths).
+func (c *Config) ProfileFor(component string) *Profile {
+	if c == nil {
+		return nil
+	}
+	// 1. Explicit binding in Components.
+	if c.Components != nil {
+		if name, ok := c.Components[component]; ok && name != "" {
+			if p, ok := c.Profiles[name]; ok {
+				cp := p
+				cp.Name = name
+				return &cp
+			}
+		}
+	}
+	// 2. Fallback to "default" profile.
+	if c.Profiles != nil {
+		if p, ok := c.Profiles["default"]; ok {
+			cp := p
+			cp.Name = "default"
+			return &cp
+		}
+	}
+	// 3. Legacy Synth block as migration path.
+	if c.Synth != nil && (c.Synth.Model != "" || c.Synth.APIKey != "" || c.Synth.BaseURL != "") {
+		return &Profile{
+			Name:        "default",
+			Provider:    inferProviderFromURL(c.Synth.BaseURL),
+			Model:       c.Synth.Model,
+			BaseURL:     c.Synth.BaseURL,
+			APIKey:      c.Synth.APIKey,
+			MaxTokens:   c.Synth.MaxTokens,
+			TimeoutSecs: c.Synth.TimeoutSecs,
+		}
+	}
+	return nil
+}
+
+// DefaultComponentProfile returns the binding for a component as a
+// string, or "" when no binding exists. Substrate callers that want
+// to surface the binding name (not the resolved Profile) use this.
+//
+// Defaults: if the operator has not bound the component explicitly,
+// this returns "" (caller should fall through to ProfileFor's
+// fallback chain). Components like "memory" get a sensible binding
+// ('default') when one is missing, but the binding string itself
+// stays empty so operators can see what's actually configured.
+func (c *Config) DefaultComponentProfile(component string) string {
+	if c == nil || c.Components == nil {
+		return ""
+	}
+	return c.Components[component]
+}
+
+// inferProviderFromURL heuristically maps a base URL to a vendor
+// identifier. Substrate doesn't store provider explicitly, so the
+// URL is the operative signal for legacy-migrated configs.
+func inferProviderFromURL(u string) string {
+	lu := strings.ToLower(u)
+	switch {
+	case strings.Contains(lu, "minimax"):
+		return "minimax"
+	case strings.Contains(lu, "openai"):
+		return "openai"
+	case strings.Contains(lu, "anthropic"):
+		return "anthropic"
+	case strings.Contains(lu, "ollama") || strings.Contains(lu, "11434"):
+		return "ollama"
+	case lu == "":
+		return "custom"
+	}
+	return "custom"
 }
 
 // MPMDataDir is the subdirectory where all MPM runtime data resides
