@@ -81,6 +81,9 @@ func NewRouter() *CommandRouter {
 		"theory":   {Name: "theory", Description: "Theory tracker (add|resolve)"},
 		"skill":    {Name: "skill", Description: "Skill library (add|list|show|search)"},
 
+		// Tour (cognitive-interface RFC Wave 4) — onboarding walkthrough.
+		"tour": {Name: "tour", Description: "Interactive walkthrough of the cognitive verbs (--demo auto-runs each step; --step N jumps)"},
+
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
 		"list-skills": {Name: "list-skills", Description: "List skills (scope: all|local|shared)", MinArgs: 0, MaxArgs: 1},
@@ -232,6 +235,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTheory(args[1:])
 	case "skill":
 		return handleSkill(args[1:])
+	case "tour":
+		return handleTour(args[1:])
 	case "ls":
 		return handleLs(args)
 	case "show":
