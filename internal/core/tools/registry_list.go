@@ -35,7 +35,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_long_term_memory",
-		Description: "Search MPM long-term memory by FTS5 + semantic + reinforcement scoring. Federated across local + shared DBs when scope=all.",
+		Description: "Searches local + shared memories by FTS5 lexical matching + semantic similarity + reinforcement scoring. Hyphenated words are split into separate tokens (e.g., 'lazy-start' becomes tokens 'lazy' AND 'start'), so natural-language hyphenated queries work correctly. Use broad keywords rather than literal phrases — the FTS5 contract is implicit-AND across all tokens, with prefix wildcards applied per token. Special FTS5 characters (\", (, ), *, +, :, -) are stripped from query input; pass natural-language strings, not raw FTS5 syntax. Federated across DBs: scope='all' (default) merges local + shared with Shared Premium scoring (1.20x shared, 1.35x shared+rules, capped at 1.0); 'local' restricts to local tables; 'shared' restricts to shared.memories via FTS5. Use collection to narrow to a specific collection (theories, decisions, lessons, memories, etc.). Pass empty query to return no results (not all memories).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"},"collection":{"type":"string"},"scope":{"type":"string","enum":["all","local","shared"],"description":"Recall scope. all (default) merges local + shared with Shared Premium (1.20x shared, 1.35x shared+rules, cap 1.0); local restricts to local tables; shared restricts to shared.memories via FTS5.","default":"all"}},"required":["query"]}`),
 		Handler:     handleQueryLongTermMemory,
 	},
@@ -59,25 +59,25 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "resolve_theory",
-		Description: "Resolve a pending theory as confirmed or disproven.",
+		Description: "Resolve a pending theory. NOTE: this explicit tool exists but is now the FALLBACK path. The PREFERRED path is the implicit auto-resolution hook: save a memory carrying tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), and the theory row flips status in the same transaction as the memory insert. Use this explicit resolve_theory call only when you don't have a memory to anchor the resolution to. Required: theoryId, conclusion (enum: 'confirmed' or 'disproven'). Optional: newStatus (defaults to match conclusion — 'proven' for confirmed, 'disproven' for rejected). Forensics: the implicit hook sets resolved_by='save_to_memory:theory_resolve_hook'; this explicit tool sets resolved_by='mcp:resolve_theory'.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"theoryId":{"type":"string"},"conclusion":{"type":"string","enum":["confirmed","disproven"]},"newStatus":{"type":"string","enum":["proven","disproven"]},"winnerId":{"type":"string","description":"Arc 1 closure: when present, treats the theory as an arbitration theory from resolve-contradictions and routes to the auto-slash path. Absent = legacy path (mark resolved, no slash)."}},"required":["theoryId","conclusion","newStatus"]}`),
 		Handler:     handleResolveTheory,
 	},
 	{
 		Name:        "record_decision",
-		Description: "Record an architectural decision with context, choice, and rationale.",
+		Description: "Record an architectural decision. STRICTLY REQUIRED fields: context (the situation that triggered the decision), choice (what was decided), rationale (why this choice over alternatives — the substrate rejects empty rationale as a malformed record). The rationale field is non-bypassable: an agent must always articulate why the choice was made, even if briefly. Optional but recommended: outcome (post-hoc learning about the decision's eventual outcome, surfaced via search_references for future-me), tags (semantic territory for proactive_recall_hint), dependencies (JSON array of memory/theory/decision IDs this decision builds on).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"context":{"type":"string"},"choice":{"type":"string"},"rationale":{"type":"string"},"outcome":{"type":"string","description":"Optional. Out-of-band learning captured about the decision's eventual outcome; visible to future-me via search_references."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["context","choice","rationale"]}`),
 		Handler:     handleRecordDecision,
 	},
 	{
 		Name:        "save_lesson",
-		Description: "Persist a lesson learned (warning / practice / insight).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."}},"required":["fact"]}`),
+		Description: "Persist a lesson learned (warning / practice / insight). Pass `source_ids` to credit the cognitive nodes that helped you formulate this lesson — the Provenance Proxy uses these to bump `success_count` on each cited node in the retrieval observability layer (UPSERT semantic: never-retrieved nodes still receive a credit, just with success_count starting at 1). Optional: An array of node IDs (e.g., ['lesson:123', 'skill:deploy']) that actively helped you formulate this lesson. Citing sources helps the system learn which memories are most useful.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string"},"type":{"type":"string","enum":["warning","practice","insight"]},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"source_ids":{"type":"array","items":{"type":"string"},"description":"Optional list of node IDs (memories, skills, lessons, decisions, theories) that this lesson was distilled from. Each id receives a success_count increment via UPSERT in the retrieval observability layer; never-retrieved nodes are credited with a fresh row, not skipped."}},"required":["fact"]}`),
 		Handler:     handleSaveLesson,
 	},
 	{
 		Name:        "search_lessons",
-		Description: "Search MPM lessons by content query.",
+		Description: "Searches lessons by FTS5 lexical matching. Hyphenated words are split into separate tokens (e.g., 'lazy-start' becomes tokens 'lazy' AND 'start'), so natural-language hyphenated queries work correctly. Use broad keywords rather than literal phrases — the FTS5 contract is implicit-AND across all tokens, with prefix wildcards applied per token. Special FTS5 characters (\", (, ), *, +, :, -) are stripped from query input; pass natural-language strings, not raw FTS5 syntax. Examples: query 'lazy-start' matches lessons containing 'lazy' AND 'start'; query 'go test' matches lessons containing 'go' AND 'test'. Pass empty query to return no results (not all lessons).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		Handler:     handleSearchLessons,
 	},
@@ -89,7 +89,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "create_topic",
-		Description: "Create a topic in MPM.",
+		Description: "Create a topic in MPM — a named semantic cluster for grouping related memories. Required: name (short slug; e.g., '2026-world-cup', 'openclaw-mcp'). Optional: description (longer prose describing the theme). Returns the topic ID; use link_topic to attach memories. Topics organize multi-memory themes independently of collection (lessons, decisions, memories) — the same memory can belong to multiple topics; the same topic can hold memories across collections.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"}},"required":["name"]}`),
 		Handler:     handleCreateTopic,
 	},
@@ -101,7 +101,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "link_topic",
-		Description: "Link a memory to a topic.",
+		Description: "Link a memory to a topic. Required: memoryId, topicId. Optional: relevance (float 0.0-1.0; default 1.0 — how central the memory is to the topic; surfaces in retrieval ordering). One memory can belong to many topics; one topic can hold many memories. When a memory linked to a topic is recalled, the topic surfaces adjacent linked memories too — topics are how the agent builds multi-memory context windows. Idempotent: re-linking with the same relevance is a no-op.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"topic_id":{"type":"string"}},"required":["memory_id","topic_id"]}`),
 		Handler:     handleLinkTopic,
 	},
@@ -119,7 +119,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "list_references",
-		Description: "List reference documents.",
+		Description: "List reference documents (long-form source material ingested via add_reference). Optional: limit (default 50), offset (default 0; for pagination beyond the first page). Returns rows with id, title, filepath, indexed_at, and chunk_count. Reference docs live in a separate 'shelf' from memories — they don't decay and aren't auto-promoted to long-term, but they ARE searchable via search_references. Use for the 'what source material have we ingested?' inspection case.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":50},"offset":{"type":"number","default":0,"description":"Optional. Pagination offset; default 0."}}}`),
 		Handler:     handleListReferences,
 	},
@@ -200,7 +200,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "query_memory_quality",
-		Description: "Per-source memory quality statistics.",
+		Description: "Per-source memory quality statistics. No parameters required. Returns aggregate stats grouped by source (call, migrate, seed, web, etc.): counts, average weight, average confidence, confidence distribution histogram, weight distribution histogram. Use to spot a source that's degrading (e.g., a migrate import that brought in low-quality rows) or to audit LTM proportions across sources. Results are point-in-time — re-run periodically to track drift between sessions.",
 		Schema:      json.RawMessage(`{"type":"object"}`),
 		Handler:     handleQueryMemoryQuality,
 	},
@@ -244,8 +244,23 @@ var Registry = []Tool{
 		Handler: handleExplainConfidence,
 	},
 	{
+		Name:        "explain_retrieval",
+		Description: "Run a standard FTS search and return a per-node diagnostic breakdown: Base FTS Match score, Reuse Count (how often the node has been surfaced into agent working memory), Last Retrieved timestamp, and Success Count. The retrieval ordering is identical to query_long_term_memory — the FTS bm25() rank is preserved bit-for-bit. This tool layers observability on top, it does NOT alter ranking. Use this when you want to understand WHY a result ranked where it did, or how often it has been consumed before.",
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"query":      {"type": "string", "description": "The FTS query string (same contract as query_long_term_memory)."},
+				"limit":      {"type": "number", "description": "Max results to diagnose (default 10)."},
+				"collection": {"type": "string", "description": "Optional collection filter (memories, lessons, decisions, theories, skills)."},
+				"scope":      {"type": "string", "enum": ["all", "local", "shared"], "default": "all"}
+			},
+			"required": ["query"]
+		}`),
+		Handler: handleExplainRetrieval,
+	},
+	{
 		Name:        "query_audit_log",
-		Description: "Query the runtime anomaly ledger.",
+		Description: "Query the runtime anomaly ledger. Filters (all optional, combined with AND): level (enum: 'warn' | 'error' | 'fatal'), component (enum: 'relay' | 'synthesis' | 'watcher' | 'security' | 'cluster'), days (integer; default 1 — last N days). Optional: limit (default 50). Returns rows newest-first. Standard shapes: `{'level':'error','days':7}` for all errors in the last week; `{'component':'cluster'}` for cluster-related entries; `{'days':30,'limit':200}` for the deep-scan shape. Use filter examples as a starting point; the underlying query is plain SQL.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"level":{"type":"string"},"component":{"type":"string"},"days":{"type":"number"},"limit":{"type":"number"}}}`),
 		Handler:     handleQueryAuditLog,
 	},
@@ -340,7 +355,29 @@ var Registry = []Tool{
 	// across the surface and matches the AST guard rail's expectation.
 	{
 		Name:        "flush_scratchpad",
-		Description: "Save or update a volatile working thesis for a session. Use this to explicitly checkpoint reasoning that isn't ready for permanent memory. Idempotent per session_id.",
+		Description: `Overwrites the ephemeral scratchpad.
+
+CRITICAL USAGE RULE: This is your Working Context. Use this to avoid context crunch during multi-step tasks.
+You must maintain your execution state here. Do not append infinitely; overwrite to keep it concise.
+
+When starting a complex task, scaffold your state using this exact markdown template:
+
+Working Context
+Goal: [What are we trying to achieve?]
+Current State: [What was the last action taken?]
+Completed:
+
+[x] Step 1
+Next Actions:
+
+[ ] Step 2
+Open Questions:
+
+[Unknowns to resolve]
+Relevant Context: [IDs of memories/skills in use]
+Exit Criteria: [What constitutes completion? When do we wipe this?]
+
+When the Exit Criteria is met, you MUST wipe this scratchpad clean (pass an empty string). If you learned something durable during the task, use save_lesson before wiping.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -354,7 +391,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "read_scratchpad",
-		Description: "Read the current ephemeral scratchpad for a specific session.",
+		Description: "Read the agent's current Working Context (ephemeral scratchpad) for a specific session. Use this at session start to recover state from a prior session's flush_scratchpad, or mid-task to verify the latest checkpoint.",
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -396,7 +433,7 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "list_handoffs",
-		Description: "List session handoff history.",
+		Description: "List session handoff history. Optional: limit (default 10), unread (boolean; default false — set true to surface only handoffs not yet consumed by the wake_context system). Returns rows newest-first with session_id, summary, ended_at, state, and the unread flag. Use when the wake context summary is too short to diagnose a thread: 'what did the previous session hand forward, and is it still unread?'",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number"},"unread":{"type":"boolean"}}}`),
 		Handler:     handleListHandoffs,
 	},
@@ -408,25 +445,25 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "shred_memory",
-		Description: "Hard-delete a memory and its mirror file.",
+		Description: "Hard-delete a memory or lesson by ID. Lesson-aware: passing a lesson ID (from list_lessons / search_lessons / save_lesson) cascades through lessons_base AND lessons_fts atomically in a single transaction; passing a memory ID soft-deletes from memories (sets deleted_at) and cascades to topic_memberships + challenged_theories. The result map reports `lesson_id` vs `memory_id` to disambiguate which path fired. Success:true means the row is actually gone — for lessons this includes the FTS5 index row; for memories this is a soft-delete with audit trail. Idempotent: shredding a non-existent ID returns success:true (no-op). Required field: memory_id (accepts either memory OR lesson IDs).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
 		Handler:     handleShredMemory,
 	},
 	{
 		Name:        "reinforce_memory",
-		Description: "Increment reinforcement count and bump weight.",
+		Description: "Increment reinforcement count and bump weight. Required: memoryId. Optional: delta (integer; default 1 — how much to increment reinforcement_count and add to the weight column). Use when a memory has been useful and should rise in retrieval ranking. Successive calls accumulate: calling twice with delta=1 produces a total delta of 2. The weight change cascades through hybrid-search scoring; reinforcement_count feeds proactive_recall_hint.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"delta":{"type":"number"}},"required":["memory_id"]}`),
 		Handler:     handleReinforceMemory,
 	},
 	{
 		Name:        "weaken_memory",
-		Description: "Decrement reinforcement count and reduce weight.",
+		Description: "Decrement reinforcement count and reduce weight. Required: memoryId. Optional: delta (integer; default 1 — how much to decrement reinforcement_count and subtract from the weight column). Use when a memory has been misleading or contradicted. Once weight drops below 0 the row is eligible for `gc_run --shred-negative` (only if a proven theory exists; the theory provides the evidence chain — negative weight alone is never sufficient). Successive calls accumulate.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"delta":{"type":"number"}},"required":["memory_id"]}`),
 		Handler:     handleWeakenMemory,
 	},
 	{
 		Name:        "snooze_memory",
-		Description: "Temporarily suppress a memory from retrieval.",
+		Description: "Temporarily suppress a memory from retrieval. Required: memoryId. Optional: days (integer; default 1 — how many days to suppress before the row reappears in query results). The row stays in the DB; only retrieval is filtered. Use when a memory is technically true but actively distracting in current context. Successive calls RESET the snooze window — calling twice with days=1 produces a total snooze of 1 day, not 2 (use days=N if you need a longer window).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"days":{"type":"number","default":1,"description":"Optional. Snooze duration in days; default 1."}},"required":["memory_id"]}`),
 		Handler:     handleSnoozeMemory,
 	},
@@ -438,13 +475,13 @@ var Registry = []Tool{
 	},
 	{
 		Name:        "patch_memory",
-		Description: "Patch metadata on an existing memory via JSON-Patch ops.",
+		Description: "Patch metadata on an existing memory via JSON-Patch (RFC 6902) ops. Required: memoryId. Required: patch (array of JSON-Patch ops). Supported ops: add, remove, replace, move, copy, test. Path uses JSON Pointer syntax (e.g., '/metadata/key', '/tags/0'). Example payload: `{'memoryId':'abc123','patch':[{'op':'replace','path':'/tags','value':['new-tag']}]}`. Use for surgical metadata updates; for weight changes use set_memory_weight; for soft-delete use shred_memory.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"},"patch":{"type":"object"}},"required":["memory_id","patch"]}`),
 		Handler:     handlePatchMemory,
 	},
 	{
 		Name:        "promote_memory",
-		Description: "Promote a memory to long-term (LTM) status.",
+		Description: "Promote a memory to long-term (LTM) status by setting `is_long_term=1`. Required: memoryId. Use when a memory has proven durable value — referenced multiple times across sessions, contains an architectural decision, or has survived validation. The flag exempts the row from standard decay sweeps in `gc_run`. Promotion does NOT bypass eviction logic for lessons (lessons have their own LTM gate). Idempotent: re-promoting an LTM row is a no-op, returns success:true. The promotion is recorded in metadata.promoted_at for forensic tracing.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
 		Handler:     handlePromoteMemory,
 	},
@@ -453,6 +490,12 @@ var Registry = []Tool{
 		Description: "List memories due for spaced-repetition review.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"limit":{"type":"number","default":20},"days":{"type":"number","default":30,"description":"Optional. Stale window in days; default 30."}}}`),
 		Handler:     handleReviewMemories,
+	},
+	{
+		Name:        "request_review",
+		Description: "Concurrent multi-component review. Fetch artifact bodies from memory ids in 'artifacts' (optional list of ids; resolved text is passed to each component). Send the same prompt + artifact to every component named in 'components' (e.g. ['memory','critic','scheduler']). Each component resolves to a profile via the execution-profile abstraction; per-component concurrent fan-out, per-request optional timeout. Strategy must be 'parallel' (v0.1). Returns rendered Markdown with one section per component — full text response per component, or an error block. Independent results: one component's failure does not abort the others. Non-goals (v0.1): no consensus synthesis, no review persistence, no retry, no streaming.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text (NOT ids — the coordinator never sees ids)."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel","description":"Dispatch strategy. v0.1 only supports 'parallel'."},"timeout_secs":{"type":"number","description":"Optional total timeout in seconds for the orchestration. If zero or omitted, the caller's context governs."}},"required":["components","prompt"]}`),
+		Handler:     handleRequestReview,
 	},
 	{
 		Name:        "synthesize_memory",
@@ -485,6 +528,18 @@ var Registry = []Tool{
 		Handler:     handlePromoteToGlobal,
 	},
 	{
+		Name:        "promote_skill_to_global",
+		Description: "Operator-gated: mark a skill row as shared (is_global=1) and stamp metadata.derived_from_skill_id for lineage. Requires confirm=true.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"skill_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["skill_id","confirm"]}`),
+		Handler:     handlePromoteSkillToGlobal,
+	},
+	{
+		Name:        "delete_skill",
+		Description: "Soft-delete a skill by id. The row stays in the DB for forensics (deleted_at is set); read_skill and list_skills filter it out. Idempotent: deleting an unknown id is a no-op. Required: skill_id.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"skill_id":{"type":"string"}},"required":["skill_id"]}`),
+		Handler:     handleDeleteSkill,
+	},
+	{
 		// Phase 5a: opportunistic scheduler. target_time accepts an
 		// absolute unix epoch OR a relative duration string ("24h", "2h",
 		// "30m", "7d"). recurring_rule is stored as a hint; the agent
@@ -499,8 +554,8 @@ var Registry = []Tool{
 		// Folds any due wakes into the response as WakesPending. Useful
 		// at session start or after a passive poll.
 		Name:        "check_wakes",
-		Description: "Pull all due wakes (fired=0 AND target_time<=now), mark them fired, and return them in WakesPending. Idempotent across concurrent callers (transactional mark).",
-		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Description: "Pull due wakes (fired=0 AND target_time<=now), mark them fired, return in WakesPending. Idempotent across concurrent callers. Pass `kinds` to filter by metadata.kind; default is notification-only (backward compatible). Use `kinds: [\"*\"]` to surface every pending wake regardless of kind (cron-injected, system, etc.); use `kinds: [\"notification\", \"cron\"]` for a specific subset.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"kinds":{"type":"array","items":{"type":"string"},"description":"Wake kinds to surface. Default (omitted): notification-only. Pass [\"*\"] for all kinds, or specific kinds like [\"notification\", \"cron\"]. The literal string \"*\" short-circuits to no kind filter."}}}`),
 		Handler:     handleCheckWakes,
 	},
 	{
@@ -545,6 +600,82 @@ var Registry = []Tool{
 		Description: "Self-diagnosis: SQLite integrity + page stats + domain counts + lifetime SQLITE_BUSY retry counter. Returns one compact payload, no parameters.",
 		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
 		Handler:     handleHealthCheck,
+	},
+
+	{
+		// Phase 2 of the epistemic compaction pipeline. Reflex to the
+		// epistemic_pressure trigger on every wake_context: when the
+		// agent sees exceeded=true, it calls this tool to drain a
+		// bounded batch of raw memories into a durable lesson.
+		//
+		// Wire-format contract:
+		//   - Returns {compacted, lessons_created, raw_marked, lesson_id}
+		//     on commit; {skipped_reason} on no-op (no raw / below
+		//     threshold).
+		//   - Atomicity: lesson insert + raw mark share one transaction.
+		//     LLM failure → zero DB writes (no partial state).
+		//   - Schema violation (model returns invalid JSON) surfaces
+		//     as model_schema_violation error; data plane untouched.
+		//
+		// force=true bypasses the pressure threshold (rare; mostly for
+		// tests). Default is false — the agent respects the gauge.
+		Name:        "compact_epistemology",
+		Description: "Compact a batch of raw memories into a durable lesson. Reads its own state from the epistemic_pressure view; bails cheaply when there is nothing to compact. Atomic transaction ensures no partial state. force=true bypasses the pressure threshold.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"force":{"type":"boolean","default":false,"description":"Bypass the pressure threshold (rare; mostly for tests)."}}}`),
+		Handler:     handleCompactEpistemology,
+	},
+
+	// ── Scheduled Tasks (Agentic Cron) ──────────────────────────────
+	// Three split tools following the existing wake / lesson pattern
+	// (schedule_wake / list_wakes / check_wakes are all separate
+	// tools, not a multiplexed CRUD). The agent reads each tool's
+	// schema to learn the required fields; no guessing.
+
+	{
+		Name:        "upsert_scheduled_task",
+		Description: "Create or update a recurring Agentic Cron task. The mpm-scheduler daemon polls scheduled_tasks on a 60s tick loop, injects a standard scheduled_wakes row at each fire, and rolls over next_run_at automatically — you do not need to manually reschedule. Required: id (semantic slug, re-using updates), name (human label), cron_expr (standard 5-field cron, parsed by robfig/cron/v3, e.g. '0 3 * * *' = daily 03:00 UTC), directive_id (the directive the agent reads when it wakes; the handler runs a fail-fast lookup to confirm the directive exists before accepting the upsert — better to catch a typo at 2 PM than have the daemon silently drop the wake at 3 AM), status ('active' or 'paused'). To stop a recurring task without deleting it, call upsert again with status='paused'.",
+		Schema:      json.RawMessage(`{"type":"object","required":["id","name","cron_expr","directive_id","status"],"properties":{"id":{"type":"string","description":"Semantic slug (e.g., 'epistemic-compaction'). Re-using an ID updates the existing row."},"name":{"type":"string"},"cron_expr":{"type":"string","description":"Standard 5-field cron expression."},"directive_id":{"type":"string","description":"ID of an existing directive in the 'directives' collection; the handler validates it exists."},"status":{"type":"string","enum":["active","paused"]}}}`),
+		Handler:     handleUpsertScheduledTask,
+	},
+	{
+		Name:        "list_scheduled_tasks",
+		Description: "List all scheduled tasks ordered by next_run_at ASC. Returns id, name, cron_expr, directive_id, status, last_run_at, next_run_at, created_at, updated_at for each task. Use to inspect what's queued and what fired last.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{}}`),
+		Handler:     handleListScheduledTasks,
+	},
+	{
+		Name:        "delete_scheduled_task",
+		Description: "Hard-delete a scheduled task by id. Most operators should set status='paused' via upsert_scheduled_task instead — paused rows are kept for forensics and re-enableable. Use delete only when you want permanent removal.",
+		Schema:      json.RawMessage(`{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"Semantic slug of the task to delete."}}}`),
+		Handler:     handleDeleteScheduledTask,
+	},
+
+	// --- Skills layer (collection='skills') --------------------------------
+	//
+	// Skills are markdown documents with YAML frontmatter describing a
+	// procedure: when_to_use, constraints, and an ordered set of steps.
+	// The full contract is in internal/core/skill.go; MPM stores each
+	// skill as a memory row (collection='skills') so the existing FTS5
+	// index, retrieval, and decay paths apply unchanged. The
+	// `proactive_recall_hint` and `read_wake_context` surfaces surface
+	// the latest version of each skill for the active agent.
+	{
+		Name:        "save_skill",
+		Description: "Persist a new skill or update an existing version. The skill is a markdown document with YAML frontmatter describing a procedure (when_to_use, constraints, steps). MPM stores it as a row in collection='skills', indexed for FTS5 search and surfaced via list_skills + read_skill + proactive_recall_hint. Saving the same (name, version) requires force=true. Required: name, version, content. Optional: author, force.",
+		Schema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Stable skill name (e.g. 'agentshell')"},"version":{"type":"string","description":"Semver version (e.g. '2.0.0')"},"content":{"type":"string","description":"Full markdown document including YAML frontmatter"},"author":{"type":"string","description":"Agent name for metadata (default: active context agent)"},"force":{"type":"boolean","description":"Overwrite existing skill with same name+version","default":false}},"required":["name","version","content"]}`),
+		Handler:     handleSaveSkill,
+	},
+	{
+		Name:        "read_skill",
+		Description: "Fetch a skill by name (latest version) or full id (skill:<name>-v<version>). Returns the parsed frontmatter (name, when_to_use, constraints, steps) plus the markdown body. Use when the agent has decided a specific skill applies and needs its full content. Required: name. Optional: version.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"version":{"type":"string"}},"required":["name"]}`),
+		Handler:     handleReadSkill,
+	},
+	{
+		Name:        "list_skills",
+		Description: "Inventory of available skills. Returns name, version, when_to_use, is_global, weight for each skill (latest version only). Use at session start to know the catalogue, or before read_skill to confirm a name exists. Optional: scope (local|shared|all, default all).",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"scope":{"type":"string","enum":["local","shared","all"]}}}`),
+		Handler:     handleListSkills,
 	},
 }
 

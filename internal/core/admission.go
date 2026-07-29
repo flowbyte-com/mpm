@@ -131,7 +131,7 @@ func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+client.APIKey)
+	req.Header.Set("X-Api-Key", client.APIKey)
 
 	httpClient := &http.Client{Timeout: client.Timeout}
 	resp, err := httpClient.Do(req)

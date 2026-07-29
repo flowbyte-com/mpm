@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1048,31 +1049,27 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 	// Check for common optional tools
 	tools := []struct {
 		name     string
-		command  string
 		required bool
 	}{
-		{"fzf", "fzf --version", false},
-		{"sqlite3", "sqlite3 --version", false},
-		{"git", "git --version", false},
+		{"fzf", false},
+		{"sqlite3", false},
+		{"git", false},
 	}
 
 	for _, tool := range tools {
-		_, err := exec.LookPath(tool.command)
+		_, err := exec.LookPath(tool.name)
 		if err != nil {
-			status := "WARN"
 			report.Warnings++
-			fmt.Printf("    [%s] %s\n", colorYellow(status), tool.name)
+			fmt.Printf("    [%s] %s\n", colorYellow("WARN"), tool.name)
 			fmt.Printf("          Not found (optional)\n\n")
-			check := DoctorCheck{
+			report.Checks = append(report.Checks, DoctorCheck{
 				Name:     tool.name,
-				Status:   status,
+				Status:   "WARN",
 				Message:  "Not found (optional)",
 				Duration: "0ms",
-			}
-			report.Checks = append(report.Checks, check)
+			})
 			report.TotalChecks++
 		} else {
-			// Get version
 			out, _ := exec.Command(tool.name, "--version").Output()
 			version := strings.TrimSpace(string(out))
 			if len(version) > 50 {
@@ -1082,13 +1079,12 @@ func runDoctorDependencyChecks(report *DoctorReport) {
 			report.TotalChecks++
 			fmt.Printf("    [%s] %s\n", colorGreen("PASS"), tool.name)
 			fmt.Printf("          %s\n\n", version)
-			check := DoctorCheck{
+			report.Checks = append(report.Checks, DoctorCheck{
 				Name:     tool.name,
 				Status:   "PASS",
 				Message:  version,
 				Duration: "0ms",
-			}
-			report.Checks = append(report.Checks, check)
+			})
 		}
 	}
 }
@@ -1264,30 +1260,329 @@ var (
 		Italic(true)
 )
 
-// PrintQuicklinks displays the compact quicklinks when mpm is run with no args.
+// PrintQuicklinks displays the compact dashboard when `mpm` is run
+// with no arguments. The output is the v0.2 post-RFC shape: a single
+// screen with five sections (Working Context / Last Session /
+// Substrate / Common commands / Footer). The cognitive-verb front
+// door, surfaced as the most-common-commands block at the bottom.
+//
+// Architecture: this is a thin assembler that composes existing
+// primitives (WorkingContextService, dm.GetMemoryStats,
+// dm.GatherWakeContext, dm.HealthCheck, the scheduled_tasks table,
+// CountMemories-style collectors). No new substrate. No new
+// service / store / renderer — PrintQuicklinks is presentation-only
+// rendering of substrate data, not a behaviour-cross-source
+// composition worth a service layer.
+//
+// Layering discipline: PrintQuicklinks stays in package main, lives
+// in main.go (where the legacy version was). It composes the same
+// wave-1-3 helpers the rest of the cognitive surface uses.
+//
+// Sections:
+//
+//   Working Context — what the agent wrote most recently. If empty,
+//     the section is replaced with a "no working context — start
+//     one with `mpm work`" pointer so the operator knows the
+//     cognitive flow.
+//   Last Session — when the agent last ran + first line of the
+//     handoff summary. Falls back to "(no prior sessions)" on a
+//     fresh install.
+//   Substrate — memory/lesson/decision/skill counts (each from
+//     GetMemoryStats + a countMemories-style query) and a one-line
+//     health verdict from HealthCheck.
+//   Common commands — the cognitive front door. Static list, eight
+//     verbs the operator types every morning.
+//   Footer — single line pointing at `mpm help` for the full
+//     catalogue.
+//
+// The "Next:" line under Working Context is intentionally sourced
+// from pending theories in the substrate (the closest the substrate
+// has to operator-visible open questions). It is NOT a workflow
+// recommendation — the cognitive-interface RFC's ARCHITECTURE
+// INVARIANT blocks `mpm continue` from becoming a planner, and the
+// same principle applies here. The line is "questions waiting to
+// be resolved" not "what should I do next?"
 func PrintQuicklinks() {
+	dm := getDBConcrete()
+	if dm == nil {
+		// Database unavailable — fall back to a tiny welcome that
+		// doesn't lie about substrate state we can't read.
+		fmt.Println()
+		fmt.Println("MPM")
+		fmt.Println(strings.Repeat("\u2500", 58))
+		fmt.Println()
+		fmt.Println("Database unavailable — substrate is not open.")
+		fmt.Println("Check MPM_WORKSPACE / MPM_DB_PATH and retry.")
+		fmt.Println()
+		fmt.Println("Type `mpm help` for the complete command reference.")
+		fmt.Println()
+		return
+	}
+
+	divider := strings.Repeat("\u2500", 58)
+
 	fmt.Println()
-	fmt.Println("mpm · Memory Persistence Module")
+	// Run readiness first — scheduler auto-start may trigger
+	// here, before the rest of the dashboard composes. The
+	// readiness logic returns a slice of items in canonical
+	// display order (see cmd/mpm/readiness.go for the side-
+	// effect policy).
+	items := ReadReadiness(dm)
+	allOK := readinessOverall(items)
+
+	// First-run UX: when the substrate has no AI provider
+	// configured yet (fresh install or user hasn't run
+	// 'mpm config'), replace the standard 'MPM Ready' header
+	// with a friendly 'Welcome to MPM' that points at the
+	// wizard. The substrate is technically still ready at the
+	// readiness layer (the scheduler runs, db is open, etc.)
+	// but the cognitive system can't actually DO anything
+	// without an LLM, so we treat that as a soft unready.
+	header := "MPM Ready"
+	if c, err := config.LoadConfig(); err == nil && !isProviderConfigured(c) {
+		header = "Welcome to MPM \u2014 no AI provider configured"
+	} else if !allOK {
+		header = "MPM Not ready \u2014 see below"
+	}
+	fmt.Println(header)
+	fmt.Println(divider)
 	fmt.Println()
-	fmt.Println("Usage: mpm <query|text> [flags]")
+	if header != "MPM Ready" {
+		fmt.Println(" Run `mpm config` to configure your first model.")
+		fmt.Println()
+	}
+	for _, item := range items {
+		marker := "✓"
+		if !item.OK {
+			marker = "⚠"
+		}
+		fmt.Printf(" %s  %-22s %s\n", marker, item.Name, item.Detail)
+		if item.Hint != "" {
+			fmt.Printf("        \u2192 %s\n", item.Hint)
+		}
+	}
 	fmt.Println()
-	fmt.Println("Daily Commands:")
-	fmt.Println("  mpm <query>       Search memories (default when called with a bare string)")
-	fmt.Println("  mpm add <text>    Add a new memory")
-	fmt.Println("  mpm add -i        Interactive add — opens $EDITOR")
-	fmt.Println("  mpm snooze <id>   Bump a memory's relevance (no LTM promotion)")
-	fmt.Println("  mpm ls            List memories")
-	fmt.Println("  mpm show <id>     Show memory details")
-	fmt.Println("  mpm rm <id>       Delete a memory")
-	fmt.Println("  mpm help          Show this help")
+
+	// Section 1: Working Context.
+	fmt.Println("Working Context")
+	fmt.Println(divider)
+	sessionID := getOrMakeSessionID()
+	wcSvc := NewWorkingContextService(
+		NewWorkingContextStore(dm),
+		NewDatabaseManagerMemoryWriter(dm),
+	)
+	wc, _ := wcSvc.GetCurrent(sessionID)
+	if wc == nil {
+		fmt.Println("(no working context \u2014 run `mpm work` to start one)")
+		fmt.Println()
+	} else {
+		fmt.Printf("\u2713 %s\n", truncate(wc.Thesis, 70))
+		fmt.Printf("Updated: %s\n", formatAge(wc.UpdatedAt))
+		fmt.Println()
+		fmt.Println("Next:")
+		// Pull pending theories as "open questions waiting to be
+		// resolved". The substrate tracks these natively; surfacing
+		// them here is honest information composition rather than
+		// workflow recommendation.
+		theories := loadPendingTheoriesForQuicklinks(dm, 3)
+		if len(theories) == 0 {
+			fmt.Println(" \u2022 (no open theories)")
+		} else {
+			for _, t := range theories {
+				fmt.Printf(" \u2022 %s\n", truncate(t, 80))
+			}
+		}
+		fmt.Println()
+	}
+
+	// Section 2: Last Session.
+	fmt.Println("Last Session")
+	fmt.Println(divider)
+	if wake, err := dm.GatherWakeContext(); err == nil && wake.LastHandoff != nil {
+		when := formatAge(wake.LastHandoff.EndedAt)
+		fmt.Printf("%s\n", when)
+		if wake.LastHandoff.Summary != "" {
+			fmt.Printf("\"%s\"\n", truncate(wake.LastHandoff.Summary, 80))
+		}
+	} else {
+		fmt.Println("(no prior sessions \u2014 this is your first run)")
+	}
 	fmt.Println()
-	fmt.Println("Engine Room (ops):")
-	fmt.Println("  mpm ops           Run maintenance, diagnostics, synthesis, and more")
-	fmt.Println("  mpm ops help      List all ops subcommands")
+
+	// Section 3: Substrate.
+	fmt.Println("Substrate")
+	fmt.Println(divider)
 	fmt.Println()
-	fmt.Println("Also available via mpm ops:")
-	fmt.Println("  mpm ops mode | persona | topic | lesson | session | reference | wake")
+	countMem := func(collection string) string {
+		var n int
+		row := dm.QueryRowTracked(
+			`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND collection = ?`,
+			collection,
+		)
+		if err := row.Scan(&n); err != nil {
+			return "?"
+		}
+		return fmt.Sprintf("%d", n)
+	}
+	fmt.Printf("Memorys:   %s\n", withThousands(countMem("memories")))
+	fmt.Printf("Lessons:   %s\n", countMem("lessons"))
+	fmt.Printf("Decisions: %s\n", countMem("decisions"))
+	fmt.Printf("Skills:    %s\n", countMem("skills"))
 	fmt.Println()
+	if _, err := dm.HealthCheck(); err != nil {
+		fmt.Printf("Health: \u26A0 %s\n", truncate(err.Error(), 60))
+	} else {
+		fmt.Println("Health: \u2713 Healthy")
+	}
+	fmt.Println()
+
+	// Section 4: Quick actions (the cognitive-verb front door).
+	fmt.Println(divider)
+	fmt.Println()
+	fmt.Println("Quick actions")
+	fmt.Println()
+	fmt.Println(" mpm continue      Resume your work")
+	fmt.Println(" mpm work show      Show Working Context")
+	fmt.Println(" mpm remember      Store a memory")
+	fmt.Println(" mpm recall        Search memory")
+	fmt.Println(" mpm doctor        System health")
+	fmt.Println()
+	fmt.Println(divider)
+	fmt.Println()
+	fmt.Println("Type `mpm help` for the complete command reference.")
+	fmt.Println()
+}
+
+// loadPendingTheoriesForQuicklinks returns up to limit pending
+// theories (content preview). Best-effort — fails silently if the
+// shape doesn't exist on this install.
+//
+// Theory content is shaped by the propose_theory MCP tool:
+// "hypothesis_id=<id> validation=<criteria>". The two-audience
+// principle (RFC §'two-personalities') applies to data shape too:
+// this raw key=value form is fine for `mpm call propose_theory`
+// scripts but reads as machine noise on the cognitive-verb
+// dashboard. We parse it into a clean "<id>: <criteria>" form
+// here so the Quicklinks surface reads as information, not raw
+// protocol. Unknown shapes pass through unchanged.
+func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int) []string {
+	if dm == nil || limit <= 0 {
+		return nil
+	}
+	rows, err := dm.QueryTracked(
+		`SELECT id, content FROM memories
+		 WHERE collection = 'theories'
+		   AND deleted_at IS NULL
+		   AND json_extract(metadata, '$.status') = 'pending'
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id, content string
+		if err := rows.Scan(&id, &content); err != nil {
+			continue
+		}
+		out = append(out, formatTheoryPreview(content, id))
+	}
+	return out
+}
+
+// formatTheoryPreview renders a pending-theory content row as a
+// one-line preview. Recognises the propose_theory shape
+// "hypothesis_id=<id> validation=<criteria>" and rewrites it as
+// "<id>: <criteria>" so the dashboard reads cleanly. Unknown shapes
+// pass through (truncated to 80 chars). The opaque id (mpm-<hex>)
+// is the fallback when content is empty.
+func formatTheoryPreview(content, id string) string {
+	// Strip a trailing newline if present.
+	content = strings.TrimRight(content, "\n")
+	const idKey = "hypothesis_id="
+	const valKey = " validation="
+	if strings.HasPrefix(content, idKey) {
+		stripped := strings.TrimPrefix(content, idKey)
+		if i := strings.Index(stripped, valKey); i >= 0 {
+			id := stripped[:i]
+			criteria := strings.TrimSpace(stripped[i+len(valKey):])
+			if id != "" && criteria != "" {
+				return id + ": " + criteria
+			}
+			if id != "" {
+				return id
+			}
+		}
+		// hypothesis_id=<id> with no validation= : just show the id.
+		return strings.TrimSpace(stripped)
+	}
+	// Unknown shape — truncate, but keep first line if multi-line.
+	if idx := indexOfNewline(content); idx > 0 {
+		content = content[:idx]
+	}
+	if len(content) > 80 {
+		content = strings.TrimSpace(content[:80]) + "…"
+	}
+	if content == "" {
+		return id
+	}
+	return content
+}
+
+// indexOfNewline returns the index of the first '\n' in s, or -1.
+func indexOfNewline(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+// isProviderConfigured reports whether the substrate has an
+// AI provider wired up. Used by the first-run UX on 'mpm' (no
+// args) to detect fresh installs and surface a 'run mpm config'
+// prompt instead of a generic 'MPM Ready' header.
+//
+// Specifically: Model is non-empty AND (APIKey OR BaseURL is
+// non-empty). Ollama uses base_url with no key, so either is
+// acceptable. The strict check is 'any one of the three fields
+// is filled', but real-world fresh installs tend to have neither,
+// so we err on the side of 'show the wizard prompt.'
+func isProviderConfigured(c *config.Config) bool {
+	if c == nil || c.Synth == nil {
+		return false
+	}
+	s := c.Synth
+	return s.Model != "" || s.APIKey != "" || s.BaseURL != ""
+}
+
+// withThousands formats an n-string with a thousands separator.
+// Best-effort: returns the input as-is if it doesn't parse as int.
+func withThousands(s string) string {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return s
+	}
+	return strconv.FormatInt(int64(n), 10)
+}
+
+// parseSQLiteTimestamp tries to parse a SQLite CURRENT_TIMESTAMP
+// format; returns zero-time on failure.
+func parseSQLiteTimestamp(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.UTC); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // printHelp displays the mpm help text with lipgloss styling
@@ -1322,7 +1617,6 @@ func printHelp() {
 		{"mode | persona", "", false},
 		{"wake | directives | switch | status", "", false},
 		{"doctor | maintain | gc | prune", "", false},
-		{"watch | review", "", false},
 		{"stats | export | synthesize", "", false},
 		{"backup | restore-db | ingest", "", false},
 		{"backfill-embeddings", "", false},

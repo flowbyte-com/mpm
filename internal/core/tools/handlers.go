@@ -11,6 +11,9 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/orchestration"
+	"github.com/flowbyte-com/mpm-core/renderers"
 	"path/filepath"
 )
 
@@ -158,6 +161,18 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	items, err := dm.HybridSearchMemories(query, collection, limit, scope)
 	if err != nil {
 		return nil, err
+	}
+	// Observability Layer: every result in a memory search is a node
+	// the agent is about to consume. Record each. Collection name in
+	// the database is the canonical node_type — pass through.
+	for _, item := range items {
+		if id, _ := item["id"].(string); id != "" {
+			coll, _ := item["collection"].(string)
+			if coll == "" {
+				coll = "memory"
+			}
+			_ = dm.RecordRetrieval(id, coll)
+		}
 	}
 	return map[string]interface{}{
 		"success":  true,
@@ -615,6 +630,27 @@ func parseBoolDefault(v interface{}, def bool) bool {
 	return def
 }
 
+// inferNodeType best-effort classifies a citation id into one of the
+// cognitive-object types (memory / lesson / skill / decision / theory)
+// by inspecting the id prefix. Falls back to "memory" when the prefix
+// is unfamiliar — the save_lesson Provenance Proxy must not block on
+// unknown id formats and the schema's NOT NULL constraint on
+// node_type requires a value.
+func inferNodeType(id string) string {
+	switch {
+	case strings.HasPrefix(id, "skill:"):
+		return "skill"
+	case strings.HasPrefix(id, "lesson:"), strings.HasPrefix(id, "les-"):
+		return "lesson"
+	case strings.HasPrefix(id, "dec-"):
+		return "decision"
+	case strings.HasPrefix(id, "theory:"), strings.HasPrefix(id, "the-"):
+		return "theory"
+	default:
+		return "memory"
+	}
+}
+
 // callSaveLesson persists a lesson to MPM.
 func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
@@ -628,6 +664,32 @@ func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, err
 	}
+
+	// Provenance Proxy: if the agent lists the node IDs this lesson
+	// was distilled from, credit each in the retrieval observability
+	// layer via IncrementSuccess. INSERT-or-UPDATE semantic: a node
+	// that was never retrieved this turn can still receive a credit
+	// when the agent cites it from prior-session memory. Telemetry
+	// must not block the user's lesson-save path; errors are
+	// swallowed.
+	credited := 0
+	if raw, ok := p["source_ids"].([]interface{}); ok && len(raw) > 0 {
+		for _, v := range raw {
+			id, _ := v.(string)
+			if id == "" {
+				continue
+			}
+			if err := dm.IncrementSuccess(id, inferNodeType(id)); err == nil {
+				credited++
+			}
+			// err != nil: log via audit, don't surface — the lesson
+			// is already saved and the user-facing path succeeded.
+		}
+	}
+
+	// Augment the SaveLesson response with a credit count so the
+	// agent can verify the provenance was wired.
+	out["credited_sources"] = credited
 	return out, nil
 }
 
@@ -641,6 +703,12 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	items, err := dm.SearchLessonsLimited(query)
 	if err != nil {
 		return nil, err
+	}
+	// Observability Layer: each lesson search result is a retrieval.
+	for _, item := range items {
+		if id, _ := item["id"].(string); id != "" {
+			_ = dm.RecordRetrieval(id, "lesson")
+		}
 	}
 	return map[string]interface{}{
 		"success": true,
@@ -804,6 +872,10 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"content":    m.Content,
 			"created_at": m.CreatedAt,
 		})
+		// Observability Layer: every node pulled into the boot prompt
+		// is "retrieved". Fire-and-forget; telemetry must not block
+		// the wake surface. Errors are swallowed.
+		_ = dm.RecordRetrieval(m.ID, "memory")
 	}
 
 	milestoneRefs := make([]map[string]interface{}, 0, len(data.RecentMilestones))
@@ -813,29 +885,51 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"content":    m.Content,
 			"created_at": m.CreatedAt,
 		})
+		_ = dm.RecordRetrieval(m.ID, "memory")
 	}
 
 	// Cold-start sweep: check for wakes that came due while the system
 	// was offline. The agent sees these immediately on boot — no need to
 	// wait for the next tool call to trigger the opportunistic fold.
-	wakes, wErr := dm.CheckPendingWakes(time.Now())
+	// Pass nil kinds for backward-compatible default (notification-only).
+	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
 	result := map[string]interface{}{
-		"success":            true,
-		"session_id":         data.SessionID,
-		"active_mode":        data.ActiveMode,
-		"active_persona":     data.ActivePersona,
-		"recent_topics":      data.RecentTopics,
-		"recent_memories":    memRefs,
-		"recent_milestones":  milestoneRefs,
-		"audit_summary":      data.AuditSummary,
-		"last_handoff":       data.LastHandoff,
-		"scratchpad_orphans": data.ScratchpadOrphans,
+		"success":             true,
+		"session_id":          data.SessionID,
+		"active_mode":         data.ActiveMode,
+		"active_persona":      data.ActivePersona,
+		"recent_topics":       data.RecentTopics,
+		"recent_memories":     memRefs,
+		"recent_milestones":   milestoneRefs,
+		"audit_summary":       data.AuditSummary,
+		"last_handoff":        data.LastHandoff,
+		"scratchpad_orphans":  data.ScratchpadOrphans,
+		"epistemic_pressure":  data.EpistemicPressure,
 	}
 	if wErr == nil && len(wakes) > 0 {
 		result["wakes_pending"] = wakes
 		result["wakes_pending_count"] = len(wakes)
 	}
 	_ = wErr // CheckPendingWakes errors are non-fatal here
+
+	// Epistemic pressure — same shape contract as the other fields:
+	// struct → map[string]interface{} for the JSON wire. The struct
+	// itself has json tags (raw_count, lesson_count, ratio, threshold,
+	// exceeded) but the rest of the handler surface is map-shaped, so
+	// convert for consistency. Marshalling/unmarshalling here would
+	// also work but introduces a JSON round-trip cost on every wake.
+	//
+	// Numeric fields are emitted as float64 (JSON's number type) rather
+	// than int — this matches what json.Marshal would produce on the
+	// wire and avoids type-coercion surprises for downstream parsers.
+	result["epistemic_pressure"] = map[string]interface{}{
+		"raw_count":         float64(data.EpistemicPressure.RawCount),
+		"lesson_count":      float64(data.EpistemicPressure.LessonCount),
+		"ratio":             data.EpistemicPressure.Ratio,
+		"threshold":         float64(data.EpistemicPressure.Threshold),
+		"exceeded":          data.EpistemicPressure.Exceeded,
+		"last_compacted_at": data.EpistemicPressure.LastCompactedAt,
+	}
 
 	return result, nil
 }
@@ -1044,7 +1138,107 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	}, nil
 }
 
-// callQueryAuditLog returns recent entries from system_audit_log. The
+// handleSaveSkill persists a new skill or updates an existing version.
+// Skills are markdown documents with YAML frontmatter (name, version,
+// when_to_use, constraints, steps) stored as memory rows in
+// collection='skills'. The full contract lives in internal/core/skill.go;
+// this handler is a thin shim over dm.SaveSkill that adds the
+// payload-parsing and frontmatter-validation pass.
+//
+// Args:
+//   - name (string, required)        — the skill's stable name
+//   - version (string, required)     — semver, e.g. "2.0.0"
+//   - content (string, required)     — full markdown incl. frontmatter
+//   - author (string, optional)      — agent name for metadata
+//   - force (bool, optional)         — overwrite when name+version exists
+//
+// Validation order is deliberate: SkillIDForNameAndVersion first (cheap
+// arg-shape check) so the caller gets a precise error message before
+// the more expensive frontmatter parse. ParseSkillFrontmatter runs
+// next so the DM never sees malformed YAML — keeping rejection at the
+// boundary rather than mid-transaction. dm.SaveSkill re-runs both for
+// defence-in-depth, but a front-end rejection here saves a DB round
+// trip and produces a tighter error string.
+func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	name := internal.ParseStringOr(p["name"], "")
+	version := internal.ParseStringOr(p["version"], "")
+	content := internal.ParseStringOr(p["content"], "")
+	author := internal.ParseStringOr(p["author"], ac.Agent)
+	force := false
+	if v, ok := p["force"].(bool); ok {
+		force = v
+	}
+	if name == "" || version == "" || content == "" {
+		return nil, fmt.Errorf("name, version, and content are required")
+	}
+
+	// Validate name+version shape before parsing frontmatter so the
+	// caller gets the cheaper rejection first. The same call also
+	// runs inside dm.SaveSkill, so this is a UX optimisation, not a
+	// security gate.
+	if _, err := internal.SkillIDForNameAndVersion(name, version); err != nil {
+		return nil, err
+	}
+
+	// Validate frontmatter before persisting.
+	if _, _, err := internal.ParseSkillFrontmatter(content); err != nil {
+		return nil, fmt.Errorf("invalid frontmatter: %w", err)
+	}
+
+	id, err := dm.SaveSkill(name, version, content, author, force)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"id":      id,
+		"name":    name,
+		"version": version,
+	}, nil
+}
+
+// handleReadSkill fetches a skill by name (latest version) or exact id.
+func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	name := internal.ParseStringOr(p["name"], "")
+	version := internal.ParseStringOr(p["version"], "")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	skill, err := dm.ReadSkill(name, version)
+	if err != nil {
+		return nil, err
+	}
+	// Observability Layer: skill reads are retrievals.
+	_ = dm.RecordRetrieval(skill.ID, "skill")
+	return map[string]interface{}{
+		"success":     true,
+		"id":          skill.ID,
+		"name":        skill.Name,
+		"version":     skill.Version,
+		"when_to_use": skill.WhenToUse,
+		"domain":      skill.Domain,
+		"constraints": skill.Constraints,
+		"steps":       skill.Steps,
+		"body":        skill.Body,
+		"is_global":   skill.IsGlobal,
+	}, nil
+}
+
+// handleListSkills returns the latest version of each skill in scope.
+func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	scope := internal.ParseStringOr(p["scope"], "all")
+	skills, err := dm.ListSkills(scope)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"skills":  skills,
+		"count":   len(skills),
+		"scope":   scope,
+	}, nil
+}
+
 // agent uses this to investigate what went wrong, especially across
 // sessions — the wake context surface only shows a count, the details
 // come from this tool.
@@ -1562,6 +1756,83 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}, nil
 }
 
+// handlePromoteSkillToGlobal marks a skill row as shared (is_global=1)
+// and stamps metadata.derived_from_skill_id so the promoted row is
+// traceable. The third operator-gated shared-DB promotion path
+// alongside record_global_rule and promote_to_global.
+//
+// Unlike promote_to_global, no separate shared row is created: the skill
+// keeps its deterministic id and is flipped in place (see
+// PromoteSkillToGlobal). So there is no "local -> shared id" lineage to
+// report — the audit note records the single id that was elevated.
+//
+// Args:
+//
+//	--skill_id  (required) The skill id to promote (e.g. "skill:agentshell-v1.0.0")
+//	--confirm   (required) Must be true. Refuses without it.
+func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("promote_skill_to_global requires confirm=true; cross-project promotion should be operator-gated")
+	}
+	skillID := internal.ParseStringOr(p["skill_id"], "")
+	if skillID == "" {
+		return nil, fmt.Errorf("skill_id is required")
+	}
+
+	// Forward the validated confirm rather than a literal true, so the
+	// value the operator supplied is the value the gate sees end to end.
+	if err := dm.PromoteSkillToGlobal(skillID, confirm); err != nil {
+		return nil, err
+	}
+	// Forensic log — skill→shared promotion. Records which skill id was
+	// elevated so other agents can audit the shared surface.
+	dm.LogAudit(
+		mpminternal.AuditInfo, "shared_db",
+		fmt.Sprintf("promote_skill_to_global %s", skillID), "",
+		mpminternal.AuditContext{
+			"skill_id": skillID,
+		},
+	)
+	return map[string]interface{}{
+		"success":   true,
+		"skill_id":  skillID,
+		"is_global": true,
+	}, nil
+}
+
+// handleDeleteSkill soft-deletes a skill by id. The row stays in the DB
+// for forensics (deleted_at is set); read_skill and list_skills filter
+// it out. Idempotent: deleting an unknown id is a no-op (matches
+// ShredSkill's silent-on-missing contract). No confirm gate — a
+// soft-delete is recoverable from the row, unlike hard shredding; if
+// that changes, the gate mirrors promote_to_global /
+// promote_skill_to_global.
+//
+// Args:
+//
+//	--skill_id  (required) The skill id to delete (e.g. "skill:agentshell-v1.0.0")
+func handleDeleteSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	skillID := internal.ParseStringOr(p["skill_id"], "")
+	if skillID == "" {
+		return nil, fmt.Errorf("skill_id is required")
+	}
+	if err := dm.ShredSkill(skillID); err != nil {
+		return nil, err
+	}
+	// Forensic log — soft-delete is recoverable, so audit-only (no "shared_db"
+	// component like the promote paths).
+	dm.LogAudit(
+		mpminternal.AuditInfo, "skill",
+		fmt.Sprintf("delete_skill %s", skillID), "",
+		mpminternal.AuditContext{"skill_id": skillID},
+	)
+	return map[string]interface{}{
+		"success":  true,
+		"skill_id": skillID,
+	}, nil
+}
+
 // splitTags is a small helper that turns a comma-separated tag string
 // into a []string. Empty input returns nil.
 func splitTags(s string) []string {
@@ -1606,11 +1877,14 @@ func splitTags(s string) []string {
 // ActiveContext has a SessionID. The two blocks land separately on the
 // response so receiving agents can distinguish agent-scheduled future
 // tasks (WakesPending) from incoming epistemic events (EventWakesPending).
-func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}) map[string]interface{} {
+//
+// kinds is forwarded to CheckPendingWakes — see that function for the
+// semantics. nil = backward-compatible default (notification-only).
+func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}, kinds []string) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
 	}
-	if due, err := dm.CheckPendingWakes(time.Now()); err == nil && len(due) > 0 {
+	if due, err := dm.CheckPendingWakes(time.Now(), kinds); err == nil && len(due) > 0 {
 		out["WakesPending"] = due
 		out["WakesPendingCount"] = len(due)
 	}
@@ -1657,18 +1931,46 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	return checkWakesAndFold(dm, ac, out), nil
+	return checkWakesAndFold(dm, ac, out, nil), nil
 }
 
 func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	kinds := readKindsParam(p)
 	out := checkWakesAndFold(dm, ac, map[string]interface{}{
 		"success": true,
-	})
+	}, kinds)
 	if _, ok := out["WakesPending"]; !ok {
 		out["WakesPending"] = []map[string]interface{}{}
 		out["WakesPendingCount"] = 0
 	}
 	return out, nil
+}
+
+// readKindsParam extracts the optional kinds array from a tool payload.
+// Returns nil if absent, malformed, or empty — nil triggers the
+// backward-compatible default (notification-only) in CheckPendingWakes.
+func readKindsParam(p map[string]interface{}) []string {
+	if p == nil {
+		return nil
+	}
+	raw, ok := p["kinds"]
+	if !ok || raw == nil {
+		return nil
+	}
+	arr, ok := raw.([]interface{})
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	kinds := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok && s != "" {
+			kinds = append(kinds, s)
+		}
+	}
+	if len(kinds) == 0 {
+		return nil
+	}
+	return kinds
 }
 
 // handleCheckPendingEventWakes (Arc 2): pulls incoming event wakes
@@ -1722,7 +2024,7 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"count":         len(items),
 		"include_fired": includeFired,
 		"overdue_only":  overdueOnly,
-	}), nil
+	}, nil), nil
 }
 
 // handleDigestWakes returns a compact summary of overdue + pending wakes.
@@ -1744,6 +2046,109 @@ func handleDigestWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	return dm.DigestScheduledWakes(topN)
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled Tasks (Agentic Cron)
+// ---------------------------------------------------------------------------
+//
+// Three split tools following the existing wake / lesson pattern
+// (schedule_wake, list_wakes, check_wakes are all separate). CRUD
+// overloaded onto one tool forces the agent to guess which fields
+// are required for which operation; discrete tools make the JSON
+// schema self-documenting.
+//
+// Fail-fast on upsert: the handler runs a single index lookup against
+// `memories WHERE id = ? AND collection = 'directives'` BEFORE writing.
+// If the directive doesn't exist, the upsert is rejected. Better to
+// catch a typo at 2 PM than have the daemon silently drop the wake
+// at 3 AM.
+
+// handleUpsertScheduledTask creates or updates a recurring agentic
+// workflow. Computes next_run_at from the cron expression (UTC) and
+// stores it; the daemon never parses cron on the hot path.
+func handleUpsertScheduledTask(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id := internal.ParseStringOr(p["id"], "")
+	name := internal.ParseStringOr(p["name"], "")
+	cronExpr := internal.ParseStringOr(p["cron_expr"], "")
+	directiveID := internal.ParseStringOr(p["directive_id"], "")
+	status := internal.ParseStringOr(p["status"], internal.ScheduledTaskActive)
+
+	if id == "" || name == "" || cronExpr == "" || directiveID == "" {
+		return nil, fmt.Errorf("id, name, cron_expr, directive_id are all required")
+	}
+	if status != internal.ScheduledTaskActive && status != internal.ScheduledTaskPaused {
+		return nil, fmt.Errorf("invalid status %q: must be %q or %q",
+			status, internal.ScheduledTaskActive, internal.ScheduledTaskPaused)
+	}
+
+	// Fail-fast: confirm directive_id actually exists in the
+	// directives collection. A lightning-fast indexed lookup; the
+	// agent catches the typo at upsert time, not at 3 AM.
+	sqlDB := dm.SQLDB()
+	if sqlDB == nil {
+		return nil, fmt.Errorf("db not available")
+	}
+	var foundID string
+	row := sqlDB.QueryRow(
+		`SELECT id FROM memories WHERE id = ? AND collection = 'directives' AND deleted_at IS NULL LIMIT 1`,
+		directiveID,
+	)
+	if err := row.Scan(&foundID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("directive_id %q not found in memories where collection='directives'", directiveID)
+		}
+		return nil, fmt.Errorf("validate directive_id: %w", err)
+	}
+
+	task := internal.ScheduledTask{
+		ID:          id,
+		Name:        name,
+		CronExpr:    cronExpr,
+		DirectiveID: directiveID,
+		Status:      status,
+	}
+	if err := dm.UpsertScheduledTask(task); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"task_id": id,
+		"status":  status,
+	}, nil
+}
+
+// handleListScheduledTasks returns all scheduled tasks ordered by
+// next_run_at ASC. Use to inspect what's queued and what fired last.
+func handleListScheduledTasks(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	tasks, err := dm.ListScheduledTasks()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"tasks":   tasks,
+		"count":   len(tasks),
+	}, nil
+}
+
+// handleDeleteScheduledTask hard-deletes a task by id. Most
+// operators should set status='paused' via upsert instead so the
+// schedule is preserved for forensics; delete is for permanent
+// removal.
+func handleDeleteScheduledTask(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id := internal.ParseStringOr(p["id"], "")
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	if err := dm.DeleteScheduledTask(id); err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"task_id": id,
+		"deleted": true,
+	}, nil
+}
+
 // handleHealthCheck returns compact operational status for the agent:
 // PRAGMA integrity + SQLite page stats + domain counts + lifetime
 // SQLITE_BUSY retry counter. Designed for self-diagnosis when the
@@ -1751,6 +2156,44 @@ func handleDigestWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 // parameters — the result is the entire payload.
 func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	return dm.HealthCheck()
+}
+
+// handleCompactEpistemology is the reflex to epistemic_pressure.
+// Reads its own state (raw_count, threshold) from the pressure view,
+// batches the oldest 50 raw memories, calls the LLM for a strict-JSON
+// lesson, validates, and commits atomically. See internal/core.CompactEpistemology
+// for the orchestration details.
+//
+// Optional `force` flag bypasses the pressure threshold — used by
+// agents who want to compact proactively even when the gauge reads
+// below_threshold (rare; mostly for tests and one-off cleanups).
+func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	force := parseBoolDefault(p["force"], false)
+
+	result, err := dm.CompactEpistemology(context.Background(), force)
+	if err != nil {
+		return nil, err
+	}
+
+	// No-op path (skipped_reason set): return as-is.
+	if result.SkippedReason != "" {
+		return map[string]interface{}{
+			"success":        true,
+			"compacted":       0,
+			"lessons_created": 0,
+			"raw_marked":      0,
+			"skipped_reason":  result.SkippedReason,
+		}, nil
+	}
+
+	// Commit path: lesson inserted, raw memories marked.
+	return map[string]interface{}{
+		"success":         true,
+		"compacted":        result.Compacted,
+		"lessons_created":  result.LessonsCreated,
+		"raw_marked":      result.RawMarked,
+		"lesson_id":        result.LessonID,
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,4 +2387,194 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 		"lineage":   lineage,
 	}, nil
 
+}
+
+// handleExplainRetrieval runs a standard FTS search and returns a
+// diagnostic breakdown per result: base FTS score, reuse count, last
+// retrieved timestamp, success count. The intent is observability —
+// the agent (or operator) can see WHY a result ranked where it did,
+// and how often it has been surfaced before.
+//
+// The search ranking itself is NOT modified. explain_retrieval reads
+// the same HybridSearchMemories path that query_long_term_memory uses,
+// then layers retrieval_metadata on top via GetRetrievalMetadata per
+// row. The retrieval_metadata is joined in the SQL path (so future
+// rankers can use it) but today DefaultRanker passes ftsScore through
+// unchanged.
+func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	query := internal.ParseStringOr(p["query"], "")
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	limit := int(internal.ParseFloatOr(p["limit"], 10))
+	if limit <= 0 {
+		limit = 10
+	}
+	collection := internal.ParseStringOr(p["collection"], "")
+	scope := internal.ParseStringOr(p["scope"], "all")
+
+	items, err := dm.HybridSearchMemories(query, collection, limit, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Retrieval Diagnostic\n\n")
+	sb.WriteString("**Query:** ")
+	sb.WriteString(query)
+	sb.WriteString("\n\n")
+	if len(items) == 0 {
+		sb.WriteString("_No results._\n")
+		return map[string]interface{}{
+			"success":    true,
+			"query":      query,
+			"diagnostic": sb.String(),
+			"count":      0,
+		}, nil
+	}
+	sb.WriteString(fmt.Sprintf("**%d result(s).** Retrieval ordering follows FTS `bm25()` rank — identical to `query_long_term_memory`. Retrieval metadata is observability only and does NOT influence ranking today (see `DefaultRanker` in retrieval_ranker.go).\n\n", len(items)))
+
+	for _, item := range items {
+		id, _ := item["id"].(string)
+		if id == "" {
+			continue
+		}
+		meta, _ := dm.GetRetrievalMetadata(id)
+
+		// FTS / combined score — combined_score is the post-hybrid
+		// blend when present; fall back to weight for items without it.
+		var ftsScore interface{} = item["weight"]
+		if cs, ok := item["combined_score"]; ok {
+			ftsScore = cs
+		}
+
+		sb.WriteString("## Diagnostic: ")
+		sb.WriteString(id)
+		sb.WriteString("\n")
+		sb.WriteString("- Base FTS Match: ")
+		sb.WriteString(fmt.Sprintf("%v", ftsScore))
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- Reuse Count: %d\n", meta.ReuseCount))
+		lastRetrieved := meta.LastRetrievedAt
+		if lastRetrieved == "" {
+			lastRetrieved = "_never_"
+		}
+		sb.WriteString("- Last Retrieved: ")
+		sb.WriteString(lastRetrieved)
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- Success Count: %d\n", meta.SuccessCount))
+		sb.WriteString("\n")
+	}
+
+	return map[string]interface{}{
+		"success":    true,
+		"query":      query,
+		"diagnostic": sb.String(),
+		"count":      len(items),
+	}, nil
+}
+
+// handleRequestReview implements the request_review MCP tool.
+//
+// Architectural intent (Wed 2026-07-29 design session):
+//
+//   Adapter layer for the ReviewCoordinator orchestration primitive
+//   (internal/core/orchestration). This handler is responsible for:
+//
+//     1. Fetching artifact bodies from the database (resolving ids
+//        in the caller's 'artifacts' list to actual text).
+//     2. Building the substrate-side RequestReview payload (a
+//        ReviewRequest — see orchestration/review_coordinator.go).
+//     3. Calling DefaultReviewCoordinator.Execute().
+//     4. Rendering the resulting []ReviewResult via the renderers
+//        package, which returns Markdown-shaped output suitable for
+//        both agent consumers (LLMs parse it back as text) and
+//        humans (operators read the dashboard).
+//
+// The handler is intentionally thin. All the concurrency, timeout,
+// profile resolution, and fan-out live in the engine layer
+// (orchestration package). All the markdown rendering lives in
+// the renderers package. This handler is the only one in the
+// call chain that knows about the database, the coordinator, and
+// the renderer.
+func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// Note on error shape: the TestRegistry_AllToolsExecuteWithoutPanic
+	// harness compares CLI and MCP error strings after stripping the
+	// MCP adapter's "<tool> failed: " prefix via strings.LastIndex(": ").
+	// The CLI side returns the bare error from this handler, so
+	// including the tool name in the error string would create a
+	// permanent drift (CLI: "request_review: ..." vs stripped-MCP:
+	// "..."). Errors below carry only the inner message; the MCP
+	// layer adds the tool-name prefix when wrapping.
+	components := mpminternal.ParseStringSliceOr(p["components"])
+	if len(components) == 0 {
+		return nil, fmt.Errorf("'components' is required (at least one substrate component name, e.g. ['memory','critic'])")
+	}
+	prompt, _ := p["prompt"].(string)
+	if prompt == "" {
+		return nil, fmt.Errorf("'prompt' is required")
+	}
+	strategy := mpminternal.ParseStringOr(p["strategy"], "parallel")
+	if strategy != "parallel" {
+		return nil, fmt.Errorf("only strategy='parallel' is supported in v0.1 (got %q)", strategy)
+	}
+	var timeout time.Duration
+	if t := int(mpminternal.ParseFloatOr(p["timeout_secs"], 0)); t > 0 {
+		timeout = time.Duration(t) * time.Second
+	}
+
+	// Resolve artifact bodies (id → text). The boundary contract:
+	// the ReviewCoordinator never sees an id — it operates on
+	// pre-resolved text. This is what makes Skills portable
+	// across installs (no DB ids leak into the orchestration
+	// engine).
+	artifactIDs := mpminternal.ParseStringSliceOr(p["artifacts"])
+	var contextData strings.Builder
+	for i, id := range artifactIDs {
+		mem, err := dm.GetMemory(id)
+		if err != nil {
+			return nil, fmt.Errorf("artifact %q: %w", id, err)
+		}
+		if mem == nil {
+			return nil, fmt.Errorf("artifact %q not found", id)
+		}
+		content, _ := mem["content"].(string)
+		fmt.Fprintf(&contextData, "### Artifact %d (id=%q)\n\n", i+1, id)
+		contextData.WriteString(content)
+		contextData.WriteString("\n\n")
+	}
+
+	// Wire the coordinator. The orchestrator uses the substrate's
+	// config (Profiles + Components + Capabilities) for routing; the
+	// ModelFactory builds per-profile HTTP clients from the
+	// substrate's existing *synth.SynthClient.
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load substrate config: %w", err)
+	}
+	coord := orchestration.NewDefaultReviewCoordinator(cfg, orchestration.DefaultModelFactory())
+	req := orchestration.ReviewRequest{
+		Components:  components,
+		Prompt:      prompt,
+		ContextData: contextData.String(),
+		Strategy:    orchestration.StrategyParallel,
+		Timeout:     timeout,
+	}
+
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	results, err := coord.Execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: %w", err)
+	}
+
+	// Return the rendered string directly. The MCP wrapper
+	// catches it as the tool's result body; the CLI's `mpm call`
+	// prints it to stdout. Same surface both ways.
+	return renderers.FormatReviewsMarkdown(results), nil
 }

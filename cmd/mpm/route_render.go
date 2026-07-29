@@ -385,6 +385,12 @@ func fetchTopDirectives(workspace string, limit int) string {
 //
 // The function is read-only and tolerant: missing files return "" rather than
 // erroring. We use the first match in priority order.
+//
+// Empty workspace: returns "" immediately. Without this guard, the
+// candidates resolve to relative paths (e.g. `src/db/mpm.db`) and the
+// function would probe the CWD — which is the 2026-07-21 ghost-DB
+// failure mode that lesson 59fe3f8ff3e1549e retired. The empty-workspace
+// contract is enforced by TestResolveMPMDatabase/empty_workspace_returns_empty.
 func resolveMPMDatabase(workspace string) string {
 	// Empty workspace means "don't resolve" — returning a relative path
 	// would let os.Stat probe CWD accidentally and pick up a fixture

@@ -17,11 +17,11 @@ import (
 // backward compatibility with the Python plugin; the MCP server returns a
 // pre-formatted string).
 type WakeContextData struct {
-	SessionID      string              `json:"session_id"`
-	ActiveMode     string              `json:"active_mode"`
-	ActivePersona  string              `json:"active_persona"`
-	RecentTopics    []string            `json:"recent_topics"`
-	RecentMemories  []WakeContextMemory `json:"recent_memories"`
+	SessionID        string              `json:"session_id"`
+	ActiveMode       string              `json:"active_mode"`
+	ActivePersona    string              `json:"active_persona"`
+	RecentTopics     []string            `json:"recent_topics"`
+	RecentMemories   []WakeContextMemory `json:"recent_memories"`
 	RecentMilestones []WakeContextMemory `json:"recent_milestones"`
 	// AuditSummary is a one-line summary of system_audit_log activity in
 	// the last 24h, or empty if no error/fatal events were logged. The
@@ -51,6 +51,39 @@ type WakeContextData struct {
 	// (promote_scratchpad), amend (flush_scratchpad with same
 	// session_id), or discard (discard_scratchpad).
 	ScratchpadOrphans string `json:"scratchpad_orphans,omitempty"`
+	// EpistemicPressure summarises the substrate's cognitive load:
+	// raw memories pending compaction vs durable lessons present.
+	// Surfaced on every wake so the agent feels its own cognitive
+	// pressure without polling (proprioception). Threshold lives in
+	// system_config under key "compaction.raw_threshold" (default 100).
+	// Exceeded=true is the agent's signal that a compact_epistemology
+	// call is warranted; Ratio is a secondary signal (raw:lesson
+	// density) clamped to 0 when LessonCount == 0 to avoid
+	// divide-by-zero NaN/Inf in the JSON response.
+	EpistemicPressure EpistemicPressureData `json:"epistemic_pressure"`
+	// AvailableSkills is the lightweight catalogue of skills the agent
+	// has access to. At most TopSkillsInWake entries are surfaced in
+	// weight order. Populated by GatherWakeContext when the skill feature
+	// is enabled; empty otherwise.
+	AvailableSkills []SkillSummary `json:"available_skills,omitempty"`
+}
+
+// EpistemicPressureData is the structured payload of the substrate's
+// cognitive load surface. All fields are scalar and cheap to compute;
+// no joins, no cluster extraction (that's deferred to the
+// compact_epistemology tool in Phase 2 of the compaction pipeline).
+type EpistemicPressureData struct {
+	RawCount    int     `json:"raw_count"`
+	LessonCount int     `json:"lesson_count"`
+	Ratio       float64 `json:"ratio"`
+	Threshold   int     `json:"threshold"`
+	Exceeded    bool    `json:"exceeded"`
+	// LastCompactedAt is the RFC3339 timestamp of the most recent
+	// compact_epistemology commit. Empty string when no compaction
+	// has happened yet — agent can branch on that without a separate
+	// "is this field present?" check. Set via system_config.compaction
+	// .last_run by the compact tool after each successful commit.
+	LastCompactedAt string `json:"last_compacted_at"`
 }
 
 // Scratchpad age-tag thresholds. Tunable from one place. The
@@ -136,6 +169,15 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.RecentTopics = dm.GetRecentUserTopics(5)
 	data.AuditSummary = dm.AuditSummary()
 
+	// Epistemic pressure — single COUNT query against the view plus
+	// the system_config threshold lookup, folded into one sub-millisecond
+	// SELECT. Defaults are non-fatal: a missing compaction key in
+	// system_config falls back to 100; a view query failure is logged
+	// to audit and the field is left as the zero value (the agent
+	// sees absent → no compaction pressure, which is the safe
+	// default).
+	data.EpistemicPressure = dm.gatherEpistemicPressure()
+
 	// Phase 2c (this commit): surface shared global rules in wake
 	// context. Cheap to query (lazy-backfilled FTS) and high-signal —
 	// every agent on the workstation sees the same house rules on
@@ -157,8 +199,76 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	}
 
 	data.ScratchpadOrphans = dm.ScratchpadOrphansSummary()
+	data.AvailableSkills = populateAvailableSkills(dm, "all")
 
 	return data, nil
+}
+
+// gatherEpistemicPressure returns the cognitive-load snapshot the agent
+// sees on every wake. Single SELECT against the epistemic_pressure_v
+// view, joined with a subquery on system_config for the threshold.
+// Designed to be sub-millisecond at realistic substrate sizes (the
+// two COUNT(*) subqueries in the view hit the (collection, deleted_at,
+// ...) composite index on memories and the lessons view directly).
+//
+// Threshold default: 100 (configurable via system_config.compaction.raw_threshold).
+// Ratio default when LessonCount == 0: 0.0 (not NaN, not +Inf — those
+// break downstream JSON parsers). The 0.0 represents "no ratio
+// information" — a fresh agent has no lessons, but the metric is
+// still meaningful via RawCount alone.
+func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
+	var (
+		rawCount    int
+		lessonCount int
+		threshold   int
+	)
+	err := dm.SQLDB().QueryRow(`
+		SELECT
+		  raw_count,
+		  lesson_count,
+		  COALESCE(
+		    (SELECT CAST(json_extract(raw_json, '$.raw_threshold') AS INTEGER)
+		     FROM system_config WHERE key = 'compaction'),
+		    100
+		  ) AS threshold
+		FROM epistemic_pressure_v
+	`).Scan(&rawCount, &lessonCount, &threshold)
+	if err != nil {
+		// Non-fatal: log to audit and return zero value. The agent sees
+		// absent pressure (raw_count=0, exceeded=false) which is the
+		// safe default — no spurious compaction triggers from a
+		// substrate glitch.
+		dm.LogAudit(AuditWarn, "wake_context", "epistemic_pressure read failed: "+err.Error(), "", AuditContext{})
+		return EpistemicPressureData{Threshold: 100}
+	}
+
+	// Last compaction timestamp. Read separately so a missing
+	// system_config row doesn't kill the whole gauge read. Empty
+	// string when no compaction has happened — agents branch on
+	// non-empty rather than parsing the string.
+	var lastCompacted string
+	_ = dm.SQLDB().QueryRow(`
+		SELECT COALESCE(json_extract(raw_json, '$.last_run_at'), '')
+		FROM system_config WHERE key = 'compaction.last_run'
+	`).Scan(&lastCompacted)
+
+	// Divide-by-zero guard. With LessonCount == 0 the ratio is undefined;
+	// emit 0.0 so the JSON marshaller produces a valid number instead of
+	// NaN or +Inf that downstream parsers reject. RawCount alone is the
+	// signal the agent acts on; ratio is a secondary density metric.
+	ratio := 0.0
+	if lessonCount > 0 {
+		ratio = float64(rawCount) / float64(lessonCount)
+	}
+
+	return EpistemicPressureData{
+		RawCount:        rawCount,
+		LessonCount:     lessonCount,
+		Ratio:           ratio,
+		Threshold:       threshold,
+		Exceeded:        rawCount > threshold,
+		LastCompactedAt: lastCompacted,
+	}
 }
 
 // recentMemories returns up to `limit` non-deleted memories ordered newest first.
@@ -344,6 +454,16 @@ func formatWakeContext(d WakeContextData) string {
 	}
 	if d.ScratchpadOrphans != "" {
 		lines = append(lines, d.ScratchpadOrphans)
+	}
+	if len(d.AvailableSkills) > 0 {
+		lines = append(lines, fmt.Sprintf("**Available Skills (count=%d):**", len(d.AvailableSkills)))
+		for _, s := range d.AvailableSkills {
+			marker := ""
+			if s.IsGlobal {
+				marker = " [shared]"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s v%s: %s%s", s.Name, s.Version, s.WhenToUse, marker))
+		}
 	}
 	if d.LastHandoff != nil {
 		lines = append(lines, formatHandoff(d.LastHandoff))

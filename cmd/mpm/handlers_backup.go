@@ -146,7 +146,7 @@ func handleRestoreDB(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Restore failed (open): %v\n", err), 1)
 	}
-	defer db.Close()
+	defer closeSQLDB(db)
 
 	// Wrap the entire restore in a transaction. On any statement error, the
 	// transaction rolls back and the database is left untouched. This prevents
@@ -210,7 +210,7 @@ func flushWal(dbPath string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer closeSQLDB(db)
 	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return err
 }

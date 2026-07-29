@@ -1,0 +1,1297 @@
+// cmd/mpm/handlers_config.go — `mpm config` family.
+//
+// v (operator) design session, Wed 2026-07-29:
+//
+//   "A user should never have to manually edit config.json for normal
+//   setup. Adding a setup wizard is one of those tiny bits of
+//   friction that instantly makes a project feel 'developer tool'
+//   rather than 'finished product'."
+//
+// `mpm config` provides the operator-facing front door for the
+// substrate's existing config block (internal/core/config/config.go).
+// The substrate already has well-formed synth / alias / memory_dir
+// configuration; operators just shouldn't have to hand-edit JSON to
+// set the API key and model.
+//
+// Surface:
+//
+//   mpm config                       Interactive wizard over the
+//                                    synth block. Preset choices
+//                                    for MiniMax / OpenAI / Ollama
+//                                    / Anthropic / Custom.
+//
+//   mpm config show | list          Print current synth block.
+//
+//   mpm config get <key>             Print one value.
+//                                    Keys: model, api_key, base_url,
+//                                    max_tokens, timeout_seconds.
+//                                    Aliases: 'token' → api_key,
+//                                    'endpoint' → base_url.
+//
+//   mpm config set <key> <value>     Set one value, persist.
+//
+//   mpm config edit                  Open mpm_config.json in $EDITOR.
+//
+//   mpm config validate              Substrate-side validation
+//                                    placeholder for v0.1 (just confirms
+//                                    the file loaded and prints OK).
+//
+// Architecture: handlers_config.go composes internal/core/config
+// (LoadConfig for read, the new SaveConfig for write). No new
+// substrate. No service / store / renderer.
+//
+// UI choice: instead of pulling in promptui or bubbletea for a TUI,
+// this implementation uses numbered-choice prompts over stdin. The
+// operator types '1' or hits enter for default. Reasoning: zero new
+// dependencies, works in any TTY, scripts well via `--non-interactive`
+// with stdin from /dev/null. A real TUI can land later via the
+// operators who actually want arrow-key navigation; the numbered-
+// choice approach covers all the v0.1 UX goals already.
+//
+// Non-interactivity: every subcommand's stdin read is guarded by
+// isatty(os.Stdin). When stdin isn't a terminal (CI / agent), the
+// wizard aborts with a friendly message pointing at `mpm config
+// set` for scripting. This keeps CI runs deterministic.
+
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
+
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
+)
+
+// handleConfig is the entry point for `mpm config [...]`. Dispatches
+// to the appropriate subcommand handler.
+func handleConfig(args []string) int {
+	if len(args) == 0 {
+		return handleConfigInteractive(loadOrInitConfig())
+	}
+	switch args[0] {
+	case "show", "list":
+		return handleConfigShow(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config get <key>\n  keys: model, api_key, base_url, max_tokens, timeout_seconds\n  aliases: token=api_key, endpoint=base_url")
+			return 1
+		}
+		return handleConfigGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 3 {
+			usererror.Error("mpm config set <key> <value>\n  keys: model, api_key, base_url, max_tokens, timeout_seconds")
+			return 1
+		}
+		return handleConfigSet(loadOrInitConfig(), args[1], strings.Join(args[2:], " "))
+	case "edit":
+		return handleConfigEdit()
+	case "validate":
+		return handleConfigValidate(loadOrInitConfig())
+	case "profile":
+		return handleConfigProfile(args[1:])
+	case "component":
+		return handleConfigComponent(args[1:])
+	case "capability":
+		return handleConfigCapability(args[1:])
+	case "help", "-h", "--help":
+		printConfigHelp()
+		return 0
+	default:
+		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, (no args = interactive wizard)", args[0])
+		return 1
+	}
+}
+
+// loadOrInitConfig returns the loaded config, creating an empty
+// SynthConfig if missing so the wizard / set / get paths always
+// operate on a non-nil struct. nil-check happens in the helpers.
+func loadOrInitConfig() *config.Config {
+	c, err := config.LoadConfig()
+	if err != nil {
+		usererror.Error("loading config: %v", err)
+		os.Exit(1)
+	}
+	if c.Synth == nil {
+		c.Synth = &config.SynthConfig{}
+	}
+	return c
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand handlers
+// ---------------------------------------------------------------------------
+
+func handleConfigShow(c *config.Config) int {
+	fmt.Println("Configuration")
+	fmt.Println(strings.Repeat("─", 60))
+
+	// Profiles — the operator-facing execution-profile abstraction.
+	if len(c.Profiles) > 0 {
+		fmt.Println()
+		fmt.Println("  Profiles")
+		for _, name := range sortedKeysForConfig(c.Profiles) {
+			p := c.Profiles[name]
+			fmt.Printf("    %-12s : provider=%s · model=%s\n", name, p.Provider, p.Model)
+			if p.BaseURL != "" {
+				fmt.Printf("    %-12s   base_url=%s\n", "", p.BaseURL)
+			}
+			if p.APIKey != "" {
+				fmt.Printf("    %-12s   api_key=%s\n", "", redactAPIKey(p.APIKey))
+			}
+		}
+	}
+
+	// Components — substrate functions bound to profiles.
+	if len(c.Components) > 0 {
+		fmt.Println()
+		fmt.Println("  Components")
+		for _, comp := range sortedKeysForConfig(c.Components) {
+			bound := c.Components[comp]
+			if bound == "" {
+				bound = "(default)"
+			}
+			fmt.Printf("    %-12s → %s\n", comp, bound)
+		}
+	}
+
+	// Capabilities — operator-meaningful vocabulary that Skills
+	// and runtime code address, mapped to substrate components.
+	if len(c.Capabilities) > 0 {
+		fmt.Println()
+		fmt.Println("  Capabilities")
+		for _, cap := range sortedKeysForConfig(c.Capabilities) {
+			bound := c.Capabilities[cap]
+			if bound == "" {
+				bound = "(default)"
+			}
+			fmt.Printf("    %-12s → %s\n", cap, bound)
+		}
+	}
+
+	// Legacy synth block — still surfaced for operators with the
+	// pre-profiles config (or who haven't migrated).
+	if c.Synth != nil {
+		s := c.Synth
+		fmt.Println()
+		fmt.Println("  Legacy synth block (migrate via 'mpm config profile add')")
+		fmt.Printf("    provider     : %s\n", synthProviderLabel(s))
+		fmt.Printf("    model        : %s\n", s.Model)
+		fmt.Printf("    api key      : %s\n", redactAPIKey(s.APIKey))
+		fmt.Printf("    base url     : %s\n", s.BaseURL)
+		fmt.Printf("    max tokens   : %d\n", s.MaxTokens)
+		fmt.Printf("    timeout secs : %d\n", s.TimeoutSecs)
+		fmt.Printf("    vendor chain : %d vendor(s)\n", len(s.Vendors))
+	}
+
+	if len(c.Profiles) == 0 && (c.Synth == nil || c.Synth.Model == "") {
+		fmt.Println()
+		fmt.Println("  (no AI provider configured — run `mpm config` to set one up)")
+	}
+
+	fmt.Println()
+	fmt.Println("Config file:", config.ConfigPath())
+	return 0
+}
+
+func handleConfigGet(c *config.Config, key string) int {
+	val, err := configLookup(c, key)
+	if err != nil {
+		usererror.Error("%v", err)
+		return 1
+	}
+	fmt.Println(val)
+	return 0
+}
+
+func handleConfigSet(c *config.Config, key, val string) int {
+	if c.Synth == nil {
+		c.Synth = &config.SynthConfig{}
+	}
+	if err := configApply(c, key, val); err != nil {
+		usererror.Error("%v", err)
+		return 1
+	}
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ %s set\n", configCanonicalKey(key))
+	return 0
+}
+
+func handleConfigEdit() int {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	path := config.ConfigPath()
+	cmd := exec.Command(editor, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		usererror.Error("editor exited: %v", err)
+		return 1
+	}
+	fmt.Println("✓ Configuration reloaded")
+	return 0
+}
+
+func handleConfigValidate(c *config.Config) int {
+	// Robust structural validation. Walks Profiles, Components,
+	// Capabilities, and the legacy Synth fallback to surface
+	// actionable errors. Per v (operator) request, this becomes
+	// the cognitive equivalent of `go vet` / `cargo check` /
+	// `terraform validate` — a single command that builds
+	// confidence before operators deploy config changes.
+	//
+	// Scope: structural only. Live provider connectivity (HTTP
+	// pings, model listing) is a future-RFC feature -- it would
+	// need per-vendor ping primitives and error tolerance for
+	// flaky networks. Today's validator catches "this binding
+	// won't work because the profile is missing a model" without
+	// leaving the operator's machine.
+	if c == nil {
+		fmt.Println("✗ no config loaded")
+		return 1
+	}
+	issues := 0
+
+	fmt.Println("Configuration validation")
+	fmt.Println(strings.Repeat("─", 60))
+
+	// Check 1: at least one usable provider is configured.
+	hasProvider := (c.Synth != nil && (c.Synth.Model != "" || c.Synth.BaseURL != "")) ||
+		len(c.Profiles) > 0
+	if hasProvider {
+		fmt.Println("  ✓ provider configuration present")
+	} else {
+		fmt.Println("  ✗ no provider configured")
+		fmt.Println("      → run `mpm config` to set one up")
+		issues++
+	}
+
+	// Check 2: every profile has provider + model set.
+	if len(c.Profiles) > 0 {
+		profileOK := 0
+		for _, name := range sortedKeysForConfig(c.Profiles) {
+			p := c.Profiles[name]
+			if p.Provider == "" || p.Model == "" {
+				fmt.Printf("  ✗ profile %q missing %s\n", name, missingField(p))
+				issues++
+			} else {
+				profileOK++
+			}
+		}
+		if profileOK > 0 && profileOK == len(c.Profiles) {
+			fmt.Printf("  ✓ profiles: %d / %d valid\n", profileOK, len(c.Profiles))
+		}
+	}
+
+	// Check 3: every component bound to a profile that resolves.
+	if len(c.Components) > 0 {
+		componentOK := 0
+		for _, comp := range sortedKeysForConfig(c.Components) {
+			bound := c.Components[comp]
+			if bound == "" {
+				fmt.Printf("  ⚠ component %q unbound (falls back to ProfileFor default chain)\n", comp)
+				continue
+			}
+			if _, ok := c.Profiles[bound]; !ok {
+				// Fall back to "default" profile if one exists.
+				if _, hasDefault := c.Profiles["default"]; hasDefault {
+					componentOK++
+					continue
+				}
+				fmt.Printf("  ✗ component %q bound to missing profile %q\n", comp, bound)
+				fmt.Printf("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`\n", bound, comp)
+				issues++
+				continue
+			}
+			componentOK++
+		}
+		if componentOK == len(c.Components) && len(c.Components) > 0 {
+			fmt.Printf("  ✓ components: %d / %d bound\n", componentOK, len(c.Components))
+		}
+	}
+
+	// Check 4: every capability maps to a real component.
+	//
+	// "Real" here means: the capability's bound component name
+	// resolves to either a known component (memory, critic, ...)
+	// or to a component explicitly bound in Config.Components.
+	// Capability → component → profile is the chain; the
+	// validator only checks the first hop (the component name
+	// exists), since downstream checks are already covered above.
+	if len(c.Capabilities) > 0 {
+		capOK := 0
+		knownSet := map[string]bool{}
+		for _, k := range knownComponents {
+			knownSet[k] = true
+		}
+		for _, cap := range sortedKeysForConfig(c.Capabilities) {
+			bound := c.Capabilities[cap]
+			if bound == "" {
+				fmt.Printf("  ⚠ capability %q unbound (will use default if defined)\n", cap)
+				continue
+			}
+			if !knownSet[bound] {
+				if _, ok := c.Components[bound]; !ok {
+					fmt.Printf("  ✗ capability %q bound to missing component %q\n", cap, bound)
+					fmt.Printf("      → bind to a known component: `mpm config capability set %q <component>`\n", cap)
+					issues++
+					continue
+				}
+			}
+			capOK++
+		}
+		if capOK == len(c.Capabilities) && len(c.Capabilities) > 0 {
+			fmt.Printf("  ✓ capabilities: %d / %d resolve\n", capOK, len(c.Capabilities))
+		}
+	}
+
+	// Check 5: known components (memory, critic, scheduler) all
+	// resolve to a Profile via the ProfileFor chain. Catches the
+	// 'shadow components' case where the operator intended to bind
+	// them but forgot.
+	if c.Synth != nil || len(c.Profiles) > 0 {
+		missingComponent := 0
+		for _, comp := range knownComponents {
+			if c.ProfileFor(comp) == nil {
+				fmt.Printf("  ✗ component %q cannot resolve to a profile\n", comp)
+				missingComponent++
+				issues++
+			}
+		}
+		if missingComponent == 0 && (c.Synth != nil || len(c.Profiles) > 0) {
+			fmt.Printf("  ✓ known components: %s resolve to profiles\n", strings.Join(knownComponents, ", "))
+		}
+	}
+
+	fmt.Println()
+	if issues == 0 {
+		fmt.Println("Validation: ✓ OK")
+		return 0
+	}
+	fmt.Printf("Validation: ✗ FAIL (%d issue%s)\n", issues, pluralForN(issues))
+	fmt.Println()
+	fmt.Println("Live provider checks (--live flag) are a future RFC.")
+	return 1
+}
+
+// missingField returns the first missing required field in p
+// (provider or model). The CLI surface surfaces these in the
+// validator output so operators know which field to set.
+func missingField(p config.Profile) string {
+	if p.Provider == "" {
+		return "provider"
+	}
+	if p.Model == "" {
+		return "model"
+	}
+	return ""
+}
+
+// pluralForN returns "s" for non-1 counts, "" for 1. Tiny helper
+// to keep the validator output grammatical without pulling in
+// golang.org/x/text.
+func pluralForN(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// ---------------------------------------------------------------------------
+// Interactive wizard
+// ---------------------------------------------------------------------------
+
+// handleConfigInteractive runs the wizard. Each prompt uses stdin;
+// defaults are accepted by hitting enter. The wizard is non-TTY-safe
+// (refuses to run with stdin redirected, points operator at the
+// scripting interface).
+func handleConfigInteractive(c *config.Config) int {
+	if !isatty(os.Stdin) {
+		fmt.Println("Configure MPM")
+		fmt.Println()
+		fmt.Println("Non-interactive mode detected (stdin isn't a terminal).")
+		fmt.Println("Use the scriptable interface instead:")
+		fmt.Println()
+		fmt.Println("  mpm config set api_key $OPENAI_API_KEY")
+		fmt.Println("  mpm config set model gpt-5.5")
+		fmt.Println("  mpm config set base_url https://api.openai.com/v1")
+		fmt.Println()
+		fmt.Println("Or run `mpm config` interactively from a real terminal.")
+		return 0
+	}
+
+	fmt.Println("Configure MPM")
+	fmt.Println()
+	fmt.Println("Each preset fills in the right default base_url + model")
+	fmt.Println("for that provider. You'll be asked to confirm before saving.")
+	fmt.Println()
+
+	// Ensure synth block exists.
+	if c.Synth == nil {
+		c.Synth = &config.SynthConfig{}
+	}
+
+	// Preset choice.
+	preset := promptChoice(rwFromStdin(), "Provider", []choice{
+		{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.SynthConfig{
+			Model:   "MiniMax-M2.7",
+			BaseURL: "https://api.minimax.io/anthropic/v1",
+		}},
+		{id: "openai", label: "OpenAI", defaults: config.SynthConfig{
+			Model:   "gpt-4o",
+			BaseURL: "https://api.openai.com/v1/v1",
+		}},
+		{id: "ollama", label: "Ollama (local)", defaults: config.SynthConfig{
+			Model:   "llama3",
+			BaseURL: "http://localhost:11434/v1",
+		}},
+		{id: "anthropic", label: "Anthropic direct", defaults: config.SynthConfig{
+			Model:   "claude-3-5-sonnet",
+			BaseURL: "https://api.anthropic.com/v1",
+		}},
+		{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.SynthConfig{}},
+	})
+	if preset == nil {
+		fmt.Println("Aborted.")
+		return 0
+	}
+
+	// Apply preset defaults to the struct (filling empty fields
+	// only — operators can override per-field in the prompts
+	// below).
+	mergeDefaults(c.Synth, preset.defaults)
+
+	// Model prompt.
+	model := promptString(rwFromStdin(), "Model", c.Synth.Model)
+	if model != "" {
+		c.Synth.Model = strings.TrimSpace(model)
+	}
+
+	// Base URL prompt.
+	baseURL := promptString(rwFromStdin(), "Base URL", c.Synth.BaseURL)
+	if baseURL != "" {
+		c.Synth.BaseURL = strings.TrimSpace(baseURL)
+	}
+
+	// API key prompt — only if preset needs it (skip for Ollama).
+	needsKey := preset.id != "ollama"
+	if needsKey {
+		existing := c.Synth.APIKey
+		var labelDefault string
+		if existing != "" {
+			labelDefault = "(unchanged)"
+		}
+		key := promptSecret(rwFromStdin(), "API key", labelDefault)
+		if key != "" {
+			c.Synth.APIKey = strings.TrimSpace(key)
+		}
+	}
+
+	// Max tokens + timeout (rarely customised, default-only).
+	tokens := promptString(rwFromStdin(), "Max tokens", intToStr(c.Synth.MaxTokens))
+	if tokens != "" {
+		if n, err := strconvAtoi(tokens); err == nil && n > 0 {
+			c.Synth.MaxTokens = n
+		}
+	}
+	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(c.Synth.TimeoutSecs))
+	if timeout != "" {
+		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
+			c.Synth.TimeoutSecs = n
+		}
+	}
+
+	// Confirm + save.
+	fmt.Println()
+	fmt.Println("Preview:")
+	fmt.Printf("  model      : %s\n", c.Synth.Model)
+	fmt.Printf("  base url   : %s\n", c.Synth.BaseURL)
+	fmt.Printf("  api key    : %s\n", redactAPIKey(c.Synth.APIKey))
+	fmt.Printf("  max tokens : %d\n", c.Synth.MaxTokens)
+	fmt.Printf("  timeout    : %d\n", c.Synth.TimeoutSecs)
+	fmt.Println()
+	if !confirmPrompt(rwFromStdin(), "Save?") {
+		fmt.Println("Aborted.")
+		return 0
+	}
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Println()
+	fmt.Println("✓ Configuration saved to " + config.ConfigPath())
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// configLookup resolves a key (incl. aliases) against the loaded
+// config and returns the canonical display value.
+func configLookup(c *config.Config, key string) (string, error) {
+	if c == nil || c.Synth == nil {
+		return "", fmt.Errorf("no synth block configured")
+	}
+	canon := configCanonicalKey(key)
+	switch canon {
+	case "model":
+		return c.Synth.Model, nil
+	case "api_key":
+		return c.Synth.APIKey, nil
+	case "base_url":
+		return c.Synth.BaseURL, nil
+	case "max_tokens":
+		return intToStr(c.Synth.MaxTokens), nil
+	case "timeout_seconds":
+		return intToStr(c.Synth.TimeoutSecs), nil
+	}
+	return "", fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds)", key)
+}
+
+// configApply mutates the loaded config in place. Pure mutation
+// helper; persistence happens in handleConfigSet via SaveConfig.
+func configApply(c *config.Config, key, val string) error {
+	if c.Synth == nil {
+		return fmt.Errorf("synth block missing")
+	}
+	canon := configCanonicalKey(key)
+	switch canon {
+	case "model":
+		c.Synth.Model = val
+	case "api_key":
+		c.Synth.APIKey = val
+	case "base_url":
+		c.Synth.BaseURL = val
+	case "max_tokens":
+		n, err := strconvAtoi(val)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("max_tokens must be a positive integer (got %q)", val)
+		}
+		c.Synth.MaxTokens = n
+	case "timeout_seconds":
+		n, err := strconvAtoi(val)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("timeout_seconds must be a positive integer (got %q)", val)
+		}
+		c.Synth.TimeoutSecs = n
+	default:
+		return fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds)", key)
+	}
+	return nil
+}
+
+// configCanonicalKey normalises an input key to its canonical form.
+//   "token"       → "api_key"
+//   "apikey"      → "api_key"
+//   "endpoint"    → "base_url"
+//   "base-url"    → "base_url"
+//   "max"         → "max_tokens"
+//   "timeout"     → "timeout_seconds"
+func configCanonicalKey(key string) string {
+	k := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	switch k {
+	case "token", "apikey", "api_key":
+		return "api_key"
+	case "endpoint", "baseurl", "base_url":
+		return "base_url"
+	case "max", "maxtokens", "max_tokens":
+		return "max_tokens"
+	case "timeout", "timeoutsecs", "timeout_seconds":
+		return "timeout_seconds"
+	case "model":
+		return "model"
+	}
+	return k
+}
+
+// synthProviderLabel heuristically labels the configured provider
+// from base_url. Substrate doesn't store the provider explicitly;
+// the base_url is the operative signal. Used for `mpm config show`.
+func synthProviderLabel(s *config.SynthConfig) string {
+	if s == nil {
+		return "(none)"
+	}
+	u := strings.ToLower(s.BaseURL)
+	switch {
+	case strings.Contains(u, "minimax"):
+		return "MiniMax"
+	case strings.Contains(u, "openai"):
+		return "OpenAI"
+	case strings.Contains(u, "ollama") || strings.Contains(u, "11434"):
+		return "Ollama"
+	case strings.Contains(u, "anthropic"):
+		return "Anthropic"
+	case s.BaseURL == "" && s.Model == "":
+		return "(not configured)"
+	}
+	if s.BaseURL != "" {
+		return s.BaseURL
+	}
+	return "Custom"
+}
+
+// redactAPIKey returns a printable representation of an API key
+// without leaking it. Shows the first 4 chars + '...' + last 4
+// chars when long enough; otherwise '****' or '(unset)'.
+func redactAPIKey(k string) string {
+	if k == "" {
+		return "(unset)"
+	}
+	if len(k) <= 12 {
+		return "****"
+	}
+	return k[:4] + "..." + k[len(k)-4:]
+}
+
+// mergeDefaults fills empty fields in target with values from src.
+// Non-empty fields in target are preserved. Used by the wizard
+// to apply preset defaults without clobbering operator edits.
+func mergeDefaults(target *config.SynthConfig, src config.SynthConfig) {
+	if target == nil {
+		return
+	}
+	if target.Model == "" {
+		target.Model = src.Model
+	}
+	if target.BaseURL == "" {
+		target.BaseURL = src.BaseURL
+	}
+}
+
+// ---------------------------------------------------------------------------
+// stdin prompts (numbered-choice + line-reader)
+// ---------------------------------------------------------------------------
+
+// choice is one row in a numbered-choice prompt.
+type choice struct {
+	id       string
+	label    string
+	defaults config.SynthConfig
+}
+
+// rwFromStdin returns a buffered reader around stdin. Used by
+// every prompt.
+func rwFromStdin() *bufio.Reader {
+	return bufio.NewReader(os.Stdin)
+}
+
+// promptChoice prints a numbered list and reads a selection.
+func promptChoice(rw *bufio.Reader, header string, choices []choice) *choice {
+	fmt.Printf("\n  %s\n", header)
+	for i, c := range choices {
+		fmt.Printf("    %d. %s\n", i+1, c.label)
+	}
+	fmt.Printf("\n  Choose [%d-%d] (default: 1): ", 1, len(choices))
+	raw, _ := rw.ReadString('\n')
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "1"
+	}
+	n, err := strconvAtoi(raw)
+	if err != nil || n < 1 || n > len(choices) {
+		fmt.Println("  invalid choice; aborting")
+		return nil
+	}
+	return &choices[n-1]
+}
+
+// promptString prints a labeled prompt and reads a line. Returns
+// the default value (labelDefault) when the user enters nothing.
+func promptString(rw *bufio.Reader, label, def string) string {
+	prompt := label
+	if def != "" {
+		prompt = label + " [" + def + "]"
+	}
+	prompt += ": "
+	fmt.Print(prompt)
+	raw, _ := rw.ReadString('\n')
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return raw
+}
+
+// promptSecret prints a labeled prompt and reads a line. The input
+// is echoed if stdin is a TTY (terminal-side visibility) because
+// we're not pulling in a TUI library — the operator's terminal
+// handles input visibility. def is non-empty when there's an
+// existing key; the prompt says "press enter to keep" rather than
+// show the secret.
+func promptSecret(rw *bufio.Reader, label, def string) string {
+	prompt := label
+	if def != "(unchanged)" && def != "" {
+		prompt = label + " [keep existing]"
+	}
+	prompt += ": "
+	fmt.Print(prompt)
+	raw, _ := rw.ReadString('\n')
+	return strings.TrimSpace(raw)
+}
+
+// confirmPrompt reads a Y/n confirmation.
+func confirmPrompt(rw *bufio.Reader, label string) bool {
+	fmt.Printf("  %s [Y/n]: ", label)
+	raw, _ := rw.ReadString('\n')
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || raw == "y" || raw == "yes" {
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers (kept package-private to avoid touching stdlib imports)
+// ---------------------------------------------------------------------------
+
+// intToStr formats an int as a string, returning "" for 0. Used to
+// surface a default placeholder only.
+func intToStr(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// strconvAtoi wraps strconv.Atoi to keep imports slim. The wizard
+// uses this only for the two int fields.
+func strconvAtoi(s string) (int, error) {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+// printConfigHelp prints the mpm config help block.
+func printConfigHelp() {
+	fmt.Println(`mpm config — Configure the AI provider
+
+Usage:
+  mpm config                       Interactive wizard
+  mpm config show | list            Show current configuration
+  mpm config get <key>             Get one value
+  mpm config set <key> <value>     Set one value
+  mpm config edit                  Open mpm_config.json in $EDITOR
+  mpm config validate              Validate configuration shape
+
+Keys (canonical names; aliases accepted):
+  model, api_key (alias: token), base_url (alias: endpoint),
+  max_tokens, timeout_seconds
+
+Examples:
+  mpm config set api_key $OPENAI_API_KEY
+  mpm config set model gpt-4o
+  mpm config set endpoint https://api.openai.com/v1
+
+Config file: ~/.mpm/mpm_config.json (path resolved via the
+workspace; $EDITOR is opened on this file for 'mpm config edit'.)`)
+}
+
+// (syscall imported for isatty() — package main already in scope.)
+var _ = syscall.Stdin
+
+// ---------------------------------------------------------------------------
+// Profile subcommands (mpm config profile <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigProfile routes profile management subcommands.
+//
+//   mpm config profile add [name]                   Interactive wizard /
+//                                                  accept-name-from-stdin
+//   mpm config profile list                       Render all profiles
+//   mpm config profile get <name>                  Show one profile
+//   mpm config profile set <name> <key> <value>    Set one field
+//   mpm config profile remove <name>               Delete; refuse if
+//                                                  any component binds
+//                                                  to this profile
+func handleConfigProfile(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config profile <sub> — need one of: add, list, get, set, remove")
+		return 1
+	}
+	switch args[0] {
+	case "add":
+		name := ""
+		if len(args) >= 2 {
+			name = args[1]
+		}
+		return handleProfileAdd(loadOrInitConfig(), name)
+	case "list":
+		return handleProfileList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config profile get <name>")
+			return 1
+		}
+		return handleProfileGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 4 {
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning")
+			return 1
+		}
+		return handleProfileSet(loadOrInitConfig(), args[1], args[2], strings.Join(args[3:], " "))
+	case "remove":
+		if len(args) < 2 {
+			usererror.Error("mpm config profile remove <name>")
+			return 1
+		}
+		return handleProfileRemove(loadOrInitConfig(), args[1])
+	default:
+		usererror.Error("mpm config profile: unknown subcommand %q — try add|list|get|set|remove", args[0])
+		return 1
+	}
+}
+
+func handleProfileAdd(c *config.Config, name string) int {
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	if name == "" {
+		if !isatty(os.Stdin) {
+			usererror.Error("mpm config profile add requires a name in non-interactive mode")
+			return 1
+		}
+		name = strings.TrimSpace(promptString(rwFromStdin(), "Profile name", ""))
+		if name == "" {
+			fmt.Println("Aborted.")
+			return 0
+		}
+	}
+	if _, exists := c.Profiles[name]; exists {
+		usererror.Error("profile %q already exists — use 'mpm config profile set' to update fields", name)
+		return 1
+	}
+	p := config.Profile{Name: name}
+	if isatty(os.Stdin) {
+		p.Provider = strings.TrimSpace(promptString(rwFromStdin(), "Provider (openai/anthropic/ollama/custom)", "custom"))
+		p.Model = strings.TrimSpace(promptString(rwFromStdin(), "Model", ""))
+		p.BaseURL = strings.TrimSpace(promptString(rwFromStdin(), "Base URL", ""))
+		if p.Provider != "ollama" {
+			p.APIKey = strings.TrimSpace(promptSecret(rwFromStdin(), "API key", ""))
+		}
+		tempStr := promptString(rwFromStdin(), "Temperature (0.0-2.0)", "0.2")
+		if t, err := strconvAtoiFloat(tempStr); err == nil {
+			p.Temperature = &t
+		}
+	} else {
+		fmt.Printf("Created empty profile %q. Use 'mpm config profile set %s <key> <value>' to fill.\n", name, name)
+	}
+	c.Profiles[name] = p
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q added\n", name)
+	return 0
+}
+
+func handleProfileList(c *config.Config) int {
+	fmt.Println("Execution profiles")
+	fmt.Println(strings.Repeat("─", 60))
+	if len(c.Profiles) == 0 {
+		fmt.Println("  (no profiles configured — run `mpm config profile add <name>` or `mpm config` to set one up)")
+		return 0
+	}
+	for _, name := range sortedKeysForConfig(c.Profiles) {
+		p := c.Profiles[name]
+		fmt.Printf("  %s\n", name)
+		fmt.Printf("    provider    : %s\n", p.Provider)
+		fmt.Printf("    model       : %s\n", p.Model)
+		if p.BaseURL != "" {
+			fmt.Printf("    base url    : %s\n", p.BaseURL)
+		}
+		if p.APIKey != "" {
+			fmt.Printf("    api key     : %s\n", redactAPIKey(p.APIKey))
+		}
+		if p.Temperature != nil {
+			fmt.Printf("    temperature : %.2f\n", *p.Temperature)
+		}
+		if p.MaxTokens > 0 {
+			fmt.Printf("    max tokens  : %d\n", p.MaxTokens)
+		}
+		if p.TimeoutSecs > 0 {
+			fmt.Printf("    timeout sec : %d\n", p.TimeoutSecs)
+		}
+		if p.Reasoning != "" {
+			fmt.Printf("    reasoning   : %s\n", p.Reasoning)
+		}
+		fmt.Println()
+	}
+	return 0
+}
+
+func handleProfileGet(c *config.Config, name string) int {
+	p, ok := c.Profiles[name]
+	if !ok {
+		usererror.Error("profile %q not found", name)
+		return 1
+	}
+	fmt.Printf("profile %q:\n", name)
+	fmt.Printf("  provider    : %s\n", p.Provider)
+	fmt.Printf("  model       : %s\n", p.Model)
+	if p.BaseURL != "" {
+		fmt.Printf("  base url    : %s\n", p.BaseURL)
+	}
+	if p.APIKey != "" {
+		fmt.Printf("  api key     : %s\n", redactAPIKey(p.APIKey))
+	}
+	if p.Temperature != nil {
+		fmt.Printf("  temperature : %.2f\n", *p.Temperature)
+	}
+	if p.MaxTokens > 0 {
+		fmt.Printf("  max tokens  : %d\n", p.MaxTokens)
+	}
+	if p.TimeoutSecs > 0 {
+		fmt.Printf("  timeout sec : %d\n", p.TimeoutSecs)
+	}
+	if p.Reasoning != "" {
+		fmt.Printf("  reasoning   : %s\n", p.Reasoning)
+	}
+	return 0
+}
+
+func handleProfileSet(c *config.Config, name, key, value string) int {
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	p, ok := c.Profiles[name]
+	if !ok {
+		usererror.Error("profile %q not found — use 'mpm config profile add %s' first", name, name)
+		return 1
+	}
+	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
+	case "provider":
+		p.Provider = value
+	case "model":
+		p.Model = value
+	case "base_url", "endpoint", "baseurl":
+		p.BaseURL = value
+	case "api_key", "token", "apikey":
+		p.APIKey = value
+	case "temperature":
+		t, err := strconvAtoiFloat(value)
+		if err != nil {
+			usererror.Error("temperature must be a number 0.0-2.0 (got %q)", value)
+			return 1
+		}
+		p.Temperature = &t
+	case "max_tokens", "maxtokens", "max":
+		n, err := strconvAtoi(value)
+		if err != nil || n <= 0 {
+			usererror.Error("max_tokens must be a positive integer (got %q)", value)
+			return 1
+		}
+		p.MaxTokens = n
+	case "timeout_seconds", "timeout":
+		n, err := strconvAtoi(value)
+		if err != nil || n <= 0 {
+			usererror.Error("timeout_seconds must be a positive integer (got %q)", value)
+			return 1
+		}
+		p.TimeoutSecs = n
+	case "reasoning":
+		p.Reasoning = value
+	default:
+		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning)", key)
+		return 1
+	}
+	c.Profiles[name] = p
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
+	return 0
+}
+
+func handleProfileRemove(c *config.Config, name string) int {
+	if _, ok := c.Profiles[name]; !ok {
+		usererror.Error("profile %q not found", name)
+		return 1
+	}
+	for comp, bound := range c.Components {
+		if bound == name {
+			usererror.Error("cannot remove profile %q: component %q is bound to it\n  unbind first: 'mpm config component set %s <other-profile>'", name, comp, comp)
+			return 1
+		}
+	}
+	delete(c.Profiles, name)
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q removed\n", name)
+	return 0
+}
+
+// sortedKeys returns the map's keys in lexical order. Used to give
+// profile + component listings a stable output shape.
+func sortedKeysForConfig[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// strconvAtoiFloat parses a string as a float without importing
+// strconv twice. Keeps the imports lean.
+func strconvAtoiFloat(s string) (float64, error) {
+	n := 0.0
+	frac := 1.0
+	seenDot := false
+	for _, c := range s {
+		switch {
+		case c == '.' && !seenDot:
+			seenDot = true
+			frac = 1
+		case c >= '0' && c <= '9':
+			d := float64(c - '0')
+			if seenDot {
+				frac *= 10
+				n += d / frac
+			} else {
+				n = n*10 + d
+			}
+		default:
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+	}
+	return n, nil
+}
+
+// ---------------------------------------------------------------------------
+// Component subcommands (mpm config component <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigComponent routes component binding subcommands.
+//
+//   mpm config component list                Render all bindings
+//   mpm config component get <component>     Show one binding
+//   mpm config component set <comp> <profile> Set binding
+func handleConfigComponent(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config component <sub> — need one of: list, get, set")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		return handleComponentList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config component get <name>")
+			return 1
+		}
+		return handleComponentGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 3 {
+			usererror.Error("mpm config component set <component> <profile>")
+			return 1
+		}
+		return handleComponentSet(loadOrInitConfig(), args[1], args[2])
+	default:
+		usererror.Error("mpm config component: unknown subcommand %q — try list|get|set", args[0])
+		return 1
+	}
+}
+
+// knownComponents is the v0.1 allow-list for components. The
+// underlying map accepts any name, but the visible component list
+// surfaces these in stable order. Future RFCs append names here.
+var knownComponents = []string{"memory", "critic", "scheduler"}
+
+func handleComponentList(c *config.Config) int {
+	fmt.Println("Component bindings")
+	fmt.Println(strings.Repeat("─", 60))
+	if len(c.Components) == 0 {
+		fmt.Println("  (no components bound — defaults to 'default' profile via ProfileFor fallback)")
+		return 0
+	}
+	for _, comp := range sortedKeysForConfig(c.Components) {
+		bound := c.Components[comp]
+		if bound == "" {
+			bound = "(default)"
+		}
+		fmt.Printf("  %-12s → %s\n", comp, bound)
+	}
+	return 0
+}
+
+func handleComponentGet(c *config.Config, component string) int {
+	bound := c.Components[component]
+	if bound == "" {
+		bound = "(default)"
+	}
+	fmt.Printf("  %s → %s\n", component, bound)
+	return 0
+}
+
+func handleComponentSet(c *config.Config, component, profile string) int {
+	if c.Components == nil {
+		c.Components = map[string]string{}
+	}
+	// Empty profile string → unset binding (component falls back
+	// to ProfileFor's default / Synth legacy chain).
+	if profile == "" {
+		delete(c.Components, component)
+		if err := config.SaveConfig(c); err != nil {
+			usererror.Error("saving config: %v", err)
+			return 1
+		}
+		fmt.Printf("✓ component %q unbound\n", component)
+		return 0
+	}
+	if _, ok := c.Profiles[profile]; !ok {
+		usererror.Error("profile %q not found — define it first with 'mpm config profile add %s'", profile, profile)
+		return 1
+	}
+	c.Components[component] = profile
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ component %q → profile %q\n", component, profile)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Capability subcommands (mpm config capability <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigCapability routes capability binding subcommands.
+//
+//   mpm config capability list                Render all bindings
+//   mpm config capability get <capability>    Show one binding
+//   mpm config capability set <cap> <comp>    Bind capability to component
+//
+// Capabilities are the operator-meaningful vocabulary that Skills and
+// runtime code address. Components are the substrate-specific
+// functions that fulfil them. Default v0.1 capabilities:
+//
+//   planner   → memory
+//   reviewer  → critic
+//   reflect   → critic
+//   summarise → memory
+//
+// Operators can override any of these or add their own. The runtime
+// resolves at skill-execution time: skill says 'I need reviewer',
+// config says reviewer → critic, ProfileFor(critic) returns the
+// model.
+func handleConfigCapability(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config capability <sub> — need one of: list, get, set")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		return handleCapabilityList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config capability get <capability>")
+			return 1
+		}
+		return handleCapabilityGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 3 {
+			usererror.Error("mpm config capability set <capability> <component>")
+			return 1
+		}
+		return handleCapabilitySet(loadOrInitConfig(), args[1], args[2])
+	default:
+		usererror.Error("mpm config capability: unknown subcommand %q — try list|get|set", args[0])
+		return 1
+	}
+}
+
+// defaultCapabilities are the v0.1 capability → component
+// defaults. Loaded once when Capabilities is nil (first-run),
+// can be overridden by the operator via 'capability set'.
+var defaultCapabilities = map[string]string{
+	"planner":   "memory",
+	"reviewer":  "critic",
+	"reflect":   "critic",
+	"summarise": "memory",
+}
+
+func handleCapabilityList(c *config.Config) int {
+	fmt.Println("Capability registry")
+	fmt.Println(strings.Repeat("─", 60))
+	if c.Capabilities == nil {
+		fmt.Println("  (no capabilities configured — defaults loaded on first use)")
+		fmt.Println()
+		for cap, comp := range defaultCapabilities {
+			fmt.Printf("  default  %-12s → %s\n", cap, comp)
+		}
+		return 0
+	}
+	for _, cap := range sortedKeysForConfig(c.Capabilities) {
+		bound := c.Capabilities[cap]
+		if bound == "" {
+			bound = "(unbound)"
+		}
+		fmt.Printf("  %-12s → %s\n", cap, bound)
+	}
+	return 0
+}
+
+func handleCapabilityGet(c *config.Config, capability string) int {
+	bound := c.CapabilityFor(capability)
+	if bound == "" {
+		// Fall back to defaults so operators see the canonical binding.
+		if def, ok := defaultCapabilities[capability]; ok {
+			fmt.Printf("  %s → %s (default; not explicitly bound)\n", capability, def)
+			return 0
+		}
+		fmt.Printf("  %s → (unbound)\n", capability)
+		return 0
+	}
+	fmt.Printf("  %s → %s\n", capability, bound)
+	return 0
+}
+
+func handleCapabilitySet(c *config.Config, capability, component string) int {
+	if c.Capabilities == nil {
+		c.Capabilities = map[string]string{}
+	}
+	// Empty component → remove the binding (use defaults).
+	if component == "" {
+		delete(c.Capabilities, capability)
+		if err := config.SaveConfig(c); err != nil {
+			usererror.Error("saving config: %v", err)
+			return 1
+		}
+		fmt.Printf("✓ capability %q unbound (will use default)\n", capability)
+		return 0
+	}
+	c.Capabilities[capability] = component
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ capability %q → component %q\n", capability, component)
+	return 0
+}

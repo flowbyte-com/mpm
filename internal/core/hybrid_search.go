@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,17 @@ type HybridConfig struct {
 	Origin string
 }
 
+// safeSchemaPrefixPattern validates SQL-safe schema prefixes.
+var safeSchemaPrefixPattern = regexp.MustCompile(`^$|^[a-zA-Z_][a-zA-Z0-9_]*\.$`)
+
+// ValidateSchemaPrefix returns an error if the prefix contains unsafe chars.
+func ValidateSchemaPrefix(prefix string) error {
+	if !safeSchemaPrefixPattern.MatchString(prefix) {
+		return fmt.Errorf("invalid schema prefix: %q must match %s", prefix, safeSchemaPrefixPattern.String())
+	}
+	return nil
+}
+
 // DefaultHybridConfig returns sensible defaults.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
@@ -88,6 +100,9 @@ type HybridResult struct {
 // FTS5 results that lack embeddings are still returned (graceful degradation).
 // Vector results that FTS5 would rank higher are boosted.
 func HybridSearch(dm *DatabaseManager, query string, collection string, cfg HybridConfig) ([]HybridResult, error) {
+	if err := ValidateSchemaPrefix(cfg.SchemaPrefix); err != nil {
+		return nil, err
+	}
 	if cfg.Limit <= 0 {
 		cfg.Limit = 15
 	}
@@ -457,6 +472,14 @@ type ftsEntry struct {
 	LastAccessedAt     *string
 	ReferenceID        *string
 	Score              float64
+	// Retrieval metadata (Observability Layer, 2026-07-26).
+	// Populated by a LEFT JOIN against retrieval_metadata; today these
+	// fields are observability-only and do not influence Score or
+	// ORDER BY. A future RetrievalRanker implementation may consult
+	// these to blend a reuse-adjusted score per row.
+	ReuseCount      int
+	LastRetrievedAt *string
+	SuccessCount    int
 }
 
 type vecEntry struct {
@@ -479,23 +502,37 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 	ftsTable := schemaPrefix + "memories_fts"
 	memTable := schemaPrefix + "memories"
 
-	// FTS5 query sanitization (2026-07-17, surfaced by hermes diagnostic).
-	// Bare hyphenated queries like "memory-test" get parsed by FTS5 as
-	// column-filter syntax: "memory" is treated as a column name and
-	// "-test" as an exclusion term. The result is either "no such
-	// column" errors or silent zero-result queries. Wrapping in double
-	// quotes forces MATCH to parse as a phrase, after which the
-	// unicode61 tokenizer splits on hyphens and the indexed tokens
-	// match the query tokens. Same outcome as before for non-hyphenated
-	// queries (the tokenizer handles whitespace the same way).
-	safeQuery := `"\` + strings.ReplaceAll(strings.ReplaceAll(query, `\`, `\\`), `"`, `\"`) + `"`
+	// FTS5 query construction (2026-07-23, builds on 2026-07-17 fix).
+	// The 2026-07-17 fix wrapped the user query in double quotes to
+	// dodge the hyphen-as-column-name parser quirk. That worked at the
+	// syntax level but introduced a new silent bug: phrase queries
+	// (`"lazy start"`) only match the literal two-word phrase, while
+	// the porter unicode61 tokenizer stores "lazy-start" as the
+	// separate tokens "lazy" and "start". Wrapping in quotes hid the
+	// hyphen crash but traded it for silent zero-result queries.
+	//
+	// BuildFTS5Query tokenizes the query the same way the index does
+	// (split on whitespace + hyphens + underscores + dots), applies
+	// prefix wildcard per token, and joins with whitespace (FTS5
+	// implicit AND). This makes hyphenated, multi-word, and partial
+	// keyword queries all work via the same code path.
+	safeQuery := BuildFTS5Query(query)
+	if safeQuery == "" {
+		// Empty query — FTS5 MATCH "" raises an error; return empty
+		// so the caller can short-circuit.
+		return nil, nil
+	}
 	sqlQuery := `
 		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
 		       m.created_at, m.reinforcement_count, m.weight,
 		       m.last_accessed_at, m.reference_id,
-		       bm25(` + ftsTable + `) AS score
+		       bm25(` + ftsTable + `) AS score,
+		       COALESCE(rm.reuse_count, 0) AS reuse_count,
+		       rm.last_retrieved_at AS last_retrieved_at,
+		       COALESCE(rm.success_count, 0) AS success_count
 		FROM ` + ftsTable + `
 		JOIN ` + memTable + ` m ON ` + ftsTable + `.rowid = m.rowid
+		LEFT JOIN retrieval_metadata rm ON rm.node_id = m.id
 		WHERE ` + ftsTable + ` MATCH ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 		  AND (? = '' OR m.collection = ?)
 		ORDER BY score
@@ -513,14 +550,18 @@ func searchLike(db *sql.DB, query, collection string, limit int, schemaPrefix st
 	likePat := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
 	memTable := schemaPrefix + "memories"
 	sqlQuery := `
-		SELECT id, content, collection, tags, metadata,
-		       created_at, reinforcement_count, weight,
-		       last_accessed_at, reference_id,
-		       0.0 AS score
-		FROM ` + memTable + `
-		WHERE content LIKE ? AND deleted_at IS NULL` + MemoryExpireClause + `
-		  AND (? = '' OR collection = ?)
-		ORDER BY created_at DESC
+		SELECT m.id, m.content, m.collection, m.tags, m.metadata,
+		       m.created_at, m.reinforcement_count, m.weight,
+		       m.last_accessed_at, m.reference_id,
+		       0.0 AS score,
+		       COALESCE(rm.reuse_count, 0) AS reuse_count,
+		       rm.last_retrieved_at AS last_retrieved_at,
+		       COALESCE(rm.success_count, 0) AS success_count
+		FROM ` + memTable + ` m
+		LEFT JOIN retrieval_metadata rm ON rm.node_id = m.id
+		WHERE m.content LIKE ? AND m.deleted_at IS NULL` + MemoryExpireClause + `
+		  AND (? = '' OR m.collection = ?)
+		ORDER BY m.created_at DESC
 		LIMIT ?`
 	rows, err := db.Query(sqlQuery, likePat, collection, collection, limit)
 	if err != nil {
@@ -534,10 +575,12 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 	var results []ftsEntry
 	for rows.Next() {
 		var e ftsEntry
-		var nullableTags, nullableMetadata, nullableLastAccessed, nullableRefID sql.NullString
+		var nullableTags, nullableMetadata, nullableLastAccessed, nullableRefID,
+			nullableMetaLastRetrieved sql.NullString
 		if err := rows.Scan(&e.ID, &e.Content, &e.Collection, &nullableTags, &nullableMetadata,
 			&e.CreatedAt, &e.ReinforcementCount, &e.Weight,
-			&nullableLastAccessed, &nullableRefID, &e.Score); err != nil {
+			&nullableLastAccessed, &nullableRefID, &e.Score,
+			&e.ReuseCount, &nullableMetaLastRetrieved, &e.SuccessCount); err != nil {
 			continue
 		}
 		e.Tags = nullableTags.String
@@ -547,6 +590,10 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 		}
 		if nullableRefID.Valid {
 			e.ReferenceID = &nullableRefID.String
+		}
+		if nullableMetaLastRetrieved.Valid {
+			s := nullableMetaLastRetrieved.String
+			e.LastRetrievedAt = &s
 		}
 		results = append(results, e)
 	}
@@ -568,6 +615,9 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 // "shared." for ATTACHed shared DB. Constrained to two values; safe
 // to interpolate directly into the table reference.
 func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float32, limit int, schemaPrefix string) ([]VectorMatch, error) {
+	if err := ValidateSchemaPrefix(schemaPrefix); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 10
 	}

@@ -8,83 +8,239 @@ import (
 	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
-func handleStatus() int {
+// handleStatus shows the system status dashboard. Supports --json / -j
+// for machine-readable output; the JSON shape mirrors the text dashboard
+// field-for-field.
+func handleStatus(args []string) int {
 	dm := getDBConcrete()
 	if dm == nil {
 		return 1
+	}
+	jsonOutput, _ := ExtractJSONFlag(args)
+	if jsonOutput {
+		return printStatusJSON(dm, startTime)
 	}
 	printStatusDashboard(dm, startTime)
 	return 0
 }
 
-func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
-	uptime := formatUptime(time.Since(startTime))
-	totalMemories, _ := countMemories(dm, "")
-	ltmCount, _ := countMemories(dm, "weight >= 10")
-	theoriesCount, _ := countMemories(dm, "collection = 'theories'")
-	decisionsCount, _ := countMemories(dm, "collection = 'decisions'")
-	activeTheories, _ := countTheoriesByStatus(dm, "pending")
-	resolvedTheories, _ := countTheoriesByStatus(dm, "resolved")
+// statusData is the canonical view of the daemon's state used by both
+// the text dashboard (printStatusDashboard) and the JSON output
+// (printStatusJSON). Single source of truth so the two views cannot drift.
+type statusData struct {
+	uptime        string
+	modeState     string   // none | one | many | auto
+	modeValues    []string // empty when state="none", one entry when "one"/"auto", many when "many"
+	personaState  string   // none | one | auto
+	personaValues []string // empty when "none", one entry when "one"/"auto"
+	memTotal      int
+	memLTM        int
+	theoryTotal   int
+	theoryPend    int
+	theoryResolv  int
+	decisions     int
+	synthMerged   int
+	synthLast     string
+	recentEvents  []watchdogEvent
+}
 
-	daemonStatus := getDaemonStatus()
+// stateForMode classifies active.json's modes slice into a {state, values}
+// pair. state ∈ {none, one, many, auto} — the auto state means the user
+// has handed off mode selection to the substrate (current code keeps "auto"
+// as the literal first-slot value).
+func stateForMode(activeModes []string) (state string, values []string) {
+	switch len(activeModes) {
+	case 0:
+		return "none", []string{}
+	case 1:
+		if activeModes[0] == "auto" {
+			return "auto", []string{"auto"}
+		}
+		return "one", activeModes
+	default:
+		return "many", activeModes
+	}
+}
 
-	synthCount, lastSynth := getSynthesisStats(dm)
+// stateForPersona classifies active.json's persona string into a {state, values}
+// pair. state ∈ {none, one, auto}. "ephemeral" is surfaced as state="auto"
+// with values=["ephemeral"] — it's a kind of auto-loaded persona, not a
+// separate cardinality.
+func stateForPersona(activePersona string) (state string, values []string) {
+	switch activePersona {
+	case "":
+		return "none", []string{}
+	case "auto", "ephemeral":
+		return "auto", []string{activePersona}
+	default:
+		return "one", []string{activePersona}
+	}
+}
 
-	recentEvents := getRecentWatchdogEvents(dm, 3)
+func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statusData {
+	var d statusData
+	d.uptime = formatUptime(time.Since(startTime))
+	d.memTotal, _ = countMemories(dm, "")
+	d.memLTM, _ = countMemories(dm, "weight >= 10")
+	d.theoryTotal, _ = countMemories(dm, "collection = 'theories'")
+	d.decisions, _ = countMemories(dm, "collection = 'decisions'")
+	d.theoryPend, _ = countTheoriesByStatus(dm, "pending")
+	d.theoryResolv, _ = countTheoriesByStatus(dm, "resolved")
+	d.synthMerged, d.synthLast = getSynthesisStats(dm)
+	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
-	// Auto-mode transparency
-	modeLine := ""
-	personaLine := ""
+	// Default to "none" — the absence of an active selection is always
+	// visible (never silent). Overridden below if a real value is found
+	// or if LoadActiveJSON fails (in which case the defaults persist).
+	d.modeState, d.modeValues = "none", []string{}
+	d.personaState, d.personaValues = "none", []string{}
+
 	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
-		if len(active.Modes) > 0 && active.Modes[0] == "auto" {
-			modeLine = "Mode: auto (loaded: auto)"
-		} else if len(active.Modes) > 0 {
-			modeLine = fmt.Sprintf("Mode: %s", strings.Join(active.Modes, ", "))
-		}
-		if active.Persona == "auto" {
-			personaLine = "Persona: auto (loaded: auto)"
-		} else if active.Persona == "ephemeral" {
+		d.modeState, d.modeValues = stateForMode(active.Modes)
+		d.personaState, d.personaValues = stateForPersona(active.Persona)
+	}
+	return d
+}
+
+// formatModeLine renders the dashboard's "Mode: ..." line from a
+// {state, values} pair. Cardinality is explicit in the text so a
+// reader doesn't have to count entries.
+func formatModeLine(state string, values []string) string {
+	switch state {
+	case "none":
+		return "Mode: none"
+	case "one":
+		return fmt.Sprintf("Mode: one (%s)", values[0])
+	case "many":
+		return fmt.Sprintf("Mode: many (%s)", strings.Join(values, ", "))
+	case "auto":
+		return "Mode: auto (loaded: auto)"
+	}
+	return fmt.Sprintf("Mode: %s", state)
+}
+
+// formatPersonaLine renders the dashboard's "Persona: ..." line.
+// For auto-state with ephemeral values, looks up the ephemeral persona's
+// display name to give the operator a more useful "loaded:" hint.
+func formatPersonaLine(state string, values []string, dm *mpminternal.DatabaseManager) string {
+	switch state {
+	case "none":
+		return "Persona: none"
+	case "one":
+		return fmt.Sprintf("Persona: one (%s)", values[0])
+	case "auto":
+		if len(values) > 0 && values[0] == "ephemeral" {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
 				displayName := ep.Name
 				if ep.Title != "" {
 					displayName = ep.Title
 				}
-				personaLine = fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
-			} else {
-				personaLine = "Persona: auto (loaded: ephemeral)"
+				return fmt.Sprintf("Persona: auto (loaded: ephemeral - %q)", displayName)
 			}
-		} else if active.Persona != "" {
-			personaLine = fmt.Sprintf("Persona: %s", active.Persona)
+			return "Persona: auto (loaded: ephemeral)"
 		}
+		return "Persona: auto (loaded: auto)"
 	}
+	return fmt.Sprintf("Persona: %s", state)
+}
+
+func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
+	d := buildStatusData(dm, startTime)
 
 	fmt.Println("⚡ MPM · System Status")
 	fmt.Println("────────────────────────────────────")
-	fmt.Printf("Uptime:    %s\n", uptime)
-	if modeLine != "" {
-		fmt.Printf("  %s\n", modeLine)
-	}
-	if personaLine != "" {
-		fmt.Printf("  %s\n", personaLine)
-	}
-	fmt.Printf("Memories:  %d total | %d LTM\n", totalMemories, ltmCount)
-	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", theoriesCount, activeTheories, resolvedTheories)
-	fmt.Printf("Decisions: %d total\n", decisionsCount)
-	fmt.Printf("Watcher:   %s\n", daemonStatus)
-	fmt.Printf("Synthesis: %d merged | last: %s\n", synthCount, lastSynth)
-	if len(recentEvents) > 0 {
+	fmt.Printf("Uptime:    %s\n", d.uptime)
+	fmt.Printf("  %s\n", formatModeLine(d.modeState, d.modeValues))
+	fmt.Printf("  %s\n", formatPersonaLine(d.personaState, d.personaValues, dm))
+	fmt.Printf("Memories:  %d total | %d LTM\n", d.memTotal, d.memLTM)
+	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", d.theoryTotal, d.theoryPend, d.theoryResolv)
+	fmt.Printf("Decisions: %d total\n", d.decisions)
+	fmt.Printf("Synthesis: %d merged | last: %s\n", d.synthMerged, d.synthLast)
+	if len(d.recentEvents) > 0 {
 		fmt.Println("────────────────────────────────────")
 		fmt.Println("Recent events:")
-		for _, e := range recentEvents {
+		for _, e := range d.recentEvents {
 			fmt.Printf("  %s %s\n", e.op, e.detail)
 		}
 	}
 	fmt.Println("────────────────────────────────────")
 	fmt.Println("Run `mpm help` for daily commands.")
 	fmt.Println("Run `mpm ops help` for engine room.")
+}
+
+// modeStateJSON / personaStateJSON are the wire shape for the
+// status JSON output. Both use the {state, values} form so consumers
+// can branch on cardinality without parsing the string.
+type modeStateJSON struct {
+	State  string   `json:"state"`
+	Values []string `json:"values"`
+}
+
+type personaStateJSON struct {
+	State  string   `json:"state"`
+	Values []string `json:"values"`
+}
+
+// printStatusJSON emits the status dashboard as a JSON object.
+// Mode and persona are first-class {state, values} objects —
+// cardinality (none|one|many|auto for mode, none|one|auto for persona)
+// is the discriminator; values carry the actual selections.
+func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
+	d := buildStatusData(dm, startTime)
+
+	type jsonEvent struct {
+		Op     string `json:"op"`
+		Detail string `json:"detail"`
+	}
+	out := struct {
+		Uptime       string           `json:"uptime"`
+		Mode         modeStateJSON    `json:"mode"`
+		Persona      personaStateJSON `json:"persona"`
+		Memories     memCounts        `json:"memories"`
+		Theories     thCounts         `json:"theories"`
+		Decisions    int              `json:"decisions"`
+		Synthesis    synthCounts      `json:"synthesis"`
+		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
+	}{
+		Uptime:    d.uptime,
+		Mode:      modeStateJSON{State: d.modeState, Values: d.modeValues},
+		Persona:   personaStateJSON{State: d.personaState, Values: d.personaValues},
+		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
+		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
+		Decisions: d.decisions,
+		Synthesis: synthCounts{Merged: d.synthMerged, Last: d.synthLast},
+	}
+	for _, e := range d.recentEvents {
+		out.RecentEvents = append(out.RecentEvents, jsonEvent{Op: e.op, Detail: e.detail})
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return usererror.Error("json encode failed: %v", err)
+	}
+	return 0
+}
+
+type memCounts struct {
+	Total int `json:"total"`
+	LTM   int `json:"ltm"`
+}
+
+type thCounts struct {
+	Total    int `json:"total"`
+	Pending  int `json:"pending"`
+	Resolved int `json:"resolved"`
+}
+
+type synthCounts struct {
+	Merged int    `json:"merged"`
+	Last   string `json:"last"`
 }
 
 func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
@@ -107,14 +263,6 @@ func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int,
 		AND json_extract(metadata, '$.status') = ?`
 	err := dm.SQLDB().QueryRow(query, status).Scan(&count)
 	return count, err
-}
-
-// getDaemonStatus returns the watcher daemon status. Deprecated 2026-06-26 —
-// the watcher is gone, so this always reports "not running". Kept as a stable
-// string contract for the status dashboard so callers don't have to special-case
-// a missing function.
-func getDaemonStatus() string {
-	return "not running (watcher deprecated 2026-06-26)"
 }
 
 func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {
