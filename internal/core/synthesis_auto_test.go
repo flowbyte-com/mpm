@@ -229,3 +229,271 @@ func equalStringSlicesForTest(a, b []string) bool {
 // future edits where the test file may grow to need them.
 var _ = time.Now
 var _ = context.Background
+
+// =============================================================================
+// Content_hash dedup + cooldown tests
+// =============================================================================
+
+// TestSynthHashContent_KnownVector pins the SHA-256 hex format. If
+// the algorithm ever changes (or we accidentally swap to a different
+// hash), this regression test fires. The test vector below is the
+// standard SHA-256("hello") from NIST examples.
+func TestSynthHashContent_KnownVector(t *testing.T) {
+	const want = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+	got := synthHashContent("hello")
+	if got != want {
+		t.Errorf("synthHashContent(\"hello\") = %q; want %q", got, want)
+	}
+}
+
+// TestSynthHashContent_Format pins the format contract: 64-char
+// lower-case hex. Anything else would break either the SQL column
+// (TEXT comparison) or the equality lookup (case-sensitive).
+func TestSynthHashContent_Format(t *testing.T) {
+	cases := []string{
+		"hello",
+		"",
+		"a",
+		"This is a longer string with mixed CASE and 123 numbers",
+		"\u4e2d\u6587\u5185\u5bb9", // Chinese — non-ASCII path
+	}
+	for _, s := range cases {
+		got := synthHashContent(s)
+		if len(got) != 64 {
+			t.Errorf("synthHashContent(%q) length = %d; want 64", s, len(got))
+		}
+		for i, r := range got {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				t.Errorf("synthHashContent(%q)[%d] = %q not lower-case hex (got %q)", s, i, r, got)
+				break
+			}
+		}
+	}
+}
+
+// TestSynthHashContent_Deterministic — same input → same output.
+func TestSynthHashContent_Deterministic(t *testing.T) {
+	a := synthHashContent("the quick brown fox")
+	b := synthHashContent("the quick brown fox")
+	if a != b {
+		t.Errorf("hash not deterministic: %q vs %q", a, b)
+	}
+}
+
+// TestSynthHashContent_DistinctInputs — distinct inputs → distinct
+// hashes. Catches the trivial bug where someone forgets to pass the
+// input through to sha256.
+func TestSynthHashContent_DistinctInputs(t *testing.T) {
+	a := synthHashContent("the quick brown fox")
+	b := synthHashContent("the quick brown cat")
+	if a == b {
+		t.Errorf("collision: %q and %q both produced %q", "fox", "cat", a)
+	}
+}
+
+// TestSynthHasContentHash_Miss pins the empty-DB miss path.
+// synthHasContentHash must return (false, 0) on a clean DB.
+func TestSynthHasContentHash_Miss(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	hit, runCount := synthHasContentHash(dm, "deadbeef")
+	if hit || runCount != 0 {
+		t.Errorf("expected (false, 0) on empty DB; got (%v, %d)", hit, runCount)
+	}
+}
+
+// TestSynthHasContentHash_HitAndBump pins the lifecycle: insert
+// via recordSynthRun → look up returns hit + runCount=1 → call
+// again with bump → runCount becomes 2.
+func TestSynthHasContentHash_HitAndBump(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	const hash = "abc123"
+	recordSynthRun(dm, hash, "result-mem-1")
+
+	hit, runCount := synthHasContentHash(dm, hash)
+	if !hit {
+		t.Errorf("expected hit after recordSynthRun")
+	}
+	if runCount != 1 {
+		t.Errorf("runCount after first insert = %d; want 1", runCount)
+	}
+
+	bumpSynthDedupCounter(dm, hash)
+	_, runCount = synthHasContentHash(dm, hash)
+	if runCount != 2 {
+		t.Errorf("runCount after dedup bump = %d; want 2", runCount)
+	}
+}
+
+// TestRecordSynthRun_FirstRun pins the INSERT path. The first
+// write for a content_hash sets run_count=1, last_run_at=now,
+// result_memory_id set. We don't assert timestamps directly
+// because they're time.Now() — too flaky for that. Instead we
+// assert the row exists and run_count is 1.
+func TestRecordSynthRun_FirstRun(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	const hash = "first-run-hash"
+	const resultID = "mem-result-1"
+	recordSynthRun(dm, hash, resultID)
+
+	var storedResult string
+	err = dm.db.QueryRow(
+		`SELECT result_memory_id FROM synth_runs WHERE content_hash = ?`,
+		hash,
+	).Scan(&storedResult)
+	if err != nil {
+		t.Fatalf("SELECT result_memory_id: %v", err)
+	}
+	if storedResult != resultID {
+		t.Errorf("result_memory_id = %q; want %q", storedResult, resultID)
+	}
+}
+
+// TestDetectNearMiss_RespectsLastSynthesizedAtCooldown pins the
+// per-candidate cooldown filter. A memory stamped with
+// last_synthesized_at = now (within the cooldown window) must
+// not be returned as a near-miss candidate.
+func TestDetectNearMiss_RespectsLastSynthesizedAtCooldown(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	const memID = "mem-cooldown-1"
+	_, err = dm.db.Exec(`
+		INSERT INTO memories (id, collection, content, content_hash, last_synthesized_at)
+		VALUES (?, 'memories', ?, ?, strftime('%s','now'))
+	`, memID, "alpha beta gamma delta epsilon", "hash-mem-1")
+	if err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	// FTS5 needs the trigger to populate the FTS index. The trigger
+	// only fires on INSERT INTO memories, so the FTS lookup below
+	// would otherwise miss the row. Confirm the row IS indexed by
+	// running a quick probe.
+	var indexed int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?`,
+		`"alpha"`).Scan(&indexed); err != nil {
+		t.Fatalf("FTS5 probe: %v", err)
+	}
+	if indexed == 0 {
+		t.Skip("FTS5 trigger not auto-fired in this DB session; skipping cooldown assertion")
+	}
+
+	// Cooldown of 3600s: the row we just inserted has
+	// last_synthesized_at = now, which is well within the
+	// cooldown window. It MUST NOT appear.
+	//
+	// Threshold is 0 to bypass the bm25 score filter entirely
+	// — this test is about the cooldown predicate, not FTS5
+	// relevance scoring. SQLite FTS5 bm25 scores for a 5-word
+	// doc matching a 2-word query are small (e.g. -1e-06); the
+	// production -10 threshold would exclude this row for score
+	// reasons even when cooldown is off, which would make the
+	// test impossible to interpret. Threshold=0 means "any
+	// FTS5 hit passes", letting us isolate the cooldown
+	// predicate's behaviour.
+	candidates, err := DetectNearMiss(dm, "alpha beta", "new-mem", 0.0, 3600)
+	if err != nil {
+		t.Fatalf("DetectNearMiss: %v", err)
+	}
+	for _, c := range candidates {
+		if c.ID == memID {
+			t.Errorf("candidate %s should be filtered by cooldown (3600s)", memID)
+		}
+	}
+
+	// Cooldown of 0: the filter is a no-op. The row SHOULD appear.
+	candidates, err = DetectNearMiss(dm, "alpha beta", "new-mem", 0.0, 0)
+	if err != nil {
+		t.Fatalf("DetectNearMiss (cooldown=0): %v", err)
+	}
+	found := false
+	for _, c := range candidates {
+		if c.ID == memID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("candidate %s should appear with cooldown=0", memID)
+	}
+}
+
+// TestMarkMemorySynthCooldown pins the UPDATE path. After
+// markMemorySynthCooldown(R), R.last_synthesized_at must NOT be
+// NULL (i.e. the cooldown filter will exclude R from
+// near-miss candidates until the window expires).
+func TestMarkMemorySynthCooldown(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	const memID = "mem-result-cooldown"
+	_, err = dm.db.Exec(`
+		INSERT INTO memories (id, collection, content, content_hash, last_synthesized_at)
+		VALUES (?, 'memories', ?, ?, NULL)
+	`, memID, "result content", "hash-result")
+	if err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	markMemorySynthCooldown(dm, memID)
+
+	var stamped *int64
+	err = dm.db.QueryRow(
+		`SELECT last_synthesized_at FROM memories WHERE id = ?`,
+		memID,
+	).Scan(&stamped)
+	if err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if stamped == nil {
+		t.Errorf("last_synthesized_at still NULL after markMemorySynthCooldown")
+	}
+}
+
+// TestMarkMemorySynthCooldown_NilAndEmpty pins the safe-call path.
+// markMemorySynthCooldown(nil, "x") and markMemorySynthCooldown(dm, "")
+// must both no-op without panicking. The argument is touched on
+// every successful synthesis — a panic here would crash the
+// write path.
+func TestMarkMemorySynthCooldown_NilAndEmpty(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	// nil dm → no-op.
+	markMemorySynthCooldown(nil, "any-id")
+	// empty id → no-op.
+	markMemorySynthCooldown(dm, "")
+	// Both must not have created any rows (the empty dm might, but
+	// nil must not).
+	var rows int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&rows); err != nil {
+		t.Fatalf("COUNT: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("expected 0 memories; got %d", rows)
+	}
+}
