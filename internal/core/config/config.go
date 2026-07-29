@@ -22,6 +22,16 @@ type Config struct {
 	Components     map[string]string `json:"components,omitempty"`   // substrate-component → profile-name bindings
 	Capabilities   map[string]string `json:"capabilities,omitempty"` // capability-name → component-name bindings
 	Aliases        map[string]string `json:"aliases,omitempty"`   // CLI command aliases: "mem" → "recall --collection memories"
+
+	// SynthesisEnabled is the kill switch for the background
+	// synthesis engine. When false, AutoSynthesize short-circuits
+	// before any FTS5 query or LLM call. Default true (a missing
+	// field in mpm_config.json doesn't accidentally disable
+	// synthesis). Pointer-to-bool so "not set" means "default on"
+	// and "explicitly false" means "kill switch engaged".
+	//
+	// CLI setter: `mpm config set synthesis_enabled false`.
+	SynthesisEnabled *bool `json:"synthesis_enabled,omitempty"`
 }
 
 // Profile describes one execution profile: a (provider, model,

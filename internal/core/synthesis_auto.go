@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/synth"
 )
 
@@ -30,6 +31,73 @@ type nearMissCandidate struct {
 	Tags    string `json:"tags,omitempty"`
 }
 
+// sanitiseFTS5Tokens splits content into FTS5-safe tokens. Each token
+// is wrapped in FTS5 phrase quotes ("token") so FTS5 treats them as
+// literal phrases rather than column-filter syntax.
+//
+// Why this matters: FTS5 supports the column-filter syntax `col:term`.
+// A bare token that happens to match a column name (e.g. "07" matches
+// no column, but any token that DOES match a column name without the
+// `:`) triggers a "no such column: X" error from the FTS5 engine.
+// The watchdog before this fix showed 164 synthesize_skip events all
+// with errors like "no such column: 07" / "no such column: CHOICE" —
+// those are memory-content tokens being misinterpreted as column names.
+//
+// FTS5 operators (AND, OR, NOT, NEAR) are skipped. FTS5 special
+// characters (* " ( ) : - ^ +) are stripped from word boundaries so
+// the literal phrase itself is clean. Outputs are wrapped in FTS5
+// phrase quotes so FTS5 treats the whole token as a literal term.
+//
+// Note: this is NOT a parameterised SQL query — the FTS5 MATCH term
+// is inherently a search-engine string and must be quoted per-token.
+// Parameterised queries (the parameter binding at the SQL layer) are
+// already correct in DetectNearMiss; the bug is at the FTS5 MATCH
+// term level, not the SQL parameter level.
+func sanitiseFTS5Tokens(content string) []string {
+	words := strings.Fields(content)
+	tokens := make([]string, 0, len(words))
+	for _, w := range words {
+		w = strings.TrimFunc(w, func(r rune) bool {
+			return r == '*' || r == '"' || r == '(' || r == ')' ||
+				r == ':' || r == '-' || r == '^' || r == '+'
+		})
+		up := strings.ToUpper(w)
+		if up == "AND" || up == "OR" || up == "NOT" || up == "NEAR" || w == "" {
+			continue
+		}
+		// FTS5 phrase quoting: each token becomes a literal phrase.
+		// %q handles any embedded double-quotes (none should
+		// survive the TrimFunc above, but be defensive).
+		tokens = append(tokens, fmt.Sprintf("%q", w))
+		if len(tokens) >= 100 {
+			break
+		}
+	}
+	return tokens
+}
+
+// synthesisEnabled is the kill switch for the background synthesis
+// engine. Reads the substrate config and returns whether synthesis
+// should fire. Default true (a missing field in mpm_config.json
+// doesn't accidentally disable synthesis). Pointer-to-bool in the
+// config struct distinguishes "not set" (default on) from explicitly
+// false (kill switch engaged).
+//
+// Cheap on every call: file load + JSON parse. AutoSynthesize is
+// async fire-and-forget so this isn't on the user-facing hot path.
+// Operators can disable synthesis via:
+//   mpm config set synthesis_enabled false
+func synthesisEnabled() bool {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		return true
+	}
+	if cfg.SynthesisEnabled == nil {
+		return true
+	}
+	return *cfg.SynthesisEnabled
+}
+
 // DetectNearMiss uses FTS5 bm25 to find memories whose content overlaps
 // semantically with the given text. Returns up to 10 candidates ordered by
 // relevance, filtered by a bm25 score threshold.
@@ -38,25 +106,11 @@ type nearMissCandidate struct {
 // relevant. The threshold of -10 means "at least somewhat relevant". Exact
 // duplicates (same content_hash) are excluded via the newID parameter.
 func DetectNearMiss(dm CoreDB, content string, newID string, threshold float64) ([]nearMissCandidate, error) {
-	words := strings.Fields(content)
-	sanitised := make([]string, 0, len(words))
-	for _, w := range words {
-		w = strings.TrimFunc(w, func(r rune) bool {
-			return r == '*' || r == '"' || r == '(' || r == ')'
-		})
-		up := strings.ToUpper(w)
-		if up == "AND" || up == "OR" || up == "NOT" || up == "NEAR" || w == "" {
-			continue
-		}
-		sanitised = append(sanitised, w)
-		if len(sanitised) >= 100 {
-			break
-		}
-	}
-	if len(sanitised) == 0 {
+	tokens := sanitiseFTS5Tokens(content)
+	if len(tokens) == 0 {
 		return nil, nil
 	}
-	query := strings.Join(sanitised, " ")
+	query := strings.Join(tokens, " ")
 
 	rows, err := dm.SQLDB().Query(`
 		SELECT m.id, m.content, bm25(memories_fts) as score, m.tags
@@ -155,6 +209,15 @@ func hasSynthPair(a, b string) bool {
 // in place and the synthesis is silently abandoned.
 func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, newID, content string) {
 	if client == nil || dm == nil {
+		return
+	}
+	// Kill switch: operators can disable the background synthesis
+	// engine entirely via `mpm config set synthesis_enabled false`.
+	// Without this, the engine fires an LLM call on every memory
+	// write chain that finds near-miss candidates — that's the
+	// root cause of token burn spikes. The switch is on top of
+	// the nil checks so we don't error if config is unloadable.
+	if !synthesisEnabled() {
 		return
 	}
 	if ctx == nil {
