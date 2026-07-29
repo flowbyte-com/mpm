@@ -92,11 +92,15 @@ func handleConfig(args []string) int {
 		return handleConfigEdit()
 	case "validate":
 		return handleConfigValidate(loadOrInitConfig())
+	case "profile":
+		return handleConfigProfile(args[1:])
+	case "component":
+		return handleConfigComponent(args[1:])
 	case "help", "-h", "--help":
 		printConfigHelp()
 		return 0
 	default:
-		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, (no args = interactive wizard)", args[0])
+		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, (no args = interactive wizard)", args[0])
 		return 1
 	}
 }
@@ -123,20 +127,56 @@ func loadOrInitConfig() *config.Config {
 func handleConfigShow(c *config.Config) int {
 	fmt.Println("Configuration")
 	fmt.Println(strings.Repeat("─", 60))
-	if c.Synth == nil {
-		fmt.Println("  (no synth block)")
+
+	// Profiles — the operator-facing execution-profile abstraction.
+	if len(c.Profiles) > 0 {
 		fmt.Println()
-		fmt.Println("  Run `mpm config` to set up an AI provider.")
-		return 0
+		fmt.Println("  Profiles")
+		for _, name := range sortedKeysForConfig(c.Profiles) {
+			p := c.Profiles[name]
+			fmt.Printf("    %-12s : provider=%s · model=%s\n", name, p.Provider, p.Model)
+			if p.BaseURL != "" {
+				fmt.Printf("    %-12s   base_url=%s\n", "", p.BaseURL)
+			}
+			if p.APIKey != "" {
+				fmt.Printf("    %-12s   api_key=%s\n", "", redactAPIKey(p.APIKey))
+			}
+		}
 	}
-	s := c.Synth
-	fmt.Printf("  provider       : %s\n", synthProviderLabel(s))
-	fmt.Printf("  model          : %s\n", s.Model)
-	fmt.Printf("  api key        : %s\n", redactAPIKey(s.APIKey))
-	fmt.Printf("  base url       : %s\n", s.BaseURL)
-	fmt.Printf("  max tokens     : %d\n", s.MaxTokens)
-	fmt.Printf("  timeout secs   : %d\n", s.TimeoutSecs)
-	fmt.Printf("  fallback chain : %d vendor(s)\n", len(s.Vendors))
+
+	// Components — substrate functions bound to profiles.
+	if len(c.Components) > 0 {
+		fmt.Println()
+		fmt.Println("  Components")
+		for _, comp := range sortedKeysForConfig(c.Components) {
+			bound := c.Components[comp]
+			if bound == "" {
+				bound = "(default)"
+			}
+			fmt.Printf("    %-12s → %s\n", comp, bound)
+		}
+	}
+
+	// Legacy synth block — still surfaced for operators with the
+	// pre-profiles config (or who haven't migrated).
+	if c.Synth != nil {
+		s := c.Synth
+		fmt.Println()
+		fmt.Println("  Legacy synth block (migrate via 'mpm config profile add')")
+		fmt.Printf("    provider     : %s\n", synthProviderLabel(s))
+		fmt.Printf("    model        : %s\n", s.Model)
+		fmt.Printf("    api key      : %s\n", redactAPIKey(s.APIKey))
+		fmt.Printf("    base url     : %s\n", s.BaseURL)
+		fmt.Printf("    max tokens   : %d\n", s.MaxTokens)
+		fmt.Printf("    timeout secs : %d\n", s.TimeoutSecs)
+		fmt.Printf("    vendor chain : %d vendor(s)\n", len(s.Vendors))
+	}
+
+	if len(c.Profiles) == 0 && (c.Synth == nil || c.Synth.Model == "") {
+		fmt.Println()
+		fmt.Println("  (no AI provider configured — run `mpm config` to set one up)")
+	}
+
 	fmt.Println()
 	fmt.Println("Config file:", config.ConfigPath())
 	return 0
@@ -611,3 +651,372 @@ workspace; $EDITOR is opened on this file for 'mpm config edit'.)`)
 
 // (syscall imported for isatty() — package main already in scope.)
 var _ = syscall.Stdin
+
+// ---------------------------------------------------------------------------
+// Profile subcommands (mpm config profile <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigProfile routes profile management subcommands.
+//
+//   mpm config profile add [name]                   Interactive wizard /
+//                                                  accept-name-from-stdin
+//   mpm config profile list                       Render all profiles
+//   mpm config profile get <name>                  Show one profile
+//   mpm config profile set <name> <key> <value>    Set one field
+//   mpm config profile remove <name>               Delete; refuse if
+//                                                  any component binds
+//                                                  to this profile
+func handleConfigProfile(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config profile <sub> — need one of: add, list, get, set, remove")
+		return 1
+	}
+	switch args[0] {
+	case "add":
+		name := ""
+		if len(args) >= 2 {
+			name = args[1]
+		}
+		return handleProfileAdd(loadOrInitConfig(), name)
+	case "list":
+		return handleProfileList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config profile get <name>")
+			return 1
+		}
+		return handleProfileGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 4 {
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning")
+			return 1
+		}
+		return handleProfileSet(loadOrInitConfig(), args[1], args[2], strings.Join(args[3:], " "))
+	case "remove":
+		if len(args) < 2 {
+			usererror.Error("mpm config profile remove <name>")
+			return 1
+		}
+		return handleProfileRemove(loadOrInitConfig(), args[1])
+	default:
+		usererror.Error("mpm config profile: unknown subcommand %q — try add|list|get|set|remove", args[0])
+		return 1
+	}
+}
+
+func handleProfileAdd(c *config.Config, name string) int {
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	if name == "" {
+		if !isatty(os.Stdin) {
+			usererror.Error("mpm config profile add requires a name in non-interactive mode")
+			return 1
+		}
+		name = strings.TrimSpace(promptString(rwFromStdin(), "Profile name", ""))
+		if name == "" {
+			fmt.Println("Aborted.")
+			return 0
+		}
+	}
+	if _, exists := c.Profiles[name]; exists {
+		usererror.Error("profile %q already exists — use 'mpm config profile set' to update fields", name)
+		return 1
+	}
+	p := config.Profile{Name: name}
+	if isatty(os.Stdin) {
+		p.Provider = strings.TrimSpace(promptString(rwFromStdin(), "Provider (openai/anthropic/ollama/custom)", "custom"))
+		p.Model = strings.TrimSpace(promptString(rwFromStdin(), "Model", ""))
+		p.BaseURL = strings.TrimSpace(promptString(rwFromStdin(), "Base URL", ""))
+		if p.Provider != "ollama" {
+			p.APIKey = strings.TrimSpace(promptSecret(rwFromStdin(), "API key", ""))
+		}
+		tempStr := promptString(rwFromStdin(), "Temperature (0.0-2.0)", "0.2")
+		if t, err := strconvAtoiFloat(tempStr); err == nil {
+			p.Temperature = &t
+		}
+	} else {
+		fmt.Printf("Created empty profile %q. Use 'mpm config profile set %s <key> <value>' to fill.\n", name, name)
+	}
+	c.Profiles[name] = p
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q added\n", name)
+	return 0
+}
+
+func handleProfileList(c *config.Config) int {
+	fmt.Println("Execution profiles")
+	fmt.Println(strings.Repeat("─", 60))
+	if len(c.Profiles) == 0 {
+		fmt.Println("  (no profiles configured — run `mpm config profile add <name>` or `mpm config` to set one up)")
+		return 0
+	}
+	for _, name := range sortedKeysForConfig(c.Profiles) {
+		p := c.Profiles[name]
+		fmt.Printf("  %s\n", name)
+		fmt.Printf("    provider    : %s\n", p.Provider)
+		fmt.Printf("    model       : %s\n", p.Model)
+		if p.BaseURL != "" {
+			fmt.Printf("    base url    : %s\n", p.BaseURL)
+		}
+		if p.APIKey != "" {
+			fmt.Printf("    api key     : %s\n", redactAPIKey(p.APIKey))
+		}
+		if p.Temperature != nil {
+			fmt.Printf("    temperature : %.2f\n", *p.Temperature)
+		}
+		if p.MaxTokens > 0 {
+			fmt.Printf("    max tokens  : %d\n", p.MaxTokens)
+		}
+		if p.TimeoutSecs > 0 {
+			fmt.Printf("    timeout sec : %d\n", p.TimeoutSecs)
+		}
+		if p.Reasoning != "" {
+			fmt.Printf("    reasoning   : %s\n", p.Reasoning)
+		}
+		fmt.Println()
+	}
+	return 0
+}
+
+func handleProfileGet(c *config.Config, name string) int {
+	p, ok := c.Profiles[name]
+	if !ok {
+		usererror.Error("profile %q not found", name)
+		return 1
+	}
+	fmt.Printf("profile %q:\n", name)
+	fmt.Printf("  provider    : %s\n", p.Provider)
+	fmt.Printf("  model       : %s\n", p.Model)
+	if p.BaseURL != "" {
+		fmt.Printf("  base url    : %s\n", p.BaseURL)
+	}
+	if p.APIKey != "" {
+		fmt.Printf("  api key     : %s\n", redactAPIKey(p.APIKey))
+	}
+	if p.Temperature != nil {
+		fmt.Printf("  temperature : %.2f\n", *p.Temperature)
+	}
+	if p.MaxTokens > 0 {
+		fmt.Printf("  max tokens  : %d\n", p.MaxTokens)
+	}
+	if p.TimeoutSecs > 0 {
+		fmt.Printf("  timeout sec : %d\n", p.TimeoutSecs)
+	}
+	if p.Reasoning != "" {
+		fmt.Printf("  reasoning   : %s\n", p.Reasoning)
+	}
+	return 0
+}
+
+func handleProfileSet(c *config.Config, name, key, value string) int {
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	p, ok := c.Profiles[name]
+	if !ok {
+		usererror.Error("profile %q not found — use 'mpm config profile add %s' first", name, name)
+		return 1
+	}
+	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
+	case "provider":
+		p.Provider = value
+	case "model":
+		p.Model = value
+	case "base_url", "endpoint", "baseurl":
+		p.BaseURL = value
+	case "api_key", "token", "apikey":
+		p.APIKey = value
+	case "temperature":
+		t, err := strconvAtoiFloat(value)
+		if err != nil {
+			usererror.Error("temperature must be a number 0.0-2.0 (got %q)", value)
+			return 1
+		}
+		p.Temperature = &t
+	case "max_tokens", "maxtokens", "max":
+		n, err := strconvAtoi(value)
+		if err != nil || n <= 0 {
+			usererror.Error("max_tokens must be a positive integer (got %q)", value)
+			return 1
+		}
+		p.MaxTokens = n
+	case "timeout_seconds", "timeout":
+		n, err := strconvAtoi(value)
+		if err != nil || n <= 0 {
+			usererror.Error("timeout_seconds must be a positive integer (got %q)", value)
+			return 1
+		}
+		p.TimeoutSecs = n
+	case "reasoning":
+		p.Reasoning = value
+	default:
+		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning)", key)
+		return 1
+	}
+	c.Profiles[name] = p
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
+	return 0
+}
+
+func handleProfileRemove(c *config.Config, name string) int {
+	if _, ok := c.Profiles[name]; !ok {
+		usererror.Error("profile %q not found", name)
+		return 1
+	}
+	for comp, bound := range c.Components {
+		if bound == name {
+			usererror.Error("cannot remove profile %q: component %q is bound to it\n  unbind first: 'mpm config component set %s <other-profile>'", name, comp, comp)
+			return 1
+		}
+	}
+	delete(c.Profiles, name)
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ profile %q removed\n", name)
+	return 0
+}
+
+// sortedKeys returns the map's keys in lexical order. Used to give
+// profile + component listings a stable output shape.
+func sortedKeysForConfig[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// strconvAtoiFloat parses a string as a float without importing
+// strconv twice. Keeps the imports lean.
+func strconvAtoiFloat(s string) (float64, error) {
+	n := 0.0
+	frac := 1.0
+	seenDot := false
+	for _, c := range s {
+		switch {
+		case c == '.' && !seenDot:
+			seenDot = true
+			frac = 1
+		case c >= '0' && c <= '9':
+			d := float64(c - '0')
+			if seenDot {
+				frac *= 10
+				n += d / frac
+			} else {
+				n = n*10 + d
+			}
+		default:
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+	}
+	return n, nil
+}
+
+// ---------------------------------------------------------------------------
+// Component subcommands (mpm config component <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigComponent routes component binding subcommands.
+//
+//   mpm config component list                Render all bindings
+//   mpm config component get <component>     Show one binding
+//   mpm config component set <comp> <profile> Set binding
+func handleConfigComponent(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config component <sub> — need one of: list, get, set")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		return handleComponentList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config component get <name>")
+			return 1
+		}
+		return handleComponentGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 3 {
+			usererror.Error("mpm config component set <component> <profile>")
+			return 1
+		}
+		return handleComponentSet(loadOrInitConfig(), args[1], args[2])
+	default:
+		usererror.Error("mpm config component: unknown subcommand %q — try list|get|set", args[0])
+		return 1
+	}
+}
+
+// knownComponents is the v0.1 allow-list for components. The
+// underlying map accepts any name, but the visible component list
+// surfaces these in stable order. Future RFCs append names here.
+var knownComponents = []string{"memory", "critic", "scheduler"}
+
+func handleComponentList(c *config.Config) int {
+	fmt.Println("Component bindings")
+	fmt.Println(strings.Repeat("─", 60))
+	if len(c.Components) == 0 {
+		fmt.Println("  (no components bound — defaults to 'default' profile via ProfileFor fallback)")
+		return 0
+	}
+	for _, comp := range sortedKeysForConfig(c.Components) {
+		bound := c.Components[comp]
+		if bound == "" {
+			bound = "(default)"
+		}
+		fmt.Printf("  %-12s → %s\n", comp, bound)
+	}
+	return 0
+}
+
+func handleComponentGet(c *config.Config, component string) int {
+	bound := c.Components[component]
+	if bound == "" {
+		bound = "(default)"
+	}
+	fmt.Printf("  %s → %s\n", component, bound)
+	return 0
+}
+
+func handleComponentSet(c *config.Config, component, profile string) int {
+	if c.Components == nil {
+		c.Components = map[string]string{}
+	}
+	// Empty profile string → unset binding (component falls back
+	// to ProfileFor's default / Synth legacy chain).
+	if profile == "" {
+		delete(c.Components, component)
+		if err := config.SaveConfig(c); err != nil {
+			usererror.Error("saving config: %v", err)
+			return 1
+		}
+		fmt.Printf("✓ component %q unbound\n", component)
+		return 0
+	}
+	if _, ok := c.Profiles[profile]; !ok {
+		usererror.Error("profile %q not found — define it first with 'mpm config profile add %s'", profile, profile)
+		return 1
+	}
+	c.Components[component] = profile
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ component %q → profile %q\n", component, profile)
+	return 0
+}
