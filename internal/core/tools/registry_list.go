@@ -492,6 +492,12 @@ When the Exit Criteria is met, you MUST wipe this scratchpad clean (pass an empt
 		Handler:     handleReviewMemories,
 	},
 	{
+		Name:        "request_review",
+		Description: "Concurrent multi-component review. Fetch artifact bodies from memory ids in 'artifacts' (optional list of ids; resolved text is passed to each component). Send the same prompt + artifact to every component named in 'components' (e.g. ['memory','critic','scheduler']). Each component resolves to a profile via the execution-profile abstraction; per-component concurrent fan-out, per-request optional timeout. Strategy must be 'parallel' (v0.1). Returns rendered Markdown with one section per component — full text response per component, or an error block. Independent results: one component's failure does not abort the others. Non-goals (v0.1): no consensus synthesis, no review persistence, no retry, no streaming.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text (NOT ids — the coordinator never sees ids)."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel","description":"Dispatch strategy. v0.1 only supports 'parallel'."},"timeout_secs":{"type":"number","description":"Optional total timeout in seconds for the orchestration. If zero or omitted, the caller's context governs."}},"required":["components","prompt"]}`),
+		Handler:     handleRequestReview,
+	},
+	{
 		Name:        "synthesize_memory",
 		Description: "Run LLM synthesis on a memory (find near-miss duplicates, optionally merge).",
 		Schema:      json.RawMessage(`{"type":"object","properties":{"memory_id":{"type":"string"}},"required":["memory_id"]}`),
