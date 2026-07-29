@@ -64,6 +64,9 @@ func NewRouter() *CommandRouter {
 		"ingest":  {Name: "ingest", Description: "Import memories from external SQLite sources"},
 		"migrate": {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
 
+		// Working Context (cognitive-interface RFC Wave 1)
+		"work": {Name: "work", Description: "Working Context (ephemeral execution state) — status|show|clear|promote"},
+
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
 		"list-skills": {Name: "list-skills", Description: "List skills (scope: all|local|shared)", MinArgs: 0, MaxArgs: 1},
@@ -180,6 +183,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleIngest(args)
 	case "migrate":
 		return handleMigrate(args)
+	case "work":
+		return handleWork(args[1:])
 	case "stats":
 		return handleStats(args)
 	case "prune":
