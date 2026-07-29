@@ -110,7 +110,7 @@ func handleMigrate(args []string) int {
 
 	// Pure-undo mode: delegate to ingest's undo.
 	if undoBatch != "" {
-		return handleIngest(append([]string{"ingest", "--undo", undoBatch}))
+		return handleIngest([]string{"ingest", "--undo", undoBatch})
 	}
 
 	// Stage mode: parse + stage in raw_memories.
