@@ -35,7 +35,7 @@ import (
 // cognitiveHelpSections is the default cognitive-interface help.
 // Each section is small; the whole output fits in a terminal.
 // Sections in display order. Future waves add commands here as
-// their primary cognitive verb aliases land (commit 5 of Wave 1).
+// their primary cognitive verb aliases land.
 var cognitiveHelpSections = []cogHelpSection{
 	{
 		title: "Daily",
@@ -44,7 +44,18 @@ var cognitiveHelpSections = []cogHelpSection{
 			{"work", "Working Context — ephemeral execution state", true},
 			{"call", "Universal MCP-tool boundary (use for everything not yet aliased as a cognitive verb)", false},
 			{"status", "System status dashboard (--json for machine output)", false},
+			{"why", "Why does this artifact exist? — provenance flagship", false},
+			{"doctor", "Trust-signal flagship — substrate health (db, embeddings, scheduler, review)", false},
 			{"version", "Show mpm version + build info", false},
+		},
+	},
+	{
+		title: "Cognition (verbs)",
+		cmds: []helpCmd{
+			{"remember", "Create a memory (alias for mpm add)", false},
+			{"learn", "Curate a lesson (alias for mpm lesson add)", false},
+			{"decide", "Record a decision (alias for mpm record_decision)", false},
+			{"theorize", "Propose a theory (alias for mpm propose_theory)", false},
 		},
 	},
 	{
@@ -52,11 +63,11 @@ var cognitiveHelpSections = []cogHelpSection{
 		cmds: []helpCmd{
 			{"kb memory", "Memory CRUD (list|show|search|shred|add|reinforce|weaken|snooze|set-weight|promote|patch-memory)", true},
 			{"kb lesson", "Lesson CRUD (curated insights from memories)", true},
-			{"kb skill", "Skill CRUD (procedural memory with --file frontmatter)", true},
-			{"kb topic", "Topic CRUD", true},
-			{"kb reference", "Reference library CRUD", true},
-			{"kb theory", "Theories (pending|resolved|all)", false},
-			{"kb decision", "Decision ledger (record|recall)", false},
+			{"topic", "Topic CRUD", true},
+			{"reference", "Reference library CRUD", true},
+			{"decision add|resolve", "Decision ledger (alias for mpm decide)", true},
+			{"theory add|resolve", "Theory tracker (alias for mpm theorize)", true},
+			{"skill add|list|show|search", "Skill library (alias for save-skill/list-skills/read-skill)", true},
 		},
 	},
 	{
@@ -75,7 +86,7 @@ var cognitiveHelpSections = []cogHelpSection{
 		title: "Need more?",
 		cmds: []helpCmd{
 			{"mpm help knowledge", "Expanded view of knowledge surface (memory|lesson|skill|topic|reference)", false},
-			{"mpm help runtime", "Wave 2 — wake, doctor, why", false},
+			{"mpm help runtime", "wave 2 — wake, doctor, why", false},
 			{"mpm help maintenance", "Wave 2+ — backup, restore, review", false},
 			{"mpm help reflection", "Wave 2+ — synthesize, confidence, evidence, milestones", false},
 			{"mpm help work", "Working Context subcommands (status|show|clear|promote)", false},
