@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +101,36 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	return &config, nil
+}
+
+// SaveConfig persists the MPM configuration to disk. Atomic write:
+// the new content goes to a temp file in the same directory, then
+// is renamed over the destination. This guarantees a partial write
+// can never leave the operator with a corrupted mpm_config.json.
+//
+// Permission 0600: mpm_config.json frequently contains API keys, so
+// read/write is restricted to the owning user. Multi-user systems
+// should install MPM with separate per-user workspace dirs.
+//
+// Idempotent: returns nil if c is nil (saves a no-op; lets the CLI
+// pass empty SynthConfig through without guarding).
+func SaveConfig(c *Config) error {
+	if c == nil {
+		return nil
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	path := ConfigPath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
+	}
+	return nil
 }
 
 // MPMDataDir is the subdirectory where all MPM runtime data resides
