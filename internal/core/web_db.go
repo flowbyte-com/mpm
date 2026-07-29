@@ -96,7 +96,7 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 	}
 	defer rows.Close()
 
-	mems := []map[string]interface{}{}
+	var mems []map[string]interface{}
 	for rows.Next() {
 		var id, collection, content, tagsJSON, metadataJSON, createdAt string
 		var sessionID, sourceDB, sourceID *string
@@ -892,6 +892,9 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 		if len(strings.TrimSpace(q)) >= 3 {
 			dm.recordReferenceInteraction(docID, &id, q, searchKind, rank, score)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return chunks, nil
 }

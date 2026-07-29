@@ -2202,6 +2202,125 @@ func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, erro
 	return configs, nil
 }
 
+// GetConfigInt reads an integer config from system_config with env fallback.
+// Key format: "section.setting" (e.g., "consolidation.max_memories").
+// Checks: 1) system_config table, 2) MPM_<SECTION>_<SETTING> env var (uppercase, dots->underscores), 3) default.
+func (dm *DatabaseManager) GetConfigInt(key string, defaultValue int) int {
+	if dm == nil {
+		return getConfigIntFromEnv(key, defaultValue)
+	}
+	cfg, err := dm.GetSystemConfig(key)
+	if err == nil {
+		if raw, ok := cfg["raw_json"].(string); ok && raw != "" {
+			var val int
+			if err := json.Unmarshal([]byte(raw), &val); err == nil {
+				return val
+			}
+		}
+	}
+	return getConfigIntFromEnv(key, defaultValue)
+}
+
+func getConfigIntFromEnv(key string, defaultValue int) int {
+	// Primary: new env var format MPM_<SECTION>_<SETTING> (dots -> underscores)
+	envKey := "MPM_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+	if v := os.Getenv(envKey); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	// Backward compat: old MPM_MAX_VECTOR_SCAN for vector.max_scan
+	if key == "vector.max_scan" {
+		if v := os.Getenv("MPM_MAX_VECTOR_SCAN"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				return parsed
+			}
+		}
+	}
+	return defaultValue
+}
+
+// GetConfigInt64 reads an int64 config from system_config with env fallback.
+func (dm *DatabaseManager) GetConfigInt64(key string, defaultValue int64) int64 {
+	if dm == nil {
+		return getConfigInt64FromEnv(key, defaultValue)
+	}
+	cfg, err := dm.GetSystemConfig(key)
+	if err == nil {
+		if raw, ok := cfg["raw_json"].(string); ok && raw != "" {
+			var val int64
+			if err := json.Unmarshal([]byte(raw), &val); err == nil {
+				return val
+			}
+		}
+	}
+	return getConfigInt64FromEnv(key, defaultValue)
+}
+
+func getConfigInt64FromEnv(key string, defaultValue int64) int64 {
+	envKey := "MPM_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+	if v := os.Getenv(envKey); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// GetConfigFloat64 reads a float64 config from system_config with env fallback.
+func (dm *DatabaseManager) GetConfigFloat64(key string, defaultValue float64) float64 {
+	if dm == nil {
+		return getConfigFloat64FromEnv(key, defaultValue)
+	}
+	cfg, err := dm.GetSystemConfig(key)
+	if err == nil {
+		if raw, ok := cfg["raw_json"].(string); ok && raw != "" {
+			var val float64
+			if err := json.Unmarshal([]byte(raw), &val); err == nil {
+				return val
+			}
+		}
+	}
+	return getConfigFloat64FromEnv(key, defaultValue)
+}
+
+func getConfigFloat64FromEnv(key string, defaultValue float64) float64 {
+	envKey := "MPM_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+	if v := os.Getenv(envKey); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// GetConfigString reads a string config from system_config with env fallback.
+func (dm *DatabaseManager) GetConfigString(key string, defaultValue string) string {
+	if dm == nil {
+		return getConfigStringFromEnv(key, defaultValue)
+	}
+	cfg, err := dm.GetSystemConfig(key)
+	if err == nil {
+		if raw, ok := cfg["raw_json"].(string); ok && raw != "" {
+			var val string
+			if err := json.Unmarshal([]byte(raw), &val); err == nil {
+				return val
+			}
+			// If not JSON, return raw
+			return raw
+		}
+	}
+	return getConfigStringFromEnv(key, defaultValue)
+}
+
+func getConfigStringFromEnv(key string, defaultValue string) string {
+	envKey := "MPM_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	return defaultValue
+}
+
 // ==================== VECTOR SEARCH ====================
 
 type searchResult struct {
