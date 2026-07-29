@@ -67,7 +67,19 @@ func NewRouter() *CommandRouter {
 		// Working Context (cognitive-interface RFC Wave 1)
 		"work": {Name: "work", Description: "Working Context (ephemeral execution state) — status|show|clear|promote"},
 		"continue": {Name: "continue", Description: "Session resumption dashboard — composes working context, wake context, decisions, skills, theories"},
+
+		// Cognitive-verb aliases (Wave 3). Humans express cognition;
+		// the substrate contracts (add, record_decision, propose_theory,
+		// resolve_theory, save-skill, list-skills, read-skill) stay
+		// stable for agent calls.
+		"remember": {Name: "remember", Description: "Create a memory (cognitive verb for mpm add)", MinArgs: 1},
+		"learn":    {Name: "learn", Description: "Create a lesson (cognitive verb for mpm lesson add)", MinArgs: 1},
+		"decide":   {Name: "decide", Description: "Record a decision (cognitive verb for record_decision)", MinArgs: 0},
+		"theorize": {Name: "theorize", Description: "Propose a theory (cognitive verb for propose_theory)", MinArgs: 1},
+		"decision": {Name: "decision", Description: "Decision ledger (add|resolve)"},
 		"why":      {Name: "why", Description: "Why does this artifact exist? — one-level provenance (evidence + confidence + retrieval)"},
+		"theory":   {Name: "theory", Description: "Theory tracker (add|resolve)"},
+		"skill":    {Name: "skill", Description: "Skill library (add|list|show|search)"},
 
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
@@ -206,6 +218,20 @@ func (r *CommandRouter) Execute(args []string) int {
 		return r.handleSwitch()
 	case "add":
 		return handleAdd(args)
+	case "remember":
+		return handleRemember(args[1:])
+	case "learn":
+		return handleLearn(args[1:])
+	case "decide":
+		return handleDecide(args[1:])
+	case "theorize":
+		return handleTheorize(args[1:])
+	case "decision":
+		return handleDecision(args[1:])
+	case "theory":
+		return handleTheory(args[1:])
+	case "skill":
+		return handleSkill(args[1:])
 	case "ls":
 		return handleLs(args)
 	case "show":
@@ -278,10 +304,6 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleEvidence(args[1:])
 	case "save-skill":
 		return handleSaveSkill(args[1:])
-	case "list-skills":
-		return handleListSkills(args[1:])
-	case "read-skill":
-		return handleReadSkill(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
