@@ -36,21 +36,34 @@ import (
 // Each section is small; the whole output fits in a terminal.
 // Sections in display order. Future waves add commands here as
 // their primary cognitive verb aliases land.
+//
+// Naming follows the post-RFC polish session (Wed 2026-07-29):
+//   Cognition  →  Create    (cognitive verbs ARE knowledge creation)
+//   Reflection →  Observability (doctor + why + provenance tooling)
+//   Engine Room →  Advanced  (the ops namespace is infrastructure,
+//                          not interface; demoted to a single line)
+//
+// The default help intentionally hides the total command count.
+// Humans see "67 commands" and conclude "too many" before reading
+// the actual surface. The cognitive front door is small (8 verbs);
+// the operator catalogue grows behind `mpm help --all` for users
+// who explicitly ask.
 var cognitiveHelpSections = []cogHelpSection{
 	{
 		title: "Daily",
 		cmds: []helpCmd{
-			{"continue", "Session resumption dashboard (composes Working Context + Wake Context + Memory Stats)", true},
-			{"work", "Working Context — ephemeral execution state", true},
-			{"call", "Universal MCP-tool boundary (use for everything not yet aliased as a cognitive verb)", false},
+			{"continue", "Session resumption dashboard — what was I doing yesterday", true},
+			{"work", "Working Context — show the ephemeral execution state", true},
+			{"call", "Universal MCP-tool boundary (use for everything not yet aliased)", false},
 			{"status", "System status dashboard (--json for machine output)", false},
 			{"why", "Why does this artifact exist? — provenance flagship", false},
-			{"doctor", "Trust-signal flagship — substrate health (db, embeddings, scheduler, review)", false},
+			{"doctor", "Trust-signal flagship — db / embeddings / scheduler / review", false},
+			{"info", "Installation identity — version, paths, counts", false},
 			{"version", "Show mpm version + build info", false},
 		},
 	},
 	{
-		title: "Cognition (verbs)",
+		title: "Create",
 		cmds: []helpCmd{
 			{"remember", "Create a memory (alias for mpm add)", false},
 			{"learn", "Curate a lesson (alias for mpm lesson add)", false},
@@ -71,26 +84,29 @@ var cognitiveHelpSections = []cogHelpSection{
 		},
 	},
 	{
-		title: "Engine Room",
+		title: "Maintenance",
 		cmds: []helpCmd{
-			{"ops", "Maintenance, diagnostics, synthesis, and power tools", true},
+			{"backup", "Export database (see mpm ops backup for the engine-room version)", false},
+			{"restore", "Restore from JSON export (see mpm ops restore)", false},
+			{"review", "Spaced reinforcement review (see mpm ops review)", false},
 		},
 	},
 	{
 		title: "Debug",
 		cmds: []helpCmd{
-			{"debug", "Low-level inspection tools", true},
+			{"debug", "Low-level inspection tools (history|diff|diff-lines|patch-memory|shred|show|gc)", true},
 		},
 	},
 	{
 		title: "Need more?",
 		cmds: []helpCmd{
-			{"mpm help knowledge", "Expanded view of knowledge surface (memory|lesson|skill|topic|reference)", false},
-			{"mpm help runtime", "wave 2 — wake, doctor, why", false},
-			{"mpm help maintenance", "Wave 2+ — backup, restore, review", false},
-			{"mpm help reflection", "Wave 2+ — synthesize, confidence, evidence, milestones", false},
+			{"mpm help observability", "doctor / why / milestones / broadcast / changelog / self-heal", false},
+			{"mpm help maintenance", "engine-room maintenance surface (ops gc / maintain / restore-db / backup)", false},
+			{"mpm help advanced", "the mpm ops namespace — scripting and operator workflows", false},
+			{"mpm help knowledge", "expanded view of knowledge (memory|lesson|skill|topic|reference)", false},
 			{"mpm help work", "Working Context subcommands (status|show|clear|promote)", false},
-			{"mpm help --all", "Full catalogue dump (operator interface + aliases)", false},
+			{"mpm tour", "interactive walkthrough of the cognitive verbs", false},
+			{"mpm help --all", "full operator catalogue — for the rare 'I need to see every command' moment", false},
 		},
 	},
 }
@@ -145,22 +161,28 @@ func renderCognitiveHelp() string {
 // This is the "operator interface" — every command the binary
 // supports. Tools that want this should use `mpm help --json` (future)
 // rather than parsing this text — text help is not an API (RFC §4).
+//
+// Per the post-RFC polish session (Wed 2026-07-29), this output
+// intentionally does NOT include a total count. Humans see "67"
+// and assume "too many" before reading the cognitive-verb default.
+// Operators who explicitly ask for the full catalogue are signalling
+// they want to see what's there; the listing carries that signal
+// without needing an emphasised count.
 func printHelpAll() {
 	if r := getCmdRouter(); r != nil {
 		cmds := make([]string, 0, len(r.Commands))
 		for name, c := range r.Commands {
 			cmds = append(cmds, fmt.Sprintf("%-22s %s", name, c.Description))
 		}
-		// sort.Strings is the boring option but works without imports.
 		sortStrings(cmds)
-		fmt.Println("Full command catalogue (operator interface):")
+		fmt.Println("Operator catalogue (run `mpm help` for the cognitive-verb default):")
 		fmt.Println(strings.Repeat("─", 60))
 		for _, line := range cmds {
 			fmt.Println("  " + line)
 		}
 		fmt.Println()
-		fmt.Printf("Total: %d commands. Use 'mpm help <section>' for progressive disclosure,\n", len(cmds))
-		fmt.Println("or 'mpm help' for the cognitive-verb default.")
+		fmt.Println("Use `mpm help <section>` for progressive disclosure.")
+		fmt.Println("Sections: knowledge, runtime, maintenance, observability, advanced, work, debug.")
 	}
 }
 
