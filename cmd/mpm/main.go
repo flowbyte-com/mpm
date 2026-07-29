@@ -1419,6 +1419,15 @@ func PrintQuicklinks() {
 // loadPendingTheoriesForQuicklinks returns up to limit pending
 // theories (content preview). Best-effort — fails silently if the
 // shape doesn't exist on this install.
+//
+// Theory content is shaped by the propose_theory MCP tool:
+// "hypothesis_id=<id> validation=<criteria>". The two-audience
+// principle (RFC §'two-personalities') applies to data shape too:
+// this raw key=value form is fine for `mpm call propose_theory`
+// scripts but reads as machine noise on the cognitive-verb
+// dashboard. We parse it into a clean "<id>: <criteria>" form
+// here so the Quicklinks surface reads as information, not raw
+// protocol. Unknown shapes pass through unchanged.
 func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int) []string {
 	if dm == nil || limit <= 0 {
 		return nil
@@ -1442,18 +1451,48 @@ func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int
 		if err := rows.Scan(&id, &content); err != nil {
 			continue
 		}
-		preview := content
-		// Strip the leading "VALIDATION_CRITERIA" / "TYPE" markers
-		// that propose_theory produces so the line reads cleanly.
-		if idx := indexOfNewline(content); idx > 0 {
-			preview = content[:idx]
-		}
-		if preview == "" {
-			preview = id
-		}
-		out = append(out, preview)
+		out = append(out, formatTheoryPreview(content, id))
 	}
 	return out
+}
+
+// formatTheoryPreview renders a pending-theory content row as a
+// one-line preview. Recognises the propose_theory shape
+// "hypothesis_id=<id> validation=<criteria>" and rewrites it as
+// "<id>: <criteria>" so the dashboard reads cleanly. Unknown shapes
+// pass through (truncated to 80 chars). The opaque id (mpm-<hex>)
+// is the fallback when content is empty.
+func formatTheoryPreview(content, id string) string {
+	// Strip a trailing newline if present.
+	content = strings.TrimRight(content, "\n")
+	const idKey = "hypothesis_id="
+	const valKey = " validation="
+	if strings.HasPrefix(content, idKey) {
+		stripped := strings.TrimPrefix(content, idKey)
+		if i := strings.Index(stripped, valKey); i >= 0 {
+			id := stripped[:i]
+			criteria := strings.TrimSpace(stripped[i+len(valKey):])
+			if id != "" && criteria != "" {
+				return id + ": " + criteria
+			}
+			if id != "" {
+				return id
+			}
+		}
+		// hypothesis_id=<id> with no validation= : just show the id.
+		return strings.TrimSpace(stripped)
+	}
+	// Unknown shape — truncate, but keep first line if multi-line.
+	if idx := indexOfNewline(content); idx > 0 {
+		content = content[:idx]
+	}
+	if len(content) > 80 {
+		content = strings.TrimSpace(content[:80]) + "…"
+	}
+	if content == "" {
+		return id
+	}
+	return content
 }
 
 // indexOfNewline returns the index of the first '\n' in s, or -1.
