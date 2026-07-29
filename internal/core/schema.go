@@ -222,6 +222,22 @@ var BaseTables = []string{
 		UNION ALL
 		SELECT id, 'lessons' AS collection, MAX(0.01, (retrieval_priority + importance) / 2.0) AS legacy_weight
 		FROM lessons;`,
+
+	// Synth ledger — persistent content_hash dedup for AutoSynthesize.
+	// content_hash is the PK so re-ingesting the same content always
+	// hits O(1) lookup. first_run_at is the original timestamp;
+	// last_run_at is bumped on each re-sight (watchdog observability);
+	// run_count is the cumulative number of times this content was
+	// seen (dedup hit counter). result_memory_id points at the
+	// synthesized memory produced on first_run_at — useful for
+	// forensic trails when the originals have since been soft-deleted.
+	`CREATE TABLE IF NOT EXISTS synth_runs (
+		content_hash TEXT PRIMARY KEY,
+		first_run_at INTEGER NOT NULL,
+		last_run_at  INTEGER NOT NULL,
+		run_count    INTEGER NOT NULL DEFAULT 1,
+		result_memory_id TEXT
+	);`,
 }
 
 // ReferenceTables contains the reference-library table creation statements.
@@ -350,6 +366,8 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_memories_reinforcement ON memories(collection, deleted_at, reinforcement_count, weight);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_prune ON memories(collection, deleted_at, updated_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_spaced_review ON memories(collection, deleted_at, is_long_term, weight, last_accessed_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_last_synth ON memories(collection, deleted_at, last_synthesized_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_synth_runs_last_run ON synth_runs(last_run_at);`,
 
 	// System audit log — runtime anomalies (errors, warnings, fatal conditions)
 	// AND deliberate state-mutation events (info). The agent queries this via
@@ -632,6 +650,7 @@ var SafeMigrations = [][3]string{
 	// the local DB so this migration is applied to both via attachShared.
 	{"memories", "is_global",          "INTEGER NOT NULL DEFAULT 0"},
 	{"lessons",  "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
+	{"memories", "last_synthesized_at", "INTEGER"},
 	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
 	{"reference_docs", "import_reason", "TEXT"},
