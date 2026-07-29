@@ -576,6 +576,35 @@ The distinction is important. The Core describes what the agent knows. The Runti
 
 Mature systems often owe their longevity to having a very small, stable core. Every feature that lives in Core must earn its place through years of usage evidence, not through the effort it took to build. Features that fail to justify themselves are removed. Engineers are sentimental about code; the regret log and disciplined review break that sentiment.
 
+#### Execution Profile Routing
+
+The substrate's LLM consumption is mediated through a five-layer routing chain:
+
+```
+   Skill              says 'reviewer'    (portable, install-agnostic)
+     ↓
+   Capability         says 'critic'      (operator-bound)
+     ↓
+   Component          says 'review profile' (substrate function)
+     ↓
+   Profile            says 'gpt-4o, tmp 0.2' (provider + params)
+     ↓
+   Provider                                (openai / ollama / ...)
+```
+
+**Motivating principle:** different cognitive functions have different model requirements. Memory synthesis wants strong reasoning and long context; the critic wants analytical and cheap; the scheduler wants cheap and reliable. One model doesn't fit every cognitive task, so operators configure each profile to be the model that fits its role.
+
+**Why this matters:** skills are portable across installs. A skill references the capability `reviewer`; the install decides whether `reviewer` maps to `critic` (the substrate's term) or to an operator-named component. The runtime does the lookup. No code changes when operators rename their components.
+
+The execution-profile abstraction is the substrate's primitive for this routing:
+
+- `Config.ProfileFor(component)` — resolves a component name to a Profile.
+- `Config.CapabilityFor(name)` — resolves a capability name to a component name.
+
+The CLI surface (`mpm config profile|component|capability`) lets operators configure the routing without writing code. The MCP surface (`mpm call request_review ...`) lets agents invoke multi-component reviews against the same routing — the substrate's first orchestration primitive.
+
+For the full design — including the substrate-side primitives, the `Daily` / `Create` / `Knowledge` taxonomy, and the no-hardcoded-component-names discipline — see `docs/cli-cognitive-interface-rfc.md`.
+
 ### 6.2 Confidence Engine
 
 *How the system derives belief from evidence rather than arbitrary LLM scoring.*
@@ -894,6 +923,15 @@ mpm doctor              # Trust-signal diagnostics (5 checks: DB, embeddings, wo
 mpm info                # Installation identity — version, paths, models, skills, counts
 mpm tour                # Interactive 6-step walkthrough of cognitive verbs
 mpm tour --demo         # Auto-run each step with sample arguments
+
+# Cross-component orchestration
+mpm call request_review \
+    --payload '{"components":["memory","critic"],"prompt":"is this consistent?","artifacts":["mem_abc123"]}'
+                        # Concurrent multi-component review: each component resolves to a
+                        # profile via ProfileFor; per-component model call fused into a
+                        # Markdown render. Independent results — one component failing
+                        # does not abort the others. (Engine: internal/core/orchestration.
+                        # Renderer: internal/core/renderers. Adapter: tools/handlers.go.)
 
 # Configuration
 mpm config              # Interactive AI provider setup wizard (MiniMax, OpenAI, Ollama, Anthropic, Custom)
