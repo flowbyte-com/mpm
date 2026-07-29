@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,6 +161,18 @@ func closeDB(dm *internal.DatabaseManager) {
 	}
 	if err := dm.Close(); err != nil {
 		usererror.Warn("database close error: %v", err)
+	}
+}
+
+// closeSQLDB closes a raw *sql.DB and logs any error. Mirrors closeDB for
+// DatabaseManager (LOW-03 fix). Used by handlers that open transient
+// connections outside the singleton (backup/restore-db/wal-flush).
+func closeSQLDB(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	if err := db.Close(); err != nil {
+		usererror.Warn("sql.DB close error: %v", err)
 	}
 }
 

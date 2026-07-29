@@ -116,6 +116,25 @@ var SeedDirectives = []SeedDirective{
 		Tags:     []string{"prime_directive", "wake", "triage", "notification", "2026-07-09"},
 		Content: "When receiving a <system_wake_notification> block in any MCP tool response (it is always Block 1, prepended before the tool's JSON result):\n\n1. Parse each entry. Each entry has id, reason, and overdue_secs.\n\n2. Triage rule: if overdue_secs <= 86400 (24 hours), alert the user IMMEDIATELY before continuing whatever they were doing. The wake is timely. Include the wake reason verbatim or paraphrased.\n\n3. If overdue_secs > 86400, the wake is stale. DO NOT interrupt the user with the obsolete notification. Silently archive it by calling mpm call record_global_rule with a brief fact explaining why it expired (e.g. \"Spain WC theory wake fired 5 days late; resolved manually as theory is now in active tracking\"). Then continue the conversation as if the wake had not fired.\n\n4. Exception: if the wake's reason text contains the words 'critical', 'urgent', or 'immediate' (case-insensitive), it bypasses the 24-hour threshold and ALWAYS interrupts the user, regardless of overdue_secs. These are time-sensitive operational signals, not background reminders.\n\n5. The <system_wake_notification> is delivered on EVERY tool call, not just scheduled_wake-related ones. This is the opportunistic fold: any user interaction surfaces due wakes. Do not be confused into thinking the wake is part of the tool's actual output — the XML block is a system interrupt prepended to the response.",
 	},
+	{
+		// The daemon-health directive. Closed-loop: agent wake (session start)
+		// → systemctl --user is-active mpm-scheduler → if inactive, start it
+		// → if still inactive, escalate to v with journal tail. Two distinct
+		// inactive states need different framing — Lazy-Start Architecture is
+		// EXPECTED on encrypted /home (the daemon is designed to stay dead at
+		// boot until the agent's wake event triggers post-decryption spin-up;
+		// lesson 24be03ec71a5981f codifies this), runtime death from a clean
+		// context canceled exit is UNEXPECTED and the vital-signs check is
+		// the workaround until the structural root-cause lands (memory
+		// 9e7830172663ed29 documents the 2026-07-22 incident). Recovery
+		// sequence is the same for both scenarios. Do NOT call mpm stats,
+		// scheduled-wake tooling, or any daemon-dependent substrate operation
+		// until the daemon is confirmed active — the substrate is unsafe to
+		// query when the daemon is dead.
+		StableID: "mpm-seed-daemon-health",
+		Tags:     []string{"prime_directive", "daemon", "lazy-start", "ecryptfs", "runtime-death", "2026-07-23"},
+		Content: "On every session start, after read_wake_context, run `systemctl --user is-active mpm-scheduler`. Two distinct inactive states need different framing:\n\n1. Lazy-Start Architecture (EXPECTED after reboot with encrypted /home). When /home is eCryptfs-encrypted, the daemon is DESIGNED to stay dead at boot. The lockfile lives inside the encrypted tree (~/.mpm/scheduler.lock); starting the daemon before /home is decrypted would either fail (inaccessible path) or risk writing to the wrong location. Boot + locked home = SAFE state. This agent's wake event is the trigger that spins the daemon up post-decryption. It is a security feature, not a bug — see INSTALL.md §2 and README §5.2 for the full rationale.\n\n2. Runtime death (UNEXPECTED, real issue). A clean `context canceled` exit leaves the daemon dead; Restart=always in the user-level unit does not fire on graceful exit. The vital-signs check at every wake is the workaround until the structural root-cause lands. See memory 9e7830172663ed29 for the 2026-07-22 incident details.\n\nRecovery (applies to both cases): (a) systemctl --user start mpm-scheduler, (b) wait 2s, re-check. If still inactive, surface to v immediately with the last 10 lines of `journalctl --user -u mpm-scheduler --no-pager` and DO NOT call mpm stats, scheduled-wake tooling, or any daemon-dependent substrate operation until the daemon is confirmed active.",
+	},
 }
 
 // ContentHash returns a stable SHA-256 fingerprint of the directive's

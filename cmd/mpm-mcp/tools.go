@@ -127,7 +127,7 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			},
 		}
 
-		if due, dErr := dm.CheckPendingWakes(time.Now()); dErr == nil && len(due) > 0 {
+		if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
 			notification := core.FormatWakeNotification(due)
 			// Prepend the notification as Block 1 so it is the very
 			// first content the LLM sees. Build a new slice rather than

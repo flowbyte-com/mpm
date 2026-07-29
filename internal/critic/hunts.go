@@ -44,6 +44,7 @@ func (h *SurvivalAsymmetryHunt) Run(ctx context.Context, a *Audit) ([]Finding, e
 
 	// Query survival stats by source. Mirrors query_memory_quality.
 	// "Survival" = memory row not deleted (deleted_at IS NULL).
+	// deleted_at is stored as INTEGER Unix epoch (matches expires_at).
 	rows, err := a.DB().QueryContext(ctx, `
 		SELECT
 			json_extract(metadata, '$.source') AS source,

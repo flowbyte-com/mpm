@@ -275,8 +275,8 @@ func handleRm(args []string) int {
 	// because the singleton lookup doesn't introduce one.
 	var err error
 
-	// Soft delete by setting deleted_at
-	_, err = dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	// Soft delete by setting deleted_at (INTEGER Unix epoch, matches expires_at)
+	_, err = dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, id)
 	if err != nil {
 		usererror.Error("%v", err)
 	}

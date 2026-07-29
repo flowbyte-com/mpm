@@ -46,8 +46,18 @@ func handleOpsInitDirectives(args []string) int {
 	return 0
 }
 
+// printSeedSummary is the directives-flavoured back-compat wrapper.
+// New code should call printSeedReport with the appropriate banner + label.
 func printSeedSummary(s seed.SeedSummary) {
-	fmt.Println("Baseline Cognitive Bootstrap — seed report")
+	printSeedReport("Baseline Cognitive Bootstrap — seed report", s, "directives")
+}
+
+// printSeedReport renders a SeedSummary with caller-supplied banner
+// and label. The label drives the "no rows in registry" empty-state
+// sentence and the post-seed activity hint, so each seed command
+// points the operator at the right next call.
+func printSeedReport(banner string, s seed.SeedSummary, label string) {
+	fmt.Println(banner)
 	fmt.Println(strings.Repeat("─", 60))
 
 	if len(s.Created) > 0 {
@@ -69,20 +79,27 @@ func printSeedSummary(s seed.SeedSummary) {
 		for _, id := range s.Updated {
 			fmt.Printf("    ! %s\n", id)
 		}
-		fmt.Println("    (Local edits to a seeded directive are intentionally preserved.")
+		fmt.Println("    (Local edits to a seeded entry are intentionally preserved.")
 		fmt.Println("     To re-sync, delete the local row and re-run.)")
 	}
 
 	total := len(s.Created) + len(s.Skipped) + len(s.Updated)
 	if total == 0 {
-		fmt.Println("\n  No directives in registry. (Empty seed.Directives slice.)")
+		fmt.Printf("\n  No entries in registry. (Empty seed.%s slice.)\n", label)
 	} else {
 		fmt.Printf("\n  %d total: %d created, %d skipped, %d drifted.\n",
 			total, len(s.Created), len(s.Skipped), len(s.Updated))
 	}
 
 	if len(s.Created) > 0 {
-		fmt.Println("\nThese directives are now active. The agent will read them on")
-		fmt.Println("the next session via `mpm call read_directives`.")
+		switch label {
+		case "directives":
+			fmt.Println("\nThese directives are now active. The agent will read them on")
+			fmt.Println("the next session via `mpm call read_directives`.")
+		case "skills":
+			fmt.Println("\nThese skills are now active. The agent will surface them via")
+			fmt.Println("proactive_recall_hint when conversation keywords overlap with")
+			fmt.Println("a skill's when_to_use field.")
+		}
 	}
 }

@@ -9,6 +9,7 @@
 #   make service             - Alias for service-scheduler
 #   make clean               - Remove bin/
 #   make test                - Run tests
+#   make lint                - Run golangci-lint (advisory; not CI-gated)
 #   make help                - Show this help
 #
 # RECOMMENDED INSTALL PATH:
@@ -35,10 +36,10 @@ SYSTEM_SERVICE_DST := /etc/systemd/system/$(SERVICE_NAME).service
 GO := $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 
 VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
-BUILD_LDFLAGS := -ldflags "-X main.buildVersion=mpm-std"
+BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 
-.PHONY: all build install service-scheduler service install-system-service uninstall-service clean test help
+.PHONY: all build install service-scheduler service install-system-service uninstall-service gen-cli clean test lint help
 
 all: build
 
@@ -53,7 +54,7 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-std)"
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-alpha)"
 
 # Install all four binaries to PREFIX/bin (system-wide, requires sudo).
 install: build
@@ -112,11 +113,23 @@ install-system-service:
 	@echo "    sudo systemctl enable --now $(SERVICE_NAME)"
 	@echo "    systemctl status $(SERVICE_NAME)"
 
+# Regenerate the CLI command catalogue in README.md (sent-injected
+# auto-generated block in §8). Walks r.Commands via go/ast — no
+# reflection, no runtime import, source-level extraction. Idempotent.
+gen-cli:
+	$(GO) run ./cmd/gen-cli
+
 # Run tests
 test:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+
+# Run golangci-lint (advisory only — does not gate CI).
+# Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; exit 1; }
+	golangci-lint run ./...
 
 # Clean build artifacts
 clean:
@@ -133,7 +146,9 @@ help:
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
+	@echo "    make gen-cli             - Regenerate the CLI catalogue in README.md §8"
 	@echo "    make test                - Run go tests"
+	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
 	@echo "    make clean               - Remove bin/"
 	@echo "    make help                - Show this help"
 	@echo ""

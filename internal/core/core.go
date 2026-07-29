@@ -76,6 +76,7 @@ type CoreDB interface {
 	PromoteMemory(memoryID string) (map[string]interface{}, error)
 	PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error)
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
+	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
 	PruneExpired() (int, error)
 	PruneOlderThan(before time.Time) (int, error)
 	PruneNeverAccessed() (int, error)
@@ -195,10 +196,18 @@ type CoreDB interface {
 
 	// ─── Wakes ───────────────────────────────────────────────────────
 	ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error)
-	CheckPendingWakes(now time.Time) ([]map[string]interface{}, error)
+	CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error)
 	ListScheduledWakes(includeFired, overdueOnly bool, limit int) ([]map[string]interface{}, error)
 	DigestScheduledWakes(topN int) (map[string]interface{}, error)
 	FireStaleFoundationWakes(deletedArtifactID string) (int, error)
+
+	// ─── Scheduled Tasks (Agentic Cron) ─────────────────────────────
+	// Recurring agentic workflows. The mpm-scheduler daemon's 60s tick
+	// loop polls these via ProcessScheduledTasks, injects a standard
+	// scheduled_wakes row at each fire, and rolls over next_run_at.
+	UpsertScheduledTask(task ScheduledTask) error
+	ListScheduledTasks() ([]ScheduledTask, error)
+	DeleteScheduledTask(id string) error
 
 	// ─── Arc 2: Active Dissemination ────────────────────────────────
 	BroadcastMemory(memoryID string, opts BroadcastOpts) (*BroadcastReport, error)
@@ -229,6 +238,23 @@ type CoreDB interface {
 
 	// ─── Misc ────────────────────────────────────────────────────────
 	WipeRecord(tier, id string) error
+
+	// ─── Skills (procedural memory) ─────────────────────────────────
+	ReadSkill(nameOrID, version string) (*Skill, error)
+	ListSkills(scope string) ([]SkillSummary, error)
+	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
+	PromoteSkillToGlobal(skillID string, confirm bool) error
+	ShredSkill(skillID string) error
+
+	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
+	// Fire-and-forget telemetry for adaptive retrieval. Called from
+	// MCP read handlers and wake_context after a successful retrieval.
+	// Implementations must be cheap (single-row UPSERT) and must not
+	// fail the user-facing path.
+	RecordRetrieval(nodeID, nodeType string) error
+	RecordRetrievalSuccess(nodeID, nodeType string) error
+	IncrementSuccess(nodeID, nodeType string) error
+	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
 }
 
 // Compile-time assertion that *DatabaseManager satisfies CoreDB.

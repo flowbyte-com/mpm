@@ -166,6 +166,66 @@ MPM_BACKUP_DIR=/custom/path/backups
 
 ---
 
+> **Lazy-Start Architecture (encrypted `/home`).** When `/home` is eCryptfs-encrypted,
+> the scheduler daemon is **designed to stay dead at boot**. The lockfile lives inside
+> the encrypted tree (`~/.mpm/scheduler.lock`); starting the daemon before `/home`
+> is decrypted would either fail (inaccessible path) or risk writing to the wrong
+> location. The architecture treats *boot + locked home* as the SAFE state and expects
+> the agent's first wake context (`AGENTS.md` Session Startup step 2) to spin the
+> daemon up *after* decryption is complete. This isolates the daemon's first write
+> to a moment when the substrate is verifiably writable. **It is a security feature,
+> not a bug.** Lesson `24be03ec71a5981f` codifies the rationale.
+>
+> Operators on systems without an agent wake path (cron-driven unattended tasks,
+> headless deployments) can opt out by adding the drop-in documented in the
+> Troubleshooting row below.
+
+### 2.1. Agentic Cron (recurring tasks, optional)
+
+> **Skip this subsection if:** self-scheduled one-off wakes via `schedule_wake`
+> are enough. The Agentic Cron adds a registry of recurring tasks the daemon
+> polls on its 60s tick — nightly compactions, weekly security audits, etc.
+> Single-agent workflows that don't need a fixed cadence can skip this.
+
+Once the daemon is running, recurring tasks are managed via `mpm tasks`:
+
+```bash
+mpm tasks upsert <id> <name> <cron_expr> <directive_id> [status]
+mpm tasks list
+mpm tasks delete <id>    # or pass 'rm'; prefer status='paused' for soft-stop
+```
+
+**Example: nightly epistemic compaction at 03:00 UTC.** The directive_id
+must already exist in `memories` where `collection='directives'` — the
+handler runs a fail-fast index lookup before writing, so a typo is caught
+at upsert time, not at 3 AM as a silent wake drop.
+
+```bash
+# Create the directive first (one-time)
+mpm call save_to_memory --payload '{
+  "fact": "Compact last week's memories tagged \"scratchpad\" into a durable lesson. Shred the originals.",
+  "collection": "directives",
+  "tags": ["prime_directive", "epistemic-compaction", "2026-07-23"]
+}'    # note the returned id, e.g. abc123...
+
+# Then schedule the task
+mpm tasks upsert epistemic-compaction \
+  "Nightly epistemic compaction" \
+  "0 3 * * *" \
+  abc123... active
+```
+
+The daemon's tick loop polls `scheduled_tasks WHERE status='active' AND
+next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes`
+row in the same transaction as the `next_run_at` rollover. A daemon crash
+between injection and rollover cannot double-fire. The agent sees the
+injected wake on its next MCP call and reads the directive.
+
+**Three MCP tools** mirror the CLI for agent-driven automation:
+`upsert_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task`.
+Architecture and edge cases (re-upsert semantics, poison-pill handling,
+why pre-compute `next_run_at`) documented in [README §9.3](README.md#agentic-cron-recurring-tasks).
+
 ## 3. Wire to your host
 
 > **Pick one.** OpenClaw and Hermes are the two supported hosts as of
@@ -275,13 +335,19 @@ without losing agent state; runtime data persists across `git pull`.
 |---------|---------------|-----|
 | Install fails: "Go not found" | `go version` | Install Go 1.26+ or add to PATH |
 | Install fails: "systemd required" | `systemctl --version` | Install systemd (most distros have it) |
+| `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `sudo loginctl enable-linger $USER` (set `Linger=yes`) |
 | Service won't start: "permission denied" on `/var/lib/mpm/` | `ls -la /var/lib/mpm/` | `sudo chown -R $USER:$USER /var/lib/mpm` |
 | Service won't start after reboot on encrypted home | `findmnt /home` | Use `sudo ./scripts/install.sh` (system service) instead of `make service-scheduler` (user service) |
+| `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
+| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` (this is expected) | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | This is **expected behaviour** under the Lazy-Start Architecture — see INSTALL §2. The daemon is designed to stay dead at boot when `/home` is encrypted (the lockfile inside the encrypted tree would be inaccessible otherwise). On the next agent wake, `AGENTS.md` Session Startup step 2 detects the dead daemon and starts it post-decryption. If your workload runs unattended with no agent wake path (cron / system timers only), opt out by adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. |
 | CLI fails: "no such file: mpm.real" | `ls -la /usr/local/bin/mpm*` | Re-run `sudo ./scripts/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 /usr/local/bin/mpm` | `/usr/local/bin/mpm` must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
+| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l $HOME/projects/mpm/bin/mpm-mcp` | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
 | MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path; restart gateway |
 | `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
-| `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run init. |
+| OpenClaw: agent doesn't see MPM tools in chat | `openclaw mcp list \| grep mpm` | `openclaw gateway restart` (Gateway caches MCP servers at startup) |
+| Hermes: agent doesn't see MPM tools in chat | `hermes mcp list \| grep mpm` | Confirm `mcp` toolset in `~/.hermes/config.yaml:toolsets`. Restart session (`/reset`) — config changes don't apply mid-conversation. |
+| `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run `mpm ops init directives`. |
 | MCP tools load but `read_wake_context` returns empty | `mpm ops stats` | DB may be empty. Confirm `MPM_WORKSPACE` matches the canonical db path prime directive. |
 | Legacy user unit conflicts with system unit | `systemctl --user status mpm-scheduler`; `systemctl status mpm-scheduler` | Disable the legacy one: `systemctl --user disable --now mpm-scheduler; rm ~/.config/systemd/user/mpm-scheduler.service` |
 
