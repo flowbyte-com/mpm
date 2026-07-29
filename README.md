@@ -1206,11 +1206,6 @@ mpm call check_pending_event_wakes --payload '{"session_id":"..."}'
 **Why the deterministic ID is the entire architecture.** Without the PRIMARY KEY, dedup is an application-level check: SELECT then INSERT, with a TOCTOU race. With the PRIMARY KEY, dedup is a database-level guarantee: `INSERT OR IGNORE` is atomic, idempotent, and O(1). The whole receiver-correctness story is the deterministic ID; the rest is plumbing.
 
 For the schema, fan-out algorithm, test matrix, and smoke behind this section, see **Appendix B**.
-#### Fsnotify Reconciliation
-
-*Periodic filesystem sweep as fallback — auto-ingest is intentionally deprecated (see Watcher Deprecation below).*
-
-30s startup delay + 10-min periodic sweep (25 file/sweep cap) reconciles the filesystem state. `source_path` metadata check prevents re-ingestion of already-processed files. (Residual from the deprecated watcher; consolidated into on-demand ops.)
 #### Spaced Reinforcement Review
 
 *Surface forgotten LTM memories for re-touch — knowledge decays if not exercised.*
@@ -1219,21 +1214,7 @@ For the schema, fan-out algorithm, test matrix, and smoke behind this section, s
 mpm ops review --promoted   # Show recently elevated LTM memories
 mpm ops review --stale      # Surface forgotten LTM memories
 ```
-#### Watcher Deprecation (2026-06-26)
 
-*The file-watcher daemon was removed on 2026-06-26 because `save_to_memory` covers its use case natively — one ingestion path, not two.*
-
-The MPM file-watcher daemon (`mpm watch start|stop|status`, fsnotify goroutine, worker pool, 5-min decay loop) was deprecated and removed on 2026-06-26. Its original purpose — auto-ingest of files written by pre-MCP agents — is obsolete now that `save_to_memory` is a native MCP tool. Replacement matrix:
-
-| Watcher capability | Replacement |
-|---|---|
-| 5-min decay sweep | `mpm ops maintain` on demand (also runs autonomously in the daemon) |
-| External SQLite polling | `mpm ops ingest --source <path>` one-shot |
-| LLM synthesis | `mpm ops synthesize [--dry-run]` on demand (also runs autonomously in the daemon) |
-| Topic clustering | `mpm ops synthesize` (synthesis pass) |
-| Filesystem auto-ingest | Obsolete — `mpm call save_to_memory` covers it |
-
-The reusable parser library (`extractFacts`, `extractFromSessionLine`, `looksLikeFact`, `extractKeywords`, `parseSessionsSnapshot`, `readJSONLines`) was preserved in `cmd/mpm/parsers.go` for future one-shot filesystem tooling.
 
 ---
 
@@ -1383,7 +1364,6 @@ Three paths, all routed through the secret/poison scanner — no write path bypa
 |---|---|
 | `mpm call save_skill --payload '{"name":"...","version":"...","content":"...","author_agent":"..."}'` | Programmatic creation by the agent or operator |
 | `mpm save-skill --file path/to/SKILL.md` | Operator curation from terminal |
-| File ingestion: drop a `.md` with `kind: skill` frontmatter into a watched dir | Organic capture from a project workspace |
 
 Saving the same `(name, version)` pair requires `force=true` — silent overwrites are rejected. Saving a new version for an existing name flips the prior version's `is_latest` to `0` in the same transaction and stamps `supersedes` linkage, so older versions remain queryable but no longer advertise themselves as current.
 
@@ -1608,7 +1588,7 @@ The wake context surfaces a single-line summary when errors or fatals were logge
 |---|---|---|
 | `id` | TEXT PK | Unique identifier |
 | `level` | TEXT | `warn` / `error` / `fatal` (CHECK constraint) |
-| `component` | TEXT | `relay`, `synthesis`, `watcher`, `security` |
+| `component` | TEXT | `relay`, `synthesis`, `security`, `cluster` |
 | `message` | TEXT | Human-readable description |
 | `stack_trace` | TEXT | Auto-captured Go stack at log point (truncated to 4KB) |
 | `context` | JSON | Structured 3–5 field key-value pair |
@@ -1623,7 +1603,7 @@ Indexes: `(level, created_at)`, `(component)`, `(created_at)`. 30-day retention 
 | `security` | Poison phrase or sensitive content blocked during memory write |
 | `relay` | Non-trivial HTTP error during SSE broadcast |
 | `synthesis` | All LLM vendors failed; event routed to DLQ |
-| `watcher` | DEPRECATED — new audit rows not expected |
+| `cluster` | Audit-cluster proposal raised / resolved / snoozed |
 
 #### Why a SQLite table, not more jsonl files
 
