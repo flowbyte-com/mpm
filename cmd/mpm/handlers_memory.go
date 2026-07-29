@@ -186,17 +186,17 @@ func handleMemoryAdd(args []string) int {
 		suggestions, _ = suggestTopicsForMemory(dm, mem.ID, content, 3, 0.3)
 
 		// Fire-and-forget: check for near-miss candidates and auto-synthesize.
-		// Uses its own session so it doesn't block the caller's connection.
-		go func(id, c string) {
-			synthDM, synthErr := dm.NewSession()
-			if synthErr != nil {
-				slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
-				return
+		// Uses synthesis worker pool (bounded, with context) so it doesn't block the caller's connection.
+		if dm != nil {
+			if synthDM, err := dm.NewSession(); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				pool := mpminternal.GetSynthesisPool(3)
+				pool.Submit(ctx, synthDM, synth.NewSynthClient(), mem.ID, content)
+				cancel()
+			} else {
+				slog.Warn("synthesis: failed to open db session", "memory_id", mem.ID, "error", err)
 			}
-			defer synthDM.Close()
-			client := synth.NewSynthClient()
-			mpminternal.AutoSynthesize(context.Background(), synthDM, client, id, c)
-		}(mem.ID, content)
+		}
 	}
 	mem.SuggestedTopics = suggestions
 
