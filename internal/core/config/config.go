@@ -17,10 +17,11 @@ type Config struct {
 	SessionsDirs   []string          `json:"sessions_dirs,omitempty"`
 	ExternalDbs    []ExternalDB      `json:"external_dbs,omitempty"`
 	OpenClawDBPath string            `json:"openclaw_db_path,omitempty"` // Source DB for ingest (default: ~/.openclaw/memory/main.sqlite)
-	Synth          *SynthConfig      `json:"synth,omitempty"` // Legacy single-profile config; superseded by Profiles + Components
+	Synth          *SynthConfig      `json:"synth,omitempty"`   // Legacy single-profile config; superseded by Profiles + Components
 	Profiles       map[string]Profile `json:"profiles,omitempty"`    // Named execution profiles; preferred surface
 	Components     map[string]string `json:"components,omitempty"`   // substrate-component → profile-name bindings
-	Aliases        map[string]string `json:"aliases,omitempty"`  // Cli command aliases: "mem" → "recall --collection memories"
+	Capabilities   map[string]string `json:"capabilities,omitempty"` // capability-name → component-name bindings
+	Aliases        map[string]string `json:"aliases,omitempty"`   // CLI command aliases: "mem" → "recall --collection memories"
 }
 
 // Profile describes one execution profile: a (provider, model,
@@ -246,6 +247,40 @@ func (c *Config) DefaultComponentProfile(component string) string {
 		return ""
 	}
 	return c.Components[component]
+}
+
+// CapabilityFor resolves a capability name to its bound substrate
+// component. Capabilities are the operator-meaningful vocabulary
+// that skills and runtime code address; components are the
+// substrate-specific functions that fulfil them.
+//
+// Resolution: returns Components[capability] when bound, or ""
+// when no binding exists. Callers should fall through to a
+// conventional default component (e.g. "memory" for memory
+// operations) when the capability isn't bound.
+//
+// Why this layer exists:
+//
+//   Skills are portable across installations. A skill declares
+//   'I need a reviewer', not 'I need the critic component' or
+//   'I need claude-sonnet'. The capability registry maps the
+//   install's vocabulary to its substrate. Operators on
+//   different installs can name their components differently
+//   (one install calls it 'critic', another calls it
+//   'reviewer'); both bind capability 'reviewer' to their
+//   local component name, and every skill works on both.
+//
+// Future RFCs:
+//   - Components can declare which capabilities they fulfil.
+//     Today the binding is operator-set; future could auto-
+//     discover.
+//   - A capability could fulfil multiple components (e.g.
+//     'synthesizer' → both 'memory' and 'critic').
+func (c *Config) CapabilityFor(capability string) string {
+	if c == nil || c.Capabilities == nil {
+		return ""
+	}
+	return c.Capabilities[capability]
 }
 
 // inferProviderFromURL heuristically maps a base URL to a vendor
