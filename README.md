@@ -901,9 +901,10 @@ mpm config show         # Print current config
 mpm config get <key>    # Print one config value
 mpm config set <k> <v>  # Set one config value and persist
 mpm config edit         # Open mpm_config.json in $EDITOR
-mpm config profile      # Execution-profile management (list, set, show)
-mpm config component    # Component management (list, register, describe)
-mpm config capability   # Capability registry (list, validate, describe)
+mpm config profile add|list|get|set|remove <name>  # Execution profiles (provider/model/temperature/...)
+mpm config component list|get|set <component>     # Component bindings (memory → profile, etc.)
+mpm config capability list|get|set <capability>   # Capability registry (operator-meaningful vocabulary)
+mpm config validate                                # Structural validation (5 layers of checks; exit 0/1/2)
 ```
 
 ### `kb` — Knowledge Base
