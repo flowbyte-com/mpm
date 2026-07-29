@@ -176,8 +176,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":
-		runDoctorCommand(args[1:])
-		return 0
+		return handleDoctor(args[1:])
 	case "recall":
 		return handleRecall(args)
 	case "ingest":
