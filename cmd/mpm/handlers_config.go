@@ -60,6 +60,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -129,6 +130,16 @@ func loadOrInitConfig() *config.Config {
 func handleConfigShow(c *config.Config) int {
 	fmt.Println("Configuration")
 	fmt.Println(strings.Repeat("─", 60))
+
+	// Synthesis engine kill switch — top-level state, independent
+	// of profiles/components (which are concerns under the legacy
+	// synth block). Default-enabled; a missing field means "on".
+	synStatus := "enabled"
+	if c.SynthesisEnabled != nil && !*c.SynthesisEnabled {
+		synStatus = "DISABLED (background synthesis is off)"
+	}
+	fmt.Println()
+	fmt.Printf("  Synthesis engine: %s\n", synStatus)
 
 	// Profiles — the operator-facing execution-profile abstraction.
 	if len(c.Profiles) > 0 {
@@ -562,10 +573,22 @@ func configLookup(c *config.Config, key string) (string, error) {
 // configApply mutates the loaded config in place. Pure mutation
 // helper; persistence happens in handleConfigSet via SaveConfig.
 func configApply(c *config.Config, key, val string) error {
+	canon := configCanonicalKey(key)
+	// Top-level keys (not inside Synth) — handle before the synth
+	// nil-check so callers can disable synthesis even when the
+	// legacy synth block is missing.
+	switch canon {
+	case "synthesis_enabled":
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("synthesis_enabled must be a boolean (true|false); got %q", val)
+		}
+		c.SynthesisEnabled = &b
+		return nil
+	}
 	if c.Synth == nil {
 		return fmt.Errorf("synth block missing")
 	}
-	canon := configCanonicalKey(key)
 	switch canon {
 	case "model":
 		c.Synth.Model = val
@@ -586,7 +609,7 @@ func configApply(c *config.Config, key, val string) error {
 		}
 		c.Synth.TimeoutSecs = n
 	default:
-		return fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds)", key)
+		return fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
 	}
 	return nil
 }
