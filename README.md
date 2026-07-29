@@ -492,6 +492,18 @@ mpm challenge <id> "recent data contradicts this"
 mpm status
 mpm ops stats
 mpm wake               # last session context
+
+# Swap the LLM provider — e.g. OpenRouter (any model, including the free tier):
+mpm config profile add router                           # interactive wizard on TTY; non-interactive creates an empty profile
+mpm config profile set router provider openrouter
+mpm config profile set router model openai/gpt-4o-mini
+mpm config profile set router base_url https://openrouter.ai/api/v1
+mpm config profile set router api_key <your openrouter key>
+mpm config component set memory router                   # bind memory writes to the new profile
+                                                        # (auth header + endpoint are inferred from base_url)
+
+# Free tier is just a model suffix — `meta-llama/llama-3.3-70b-instruct:free`:
+mpm config profile set router model meta-llama/llama-3.3-70b-instruct:free
 ```
 
 Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
@@ -934,7 +946,7 @@ mpm call request_review \
                         # Renderer: internal/core/renderers. Adapter: tools/handlers.go.)
 
 # Configuration
-mpm config              # Interactive AI provider setup wizard (MiniMax, OpenAI, Ollama, Anthropic, Custom)
+mpm config              # Interactive AI provider setup wizard (MiniMax, OpenAI, OpenRouter, Anthropic, Ollama, LM Studio, Custom)
 mpm config show         # Print current config
 mpm config get <key>    # Print one config value
 mpm config set <k> <v>  # Set one config value and persist

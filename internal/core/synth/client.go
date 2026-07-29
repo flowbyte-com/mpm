@@ -37,12 +37,23 @@ type SynthClientInterface interface {
 // SynthClient is the HTTP client to LLM vendors. Fields are exported so
 // callers (admission flow, CLI handlers) can read the resolved configuration
 // without going through a getter.
+//
+// Wire selection (Anthropic-protocol vs OpenAI-protocol) is inferred from
+// BaseURL at construction. The Model/BaseURL/APIKey set here shape the
+// wire — operators don't pick the wire explicitly; URL is the operative
+// signal. See internal/core/synth/wire.go for the dispatch table.
 type SynthClient struct {
 	Model     string
 	APIKey    string
 	BaseURL   string
 	MaxTokens int
 	Timeout   time.Duration
+	// Wire is the protocol the client will speak. Resolved once at
+	// construction time from BaseURL; defaults to Anthropic-protocol
+	// for backwards compatibility. Exported for tests and for the
+	// orchestrator's ModelFactory which sometimes needs to render the
+	// wire label to operators.
+	Wire wireShape
 }
 
 // NewSynthClient reads LLM configuration from mpm_config.json (synth block)
@@ -74,9 +85,33 @@ func NewSynthClient() *SynthClient {
 		}
 	}
 	if sc.APIKey == "" {
-		if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
-			sc.APIKey = key
+		// Env-var fallback. The legacy MINIMAX_API_KEY works
+		// for the default Anthropic-protocol wire (which is
+		// what MiniMax itself speaks). For OpenAI-protocol
+		// wires (OpenRouter, OpenAI native, LM Studio),
+		// OPENROUTER_API_KEY or OPENAI_API_KEY are the
+		// matching env vars. Wire inference picks the right
+		// one based on BaseURL.
+		sc.Wire = inferWire(sc.BaseURL)
+		switch sc.Wire {
+		case wireOpenAI:
+			if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+				sc.APIKey = key
+			} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+				sc.APIKey = key
+			}
+		default:
+			if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
+				sc.APIKey = key
+			} else if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+				sc.APIKey = key
+			}
 		}
+	} else {
+		// API key was set on the explicit config path
+		// (synth block or profile); wire is still inferred
+		// from BaseURL the same way.
+		sc.Wire = inferWire(sc.BaseURL)
 	}
 	return sc
 }
@@ -114,9 +149,15 @@ type SynthResult struct {
 // Synthesize sends memory fragments to the LLM using the consolidation prompt
 // and returns the parsed synthesis result. Uses a context with the configured
 // timeout for cancellation safety.
+//
+// Wire dispatch: Auth header, request path, and response parser are
+// selected by sc.Wire (inferred from BaseURL at construction). Same
+// body shape on both wires (system message first, user second in the
+// messages array) — the divergence is in the URL, the header, and the
+// response unwrap, all of which live in wire.go.
 func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*SynthResult, error) {
 	if sc.APIKey == "" {
-		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
+		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block, MINIMAX_API_KEY env var, or OPENROUTER_API_KEY env var)")
 	}
 
 	userContent := strings.Join(fragments, "\n---MEMORY---\n")
@@ -135,12 +176,13 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", sc.BaseURL+"/messages", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", sc.BaseURL+sc.Wire.path(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", sc.APIKey)
+	authName, authValue := sc.Wire.authHeader(sc.APIKey)
+	req.Header.Set(authName, authValue)
 
 	var resp *http.Response
 	var respBody []byte
@@ -177,9 +219,9 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	rawResult, err := sc.ParseResponseBody(respBody, "default")
+	rawResult, err := sc.Wire.parseResponseBody(respBody)
 	if err != nil {
-		return nil, fmt.Errorf("synthesis [vendor=default]: %w", err)
+		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}
 	var result SynthResult
 	if err := json.Unmarshal(rawResult, &result); err != nil {
@@ -191,49 +233,36 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 	return &result, nil
 }
 
-// ParseResponseBody parses the Anthropic-style response wrapper and returns
-// the inner LLM output text as raw bytes. Exported because admission.go
-// (different package) needs to call it on admission responses.
-//
-// The vendor parameter is included for contextual error messages — the caller
-// passes the vendor name (or "default" / "admission" / etc.) so error logs
-// identify which path produced the failure.
-func (sc *SynthClient) ParseResponseBody(body []byte, vendor string) ([]byte, error) {
-	wrapper := struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}{}
-	if err := json.Unmarshal(body, &wrapper); err != nil {
-		return nil, fmt.Errorf("vendor %s: failed to parse response wrapper: %w (body: %s)", vendor, err, string(body))
+// wireLabel returns a human-readable name for a wire. Used in error
+// messages to make watchdog output diagnosable without inspecting
+// raw JSON.
+func wireLabel(w wireShape) string {
+	switch w {
+	case wireOpenAI:
+		return "openai"
+	default:
+		return "default"
 	}
-	if len(wrapper.Content) == 0 {
-		return nil, fmt.Errorf("vendor %s: API returned empty content", vendor)
-	}
-	// Find the first content block of type "text". Anthropic-style responses
-	// may include a "thinking" block before the "text" block; using
-	// content[0] would pick up the thinking block which has no Text field.
-	var raw string
-	for _, c := range wrapper.Content {
-		if c.Type == "text" && c.Text != "" {
-			raw = strings.TrimSpace(c.Text)
-			break
-		}
-	}
-	if raw == "" {
-		return nil, fmt.Errorf("vendor %s: LLM returned empty response text (content types: %v)", vendor, contentTypes(wrapper.Content))
-	}
-	return []byte(raw), nil
 }
 
-func contentTypes(blocks []struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}) []string {
-	out := make([]string, 0, len(blocks))
-	for _, b := range blocks {
-		out = append(out, b.Type)
+// ParseResponseBody parses a vendor response body and returns the
+// inner LLM output text as raw bytes. Exported because admission.go
+// and compact_epistemology (different packages) need to call it on
+// their own vendor responses.
+//
+// The vendor parameter is included for contextual error messages —
+// the caller passes the vendor name (or "default" / "admission" /
+// "compact_lesson" / etc.) so error logs identify which path
+// produced the failure.
+//
+// Wire dispatch is delegated to sc.Wire (set by NewSynthClient
+// from BaseURL). The exported method is the *same* dispatch as
+// Synthesize uses internally; admission and compact inherit the
+// wire for free without choosing.
+func (sc *SynthClient) ParseResponseBody(body []byte, vendor string) ([]byte, error) {
+	raw, err := sc.Wire.parseResponseBody(body)
+	if err != nil {
+		return nil, fmt.Errorf("vendor %s: %w", vendor, err)
 	}
-	return out
+	return raw, nil
 }

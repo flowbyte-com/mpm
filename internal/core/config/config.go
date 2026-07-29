@@ -296,15 +296,34 @@ func (c *Config) CapabilityFor(capability string) string {
 // inferProviderFromURL heuristically maps a base URL to a vendor
 // identifier. Substrate doesn't store provider explicitly, so the
 // URL is the operative signal for legacy-migrated configs.
+//
+// Provider labels and what they wire to (in client.go):
+//
+//   minimax     — Anthropic-protocol at api.minimax.io/anthropic/v1
+//   openrouter  — OpenAI-protocol at openrouter.ai/api/v1
+//   openai      — OpenAI-protocol at api.openai.com/v1
+//   anthropic   — Anthropic-protocol at api.anthropic.com
+//   ollama      — local 11434 (LM Studio also matches ollama's port test)
+//   lmstudio    — local OpenAI-compatible (separate label for clarity)
+//   custom      — anything else; wire falls back to Anthropic-protocol
+//
+// The wire dispatch (Anthropic-protocol vs OpenAI-protocol) is
+// computed separately in internal/core/synth/wire.go via inferWire()
+// — this function is the human-readable label, that one is the
+// runtime protocol decision.
 func inferProviderFromURL(u string) string {
 	lu := strings.ToLower(u)
 	switch {
+	case strings.Contains(lu, "openrouter"):
+		return "openrouter"
 	case strings.Contains(lu, "minimax"):
 		return "minimax"
 	case strings.Contains(lu, "openai"):
 		return "openai"
 	case strings.Contains(lu, "anthropic"):
 		return "anthropic"
+	case strings.Contains(lu, "lmstudio"):
+		return "lmstudio"
 	case strings.Contains(lu, "ollama") || strings.Contains(lu, "11434"):
 		return "ollama"
 	case lu == "":
