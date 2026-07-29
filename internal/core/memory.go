@@ -206,6 +206,11 @@ func (s *MemoryStore) addColumnIfNotExists(table, column, colType string) error 
 // Sessions: Timestamp-based with auto-expire (30-day purging via VACUUM)
 // Topics: FTS5 + Vector storage
 func (s *MemoryStore) InitSQLite() error {
+	// If backed by a DatabaseManager (CLI usage), schema is already initialized.
+	if s.DM != nil {
+		return nil
+	}
+
 	err := os.MkdirAll(filepath.Dir(s.SQLiteDBPath), 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create db dir: %w", err)
@@ -1355,15 +1360,19 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 	}
 
 	// Get all LTM and reinforced memories grouped by tag
-	// LIMIT 500 prevents O(n²) CPU lock on massive databases
+	// LIMIT prevents O(n²) CPU lock on massive databases
+	consolidationLimit := 500
+	if s.DM != nil {
+		consolidationLimit = s.DM.GetConfigInt("consolidation.max_memories", 500)
+	}
 	rows, err := s.DB.Query(`
 		SELECT id, collection, content, tags, embedding, created_at, weight, reinforcement_count
 		FROM memories
 		WHERE deleted_at IS NULL
 		  AND (is_long_term = 1 OR reinforcement_count > 0 OR weight > 1)
 		ORDER BY collection, created_at DESC
-		LIMIT 500
-	`)
+		LIMIT ?
+	`, consolidationLimit)
 	if err != nil {
 		return 0, err
 	}

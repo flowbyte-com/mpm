@@ -345,6 +345,12 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_lessons_retrieval_priority ON lessons(retrieval_priority);`,
 	`CREATE INDEX IF NOT EXISTS idx_lessons_importance ON lessons(importance);`,
 
+	// Composite indexes for heavy write-path queries (DecayWeights, ConsolidateMemories, AutoPrunePolicy, SpacedReinforcementReview)
+	`CREATE INDEX IF NOT EXISTS idx_memories_decay ON memories(collection, deleted_at, is_long_term, weight);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_reinforcement ON memories(collection, deleted_at, reinforcement_count, weight);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_prune ON memories(collection, deleted_at, updated_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_spaced_review ON memories(collection, deleted_at, is_long_term, weight, last_accessed_at);`,
+
 	// System audit log — runtime anomalies (errors, warnings, fatal conditions)
 	// AND deliberate state-mutation events (info). The agent queries this via
 	// the query_audit_log MCP tool to surface what went wrong, especially
