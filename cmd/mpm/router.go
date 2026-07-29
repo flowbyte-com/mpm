@@ -84,6 +84,13 @@ func NewRouter() *CommandRouter {
 		// Tour (cognitive-interface RFC Wave 4) — onboarding walkthrough.
 		"tour": {Name: "tour", Description: "Interactive walkthrough of the cognitive verbs (--demo auto-runs each step; --step N jumps)"},
 
+		// Identity inspector — `mpm info`, distinct from `mpm status` (live substrate)
+		// and `mpm doctor` (trust signals). Per the post-RFC polish session.
+		"info": {Name: "info", Description: "Installation identity (version, database, models, scheduler, skills, persona, counts)"},
+
+		// Configuration wizard (Wed 2026-07-29 polish session).
+		"config": {Name: "config", Description: "Configure the AI provider (interactive wizard or scripted set|get|show|edit)"},
+
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
 		"list-skills": {Name: "list-skills", Description: "List skills (scope: all|local|shared)", MinArgs: 0, MaxArgs: 1},
@@ -237,6 +244,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSkill(args[1:])
 	case "tour":
 		return handleTour(args[1:])
+	case "info":
+		return handleInfo(args[1:])
+	case "config":
+		return handleConfig(args[1:])
 	case "ls":
 		return handleLs(args)
 	case "show":
