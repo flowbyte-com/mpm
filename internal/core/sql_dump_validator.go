@@ -136,6 +136,7 @@ var CanonicalMPMSchema = []string{
 	"shared.bcast_event_wakes",
 	"shared.bcast_sessions",
 	"shared.contradiction_log",
+	"synth_runs",
 	"system_audit_log",
 	"system_config",
 	"topic_memberships",

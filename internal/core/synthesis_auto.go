@@ -12,8 +12,12 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,31 +102,196 @@ func synthesisEnabled() bool {
 	return *cfg.SynthesisEnabled
 }
 
+// synthHashContent returns the lower-case hex SHA-256 of content.
+// Format matches the existing memories.content_hash column
+// (BackfillContentHash in memory.go uses the same expression), so
+// the dedup table and the memories table share the same identity
+// key. Length is always 64 hex chars.
+//
+// Cheap on every call: SHA-256 of <10KB content is sub-millisecond
+// on any modern CPU. Faster than the FTS5 query, so this is the
+// fast-skip path — compute the hash first, look it up, skip the
+// expensive query and the LLM call.
+func synthHashContent(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// synthCooldownSeconds is the minimum time (in seconds) between
+// re-synthesizing the same content. Looked up via the typed
+// GetConfigInt helper from system_config (key
+// "synth.cooldown_seconds"), with env-var override
+// MPM_SYNTH_COOLDOWN_SECONDS, default 3600 (one hour).
+//
+// Default 1h is the conservative baseline: long enough to
+// stop token burn under burst writes, short enough that a
+// re-ingestion 30 minutes later still gets a fresh synthesis
+// if the surrounding context has changed meaningfully.
+//
+// AutoSynthesize does not pollute this surface; the cooldown
+// is per-row on memories.last_synthesized_at and per-hash on
+// synth_runs. The combination means:
+//   - same content within cooldown: skipped (synth_runs hit)
+//   - same content after cooldown: re-synthesized (synth_runs
+//     upserted, last_run_at bumped)
+//   - different content but overlapping candidates: filtered
+//     out by DetectNearMiss cooldown on last_synthesized_at
+func synthCooldownSeconds() int {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		return 3600
+	}
+	if v := osGetenvInt("synth.cooldown_seconds", cfg); v > 0 {
+		return v
+	}
+	return 3600
+}
+
+// osGetenvInt reads MPM_<KEY> env var with dots->underscores
+// lookup. Returns 0 if unset or unparseable; caller handles
+// default semantics. Mirrors GetConfigInt's env-var fallback.
+func osGetenvInt(key string, _ *config.Config) int {
+	envKey := "MPM_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+	v := os.Getenv(envKey)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// synthHasContentHash checks the persistent synth_runs ledger
+// for the given content hash. Returns (true, runCount) on hit,
+// (false, 0) on miss. Cheap O(1) lookup keyed by content_hash.
+//
+// The ledger is the authoritative "has this content ever been
+// involved in synthesis" record. Updates atomically bump
+// last_run_at and run_count; first_run_at and
+// result_memory_id are preserved from the original synthesis.
+func synthHasContentHash(dm CoreDB, contentHash string) (bool, int) {
+	if dm == nil {
+		return false, 0
+	}
+	var runCount int
+	err := dm.SQLDB().QueryRow(
+		`SELECT run_count FROM synth_runs WHERE content_hash = ?`,
+		contentHash,
+	).Scan(&runCount)
+	if err != nil {
+		return false, 0
+	}
+	return true, runCount
+}
+
+// recordSynthRun upserts a synth_runs row. On first synthesis
+// for this content_hash: insert with run_count=1. On re-sights
+// (shouldn't normally happen given the fast-skip, but defensive):
+// bump last_run_at and run_count. first_run_at and
+// result_memory_id stay locked to the original synthesis.
+//
+// resultMemoryID is the id of the synthesized memory written
+// from this content; surfaced for forensic trails.
+func recordSynthRun(dm CoreDB, contentHash, resultMemoryID string) {
+	if dm == nil {
+		return
+	}
+	now := time.Now().Unix()
+	dm.SQLDB().Exec(`
+		INSERT INTO synth_runs (content_hash, first_run_at, last_run_at, run_count, result_memory_id)
+		VALUES (?, ?, ?, 1, ?)
+		ON CONFLICT(content_hash) DO UPDATE SET
+			last_run_at = excluded.last_run_at,
+			run_count = run_count + 1
+	`, contentHash, now, now, resultMemoryID)
+}
+
+// bumpSynthDedupCounter increments run_count and refreshes
+// last_run_at on a synth_runs row without changing the
+// result_memory_id. Used when a dedup HIT (the content was
+// already synthesized) but the caller wants a watchdog-visible
+// signal that the same content was re-sighted. run_count is the
+// cumulative number of times this content was seen across the
+// lifetime of the ledger.
+func bumpSynthDedupCounter(dm CoreDB, contentHash string) {
+	if dm == nil {
+		return
+	}
+	now := time.Now().Unix()
+	dm.SQLDB().Exec(`
+		UPDATE synth_runs
+		SET last_run_at = ?, run_count = run_count + 1
+		WHERE content_hash = ?
+	`, now, contentHash)
+}
+
+// markMemorySynthCooldown stamps last_synthesized_at on a
+// surviving memory (typically the synthesized merge result,
+// R). Makes the new memory's cooldown visible to
+// DetectNearMiss for the next ingest: candidates that were
+// just produced from synthesis won't themselves be
+// immediately re-merged into another synthesis run.
+//
+// Originals (newID + soft-deleted candidates) are NOT
+// stamped — they're being deleted; their last_synthesized_at
+// would be moot.
+func markMemorySynthCooldown(dm CoreDB, memoryID string) {
+	if dm == nil || memoryID == "" {
+		return
+	}
+	dm.SQLDB().Exec(
+		`UPDATE memories SET last_synthesized_at = strftime('%s','now') WHERE id = ?`,
+		memoryID,
+	)
+}
+
 // DetectNearMiss uses FTS5 bm25 to find memories whose content overlaps
 // semantically with the given text. Returns up to 10 candidates ordered by
-// relevance, filtered by a bm25 score threshold.
+// relevance, filtered by a bm25 score threshold AND by the per-memory
+// last_synthesized_at cooldown.
 //
 // bm25 in SQLite returns negative values where lower (more negative) = more
-// relevant. The threshold of -10 means "at least somewhat relevant". Exact
-// duplicates (same content_hash) are excluded via the newID parameter.
-func DetectNearMiss(dm CoreDB, content string, newID string, threshold float64) ([]nearMissCandidate, error) {
+// relevant. The threshold of -10 means "at least somewhat relevant". The
+// cooldownSeconds parameter excludes memories stamped with a recent
+// last_synthesized_at — pass 0 to disable the cooldown filter (back-compat
+// for callers that want the raw FTS5 result).
+//
+// "Exact duplicates (same content_hash) are excluded via the newID
+// parameter" — kept from the prior version but note the AutoSynthesize
+// fast-skip on synth_runs handles duplicates BEFORE we get here.
+func DetectNearMiss(dm CoreDB, content string, newID string, threshold float64, cooldownSeconds int) ([]nearMissCandidate, error) {
 	tokens := sanitiseFTS5Tokens(content)
 	if len(tokens) == 0 {
 		return nil, nil
 	}
 	query := strings.Join(tokens, " ")
 
+	// Cooldown predicate. If cooldownSeconds <= 0 the filter is a
+	// no-op (the IS NULL OR < cutoff becomes IS NULL OR 1, which
+	// matches all rows).
+	var cooldownClause string
+	var cooldownArgs []interface{}
+	if cooldownSeconds > 0 {
+		cutoff := time.Now().Unix() - int64(cooldownSeconds)
+		cooldownClause = ` AND (m.last_synthesized_at IS NULL OR m.last_synthesized_at < ?) `
+		cooldownArgs = []interface{}{cutoff}
+	}
+
+	args := append([]interface{}{query, newID}, cooldownArgs...)
+
 	rows, err := dm.SQLDB().Query(`
-		SELECT m.id, m.content, bm25(memories_fts) as score, m.tags
+		SELECT m.id, m.content, bm25(memories_fts) as score, COALESCE(m.tags, '') as tags
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
 		WHERE memories_fts MATCH ?
 		  AND m.deleted_at IS NULL
 		  AND m.id != ?
-		  AND m.collection NOT IN ('theories', 'decisions')
+		  AND m.collection NOT IN ('theories', 'decisions')`+cooldownClause+`
 		ORDER BY score
 		LIMIT 10
-	`, query, newID)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("FTS5 near-miss query failed: %w", err)
 	}
@@ -224,9 +393,30 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		ctx = context.Background()
 	}
 
-	// 1. FTS5 pre-filter
+	// 0. content_hash fast-skip (BEFORE FTS5 query).
+	// sha256(content) → check synth_runs ledger. Hit means this
+	// exact content has already been synthesized (or attempted)
+	// in some prior session; bumping last_run_at is enough for
+	// observability, but the LLM call is unnecessary. This is
+	// the layer that stops the token burn from re-ingestion of
+	// already-synthesized content (e.g. a tui save that re-saves
+	// the same memory because the user hit cmd-s twice).
+	contentHash := synthHashContent(content)
+	if hit, runCount := synthHasContentHash(dm, contentHash); hit {
+		bumpSynthDedupCounter(dm, contentHash)
+		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
+			"reason":        "content_hash already synthesized",
+			"content_hash":  contentHash,
+			"prior_runs":    runCount,
+			"timestamp":     time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	// 1. FTS5 pre-filter (with candidate cooldown via last_synthesized_at).
 	threshold := -10.0
-	candidates, err := DetectNearMiss(dm, content, newID, threshold)
+	cooldown := synthCooldownSeconds()
+	candidates, err := DetectNearMiss(dm, content, newID, threshold, cooldown)
 	if err != nil {
 		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
 			"reason": "near-miss detection failed",
@@ -376,11 +566,23 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	}
 	dm.SQLDB().Exec("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID)
 
-	// 12. Log success to watchdog
+	// 12. Persist the synth_runs ledger entry + stamp cooldown on R.
+	// recordSynthRun: content_hash → first/last_run_at + run_count.
+	// markMemorySynthCooldown: stamps R.last_synthesized_at so the
+	// next FTS5 query won't re-pick R as a candidate within the
+	// cooldown window. Originals (newID + toMerge) are NOT stamped:
+	// their last_synthesized_at would be moot (they're being
+	// soft-deleted on the next step).
+	recordSynthRun(dm, contentHash, newSynthID)
+	markMemorySynthCooldown(dm, newSynthID)
+
+	// 13. Log success to watchdog
 	logWatchdogOp(dm, "synthesize", map[string]interface{}{
-		"new_id":    newSynthID,
-		"old_ids":   sourceIDs,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"new_id":       newSynthID,
+		"old_ids":      sourceIDs,
+		"content_hash": contentHash,
+		"cooldown_s":   cooldown,
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
