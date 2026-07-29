@@ -205,16 +205,15 @@ func main() {
 						os.Exit(0)
 					}
 					printSuccess("memory saved (id=%s)", mem.ID)
-					// Fire-and-forget auto-synthesis (same pattern as memory add handler)
-					go func(id, c string) {
-						synthDM, synthErr := getDB().NewSession()
-						if synthErr != nil {
-							slog.Warn("synthesis: failed to open db session", "memory_id", id, "error", synthErr)
-							return
-						}
-						defer synthDM.Close()
-						mpminternal.AutoSynthesize(context.Background(), synthDM, synth.NewSynthClient(), id, c)
-					}(mem.ID, data)
+					// Submit to synthesis worker pool (bounded, with context)
+					if synthDM, err := getDB().NewSession(); err == nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						pool := mpminternal.GetSynthesisPool(3)
+						pool.Submit(ctx, synthDM, synth.NewSynthClient(), mem.ID, data)
+						cancel()
+					} else {
+						slog.Warn("synthesis: failed to open db session", "memory_id", mem.ID, "error", err)
+					}
 				}
 				os.Exit(0)
 			}
