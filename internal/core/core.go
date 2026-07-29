@@ -125,6 +125,13 @@ type CoreDB interface {
 	DeleteSystemConfig(key string) error
 	GetAllSystemConfigs() ([]map[string]interface{}, error)
 
+	// ─── Config Helpers ────────────────────────────────────────────
+	// GetConfigInt reads an integer config from system_config with env fallback.
+	GetConfigInt(key string, defaultValue int) int
+	GetConfigInt64(key string, defaultValue int64) int64
+	GetConfigFloat64(key string, defaultValue float64) float64
+	GetConfigString(key string, defaultValue string) string
+
 	// ─── References ──────────────────────────────────────────────────
 	AddReference(doc *ReferenceDoc, chunks []ReferenceChunk) error
 	DeleteReference(id string) error

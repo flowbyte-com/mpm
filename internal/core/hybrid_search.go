@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -276,18 +274,38 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
 	contradictionTable := cfg.SchemaPrefix + "memories"
 	candMap := make(map[string]candidateInfo, scanLimit)
-	for _, c := range scanSet {
-		var embStr string
-		var contentStr string
-		err := dm.SQLDB().QueryRow(
-			fmt.Sprintf(`SELECT embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id = ? AND embedding IS NOT NULL AND embedding != 'null'`, contradictionTable),
-			c.ID,
-		).Scan(&embStr, &contentStr, &c.Metadata)
-		if err == nil && embStr != "" {
-			var emb []float32
-			if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-				candMap[c.ID] = candidateInfo{embedding: emb, content: contentStr, isChallenged: c.IsChallenged, metadataJSON: c.Metadata}
+
+	// Batch fetch embeddings + content + metadata in a single query
+	if scanLimit > 0 {
+		placeholders := make([]string, scanLimit)
+		args := make([]interface{}, scanLimit)
+		for i, c := range scanSet {
+			placeholders[i] = "?"
+			args[i] = c.ID
+		}
+		rows, err := dm.SQLDB().Query(
+			fmt.Sprintf(`SELECT id, embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id IN (%s) AND embedding IS NOT NULL AND embedding != 'null'`, contradictionTable, strings.Join(placeholders, ",")),
+			args...,
+		)
+		if err == nil {
+			for rows.Next() {
+				var id, embStr, contentStr, metaStr string
+				if err := rows.Scan(&id, &embStr, &contentStr, &metaStr); err == nil && embStr != "" {
+					var emb []float32
+					if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
+						candMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr}
+					}
+				}
 			}
+			rows.Close()
+		}
+	}
+
+	// Backfill isChallenged from scanSet (since we didn't include it in the batch query)
+	for _, c := range scanSet {
+		if info, ok := candMap[c.ID]; ok {
+			info.isChallenged = c.IsChallenged
+			candMap[c.ID] = info
 		}
 	}
 
@@ -645,12 +663,7 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 	memTable := schemaPrefix + "memories"
 
-	maxScan := 5000
-	if v := os.Getenv("MPM_MAX_VECTOR_SCAN"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			maxScan = parsed
-		}
-	}
+	maxScan := dm.GetConfigInt("vector.max_scan", 5000)
 	if maxScan > 0 {
 		countQuery := `SELECT COUNT(*) FROM ` + memTable + ` WHERE ` + strings.Join(whereClauses, " AND ")
 		var rowCount int
