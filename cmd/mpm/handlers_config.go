@@ -96,11 +96,13 @@ func handleConfig(args []string) int {
 		return handleConfigProfile(args[1:])
 	case "component":
 		return handleConfigComponent(args[1:])
+	case "capability":
+		return handleConfigCapability(args[1:])
 	case "help", "-h", "--help":
 		printConfigHelp()
 		return 0
 	default:
-		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, (no args = interactive wizard)", args[0])
+		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, (no args = interactive wizard)", args[0])
 		return 1
 	}
 }
@@ -154,6 +156,20 @@ func handleConfigShow(c *config.Config) int {
 				bound = "(default)"
 			}
 			fmt.Printf("    %-12s → %s\n", comp, bound)
+		}
+	}
+
+	// Capabilities — operator-meaningful vocabulary that Skills
+	// and runtime code address, mapped to substrate components.
+	if len(c.Capabilities) > 0 {
+		fmt.Println()
+		fmt.Println("  Capabilities")
+		for _, cap := range sortedKeysForConfig(c.Capabilities) {
+			bound := c.Capabilities[cap]
+			if bound == "" {
+				bound = "(default)"
+			}
+			fmt.Printf("    %-12s → %s\n", cap, bound)
 		}
 	}
 
@@ -227,27 +243,168 @@ func handleConfigEdit() int {
 }
 
 func handleConfigValidate(c *config.Config) int {
-	// v0.1 validation is intentionally minimal. Substrate config
-	// shape is the substrate's contract; this handler only
-	// confirms the file loaded and that required synth fields are
-	// non-empty. Future RFCs can add live-provider pings.
+	// Robust structural validation. Walks Profiles, Components,
+	// Capabilities, and the legacy Synth fallback to surface
+	// actionable errors. Per v (operator) request, this becomes
+	// the cognitive equivalent of `go vet` / `cargo check` /
+	// `terraform validate` — a single command that builds
+	// confidence before operators deploy config changes.
+	//
+	// Scope: structural only. Live provider connectivity (HTTP
+	// pings, model listing) is a future-RFC feature -- it would
+	// need per-vendor ping primitives and error tolerance for
+	// flaky networks. Today's validator catches "this binding
+	// won't work because the profile is missing a model" without
+	// leaving the operator's machine.
 	if c == nil {
 		fmt.Println("✗ no config loaded")
 		return 1
 	}
-	if c.Synth == nil {
-		fmt.Println("✗ synth block missing")
-		fmt.Println("  run `mpm config` to set up a provider")
-		return 1
+	issues := 0
+
+	fmt.Println("Configuration validation")
+	fmt.Println(strings.Repeat("─", 60))
+
+	// Check 1: at least one usable provider is configured.
+	hasProvider := (c.Synth != nil && (c.Synth.Model != "" || c.Synth.BaseURL != "")) ||
+		len(c.Profiles) > 0
+	if hasProvider {
+		fmt.Println("  ✓ provider configuration present")
+	} else {
+		fmt.Println("  ✗ no provider configured")
+		fmt.Println("      → run `mpm config` to set one up")
+		issues++
 	}
-	if c.Synth.APIKey == "" && c.Synth.BaseURL == "" {
-		fmt.Println("✗ no api_key and no base_url set")
-		fmt.Println("  run `mpm config` to set up a provider")
-		return 1
+
+	// Check 2: every profile has provider + model set.
+	if len(c.Profiles) > 0 {
+		profileOK := 0
+		for _, name := range sortedKeysForConfig(c.Profiles) {
+			p := c.Profiles[name]
+			if p.Provider == "" || p.Model == "" {
+				fmt.Printf("  ✗ profile %q missing %s\n", name, missingField(p))
+				issues++
+			} else {
+				profileOK++
+			}
+		}
+		if profileOK > 0 && profileOK == len(c.Profiles) {
+			fmt.Printf("  ✓ profiles: %d / %d valid\n", profileOK, len(c.Profiles))
+		}
 	}
-	fmt.Println("✓ configuration shape looks OK")
-	fmt.Println("  (live provider connectivity check is a follow-up RFC)")
-	return 0
+
+	// Check 3: every component bound to a profile that resolves.
+	if len(c.Components) > 0 {
+		componentOK := 0
+		for _, comp := range sortedKeysForConfig(c.Components) {
+			bound := c.Components[comp]
+			if bound == "" {
+				fmt.Printf("  ⚠ component %q unbound (falls back to ProfileFor default chain)\n", comp)
+				continue
+			}
+			if _, ok := c.Profiles[bound]; !ok {
+				// Fall back to "default" profile if one exists.
+				if _, hasDefault := c.Profiles["default"]; hasDefault {
+					componentOK++
+					continue
+				}
+				fmt.Printf("  ✗ component %q bound to missing profile %q\n", comp, bound)
+				fmt.Printf("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`\n", bound, comp)
+				issues++
+				continue
+			}
+			componentOK++
+		}
+		if componentOK == len(c.Components) && len(c.Components) > 0 {
+			fmt.Printf("  ✓ components: %d / %d bound\n", componentOK, len(c.Components))
+		}
+	}
+
+	// Check 4: every capability maps to a real component.
+	//
+	// "Real" here means: the capability's bound component name
+	// resolves to either a known component (memory, critic, ...)
+	// or to a component explicitly bound in Config.Components.
+	// Capability → component → profile is the chain; the
+	// validator only checks the first hop (the component name
+	// exists), since downstream checks are already covered above.
+	if len(c.Capabilities) > 0 {
+		capOK := 0
+		knownSet := map[string]bool{}
+		for _, k := range knownComponents {
+			knownSet[k] = true
+		}
+		for _, cap := range sortedKeysForConfig(c.Capabilities) {
+			bound := c.Capabilities[cap]
+			if bound == "" {
+				fmt.Printf("  ⚠ capability %q unbound (will use default if defined)\n", cap)
+				continue
+			}
+			if !knownSet[bound] {
+				if _, ok := c.Components[bound]; !ok {
+					fmt.Printf("  ✗ capability %q bound to missing component %q\n", cap, bound)
+					fmt.Printf("      → bind to a known component: `mpm config capability set %q <component>`\n", cap)
+					issues++
+					continue
+				}
+			}
+			capOK++
+		}
+		if capOK == len(c.Capabilities) && len(c.Capabilities) > 0 {
+			fmt.Printf("  ✓ capabilities: %d / %d resolve\n", capOK, len(c.Capabilities))
+		}
+	}
+
+	// Check 5: known components (memory, critic, scheduler) all
+	// resolve to a Profile via the ProfileFor chain. Catches the
+	// 'shadow components' case where the operator intended to bind
+	// them but forgot.
+	if c.Synth != nil || len(c.Profiles) > 0 {
+		missingComponent := 0
+		for _, comp := range knownComponents {
+			if c.ProfileFor(comp) == nil {
+				fmt.Printf("  ✗ component %q cannot resolve to a profile\n", comp)
+				missingComponent++
+				issues++
+			}
+		}
+		if missingComponent == 0 && (c.Synth != nil || len(c.Profiles) > 0) {
+			fmt.Printf("  ✓ known components: %s resolve to profiles\n", strings.Join(knownComponents, ", "))
+		}
+	}
+
+	fmt.Println()
+	if issues == 0 {
+		fmt.Println("Validation: ✓ OK")
+		return 0
+	}
+	fmt.Printf("Validation: ✗ FAIL (%d issue%s)\n", issues, pluralForN(issues))
+	fmt.Println()
+	fmt.Println("Live provider checks (--live flag) are a future RFC.")
+	return 1
+}
+
+// missingField returns the first missing required field in p
+// (provider or model). The CLI surface surfaces these in the
+// validator output so operators know which field to set.
+func missingField(p config.Profile) string {
+	if p.Provider == "" {
+		return "provider"
+	}
+	if p.Model == "" {
+		return "model"
+	}
+	return ""
+}
+
+// pluralForN returns "s" for non-1 counts, "" for 1. Tiny helper
+// to keep the validator output grammatical without pulling in
+// golang.org/x/text.
+func pluralForN(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,5 +1175,123 @@ func handleComponentSet(c *config.Config, component, profile string) int {
 		return 1
 	}
 	fmt.Printf("✓ component %q → profile %q\n", component, profile)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Capability subcommands (mpm config capability <sub>)
+// ---------------------------------------------------------------------------
+
+// handleConfigCapability routes capability binding subcommands.
+//
+//   mpm config capability list                Render all bindings
+//   mpm config capability get <capability>    Show one binding
+//   mpm config capability set <cap> <comp>    Bind capability to component
+//
+// Capabilities are the operator-meaningful vocabulary that Skills and
+// runtime code address. Components are the substrate-specific
+// functions that fulfil them. Default v0.1 capabilities:
+//
+//   planner   → memory
+//   reviewer  → critic
+//   reflect   → critic
+//   summarise → memory
+//
+// Operators can override any of these or add their own. The runtime
+// resolves at skill-execution time: skill says 'I need reviewer',
+// config says reviewer → critic, ProfileFor(critic) returns the
+// model.
+func handleConfigCapability(args []string) int {
+	if len(args) == 0 {
+		usererror.Error("mpm config capability <sub> — need one of: list, get, set")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		return handleCapabilityList(loadOrInitConfig())
+	case "get":
+		if len(args) < 2 {
+			usererror.Error("mpm config capability get <capability>")
+			return 1
+		}
+		return handleCapabilityGet(loadOrInitConfig(), args[1])
+	case "set":
+		if len(args) < 3 {
+			usererror.Error("mpm config capability set <capability> <component>")
+			return 1
+		}
+		return handleCapabilitySet(loadOrInitConfig(), args[1], args[2])
+	default:
+		usererror.Error("mpm config capability: unknown subcommand %q — try list|get|set", args[0])
+		return 1
+	}
+}
+
+// defaultCapabilities are the v0.1 capability → component
+// defaults. Loaded once when Capabilities is nil (first-run),
+// can be overridden by the operator via 'capability set'.
+var defaultCapabilities = map[string]string{
+	"planner":   "memory",
+	"reviewer":  "critic",
+	"reflect":   "critic",
+	"summarise": "memory",
+}
+
+func handleCapabilityList(c *config.Config) int {
+	fmt.Println("Capability registry")
+	fmt.Println(strings.Repeat("─", 60))
+	if c.Capabilities == nil {
+		fmt.Println("  (no capabilities configured — defaults loaded on first use)")
+		fmt.Println()
+		for cap, comp := range defaultCapabilities {
+			fmt.Printf("  default  %-12s → %s\n", cap, comp)
+		}
+		return 0
+	}
+	for _, cap := range sortedKeysForConfig(c.Capabilities) {
+		bound := c.Capabilities[cap]
+		if bound == "" {
+			bound = "(unbound)"
+		}
+		fmt.Printf("  %-12s → %s\n", cap, bound)
+	}
+	return 0
+}
+
+func handleCapabilityGet(c *config.Config, capability string) int {
+	bound := c.CapabilityFor(capability)
+	if bound == "" {
+		// Fall back to defaults so operators see the canonical binding.
+		if def, ok := defaultCapabilities[capability]; ok {
+			fmt.Printf("  %s → %s (default; not explicitly bound)\n", capability, def)
+			return 0
+		}
+		fmt.Printf("  %s → (unbound)\n", capability)
+		return 0
+	}
+	fmt.Printf("  %s → %s\n", capability, bound)
+	return 0
+}
+
+func handleCapabilitySet(c *config.Config, capability, component string) int {
+	if c.Capabilities == nil {
+		c.Capabilities = map[string]string{}
+	}
+	// Empty component → remove the binding (use defaults).
+	if component == "" {
+		delete(c.Capabilities, capability)
+		if err := config.SaveConfig(c); err != nil {
+			usererror.Error("saving config: %v", err)
+			return 1
+		}
+		fmt.Printf("✓ capability %q unbound (will use default)\n", capability)
+		return 0
+	}
+	c.Capabilities[capability] = component
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ capability %q → component %q\n", capability, component)
 	return 0
 }
