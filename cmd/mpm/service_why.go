@@ -257,7 +257,11 @@ func (s *WhyService) fetchFromCollection(id, collection string) (map[string]inte
 	var sessID, metaStr, tagsJSON sql.NullString
 	var createdAt, updatedAt sql.NullString
 	var lastAccessed sql.NullString
-	var weight, isLTM int
+	// weight + is_long_term can arrive as INTEGER, FLOAT, or NUMERIC
+	// depending on insert path (some handlers write REAL values). Scan
+	// into float64/bool to handle all three, then convert.
+	var weight float64
+	var isLTM bool
 
 	if err := row.Scan(&outID, &content, &sessID, &tagsJSON, &weight, &isLTM, &metaStr, &coll, &createdAt, &updatedAt, &lastAccessed); err != nil {
 		return nil, err
@@ -265,8 +269,8 @@ func (s *WhyService) fetchFromCollection(id, collection string) (map[string]inte
 	out := map[string]interface{}{
 		"id":           outID,
 		"content":      content,
-		"weight":       int64(weight),
-		"is_long_term": isLTM == 1,
+		"weight":       int64(int(weight)),
+		"is_long_term": isLTM,
 		"collection":   coll,
 	}
 	if sessID.Valid {
