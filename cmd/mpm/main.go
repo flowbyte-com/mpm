@@ -1322,8 +1322,30 @@ func PrintQuicklinks() {
 	divider := strings.Repeat("\u2500", 58)
 
 	fmt.Println()
-	fmt.Println("MPM")
+	// Run readiness first — scheduler auto-start may trigger
+	// here, before the rest of the dashboard composes. The
+	// readiness logic returns a slice of items in canonical
+	// display order (see cmd/mpm/readiness.go for the side-
+	// effect policy).
+	items := ReadReadiness(dm)
+	allOK := readinessOverall(items)
+	header := "MPM Ready"
+	if !allOK {
+		header = "MPM Not ready — see below"
+	}
+	fmt.Println(header)
 	fmt.Println(divider)
+	fmt.Println()
+	for _, item := range items {
+		marker := "✓"
+		if !item.OK {
+			marker = "⚠"
+		}
+		fmt.Printf(" %s  %-22s %s\n", marker, item.Name, item.Detail)
+		if item.Hint != "" {
+			fmt.Printf("        \u2192 %s\n", item.Hint)
+		}
+	}
 	fmt.Println()
 
 	// Section 1: Working Context.
@@ -1399,10 +1421,10 @@ func PrintQuicklinks() {
 	}
 	fmt.Println()
 
-	// Section 4: Common commands (the cognitive-verb front door).
+	// Section 4: Quick actions (the cognitive-verb front door).
 	fmt.Println(divider)
 	fmt.Println()
-	fmt.Println("Most common commands")
+	fmt.Println("Quick actions")
 	fmt.Println()
 	fmt.Println(" mpm continue      Resume your work")
 	fmt.Println(" mpm work show      Show Working Context")
