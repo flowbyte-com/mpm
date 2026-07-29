@@ -1,3 +1,15 @@
+// cmd/mpm/draft.go — interactive $EDITOR-based drafting helper.
+//
+// Used by `mpm memory add --interactive` to let an operator compose
+// long-form memory content in their editor of choice, see a preview,
+// and confirm before insertion. Lives in its own file because the
+// helper has no relationship to any single handler and pulls in
+// separate process-management concerns (os/exec, tempfile cleanup).
+//
+// Originally tucked at the bottom of handlers_watch.go during the
+// 2026-06 watcher deprecation sweep; promoted to a sibling file on
+// 2026-07-29 when the watch handler was hard-removed.
+
 package main
 
 import (
@@ -6,21 +18,6 @@ import (
 	"os/exec"
 	"strings"
 )
-
-func handleWatch(args []string) int {
-	subCmd := "status"
-	if len(args) > 0 {
-		subCmd = args[0]
-	}
-	fmt.Printf("⚠️  mpm watch %s is deprecated (removed 2026-06-26).\n", subCmd)
-	fmt.Println("    The watcher daemon was an auto-ingest workaround for pre-MCP agents.")
-	fmt.Println("    Use `mpm ops maintain` for decay/cleanup on demand.")
-	fmt.Println("    Use `mpm ops synthesize` for synthesis on demand.")
-	fmt.Println("    Use `mpm ops ingest --source <path>` for one-shot external DB ingestion.")
-	fmt.Println("    The parser library lives at cmd/mpm/parsers.go if a future one-shot")
-	fmt.Println("    CLI needs to be rebuilt from scratch.")
-	return 0
-}
 
 // draftInteractiveContent opens $EDITOR on a temp file, waits for the user
 // to save+exit, reads the result, shows a preview, and asks for y/N
