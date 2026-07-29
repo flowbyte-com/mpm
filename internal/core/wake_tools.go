@@ -110,24 +110,63 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 // SELECT, so concurrent CheckPendingWakes calls will not return the
 // same wake twice. Two callers racing for the same wake will see one
 // winner and the other an empty list.
-func (dm *DatabaseManager) CheckPendingWakes(now time.Time) ([]map[string]interface{}, error) {
+//
+// Kinds filter:
+//   - kinds nil/empty: backward-compatible default. Surfaces notification
+//     wakes (kind='notification' or kind absent on metadata). Cron-injected
+//     and other system-kind wakes are excluded.
+//   - kinds contains "*": surface every pending wake regardless of kind.
+//   - kinds is a specific list: surface only wakes whose metadata.kind
+//     matches one of the entries (json_extract IN (...)). Wakes with
+//     no kind set are excluded by this branch.
+func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Build the kind-filter clause. Three branches:
+	//   "*" anywhere  -> no filter (surface everything)
+	//   specific list -> IN clause on json_extract(metadata, '$.kind')
+	//   nil / empty   -> backward-compat default (notification only)
+	whereExtra := ""
+	args := []interface{}{nowUnix}
+
+	includeAll := false
+	for _, k := range kinds {
+		if k == "*" {
+			includeAll = true
+			break
+		}
+	}
+
+	switch {
+	case includeAll:
+		// Surface every pending wake regardless of metadata.kind.
+	case len(kinds) > 0:
+		placeholders := make([]string, 0, len(kinds))
+		for _, k := range kinds {
+			placeholders = append(placeholders, "?")
+			args = append(args, k)
+		}
+		whereExtra = ` AND json_extract(metadata, '$.kind') IN (` + strings.Join(placeholders, ",") + `)`
+	default:
+		// Backward-compat default: only notification-kind wakes.
+		whereExtra = ` AND (
+		    metadata IS NULL OR metadata = ''
+		    OR json_extract(metadata, '$.kind') IS NULL
+		    OR json_extract(metadata, '$.kind') = 'notification'
+		  )`
+	}
+
 	rows, err := tx.Query(
 		`SELECT id, target_time, reason, theory_id, recurring_rule, created_by, metadata, created_at
 		 FROM scheduled_wakes
-		 WHERE fired = 0 AND target_time <= ?
-		   AND (
-		     metadata IS NULL OR metadata = ''
-		     OR json_extract(metadata, '$.kind') IS NULL
-		     OR json_extract(metadata, '$.kind') = 'notification'
-		   )
+		 WHERE fired = 0 AND target_time <= ?`+whereExtra+`
 		 ORDER BY target_time ASC`,
-		nowUnix,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("select pending wakes: %w", err)

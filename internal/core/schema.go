@@ -51,6 +51,15 @@ var BaseTables = []string{
 		config_snapshot JSON
 	);`,
 
+	// Schema migrations table - sentinel rows mark which one-shot data
+	// migrations have already run. Used by MigrateDeletedAtToUnixEpoch
+	// (deleted_at_unified_v1) and any future data migrations that need
+	// to be idempotent across restarts.
+	`CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY,
+		applied_at INTEGER NOT NULL
+	);`,
+
 	// Lessons table - stores learned lessons (insights, warnings, practices)
 	`CREATE TABLE IF NOT EXISTS lessons (
 		id TEXT PRIMARY KEY,
@@ -61,6 +70,24 @@ var BaseTables = []string{
 		source_session_id TEXT,
 		created TEXT NOT NULL,
 		content_hash TEXT
+	);`,
+
+	// Retrieval metadata — Observability Layer for "Adaptive Retrieval"
+	// (2026-07-26). 1:1 mapping with any cognitive node (Memory,
+	// Lesson, Decision, Theory, Skill). Tracks how often each node is
+	// surfaced into agent working memory. Search ranking is NOT altered
+	// by this table; the data is observability only until a future
+	// ranker chooses to consume it. See retrieval_ranker.go for the
+	// RetrievalRanker interface and DefaultRanker (preserves today's
+	// ftsScore pass-through behavior bit-for-bit).
+	`CREATE TABLE IF NOT EXISTS retrieval_metadata (
+		node_id TEXT PRIMARY KEY,
+		node_type TEXT NOT NULL,
+		reuse_count INTEGER DEFAULT 0,
+		last_retrieved_at DATETIME,
+		success_count INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
 
 	// Raw memories table - for v6 ingest workflow
@@ -87,6 +114,35 @@ var BaseTables = []string{
 		last_cursor TEXT NOT NULL,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
+
+	// Epistemic pressure view — powers the wake_context surface. Two
+	// scalar counts: raw_count (memories in the 'memories' collection
+	// not yet marked as rolled-up into a lesson) and lesson_count
+	// (durable lessons currently in the substrate).
+	//
+	// Convention: a raw memory is "compacted" once it has
+	//   metadata.compacted_into = <lesson_id>
+	// set on its row. Missing/null/empty metadata AND metadata without
+	// that key both count as raw (the conservative default — better to
+	// over-count than to assume compaction that never happened).
+	//
+	// Lessons are hard-deleted (no deleted_at column on lessons_base),
+	// so COUNT(*) on the lessons view naturally excludes shredded
+	// lessons — no filter needed.
+	//
+	// Used by internal.GatherWakeContext to surface the
+	// epistemic_pressure block on every wake. Cheap: two indexed
+	// COUNT(*) queries against the (collection, deleted_at, ...) and
+	// lessons views. Sub-millisecond at realistic substrate sizes.
+	`CREATE VIEW IF NOT EXISTS epistemic_pressure_v AS
+	SELECT
+	  (SELECT COUNT(*) FROM memories
+	   WHERE collection = 'memories'
+	     AND deleted_at IS NULL
+	     AND (metadata IS NULL OR metadata = ''
+	          OR json_extract(metadata, '$.compacted_into') IS NULL)
+	  ) AS raw_count,
+	  (SELECT COUNT(*) FROM lessons) AS lesson_count`,
 
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (
@@ -374,8 +430,16 @@ var CommonIndexes = []string{
 	//   - target_time:  unix epoch seconds; wake is due when <= now().
 	//   - fired:        0 = not yet surfaced; 1 = surfaced at fired_at.
 	//   - recurring_rule: agent's own cron-like spec (e.g. "+24h", "next monday").
-	//                    The schema stores it; the agent is responsible for
-	//                    re-scheduling itself. No daemon parses this field.
+	//                    DEPRECATED 2026-07-23 — the column remains in the
+	//                    schema for backward compatibility with existing
+	//                    code paths (Wake.RecurringRule field, schedule_wake
+	//                    tool payload), but is NEVER honored by the daemon.
+	//                    Recurring workflows now live in the dedicated
+	//                    `scheduled_tasks` table (CRUD via the upcoming
+	//                    `manage_scheduled_task` MCP tool) — the daemon's
+	//                    60s tick loop polls that table and injects a
+	//                    standard `scheduled_wakes` row at each fire.
+	//                    A future schema-version bump can drop this column.
 	//   - theory_id:    optional pointer to a pending theory to evaluate.
 	//
 	// The composite index idx_scheduled_wakes_due supports the hot path:
@@ -400,6 +464,46 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_theory ON scheduled_wakes(theory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_created ON scheduled_wakes(created_at);`,
+
+	// ── Scheduled Tasks (Agentic Cron) ──────────────────────────────
+	//
+	// A first-class registry of recurring agentic workflows. The
+	// mpm-scheduler daemon's 60s tick loop polls
+	//   WHERE status='active' AND next_run_at <= ?
+	// and for each due task: (a) inserts a `scheduled_wakes` row with
+	// reason='cron:<task_id>' and metadata.source='cron' / directive_id,
+	// then (b) rolls over next_run_at to the next cron occurrence. The
+	// three operations (read, inject, rollover) wrap in a single SQLite
+	// transaction so a daemon crash between wake-injection and rollover
+	// can't double-fire.
+	//
+	//   - id:           semantic slug the agent picks (e.g.
+	//                   "epistemic-compaction"). Re-using an ID updates
+	//                   the existing row (ON CONFLICT).
+	//   - cron_expr:    standard 5-field cron, parsed by robfig/cron/v3.
+	//                   next_run_at is pre-computed at upsert time, so
+	//                   the daemon never parses cron strings on the hot
+	//                   path.
+	//   - directive_id: the directive the agent reads when it wakes.
+	//                   Resolved via read_directives at wake-time.
+	//   - status:       active | paused. Pausing halts injection
+	//                   without losing the schedule (rows are kept for
+	//                   forensics; the row is never hard-deleted).
+	//   - last_run_at:  the last injection timestamp (not wake-processing
+	//                   time — that's the agent's own concern).
+	//   - next_run_at:  the pre-computed next cron occurrence (UTC).
+	`CREATE TABLE IF NOT EXISTS scheduled_tasks (
+		id           TEXT PRIMARY KEY,
+		name         TEXT NOT NULL,
+		cron_expr    TEXT NOT NULL,
+		directive_id TEXT NOT NULL,
+		status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused')),
+		last_run_at  DATETIME,
+		next_run_at  DATETIME NOT NULL,
+		created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);`,
 
 	// Ephemeral Scratchpad — single-row-per-session volatile thesis
 	// storage. Used by agents (808 in particular) to checkpoint
@@ -494,7 +598,7 @@ var SafeMigrations = [][3]string{
 	{"topics", "parent_topic_id", "TEXT"},
 	{"topics", "embedding", "BLOB"},
 	{"memories", "embedding", "BLOB"},
-	{"memories", "deleted_at", "TEXT"},
+	{"memories", "deleted_at", "INTEGER"},
 	{"memories", "reference_id", "TEXT"},
 	{"memories", "content_hash", "TEXT"},
 	{"memories", "is_prime_directive", "INTEGER DEFAULT 0"},

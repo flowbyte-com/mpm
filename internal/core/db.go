@@ -759,10 +759,16 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	return manager, nil
 }
 
-// NewSession opens a new independent connection to the same database file.
+// NewSession opens an independent connection to the same database file.
+//
+// Background workers (synthesis, lifecycle, critic) need an isolated
+// connection so their long-running queries don't block the primary
+// session's hot path. WAL mode + busy_timeout=5000 keep contention
+// bounded — see audit.md (2026-07-23) finding 4 for the rationale.
+//
+// This pattern is allowed by sqlopen_owner_test.go's whitelist.
+//
 // The caller owns the returned CoreDB and must Close it when done.
-// Intended for background goroutines (synthesis, lifecycle) that need their
-// own connection to avoid blocking the primary session.
 func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 	db, err := sql.Open("sqlite3", dm.dbPath)
 	if err != nil {
@@ -1143,8 +1149,11 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 	} else {
 		// FTS5 search with LIKE fallback if the index is missing or
 		// empty (e.g. fresh shared DB before first backfill).
-		escaped := strings.ReplaceAll(query, `"`, `""`)
-		ftsQuery := `"` + escaped + `"*`
+		// Tokenization handled by BuildFTS5Query (porter unicode61).
+		ftsQuery := BuildFTS5Query(query)
+		if ftsQuery == "" {
+			ftsQuery = `""` // defensive — fall through to LIKE on empty
+		}
 		rows, err := dm.db.Query(`
 			SELECT m.id, m.content, m.collection, m.tags, m.metadata, m.weight,
 			       m.reinforcement_count, m.created_at, m.updated_at, m.is_global
@@ -1207,6 +1216,9 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 			"is_global":           int(isGlobal.Int64),
 			"source":              "shared",
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -1329,6 +1341,24 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
+
+	// Data migration: convert legacy TEXT deleted_at values to INTEGER
+	// Unix epoch, matching the expires_at convention. Wrapped in its own
+	// transaction so the backfill UPDATE and sentinel INSERT are atomic.
+	// Runs BEFORE any handler executes — this is why it sits in
+	// initUnifiedSchema rather than a CLI command. Idempotent via the
+	// schema_migrations sentinel.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	if err := MigrateDeletedAtToUnixEpoch(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("migrate deleted_at: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
 
 	// Use shared index definitions. Skip any index that targets a view — SQLite
 	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
@@ -1896,6 +1926,21 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 // is attributed to the txNode, so watchdog.jsonl entries from inside a tx
 // carry the same shape as standalone queries.
 func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+	id := GenerateID()
+	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
+}
+
+// saveMemoryRow is the shared INSERT primitive that backs both
+// SaveMemoryNode (which generates a random id) and SaveSkill (which
+// uses a deterministic skill:<name>-v<version> id). Routing both
+// writers through this single function makes the security scanner
+// structurally guaranteed for every memories row, including the
+// deterministic-id skills path that previously had its own INSERT.
+//
+// Watchdog telemetry, IVF cluster assignment, content_hash, and all
+// other insert-time invariants live here so future fields added to
+// the memories schema automatically reach every caller.
+func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
 			"reason":    reason,
@@ -1911,7 +1956,6 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 
-	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 
@@ -1972,7 +2016,7 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 	// tx).
 	if embedding != nil && len(embedding) > 0 {
 		if _, assignErr := AssignToClusterNode(node, dm, id, embedding, ""); assignErr != nil {
-			slog.Warn("SaveMemoryNode: IVF assignment failed (memory is unassigned; rebalance will recover)",
+			slog.Warn("saveMemoryRow: IVF assignment failed (memory is unassigned; rebalance will recover)",
 				"memory_id", id, "error", assignErr.Error())
 		}
 	}
@@ -2152,6 +2196,9 @@ func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, erro
 			"snapshot":     snapshot,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return configs, nil
 }
 
@@ -2278,10 +2325,57 @@ func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 	return tx.Commit()
 }
 
-// ShredMemory performs a hard delete on memories table
+// ShredMemory performs a hard delete on the row identified by id, with
+// collection-aware routing. The 2026-07-22 session claimed this fix was
+// shipped but the actual code change was never committed to git (the
+// shred_lesson_aware_test.go file is untracked, but the corresponding
+// production-code fix was missing from db.go). The 2026-07-23 session
+// re-applies the fix for real.
+//
+// Routing contract:
+//   1. Probe lessons_base for the id. If present, route through the
+//      `lessons` view — that view's INSTEAD OF DELETE trigger (created
+//      in migrateLessonsToView) removes the row from lessons_base AND
+//      lessons_fts atomically.
+//   2. Else fall through to DELETE FROM memories. (Lessons and memories
+//      share the 16-char hex id space, so probing first is required —
+//      a plain DELETE FROM memories WHERE id=? would not trigger the
+//      lessons view's INSTEAD OF DELETE.)
+//
+// Returns nil on either successful delete OR a non-existent id (idempotent:
+// callers can shred without a separate existence check).
 func ShredMemory(db *sql.DB, id string) error {
-	_, err := db.Exec("DELETE FROM memories WHERE id = ?", id)
-	return err
+	if id == "" {
+		return fmt.Errorf("shred: id is required")
+	}
+	// Single transaction: probe lessons_base, route accordingly, fall
+	// through to memories. Done in one tx so the lessons probe and the
+	// delete are observed atomically — no race window where a row moves
+	// between collections mid-probe.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("shred: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var lessonCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, id).Scan(&lessonCount); err != nil {
+		return fmt.Errorf("shred: probe lessons_base: %w", err)
+	}
+	if lessonCount > 0 {
+		// Route through the lessons view — its INSTEAD OF DELETE trigger
+		// removes from lessons_base AND lessons_fts atomically.
+		if _, err := tx.Exec(`DELETE FROM lessons WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("shred: delete from lessons: %w", err)
+		}
+	} else {
+		// Fall through to memories. The row may not exist in either
+		// table (idempotent); DELETE on a missing row is a no-op.
+		if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("shred: delete from memories: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // ==================== HELPERS ====================
@@ -2681,19 +2775,35 @@ func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
 	return lessons, nil
 }
 
-// SearchLessons performs FTS5 search across lessons
+// SearchLessons performs FTS5 search across lessons.
+//
+// The query is tokenized via BuildFTS5Query to match the index's porter
+// unicode61 tokenizer (lessons_fts). Hyphenated, multi-word, and partial
+// keyword queries all work; see BuildFTS5Query for the contract.
+//
+// JOIN on `lessons.rowid` (not on the `lessons` view's columns) is critical.
+// An earlier version wrote `WHERE l.id IN (SELECT id FROM lessons WHERE
+// lessons_fts MATCH ?)` — that silently failed because `lessons_fts` is the
+// FTS5 virtual table, not a column of the `lessons` view, so the match raised
+// "no such column" and the call fell through to the LIKE fallback. The FTS5
+// path was effectively dead code on production until 2026-07-23.
 func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
-	escaped := strings.ReplaceAll(query, "\"", "\"\"")
-	ftsQuery := "\"" + escaped + "\"*"
+	ftsQuery := BuildFTS5Query(query)
+	if ftsQuery == "" {
+		// Empty query: return no results. Falling through to LIKE with
+		// '%' would match every lesson; the caller should not see that.
+		return nil, nil
+	}
 
 	rows, err := dm.db.Query(`
 		SELECT l.id, l.type, l.content, l.tags, l.reinforcement_count, l.source_session_id, l.created
 		FROM lessons l
-		WHERE l.id IN (SELECT id FROM lessons WHERE lessons_fts MATCH ?)
+		JOIN lessons_fts fts ON l.rowid = fts.rowid
+		WHERE lessons_fts MATCH ?
 		ORDER BY l.reinforcement_count DESC, l.created DESC
 		LIMIT ?
 	`, ftsQuery, limit)
@@ -2716,6 +2826,9 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 		lessons = append(lessons, &lesson)
 	}
 	if len(lessons) > 0 {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return lessons, nil
 	}
 	return dm.searchLessonsLike(query, limit)
@@ -2749,7 +2862,7 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 		}
 		lessons = append(lessons, &lesson)
 	}
-	return lessons, nil
+	return lessons, rows.Err()
 }
 
 // DeleteLesson removes a lesson
@@ -3062,7 +3175,7 @@ func (dm *DatabaseManager) ArchiveStaleMemories(archiveDays int) (int, error) {
 	}
 	result, err := dm.db.Exec(`
 		UPDATE memories
-		SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+		SET deleted_at = strftime('%s','now')
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE weight = 1

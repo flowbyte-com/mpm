@@ -933,6 +933,10 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		memories = append(memories, &mem)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return memories, nil
 }
 
@@ -1293,7 +1297,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if cfg.NeverAccessedMaxDays > 0 {
 		result, err := s.execTracked(`
 			UPDATE memories
-			SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			SET deleted_at = strftime('%s','now')
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
@@ -1315,7 +1319,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if cfg.LowWeightMaxDays > 0 {
 		result, err := s.execTracked(`
 			UPDATE memories
-			SET deleted_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			SET deleted_at = strftime('%s','now')
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
@@ -1390,6 +1394,10 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		}
 	}
 
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
 	// Find clusters of similar memories (simplified: same tags or similar content)
 	consolidated := 0
 	seen := make(map[string]bool)
@@ -1437,7 +1445,7 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 			// Delete all except the best
 			for k := 0; k < len(cluster); k++ {
 				if k != bestIdx {
-					s.execTracked(`UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, 0, cluster[k])
+					s.execTracked(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, 0, cluster[k])
 					consolidated++
 				}
 			}
@@ -2032,7 +2040,7 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 	// Set deleted_at so active-memory queries (WHERE deleted_at IS NULL) exclude this record.
 	result, err := s.DB.Exec(`
 		UPDATE memories
-		SET deleted_at = CURRENT_TIMESTAMP,
+		SET deleted_at = strftime('%s','now'),
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE id = ? AND collection = ?
 	`, id, collection)
@@ -2235,7 +2243,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete exact duplicates
 	for _, id := range dupeIDs {
-		s.execTracked("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", 0, id)
+		s.execTracked("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 
@@ -2339,7 +2347,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete near duplicates
 	for id := range seenNearDupes {
-		s.execTracked("UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", 0, id)
+		s.execTracked("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 
@@ -2773,7 +2781,7 @@ func (s *MemoryStore) PruneExpired() (int, error) {
 	}
 
 	result, err := s.DB.Exec(`
-		UPDATE memories SET deleted_at = CURRENT_TIMESTAMP WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
+		UPDATE memories SET deleted_at = strftime('%s','now') WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("prune expired failed: %w", err)

@@ -55,7 +55,7 @@ func newTestDMWithShared(t *testing.T) *DatabaseManager {
 			reinforcement_count INTEGER DEFAULT 0,
 			last_accessed_at DATETIME,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			deleted_at TEXT, dependencies TEXT
+			deleted_at INTEGER, dependencies TEXT
 		)`); err != nil {
 		t.Fatalf("create shared.memories: %v", err)
 	}

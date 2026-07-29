@@ -113,3 +113,79 @@ func quoteStrings(in []string) []string {
 	}
 	return out
 }
+
+// ApplySkills walks the SeedSkills registry and idempotently inserts
+// each entry as a skill row (collection='skills'). The contract:
+//
+//   - Row absent → Created (SaveSkill is the canonical writer)
+//   - Row present, content matches → Skipped (no-op)
+//   - Row present, content drifted → Updated flag (operator's edit
+//     preserved; surfaced in summary for visibility)
+//
+// ApplySkills never overwrites a local edit. The "Updated" bucket
+// is for visibility — the operator sees that their local copy
+// differs from the upstream seed and can decide to reconcile
+// manually. This matches the ApplyDirectives voice: the system
+// never silently mutates operator content.
+//
+// We route through SaveSkill (not raw INSERT OR IGNORE) so the
+// scanner, frontmatter validation, content_hash, LTM-by-default,
+// and version-flip machinery all run — same guarantees any operator
+// SaveSkill invocation gets, with no shortcut.
+func ApplySkills(dm interface {
+	SQLDB() *sql.DB
+	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
+}) (SeedSummary, error) {
+	summary := SeedSummary{
+		Created: []string{},
+		Skipped: []string{},
+		Updated: []string{},
+	}
+
+	db := dm.SQLDB()
+	if db == nil {
+		return summary, fmt.Errorf("seed.ApplySkills: db not initialized")
+	}
+
+	for _, s := range SeedSkills {
+		savedID, err := s.SavedID()
+		if err != nil {
+			return summary, fmt.Errorf("seed %s: %w", s.StableID, err)
+		}
+
+		// Look up existing row by saved id. The deleted_at IS NULL
+		// filter matches ApplyDirectives — soft-deleted rows are
+		// treated as absent so a re-init after an accidental shred
+		// can recover them.
+		var existingContent string
+		err = db.QueryRow(
+			`SELECT content FROM memories WHERE id = ? AND deleted_at IS NULL`,
+			savedID,
+		).Scan(&existingContent)
+
+		switch {
+		case err == sql.ErrNoRows:
+			// No existing row — insert via the canonical writer.
+			id, saveErr := dm.SaveSkill(s.Name, s.Version, s.Content, "seed:baseline", false)
+			if saveErr != nil {
+				return summary, fmt.Errorf("save %s: %w", s.StableID, saveErr)
+			}
+			summary.Created = append(summary.Created, id)
+
+		case err != nil:
+			return summary, fmt.Errorf("lookup %s: %w", s.StableID, err)
+
+		default:
+			// Row exists — compare content. TrimSpace so trailing
+			// newlines (SaveSkill is stricter than the registry
+			// string literals) don't trigger false drift reports.
+			if strings.TrimSpace(existingContent) == strings.TrimSpace(s.Content) {
+				summary.Skipped = append(summary.Skipped, savedID)
+			} else {
+				summary.Updated = append(summary.Updated, savedID)
+			}
+		}
+	}
+
+	return summary, nil
+}

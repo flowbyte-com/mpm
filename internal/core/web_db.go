@@ -30,6 +30,12 @@ import (
 // does lexicographic comparison and 'T' > ' ' in ASCII. All comparisons
 // against expires_at MUST use strftime('%s','now'), not CURRENT_TIMESTAMP.
 //
+// deleted_at follows the same convention as expires_at — INTEGER Unix
+// epoch. The two are unified so SQLite comparisons are always numeric and
+// never mix types (INTEGER < TEXT is always TRUE in SQLite, which would
+// shred migrated rows on rollback — see audit.md 2026-07-23 finding 1
+// for the rollback procedure).
+//
 // MemoryExpireClauseM is the alias-qualified variant for queries that
 // SELECT FROM `memories m` (e.g. FTS5 joins).
 const (
@@ -121,6 +127,9 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 			m["promoted_at"] = *promotedAt
 		}
 		mems = append(mems, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return mems, nil
 }
@@ -215,6 +224,9 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 			m["promoted_at"] = *promotedAt
 		}
 		mems = append(mems, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return mems, nil
 }
@@ -711,6 +723,9 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 			"created_at":    createdAt,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return refs, nil
 }
 
@@ -808,6 +823,9 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 				"created_at":   createdAt,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return refs, nil
 }
@@ -1084,6 +1102,9 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 			"created_at": createdAt, "tags": tags,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return topics, nil
 }
 
@@ -1133,7 +1154,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	// By tag (top 20)
 	rows, err = dm.db.Query(`
 		SELECT json_each.value as tag, COUNT(*) as count
-		FROM memories, json_each(memory.tags)
+		FROM memories, json_each(memories.tags)
 		WHERE deleted_at IS NULL
 		GROUP BY json_each.value
 		ORDER BY count DESC
@@ -1369,6 +1390,9 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 			"expires_at":          expiresAt,
 		}
 		memories = append(memories, mem)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return memories, nil
 }

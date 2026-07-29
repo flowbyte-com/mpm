@@ -7,7 +7,9 @@ require (
 	github.com/mark3labs/mcp-go v0.55.1
 	github.com/mattn/go-sqlite3 v1.14.37
 	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 )

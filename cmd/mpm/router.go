@@ -54,7 +54,6 @@ func NewRouter() *CommandRouter {
 		"review": {Name: "review", Description: "Spaced reinforcement review", MinArgs: 0},
 
 		// Feature commands
-		"watch":     {Name: "watch", Description: "File watcher for memory ingestion"},
 		"switch":    {Name: "switch", Description: "Interactive UI to change persona/mode", MinArgs: 0},
 		"reference": {Name: "reference", Description: "Reference library", MinArgs: 1},
 		"topic":     {Name: "topic", Description: "Topic management", MinArgs: 1},
@@ -62,17 +61,51 @@ func NewRouter() *CommandRouter {
 		"lesson":    {Name: "lesson", Description: "Lesson operations", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Memory operations", MinArgs: 1},
 
-		"ingest":   {Name: "ingest", Description: "Import memories from external SQLite sources"},
-		"migrate":  {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
+		"ingest":  {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"migrate": {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
+
+		// Working Context (cognitive-interface RFC Wave 1)
+		"work": {Name: "work", Description: "Working Context (ephemeral execution state) — status|show|clear|promote"},
+		"continue": {Name: "continue", Description: "Session resumption dashboard — composes working context, wake context, decisions, skills, theories"},
+
+		// Cognitive-verb aliases (Wave 3). Humans express cognition;
+		// the substrate contracts (add, record_decision, propose_theory,
+		// resolve_theory, save-skill, list-skills, read-skill) stay
+		// stable for agent calls.
+		"remember": {Name: "remember", Description: "Create a memory (cognitive verb for mpm add)", MinArgs: 1},
+		"learn":    {Name: "learn", Description: "Create a lesson (cognitive verb for mpm lesson add)", MinArgs: 1},
+		"decide":   {Name: "decide", Description: "Record a decision (cognitive verb for record_decision)", MinArgs: 0},
+		"theorize": {Name: "theorize", Description: "Propose a theory (cognitive verb for propose_theory)", MinArgs: 1},
+		"decision": {Name: "decision", Description: "Decision ledger (add|resolve)"},
+		"why":      {Name: "why", Description: "Why does this artifact exist? — one-level provenance (evidence + confidence + retrieval)"},
+		"theory":   {Name: "theory", Description: "Theory tracker (add|resolve)"},
+		"skill":    {Name: "skill", Description: "Skill library (add|list|show|search)"},
+
+		// Tour (cognitive-interface RFC Wave 4) — onboarding walkthrough.
+		"tour": {Name: "tour", Description: "Interactive walkthrough of the cognitive verbs (--demo auto-runs each step; --step N jumps)"},
+
+		// Identity inspector — `mpm info`, distinct from `mpm status` (live substrate)
+		// and `mpm doctor` (trust signals). Per the post-RFC polish session.
+		"info": {Name: "info", Description: "Installation identity (version, database, models, scheduler, skills, persona, counts)"},
+
+		// Configuration wizard (Wed 2026-07-29 polish session).
+		"config": {Name: "config", Description: "Configure the AI provider (interactive wizard or scripted set|get|show|edit)"},
+
+		// Skills — versioned procedure rows with frontmatter + body
+		"save-skill":  {Name: "save-skill", Description: "Save a skill from a markdown file (--file, --name, --version, --force)", MinArgs: 0},
+		"list-skills": {Name: "list-skills", Description: "List skills (scope: all|local|shared)", MinArgs: 0, MaxArgs: 1},
+		"read-skill":  {Name: "read-skill", Description: "Read a skill by name (or id) and optional version", MinArgs: 1, MaxArgs: 2},
 
 		"mode":       {Name: "mode", Description: "Mode operations"},
 		"wake":       {Name: "wake", Description: "Show last session context (--json, --strict)", MinArgs: 0},
 		"gc":         {Name: "gc", Description: "Run memory decay sweep (--dry-run, --review, --purge)"},
+		"tasks":      {Name: "tasks", Description: "Manage Agentic Cron tasks (upsert|list|delete)", MinArgs: 0},
 		"lint":       {Name: "lint", Description: "Validate persona/mode router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":     {Name: "backup", Description: "Export database to timestamped .sql dump (optional path arg)"},
 		"restore":    {Name: "restore", Description: "Restore a soft-deleted memory", MinArgs: 1},
 		"restore-db": {Name: "restore-db", Description: "Import a .sql dump to restore full database state", MinArgs: 1},
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
+		"status":     {Name: "status", Description: "System status dashboard", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Persona operations"},
 		"ops":        {Name: "ops", Description: "Maintenance, diagnostics, and engine-room tools"},
 
@@ -155,6 +188,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
+	case "tasks":
+		return handleTasksCommand(args[1:])
 	case "backup":
 		return handleBackup(args)
 	case "restore":
@@ -164,14 +199,17 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "help":
 		return r.handleHelp(args[1:])
 	case "doctor":
-		runDoctorCommand(args[1:])
-		return 0
+		return handleDoctor(args[1:])
 	case "recall":
 		return handleRecall(args)
 	case "ingest":
 		return handleIngest(args)
 	case "migrate":
 		return handleMigrate(args)
+	case "work":
+		return handleWork(args[1:])
+	case "continue":
+		return handleContinue(args[1:])
 	case "stats":
 		return handleStats(args)
 	case "prune":
@@ -182,14 +220,34 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleMaintain(args)
 	case "review":
 		return handleReview(args)
+	case "why":
+		return handleWhy(args[1:])
 	case "lint":
 		return handleLint(args)
-	case "watch":
-		return handleWatch(args[1:])
 	case "switch":
 		return r.handleSwitch()
 	case "add":
 		return handleAdd(args)
+	case "remember":
+		return handleRemember(args[1:])
+	case "learn":
+		return handleLearn(args[1:])
+	case "decide":
+		return handleDecide(args[1:])
+	case "theorize":
+		return handleTheorize(args[1:])
+	case "decision":
+		return handleDecision(args[1:])
+	case "theory":
+		return handleTheory(args[1:])
+	case "skill":
+		return handleSkill(args[1:])
+	case "tour":
+		return handleTour(args[1:])
+	case "info":
+		return handleInfo(args[1:])
+	case "config":
+		return handleConfig(args[1:])
 	case "ls":
 		return handleLs(args)
 	case "show":
@@ -216,6 +274,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRef(args[1:])
 	case "directives":
 		return handlePrimeDirectives()
+	case "status":
+		return handleStatus(args[1:])
 	case "memory":
 		return handleMemory(args[1:])
 	case "mode":
@@ -258,6 +318,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleCall(args[1:])
 	case "evidence":
 		return handleEvidence(args[1:])
+	case "save-skill":
+		return handleSaveSkill(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
@@ -310,22 +372,54 @@ func (r *CommandRouter) handleVersion() int {
 	return 0
 }
 
-// handleHelp routes help requests to specific help functions or prints general help
+// handleHelp routes help requests per the cognitive-interface RFC §4
+// progressive-disclosure principle. Order:
+//
+//   1. No args → cognitive default (~22 commands across 5 sections).
+//   2. --all → full operator-interface catalogue (all 56+ commands).
+//   3. <known-section> → expanded section help (knowledge, runtime,
+//                         maintenance, reflection, work, explain).
+//   4. <known-command> → existing per-command help (mode, persona, etc.).
+//   5. Anything else → "no help available" + cognitive default.
+//
+// Stage 3 keeps existing per-command help reachable so scripts that
+// depended on `mpm help mode` etc. continue to work.
 func (r *CommandRouter) handleHelp(args []string) int {
 	if len(args) == 0 {
-		PrintHelp()
+		printCognitiveHelp()
 		return 0
 	}
 
-	// Route to specific help based on command
-	helpCmd := args[0]
-	var helpFunc func() int
+	// Pull out --all before matching against command names. Operators
+	// can also use `mpm help <section> --all` if they want a flat dump
+	// from a section context.
+	all := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--all" {
+			all = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
 
+	// `mpm help --all` (no other args) → full catalogue.
+	if all && len(filtered) == 0 {
+		printHelpAll()
+		return 0
+	}
+
+	// At this point we have at least one positional arg.
+	helpCmd := filtered[0]
+
+	// 3. Section-name help (progressive disclosure).
+	if printSectionHelp(helpCmd) {
+		return 0
+	}
+
+	// 4. Per-command help (existing dispatch).
+	var helpFunc func() int
 	switch helpCmd {
-	case "watch":
-		// handleWatch is now a deprecation stub that prints its own help —
-		// route through it instead of a dedicated helpFunc.
-		return handleWatch(args[1:])
 	case "mode":
 		helpFunc = handleModeHelp
 	case "persona":
@@ -347,10 +441,19 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
 		return 0
+	case "ops":
+		printOpsHelp()
+		return 0
+	case "work":
+		printWorkHelp()
+		return 0
 	default:
-		// Fall back to general help
+		// 5. Unknown: stay explicit rather than dumping the cognitive
+		// default. Operator asked for a specific help page; tell them
+		// if we don't have one. They can then run `mpm help` for the
+		// cognitive default.
 		r.errorf("[!] Error: no help available for '%s'\n", helpCmd)
-		PrintHelp()
+		fmt.Println("Try one of: mpm help, mpm help --all, mpm help knowledge, mpm help work")
 		return 1
 	}
 
@@ -407,10 +510,6 @@ func handleOps(args []string) int {
 		return handleOpsBroadcast(subArgs)
 	case "active-sessions":
 		return handleOpsActiveSessions(subArgs)
-
-	// — Watcher —
-	case "watch":
-		return handleWatch(subArgs)
 
 	// — Review & Stats —
 	case "review":
@@ -480,7 +579,7 @@ func handleOps(args []string) int {
 		return handleSelfHeal(subArgs)
 
 	case "status":
-		return handleStatus()
+		return handleStatus(subArgs)
 
 		// — Help —
 	case "help":
@@ -503,7 +602,6 @@ var opsSubcommandDescs = []struct {
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
-	{"watch", "Start/stop/status watcher daemon"},
 	{"review", "Spaced reinforcement review"},
 	{"stats", "Memory statistics"},
 	{"prune", "Prune expired memories"},
@@ -531,6 +629,7 @@ var opsSubcommandDescs = []struct {
 	{"changelog build [--since/--until/--version/--legacy/--dry-run]", "Generate CHANGELOG.md + changelog.json from git log"},
 	{"milestones [--flavor/--days/--limit]", "List recent narrative milestones (memories tagged type:milestone-*)"},
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
+	{"init skills", "Seed the Baseline Skill Library (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
 	{"broadcast <memory_id> [--kind/--rationale/--to/--dry-run/--json]", "Arc 2 fan-out: push an epistemic event to every active session"},
@@ -819,18 +918,21 @@ func isatty(f *os.File) bool {
 }
 
 // handleOpsInit dispatches `mpm ops init <subcommand>`. Currently
-// supports `init directives` to seed the Baseline Cognitive Bootstrap.
-// Other init subcommands (e.g. `init config`) can be added here.
+// supports `init directives` (Baseline Cognitive Bootstrap) and
+// `init skills` (Baseline Skill Library). Other init subcommands
+// (e.g. `init config`) can be added here.
 func handleOpsInit(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives")
+		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives, init skills")
 		return 1
 	}
 	sub := args[0]
 	switch sub {
 	case "directives":
 		return handleOpsInitDirectives(args[1:])
+	case "skills":
+		return handleOpsInitSkills(args[1:])
 	default:
-		return usererror.Error("unknown init subcommand: %q (want: directives)", sub)
+		return usererror.Error("unknown init subcommand: %q (want: directives, skills)", sub)
 	}
 }

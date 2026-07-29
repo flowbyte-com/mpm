@@ -195,6 +195,20 @@ func ParseCommitLog(raw string) []ChangelogEntry {
 	return entries
 }
 
+// gitRefPattern validates git ref arguments against injection.
+var gitRefPattern = regexp.MustCompile(`^[a-zA-Z0-9._\-/@]+$`)
+
+// validateGitRef returns an error for refs with unsafe characters.
+func validateGitRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if !gitRefPattern.MatchString(ref) {
+		return fmt.Errorf("invalid git ref: %q contains unsafe characters", ref)
+	}
+	return nil
+}
+
 // GitLogOptions controls how the changelog tool invokes git.
 type GitLogOptions struct {
 	// RepoDir is the working directory for git invocations. Empty
@@ -217,6 +231,13 @@ type GitLogOptions struct {
 // the invocation here keeps the rest of the package testable without
 // shelling out.
 func FetchGitLog(opts GitLogOptions) (string, error) {
+	if err := validateGitRef(opts.Since); err != nil {
+		return "", err
+	}
+	if err := validateGitRef(opts.Until); err != nil {
+		return "", err
+	}
+
 	args := []string{
 		"log",
 		"--no-merges",
@@ -228,9 +249,6 @@ func FetchGitLog(opts GitLogOptions) (string, error) {
 	if opts.Since != "" {
 		args = append(args, opts.Since+"..HEAD")
 		if opts.Until != "" {
-			// Replace the trailing HEAD with the explicit upper
-			// bound. Slightly ugly but git's argument grammar
-			// doesn't expose a clean way to say "from X to Y".
 			args[len(args)-1] = opts.Since + ".." + opts.Until
 		}
 	} else if opts.Until != "" {
