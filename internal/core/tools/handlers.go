@@ -11,6 +11,9 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/orchestration"
+	"github.com/flowbyte-com/mpm-core/renderers"
 	"path/filepath"
 )
 
@@ -2469,4 +2472,109 @@ func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		"diagnostic": sb.String(),
 		"count":      len(items),
 	}, nil
+}
+
+// handleRequestReview implements the request_review MCP tool.
+//
+// Architectural intent (Wed 2026-07-29 design session):
+//
+//   Adapter layer for the ReviewCoordinator orchestration primitive
+//   (internal/core/orchestration). This handler is responsible for:
+//
+//     1. Fetching artifact bodies from the database (resolving ids
+//        in the caller's 'artifacts' list to actual text).
+//     2. Building the substrate-side RequestReview payload (a
+//        ReviewRequest — see orchestration/review_coordinator.go).
+//     3. Calling DefaultReviewCoordinator.Execute().
+//     4. Rendering the resulting []ReviewResult via the renderers
+//        package, which returns Markdown-shaped output suitable for
+//        both agent consumers (LLMs parse it back as text) and
+//        humans (operators read the dashboard).
+//
+// The handler is intentionally thin. All the concurrency, timeout,
+// profile resolution, and fan-out live in the engine layer
+// (orchestration package). All the markdown rendering lives in
+// the renderers package. This handler is the only one in the
+// call chain that knows about the database, the coordinator, and
+// the renderer.
+func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// Note on error shape: the TestRegistry_AllToolsExecuteWithoutPanic
+	// harness compares CLI and MCP error strings after stripping the
+	// MCP adapter's "<tool> failed: " prefix via strings.LastIndex(": ").
+	// The CLI side returns the bare error from this handler, so
+	// including the tool name in the error string would create a
+	// permanent drift (CLI: "request_review: ..." vs stripped-MCP:
+	// "..."). Errors below carry only the inner message; the MCP
+	// layer adds the tool-name prefix when wrapping.
+	components := mpminternal.ParseStringSliceOr(p["components"])
+	if len(components) == 0 {
+		return nil, fmt.Errorf("'components' is required (at least one substrate component name, e.g. ['memory','critic'])")
+	}
+	prompt, _ := p["prompt"].(string)
+	if prompt == "" {
+		return nil, fmt.Errorf("'prompt' is required")
+	}
+	strategy := mpminternal.ParseStringOr(p["strategy"], "parallel")
+	if strategy != "parallel" {
+		return nil, fmt.Errorf("only strategy='parallel' is supported in v0.1 (got %q)", strategy)
+	}
+	var timeout time.Duration
+	if t := int(mpminternal.ParseFloatOr(p["timeout_secs"], 0)); t > 0 {
+		timeout = time.Duration(t) * time.Second
+	}
+
+	// Resolve artifact bodies (id → text). The boundary contract:
+	// the ReviewCoordinator never sees an id — it operates on
+	// pre-resolved text. This is what makes Skills portable
+	// across installs (no DB ids leak into the orchestration
+	// engine).
+	artifactIDs := mpminternal.ParseStringSliceOr(p["artifacts"])
+	var contextData strings.Builder
+	for i, id := range artifactIDs {
+		mem, err := dm.GetMemory(id)
+		if err != nil {
+			return nil, fmt.Errorf("artifact %q: %w", id, err)
+		}
+		if mem == nil {
+			return nil, fmt.Errorf("artifact %q not found", id)
+		}
+		content, _ := mem["content"].(string)
+		fmt.Fprintf(&contextData, "### Artifact %d (id=%q)\n\n", i+1, id)
+		contextData.WriteString(content)
+		contextData.WriteString("\n\n")
+	}
+
+	// Wire the coordinator. The orchestrator uses the substrate's
+	// config (Profiles + Components + Capabilities) for routing; the
+	// ModelFactory builds per-profile HTTP clients from the
+	// substrate's existing *synth.SynthClient.
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load substrate config: %w", err)
+	}
+	coord := orchestration.NewDefaultReviewCoordinator(cfg, orchestration.DefaultModelFactory())
+	req := orchestration.ReviewRequest{
+		Components:  components,
+		Prompt:      prompt,
+		ContextData: contextData.String(),
+		Strategy:    orchestration.StrategyParallel,
+		Timeout:     timeout,
+	}
+
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	results, err := coord.Execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: %w", err)
+	}
+
+	// Return the rendered string directly. The MCP wrapper
+	// catches it as the tool's result body; the CLI's `mpm call`
+	// prints it to stdout. Same surface both ways.
+	return renderers.FormatReviewsMarkdown(results), nil
 }
