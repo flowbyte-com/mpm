@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // WhyRenderer writes a WhyReport to a stream.
@@ -188,7 +189,7 @@ func (r *WhyRenderer) renderRetrieval(ret *WhyRetrieval) {
 	fmt.Fprintf(r.out, "  reuse_count   : %d\n", ret.ReuseCount)
 	fmt.Fprintf(r.out, "  success_count : %d\n", ret.SuccessCount)
 	if ret.LastRetrievedAt != nil {
-		fmt.Fprintf(r.out, "  last_retrieved: %s\n", ret.LastRetrievedAt.Format("2006-01-02 15:04:05 UTC"))
+		fmt.Fprintf(r.out, "  last_retrieved: %s\n", mpminternal.FormatUnixSeconds(*ret.LastRetrievedAt))
 	} else {
 		fmt.Fprintln(r.out, "  last_retrieved: (never)")
 	}

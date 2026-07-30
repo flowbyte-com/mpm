@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,7 +102,7 @@ func (dm *DatabaseManager) ActiveClusters() (known, unknown []ClusterProposal, e
 		FROM audit_cluster_proposals
 		WHERE count >= ?
 		  AND (status = 'active'
-		       OR (status = 'snoozed' AND snooze_until < datetime('now')))
+		       OR (status = 'snoozed' AND snooze_until < CAST(strftime('%s','now') AS INTEGER)))
 		ORDER BY count DESC, component ASC`,
 		ClusterThreshold)
 	if err != nil {
@@ -185,10 +186,10 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 		if snoozeUntil == "" {
 			return fmt.Errorf("snooze_until required for status=%s", status)
 		}
-		// Validate and normalize the timestamp. The DB stores RFC3339
-		// (`WHERE snooze_until < datetime('now')` only works on absolute
-		// timestamps), so the relativ/either-form input must be
-		// expanded to an absolute UTC time before the UPDATE.
+		// Validate and normalize the timestamp. The DB stores INTEGER
+		// Unix-epoch seconds (`WHERE snooze_until < CAST(strftime('%s','now') AS INTEGER)`
+		// only works on absolute timestamps), so the relative/either-form input
+		// must be expanded to an absolute UTC time before the UPDATE.
 		resolved, err := parseClusterSnoozeUntil(snoozeUntil)
 		if err != nil {
 			return fmt.Errorf("invalid snooze_until %q: %w", snoozeUntil, err)
@@ -376,26 +377,45 @@ func (dm *DatabaseManager) AnnotateCluster(clusterKey, annotation, reason string
 	return nil
 }
 
-// parseClusterSnoozeUntil accepts both ISO 8601 absolute timestamps
-// and Go-relative durations and returns a normalized UTC time.Time.
+// parseClusterSnoozeUntil accepts unix-epoch integers, ISO 8601 absolute
+// timestamps, and Go-relative durations. Returns a normalized UTC time.Time.
 //
 // Accepted forms:
 //
-//	"24h"           → now + 24 hours      (relative duration)
-//	"7d"            → now + 7 days        (custom extension; not Go standard)
-//	"30m"           → now + 30 minutes
-//	"1h30m"         → composite Go duration
-//	"2026-07-12T12:00:00Z"     → absolute ISO 8601 UTC
-//	"2026-07-12T12:00:00+02:00" → absolute ISO 8601 with offset
+//	"1752422400"                  → unix-epoch seconds (cheapest to parse)
+//	"24h"                         → now + 24 hours      (relative duration)
+//	"7d"                          → now + 7 days        (custom extension; not Go standard)
+//	"30m"                         → now + 30 minutes
+//	"1h30m"                       → composite Go duration
+//	"2026-07-12T12:00:00Z"        → absolute ISO 8601 UTC
+//	"2026-07-12T12:00:00+02:00"   → absolute ISO 8601 with offset
 //
 // Rejected forms surface as a clean error so the handler can wrap it
 // in a tool-level return. Relative durations like "24 hours" or "24"
 // are rejected — sticking to Go's compact syntax prevents "is 7d seven
 // days or December 7th?" ambiguity.
+//
+// Parsing order: integer → RFC3339 → Go-relative. The integer attempt
+// is cheaper than RFC3339 parsing and is unambiguous (Go-relative forms
+// like "24h"/"7d" contain letters and will never match ParseInt).
 func parseClusterSnoozeUntil(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty")
+	}
+
+	// Unix-epoch integer seconds. Cheapest parse — try first.
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return time.Unix(n, 0).UTC(), nil
+	}
+
+	// ISO 8601 absolute. Try RFC3339Nano first (covers the common
+	// "Z" UTC suffix), then RFC3339 (covers offsets). Both
+	// representations must work — the agent might emit either.
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), nil
+		}
 	}
 
 	// Extension: Go's time.ParseDuration doesn't natively understand
@@ -415,15 +435,6 @@ func parseClusterSnoozeUntil(s string) (time.Time, error) {
 	// Standard Go duration (24h, 1h30m, 30s, 500ms, ...).
 	if d, err := time.ParseDuration(s); err == nil {
 		return time.Now().UTC().Add(d), nil
-	}
-
-	// ISO 8601 absolute. Try RFC3339Nano first (covers the common
-	// "Z" UTC suffix), then RFC3339 (covers offsets). Both
-	// representations must work — the agent might emit either.
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UTC(), nil
-		}
 	}
 
 	return time.Time{}, fmt.Errorf("not a Go duration or RFC3339 timestamp")

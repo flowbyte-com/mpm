@@ -506,7 +506,7 @@ func TestCallHelpers_ReviewMemories_FindsStaleLTM(t *testing.T) {
 	dm := newTestDM(t)
 	// Stale LTM memory: weight>=10, is_long_term=1, last_accessed 60 days ago.
 	// GetSpacedReinforcementReview filters LTM/high-weight by last_accessed.
-	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, is_long_term, last_accessed_at) VALUES (?, 'memories', 'stale fact', '[]', 10, 1, datetime('now', '-60 days'))`, 0, "mem-stale")
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, is_long_term, last_accessed_at) VALUES (?, 'memories', 'stale fact', '[]', 10, 1, CAST(strftime('%s','now', '-60 days') AS INTEGER))`, 0, "mem-stale")
 	require.NoError(t, err)
 
 	out, err := dm.ReviewMemories(30, 20)
@@ -567,10 +567,10 @@ func TestCallHelpers_RunGC_CooldownSkipOnSecondCall(t *testing.T) {
 func TestCallHelpers_RunGC_DryRunIdentifiesDead(t *testing.T) {
 	dm := newTestDM(t)
 	// Memory: weight=5, last accessed 365 days ago → will decay below 0
-	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, last_accessed_at, created_at) VALUES (?, 'memories', 'old fact', '[]', 5, datetime('now', '-365 days'), datetime('now', '-400 days'))`, 0, "mem-old")
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, last_accessed_at, created_at) VALUES (?, 'memories', 'old fact', '[]', 5, CAST(strftime('%s','now', '-365 days') AS INTEGER), CAST(strftime('%s','now', '-400 days') AS INTEGER))`, 0, "mem-old")
 	require.NoError(t, err)
 	// LTM memory: immune to decay (must NOT appear as dead)
-	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, is_long_term, last_accessed_at, created_at) VALUES (?, 'memories', 'permanent', '[]', 10, 1, datetime('now', '-1000 days'), datetime('now', '-1000 days'))`, 0, "mem-ltm")
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, is_long_term, last_accessed_at, created_at) VALUES (?, 'memories', 'permanent', '[]', 10, 1, CAST(strftime('%s','now', '-1000 days') AS INTEGER), CAST(strftime('%s','now', '-1000 days') AS INTEGER))`, 0, "mem-ltm")
 	require.NoError(t, err)
 
 	out, err := dm.RunGC(GCOptions{DryRun: true})
@@ -596,7 +596,7 @@ func TestCallHelpers_RunGC_DryRunIdentifiesDead(t *testing.T) {
 func TestCallHelpers_RunGC_AppliesUpdatesWhenNotDryRun(t *testing.T) {
 	dm := newTestDM(t)
 	// High weight, very old — should decay but not die
-	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, last_accessed_at, created_at) VALUES (?, 'memories', 'mid-weight', '[]', 7, datetime('now', '-30 days'), datetime('now', '-30 days'))`, 0, "mem-mid")
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight, last_accessed_at, created_at) VALUES (?, 'memories', 'mid-weight', '[]', 7, CAST(strftime('%s','now', '-30 days') AS INTEGER), CAST(strftime('%s','now', '-30 days') AS INTEGER))`, 0, "mem-mid")
 	require.NoError(t, err)
 
 	out, err := dm.RunGC(GCOptions{DryRun: false})

@@ -38,12 +38,15 @@ var ErrWorkingContextNotFound = errors.New("working context not found for sessio
 // WorkingContext is the domain model the Store handles. Pure data —
 // no behaviour, no methods beyond accessors. Behaviour lives in
 // WorkingContextService.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1).
 type WorkingContext struct {
-	SessionID  string    // primary key into ephemeral_scratchpad
-	Thesis     string    // one-line summary the agent writes
-	Supporting string    // raw JSON or structured context dump
-	UpdatedAt  time.Time // last write timestamp
-	ExpiresAt  time.Time // TTL boundary; service enforces this
+	SessionID  string // primary key into ephemeral_scratchpad
+	Thesis     string // one-line summary the agent writes
+	Supporting string // raw JSON or structured context dump
+	UpdatedAt  int64  // last write timestamp (Unix-epoch seconds)
+	ExpiresAt  int64  // TTL boundary; service enforces this
 }
 
 // IsExpired reports whether the working context is past its expiry.
@@ -52,7 +55,7 @@ func (wc *WorkingContext) IsExpired(now time.Time) bool {
 	if wc == nil {
 		return false
 	}
-	return !wc.ExpiresAt.IsZero() && now.After(wc.ExpiresAt)
+	return wc.ExpiresAt > 0 && now.After(time.Unix(wc.ExpiresAt, 0))
 }
 
 // WorkingContextStore is the persistence boundary for ephemeral
@@ -82,7 +85,7 @@ func (s *WorkingContextStore) Load(sessionID string) (*WorkingContext, error) {
 		return nil, fmt.Errorf("session_id is required")
 	}
 	var wc WorkingContext
-	var updatedAt, expiresAt string
+	var updatedAt, expiresAt sql.NullInt64
 	row := s.dm.QueryRowTracked(
 		`SELECT session_id, thesis, supporting, updated_at, decay_at
 		 FROM ephemeral_scratchpad
@@ -95,11 +98,11 @@ func (s *WorkingContextStore) Load(sessionID string) (*WorkingContext, error) {
 		}
 		return nil, fmt.Errorf("working context load: %w", err)
 	}
-	if t, err := parseSQLiteTime(updatedAt); err == nil {
-		wc.UpdatedAt = t
+	if updatedAt.Valid {
+		wc.UpdatedAt = updatedAt.Int64
 	}
-	if t, err := parseSQLiteTime(expiresAt); err == nil {
-		wc.ExpiresAt = t
+	if expiresAt.Valid {
+		wc.ExpiresAt = expiresAt.Int64
 	}
 	return &wc, nil
 }
@@ -116,10 +119,10 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 	if wc.Thesis == "" {
 		return fmt.Errorf("thesis is required")
 	}
-	// decay_at = 24h ahead from UpdatedAt (matches flush_scratchpad default).
+	// decay_at = 24h ahead from now if unset (matches flush_scratchpad default).
 	expiresAt := wc.ExpiresAt
-	if expiresAt.IsZero() {
-		expiresAt = time.Now().UTC().Add(24 * time.Hour)
+	if expiresAt == 0 {
+		expiresAt = time.Now().UTC().Add(24 * time.Hour).Unix()
 	}
 	_, err := s.dm.ExecTracked(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at)
@@ -127,11 +130,11 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 		ON CONFLICT(session_id) DO UPDATE SET
 			thesis = excluded.thesis,
 			supporting = excluded.supporting,
-			updated_at = CURRENT_TIMESTAMP,
+			updated_at = CAST(strftime('%s','now') AS INTEGER),
 			decay_at = excluded.decay_at;`,
 		0, // retries=0 → standard single attempt, no backoff loop
 		wc.SessionID, wc.Thesis, wc.Supporting,
-		expiresAt.Format("2006-01-02 15:04:05"))
+		expiresAt)
 	if err != nil {
 		return fmt.Errorf("working context save: %w", err)
 	}

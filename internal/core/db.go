@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -1342,12 +1343,37 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
 
-	// Data migration: convert legacy TEXT deleted_at values to INTEGER
-	// Unix epoch, matching the expires_at convention. Wrapped in its own
-	// transaction so the backfill UPDATE and sentinel INSERT are atomic.
-	// Runs BEFORE any handler executes — this is why it sits in
-	// initUnifiedSchema rather than a CLI command. Idempotent via the
-	// schema_migrations sentinel.
+	// Use shared index definitions. Skip any index that targets a view — SQLite
+	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
+	//
+	// NOTE: despite the name, CommonIndexes also carries eight CREATE TABLE
+	// statements (system_audit_log, audit_cluster_proposals, session_handoffs,
+	// scheduled_wakes, scheduled_tasks, ephemeral_scratchpad, vector_clusters,
+	// vector_assignments). The data-migration transaction below therefore has
+	// to run AFTER this loop — see the comment on that block.
+	for _, sql := range CommonIndexes {
+		if strings.Contains(sql, " ON lessons(") || strings.HasSuffix(sql, " ON lessons") {
+			continue // lessons is a view; its FTS is handled by migrateLessonsToView
+		}
+		if _, err := dm.db.Exec(sql); err != nil {
+			slog.Warn("index creation error (may be benign on re-run)", "error", err.Error())
+		}
+	}
+
+	// Data migrations: convert legacy TEXT timestamp values to INTEGER Unix
+	// epoch. Wrapped in one transaction so the backfill UPDATEs and the
+	// sentinel INSERTs are atomic. Runs BEFORE any handler executes — this is
+	// why it sits in initUnifiedSchema rather than a CLI command. Idempotent
+	// via the schema_migrations sentinels.
+	//
+	// ORDERING DEPENDENCY: this block must stay AFTER every DDL slice
+	// (BaseTables, ReferenceTables, CommonIndexes) has executed, because
+	// MigrateAllTimestampsToUnixEpoch touches tables from all three — and
+	// eight of them are declared in CommonIndexes, not BaseTables. The
+	// migration itself skips (table, column) pairs it can't find rather than
+	// erroring, so a future reorder degrades to "some columns not converted
+	// on this boot" instead of "init fails and the binary is unusable"; keep
+	// the ordering anyway so the skip path stays a safety net, not the norm.
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin migration tx: %w", err)
@@ -1356,19 +1382,21 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("migrate deleted_at: %w", err)
 	}
+	if err := MigrateAllTimestampsToUnixEpoch(tx); err != nil {
+		// A deferral means every convertible column was converted and only
+		// the sentinel was withheld, because some target columns are still
+		// declared TEXT-affinity in the DDL. Commit the partial work and
+		// retry on the next boot; failing init here would make the binary
+		// unusable for the entire window between this migration landing and
+		// the schema DDL flip.
+		if !errors.Is(err, ErrTimestampsMigrationDeferred) {
+			_ = tx.Rollback()
+			return fmt.Errorf("timestamps unification migration failed: %w", err)
+		}
+		slog.Warn("timestamps unification migration deferred", "error", err.Error())
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
-	}
-
-	// Use shared index definitions. Skip any index that targets a view — SQLite
-	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
-	for _, sql := range CommonIndexes {
-		if strings.Contains(sql, " ON lessons(") || strings.HasSuffix(sql, " ON lessons") {
-			continue // lessons is a view; its FTS is handled by migrateLessonsToView
-		}
-		if _, err := dm.db.Exec(sql); err != nil {
-			slog.Warn("index creation error (may be benign on re-run)", "error", err.Error())
-		}
 	}
 
 	// Migration: convert lessons table to lessons_base + lessons view.
@@ -1413,7 +1441,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 				COALESCE(NEW.weight, 0),
 				NEW.collection,
 				COALESCE(NEW.is_long_term, 0),
-				STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+				CAST(strftime('%s','now') AS INTEGER)
 			);
 		END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_rev_au AFTER UPDATE ON memories
@@ -1431,7 +1459,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 				COALESCE(NEW.weight, 0),
 				NEW.collection,
 				COALESCE(NEW.is_long_term, 0),
-				STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+				CAST(strftime('%s','now') AS INTEGER)
 			);
 		END;`,
 	}
@@ -1834,9 +1862,12 @@ func (dm *DatabaseManager) UpdateSessionSummary(sessionID, summary string) error
 }
 
 // GetLastSession returns the most recent session by created_at DESC.
+//
+// created_at is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1).
 func (dm *DatabaseManager) GetLastSession() (map[string]interface{}, error) {
 	var id, sessionID, content, contentHash, sourcePath, metadataJSON string
-	var createdAt time.Time
+	var createdAt int64
 
 	err := dm.db.QueryRow(`SELECT id, session_id, content, content_hash, source_path, metadata, created_at FROM sessions ORDER BY created_at DESC LIMIT 1`).
 		Scan(&id, &sessionID, &content, &contentHash, &sourcePath, &metadataJSON, &createdAt)
@@ -1982,9 +2013,17 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 
 	initialConf := InitialConfidence(artifactTypeFromCollection(collection))
 
+	// Normalize createdAt to Unix-epoch seconds. The schema column is INTEGER
+	// (Unix-epoch seconds); accept either a numeric string or an RFC3339
+	// string so existing string-typed callers keep working without an
+	// upstream rewrite. Empty string defaults to now.
 	created := createdAt
 	if created == "" {
-		created = time.Now().UTC().Format(time.RFC3339)
+		created = strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	createdSec, err := ParseTimestampArg(created)
+	if err != nil {
+		return "", fmt.Errorf("saveMemoryRow: invalid createdAt %q: %w", createdAt, err)
 	}
 
 	// Compute content_hash so dedup (memories.content_hash = ?) works at insert
@@ -1996,8 +2035,8 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	contentHashBytes := sha256.Sum256([]byte(content))
 	contentHash := hex.EncodeToString(contentHashBytes[:])
 
-	_, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, created, referenceID, retrievalPriority, importance, contentHash)
+	_, err = node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash)
 	if err != nil {
 		return id, err
 	}
@@ -2126,7 +2165,7 @@ func (dm *DatabaseManager) SaveSystemConfig(key, rawJSON, contentHash string, sn
 		return false, nil
 	}
 	// Insert or replace with new content
-	_, err = dm.db.Exec(`INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapshot) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+	_, err = dm.db.Exec(`INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapshot) VALUES (?, ?, ?, CAST(strftime('%s','now') AS INTEGER), ?)`,
 		key, rawJSON, contentHash, snapshotJSON)
 	if err != nil {
 		return false, err
@@ -2143,7 +2182,9 @@ func (dm *DatabaseManager) GetSystemConfig(key string) (map[string]interface{}, 
 	// NULL doesn't error the whole read; callers that care about snapshot
 	// content check for nil before dereferencing.
 	var snapshotJSON *string
-	var updatedAt time.Time
+	// updated_at is stored as INTEGER Unix-epoch seconds (see migration
+	// timestamps_unified_v1).
+	var updatedAt int64
 	err := dm.db.QueryRow(`SELECT raw_json, content_hash, updated_at, config_snapshot FROM system_config WHERE key = ?`, key).
 		Scan(&rawJSON, &contentHash, &updatedAt, &snapshotJSON)
 	if err != nil {
@@ -2180,7 +2221,7 @@ func (dm *DatabaseManager) GetAllSystemConfigs() ([]map[string]interface{}, erro
 	var configs []map[string]interface{}
 	for rows.Next() {
 		var key, rawJSON, contentHash, snapshotJSON string
-		var updatedAt time.Time
+		var updatedAt int64
 		if err := rows.Scan(&key, &rawJSON, &contentHash, &updatedAt, &snapshotJSON); err != nil {
 			return nil, err
 		}
@@ -2326,7 +2367,7 @@ func getConfigStringFromEnv(key string, defaultValue string) string {
 type searchResult struct {
 	id         string
 	content    string
-	createdAt  time.Time
+	createdAt  int64
 	similarity float32
 }
 
@@ -2366,7 +2407,7 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 	var results []searchResult
 	for rows.Next() {
 		var id, content, embeddingJSON string
-		var createdAt time.Time
+		var createdAt int64
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -2521,7 +2562,7 @@ func GenerateID() string {
 // CreateTopic creates a new topic and returns its ID
 func (dm *DatabaseManager) CreateTopic(name, description, fromDate, toDate string) (string, error) {
 	topicID := GenerateID()
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().Unix()
 	tagsJSON := "{}"
 	if fromDate != "" || toDate != "" {
 		tags := map[string]string{}
@@ -2704,7 +2745,7 @@ func (dm *DatabaseManager) AddMemoryToTopic(memoryID, topicID, role string) erro
 	if role == "" {
 		role = "manual"
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().Unix()
 	_, err := dm.db.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
 		memoryID, topicID, now, role)
 	return err
@@ -2995,6 +3036,10 @@ func (dm *DatabaseManager) DeleteLesson(id string) error {
 // =============================================================================
 
 // MemoryRevision represents a single entry in the memory_revisions table.
+//
+// CreatedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). Display layer callers format at the boundary
+// via FormatUnixSeconds.
 type MemoryRevision struct {
 	ID                 int64
 	MemoryID           string
@@ -3005,7 +3050,7 @@ type MemoryRevision struct {
 	IsLongTerm         bool
 	IsChallenged       bool
 	ChallengedTheoryID string
-	CreatedAt          time.Time
+	CreatedAt          int64
 }
 
 // GetMemoryRevisions returns all versions for a memory in reverse-chronological
@@ -3026,20 +3071,10 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 	var revisions []MemoryRevision
 	for rows.Next() {
 		var r MemoryRevision
-		var createdAt string
 		if err := rows.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
 			&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
-			&r.ChallengedTheoryID, &createdAt); err != nil {
+			&r.ChallengedTheoryID, &r.CreatedAt); err != nil {
 			continue
-		}
-		if t, err := time.Parse("2006-01-02 15:04:05.999999999", createdAt); err == nil {
-			r.CreatedAt = t
-		} else if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
-			r.CreatedAt = t
-		} else if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
-			r.CreatedAt = t
-		} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-			r.CreatedAt = t
 		}
 		revisions = append(revisions, r)
 	}
@@ -3056,47 +3091,22 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 // This provides point-in-time reconstruction without replaying a log.
 func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Time) (*MemoryRevision, error) {
 	// First verify the memory existed at that time
-	var createdAt string
+	var createdAt int64
 	err := dm.db.QueryRow(`SELECT created_at FROM memories WHERE id = ?`, memoryID).Scan(&createdAt)
 	if err != nil {
 		return nil, nil // memory doesn't exist
 	}
-	var createdTime time.Time
-	if t, err := time.Parse("2006-01-02 15:04:05.999999999", createdAt); err == nil {
-		createdTime = t
-	} else if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
-		createdTime = t
-	} else if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
-		createdTime = t
-	} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-		createdTime = t
-	} else {
-		return nil, nil
-	}
-	if createdTime.After(asOf) {
+	if createdAt > asOf.Unix() {
 		return nil, nil // memory didn't exist yet
 	}
 
 	// Check if the memory was soft-deleted before asOf
-	var deletedAt *string
+	var deletedAt sql.NullInt64
 	err = dm.db.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, memoryID).Scan(&deletedAt)
-	if err == nil && deletedAt != nil && *deletedAt != "" {
-		var deletedTime time.Time
-		if t, err := time.Parse("2006-01-02 15:04:05.999999999", *deletedAt); err == nil {
-			deletedTime = t
-		} else if t, err := time.Parse("2006-01-02 15:04:05", *deletedAt); err == nil {
-			deletedTime = t
-		} else if t, err := time.Parse(time.RFC3339Nano, *deletedAt); err == nil {
-			deletedTime = t
-		} else if t, err := time.Parse(time.RFC3339, *deletedAt); err == nil {
-			deletedTime = t
-		}
-		if !deletedTime.IsZero() && deletedTime.Before(asOf) {
-			return nil, nil // memory was deleted before asOf
-		}
+	if err == nil && deletedAt.Valid && deletedAt.Int64 > 0 && deletedAt.Int64 < asOf.Unix() {
+		return nil, nil // memory was deleted before asOf
 	}
 
-	asOfStr := asOf.UTC().Format("2006-01-02 15:04:05.999999999")
 	row := dm.db.QueryRow(`
 		SELECT id, memory_id, version, content, weight, collection,
 		       is_long_term, is_challenged, COALESCE(challenged_theory_id, ''), created_at
@@ -3105,24 +3115,14 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 		  AND created_at <= ?
 		ORDER BY version DESC
 		LIMIT 1
-	`, memoryID, asOfStr)
+	`, memoryID, asOf.Unix())
 
 	var r MemoryRevision
-	var revCreatedAt string
 	err = row.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
 		&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
-		&r.ChallengedTheoryID, &revCreatedAt)
+		&r.ChallengedTheoryID, &r.CreatedAt)
 	if err != nil {
 		return nil, nil // no revision found for that time
-	}
-	if t, err := time.Parse("2006-01-02 15:04:05.999999999", revCreatedAt); err == nil {
-		r.CreatedAt = t
-	} else if t, err := time.Parse("2006-01-02 15:04:05", revCreatedAt); err == nil {
-		r.CreatedAt = t
-	} else if t, err := time.Parse(time.RFC3339Nano, revCreatedAt); err == nil {
-		r.CreatedAt = t
-	} else if t, err := time.Parse(time.RFC3339, revCreatedAt); err == nil {
-		r.CreatedAt = t
 	}
 	return &r, nil
 }
@@ -3268,11 +3268,11 @@ func (dm *DatabaseManager) DecayWeights(policies map[string]DecayPolicy, interva
 			            WHEN 'ephemeral' THEN 2.0
 			            ELSE 1.0
 			        END, 1.0) AS INTEGER)), 1),
-			    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE is_long_term = 1
 			  AND deleted_at IS NULL
 			  AND collection = ?
-			  AND updated_at < DATETIME('now', '-' || ? || ' days')
+			  AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)
 			  AND weight > 1
 		`, decayFactor, collection, intervalDays)
 		if err != nil {
@@ -3294,12 +3294,12 @@ func (dm *DatabaseManager) ArchiveStaleMemories(archiveDays int) (int, error) {
 	}
 	result, err := dm.db.Exec(`
 		UPDATE memories
-		SET deleted_at = strftime('%s','now')
+		SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE weight = 1
 			  AND deleted_at IS NULL
-			  AND updated_at < DATETIME('now', '-' || ? || ' days')
+			  AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)
 			LIMIT 100
 		)
 	`, archiveDays)

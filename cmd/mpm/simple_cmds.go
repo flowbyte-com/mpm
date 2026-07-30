@@ -536,7 +536,7 @@ func handleSnooze(args []string) int {
 	_, err = dm.SQLDB().Exec(`
 		UPDATE memories
 		SET weight = MIN(weight + 1, 9),
-		    last_accessed_at = datetime('now', '+' || ? || ' days')
+		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, days, id)
 	if err != nil {
@@ -736,7 +736,7 @@ func handleRefAdd(args []string) int {
 		return 0
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := strconv.FormatInt(time.Now().Unix(), 10)
 	docID := mpminternal.GenerateID()
 	if existing != nil {
 		docID = existing.ID

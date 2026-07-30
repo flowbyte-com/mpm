@@ -89,7 +89,7 @@ func handleOpsMilestones(args []string) int {
 		FROM memories
 		WHERE deleted_at IS NULL
 		  AND tags LIKE ?
-		  AND created_at > datetime('now', ?)
+		  AND created_at > CAST(strftime('%s','now', ?) AS INTEGER)
 		ORDER BY created_at DESC
 		LIMIT ?`,
 		`%type:milestone-%`+`"`+`%`,

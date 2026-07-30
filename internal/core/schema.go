@@ -10,7 +10,7 @@ var BaseTables = []string{
 	// Sessions table - stores session metadata and transcripts
 	`CREATE TABLE IF NOT EXISTS sessions (
 		id TEXT PRIMARY KEY, session_id TEXT NOT NULL, content TEXT NOT NULL,
-		content_hash TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		content_hash TEXT UNIQUE NOT NULL, created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		source_path TEXT, metadata JSON, embedding BLOB
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);`,
@@ -19,14 +19,14 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS topics (
 		id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT,
 		parent_topic_id TEXT, tags JSON, is_active INTEGER DEFAULT 1,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, embedding BLOB
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), embedding BLOB
 	);`,
 
 	// Topic memberships - many-to-many relationship between memories/sessions and topics
 	`CREATE TABLE IF NOT EXISTS topic_memberships (
 		memory_id TEXT, session_id TEXT, topic_id TEXT NOT NULL,
-		role TEXT DEFAULT 'related', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		role TEXT DEFAULT 'related', created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		PRIMARY KEY (memory_id, topic_id),
 		UNIQUE (session_id, topic_id),
 		CHECK (memory_id IS NOT NULL OR session_id IS NOT NULL)
@@ -36,8 +36,8 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS memories (
 		id TEXT PRIMARY KEY, collection TEXT NOT NULL, content TEXT NOT NULL,
 		session_id TEXT, tags JSON, metadata JSON, embedding BLOB,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		source_db TEXT, source_id TEXT, promoted_at REAL,
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
 	);`,
@@ -47,7 +47,7 @@ var BaseTables = []string{
 		key TEXT PRIMARY KEY,
 		raw_json TEXT NOT NULL,
 		content_hash TEXT NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		config_snapshot JSON
 	);`,
 
@@ -84,10 +84,10 @@ var BaseTables = []string{
 		node_id TEXT PRIMARY KEY,
 		node_type TEXT NOT NULL,
 		reuse_count INTEGER DEFAULT 0,
-		last_retrieved_at DATETIME,
+		last_retrieved_at INTEGER,
 		success_count INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 
 	// Raw memories table - for v6 ingest workflow
@@ -112,7 +112,7 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS external_db_cursors (
 		db_label TEXT PRIMARY KEY,
 		last_cursor TEXT NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 
 	// Epistemic pressure view — powers the wake_context surface. Two
@@ -155,7 +155,7 @@ var BaseTables = []string{
 		is_long_term INTEGER NOT NULL DEFAULT 0,
 		is_challenged INTEGER NOT NULL DEFAULT 0,
 		challenged_theory_id TEXT,
-		created_at TEXT DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')),
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
 		UNIQUE(memory_id, version)
 	);`,
@@ -260,8 +260,8 @@ var ReferenceTables = []string{
 		source_path TEXT, source_type TEXT, tags TEXT,
 		content TEXT NOT NULL DEFAULT '', content_hash TEXT,
 		import_reason TEXT,
-		total_chunks INTEGER DEFAULT 0, last_indexed TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		total_chunks INTEGER DEFAULT 0, last_indexed INTEGER,
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 
 	// Reference chunks table - stores chunked content of reference documents.
@@ -297,7 +297,7 @@ var ReferenceTables = []string{
 		search_kind TEXT,
 		rank INTEGER,
 		score REAL,
-		created_at TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 
@@ -315,7 +315,7 @@ var ReferenceTables = []string{
 		reason TEXT,
 		justification TEXT,
 		admission_model TEXT,
-		created_at TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 }
@@ -394,7 +394,7 @@ var CommonIndexes = []string{
 		message     TEXT NOT NULL,
 		stack_trace TEXT,
 		context     JSON,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at  INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_level_created ON system_audit_log(level, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_component ON system_audit_log(component);`,
@@ -413,13 +413,13 @@ var CommonIndexes = []string{
 		component     TEXT NOT NULL,
 		message_hash  TEXT NOT NULL,
 		count         INTEGER NOT NULL DEFAULT 1,
-		first_seen    DATETIME NOT NULL,
-		last_seen     DATETIME NOT NULL,
+		first_seen    INTEGER NOT NULL,
+		last_seen     INTEGER NOT NULL,
 		status        TEXT NOT NULL DEFAULT 'active'
 		              CHECK (status IN ('active','snoozed','resolved')),
-		snooze_until  DATETIME,
-		created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+		snooze_until  INTEGER,
+		created_at    INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at    INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_acp_component ON audit_cluster_proposals(component);`,
 	`CREATE INDEX IF NOT EXISTS idx_acp_status_snooze ON audit_cluster_proposals(status, snooze_until);`,
@@ -433,14 +433,14 @@ var CommonIndexes = []string{
 	`CREATE TABLE IF NOT EXISTS session_handoffs (
 		id            TEXT PRIMARY KEY,
 		session_id    TEXT NOT NULL UNIQUE,
-		ended_at      DATETIME NOT NULL,
+		ended_at      INTEGER NOT NULL,
 		ended_state   TEXT NOT NULL CHECK (ended_state IN ('clean','crashed','interrupted','force_end')),
 		summary       TEXT NOT NULL,
 		commitments   JSON NOT NULL DEFAULT '[]',
 		open_questions JSON NOT NULL DEFAULT '[]',
-		read_at       DATETIME,
+		read_at       INTEGER,
 		read_by       TEXT,
-		created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at    INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_handoffs_unread ON session_handoffs(read_at, ended_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_handoffs_ended ON session_handoffs(ended_at);`,
@@ -482,7 +482,7 @@ var CommonIndexes = []string{
 		fired           INTEGER NOT NULL DEFAULT 0,
 		fired_at        INTEGER,
 		created_by      TEXT NOT NULL,
-		created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at      INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		metadata        JSON
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);`,
@@ -522,10 +522,10 @@ var CommonIndexes = []string{
 		cron_expr    TEXT NOT NULL,
 		directive_id TEXT NOT NULL,
 		status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused')),
-		last_run_at  DATETIME,
-		next_run_at  DATETIME NOT NULL,
-		created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+		last_run_at  INTEGER,
+		next_run_at  INTEGER NOT NULL,
+		created_at   INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at   INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);`,
 
@@ -552,9 +552,9 @@ var CommonIndexes = []string{
 		session_id TEXT PRIMARY KEY,
 		thesis TEXT NOT NULL,
 		supporting JSON,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		decay_at DATETIME
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		decay_at INTEGER
 	);`,
 
 	// ── IVF (Inverted File) Vector Index ──
@@ -602,12 +602,12 @@ var CommonIndexes = []string{
 		centroid   BLOB    NOT NULL,
 		n_vectors  INTEGER NOT NULL DEFAULT 0,
 		variance   REAL    NOT NULL DEFAULT 0.0,
-		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE TABLE IF NOT EXISTS vector_assignments (
 		memory_id  TEXT PRIMARY KEY,
 		cluster_id INTEGER NOT NULL,
-		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		FOREIGN KEY (cluster_id) REFERENCES vector_clusters(cluster_id)
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_vector_assignments_cluster
@@ -631,9 +631,9 @@ var SafeMigrations = [][3]string{
 	{"memories", "is_long_term", "INTEGER DEFAULT 0"},
 	{"memories", "weight", "INTEGER DEFAULT 1"},
 	{"memories", "reinforcement_count", "INTEGER DEFAULT 0"},
-	{"memories", "last_accessed_at", "DATETIME"},
-	{"memories", "updated_at", "DATETIME"},
-	{"memories", "expires_at", "DATETIME"},
+	{"memories", "last_accessed_at", "INTEGER"},
+	{"memories", "updated_at", "INTEGER"},
+	{"memories", "expires_at", "INTEGER"},
 	{"memories", "source_db", "TEXT"},
 	{"memories", "source_id", "TEXT"},
 	{"memories", "promoted_at", "REAL"},

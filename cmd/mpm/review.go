@@ -227,13 +227,16 @@ func toTime(v interface{}) time.Time {
 	}
 }
 
-// scanMemoriesFromRows scans SQL rows into a memory list
+// scanMemoriesFromRows scans SQL rows into a memory list.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1).
 func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, collection, content string
 		var reinforcementCount, weight int64
-		var lastAccess, createdAt time.Time
+		var lastAccess, createdAt int64
 
 		if err := rows.Scan(&id, &collection, &content, &reinforcementCount, &weight, &lastAccess, &createdAt); err != nil {
 			continue

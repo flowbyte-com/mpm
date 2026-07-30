@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"strconv"
-	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
@@ -39,7 +38,7 @@ func handleHistory(args []string) int {
 		if r.Version == revisions[0].Version {
 			label += "  (current)"
 		}
-		fmt.Printf("%s  %s\n", label, r.CreatedAt.UTC().Format(time.RFC3339))
+		fmt.Printf("%s  %s\n", label, mpminternal.FormatUnixSeconds(r.CreatedAt))
 	}
 	return 0
 }
@@ -96,8 +95,8 @@ func handleDiff(args []string) int {
 	diffs := dmp.DiffMain(v1Info.content, v2Info.content, true)
 	diffs = dmp.DiffCleanupSemantic(diffs)
 
-	fmt.Printf("--- v%d (%s)\n", v1, v1Info.revision.CreatedAt.UTC().Format(time.RFC3339))
-	fmt.Printf("+++ v%d (%s)\n", v2, v2Info.revision.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Printf("--- v%d (%s)\n", v1, mpminternal.FormatUnixSeconds(v1Info.revision.CreatedAt))
+	fmt.Printf("+++ v%d (%s)\n", v2, mpminternal.FormatUnixSeconds(v2Info.revision.CreatedAt))
 	fmt.Print(dmp.DiffPrettyText(diffs))
 	return 0
 }

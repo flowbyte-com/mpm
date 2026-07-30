@@ -103,10 +103,13 @@ type ConfidenceRow struct {
 
 // WhyRetrieval is the substrate's reuse statistics for an artifact.
 // Rendered as the second-to-last section.
+//
+// LastRetrievedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1); nil means "never retrieved".
 type WhyRetrieval struct {
 	ReuseCount      int
 	SuccessCount    int
-	LastRetrievedAt *time.Time
+	LastRetrievedAt *int64
 }
 
 // WhyService is the cognitive-interface provenance flagship.
@@ -360,10 +363,8 @@ func (s *WhyService) loadRetrieval(id string) (*WhyRetrieval, error) {
 		ReuseCount:   meta.ReuseCount,
 		SuccessCount: meta.SuccessCount,
 	}
-	if meta.LastRetrievedAt != "" {
-		if t, err := parseSQLiteTime(meta.LastRetrievedAt); err == nil {
-			out.LastRetrievedAt = &t
-		}
+	if meta.LastRetrievedAt != nil {
+		out.LastRetrievedAt = meta.LastRetrievedAt
 	}
 	return out, nil
 }

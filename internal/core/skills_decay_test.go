@@ -57,9 +57,9 @@ func seedAgedSkill(t *testing.T, dm *DatabaseManager, name string, weight int, i
 	if _, err := dm.db.Exec(`
 		UPDATE memories
 		SET weight = ?, is_long_term = ?,
-		    updated_at = datetime('now', '-500 days'),
-		    last_accessed_at = datetime('now', '-500 days'),
-		    created_at = datetime('now', '-500 days')
+		    updated_at = CAST(strftime('%s','now', '-500 days') AS INTEGER),
+		    last_accessed_at = CAST(strftime('%s','now', '-500 days') AS INTEGER),
+		    created_at = CAST(strftime('%s','now', '-500 days') AS INTEGER)
 		WHERE id = ?
 	`, weight, isLTM, id); err != nil {
 		t.Fatalf("seed backdate UPDATE: %v", err)

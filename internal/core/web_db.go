@@ -906,7 +906,7 @@ func (dm *DatabaseManager) recordReferenceInteraction(docID string, chunkID *str
 	_, _ = dm.db.Exec(`
 		INSERT INTO reference_interactions (id, doc_id, chunk_id, query, search_kind, rank, score, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().UTC().Format(time.RFC3339))
+	`, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().Unix())
 }
 
 // GetRecentInteractions returns the N most recent reference interactions.
@@ -1307,11 +1307,13 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
-// PruneOlderThan deletes memories created before the given time
-func (dm *DatabaseManager) PruneOlderThan(before time.Time) (int, error) {
+// PruneOlderThan deletes memories created before the given Unix-epoch seconds.
+// Boundary accepts int64 directly (created_at is INTEGER seconds since epoch).
+// Callers in cmd/mpm pass `time.Now().Add(-duration).Unix()`.
+func (dm *DatabaseManager) PruneOlderThan(beforeUnixSec int64) (int, error) {
 	result, err := dm.db.Exec(`
 		DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL
-	`, before.Format(time.RFC3339))
+	`, beforeUnixSec)
 	if err != nil {
 		return 0, err
 	}

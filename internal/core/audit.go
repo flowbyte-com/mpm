@@ -160,7 +160,7 @@ func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component string, day
 	args := []interface{}{}
 	q := `SELECT id, level, component, message, stack_trace, context, created_at
 	      FROM system_audit_log
-	      WHERE created_at >= datetime('now', ?)`
+	      WHERE created_at >= CAST(strftime('%s','now', ?) AS INTEGER)`
 	args = append(args, fmt.Sprintf("-%d days", days))
 
 	if level != "" {
@@ -245,7 +245,7 @@ func (dm *DatabaseManager) PruneAuditLog(retentionDays int) (int64, error) {
 		retentionDays = 30
 	}
 	res, err := dm.db.Exec(
-		"DELETE FROM system_audit_log WHERE created_at < datetime('now', ?)",
+		"DELETE FROM system_audit_log WHERE created_at < CAST(strftime('%s','now', ?) AS INTEGER)",
 		fmt.Sprintf("-%d days", retentionDays),
 	)
 	if err != nil {
@@ -295,6 +295,13 @@ func truncateStack(s string, max int) string {
 // on the INSERT SELECT. The DDL duplication is the cost of bypassing
 // SafeMigrations, which is column-ADD only.
 //
+// IMPORTANT (2026-07-30): column *types* — not just the column list —
+// must stay in sync with schema.go. As of Task 4 of the unix-epoch
+// migration, schema.go declares created_at as INTEGER (epoch seconds);
+// this DDL must mirror that, otherwise the INSERT SELECT below will
+// re-coerce stored epoch values to TEXT, reverting the flip and
+// breaking any downstream DATETIME('now') comparison (C2-style bug).
+//
 // Called from initUnifiedSchema right after the SafeMigrations loop and
 // before the CommonIndexes loop, so indices get rebuilt onto the
 // renamed table by the existing CREATE INDEX IF NOT EXISTS pass.
@@ -343,7 +350,7 @@ func (dm *DatabaseManager) migrateAuditLevelConstraint() error {
 		message     TEXT NOT NULL,
 		stack_trace TEXT,
 		context     JSON,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at  INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	)`
 	if _, err := tx.Exec(newDDL); err != nil {
 		return fmt.Errorf("migrateAuditLevelConstraint: create new table: %w", err)
@@ -408,20 +415,20 @@ func (dm *DatabaseManager) upsertClusterCounter(component, message, now string) 
 		VALUES (?, ?, ?, 1, ?, ?)
 		ON CONFLICT(cluster_key) DO UPDATE SET
 		    count = CASE
-		        WHEN audit_cluster_proposals.last_seen < datetime('now', ?)
+		        WHEN audit_cluster_proposals.last_seen < CAST(strftime('%s','now', ?) AS INTEGER)
 		        THEN 1
 		        ELSE audit_cluster_proposals.count + 1
 		    END,
 		    first_seen = CASE
-		        WHEN audit_cluster_proposals.last_seen < datetime('now', ?)
+		        WHEN audit_cluster_proposals.last_seen < CAST(strftime('%s','now', ?) AS INTEGER)
 		        THEN excluded.last_seen
 		        ELSE audit_cluster_proposals.first_seen
 		    END,
 		    last_seen = excluded.last_seen,
-		    updated_at = CURRENT_TIMESTAMP,
+		    updated_at = CAST(strftime('%s','now') AS INTEGER),
 		    status = CASE
 		        WHEN audit_cluster_proposals.status = 'snoozed'
-		             AND audit_cluster_proposals.snooze_until < datetime('now')
+		             AND audit_cluster_proposals.snooze_until < CAST(strftime('%s','now') AS INTEGER)
 		        THEN 'active'
 		        ELSE audit_cluster_proposals.status
 		    END`,

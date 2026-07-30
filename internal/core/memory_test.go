@@ -477,7 +477,7 @@ func TestMemoryProvenanceStorage(t *testing.T) {
 	require.NoError(t, err)
 
 	// Bump updated_at so both are eligible for decay
-	db.SQLDB().Exec(`UPDATE memories SET updated_at = DATETIME('now', '-30 days') WHERE id IN (?, ?)`, id1, id2)
+	db.SQLDB().Exec(`UPDATE memories SET updated_at = CAST(strftime('%s','now', '-30 days') AS INTEGER) WHERE id IN (?, ?)`, id1, id2)
 
 	// Run decay with aggressive rate so we can measure the difference
 	policy := map[string]DecayPolicy{

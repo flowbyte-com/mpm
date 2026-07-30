@@ -270,7 +270,7 @@ func handleMemorySearch(args []string) int {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		created := mem.Created
+		created := mpminternal.FormatUnixSeconds(mem.CreatedAt)
 		if len(created) > 10 {
 			created = created[:10]
 		}
@@ -297,7 +297,7 @@ func handleMemoryShow(args []string) int {
 
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("ID:      %s\n", mem.ID))
-	output.WriteString(fmt.Sprintf("Created: %s\n", mem.Created))
+	output.WriteString(fmt.Sprintf("Created: %s\n", mpminternal.FormatUnixSeconds(mem.CreatedAt)))
 	if mem.Source != "" {
 		output.WriteString(fmt.Sprintf("Source:  %s\n", mem.Source))
 	}
@@ -349,7 +349,7 @@ func handleMemoryList(args []string) int {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		created := mem.Created
+		created := mpminternal.FormatUnixSeconds(mem.CreatedAt)
 		if len(created) > 10 {
 			created = created[:10]
 		}
@@ -389,7 +389,7 @@ func handleMemorySearchTerm(args []string) int {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		created := mem.Created
+		created := mpminternal.FormatUnixSeconds(mem.CreatedAt)
 		if len(created) > 10 {
 			created = created[:10]
 		}

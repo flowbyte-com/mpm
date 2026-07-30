@@ -72,16 +72,20 @@ func DefaultHybridConfig() HybridConfig {
 }
 
 // HybridResult is a memory with combined FTS5 + vector scores.
+//
+// CreatedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). LastAccessedAt is a pointer because the column
+// is nullable.
 type HybridResult struct {
 	ID                 string
 	Content            string
 	Collection         string
 	Tags               string
 	Metadata           string
-	CreatedAt          string
+	CreatedAt          int64
 	ReinforcementCount int
 	Weight             int
-	LastAccessedAt     *string
+	LastAccessedAt     *int64
 	ReferenceID        *string
 	FTS5Score          float64 // raw BM25
 	VectorSimilarity   float64 // cosine similarity (0.0–1.0)
@@ -484,10 +488,10 @@ type ftsEntry struct {
 	Collection         string
 	Tags               string
 	Metadata           string
-	CreatedAt          string
+	CreatedAt          int64
 	ReinforcementCount int
 	Weight             int
-	LastAccessedAt     *string
+	LastAccessedAt     *int64
 	ReferenceID        *string
 	Score              float64
 	// Retrieval metadata (Observability Layer, 2026-07-26).
@@ -496,7 +500,7 @@ type ftsEntry struct {
 	// ORDER BY. A future RetrievalRanker implementation may consult
 	// these to blend a reuse-adjusted score per row.
 	ReuseCount      int
-	LastRetrievedAt *string
+	LastRetrievedAt *int64
 	SuccessCount    int
 }
 
@@ -505,10 +509,13 @@ type vecEntry struct {
 }
 
 // VectorMatch is returned by DatabaseManager.VectorMatch.
+//
+// CreatedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1).
 type VectorMatch struct {
 	ID         string
 	Content    string
-	CreatedAt  string
+	CreatedAt  int64
 	Similarity float64
 }
 
@@ -593,8 +600,8 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 	var results []ftsEntry
 	for rows.Next() {
 		var e ftsEntry
-		var nullableTags, nullableMetadata, nullableLastAccessed, nullableRefID,
-			nullableMetaLastRetrieved sql.NullString
+		var nullableTags, nullableMetadata, nullableRefID sql.NullString
+		var nullableLastAccessed, nullableMetaLastRetrieved sql.NullInt64
 		if err := rows.Scan(&e.ID, &e.Content, &e.Collection, &nullableTags, &nullableMetadata,
 			&e.CreatedAt, &e.ReinforcementCount, &e.Weight,
 			&nullableLastAccessed, &nullableRefID, &e.Score,
@@ -604,14 +611,15 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 		e.Tags = nullableTags.String
 		e.Metadata = nullableMetadata.String
 		if nullableLastAccessed.Valid {
-			e.LastAccessedAt = &nullableLastAccessed.String
+			v := nullableLastAccessed.Int64
+			e.LastAccessedAt = &v
 		}
 		if nullableRefID.Valid {
 			e.ReferenceID = &nullableRefID.String
 		}
 		if nullableMetaLastRetrieved.Valid {
-			s := nullableMetaLastRetrieved.String
-			e.LastRetrievedAt = &s
+			v := nullableMetaLastRetrieved.Int64
+			e.LastRetrievedAt = &v
 		}
 		results = append(results, e)
 	}
@@ -691,7 +699,8 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 
 	var results []VectorMatch
 	for rows.Next() {
-		var id, content, createdAt, embeddingJSON string
+		var id, content, embeddingJSON string
+		var createdAt int64
 		if err := rows.Scan(&id, &content, &createdAt, &embeddingJSON); err != nil {
 			continue
 		}

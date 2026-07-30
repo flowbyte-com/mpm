@@ -235,7 +235,8 @@ func IVFSearch(db *sql.DB, queryEmbedding []float32, collection string, cfg IVFC
 	// recall: scanning more clusters catches more outliers.
 	var results []VectorMatch
 	for rows.Next() {
-		var id, content, createdAt, embeddingJSON string
+		var id, content, embeddingJSON string
+		var createdAt int64
 		if err := rows.Scan(&id, &content, &createdAt, &embeddingJSON); err != nil {
 			continue
 		}

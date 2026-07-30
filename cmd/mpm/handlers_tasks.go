@@ -138,9 +138,9 @@ func handleTasksList(args []string) int {
 	fmt.Fprintln(w, "ID\tNAME\tCRON\tDIRECTIVE_ID\tSTATUS\tNEXT RUN (UTC)")
 	fmt.Fprintln(w, "----\t----\t----\t-----------\t------\t--------------")
 	for _, t := range tasks {
-		nextRun := t.NextRunAt.Format("2006-01-02 15:04:05")
+		nextRun := mpminternal.FormatUnixSeconds(t.NextRunAt)
 		if t.LastRunAt != nil {
-			nextRun = t.LastRunAt.Format("2006-01-02 15:04:05") + " (last)"
+			nextRun = mpminternal.FormatOptionalUnixSeconds(t.LastRunAt) + " (last)"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			t.ID, t.Name, t.CronExpr, t.DirectiveID, t.Status, nextRun)
