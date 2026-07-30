@@ -12,6 +12,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// ptrInt64 returns a pointer to the given int64 value. Used in test fixtures
+// to populate *int64 fields without repeating `&int64(x)` boilerplate.
+func ptrInt64(v int64) *int64 { return &v }
+
 // recallTestDBCounter increments per call to setupTestDB, giving each
 // caller a uniquely-named shared-cache in-memory database. The DSN form
 // `file:<unique>?mode=memory&cache=shared` keeps the DB in RAM while making
@@ -270,57 +274,57 @@ func TestIsMemoryStale(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		createdAt  time.Time
-		lastAccess time.Time
+		createdAt  int64
+		lastAccess *int64
 		staleDays  int
 		want       bool
 	}{
 		{
 			name:       "disabled when staleDays=0",
-			createdAt:  now.Add(-30 * day),
-			lastAccess: time.Time{},
+			createdAt:  now.Add(-30 * day).Unix(),
+			lastAccess: nil,
 			staleDays:  0,
 			want:       false,
 		},
 		{
 			name:       "recent last access — not stale",
-			createdAt:  now.Add(-30 * day),
-			lastAccess: now.Add(-5 * day),
+			createdAt:  now.Add(-30 * day).Unix(),
+			lastAccess: ptrInt64(now.Add(-5 * day).Unix()),
 			staleDays:  14,
 			want:       false,
 		},
 		{
 			name:       "last access > threshold — stale",
-			createdAt:  now.Add(-30 * day),
-			lastAccess: now.Add(-20 * day),
+			createdAt:  now.Add(-30 * day).Unix(),
+			lastAccess: ptrInt64(now.Add(-20 * day).Unix()),
 			staleDays:  14,
 			want:       true,
 		},
 		{
 			name:       "never accessed, created > threshold — stale",
-			createdAt:  now.Add(-20 * day),
-			lastAccess: time.Time{},
+			createdAt:  now.Add(-20 * day).Unix(),
+			lastAccess: nil,
 			staleDays:  14,
 			want:       true,
 		},
 		{
 			name:       "never accessed, created < threshold — not stale",
-			createdAt:  now.Add(-5 * day),
-			lastAccess: time.Time{},
+			createdAt:  now.Add(-5 * day).Unix(),
+			lastAccess: nil,
 			staleDays:  14,
 			want:       false,
 		},
 		{
 			name:       "last access exactly at threshold — not stale (exclusive)",
-			createdAt:  now.Add(-30 * day),
-			lastAccess: now.Add(-14*day + 1*time.Second),
+			createdAt:  now.Add(-30 * day).Unix(),
+			lastAccess: ptrInt64(now.Add(-14*day + 1*time.Second).Unix()),
 			staleDays:  14,
 			want:       false,
 		},
 		{
 			name:       "last access just past threshold — stale",
-			createdAt:  now.Add(-30 * day),
-			lastAccess: now.Add(-14*day - 1*time.Second),
+			createdAt:  now.Add(-30 * day).Unix(),
+			lastAccess: ptrInt64(now.Add(-14*day - 1*time.Second).Unix()),
 			staleDays:  14,
 			want:       true,
 		},
@@ -360,14 +364,14 @@ func TestFormatRationale(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		rc, weight   int
-		lastAccessed time.Time
+		lastAccessed *int64
 		wantSubstr   string
 	}{
-		{5, 12, now.Add(-48 * time.Hour), "5x ref"},
-		{5, 12, now.Add(-48 * time.Hour), "weight 12"},
-		{5, 12, now.Add(-48 * time.Hour), "LTM"},
-		{5, 12, now.Add(-48 * time.Hour), "accessed"},
-		{0, 1, time.Time{}, ""}, // no chips expected for default memory
+		{5, 12, ptrInt64(now.Add(-48 * time.Hour).Unix()), "5x ref"},
+		{5, 12, ptrInt64(now.Add(-48 * time.Hour).Unix()), "weight 12"},
+		{5, 12, ptrInt64(now.Add(-48 * time.Hour).Unix()), "LTM"},
+		{5, 12, ptrInt64(now.Add(-48 * time.Hour).Unix()), "accessed"},
+		{0, 1, nil, ""}, // no chips expected for default memory
 	}
 	for _, tt := range tests {
 		got := formatRationale(tt.rc, tt.weight, tt.lastAccessed)
