@@ -377,7 +377,10 @@ func TestCallHelpers_WeakenMemory_HonorsFloor(t *testing.T) {
 
 func TestCallHelpers_SnoozeMemory_BumpsWeightAndTimestamp(t *testing.T) {
 	dm := newTestDM(t)
-	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight, last_accessed_at) VALUES (?, 'memories', 'x', 5, '2020-01-01 00:00:00')`, 0, "mem-1")
+	// last_accessed_at is INTEGER (Unix-epoch seconds) after the timestamps
+	// unification migration. Seed with a known-past value via a Go-side bind.
+	seedAccessed := int64(1577836800) // 2020-01-01 00:00:00 UTC
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight, last_accessed_at) VALUES (?, 'memories', 'x', 5, ?)`, 0, "mem-1", seedAccessed)
 	require.NoError(t, err)
 
 	out, err := dm.SnoozeMemory("mem-1", 3)
@@ -385,10 +388,10 @@ func TestCallHelpers_SnoozeMemory_BumpsWeightAndTimestamp(t *testing.T) {
 	assert.Equal(t, 3, out["days"])
 
 	var weight int
-	var accessed string
+	var accessed int64
 	require.NoError(t, dm.QueryRowTracked(`SELECT weight, last_accessed_at FROM memories WHERE id = ?`, "mem-1").Scan(&weight, &accessed))
 	assert.Equal(t, 6, weight, "weight +1 (5 → 6)")
-	assert.NotEqual(t, "2020-01-01 00:00:00", accessed, "last_accessed_at must advance")
+	assert.Greater(t, accessed, seedAccessed, "last_accessed_at must advance")
 }
 
 func TestCallHelpers_SnoozeMemory_CapsAtLTMThreshold(t *testing.T) {
