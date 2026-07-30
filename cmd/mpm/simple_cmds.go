@@ -225,6 +225,7 @@ func handleShow(args []string) int {
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
 		usererror.Error("Memory not found: %s", id)
+		return 1
 	}
 
 	fmt.Println("\n══════════════════════════════════════════")
@@ -366,6 +367,7 @@ func handleFeedback(args []string) int {
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
 		usererror.Error("memory not found: %s", id)
+		return 1
 	}
 	isChallenged := false
 	if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {

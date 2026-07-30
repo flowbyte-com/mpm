@@ -397,17 +397,19 @@ Five minutes from zero to first decision. Choose your depth:
 ### 5.1 Try it (CLI only — no daemons)
 
 ```bash
-go install github.com/yourorg/mpm/cmd/mpm@latest
+git clone https://github.com/flowbyte-com/mpm ~/mpm
+cd ~/mpm
+make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
 ```
 
-The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (The companion daemons `mpm-mcp` and `mpm-scheduler` install separately when you want autonomous operation — see §5.2.)
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all four binaries to `/usr/local/bin`. The companion daemons `mpm-mcp` and `mpm-scheduler` install separately when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
-git clone https://github.com/yourorg/mpm
+git clone https://github.com/flowbyte-com/mpm
 cd mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
 make install         # optional — copies all four to /usr/local/bin
@@ -1105,7 +1107,11 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`backup`** — Export database to timestamped .sql dump (optional path arg)
 - **`call`** — Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
 - **`challenge`** — Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)
+- **`config`** — Configure the AI provider (interactive wizard or scripted set|get|show|edit)
+- **`continue`** — Session resumption dashboard — composes working context, wake context, decisions, skills, theories
 - **`debug`** — Low-level inspection tools for human troubleshooting
+- **`decide`** — Record a decision (cognitive verb for record_decision)
+- **`decision`** — Decision ledger (add|resolve)
 - **`decisions`** — Show decision ledger
 - **`directives`** — Show behavioral directives
 - **`doctor`** — Run diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
@@ -1114,8 +1120,10 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`gc`** — Run memory decay sweep (--dry-run, --review, --purge)
 - **`help`** — Show this help
 - **`hint`** — Check conversation context for relevant decisions/theories
+- **`info`** — Installation identity (version, database, models, scheduler, skills, persona, counts)
 - **`ingest`** — Import memories from external SQLite sources
 - **`kb`** — Knowledge base: memory, topic, lesson, session, reference
+- **`learn`** — Create a lesson (cognitive verb for mpm lesson add)
 - **`lesson`** — Lesson operations
 - **`lint`** — Validate persona/mode router frontmatter (YAML + regex compile)
 - **`list-skills`** — List skills (scope: all|local|shared)
@@ -1135,6 +1143,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`record_decision`** — Record a decision with context, choice, and rationale
 - **`reference`** — Reference library
 - **`reinforce`** — Reinforce a memory
+- **`remember`** — Create a memory (cognitive verb for mpm add)
 - **`resolve_theory`** — Mark a theory as resolved
 - **`restore`** — Restore a soft-deleted memory
 - **`restore-db`** — Import a .sql dump to restore full database state
@@ -1146,6 +1155,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`set-weight`** — Set memory weight
 - **`show`** — Show memory details
 - **`shred`** — Secure delete memory
+- **`skill`** — Skill library (add|list|show|search)
 - **`snooze`** — Bump memory relevance
 - **`stats`** — Show memory statistics
 - **`status`** — System status dashboard
@@ -1153,10 +1163,15 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`synthesize`** — Merge near-duplicate memories via LLM synthesis
 - **`tasks`** — Manage Agentic Cron tasks (upsert|list|delete)
 - **`theories`** — List theories [pending|resolved|all]
+- **`theorize`** — Propose a theory (cognitive verb for propose_theory)
+- **`theory`** — Theory tracker (add|resolve)
 - **`topic`** — Topic management
+- **`tour`** — Interactive walkthrough of the cognitive verbs (--demo auto-runs each step; --step N jumps)
 - **`version`** — Show version info
 - **`wake`** — Show last session context (--json, --strict)
 - **`weaken`** — Weaken a memory
+- **`why`** — Why does this artifact exist? — one-level provenance (evidence + confidence + retrieval)
+- **`work`** — Working Context (ephemeral execution state) — status|show|clear|promote
 
 <!-- cli:end — auto-generated by `go run ./cmd/gen-cli`. Do not edit by hand. -->
 

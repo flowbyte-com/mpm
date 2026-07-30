@@ -20,7 +20,7 @@ import (
 
 	mpmcore "github.com/flowbyte-com/mpm-core"
 
-	"mpm/internal/critic"
+	"github.com/flowbyte-com/mpm/internal/critic"
 )
 
 func main() {
