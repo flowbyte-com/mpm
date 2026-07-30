@@ -21,7 +21,7 @@ func seedClusterResolve(t *testing.T, dm *DatabaseManager, key, component, messa
 	_, err := dm.db.Exec(`
 		INSERT INTO audit_cluster_proposals
 			(cluster_key, component, message_hash, count, first_seen, last_seen, status)
-		VALUES (?, ?, ?, 5, datetime('now', '-1 day'), datetime('now'), 'active')`,
+		VALUES (?, ?, ?, 5, CAST(strftime('%s','now', '-1 day') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), 'active')`,
 		key, component, HashMessage(message))
 	if err != nil {
 		t.Fatalf("seed cluster: %v", err)
@@ -272,7 +272,7 @@ func TestActiveClusters_FilterSnoozedOutsideWindow(t *testing.T) {
 
 	// Snooze with an expired window — should re-surface as active.
 	if _, err := dm.db.Exec(
-		`UPDATE audit_cluster_proposals SET snooze_until = datetime('now', '-1 hour') WHERE cluster_key = ?`,
+		`UPDATE audit_cluster_proposals SET snooze_until = CAST(strftime('%s','now', '-1 hour') AS INTEGER) WHERE cluster_key = ?`,
 		"x:y",
 	); err != nil {
 		t.Fatal(err)

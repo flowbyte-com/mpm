@@ -130,7 +130,7 @@ func handleGC(args []string) int {
 		VALUES ('last_gc_at', ?, '')
 		ON CONFLICT(key) DO UPDATE SET
 		  raw_json = excluded.raw_json,
-		  updated_at = CURRENT_TIMESTAMP
+		  updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE (
 		  system_config.raw_json IS NULL
 		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
@@ -230,24 +230,30 @@ func handleGC(args []string) int {
 		scanned++
 		var id string
 		var weight int
-		var lastAccessed, createdAt *time.Time
+		var lastAccessed, createdAt *int64
 		var isLongTerm bool
 
 		rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm)
 
 		// Compute days since access using captured monotonic time
-		lastAccessTime := lastAccessed
-		if lastAccessTime == nil {
-			lastAccessTime = createdAt
+		lastAccessInt := lastAccessed
+		if lastAccessInt == nil {
+			lastAccessInt = createdAt
 		}
-		if lastAccessTime == nil {
+		if lastAccessInt == nil {
 			// Both timestamps are NULL — skip this row
 			continue
 		}
-		daysSinceAccess := monotonicNow.Sub(*lastAccessTime).Hours() / 24.0
+		lastAccessTime := time.Unix(*lastAccessInt, 0)
+		daysSinceAccess := monotonicNow.Sub(lastAccessTime).Hours() / 24.0
 
 		// Compute decay amount (float64 throughout)
-		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAt, aggressive, monotonicNow)
+		var createdAtTime *time.Time
+		if createdAt != nil {
+			t := time.Unix(*createdAt, 0)
+			createdAtTime = &t
+		}
+		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAtTime, aggressive, monotonicNow)
 		newWeight := float64(weight) - decay
 
 		// Floor

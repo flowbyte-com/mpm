@@ -16,11 +16,15 @@ package internal
 // RetrievalMetadata is a snapshot of retrieval stats for a single
 // node. Decoupled from the retrieval_metadata table row so the
 // ranker can be unit-tested without a database.
+//
+// LastRetrievedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1); nil means "never retrieved". Display layer
+// callers format at the boundary via FormatOptionalUnixSeconds.
 type RetrievalMetadata struct {
 	NodeID          string
 	NodeType        string
 	ReuseCount      int
-	LastRetrievedAt string // ISO-8601 string; empty when never retrieved
+	LastRetrievedAt *int64 // Unix-epoch seconds; nil = never retrieved
 	SuccessCount    int
 }
 

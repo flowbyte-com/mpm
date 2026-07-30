@@ -43,7 +43,7 @@ func (dm *DatabaseManager) FindAdmissionCandidates(limit int) ([]*AdmissionCandi
 		    SELECT 1 FROM memory_revisions mr
 		    JOIN memories m ON m.id = mr.memory_id
 		    WHERE mr.content LIKE '%' || substr(rc.content, 1, 80) || '%'
-		      AND mr.created_at > datetime('now', '-7 days')
+		      AND mr.created_at > CAST(strftime('%s','now', '-7 days') AS INTEGER)
 		  )
 		GROUP BY i.chunk_id
 		HAVING count(i.id) >= 3 AND count(DISTINCT i.query) >= 2
@@ -117,7 +117,7 @@ func (dm *DatabaseManager) RecordAdmissionOutcome(candidate *AdmissionCandidate,
 		result.Reason,
 		string(chainJSON),
 		admissionModel,
-		time.Now().UTC().Format(time.RFC3339),
+		time.Now().Unix(),
 	)
 	return err
 }

@@ -132,7 +132,7 @@ func handlePrune(args []string) int {
 			usererror.Error("Invalid duration '%s': %v", *olderThan, parseErr)
 		}
 		cutoff := time.Now().Add(-duration)
-		count, pruneErr = dm.PruneOlderThan(cutoff)
+		count, pruneErr = dm.PruneOlderThan(cutoff.Unix())
 		if pruneErr != nil {
 			usererror.Error("Prune failed: %v", pruneErr)
 		}

@@ -602,7 +602,7 @@ func handleGCRun(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[stri
 		"dead_memories":     out.DeadMemories,
 	}
 	if out.LastGCRan != nil {
-		result["last_gc_ran"] = out.LastGCRan.Format(time.RFC3339)
+		result["last_gc_ran"] = mpminternal.FormatUnixSeconds(*out.LastGCRan)
 	}
 	return result, nil
 }
@@ -1552,7 +1552,8 @@ func handleSessionHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		// Best-effort mark-read; don't fail the call if marking fails
 		// because the caller explicitly opted in. Idempotent.
 		_ = dm.MarkHandoffRead(h.ID, "manual-call")
-		h.ReadAt = ptrTime(time.Now().UTC())
+		now := time.Now().UTC().Unix()
+		h.ReadAt = &now
 		h.ReadBy = "manual-call"
 	}
 	return map[string]interface{}{
@@ -2254,11 +2255,11 @@ func handleFlushScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 
 	const query = `
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at)
-		VALUES (?, ?, ?, datetime('now', '+24 hours'))
+		VALUES (?, ?, ?, CAST(strftime('%s','now', '+24 hours') AS INTEGER))
 		ON CONFLICT(session_id) DO UPDATE SET
 			thesis = excluded.thesis,
 			supporting = excluded.supporting,
-			updated_at = CURRENT_TIMESTAMP,
+			updated_at = CAST(strftime('%s','now') AS INTEGER),
 			decay_at = excluded.decay_at;`
 
 	if _, err := dm.ExecTracked(query, 0, sessionID, thesis, supporting); err != nil {
@@ -2455,8 +2456,10 @@ func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		sb.WriteString(fmt.Sprintf("%v", ftsScore))
 		sb.WriteString("\n")
 		sb.WriteString(fmt.Sprintf("- Reuse Count: %d\n", meta.ReuseCount))
-		lastRetrieved := meta.LastRetrievedAt
-		if lastRetrieved == "" {
+		var lastRetrieved string
+		if meta.LastRetrievedAt != nil {
+			lastRetrieved = mpminternal.FormatUnixSeconds(*meta.LastRetrievedAt)
+		} else {
 			lastRetrieved = "_never_"
 		}
 		sb.WriteString("- Last Retrieved: ")

@@ -117,8 +117,8 @@ func (s *ContinueService) composeWorkingContext(sessionID string, now time.Time)
 		SessionID:  wc.SessionID,
 		Thesis:     wc.Thesis,
 		Supporting: wc.Supporting,
-		AgeLabel:   formatAge(wc.UpdatedAt),
-		ExpiresIn:  formatExpiresInFromNow(now, wc.ExpiresAt),
+		AgeLabel:   formatAgeUnix(wc.UpdatedAt),
+		ExpiresIn:  formatExpiresInFromNowUnix(wc.ExpiresAt),
 	}
 	return &DashboardSection{
 		Name: "Working Context",

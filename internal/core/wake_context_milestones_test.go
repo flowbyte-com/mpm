@@ -23,9 +23,12 @@ import (
 )
 
 // seedMilestone inserts one row into memories with the given tags and
-// created_at. created_at is the raw ISO-8601 string so the test can
-// simulate an ancient milestone without sleeping for 30 days.
-func seedMilestone(t *testing.T, dm *DatabaseManager, content string, tags []string, createdAt string) string {
+// created_at. createdAt is the unix-epoch seconds (INTEGER) — the column
+// is INTEGER-affinity as of Task 4 (2026-07-30), so passing an ISO-8601
+// string would force SQLite to TEXT-store it and break the 30d-window
+// filter. Callers that want a relative offset should pre-compute via
+// time.Now().Add(...).Unix().
+func seedMilestone(t *testing.T, dm *DatabaseManager, content string, tags []string, createdAt int64) string {
 	t.Helper()
 	tagsJSON, err := json.Marshal(tags)
 	require.NoError(t, err)
@@ -44,7 +47,7 @@ func seedMilestone(t *testing.T, dm *DatabaseManager, content string, tags []str
 func TestRecentMilestones_OnlyAnchoredRows(t *testing.T) {
 	dm := newTestDMForWake(t)
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Unix()
 	seedMilestone(t, dm, "milestone: shipped feature X", []string{"type:milestone-shipped"}, now)
 	seedMilestone(t, dm, "regular memory", []string{"general-knowledge"}, now)
 	seedMilestone(t, dm, "another regular memory", []string{"session:abc"}, now)
@@ -68,9 +71,9 @@ func TestRecentMilestones_Only30DayWindow(t *testing.T) {
 	dm := newTestDMForWake(t)
 
 	now := time.Now().UTC()
-	veryOld := now.AddDate(0, 0, -45).Format(time.RFC3339) // 45 days ago
-	edge := now.AddDate(0, 0, -29).Format(time.RFC3339)    // 29 days — inside window
-	today := now.Format(time.RFC3339)
+	veryOld := now.AddDate(0, 0, -45).Unix() // 45 days ago
+	edge := now.AddDate(0, 0, -29).Unix()    // 29 days — inside window
+	today := now.Unix()
 
 	seedMilestone(t, dm, "ancient: pre-window", []string{"type:milestone-shipped"}, veryOld)
 	seedMilestone(t, dm, "edge case: 29d old", []string{"type:milestone-shipped"}, edge)
@@ -94,7 +97,7 @@ func TestRecentMilestones_Limit(t *testing.T) {
 
 	now := time.Now().UTC()
 	for i := 0; i < 7; i++ {
-		ts := now.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)
+		ts := now.Add(time.Duration(i) * time.Minute).Unix()
 		seedMilestone(t, dm, "milestone #"+string(rune('A'+i)), []string{"type:milestone-shipped"}, ts)
 	}
 
@@ -118,7 +121,7 @@ func TestRecentMilestones_Limit(t *testing.T) {
 // accidentally match content.
 func TestRecentMilestones_DoesNotMisclassifyPrefixes(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Unix()
 
 	// Memory whose content mentions the milestone prefix but carries
 	// no actual type:milestone-* tag. Must NOT appear in the listing.
@@ -147,7 +150,7 @@ func TestRecentMilestones_DoesNotMisclassifyPrefixes(t *testing.T) {
 // milestone shows up in the wake payload under `recent_milestones`.
 func TestGatherWakeContext_IncludesRecentMilestones(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Unix()
 	seedMilestone(t, dm, "Test milestone for wake context", []string{"type:milestone-shipped"}, now)
 	seedMilestone(t, dm, "Test insight for wake context", []string{"type:milestone-insight"}, now)
 

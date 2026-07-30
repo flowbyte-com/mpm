@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,13 +26,21 @@ import (
 // DatabaseManager methods — do NOT open a separate connection or import
 // a pure-Go driver (modernc.org/sqlite) that lacks FTS5 support.
 //
-// Memory represents a single memory unit
+// Memory represents a single memory unit.
+//
+// Timestamp fields hold Unix-epoch seconds as int64 (non-nullable) or
+// *int64 (nullable). Use FormatUnixSeconds / FormatOptionalUnixSeconds
+// at the display boundary to render an RFC3339 string — see
+// format_time.go. The schema for memories.created_at, updated_at,
+// last_accessed_at, expires_at, deleted_at, last_synthesized_at is
+// INTEGER (Unix epoch seconds); the Go types here match the column
+// nullability declared in schema.go.
 type Memory struct {
 	ID                 string                 `json:"id"`
 	Content            string                 `json:"content"`
 	Metadata           map[string]interface{} `json:"metadata"`
 	Tags               []string               `json:"tags"`
-	Created            string                 `json:"created"`
+	CreatedAt          int64                  `json:"created_at"`
 	Source             string                 `json:"source"`
 	Embedding          []float32              `json:"embedding,omitempty"`
 	Collection         string                 `json:"collection,omitempty"`
@@ -42,8 +51,8 @@ type Memory struct {
 	RetrievalPriority  float64                `json:"retrieval_priority,omitempty"`
 	Importance         float64                `json:"importance,omitempty"`
 	Confidence         float64                `json:"confidence,omitempty"`
-	LastAccessedAt     string                 `json:"last_accessed_at,omitempty"`
-	ExpiresAt          string                 `json:"expires_at,omitempty"`
+	LastAccessedAt     *int64                 `json:"last_accessed_at,omitempty"`
+	ExpiresAt          *int64                 `json:"expires_at,omitempty"`
 	SuggestedTopics    interface{}            `json:"suggested_topics,omitempty"`
 	Score              float32                `json:"score,omitempty"`
 }
@@ -85,6 +94,25 @@ func (s *MemoryStore) execTracked(query string, retries int, args ...interface{}
 		return s.DM.ExecTracked(query, retries, args...)
 	}
 	return s.DB.Exec(query, args...)
+}
+
+// parseMemoryCreatedAt converts a RFC3339-formatted string into Unix-epoch
+// seconds. Returns 0 on parse failure (never an error) so the struct field
+// always has a defined value; the worst case is a 0 epoch which the display
+// layer renders as "1970-01-01T00:00:00Z". Used at the boundary where
+// AddMemory's caller-supplied createdAt (still a string today) feeds the
+// int64 struct field.
+func parseMemoryCreatedAt(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Unix()
+	}
+	return 0
 }
 
 // MemoryPaths represents the INPUT (watch) and OUTPUT (storage) paths for MPM.
@@ -342,7 +370,7 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		Content:           content,
 		Metadata:          metadata,
 		Tags:              tags,
-		Created:           createdAt,
+		CreatedAt:         parseMemoryCreatedAt(createdAt),
 		Source:            source,
 		Embedding:         embedding,
 		Collection:        collection,
@@ -445,7 +473,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		Content:           content,
 		Metadata:          metadata,
 		Tags:              tags,
-		Created:           createdAt,
+		CreatedAt:         parseMemoryCreatedAt(createdAt),
 		Source:            source,
 		Embedding:         embedding,
 		Collection:        collection,
@@ -489,10 +517,18 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 	contentHashBytes := sha256.Sum256([]byte(content))
 	contentHash := hex.EncodeToString(contentHashBytes[:])
 
-	_, err := s.DB.Exec(`
+	// Normalize createdAt to Unix-epoch seconds (INTEGER column). Accept
+	// either a numeric string or RFC3339 — matches saveMemoryRow's
+	// normalization so both write paths produce the same on-disk shape.
+	createdAtSec, err := ParseTimestampArg(createdAt)
+	if err != nil {
+		return "", fmt.Errorf("addMemoryDirect: invalid createdAt %q: %w", createdAt, err)
+	}
+
+	_, err = s.DB.Exec(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight, content_hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAt, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
+	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAtSec, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
 	return id, err
 }
 
@@ -758,7 +794,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		mem := &Memory{
 			ID:         id,
 			Content:    content,
-			Created:    createdAt,
+			CreatedAt:  parseMemoryCreatedAt(createdAt),
 			Collection: coll,
 			Metadata:   make(map[string]interface{}),
 		}
@@ -807,7 +843,9 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 					mem.Source = src
 				}
 				if created, ok := meta["created"].(string); ok {
-					mem.Created = created
+					if ts, err := ParseTimestampArg(created); err == nil {
+						mem.CreatedAt = ts
+					}
 				}
 			}
 		}
@@ -846,7 +884,7 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	var mem Memory
 	var tagsJSON, metadataJSON []byte
 	var embedding []byte
-	var createdAt string
+	var createdAt int64
 	var sessionID sql.NullString
 
 	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL"+MemoryExpireClause, id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
@@ -860,7 +898,7 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	if sessionID.Valid {
 		mem.SessionID = sessionID.String
 	}
-	mem.Created = createdAt
+	mem.CreatedAt = createdAt
 
 	if len(tagsJSON) > 0 {
 		if err := json.Unmarshal(tagsJSON, &mem.Tags); err != nil {
@@ -906,7 +944,7 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt string
+		var createdAt int64
 		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
@@ -917,7 +955,7 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
 		}
-		mem.Created = createdAt
+		mem.CreatedAt = createdAt
 
 		if len(tagsJSON) > 0 {
 			if err := json.Unmarshal(tagsJSON, &mem.Tags); err != nil {
@@ -1041,7 +1079,7 @@ func (s *MemoryStore) GetLatestByCollection(collection string) (*Memory, error) 
 	var mem Memory
 	var tagsJSON, metadataJSON []byte
 	var embedding []byte
-	var createdAt string
+	var createdAt int64
 	var sessionID sql.NullString
 
 	err := s.DB.QueryRow(
@@ -1058,7 +1096,7 @@ func (s *MemoryStore) GetLatestByCollection(collection string) (*Memory, error) 
 	if sessionID.Valid {
 		mem.SessionID = sessionID.String
 	}
-	mem.Created = createdAt
+	mem.CreatedAt = createdAt
 	if len(tagsJSON) > 0 {
 		json.Unmarshal(tagsJSON, &mem.Tags)
 	}
@@ -1156,7 +1194,7 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 		mem := &Memory{
 			ID:         id,
 			Content:    content,
-			Created:    createdAt,
+			CreatedAt:  parseMemoryCreatedAt(createdAt),
 			Collection: coll,
 			Metadata:   make(map[string]interface{}),
 		}
@@ -1250,7 +1288,7 @@ func (s *MemoryStore) DecayWeights(policies map[string]DecayPolicy, intervalDays
 			  AND is_long_term = 0
 			  AND weight > ?
 			  AND reinforcement_count = 0
-			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+			  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER))
 		`, 3, policy.Floor, policy.DecayPercent, collection, policy.Floor, intervalDays)
 		if err != nil {
 			return total, fmt.Errorf("weight decay failed for collection %s: %w", collection, err)
@@ -1302,14 +1340,14 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if cfg.NeverAccessedMaxDays > 0 {
 		result, err := s.execTracked(`
 			UPDATE memories
-			SET deleted_at = strftime('%s','now')
+			SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
 				  AND last_accessed_at IS NULL
 				  AND reinforcement_count = 0
 				  AND is_long_term = 0
-				  AND updated_at < DATETIME('now', '-' || ? || ' days')
+				  AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)
 				LIMIT 100
 			)
 		`, 0, cfg.NeverAccessedMaxDays)
@@ -1324,14 +1362,14 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	if cfg.LowWeightMaxDays > 0 {
 		result, err := s.execTracked(`
 			UPDATE memories
-			SET deleted_at = strftime('%s','now')
+			SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
 				  AND weight = 1
 				  AND reinforcement_count = 0
 				  AND is_long_term = 0
-				  AND updated_at < DATETIME('now', '-' || ? || ' days')
+				  AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)
 				LIMIT 100
 			)
 		`, 3, cfg.LowWeightMaxDays)
@@ -1506,7 +1544,7 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 		FROM memories
 		WHERE deleted_at IS NULL
 		  AND (is_long_term = 1 OR weight >= 5)
-		  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-' || ? || ' days'))
+		  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER))
 		ORDER BY last_accessed_at ASC NULLS FIRST,
 		        reinforcement_count ASC
 		LIMIT ?
@@ -1523,7 +1561,8 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt, lastAccessed string
+		var createdAt int64
+		var lastAccessed *int64
 		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
@@ -1536,7 +1575,7 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
 		}
-		mem.Created = createdAt
+		mem.CreatedAt = createdAt
 		mem.LastAccessedAt = lastAccessed
 
 		if len(tagsJSON) > 0 {
@@ -1619,7 +1658,8 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt, lastAccessed string
+		var createdAt int64
+		var lastAccessed *int64
 		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
@@ -1632,7 +1672,7 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
 		}
-		mem.Created = createdAt
+		mem.CreatedAt = createdAt
 		mem.LastAccessedAt = lastAccessed
 
 		if len(tagsJSON) > 0 {
@@ -1843,7 +1883,7 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt string
+		var createdAt int64
 		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
@@ -1852,7 +1892,7 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 		}
 
 		mem.SessionID = sessionID.String
-		mem.Created = createdAt
+		mem.CreatedAt = createdAt
 		if len(tagsJSON) > 0 {
 			json.Unmarshal(tagsJSON, &mem.Tags)
 		}
@@ -1958,7 +1998,7 @@ func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, ta
 
 	// Deactivate the original topic
 	_, err = s.DB.Exec(`
-		UPDATE topics SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+		UPDATE topics SET is_active = 0, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?
 	`, topicID)
 	if err != nil {
 		return fmt.Errorf("failed to deactivate topic: %v", err)
@@ -2006,7 +2046,7 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 		var m Memory
 		var tagsJSON, metadataJSON sql.NullString
 
-		if err := rows.Scan(&m.ID, &m.Collection, &m.Content, &m.Created, &metadataJSON, &tagsJSON); err != nil {
+		if err := rows.Scan(&m.ID, &m.Collection, &m.Content, &m.CreatedAt, &metadataJSON, &tagsJSON); err != nil {
 			continue
 		}
 
@@ -2857,7 +2897,7 @@ func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*M
 		var mem Memory
 		var tagsJSON, metadataJSON []byte
 		var embedding []byte
-		var createdAt string
+		var createdAt int64
 		var sessionID sql.NullString
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
@@ -2870,7 +2910,7 @@ func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*M
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
 		}
-		mem.Created = createdAt
+		mem.CreatedAt = createdAt
 
 		if len(tagsJSON) > 0 {
 			json.Unmarshal(tagsJSON, &mem.Tags)

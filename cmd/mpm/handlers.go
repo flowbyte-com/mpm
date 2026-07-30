@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
@@ -226,8 +227,21 @@ func getMemoryStore() *internal.MemoryStore {
 	}
 }
 
-// datePrefix returns the first 10 chars (YYYY-MM-DD) if present, else the whole string.
+// datePrefix returns the first 10 chars (YYYY-MM-DD) of the input
+// string if present, else the whole string. Used for legacy
+// string-typed Created fields (sessions listing).
 func datePrefix(s string) string {
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+// datePrefixSec returns the first 10 chars (YYYY-MM-DD) of the
+// RFC3339 rendering of an int64 Unix-epoch seconds value. Used for
+// the post-migration int64 CreatedAt fields (memories listing).
+func datePrefixSec(sec int64) string {
+	s := time.Unix(sec, 0).UTC().Format(time.RFC3339)
 	if len(s) >= 10 {
 		return s[:10]
 	}

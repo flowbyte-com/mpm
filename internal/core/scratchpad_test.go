@@ -20,7 +20,7 @@ func TestScratchpad_FlushCreatesRow(t *testing.T) {
 	dm := scratchpadDM(t)
 
 	_, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at) VALUES (?, ?, ?, datetime('now', '+24 hours'))`,
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at) VALUES (?, ?, ?, CAST(strftime('%s','now', '+24 hours') AS INTEGER))`,
 		"sess-1", "first thesis", "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
@@ -47,9 +47,9 @@ func TestScratchpad_UpsertUpdatesOnConflict(t *testing.T) {
 	// First flush.
 	if _, err := dm.db.Exec(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
-		VALUES (?, ?, datetime('now', '+24 hours'))
+		VALUES (?, ?, CAST(strftime('%s','now', '+24 hours') AS INTEGER))
 		ON CONFLICT(session_id) DO UPDATE SET
-			thesis = excluded.thesis, updated_at = CURRENT_TIMESTAMP`,
+			thesis = excluded.thesis, updated_at = CAST(strftime('%s','now') AS INTEGER)`,
 		"sess-2", "v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -57,9 +57,9 @@ func TestScratchpad_UpsertUpdatesOnConflict(t *testing.T) {
 	// Second flush with same session_id but different thesis.
 	if _, err := dm.db.Exec(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
-		VALUES (?, ?, datetime('now', '+24 hours'))
+		VALUES (?, ?, CAST(strftime('%s','now', '+24 hours') AS INTEGER))
 		ON CONFLICT(session_id) DO UPDATE SET
-			thesis = excluded.thesis, updated_at = CURRENT_TIMESTAMP`,
+			thesis = excluded.thesis, updated_at = CAST(strftime('%s','now') AS INTEGER)`,
 		"sess-2", "v2-refined"); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestScratchpadOrphansSummary_ExpiredTag(t *testing.T) {
 	// Backdate updated_at to >7d ago.
 	if _, err := dm.db.Exec(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at)
-		VALUES (?, ?, datetime('now', '-8 days'))`,
+		VALUES (?, ?, CAST(strftime('%s','now', '-8 days') AS INTEGER))`,
 		"orphan-stale", "ancient thesis"); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestScratchpadOrphansSummary_DormantTag(t *testing.T) {
 	// Backdate to 2 days — between 24h and 7d.
 	if _, err := dm.db.Exec(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at)
-		VALUES (?, ?, datetime('now', '-2 days'))`,
+		VALUES (?, ?, CAST(strftime('%s','now', '-2 days') AS INTEGER))`,
 		"orphan-dormant", "stale-but-not-ancient"); err != nil {
 		t.Fatal(err)
 	}
@@ -358,16 +358,16 @@ func TestScratchpadOrphansSummary_AggregateHeader_MixedAges(t *testing.T) {
 	dm := scratchpadDM(t)
 
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now'))`,
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))`,
 		"orphan-fresh-1", "fresh one"); err != nil { t.Fatal(err) }
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now'))`,
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))`,
 		"orphan-fresh-2", "fresh two"); err != nil { t.Fatal(err) }
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now', '-2 days'))`,
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now', '-2 days') AS INTEGER))`,
 		"orphan-dormant-1", "dormant one"); err != nil { t.Fatal(err) }
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, datetime('now', '-10 days'))`,
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now', '-10 days') AS INTEGER))`,
 		"orphan-expired-1", "expired one"); err != nil { t.Fatal(err) }
 
 	out := dm.ScratchpadOrphansSummary()

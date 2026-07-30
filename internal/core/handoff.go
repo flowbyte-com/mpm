@@ -13,17 +13,21 @@ import (
 // across the restart boundary. Handoffs are bootstrap data, not content —
 // the dormant `sessions` table still holds content snapshots for those who
 // want to keep full session logs.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). Display layer callers format at the boundary via
+// FormatUnixSeconds / FormatOptionalUnixSeconds.
 type Handoff struct {
-	ID            string     `json:"id"`
-	SessionID     string     `json:"session_id"`
-	EndedAt       time.Time  `json:"ended_at"`
-	EndedState    string     `json:"ended_state"`
-	Summary       string     `json:"summary"`
-	Commitments   []string   `json:"commitments"`
-	OpenQuestions []string   `json:"open_questions"`
-	ReadAt        *time.Time `json:"read_at,omitempty"`
-	ReadBy        string     `json:"read_by,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID            string  `json:"id"`
+	SessionID     string  `json:"session_id"`
+	EndedAt       int64   `json:"ended_at"`
+	EndedState    string  `json:"ended_state"`
+	Summary       string  `json:"summary"`
+	Commitments   []string `json:"commitments"`
+	OpenQuestions []string `json:"open_questions"`
+	ReadAt        *int64  `json:"read_at,omitempty"`
+	ReadBy        string  `json:"read_by,omitempty"`
+	CreatedAt     int64   `json:"created_at"`
 }
 
 // EndedState values — kept in sync with the CHECK constraint in schema.go.
@@ -90,7 +94,7 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 		return nil, fmt.Errorf("EndSession: marshal open_questions: %w", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Unix()
 
 	// ON CONFLICT(session_id) DO UPDATE — overwrite every column except id.
 	// id: preserve the existing id (id = session_handoffs.id refers to
@@ -127,8 +131,8 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 			created_at     = excluded.created_at,
 			read_at        = NULL,
 			read_by        = NULL`,
-		GenerateID(), sessionID, now.Format("2006-01-02 15:04:05"), endedState, summary,
-		string(commitJSON), string(questionJSON), now.Format("2006-01-02 15:04:05"),
+		GenerateID(), sessionID, now, endedState, summary,
+		string(commitJSON), string(questionJSON), now,
 	)
 	if err != nil {
 		// Audit the failure — meta-error: even the handoff writer failed.
@@ -161,25 +165,18 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 // sql.ErrNoRows if none exists. Internal helper for EndSession to
 // canonicalize the upsert result.
 //
-// Note on timestamp parsing: SQLite's DATETIME affinity normalizes stored
-// values on read into ISO 8601 form ("2026-06-26T10:16:47Z") regardless
-// of the format used at INSERT time. Scanning directly into time.Time
-// via the mattn/go-sqlite3 driver handles both formats correctly;
-// parsing the string manually with a fixed layout does NOT. So we let
-// the driver do the conversion.
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). The driver scans them directly into int64.
 func (dm *DatabaseManager) getHandoffBySessionID(sessionID string) (*Handoff, error) {
 	row := dm.db.QueryRow(`
 		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
 		FROM session_handoffs WHERE session_id = ?`, sessionID)
 	var h Handoff
-	var endedAt, createdAt time.Time
 	var commitJSON, questionJSON []byte
-	if err := row.Scan(&h.ID, &h.SessionID, &endedAt, &h.EndedState, &h.Summary,
-		&commitJSON, &questionJSON, &createdAt); err != nil {
+	if err := row.Scan(&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&commitJSON, &questionJSON, &h.CreatedAt); err != nil {
 		return nil, err
 	}
-	h.EndedAt = endedAt
-	h.CreatedAt = createdAt
 	if len(commitJSON) > 0 {
 		_ = json.Unmarshal(commitJSON, &h.Commitments)
 	}
@@ -246,7 +243,7 @@ func (dm *DatabaseManager) MarkHandoffRead(id, readBy string) error {
 	if dm == nil || dm.db == nil {
 		return fmt.Errorf("MarkHandoffRead: db not initialized")
 	}
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	now := time.Now().UTC().Unix()
 	_, err := dm.db.Exec(`
 		UPDATE session_handoffs
 		SET read_at = ?, read_by = ?
@@ -268,7 +265,8 @@ func (dm *DatabaseManager) MarkLatestHandoffRead(readBy string) (*Handoff, error
 	if err := dm.MarkHandoffRead(h.ID, readBy); err != nil {
 		return h, fmt.Errorf("mark read: %w", err)
 	}
-	h.ReadAt = ptrTime(time.Now().UTC())
+	now := time.Now().UTC().Unix()
+	h.ReadAt = &now
 	h.ReadBy = readBy
 	return h, nil
 }
@@ -320,7 +318,7 @@ func (dm *DatabaseManager) PruneHandoffs(retentionDays int) (int64, error) {
 	}
 	result, err := dm.db.Exec(`
 		DELETE FROM session_handoffs
-		WHERE created_at < datetime('now', '-' || ? || ' days')`, retentionDays)
+		WHERE created_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)`, retentionDays)
 	if err != nil {
 		return 0, fmt.Errorf("PruneHandoffs: %w", err)
 	}
@@ -333,33 +331,27 @@ func (dm *DatabaseManager) PruneHandoffs(retentionDays int) (int64, error) {
 // scanHandoff reads one row from a *sql.Row into a Handoff. Handles JSON
 // unmarshal of commitments and open_questions. Returns sql.ErrNoRows
 // unchanged so callers can detect missing-handoff cleanly.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). read_at is nullable → sql.NullInt64.
 func scanHandoff(row *sql.Row) (*Handoff, error) {
 	var (
 		h            Handoff
-		endedAt      string
 		commitJSON   string
 		questionJSON string
-		readAt       sql.NullString
+		readAt       sql.NullInt64
 		readBy       sql.NullString
-		createdAt    string
 	)
 	err := row.Scan(
-		&h.ID, &h.SessionID, &endedAt, &h.EndedState, &h.Summary,
-		&commitJSON, &questionJSON, &readAt, &readBy, &createdAt,
+		&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if t, perr := parseSQLiteTime(endedAt); perr == nil {
-		h.EndedAt = t
-	}
-	if t, perr := parseSQLiteTime(createdAt); perr == nil {
-		h.CreatedAt = t
-	}
 	if readAt.Valid {
-		if t, perr := parseSQLiteTime(readAt.String); perr == nil {
-			h.ReadAt = &t
-		}
+		v := readAt.Int64
+		h.ReadAt = &v
 	}
 	if readBy.Valid {
 		h.ReadBy = readBy.String
@@ -377,30 +369,21 @@ func scanHandoff(row *sql.Row) (*Handoff, error) {
 func scanHandoffRows(rows *sql.Rows) (*Handoff, error) {
 	var (
 		h            Handoff
-		endedAt      string
 		commitJSON   string
 		questionJSON string
-		readAt       sql.NullString
+		readAt       sql.NullInt64
 		readBy       sql.NullString
-		createdAt    string
 	)
 	err := rows.Scan(
-		&h.ID, &h.SessionID, &endedAt, &h.EndedState, &h.Summary,
-		&commitJSON, &questionJSON, &readAt, &readBy, &createdAt,
+		&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if t, perr := parseSQLiteTime(endedAt); perr == nil {
-		h.EndedAt = t
-	}
-	if t, perr := parseSQLiteTime(createdAt); perr == nil {
-		h.CreatedAt = t
-	}
 	if readAt.Valid {
-		if t, perr := parseSQLiteTime(readAt.String); perr == nil {
-			h.ReadAt = &t
-		}
+		v := readAt.Int64
+		h.ReadAt = &v
 	}
 	if readBy.Valid {
 		h.ReadBy = readBy.String
@@ -417,6 +400,11 @@ func scanHandoffRows(rows *sql.Rows) (*Handoff, error) {
 // parseSQLiteTime handles both "YYYY-MM-DD HH:MM:SS" (DATETIME format) and
 // "YYYY-MM-DDTHH:MM:SSZ" (RFC3339) since both may appear in old rows from
 // the dormant sessions table or hand-written test data.
+//
+// Deprecated: handoff scan paths now read INTEGER directly via the driver.
+// parseSQLiteTime survives only because callers in other packages (wake
+// context, scratchpad) still feed timestamp strings from raw SQL — drop
+// when those go away.
 func parseSQLiteTime(s string) (time.Time, error) {
 	for _, layout := range []string{
 		"2006-01-02 15:04:05",
@@ -428,10 +416,4 @@ func parseSQLiteTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("parseSQLiteTime: no layout matched %q", s)
-}
-
-// ptrTime returns a pointer to a time.Time (used for nullable time fields
-// in JSON output).
-func ptrTime(t time.Time) *time.Time {
-	return &t
 }

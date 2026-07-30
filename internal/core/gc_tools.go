@@ -37,9 +37,9 @@ type GCOptions struct {
 // attempted vs skipped. DeadMemories is populated on dry runs so
 // agents can decide whether to escalate (purge/shred).
 type GCRunResult struct {
-	Ran           bool       // false if cooldown skipped the run
-	CooldownSkip  bool       // true if cooldown blocked this run
-	LastGCRan     *time.Time // populated only on cooldown skip
+	Ran           bool    // false if cooldown skipped the run
+	CooldownSkip  bool    // true if cooldown blocked this run
+	LastGCRan     *int64  // populated only on cooldown skip (Unix-epoch seconds)
 	Scanned       int
 	Updated       int
 	SoftDeleted   int
@@ -73,7 +73,7 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		VALUES ('last_gc_at', ?, '')
 		ON CONFLICT(key) DO UPDATE SET
 		  raw_json = excluded.raw_json,
-		  updated_at = CURRENT_TIMESTAMP
+		  updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE (
 		  system_config.raw_json IS NULL
 		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
@@ -87,10 +87,11 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 	if rowsAffected == 0 {
 		result.CooldownSkip = true
 		if lastGC, gerr := dm.GetSystemConfig("last_gc_at"); gerr == nil {
-			// GetSystemConfig returns updated_at as time.Time (it comes from
-			// the row's updated_at column, parsed by sql.Scan into time.Time).
-			if t, ok := lastGC["updated_at"].(time.Time); ok && !t.IsZero() {
-				result.LastGCRan = &t
+			// GetSystemConfig returns updated_at as int64 Unix-epoch seconds
+			// (see migration timestamps_unified_v1).
+			if t, ok := lastGC["updated_at"].(int64); ok && t > 0 {
+				v := t
+				result.LastGCRan = &v
 			}
 		}
 		return result, nil
@@ -127,7 +128,7 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		result.Scanned++
 		var id string
 		var weight int
-		var lastAccessed, createdAt *time.Time
+		var lastAccessed, createdAt *int64
 		var isLTM bool
 		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
 			continue
@@ -139,8 +140,14 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		if last == nil {
 			continue
 		}
-		days := monotonicNow.Sub(*last).Hours() / 24.0
-		decay := gcComputeDecay(float64(weight), days, isLTM, createdAt, opts.Aggressive, monotonicNow)
+		lastTime := time.Unix(*last, 0)
+		days := monotonicNow.Sub(lastTime).Hours() / 24.0
+		var createdTime *time.Time
+		if createdAt != nil {
+			t := time.Unix(*createdAt, 0)
+			createdTime = &t
+		}
+		decay := gcComputeDecay(float64(weight), days, isLTM, createdTime, opts.Aggressive, monotonicNow)
 		newW := float64(weight) - decay
 		if newW < -10.0 {
 			newW = -10.0

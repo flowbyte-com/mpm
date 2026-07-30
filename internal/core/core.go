@@ -78,7 +78,7 @@ type CoreDB interface {
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
 	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
 	PruneExpired() (int, error)
-	PruneOlderThan(before time.Time) (int, error)
+	PruneOlderThan(beforeUnixSec int64) (int, error)
 	PruneNeverAccessed() (int, error)
 	DecayWeights(policies map[string]DecayPolicy, intervalDays int) (int, error)
 	ArchiveStaleMemories(archiveDays int) (int, error)

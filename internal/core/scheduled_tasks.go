@@ -40,16 +40,20 @@ import (
 // Status field is constrained to ScheduledTaskActive | ScheduledTaskPaused
 // (CHECK constraint at the schema level). LastRunAt is a pointer because
 // it is NULL before the task's first execution.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). Display layer callers format at the boundary via
+// FormatUnixSeconds / FormatOptionalUnixSeconds.
 type ScheduledTask struct {
-	ID          string     `json:"id" db:"id"`
-	Name        string     `json:"name" db:"name"`
-	CronExpr    string     `json:"cron_expr" db:"cron_expr"`
-	DirectiveID string     `json:"directive_id" db:"directive_id"`
-	Status      string     `json:"status" db:"status"`
-	LastRunAt   *time.Time `json:"last_run_at,omitempty" db:"last_run_at"`
-	NextRunAt   time.Time  `json:"next_run_at" db:"next_run_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+	ID          string `json:"id" db:"id"`
+	Name        string `json:"name" db:"name"`
+	CronExpr    string `json:"cron_expr" db:"cron_expr"`
+	DirectiveID string `json:"directive_id" db:"directive_id"`
+	Status      string `json:"status" db:"status"`
+	LastRunAt   *int64 `json:"last_run_at,omitempty" db:"last_run_at"`
+	NextRunAt   int64  `json:"next_run_at" db:"next_run_at"`
+	CreatedAt   int64  `json:"created_at" db:"created_at"`
+	UpdatedAt   int64  `json:"updated_at" db:"updated_at"`
 }
 
 // Status enums for scheduled_tasks. Mirrored in the CHECK constraint
@@ -129,6 +133,8 @@ func (dm *DatabaseManager) UpsertScheduledTask(task ScheduledTask) error {
 	if err != nil {
 		return err
 	}
+	nowUnix := now.Unix()
+	nextRunUnix := nextRun.Unix()
 
 	query := `
 		INSERT INTO scheduled_tasks
@@ -144,7 +150,7 @@ func (dm *DatabaseManager) UpsertScheduledTask(task ScheduledTask) error {
 	`
 	_, err = dm.db.Exec(query,
 		task.ID, task.Name, task.CronExpr, task.DirectiveID, task.Status,
-		nextRun, now, now,
+		nextRunUnix, nowUnix, nowUnix,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert scheduled_task %q: %w", task.ID, err)
@@ -247,7 +253,7 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 		if err != nil {
 			_, _ = tx.Exec(
 				`UPDATE scheduled_tasks SET status = ?, updated_at = ? WHERE id = ?`,
-				ScheduledTaskPaused, now, t.id,
+				ScheduledTaskPaused, now.Unix(), t.id,
 			)
 			continue
 		}
@@ -258,7 +264,7 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 			UPDATE scheduled_tasks
 			SET last_run_at = ?, next_run_at = ?, updated_at = ?
 			WHERE id = ?
-		`, now, nextRun, now, t.id)
+		`, now.Unix(), nextRun.Unix(), now.Unix(), t.id)
 		if err != nil {
 			return 0, fmt.Errorf("rollover task %s: %w", t.id, err)
 		}
@@ -275,6 +281,9 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 // ListScheduledTasks returns all scheduled tasks ordered by next_run_at.
 // Used by the CLI `mpm tasks list` surface and by the eventual
 // manage_scheduled_task tool's read path.
+//
+// Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1). last_run_at is nullable → sql.NullInt64.
 func (dm *DatabaseManager) ListScheduledTasks() ([]ScheduledTask, error) {
 	rows, err := dm.db.Query(`
 		SELECT id, name, cron_expr, directive_id, status,
@@ -290,18 +299,16 @@ func (dm *DatabaseManager) ListScheduledTasks() ([]ScheduledTask, error) {
 	var tasks []ScheduledTask
 	for rows.Next() {
 		var t ScheduledTask
-		var lastRun *string // scan into nullable string, then parse
+		var lastRun sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Name, &t.CronExpr, &t.DirectiveID, &t.Status,
 			&lastRun, &t.NextRunAt, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan scheduled_task: %w", err)
 		}
-		if lastRun != nil && *lastRun != "" {
-			parsed, err := time.Parse(time.RFC3339, *lastRun)
-			if err == nil {
-				t.LastRunAt = &parsed
-			}
+		if lastRun.Valid {
+			v := lastRun.Int64
+			t.LastRunAt = &v
 		}
 		tasks = append(tasks, t)
 	}

@@ -43,6 +43,9 @@ import (
 )
 
 // Wake is the projected view of a scheduled_wakes row.
+//
+// CreatedAt is stored as INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1).
 type Wake struct {
 	ID            string                 `json:"id"`
 	TargetTime    int64                  `json:"target_time"`
@@ -50,7 +53,7 @@ type Wake struct {
 	TheoryID      string                 `json:"theory_id,omitempty"`
 	RecurringRule string                 `json:"recurring_rule,omitempty"`
 	CreatedBy     string                 `json:"created_by"`
-	CreatedAt     string                 `json:"created_at"`
+	CreatedAt     int64                  `json:"created_at"`
 	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 

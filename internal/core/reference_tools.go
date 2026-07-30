@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -79,7 +80,7 @@ func (dm *DatabaseManager) AddReferenceFromFileWith(filepath, title string, tags
 		}, nil
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := strconv.FormatInt(time.Now().Unix(), 10)
 	docID := GenerateID()
 	if existing != nil {
 		// Source path seen before but content changed: reuse the id so

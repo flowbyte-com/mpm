@@ -329,8 +329,8 @@ func handleWake(args []string) int {
 			summary = summary[:54] + "…"
 		}
 		fmt.Printf("│   [%s] %-49s │\n", handoff.EndedState, summary)
-		if !handoff.EndedAt.IsZero() {
-			ts := handoff.EndedAt.Format("2006-01-02 15:04 UTC")
+		if handoff.EndedAt > 0 {
+			ts := mpminternal.FormatUnixSeconds(handoff.EndedAt)
 			fmt.Printf("│   ended %s%-40s │\n", ts, "")
 		}
 		if len(handoff.Commitments) > 0 {
@@ -386,7 +386,7 @@ func handleSessionSearch(args []string) int {
 		}
 		snippet = strings.ReplaceAll(snippet, "\n", " ")
 
-		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, datePrefix(mem.Created)))
+		output.WriteString(fmt.Sprintf("[%s] %s\n", mem.ID, datePrefixSec(mem.CreatedAt)))
 		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
 	}
 
@@ -408,7 +408,7 @@ func handleSessionShow(args []string) int {
 
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("ID:      %s\n", mem.ID))
-	output.WriteString(fmt.Sprintf("Created: %s\n\n", mem.Created))
+	output.WriteString(fmt.Sprintf("Created: %s\n\n", mpminternal.FormatUnixSeconds(mem.CreatedAt)))
 	output.WriteString(mem.Content)
 	output.WriteString("\n")
 

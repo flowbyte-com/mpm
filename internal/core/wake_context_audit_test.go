@@ -27,8 +27,8 @@ import (
 
 // seedAuditEvent inserts a raw audit_log row so AuditSummary's headline
 // has something to count. level must be one of the documented levels
-// (error, warn, fatal, info).
-func seedAuditEvent(t *testing.T, dm *DatabaseManager, level, component, message, createdAt string) {
+// (error, warn, fatal, info). createdAt is unix epoch seconds (INTEGER).
+func seedAuditEvent(t *testing.T, dm *DatabaseManager, level, component, message string, createdAt int64) {
 	t.Helper()
 	_, err := dm.db.Exec(`
 		INSERT INTO system_audit_log (level, component, message, created_at)
@@ -40,7 +40,7 @@ func seedAuditEvent(t *testing.T, dm *DatabaseManager, level, component, message
 // seedCluster inserts an audit_cluster_proposals row directly. Use
 // ClusterThreshold=3 in production, but tests can go lower to avoid
 // having to insert 3 events per cluster.
-func seedCluster(t *testing.T, dm *DatabaseManager, clusterKey, component, messageHash, status string, count int, firstSeen, lastSeen string) {
+func seedCluster(t *testing.T, dm *DatabaseManager, clusterKey, component, messageHash, status string, count int, firstSeen, lastSeen int64) {
 	t.Helper()
 	_, err := dm.db.Exec(`
 		INSERT INTO audit_cluster_proposals
@@ -52,7 +52,8 @@ func seedCluster(t *testing.T, dm *DatabaseManager, clusterKey, component, messa
 
 // seedTheory inserts a theories row with explicit metadata.status.
 // content is the searchable text where cluster_key would appear.
-func seedTheory(t *testing.T, dm *DatabaseManager, id, content, status, createdAt string) {
+// createdAt is unix epoch seconds (INTEGER).
+func seedTheory(t *testing.T, dm *DatabaseManager, id, content, status string, createdAt int64) {
 	t.Helper()
 	meta := fmt.Sprintf(`{"status":"%s"}`, status)
 	_, err := dm.db.Exec(`
@@ -64,7 +65,8 @@ func seedTheory(t *testing.T, dm *DatabaseManager, id, content, status, createdA
 
 // seedDecision inserts a decisions row. Decisions have no status field;
 // "recent" is implied by created_at (within last 30d).
-func seedDecision(t *testing.T, dm *DatabaseManager, id, content, createdAt string) {
+// createdAt is unix epoch seconds (INTEGER).
+func seedDecision(t *testing.T, dm *DatabaseManager, id, content string, createdAt int64) {
 	t.Helper()
 	_, err := dm.db.Exec(`
 		INSERT INTO memories (id, collection, content, tags, created_at)
@@ -92,7 +94,7 @@ func TestAuditSummary_HeadlineIncludesErrorAndWarningCounts(t *testing.T) {
 	// Anchor the events to "now" so they fall inside the 7-day window
 	// the production query checks against; a hardcoded date drifts
 	// outside the window as the wall clock advances.
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	now := time.Now().UTC().Unix()
 	seedAuditEvent(t, dm, "error", "relay", "e1", now)
 	seedAuditEvent(t, dm, "error", "relay", "e2", now)
 	seedAuditEvent(t, dm, "warn", "relay", "w1", now)
@@ -110,7 +112,7 @@ func TestAuditSummary_HeadlineIncludesErrorAndWarningCounts(t *testing.T) {
 
 func TestAuditSummary_UnknownClusterRichSurface(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	now := int64(1783000800) // 2026-07-02 14:00:00 UTC, epoch seconds
 	// Below the production threshold (3) but tests use ClusterThreshold
 	// directly so we just need count >= ClusterThreshold. Since
 	// ClusterThreshold is a package constant (default 3), seed at 4.
@@ -122,8 +124,8 @@ func TestAuditSummary_UnknownClusterRichSurface(t *testing.T) {
 	out := dm.AuditSummary()
 	require.Contains(t, out, "- Active Clusters (Unknown):",
 		"unknown clusters section header, got %q", out)
-	require.Contains(t, out, "[relay] 4 events since 2026-07-02",
-		"unknown cluster row format: [component] N events since YYYY-MM-DD, got %q", out)
+	require.Contains(t, out, "[relay] 4 events since 1783000800",
+		"unknown cluster row format: [component] N events since <epoch>, got %q", out)
 	require.Contains(t, out, "(ID: relay:abc123def456abc123def456abc12345)",
 		"unknown cluster row must include the actionable cluster_key ID, got %q", out)
 }
@@ -134,7 +136,7 @@ func TestAuditSummary_UnknownClusterRichSurface(t *testing.T) {
 
 func TestAuditSummary_KnownClusterCollapsedToSingleLine(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	now := int64(1783000800) // 2026-07-02 14:00:00 UTC
 	knownKey := "relay:abc123def456abc123def456abc12345"
 	unknownKey := "storage:def456abc123def456abc123def456ab"
 
@@ -165,7 +167,7 @@ func TestAuditSummary_KnownClusterCollapsedToSingleLine(t *testing.T) {
 
 func TestAuditSummary_KnownClusterAlsoMatchesRecentDecision(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	now := int64(1783000800) // 2026-07-02 14:00:00 UTC
 	knownKey := "relay:abc123def456abc123def456abc12345"
 
 	seedCluster(t, dm, knownKey, "relay", "abc123def456abc123def456abc12345", "active", 4, now, now)
@@ -183,7 +185,7 @@ func TestAuditSummary_KnownClusterAlsoMatchesRecentDecision(t *testing.T) {
 
 func TestAuditSummary_KnownClusterAlsoMatchesResolvedTheory(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	now := int64(1783000800) // 2026-07-02 14:00:00 UTC
 	resolvedKey := "relay:abc123def456abc123def456abc12345"
 
 	seedCluster(t, dm, resolvedKey, "relay", "abc123def456abc123def456abc12345", "active", 4, now, now)
@@ -209,10 +211,10 @@ func TestAuditSummary_SnoozedClusterNotSurfacedWhenStillSnoozed(t *testing.T) {
 	futureSnoozeKey := "relay:abc123def456abc123def456abc12345"
 
 	seedCluster(t, dm, futureSnoozeKey, "relay", "abc123def456abc123def456abc12345",
-		"snoozed", 5, "2026-06-25 14:00:00", "2026-06-25 14:00:00")
+		"snoozed", 5, int64(1782396000), int64(1782396000)) // 2026-06-25 14:00:00 UTC
 	// Set snooze_until far in the future.
 	_, err := dm.db.Exec(`UPDATE audit_cluster_proposals SET snooze_until = ? WHERE cluster_key = ?`,
-		"2026-12-31 00:00:00", futureSnoozeKey)
+		int64(1798675200), futureSnoozeKey) // 2026-12-31 00:00:00 UTC
 	require.NoError(t, err)
 
 	out := dm.AuditSummary()
@@ -226,10 +228,10 @@ func TestAuditSummary_SnoozedClusterSurfacedWhenSnoozeExpired(t *testing.T) {
 	expiredKey := "relay:abc123def456abc123def456abc12345"
 
 	seedCluster(t, dm, expiredKey, "relay", "abc123def456abc123def456abc12345",
-		"snoozed", 5, "2026-06-25 14:00:00", "2026-06-25 14:00:00")
+		"snoozed", 5, int64(1782396000), int64(1782396000)) // 2026-06-25 14:00:00 UTC
 	// snooze_until in the past — auto-reactivated.
 	_, err := dm.db.Exec(`UPDATE audit_cluster_proposals SET snooze_until = ? WHERE cluster_key = ?`,
-		"2026-01-01 00:00:00", expiredKey)
+		1767225600, expiredKey)
 	require.NoError(t, err)
 
 	out := dm.AuditSummary()
@@ -243,7 +245,7 @@ func TestAuditSummary_SnoozedClusterSurfacedWhenSnoozeExpired(t *testing.T) {
 
 func TestClusterKeyKnownByEpistemology_EscapesLikeWildcards(t *testing.T) {
 	dm := newTestDMForWake(t)
-	now := "2026-07-02 14:00:00"
+	now := int64(1783000800) // 2026-07-02 14:00:00 UTC
 
 	// A cluster_key containing % — naive LIKE would match ANY content.
 	// With ESCAPE '\' the % is literal, so it must NOT spuriously match.
