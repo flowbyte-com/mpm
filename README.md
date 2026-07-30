@@ -1199,7 +1199,7 @@ mpm call schedule_wake --payload '{
 }'
 ```
 
-`target_time` accepts either an absolute unix epoch or a relative duration (`30s`, `5m`, `2h`, `1d`, `7d`). Resolves to absolute at insert time and is returned in `target_iso` for log clarity.
+`target_time` accepts either an absolute unix-epoch integer, an RFC3339 timestamp, or a relative duration (`30s`, `5m`, `2h`, `1d`, `7d`). Resolves to absolute at insert time and is returned in `target_iso` for log clarity.
 
 The "agent has initiative" effect: any subsequent `mpm call` (CLI or MCP) that lands after `target_time` surfaces the wake inline as a `WakesPending` block in the response. The agent sees it, evaluates the reason, optionally schedules the next round. No missed reminders even if the agent is asleep — the next call after the target picks it up, marked with `overdue_secs` for honest accounting.
 
@@ -1571,7 +1571,7 @@ Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops
 
 *Append-only revisions with `--as-of` time travel so claims are auditable, not silently rewritten.*
 
-Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions. Terminal state is captured in `memory_revisions` for `--as-of` time-travel.
+Every memory has an append-only version history. `mpm debug history` shows all revisions with timestamps. `mpm debug diff` computes unified diffs between any two versions. Terminal state is captured in `memory_revisions` for `--as-of` time-travel. The `--as-of` flag accepts either an RFC3339 timestamp or a unix-epoch integer (seconds).
 #### Topic Auto-Suggestion
 
 *Links new memories to existing topics automatically so the graph grows without bookkeeping.*
@@ -1746,7 +1746,7 @@ Tunables centralized in `internal/core/cluster_proposals.go`: `ClusterThreshold`
 
 `annotate_cluster` is the unusual one: it **cannot** back-door a reactivation. The DM layer writes only to `system_audit_log`, never to `audit_cluster_proposals.status` / `snooze_until` / `count`. The invariant is enforced at the data layer and tested explicitly. This is the right shape for "I learned something about this cluster later" — the historical insight is preserved without altering the disposition the previous operator chose.
 
-`snooze_until` accepts both Go-relative (`24h`, `7d`, `1h30m`) and ISO 8601 absolute; the DB stores normalized RFC3339 for filter comparison.
+`snooze_until` accepts Go-relative (`24h`, `7d`, `1h30m`), ISO 8601 absolute, or a unix-epoch integer (seconds); the DB stores normalized unix-epoch seconds for filter comparison.
 
 **Why three verbs?** Audit trail integrity. The cluster table is a forensic record of "what signals has the system seen and how were they disposed of?" — collapsing snooze and resolve into one verb loses the distinction between "I'm choosing not to see this for now" and "this is closed forever." Annotate preserves historical insight without altering disposition. The asymmetry is deliberate: there is no `reactivate_cluster` tool — resolve is final, and the path back to `active` runs through the underlying cause (which the original operator presumably fixed).
 
