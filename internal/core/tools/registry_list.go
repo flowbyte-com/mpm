@@ -177,7 +177,7 @@ var Registry = []Tool{
 			"properties": {
 				"artifact_id":        {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Optional. ID of the artifact to filter on. Pair with artifact_type when ambiguous."},
 				"artifact_type":      {"type": "string", "enum": ["memory","theory","decision","lesson"], "default": "memory", "description": "Optional. Type of the artifact. Defaults to 'memory'."},
-				"since":              {"type": "string", "description": "Optional. ISO-8601 timestamp or unix epoch seconds — return changes on or after this time."},
+				"since":              {"type": ["string", "integer"], "description": "Optional. ISO-8601 timestamp or unix epoch seconds — return changes on or after this time."},
 				"since_seconds_ago":  {"type": "number", "description": "Optional alternative to 'since': duration in seconds from now."},
 				"limit":              {"type": "number", "description": "Optional. Max rows to return; default 50."}
 			}
@@ -277,7 +277,7 @@ var Registry = []Tool{
 			"type": "object",
 			"properties": {
 				"cluster_key":  {"type": "string", "description": "The cluster_key from list_active_clusters (component:hash format)."},
-				"snooze_until": {"type": "string", "description": "ISO 8601 absolute (e.g. 2026-07-12T12:00:00Z) OR Go-relative duration (e.g. 24h, 7d, 1h30m). Required."},
+				"snooze_until": {"type": ["string", "integer"], "description": "ISO 8601 absolute (e.g. 2026-07-12T12:00:00Z), Go-relative duration (e.g. 24h, 7d, 1h30m), or unix-epoch seconds. Required."},
 				"reason":       {"type": "string", "description": "Audit-friendly note — recorded in audit context for the watchdog stream."}
 			},
 			"required": ["cluster_key", "snooze_until"]
@@ -546,7 +546,7 @@ When the Exit Criteria is met, you MUST wipe this scratchpad clean (pass an empt
 		// itself is responsible for re-scheduling (no daemon parses it).
 		Name:        "schedule_wake",
 		Description: "Schedule a future wake: writes a row to scheduled_wakes. Any subsequent MPM call after target_time surfaces it as WakesPending in the response. Stateless — no daemon, no cron. target_time accepts a unix epoch (seconds), a relative duration ('24h', '30m', '7d', '1d'), or an ISO-8601 timestamp ('2026-07-12T12:00:00Z'). Use theory_id to bind the wake to a pending theory.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"},"target_time":{"type":"string"},"theory_id":{"type":"string"},"recurring_rule":{"type":"string"},"metadata":{"type":"object"}},"required":["reason","target_time"]}`),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string"},"target_time":{"type":["string","integer"],"description":"Unix epoch seconds (number), Go-relative duration ('24h','30m','7d','1d'), or ISO-8601 timestamp ('2026-07-12T12:00:00Z')."},"theory_id":{"type":"string"},"recurring_rule":{"type":"string"},"metadata":{"type":"object"}},"required":["reason","target_time"]}`),
 		Handler:     handleScheduleWake,
 	},
 	{
