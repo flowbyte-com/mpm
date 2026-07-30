@@ -42,12 +42,12 @@ type recallEntry struct {
 	content            string
 	metadata           string
 	sessionID          string
-	createdAt          time.Time
+	createdAt          int64
 	tags               string
 	synthesized        bool
 	reinforcementCount int
 	weight             int
-	lastAccessedAt     time.Time
+	lastAccessedAt     *int64
 	referenceID        string
 }
 
@@ -225,7 +225,8 @@ func handleRecall(args []string) int {
 
 	var entries []recallEntry
 	for rows.Next() {
-		var id, content, createdAt string
+		var id, content string
+		var createdAt int64
 		var nullableSessionID, nullableTags sql.NullString
 		var reinforcementCount, weight float64
 		var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
@@ -250,16 +251,14 @@ func handleRecall(args []string) int {
 			metadata:           nullableMetadata.String,
 			sessionID:          sessionID,
 			tags:               nullableTags.String,
+			createdAt:          createdAt,
 			reinforcementCount: int(reinforcementCount),
 			weight:             int(weight + 0.5), // round to nearest int for display
 			referenceID:        refID,
 		}
-		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-			entry.createdAt = t
-		}
 		if nullableLastAccessed.Valid && nullableLastAccessed.String != "" {
-			if t, err := time.Parse(time.RFC3339, nullableLastAccessed.String); err == nil {
-				entry.lastAccessedAt = t
+			if v, err := strconv.ParseInt(nullableLastAccessed.String, 10, 64); err == nil {
+				entry.lastAccessedAt = &v
 			}
 		}
 		if strings.Contains(nullableTags.String, "synthesized") {
@@ -271,7 +270,7 @@ func handleRecall(args []string) int {
 
 	// Sort by recency — must happen before empty check for JSON mode
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].createdAt.After(entries[j].createdAt)
+		return entries[i].createdAt > entries[j].createdAt
 	})
 
 	// ── Point-in-Time Reconstruction (--as-of) ─────────────────────────
@@ -332,10 +331,7 @@ func handleRecall(args []string) int {
 		budget := *tokenBudget
 		truncated := false
 		for _, e := range entries {
-			lastAccessStr := ""
-			if !e.lastAccessedAt.IsZero() {
-				lastAccessStr = e.lastAccessedAt.Format(time.RFC3339)
-			}
+			lastAccessStr := mpminternal.FormatOptionalUnixSeconds(e.lastAccessedAt)
 			score := computeScore(e.reinforcementCount, e.weight)
 			rationale := formatRationale(e.reinforcementCount, e.weight, e.lastAccessedAt)
 
@@ -385,7 +381,7 @@ func handleRecall(args []string) int {
 				Content:              jsonContent,
 				Tags:                 e.tags,
 				SessionID:            e.sessionID,
-				CreatedAt:            e.createdAt.Format(time.RFC3339),
+				CreatedAt:            mpminternal.FormatUnixSeconds(e.createdAt),
 				ReinforcementCount:   e.reinforcementCount,
 				Weight:               e.weight,
 				LastAccessedAt:       lastAccessStr,
@@ -486,8 +482,8 @@ func handleRecall(args []string) int {
 
 		// Access age (use lastAccessedAt, not createdAt)
 		accessAge := ""
-		if !e.lastAccessedAt.IsZero() {
-			accessAge = formatAge(e.lastAccessedAt)
+		if e.lastAccessedAt != nil {
+			accessAge = formatAgeUnix(*e.lastAccessedAt)
 		}
 
 		// ID chip
@@ -764,7 +760,7 @@ func computeScore(rc, weight int) float64 {
 }
 
 // formatRationale returns a one-line string describing why this memory matters.
-func formatRationale(rc, weight int, lastAccessed time.Time) string {
+func formatRationale(rc, weight int, lastAccessed *int64) string {
 	parts := []string{}
 
 	if rc > 0 {
@@ -779,25 +775,25 @@ func formatRationale(rc, weight int, lastAccessed time.Time) string {
 		parts = append(parts, "LTM")
 	}
 
-	if !lastAccessed.IsZero() {
-		parts = append(parts, "accessed "+formatAge(lastAccessed))
+	if lastAccessed != nil {
+		parts = append(parts, "accessed "+formatAgeUnix(*lastAccessed))
 	}
 
 	return strings.Join(parts, " · ")
 }
 
 // isMemoryStale returns true if the memory has not been accessed within staleDays.
-func isMemoryStale(createdAt, lastAccessed time.Time, staleDays int) bool {
+func isMemoryStale(createdAt int64, lastAccessed *int64, staleDays int) bool {
 	if staleDays <= 0 {
 		return false // feature disabled
 	}
 	threshold := time.Duration(staleDays) * 24 * time.Hour
 
-	if !lastAccessed.IsZero() {
-		return time.Since(lastAccessed) > threshold
+	if lastAccessed != nil {
+		return time.Since(time.Unix(*lastAccessed, 0)) > threshold
 	}
-	if !createdAt.IsZero() {
-		return time.Since(createdAt) > threshold
+	if createdAt > 0 {
+		return time.Since(time.Unix(createdAt, 0)) > threshold
 	}
 	return false
 }
@@ -821,7 +817,6 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 		}
 		entries := make([]hybridEntry, 0, len(results))
 		for _, r := range results {
-			createdAt := time.Unix(r.CreatedAt, 0)
 			entries = append(entries, hybridEntry{
 				ID:                 shortID(r.ID),
 				Content:            r.Content,
@@ -834,7 +829,7 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 				FTS5Score:          r.FTS5Score,
 				VectorSimilarity:   r.VectorSimilarity,
 				Rationale:          fmt.Sprintf("hybrid fts5+vec weight=%.2f", r.CombinedScore),
-				IsStale:            isMemoryStale(createdAt, time.Time{}, staleDays),
+				IsStale:            isMemoryStale(r.CreatedAt, nil, staleDays),
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{"query": query, "memories": entries, "search_mode": "hybrid"})
@@ -882,10 +877,10 @@ func printProvenance(w io.Writer, e recallEntry, content string) {
 	// Recency bonus is harder to reverse-engineer; show the access age
 	// instead and let the operator intuit it.
 	recency := ""
-	if !e.lastAccessedAt.IsZero() {
-		recency = formatAge(e.lastAccessedAt) + " ago"
+	if e.lastAccessedAt != nil {
+		recency = formatAgeUnix(*e.lastAccessedAt) + " ago"
 	} else {
-		recency = formatAge(e.createdAt) + " old"
+		recency = formatAgeUnix(e.createdAt) + " old"
 	}
 
 	fmt.Fprintf(w, "    %s[why]%s reinforcement=%d (×2 = %.1f)  weight=%d (×1.5 = %.1f)  recency=%s\n",
