@@ -226,8 +226,9 @@ func main() {
 	args := os.Args[1:]
 
 	// Default-to-recall: `mpm token budget` → `mpm recall token budget`
-	// Only triggers for a single bare positional string that isn't a flag or known command.
-	if len(args) == 1 && args[0] != "" && args[0][0] != '-' && router.resolveCommand(args[0]) == nil {
+	// Only triggers for a single bare positional string that isn't a flag, +/- feedback shortcut,
+	// or known command.
+	if len(args) == 1 && args[0] != "" && args[0][0] != '-' && args[0][0] != '+' && router.resolveCommand(args[0]) == nil {
 		args = []string{"recall", args[0]}
 	}
 

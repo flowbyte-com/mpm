@@ -24,7 +24,7 @@ import (
 
 	mpmcore "github.com/flowbyte-com/mpm-core"
 
-	"mpm/internal/scheduler"
+	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
 func main() {

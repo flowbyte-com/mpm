@@ -1,4 +1,4 @@
-module mpm
+module github.com/flowbyte-com/mpm
 
 go 1.26.1
 
