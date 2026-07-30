@@ -71,7 +71,7 @@ func handleRecall(args []string) int {
 	before := fs.String("before", "", "Only results created before this date (YYYY-MM-DD)")
 	semantic := fs.Bool("semantic", false, "Use hybrid semantic search (FTS5 + embeddings)")
 	vectorWeight := fs.Float64("vector-weight", 0.5, "Vector weight in hybrid search (0=FTS5-only, 1=vector-only)")
-	asOf := fs.String("as-of", "", "Point-in-time reconstruction: retrieve memory state as of this timestamp (RFC3339)")
+	asOf := fs.String("as-of", "", "Point-in-time reconstruction: retrieve memory state as of this timestamp (unix-epoch seconds or RFC3339)")
 	why := fs.Bool("why", false, "Show why each memory was retrieved (provenance: score factors, FTS terms, source engine)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
@@ -286,10 +286,11 @@ func handleRecall(args []string) int {
 	//   - The reconstructed content reflects the historical text, not current.
 	var timeTravelVersionMap map[string]int
 	if *asOf != "" {
-		asOfTime, err := time.Parse(time.RFC3339, *asOf)
+		asOfUnix, err := mpminternal.ParseTimestampArg(*asOf)
 		if err != nil {
-			usererror.Error("--as-of must be an RFC3339 timestamp, got %q", *asOf)
+			usererror.Error("--as-of must be a unix-epoch integer or RFC3339 timestamp, got %q", *asOf)
 		}
+		asOfTime := time.Unix(asOfUnix, 0)
 
 		timeTravelVersionMap = make(map[string]int, len(entries))
 		var filtered []recallEntry
@@ -577,10 +578,10 @@ func handleRecall(args []string) int {
 		if _, err := dm.SQLDB().Exec(fmt.Sprintf(`
 			UPDATE memories
 			SET weight = MIN(weight + 0.5, 100.0),
-			    last_accessed_at = CURRENT_TIMESTAMP
+			    last_accessed_at = CAST(strftime('%%s','now') AS INTEGER)
 			WHERE id IN (%s)
 			  AND weight >= 1
-			  AND (last_accessed_at IS NULL OR last_accessed_at < datetime('now', '-1 hour'))
+			  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%%s','now', '-1 hour') AS INTEGER))
 		`, strings.Join(ids, ",")), vals...); err != nil {
 			slog.Warn("implicit reinforcement failed", "error", err)
 		}
@@ -715,6 +716,39 @@ func formatAge(t time.Time) string {
 	}
 }
 
+// formatAgeUnix renders an int64 Unix-epoch-seconds value as a relative
+// age string ("just now" / "5m ago" / "3h ago" / "2d ago" / "yesterday").
+// Used at the display boundary for migrated-timestamp fields whose callers
+// no longer carry a time.Time. Zero values render as "(never)".
+func formatAgeUnix(sec int64) string {
+	if sec <= 0 {
+		return "(never)"
+	}
+	return formatAge(time.Unix(sec, 0))
+}
+
+// formatExpiresInFromNowUnix renders the seconds-until-expiry for an int64
+// expiry value. Mirrors formatExpiresInFromNow but operates on the int64
+// field directly.
+func formatExpiresInFromNowUnix(sec int64) string {
+	if sec <= 0 {
+		return "(none)"
+	}
+	d := time.Until(time.Unix(sec, 0))
+	switch {
+	case d <= 0:
+		return "expired"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
 // computeScore returns a fractional score 0-1 based on reinforcement count and weight.
 // Formula: clamp((rc * 2 + weight * 1.5) / 55, 0, 1)
 func computeScore(rc, weight int) float64 {
@@ -787,15 +821,12 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 		}
 		entries := make([]hybridEntry, 0, len(results))
 		for _, r := range results {
-			createdAt := time.Time{}
-			if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
-				createdAt = t
-			}
+			createdAt := time.Unix(r.CreatedAt, 0)
 			entries = append(entries, hybridEntry{
 				ID:                 shortID(r.ID),
 				Content:            r.Content,
 				Tags:               r.Tags,
-				CreatedAt:          r.CreatedAt,
+				CreatedAt:          mpminternal.FormatUnixSeconds(r.CreatedAt),
 				ReinforcementCount: r.ReinforcementCount,
 				Weight:             r.Weight,
 				Score:              r.CombinedScore,
@@ -817,10 +848,7 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 	fmt.Printf("%s%sHybrid Recall — %s%s\n\n", bold, cyan, query, reset)
 
 	for i, r := range results {
-		createdAt := time.Time{}
-		if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
-			createdAt = t
-		}
+		createdAt := time.Unix(r.CreatedAt, 0)
 		score := r.CombinedScore
 		source := r.Source
 		content := r.Content

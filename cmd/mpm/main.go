@@ -1377,7 +1377,7 @@ func PrintQuicklinks() {
 		fmt.Println()
 	} else {
 		fmt.Printf("\u2713 %s\n", truncate(wc.Thesis, 70))
-		fmt.Printf("Updated: %s\n", formatAge(wc.UpdatedAt))
+		fmt.Printf("Updated: %s\n", formatAgeUnix(wc.UpdatedAt))
 		fmt.Println()
 		fmt.Println("Next:")
 		// Pull pending theories as "open questions waiting to be
@@ -1399,7 +1399,7 @@ func PrintQuicklinks() {
 	fmt.Println("Last Session")
 	fmt.Println(divider)
 	if wake, err := dm.GatherWakeContext(); err == nil && wake.LastHandoff != nil {
-		when := formatAge(wake.LastHandoff.EndedAt)
+		when := formatAgeUnix(wake.LastHandoff.EndedAt)
 		fmt.Printf("%s\n", when)
 		if wake.LastHandoff.Summary != "" {
 			fmt.Printf("\"%s\"\n", truncate(wake.LastHandoff.Summary, 80))

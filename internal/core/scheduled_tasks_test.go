@@ -238,7 +238,7 @@ func TestProcessDueTasks_InjectsAndRollsOver(t *testing.T) {
 		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "test-cron", "Test cron", "0 3 * * *", "mpm-seed-test", ScheduledTaskActive,
-		past, past, past)
+		past.Unix(), past.Unix(), past.Unix())
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
@@ -289,16 +289,16 @@ func TestProcessDueTasks_InjectsAndRollsOver(t *testing.T) {
 	}
 
 	// next_run_at should now be in the future (rolled over to next 03:00)
-	var newNextRun time.Time
-	var lastRun *time.Time
+	var newNextRun int64
+	var lastRun *int64
 	err = dm.db.QueryRow(`
 		SELECT next_run_at, last_run_at FROM scheduled_tasks WHERE id = ?
 	`, "test-cron").Scan(&newNextRun, &lastRun)
 	if err != nil {
 		t.Fatalf("QueryRow for task: %v", err)
 	}
-	if !newNextRun.After(time.Now().UTC()) {
-		t.Errorf("next_run_at should be in future after rollover, got %v", newNextRun)
+	if newNextRun <= time.Now().UTC().Unix() {
+		t.Errorf("next_run_at should be in future after rollover, got %d", newNextRun)
 	}
 	if lastRun == nil {
 		t.Errorf("last_run_at should be set after first process")
@@ -315,7 +315,7 @@ func TestProcessDueTasks_PausesOnPoisonCron(t *testing.T) {
 		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "poison", "Poison", "0 3 * * *", "mpm-seed-p", ScheduledTaskActive,
-		past, past, past)
+		past.Unix(), past.Unix(), past.Unix())
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestListScheduledTasks_OrdersByNextRun(t *testing.T) {
 			(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`, r.id, r.id, "0 3 * * *", "d", ScheduledTaskActive,
-			r.nextRunAt, now, now); err != nil {
+			r.nextRunAt.Unix(), now.Unix(), now.Unix()); err != nil {
 			t.Fatalf("seed %s: %v", r.id, err)
 		}
 	}
@@ -429,7 +429,7 @@ func TestProcessDueTasks_CronWakeDiscoversByKind(t *testing.T) {
 		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "disc-cron", "discoverability cron", "0 3 * * *", "mpm-seed-disc",
-		ScheduledTaskActive, past, past, past); err != nil {
+		ScheduledTaskActive, past.Unix(), past.Unix(), past.Unix()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

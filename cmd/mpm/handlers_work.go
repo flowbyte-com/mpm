@@ -128,8 +128,8 @@ func handleWorkStatus(args []string) int {
 	status := WorkingContextStatus{
 		SessionID:  wc.SessionID,
 		ThesisHead: truncate(wc.Thesis, 80),
-		AgeLabel:   formatAge(wc.UpdatedAt),
-		ExpiresIn:  formatExpiresInFromNow(time.Now().UTC(), wc.ExpiresAt),
+		AgeLabel:   formatAgeUnix(wc.UpdatedAt),
+		ExpiresIn:  formatExpiresInFromNowUnix(wc.ExpiresAt),
 	}
 	if err := renderer.Render(status); err != nil {
 		usererror.Error("render: %v", err)
@@ -172,8 +172,8 @@ func handleWorkShow(args []string) int {
 	} else {
 		body += "    (empty)\n"
 	}
-	body += fmt.Sprintf("  updated_at  : %s\n", wc.UpdatedAt.Format(time.RFC3339))
-	body += fmt.Sprintf("  expires_at  : %s\n", wc.ExpiresAt.Format(time.RFC3339))
+	body += fmt.Sprintf("  updated_at  : %s\n", mpminternal.FormatUnixSeconds(wc.UpdatedAt))
+	body += fmt.Sprintf("  expires_at  : %s\n", mpminternal.FormatUnixSeconds(wc.ExpiresAt))
 	fmt.Print(body)
 	return 0
 }

@@ -23,6 +23,10 @@ import (
 // RecordRetrieval increments the reuse_count for the given node and
 // updates last_retrieved_at. Upserts via ON CONFLICT so the first
 // retrieval of a node creates the row.
+//
+// Timestamps are INTEGER Unix-epoch seconds (see migration
+// timestamps_unified_v1); CURRENT_TIMESTAMP is replaced with
+// CAST(strftime('%s','now') AS INTEGER).
 func (dm *DatabaseManager) RecordRetrieval(nodeID, nodeType string) error {
 	if nodeID == "" {
 		return fmt.Errorf("RecordRetrieval: node_id is empty")
@@ -32,11 +36,11 @@ func (dm *DatabaseManager) RecordRetrieval(nodeID, nodeType string) error {
 	}
 	_, err := dm.db.Exec(`
 		INSERT INTO retrieval_metadata (node_id, node_type, reuse_count, last_retrieved_at, success_count)
-		VALUES (?, ?, 1, CURRENT_TIMESTAMP, 0)
+		VALUES (?, ?, 1, CAST(strftime('%s','now') AS INTEGER), 0)
 		ON CONFLICT(node_id) DO UPDATE SET
 			reuse_count = retrieval_metadata.reuse_count + 1,
-			last_retrieved_at = CURRENT_TIMESTAMP,
-			updated_at = CURRENT_TIMESTAMP
+			last_retrieved_at = CAST(strftime('%s','now') AS INTEGER),
+			updated_at = CAST(strftime('%s','now') AS INTEGER)
 	`, nodeID, nodeType)
 	if err != nil {
 		return fmt.Errorf("RecordRetrieval(%q, %q): %w", nodeID, nodeType, err)
@@ -63,7 +67,7 @@ func (dm *DatabaseManager) RecordRetrievalSuccess(nodeID, nodeType string) error
 		VALUES (?, ?, 0, NULL, 1)
 		ON CONFLICT(node_id) DO UPDATE SET
 			success_count = retrieval_metadata.success_count + 1,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CAST(strftime('%s','now') AS INTEGER)
 	`, nodeID, nodeType)
 	if err != nil {
 		return fmt.Errorf("RecordRetrievalSuccess(%q, %q): %w", nodeID, nodeType, err)
@@ -100,7 +104,7 @@ func (dm *DatabaseManager) IncrementSuccess(nodeID, nodeType string) error {
 		VALUES (?, ?, 0, NULL, 1)
 		ON CONFLICT(node_id) DO UPDATE SET
 			success_count = retrieval_metadata.success_count + 1,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CAST(strftime('%s','now') AS INTEGER)
 	`, nodeID, nodeType)
 	if err != nil {
 		return fmt.Errorf("IncrementSuccess(%q, %q): %w", nodeID, nodeType, err)
@@ -119,7 +123,7 @@ func (dm *DatabaseManager) GetRetrievalMetadata(nodeID string) (RetrievalMetadat
 	var (
 		nodeType                            string
 		reuseCount, successCount            int
-		lastRetrievedAt                     *string
+		lastRetrievedAt                     *int64
 	)
 	err := dm.db.QueryRow(`
 		SELECT node_type, reuse_count, last_retrieved_at, success_count
@@ -137,7 +141,7 @@ func (dm *DatabaseManager) GetRetrievalMetadata(nodeID string) (RetrievalMetadat
 	out.ReuseCount = reuseCount
 	out.SuccessCount = successCount
 	if lastRetrievedAt != nil {
-		out.LastRetrievedAt = *lastRetrievedAt
+		out.LastRetrievedAt = lastRetrievedAt
 	}
 	return out, nil
 }

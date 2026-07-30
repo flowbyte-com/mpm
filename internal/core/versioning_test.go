@@ -30,14 +30,14 @@ func TestMemoryVersioning(t *testing.T) {
 		// Overwrite created_at to T-30m for time-travel semantics
 		_, err = dm.SQLDB().Exec(
 			`UPDATE memories SET created_at = ? WHERE id = ?`,
-			tMinus30.Format("2006-01-02 15:04:05.999999999"), id,
+			tMinus30.Unix(), id,
 		)
 		require.NoError(t, err)
 
 		// Overwrite the revision's created_at to match
 		_, err = dm.SQLDB().Exec(
 			`UPDATE memory_revisions SET created_at = ? WHERE memory_id = ? AND version = 1`,
-			tMinus30.Format("2006-01-02 15:04:05.999999999"), id,
+			tMinus30.Unix(), id,
 		)
 		require.NoError(t, err)
 
@@ -62,7 +62,7 @@ func TestMemoryVersioning(t *testing.T) {
 			// Overwrite the new revision's created_at to T-15m
 			_, err = dm.SQLDB().Exec(
 				`UPDATE memory_revisions SET created_at = ? WHERE memory_id = ? AND version = 2`,
-				tMinus15.Format("2006-01-02 15:04:05.999999999"), id,
+				tMinus15.Unix(), id,
 			)
 			require.NoError(t, err)
 
@@ -73,8 +73,9 @@ func TestMemoryVersioning(t *testing.T) {
 
 			assert.Equal(t, 2, revs[0].Version, "newest revision must be version 2")
 			assert.Equal(t, updatedContent, revs[0].Content, "v2 content must match updated text")
-			assert.True(t, revs[0].CreatedAt.Equal(tMinus15) || revs[0].CreatedAt.After(tMinus15.Add(-time.Minute)),
-				"v2 timestamp should be near T-15m")
+			tMinus15Unix := tMinus15.Unix()
+			assert.True(t, revs[0].CreatedAt == tMinus15Unix || revs[0].CreatedAt >= tMinus15Unix-60,
+				"v2 timestamp should be near T-15m, got %d expected %d", revs[0].CreatedAt, tMinus15Unix)
 
 			assert.Equal(t, 1, revs[1].Version, "oldest revision must be version 1")
 			assert.Equal(t, sourceContent, revs[1].Content, "v1 content must still be original")
@@ -124,13 +125,13 @@ func TestMemoryVersioningConcurrent(t *testing.T) {
 	now := time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC)
 	_, err = dm.SQLDB().Exec(
 		`UPDATE memories SET created_at = ? WHERE id = ?`,
-		now.Format("2006-01-02 15:04:05.999999999"), id,
+		now.Unix(), id,
 	)
 	require.NoError(t, err)
 
 	_, err = dm.SQLDB().Exec(
 		`UPDATE memory_revisions SET created_at = ? WHERE memory_id = ? AND version = 1`,
-		now.Format("2006-01-02 15:04:05.999999999"), id,
+		now.Unix(), id,
 	)
 	require.NoError(t, err)
 
@@ -151,7 +152,7 @@ func TestMemoryVersioningConcurrent(t *testing.T) {
 		ts := now.Add(time.Duration(i+1) * time.Minute)
 		_, err = dm.SQLDB().Exec(
 			`UPDATE memory_revisions SET created_at = ? WHERE memory_id = ? AND version = ?`,
-			ts.Format("2006-01-02 15:04:05.999999999"), id, i+2,
+			ts.Unix(), id, i+2,
 		)
 		require.NoError(t, err)
 	}

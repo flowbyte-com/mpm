@@ -26,8 +26,8 @@ func TestRecordRetrieval_InsertAndIncrement(t *testing.T) {
 	if meta.ReuseCount != 1 {
 		t.Errorf("first retrieval ReuseCount = %d, want 1", meta.ReuseCount)
 	}
-	if meta.LastRetrievedAt == "" {
-		t.Error("first retrieval LastRetrievedAt is empty, want populated")
+	if meta.LastRetrievedAt == nil {
+		t.Error("first retrieval LastRetrievedAt is nil, want populated")
 	}
 	if meta.NodeType != "memory" {
 		t.Errorf("NodeType = %q, want memory", meta.NodeType)
@@ -75,8 +75,8 @@ func TestGetRetrievalMetadata_UnknownNodeReturnsZero(t *testing.T) {
 	if meta.SuccessCount != 0 {
 		t.Errorf("SuccessCount = %d, want 0 for unknown node", meta.SuccessCount)
 	}
-	if meta.LastRetrievedAt != "" {
-		t.Errorf("LastRetrievedAt = %q, want empty for unknown node", meta.LastRetrievedAt)
+	if meta.LastRetrievedAt != nil {
+		t.Errorf("LastRetrievedAt = %v, want nil for unknown node", *meta.LastRetrievedAt)
 	}
 }
 
@@ -184,8 +184,8 @@ func TestIncrementSuccess_UpsertBehavior(t *testing.T) {
 	if meta.ReuseCount != 0 {
 		t.Errorf("never-retrieved ReuseCount = %d, want 0", meta.ReuseCount)
 	}
-	if meta.LastRetrievedAt != "" {
-		t.Errorf("never-retrieved LastRetrievedAt = %q, want empty (never retrieved)", meta.LastRetrievedAt)
+	if meta.LastRetrievedAt != nil {
+		t.Errorf("never-retrieved LastRetrievedAt = %v, want nil (never retrieved)", *meta.LastRetrievedAt)
 	}
 	if meta.NodeType != "memory" {
 		t.Errorf("never-retrieved NodeType = %q, want memory", meta.NodeType)

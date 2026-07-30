@@ -317,7 +317,7 @@ func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
 		  AND tags LIKE ?
-		  AND created_at > datetime('now', '-30 days')
+		  AND created_at > CAST(strftime('%s','now', '-30 days') AS INTEGER)
 		ORDER BY created_at DESC LIMIT ?`,
 		`%type:milestone-%`+`"`+`%`, limit)
 	if err != nil {
@@ -475,12 +475,16 @@ func formatWakeContext(d WakeContextData) string {
 // scannable but informative — the agent needs to know (1) when the last
 // session was, (2) what it was doing, (3) what it committed to do, and
 // (4) what's still unresolved. Anything beyond that is excess.
+//
+// Handoff timestamp fields are stored as INTEGER Unix-epoch seconds (see
+// migration timestamps_unified_v1); FormatUnixSeconds renders them at the
+// display boundary.
 func formatHandoff(h *Handoff) string {
 	var lines []string
 	header := fmt.Sprintf("**Previous Session Handoff** (%s, %s)", h.SessionID, h.EndedState)
-	if !h.EndedAt.IsZero() {
+	if h.EndedAt > 0 {
 		header = fmt.Sprintf("**Previous Session Handoff** (%s, ended %s, %s)",
-			h.SessionID, h.EndedAt.Format("2006-01-02 15:04 UTC"), h.EndedState)
+			h.SessionID, FormatUnixSeconds(h.EndedAt), h.EndedState)
 	}
 	lines = append(lines, header)
 	lines = append(lines, "  - Summary: "+h.Summary)
@@ -527,7 +531,7 @@ func (dm *DatabaseManager) auditSummaryRich() string {
 			COALESCE(SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN level = 'warn'  THEN 1 ELSE 0 END), 0)
 		FROM system_audit_log
-		WHERE created_at >= datetime('now', '-7 days')`)
+		WHERE created_at >= CAST(strftime('%s','now', '-7 days') AS INTEGER)`)
 	if err := row.Scan(&errCount, &warnCount); err != nil {
 		// Non-fatal: degrade to silent so a transient DB hiccup never
 		// floods wake context. The agent still has query_audit_log.
@@ -640,7 +644,7 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 
 	rows, err := dm.db.Query(`
 		SELECT session_id, thesis,
-		       (julianday('now') - julianday(updated_at)) * 24 AS age_hours
+		       (CAST(strftime('%s','now') AS INTEGER) - updated_at) / 3600.0 AS age_hours
 		FROM ephemeral_scratchpad
 		WHERE session_id != ?`,
 		currentSession)
@@ -732,7 +736,7 @@ func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (boo
 			OR EXISTS(
 				SELECT 1 FROM memories
 				WHERE collection = 'decisions'
-				  AND created_at >= datetime('now', '-30 days')
+				  AND created_at >= CAST(strftime('%s','now', '-30 days') AS INTEGER)
 				  AND content LIKE ? ESCAPE '\'
 			)`, pattern, pattern, pattern)
 	if err := row.Scan(&matched); err != nil {

@@ -28,8 +28,8 @@ func TestHandoff_EndSession_InsertsAndReadsBack(t *testing.T) {
 	require.Equal(t, "Round 1: did things", h.Summary)
 	require.Equal(t, []string{"commit A", "commit B"}, h.Commitments)
 	require.Equal(t, []string{"open question X"}, h.OpenQuestions)
-	require.False(t, h.CreatedAt.IsZero())
-	require.False(t, h.EndedAt.IsZero())
+	require.NotZero(t, h.CreatedAt)
+	require.NotZero(t, h.EndedAt)
 
 	// Read it back via the helper
 	got, err := dm.getHandoffBySessionID("session-test-1")
@@ -64,7 +64,7 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 	require.NoError(t, err)
 	firstID := first.ID
 	firstEndedAt := first.EndedAt
-	require.False(t, firstEndedAt.IsZero())
+	require.NotZero(t, firstEndedAt)
 
 	// Second call — must NOT error. Must overwrite.
 	second, err := dm.EndSession(sessionID, "round 2: did 20 more minutes of substantive work", HandoffClean,
@@ -76,7 +76,7 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 
 	// (d) created_at moves forward on upsert (so a stale row's age
 	// reflects the latest closeout, not its first incarnation)
-	require.True(t, !second.CreatedAt.Before(firstEndedAt),
+	require.GreaterOrEqual(t, second.CreatedAt, firstEndedAt,
 		"created_at should move forward to (or past) the first call's ended_at, got first=%v second=%v",
 		firstEndedAt, second.CreatedAt)
 
@@ -84,7 +84,7 @@ func TestHandoff_EndSession_UpsertOverwrites(t *testing.T) {
 	require.Equal(t, "round 2: did 20 more minutes of substantive work", second.Summary)
 
 	// (e) ended_at moved forward (or at least didn't go backward)
-	require.True(t, !second.EndedAt.Before(firstEndedAt),
+	require.GreaterOrEqual(t, second.EndedAt, firstEndedAt,
 		"ended_at should move forward, got first=%v second=%v",
 		firstEndedAt, second.EndedAt)
 
@@ -120,7 +120,7 @@ func TestHandoff_EndSession_UpsertResetsReadAt(t *testing.T) {
 	require.NoError(t, err)
 
 	// Manually mark as read (simulating wake consumption)
-	_, err = dm.db.Exec(`UPDATE session_handoffs SET read_at = datetime('now'), read_by = 'agent' WHERE id = ?`, first.ID)
+	_, err = dm.db.Exec(`UPDATE session_handoffs SET read_at = CAST(strftime('%s','now') AS INTEGER), read_by = 'agent' WHERE id = ?`, first.ID)
 	require.NoError(t, err)
 
 	// Sanity: row IS read before upsert
