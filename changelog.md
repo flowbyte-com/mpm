@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-30 — Unix-Epoch Timestamp Migration
+
+- **feat(core): unify all timestamp columns on unix-epoch seconds** — All 37 (table, column) pairs across 19 tables migrated to INTEGER seconds via `timestamps_unified_v1` sentinel. Go struct fields become `int64` / `*int64`. CLI inputs accept both RFC3339 and unix-epoch integers. Display formatting centralized at `FormatUnixSeconds` / `FormatOptionalUnixSeconds`. **Operators must take `mpm backup-db` before installing this release.**
+
 ## 2026-07-07 — Architecture Split & Security Audit
 
 ### Audit & Remediation (15 findings patched)

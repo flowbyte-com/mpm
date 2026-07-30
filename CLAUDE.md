@@ -127,7 +127,7 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 - **Embedding probe cached via `sync.Once`.** `DefaultEmbeddingConfig()` no longer opens a new HTTP client on every CLI invocation — pre-audit, every `mpm add` / `mpm remember` / `mpm propose_theory` blocked up to 2s on the Ollama probe timeout.
 
 **Open items the audit flagged but did not close (low-impact):**
-- `CURRENT_TIMESTAMP` is still used for *setting* `deleted_at`; `strftime('%s','now')` is used for *comparing* against it (intentional, but worth documenting).
+- All timestamp columns are INTEGER Unix-epoch seconds (unified by `timestamps_unified_v1` migration). The `deleted_at_unified_v1` precedent no longer applies separately — both migrations wrap in the same `DatabaseManager.init` transaction. **Operators must `mpm backup-db` before installing this release.**
 
 **Before adding a new external surface** (CLI command, MCP tool, agent-plugins entry), add it to the audit by re-running the relevant section.
 
