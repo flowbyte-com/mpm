@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 	"os"
 )
@@ -111,7 +112,7 @@ func NewRouter() *CommandRouter {
 
 		// Proactive Recall Hint
 		"hint":  {Name: "hint", Description: "Check conversation context for relevant decisions/theories", MinArgs: 1},
-		"route": {Name: "route", Description: "Render mode+persona for a prompt (Claude Code hook input)", MinArgs: 0, MaxArgs: 1},
+		"route": {Name: "route", Description: "Render mode+persona for a prompt (Claude Code hook input)", MinArgs: 0, MaxArgs: -1},
 
 		// Epistemology Engine
 		"propose_theory":  {Name: "propose_theory", Description: "Record a hypothesis with validation criteria", MinArgs: 1},
@@ -320,6 +321,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleEvidence(args[1:])
 	case "save-skill":
 		return handleSaveSkill(args[1:])
+	case "list-skills":
+		return handleListSkills(args[1:])
+	case "read-skill":
+		return handleReadSkill(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
@@ -883,15 +888,34 @@ func ExtractJSONFlag(args []string) (bool, []string) {
 //
 //	mpm route "review this code"        # positional arg
 //	echo "review this" | mpm route      # stdin literal
+//	mpm route --apply                   # persist the route to active.json
 //	mpm route < hook-stdin.json         # stdin JSON (Claude Code format)
+//
+// With --apply, the selected persona (when non-empty) and selected modes
+// (when non-empty) are merged into active.json so the cross-session read
+// at session start reflects the live routing signal, not a stale bag.
+// Pre-fix active_persona was stuck at "" for over a month (2026-07-30 audit).
 func (r *CommandRouter) handleRoute(args []string) int {
-	prompt := extractRoutePrompt(args, os.Stdin)
+	apply, cleanedArgs := stripApplyFlag(args)
+	prompt := extractRoutePrompt(cleanedArgs, os.Stdin)
 	skip, _ := shouldSkipRoute(prompt, os.Getenv)
 	if skip {
 		return 0
 	}
 
 	workspace := resolveRouteWorkspace()
+
+	// --apply: persist the route result to active.json before rendering, so
+	// cross-session reads see the live signal even when render fails (e.g.
+	// mode file missing — renderRoute refuses to emit a partial <system-reminder>).
+	if apply {
+		if router, err := mpminternal.NewRouter(workspace); err == nil {
+			applyRouteToActive(router.Evaluate(prompt))
+		} else if isatty(os.Stderr) {
+			usererror.Warn("route --apply: %v", err)
+		}
+	}
+
 	rendered, err := renderRoute(workspace, prompt)
 	if err != nil {
 		// Programmer-level error. Only surface on TTY (interactive) — never

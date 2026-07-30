@@ -48,7 +48,7 @@ uses a system-level service that boots with the machine, not with your login.
 ### 1a. Clone and install
 
 ```bash
-git clone https://github.com/yourorg/mpm ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
 sudo ./scripts/install.sh
 ```
