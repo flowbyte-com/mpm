@@ -12,28 +12,40 @@ import (
 	"sync"
 	"time"
 
-	"github.com/flowbyte-com/mpm-core"
+	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // resolveRouteWorkspace returns the MPM workspace path for `mpm route`.
-// Resolution order: MPM_ROUTE_WORKSPACE env var → "." (current directory).
-// The router inside will then load mode/ and persona/ from this base path.
+// Resolution order: MPM_ROUTE_WORKSPACE env var → config.GetMPMDir()
+// (which honours MPM_WORKSPACE then falls back to $HOME/.mpm).
+//
+// Returning "." here is wrong — the UserPromptSubmit hook is invoked from
+// an arbitrary cwd and ./mode does not resolve. The 2026-07-30 audit caught
+// this; the canonical pattern is config.GetMPMDir() (see internal/core/config/config.go).
 func resolveRouteWorkspace() string {
 	if v := os.Getenv("MPM_ROUTE_WORKSPACE"); v != "" {
 		return v
 	}
-	return "."
+	return config.GetMPMDir()
 }
 
 // extractRoutePrompt returns the user prompt for route evaluation.
 // Precedence:
 //  1. Positional arg (preferred for shells/hooks passing inline text)
-//  2. Stdin parsed as JSON {"prompt": "..."} (Claude Code hook format)
-//  3. Stdin treated literally (human `echo "..." | mpm route` use)
+//  2. Stdin parsed as JSON {"prompt": "..."} (canonical contract)
+//  3. Stdin parsed as JSON {"user_prompt": "..."} (Claude Code's
+//     UserPromptSubmit hook payload field name)
+//  4. Stdin treated literally (human `echo "..." | mpm route` use)
 //
 // Returns "" if no prompt source yields content. Malformed JSON on stdin
 // falls back to the literal stdin content (defense in depth — the binary
 // should still be usable in a pipe even if the upstream is non-conformant).
+//
+// When both `prompt` and `user_prompt` are present, `prompt` wins — the
+// original contract takes precedence over the Claude Code extension so
+// scripts that build their own JSON envelope keep working unchanged.
 func extractRoutePrompt(args []string, stdin io.Reader) string {
 	if len(args) > 0 {
 		return strings.TrimSpace(args[0])
@@ -51,10 +63,14 @@ func extractRoutePrompt(args []string, stdin io.Reader) string {
 	}
 	if strings.HasPrefix(s, "{") {
 		var hook struct {
-			Prompt string `json:"prompt"`
+			Prompt     string `json:"prompt"`
+			UserPrompt string `json:"user_prompt"`
 		}
 		if err := json.Unmarshal([]byte(s), &hook); err == nil {
-			return hook.Prompt
+			if hook.Prompt != "" {
+				return hook.Prompt
+			}
+			return hook.UserPrompt
 		}
 		// Malformed JSON: fall through to literal
 	}
@@ -82,6 +98,82 @@ func shouldSkipRoute(prompt string, envLookup func(string) string) (bool, string
 		return true, "env"
 	}
 	return false, ""
+}
+
+// stripApplyFlag removes --apply from args and returns (apply, cleanedArgs).
+// Other flags are passed through unchanged. Idempotent — calling twice
+// produces the same result.
+func stripApplyFlag(args []string) (bool, []string) {
+	apply := false
+	cleaned := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--apply" {
+			apply = true
+			continue
+		}
+		cleaned = append(cleaned, a)
+	}
+	return apply, cleaned
+}
+
+// applyRouteToActive merges the route report into active.json. Rules
+// (2026-07-30 audit; makes active.json a live signal, not a stale bag):
+//   - Persona: update when SelectedPersona is non-empty AND different from
+//     current. Empty result preserves the operator's manually-set persona
+//     on no-op routes (low-signal prompts).
+//   - Modes: replace when SelectedModes is non-empty. Empty result
+//     preserves current modes for the same reason.
+//   - Updated: bump only when something actually changed.
+//
+// On any disk error (read or write), the function returns silently —
+// routing must never block the user. Stderr is also gated behind isatty
+// to avoid corrupting hook output.
+func applyRouteToActive(report mpminternal.RoutingReport) {
+	current, err := mpminternal.LoadActiveJSON()
+	if err != nil {
+		if isatty(os.Stderr) {
+			usererror.Warn("route --apply: load active.json: %v", err)
+		}
+		return
+	}
+
+	next := *current // shallow copy — Modes slice is replaced wholesale below
+	changed := false
+
+	if report.SelectedPersona != "" && report.SelectedPersona != current.Persona {
+		next.Persona = report.SelectedPersona
+		changed = true
+	}
+	if len(report.SelectedModes) > 0 && !equalStringSlices(report.SelectedModes, current.Modes) {
+		next.Modes = append([]string(nil), report.SelectedModes...)
+		changed = true
+	}
+
+	if !changed {
+		return
+	}
+
+	next.Updated = time.Now().UTC().Format(time.RFC3339)
+	if err := mpminternal.SaveActiveJSON(&next); err != nil {
+		if isatty(os.Stderr) {
+			usererror.Warn("route --apply: save active.json: %v", err)
+		}
+	}
+}
+
+// equalStringSlices reports whether two string slices have identical contents
+// in identical order. Modes are ordered in the route report (threshold-filtered,
+// score-sorted) so positional equality is the right check.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 const routeOutputCap = 9500 // under Claude Code's 10,000-char hook stdout limit
@@ -147,7 +239,7 @@ func renderRoute(workspace, prompt string) (string, error) {
 		return "", nil
 	}
 
-	router, err := internal.NewRouter(workspace)
+	router, err := mpminternal.NewRouter(workspace)
 	if err != nil {
 		// Workspace unusable (missing mode/persona dirs etc.) — graceful exit
 		return "", nil
