@@ -109,7 +109,7 @@ func TestUpsertScheduledTask_NewInsert(t *testing.T) {
 	// Verify row exists with correct fields
 	var (
 		gotName, gotCron, gotDirective, gotStatus string
-		nextRun                                    time.Time
+		nextRun                                    int64
 	)
 	err := dm.db.QueryRow(`
 		SELECT name, cron_expr, directive_id, status, next_run_at
@@ -122,8 +122,8 @@ func TestUpsertScheduledTask_NewInsert(t *testing.T) {
 		t.Errorf("row mismatch: got name=%q cron=%q directive=%q status=%q",
 			gotName, gotCron, gotDirective, gotStatus)
 	}
-	if nextRun.Before(time.Now()) {
-		t.Errorf("next_run_at should be in the future, got %v", nextRun)
+	if nextRun < time.Now().Unix() {
+		t.Errorf("next_run_at should be in the future, got %d", nextRun)
 	}
 }
 
@@ -138,8 +138,8 @@ func TestUpsertScheduledTask_UpdatePreservesLastRunAndCreated(t *testing.T) {
 	}
 
 	// Capture the original created_at + last_run_at
-	var origCreated, origNextRun time.Time
-	var origLastRun *time.Time
+	var origCreated, origNextRun int64
+	var origLastRun *int64
 	err := dm.db.QueryRow(`
 		SELECT created_at, last_run_at, next_run_at FROM scheduled_tasks WHERE id = ?
 	`, original.ID).Scan(&origCreated, &origLastRun, &origNextRun)
@@ -147,7 +147,7 @@ func TestUpsertScheduledTask_UpdatePreservesLastRunAndCreated(t *testing.T) {
 		t.Fatalf("QueryRow: %v", err)
 	}
 	if origLastRun != nil {
-		t.Errorf("fresh insert should have NULL last_run_at, got %v", *origLastRun)
+		t.Errorf("fresh insert should have NULL last_run_at, got %d", *origLastRun)
 	}
 
 	// Sleep to ensure timestamps would diverge if updated
@@ -162,8 +162,8 @@ func TestUpsertScheduledTask_UpdatePreservesLastRunAndCreated(t *testing.T) {
 	}
 
 	// Verify created_at preserved, last_run_at still NULL, status updated
-	var newCreated, newNextRun time.Time
-	var newLastRun *time.Time
+	var newCreated, newNextRun int64
+	var newLastRun *int64
 	var newStatus, newName string
 	err = dm.db.QueryRow(`
 		SELECT created_at, last_run_at, next_run_at, status, name FROM scheduled_tasks WHERE id = ?
@@ -171,11 +171,11 @@ func TestUpsertScheduledTask_UpdatePreservesLastRunAndCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryRow after update: %v", err)
 	}
-	if !newCreated.Equal(origCreated) {
-		t.Errorf("created_at should be preserved: got %v, want %v", newCreated, origCreated)
+	if newCreated != origCreated {
+		t.Errorf("created_at should be preserved: got %d, want %d", newCreated, origCreated)
 	}
 	if newLastRun != nil {
-		t.Errorf("last_run_at should remain NULL until first process: got %v", *newLastRun)
+		t.Errorf("last_run_at should remain NULL until first process: got %d", *newLastRun)
 	}
 	if newStatus != ScheduledTaskPaused {
 		t.Errorf("status should be updated to paused, got %q", newStatus)
