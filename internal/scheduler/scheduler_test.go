@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS scheduled_wakes (
     fired           INTEGER NOT NULL DEFAULT 0,
     fired_at        INTEGER,
     created_by      TEXT NOT NULL,
-    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at      INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     metadata        JSON
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);
@@ -50,10 +50,10 @@ CREATE TABLE scheduled_tasks (
     cron_expr TEXT NOT NULL,
     directive_id TEXT NOT NULL,
     status TEXT CHECK (status IN ('active', 'paused')),
-    last_run_at DATETIME,
-    next_run_at DATETIME NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    last_run_at INTEGER,
+    next_run_at INTEGER NOT NULL,
+    created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
 CREATE INDEX idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);
 `
