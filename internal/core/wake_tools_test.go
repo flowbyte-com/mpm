@@ -17,6 +17,7 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -292,15 +293,25 @@ func TestResolveTargetTime_ISO8601(t *testing.T) {
 
 // helper: build a wake DM with a temp shared DB, then wipe the LOCAL
 // scheduled_wakes table so prior tests do not leak rows. The shared DB
-// is per-test (tmpdir), but the local DB at $repo/src/db/mpm.db is
-// shared across all tests in this package's binary (per NewDatabaseManager
-// at internal/db.go:489 — local DB path is fixed regardless of
-// projectRoot). Wiping scheduled_wakes between tests gives isolation
-// without requiring a full NewDatabaseManagerForDB + InitSchema dance.
+// newTestWakeDM returns a hermetic DatabaseManager rooted at a per-test
+// tmpdir, so neither scheduled_wakes nor scheduled_tasks touch the
+// production DB at $HOME/.mpm/src/db/mpm.db. The previous version only
+// redirected the shared DB via MPM_SHARED_DB, leaving the local DB on
+// the production path — after the 2026-07-30 timestamps_unified_v1
+// migration, that meant tests read TEXT-affinity columns (production DB
+// has the legacy schema) while the code path expected INTEGER, surfacing
+// as TestListScheduledTasks_OrdersByNextRun + TestProcessDueTasks_*
+// failures against src/db/mpm.db.
+//
+// Now: MPM_WORKSPACE redirects the local DB to t.TempDir(); MPM_SHARED_DB
+// redirects the shared DB to a sibling file. Both are auto-cleaned by
+// t.Cleanup. The per-test DELETE on scheduled_wakes remains as a
+// belt-and-braces guard against any future leak.
 func newTestWakeDM(t *testing.T) *DatabaseManager {
 	t.Helper()
 	tmp := t.TempDir()
-	t.Setenv("MPM_SHARED_DB", tmp+"/shared.db")
+	t.Setenv("MPM_WORKSPACE", tmp)
+	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
 	dm, err := NewDatabaseManager("")
 	if err != nil {
 		t.Fatalf("NewDatabaseManager: %v", err)
