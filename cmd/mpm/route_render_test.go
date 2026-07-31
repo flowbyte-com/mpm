@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 func TestRenderRoute(t *testing.T) {
@@ -181,10 +183,14 @@ func TestResolveRouteWorkspace(t *testing.T) {
 		name     string
 		envValue string
 		setEnv   bool
-		want     string
+		// The unset-env case asserts a STRUCTURAL property (absolute, not ".")
+		// rather than a fixed string, because the actual default depends on
+		// the caller's MPM_WORKSPACE / $HOME state. Pre-fix this asserted
+		// `"."`, which was the bug — see 2026-07-30 audit.
+		wantLiteral string // when set, exact equality; otherwise check IsAbs + non-"."
 	}{
-		{name: "env var set", envValue: "/custom/path", setEnv: true, want: "/custom/path"},
-		{name: "env var unset falls back to dot", envValue: "", setEnv: false, want: "."},
+		{name: "env var set", envValue: "/custom/path", setEnv: true, wantLiteral: "/custom/path"},
+		{name: "env var unset falls back to absolute path (regression: not '.')", envValue: "", setEnv: false},
 	}
 
 	for _, tt := range tests {
@@ -196,8 +202,17 @@ func TestResolveRouteWorkspace(t *testing.T) {
 				os.Unsetenv("MPM_ROUTE_WORKSPACE")
 			}
 			got := resolveRouteWorkspace()
-			if got != tt.want {
-				t.Errorf("resolveRouteWorkspace() = %q, want %q", got, tt.want)
+			if tt.wantLiteral != "" {
+				if got != tt.wantLiteral {
+					t.Errorf("resolveRouteWorkspace() = %q, want %q", got, tt.wantLiteral)
+				}
+				return
+			}
+			if got == "." {
+				t.Errorf("resolveRouteWorkspace() = %q — relative path bug regression (2026-07-30 audit)", got)
+			}
+			if !filepath.IsAbs(got) {
+				t.Errorf("resolveRouteWorkspace() = %q, want absolute path (resolved via config.GetMPMDir)", got)
 			}
 		})
 	}
@@ -251,6 +266,24 @@ func TestExtractRoutePrompt(t *testing.T) {
 			args:  []string{},
 			stdin: `{"prompt":""}`,
 			want:  "",
+		},
+		{
+			// Claude Code's UserPromptSubmit hook sends {user_prompt: ...}.
+			// Pre-fix this fell through to literal-stdin and routed the whole
+			// JSON blob. 2026-07-30 audit.
+			name:  "stdin JSON with user_prompt field (Claude Code hook format)",
+			args:  []string{},
+			stdin: `{"user_prompt":"review this architecture","session_id":"abc"}`,
+			want:  "review this architecture",
+		},
+		{
+			// prompt wins when both fields are set (back-compat with the
+			// original contract — positional scripts that build their own
+			// JSON should still work).
+			name:  "stdin JSON with both prompt and user_prompt prefers prompt",
+			args:  []string{},
+			stdin: `{"prompt":"from prompt","user_prompt":"from user_prompt"}`,
+			want:  "from prompt",
 		},
 	}
 
@@ -582,5 +615,212 @@ func TestShouldSkipRoute(t *testing.T) {
 				t.Errorf("shouldSkipRoute() reason = %q, want %q", reason, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestStripApplyFlag(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantApply bool
+		wantArgs  []string
+	}{
+		{name: "no flag", args: []string{"hello", "world"}, wantApply: false, wantArgs: []string{"hello", "world"}},
+		{name: "apply present", args: []string{"--apply", "hello"}, wantApply: true, wantArgs: []string{"hello"}},
+		{name: "apply last", args: []string{"hello", "--apply"}, wantApply: true, wantArgs: []string{"hello"}},
+		{name: "apply middle", args: []string{"a", "--apply", "b"}, wantApply: true, wantArgs: []string{"a", "b"}},
+		{name: "apply twice idempotent", args: []string{"--apply", "--apply"}, wantApply: true, wantArgs: []string{}},
+		{name: "empty args", args: []string{}, wantApply: false, wantArgs: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apply, got := stripApplyFlag(tt.args)
+			if apply != tt.wantApply {
+				t.Errorf("stripApplyFlag() apply = %v, want %v", apply, tt.wantApply)
+			}
+			if len(got) != len(tt.wantArgs) {
+				t.Fatalf("stripApplyFlag() len = %d, want %d (got %v)", len(got), len(tt.wantArgs), got)
+			}
+			for i := range got {
+				if got[i] != tt.wantArgs[i] {
+					t.Errorf("stripApplyFlag() arg[%d] = %q, want %q", i, got[i], tt.wantArgs[i])
+				}
+			}
+		})
+	}
+}
+
+func TestEqualStringSlices(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b []string
+		want bool
+	}{
+		{name: "both nil", a: nil, b: nil, want: true},
+		{name: "both empty", a: []string{}, b: []string{}, want: true},
+		{name: "identical", a: []string{"x", "y"}, b: []string{"x", "y"}, want: true},
+		{name: "different length", a: []string{"x"}, b: []string{"x", "y"}, want: false},
+		{name: "different order", a: []string{"x", "y"}, b: []string{"y", "x"}, want: false},
+		{name: "different content", a: []string{"x", "y"}, b: []string{"x", "z"}, want: false},
+		{name: "nil vs empty", a: nil, b: []string{}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := equalStringSlices(tt.a, tt.b); got != tt.want {
+				t.Errorf("equalStringSlices(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyRouteToActive exercises the active.json writeback path. Each
+// subtest points MPM_WORKSPACE at a fresh temp dir so the SaveActiveJSON
+// side effect stays hermetic. We seed an initial active.json, fire the
+// helper, and assert the file's contents reflect the documented rules:
+//   - SelectedPersona non-empty AND different → updates persona
+//   - SelectedPersona empty → preserves current persona
+//   - SelectedModes non-empty AND different → replaces modes
+//   - SelectedModes empty → preserves current modes
+//   - No-op (everything matches) → no write (file mtime untouched)
+//
+// "Write happened" is detected via file mtime (nanosecond resolution)
+// rather than the RFC3339 string field — back-to-back subtests can land
+// in the same wall-clock second and produce identical timestamp strings.
+func TestApplyRouteToActive(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", workspace)
+
+	seed := mpminternal.ActiveState{
+		Persona: "default",
+		Modes:   []string{"programming"},
+		Updated: "2026-06-26T10:07:39+01:00",
+	}
+	if err := mpminternal.SaveActiveJSON(&seed); err != nil {
+		t.Fatalf("seed SaveActiveJSON: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		report      mpminternal.RoutingReport
+		wantPersona string
+		wantModes   []string
+		wantWrote   bool // true → file mtime must advance; false → mtime must NOT change
+	}{
+		{
+			name:        "new persona and modes override baseline",
+			report:      mpminternal.RoutingReport{SelectedPersona: "venkat", SelectedModes: []string{"architect", "moe"}},
+			wantPersona: "venkat",
+			wantModes:   []string{"architect", "moe"},
+			wantWrote:   true,
+		},
+		{
+			name:        "empty persona preserves current (don't clobber on low-signal)",
+			report:      mpminternal.RoutingReport{SelectedPersona: "", SelectedModes: []string{"research"}},
+			wantPersona: "venkat", // unchanged from previous test
+			wantModes:   []string{"research"},
+			wantWrote:   true,
+		},
+		{
+			name:        "empty modes preserve current modes (don't wipe programming)",
+			report:      mpminternal.RoutingReport{SelectedPersona: "marcus", SelectedModes: nil},
+			wantPersona: "marcus",
+			wantModes:   []string{"research"}, // unchanged
+			wantWrote:   true,
+		},
+		{
+			name:        "no-op when both fields already match — preserves file mtime",
+			report:      mpminternal.RoutingReport{SelectedPersona: "marcus", SelectedModes: []string{"research"}},
+			wantPersona: "marcus",
+			wantModes:   []string{"research"},
+			wantWrote:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeInfo, statErr := os.Stat(mpminternal.ActiveJSONPath())
+			if statErr != nil {
+				t.Fatalf("stat before: %v", statErr)
+			}
+			callStart := time.Now()
+
+			applyRouteToActive(tt.report)
+
+			after, err := mpminternal.LoadActiveJSON()
+			if err != nil {
+				t.Fatalf("load after: %v", err)
+			}
+			if after.Persona != tt.wantPersona {
+				t.Errorf("Persona = %q, want %q", after.Persona, tt.wantPersona)
+			}
+			if !equalStringSlices(after.Modes, tt.wantModes) {
+				t.Errorf("Modes = %v, want %v", after.Modes, tt.wantModes)
+			}
+
+			afterInfo, statErr := os.Stat(mpminternal.ActiveJSONPath())
+			if statErr != nil {
+				t.Fatalf("stat after: %v", statErr)
+			}
+
+			if tt.wantWrote {
+				if !afterInfo.ModTime().After(beforeInfo.ModTime()) {
+					t.Errorf("active.json mtime did not advance (before=%v after=%v, call started %v)",
+						beforeInfo.ModTime(), afterInfo.ModTime(), callStart)
+				}
+				if _, err := time.Parse(time.RFC3339, after.Updated); err != nil {
+					t.Errorf("Updated = %q, want valid RFC3339: %v", after.Updated, err)
+				}
+			} else {
+				if !afterInfo.ModTime().Equal(beforeInfo.ModTime()) {
+					t.Errorf("active.json mtime changed on no-op route (before=%v after=%v)",
+						beforeInfo.ModTime(), afterInfo.ModTime())
+				}
+			}
+		})
+	}
+}
+
+// TestHandleRoute_ApplyFlag verifies --apply is wired end-to-end through
+// the command dispatcher: invoking `mpm route --apply "<prompt>"` against
+// a hermetic workspace must mutate active.json and not block on errors.
+func TestHandleRoute_ApplyFlag(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", workspace)
+	mustMkdir(t, filepath.Join(workspace, "mode"))
+	mustMkdir(t, filepath.Join(workspace, "persona"))
+	mustWriteFile(t, filepath.Join(workspace, "mode", "architect.md"),
+		"---\nname: architect\npatterns: architecture\n---\n\nArchitect mode body.\n")
+	mustWriteFile(t, filepath.Join(workspace, "persona", "venkat.md"),
+		"---\nname: venkat\npatterns: architecture\n---\n\nVenkat persona body.\n")
+	t.Setenv("MPM_ROUTE_WORKSPACE", workspace)
+
+	if err := mpminternal.SaveActiveJSON(&mpminternal.ActiveState{
+		Persona: "default",
+		Modes:   []string{"standard"},
+		Updated: "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	r := NewRouter()
+	rc := r.handleRoute([]string{"--apply", "design the architecture"})
+	if rc != 0 {
+		t.Fatalf("handleRoute returned %d, want 0 (hook contract: never block)", rc)
+	}
+
+	got, err := mpminternal.LoadActiveJSON()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Persona != "venkat" {
+		t.Errorf("Persona = %q, want \"venkat\" (apply should have written route persona)", got.Persona)
+	}
+	if !equalStringSlices(got.Modes, []string{"architect"}) {
+		t.Errorf("Modes = %v, want [architect]", got.Modes)
+	}
+	if got.Updated == "2026-01-01T00:00:00Z" {
+		t.Errorf("Updated = %q, want new timestamp", got.Updated)
 	}
 }
