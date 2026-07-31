@@ -895,6 +895,19 @@ func ExtractJSONFlag(args []string) (bool, []string) {
 // (when non-empty) are merged into active.json so the cross-session read
 // at session start reflects the live routing signal, not a stale bag.
 // Pre-fix active_persona was stuck at "" for over a month (2026-07-30 audit).
+// REPLACEMENT for handleRoute in cmd/mpm/router.go
+// Original lines ~911-944 (verify before applying). Drop in verbatim.
+//
+// Three-state gate replaces the always-route flow:
+//   - blank (active.json has neither persona nor modes) → emit nothing.
+//   - auto (persona or modes is the literal "auto") → run router, optionally persist.
+//   - manual (concrete values) → render from those values, skip the router.
+//
+// This makes `mpm route` the full selector: it always returns concrete
+// persona/modes (or nothing), never the "auto" sentinel. Frameworks that
+// want auto-route set the sentinel in active.json; frameworks that want
+// manual selection just write the values; frameworks that want no
+// selection at all leave active.json blank.
 func (r *CommandRouter) handleRoute(args []string) int {
 	apply, cleanedArgs := stripApplyFlag(args)
 	prompt := extractRoutePrompt(cleanedArgs, os.Stdin)
@@ -905,31 +918,63 @@ func (r *CommandRouter) handleRoute(args []string) int {
 
 	workspace := resolveRouteWorkspace()
 
-	// --apply: persist the route result to active.json before rendering, so
-	// cross-session reads see the live signal even when render fails (e.g.
-	// mode file missing — renderRoute refuses to emit a partial <system-reminder>).
-	if apply {
-		if router, err := mpminternal.NewRouter(workspace); err == nil {
-			applyRouteToActive(router.Evaluate(prompt))
-		} else if isatty(os.Stderr) {
-			usererror.Warn("route --apply: %v", err)
-		}
-	}
-
-	rendered, err := renderRoute(workspace, prompt)
-	if err != nil {
-		// Programmer-level error. Only surface on TTY (interactive) — never
-		// when invoked from a hook (would corrupt hook output).
-		if isatty(os.Stdout) {
-			usererror.Error("%v", err)
-		}
+	// Three-state gate.
+	active, _ := mpminternal.LoadActiveJSON()
+	switch {
+	case isBlankActive(active):
+		// Blank = nothing active. Emit nothing — no router call, no
+		// persistence, no <system-reminder>. Hook consumers see no output.
 		return 0
-	}
 
-	if rendered != "" {
-		fmt.Println(rendered)
+	case mpminternal.CheckAutoActive().Active:
+		// Auto sentinel — the router picks mode/persona per turn.
+		// --apply: persist the route result to active.json before rendering,
+		// so cross-session reads see the live signal even when render fails
+		// (e.g. mode file missing — renderRoute refuses to emit a partial
+		// <system-reminder>).
+		if apply {
+			if router, err := mpminternal.NewRouter(workspace); err == nil {
+				applyRouteToActive(router.Evaluate(prompt))
+			} else if isatty(os.Stderr) {
+				usererror.Warn("route --apply: %v", err)
+			}
+		}
+		rendered, err := renderRoute(workspace, prompt)
+		if err != nil {
+			if isatty(os.Stdout) {
+				usererror.Error("%v", err)
+			}
+			return 0
+		}
+		if rendered != "" {
+			fmt.Println(rendered)
+		}
+
+	default:
+		// Manual concrete values — render with those, skip the router.
+		// The user has chosen specific persona/modes; respect them.
+		rendered, err := renderManualRoute(workspace, active)
+		if err != nil {
+			if isatty(os.Stdout) {
+				usererror.Error("%v", err)
+			}
+			return 0
+		}
+		if rendered != "" {
+			fmt.Println(rendered)
+		}
 	}
 	return 0
+}
+
+// isBlankActive returns true when active.json has no persona and no modes.
+// Distinct from isAutoActive: blank means "user hasn't chosen anything",
+// auto means "user explicitly opted into auto-route".
+func isBlankActive(active *mpminternal.ActiveState) bool {
+	if active == nil {
+		return true
+	}
+	return active.Persona == "" && len(active.Modes) == 0
 }
 
 // isatty returns true if f is a terminal. Used to gate stderr noise.
