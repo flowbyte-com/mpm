@@ -202,6 +202,17 @@ type CoreDB interface {
 	RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error
 	ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error)
 
+	// ─── Cascade outbox (Task 3) ──────────────────────────────────────
+	// Transactional capture of invalidation events and per-target
+	// cascade intents. The outbox dedupes on (dead, downstream,
+	// event) so a noisy recall turn cannot produce redundant intents
+	// for the same invalidation. ListPendingCascadeIntents is the
+	// materializer's working-set read; only status='pending' rows
+	// surface so already-handled intents are not re-claimed.
+	CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, deadArtifactType, triggerEvidenceID, reason string, depth int) (string, error)
+	EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvalidation, targets []ProvenanceTarget) (int, error)
+	ListPendingCascadeIntents(limit int) ([]CascadeIntent, error)
+
 	// ─── Handoffs ────────────────────────────────────────────────────
 	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error)
 	GetLatestHandoff() (*Handoff, error)
