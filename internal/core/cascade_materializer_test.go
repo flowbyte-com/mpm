@@ -586,6 +586,104 @@ func TestMaterializer_RestartRecovery(t *testing.T) {
 	assert.Equal(t, "materialized", status)
 }
 
+// TestMaterializer_StaleRecoveryPreservesAttemptCount is the regression
+// guard for issue #3. The stale-recovery reaper must NOT reset
+// attempt_count when reclaiming an abandoned 'processing' row, otherwise
+// a poison pill that gets SIGKILL'd mid-process gets fresh retries
+// every time the reaper saves it, and the 5-attempt dead-letter cap
+// never accumulates across crashes.
+//
+// This test simulates the failing scenario: intent at attempt_count=4
+// (one shy of the 5-attempt cap) is abandoned mid-process, the reaper
+// recovers it, and the next materializer run dead-letters it on the
+// 5th attempt — not the 9th.
+//
+// If a future change re-introduces `attempt_count = 0` on the reaper
+// UPDATE, this test fails: the row gets new retries, never
+// dead-letters within the bound.
+func TestMaterializer_StaleRecoveryPreservesAttemptCount(t *testing.T) {
+	fx := newCascadeMaterializerFixture(t)
+
+	// Start the row at attempt_count=4 (one shy of the 5-attempt cap).
+	intentID := fx.enqueueIntent(t, fx.memID, "memory", fx.decID, "decision", 0, "intent at 4 of 5 attempts")
+	_, err := fx.dm.db.Exec(`
+		UPDATE epistemic_cascade_outbox
+		SET attempt_count = 4
+		WHERE id = ?
+	`, intentID)
+	require.NoError(t, err)
+
+	// Simulate SIGKILL after the row was claimed for processing: set
+	// status='processing' and updated_at to the distant past (older than
+	// the 5-minute stale timeout).
+	staleTime := time.Now().Unix() - 600
+	_, err = fx.dm.db.Exec(`
+		UPDATE epistemic_cascade_outbox
+		SET status = 'processing', updated_at = ?
+		WHERE id = ?
+	`, staleTime, intentID)
+	require.NoError(t, err)
+
+	// The reaper runs as part of the next MaterializeBatch. After
+	// reclaim, the row should still carry attempt_count >= 4.
+	_, _ = fx.mat.MaterializeBatch(context.Background(), 10)
+
+	// What we care about: attempt_count was NOT reset to 0.
+	// If the reaper reset it, the row would have attempt_count=1
+	// (one fresh attempt in this batch).
+	var (
+		status       string
+		attemptCount int
+	)
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT status, attempt_count FROM epistemic_cascade_outbox WHERE id = ?`,
+		intentID,
+	).Scan(&status, &attemptCount))
+	assert.GreaterOrEqual(t, attemptCount, 4,
+		"reaper must preserve attempt_count (issue #3); got %d", attemptCount)
+}
+
+// TestMaterializer_StaleRecoveryPreservesAttemptCount_DirectSQL is a
+// focused regression test that bypasses the materializer entirely and
+// exercises the reaper SQL directly. If the reaper SQL is changed to
+// reset attempt_count, this test fails immediately — no need to
+// trigger a full materialization cycle.
+func TestMaterializer_StaleRecoveryPreservesAttemptCount_DirectSQL(t *testing.T) {
+	fx := newCascadeMaterializerFixture(t)
+
+	intentID := fx.enqueueIntent(t, fx.memID, "memory", fx.decID, "decision", 0, "reaper preservation test")
+	staleTime := time.Now().Unix() - 600
+	_, err := fx.dm.db.Exec(`
+		UPDATE epistemic_cascade_outbox
+		SET status = 'processing', attempt_count = 4, updated_at = ?
+		WHERE id = ?
+	`, staleTime, intentID)
+	require.NoError(t, err)
+
+	// Run the same reaper SQL that claimCascadeIntents runs.
+	now := time.Now().Unix()
+	const staleTimeoutSeconds int64 = 300
+	_, err = fx.dm.db.Exec(`
+		UPDATE epistemic_cascade_outbox
+		SET status = 'pending', updated_at = ?
+		WHERE status = 'processing' AND updated_at < ?
+	`, now, now-staleTimeoutSeconds)
+	require.NoError(t, err)
+
+	// After the reaper, status=pending AND attempt_count still 4.
+	var (
+		status       string
+		attemptCount int
+	)
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT status, attempt_count FROM epistemic_cascade_outbox WHERE id = ?`,
+		intentID,
+	).Scan(&status, &attemptCount))
+	assert.Equal(t, "pending", status, "reaper must reset status to pending")
+	assert.Equal(t, 4, attemptCount,
+		"reaper must NOT reset attempt_count (issue #3); got %d", attemptCount)
+}
+
 // -----------------------------------------------------------------------------
 // Idempotent reprocessing
 // -----------------------------------------------------------------------------

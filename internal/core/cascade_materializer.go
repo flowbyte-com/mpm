@@ -452,9 +452,13 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 	const staleTimeoutSeconds int64 = 300
 
 	// Restart recovery: reclaim abandoned 'processing' rows inside the tx.
+	// DO NOT reset attempt_count here (regression in #3): a poison pill
+	// that gets SIGKILL'd mid-process would otherwise get fresh retries
+	// every time the reaper saves it, and the 5-attempt dead-letter cap
+	// would never accumulate across crashes. Only reset status + updated_at.
 	if _, err := tx.Exec(`
 		UPDATE epistemic_cascade_outbox
-		SET status = 'pending', attempt_count = 0, updated_at = ?
+		SET status = 'pending', updated_at = ?
 		WHERE status = 'processing' AND updated_at < ?
 	`, now, now-staleTimeoutSeconds); err != nil {
 		return nil, fmt.Errorf("restart recovery: %w", err)
