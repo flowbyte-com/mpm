@@ -172,6 +172,15 @@ type PreFlightCheck struct {
 }
 
 func main() {
+	// Security gate: refuse to start (and refuse to allow auto-heal
+	// to silently proceed) if the runtime dir perms are wider than 0700
+	// AND the current user can't chmod. Auto-heals succeed; only fatal
+	// on EPERM/wrong-owner. Runs before any DB connection is opened.
+	if err := config.AssertUserDirPerms0700(config.GetMPMDir()); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
 		exitCode := 0
