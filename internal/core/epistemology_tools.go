@@ -80,6 +80,17 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 // because topic memberships are observability metadata, not
 // load-bearing for the cascade materializer.
 func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error) {
+	return dm.ProposeTheoryWithExtras(hypothesis, validationCriteria, dependencies, sourceIDs, tags, nil)
+}
+
+// ProposeTheoryWithExtras extends ProposeTheory with an optional map of
+// additional top-level metadata fields. Used by the cascade materializer
+// to store cascade metadata (cascade=true, cascade_version, dead_artifact_id,
+// etc.) at the top level of the row's metadata JSON so queries can
+// filter and read cascade fields directly without parsing nested blobs.
+// cascadeFields is only appended; it never overwrites the standard fields
+// (status, validation_criteria, dependencies).
+func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -95,6 +106,12 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 		"status":              "pending",
 		"validation_criteria": validationCriteria,
 		"dependencies":        dependencies,
+	}
+	// Append cascade fields at top level (e.g. cascade=true, cascade_version,
+	// dead_artifact_id). These are the design-spec fields the materializer
+	// writes so check_wakes and query tools can read cascade metadata directly.
+	for k, v := range cascadeFields {
+		meta[k] = v
 	}
 
 	var memID string

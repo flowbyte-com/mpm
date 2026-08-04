@@ -67,10 +67,11 @@ import (
 type AuditLevel string
 
 const (
-	AuditInfo  AuditLevel = "info"  // deliberate, non-anomalous event (forensic trail only)
-	AuditWarn  AuditLevel = "warn"  // recoverable anomaly
-	AuditError AuditLevel = "error" // anomaly with operator-visible impact
-	AuditFatal AuditLevel = "fatal" // would-be-crash, captured
+	AuditInfo    AuditLevel = "info"    // deliberate, non-anomalous event (forensic trail only)
+	AuditWarn    AuditLevel = "warn"    // recoverable anomaly
+	AuditError   AuditLevel = "error"   // anomaly with operator-visible impact
+	AuditFatal   AuditLevel = "fatal"   // would-be-crash, captured
+	AuditCritical AuditLevel = "critical" // high-stakes cascade dead-letter and depth-suppression events
 )
 
 // AuditContext is a free-form JSON blob passed to LogAudit. Keep it small —
@@ -90,7 +91,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 	if dm == nil || dm.db == nil {
 		return
 	}
-	if level != AuditInfo && level != AuditWarn && level != AuditError && level != AuditFatal {
+	if level != AuditInfo && level != AuditWarn && level != AuditError && level != AuditFatal && level != AuditCritical {
 		fmt.Fprintf(os.Stderr, "audit: invalid level %q, skipping\n", level)
 		return
 	}

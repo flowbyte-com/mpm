@@ -478,7 +478,7 @@ var CommonIndexes = []string{
 	// to stay in sync — see the IMPORTANT note on that function.
 	`CREATE TABLE IF NOT EXISTS system_audit_log (
 		id          TEXT PRIMARY KEY,
-		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal')),
+		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal','critical')),
 		component   TEXT NOT NULL,
 		message     TEXT NOT NULL,
 		stack_trace TEXT,
