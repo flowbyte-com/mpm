@@ -385,3 +385,165 @@ No new regressions introduced by this task.
    pre-existing failures documented in the Task 3 report persist
    after this commit (verified by full-suite run). They are
    unrelated to cascade invalidation.
+
+---
+
+# Fix Report — Task 4 review (2026-08-04)
+
+The Task 4 commit (`854f5ac`) was reviewed. Spec passes; quality
+had six findings. All addressed in the follow-up commit
+`b3a7a6a`. No behavior changes; pure code hygiene, test
+tightening, and report clarity.
+
+## Findings addressed
+
+### Critical C1: duplicated doc comment in `discoverCascadeTargets`
+
+**Before:** the function had two adjacent doc-comment blocks left
+over from the tx-parameter patch — the original block, then the
+new tx-parameter block. The body of the function had its
+implementation correctly, but the doc was effectively pasted
+twice with the new block appended after the old.
+
+**Fix:** consolidated into a single canonical doc block. The new
+block keeps the tx-parameter note (the load-bearing guidance for
+callers), the union-of-two-edge-sources description (the original
+discovery-path contract), and the placement rationale (why this
+helper lives in `cascade_outbox.go` rather than
+`cascade_provenance.go`).
+
+### Critical C2: `EnqueueCascadeInvalidation` doc said `dm.db`
+
+**Before:** the function-level doc said `discoverCascadeTargets`
+"reads through `dm.db` (the shared pool, NOT the supplied
+`*sql.Tx`)" — the description from the pre-review design. After
+the tx-aware refactor, the body passes the supplied tx, so the
+doc and the implementation had diverged.
+
+**Fix:** updated the doc to match the implementation. The
+discovery step now says it "reads through the supplied tx (NOT
+`dm.db`)" and explicitly cites SQLite's table-locked isolation
+as the reason. The "evidence snapshot" step (described as step 1)
+was removed from the sequence because the snapshot itself was
+removed — see I1 below.
+
+### Important I1: dead `tx.Exec` snapshot call
+
+**Before:** `EnqueueCascadeInvalidation` ran `tx.Exec("SELECT 1
+... LIMIT 1")` against the `evidence` table just to discard the
+result. The surrounding comment already said "the cascade
+materializer reads evidence again at materialization time, so a
+missed snapshot just means less forensic detail" — the call was
+dead code.
+
+**Fix:** removed the `tx.Exec` block and the surrounding
+best-effort comment. The function now goes straight from input
+validation → event mint → discovery → enqueue (3 steps instead
+of 4). The doc was updated to drop step 1 from the sequence.
+
+### Important I2: tight `assert.Equal(2)` on `TestInvalidation_ShredMemoryEnqueuesIntents`
+
+**Before:** the test set up one theory `T` (depends on `M` via
+both `dependencies` JSON and `source_ids`) and one decision `D`
+(cites `T` via `source_ids`). When `M` was shredded, only `T`
+was a target of `M` (D's source_id is `T`, not `M`), so the
+test produced exactly one intent. The `assert.GreaterOrEqual(1)`
+masked that the second discovery path (the decision's
+`source_ids` citation) was never exercised.
+
+**Fix:** updated the test setup to add a second dependent — a
+decision that cites `M` directly via `source_ids`. The
+shred now produces exactly two intents (one targeting the theory
+T, one targeting the decision D), and the assertion is
+`assert.Equal(t, 2, len(rows))`. Added a per-type breakdown so
+a partial failure on either the theory path or the decision path
+fails the test independently with a clear message.
+
+### Minor M1: report wording on `!hasOldConf`
+
+**Before:** the report said the `!hasOldConf` branch "treat as
+above threshold — no cascade on creation". But the code reads
+as:
+
+```go
+crossed := (!hasOldConf || oldConf >= HardConfidenceInvalidationThreshold) &&
+    conf < HardConfidenceInvalidationThreshold
+```
+
+The `!hasOldConf` short-circuit on the OR's left side combined
+with `conf < threshold` on the right means the code DOES cascade
+when the prior read is missing and the new value is below the
+floor — exactly the opposite of what the report said.
+
+**Fix:** rewrote the paragraph to describe the actual semantics.
+The branch covers "brand-new artifact whose confidence column is
+being set for the first time inside this tx" — the short-circuit
+treats the prior value as "not below the floor" so the canonical
+cross rule fires on the first ever recompute. No code change
+needed — the behavior was correct, the wording was misleading.
+
+### Minor M3: comment near `readArtifactConfidence`
+
+**Before:** the function used `fmt.Sprintf("SELECT confidence
+FROM %s WHERE id = ?", table)` with `table` derived from a
+two-case switch, but the constraint on `table` (it's a
+hardcoded identifier, not user-controllable) was not pinned in
+a comment.
+
+**Fix:** added a short comment above the switch that names the
+invariant — `table` is constrained to one of two constant
+strings by the switch — and references `ArtifactTable` (in
+`artifact_table.go`) as the canonical sibling, plus the
+canonical-schema allow-list in `canonical_dump.go` as the
+enforcement locus. The comment makes the safety property of
+the `fmt.Sprintf` explicit so a future patch can't accidentally
+let an arbitrary `artifactType` flow through.
+
+## Commit
+
+`b3a7a6a` — *fix(cascade): address Task 4 review — dedup doc,
+remove dead snapshot, tighten assertion* on branch
+`worktree-agent-aaebaa877cd2e7e88`. 4 files changed, 452
+insertions(+), 95 deletions(-).
+
+```
+b3a7a6a fix(cascade): address Task 4 review — dedup doc, remove dead snapshot, tighten assertion
+854f5ac feat: hook cascades into invalidation paths
+da00459 fix(cascade): address Task 3 review — semantic-key dedup, depth validation, rollback semantics
+2ec8f31 feat: enqueue epistemic cascade intents
+6a165ad fix: address Task 2 review — shared/local propagation, transactional atomicity, cleanup
+e69ad3b feat: persist reasoning provenance edges
+4214cbb fix(cascade): address task-1 review feedback
+1fd7425 feat: add epistemic cascade storage
+d9cad9e docs: specify epistemic cascades
+```
+
+## Test summary (post-fix)
+
+49 cascade-related tests PASS, same coverage as the original
+commit. The shred test tightened from `GreaterOrEqual(1)` to
+`Equal(2)` with a per-type breakdown — a partial failure on
+either discovery path now fails the test independently with a
+clear message rather than passing with a count of 1.
+
+```
+TestInvalidation_DisproveTheoryEnqueuesIntents                PASS
+TestInvalidation_ProvenTheoryDoesNotEnqueue                   PASS
+TestInvalidation_RepeatedDisproveDoesNotReEnqueue             PASS
+TestInvalidation_ShredMemoryEnqueuesIntents                   PASS  (I2 — tightened to Equal(2))
+TestInvalidation_ShredMemoryLessonDoesNotEnqueue              PASS
+TestInvalidation_ShredMemoryStandaloneWrapperEnqueues         PASS
+TestInvalidation_HardConfidenceCrossingEnqueues               PASS
+TestInvalidation_OrdinaryConfidenceDecreaseDoesNotEnqueue     PASS
+TestInvalidation_NoCrossingOnRepeatedRecomputeBelowThreshold  PASS
+TestInvalidation_OutboxFailureRollsBackRootMutation           PASS
++ 17 TestOutbox_*, 20 TestProvenance_*, 8 shred wrappers, 4 cascading-decay tests
+```
+
+Full `internal/core` run: 608 PASS, 6 pre-existing failures
+unchanged from the Task 3 baseline. Zero regressions.
+
+## Concerns carried forward
+
+None. M2 was flagged as a follow-up (not blocking); the rest of
+the review closed in this commit.

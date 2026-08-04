@@ -36,6 +36,12 @@ import (
 	"time"
 )
 
+// MaxCascadeWakePerCheck bounds cascade wake delivery per CheckPendingWakes
+// call. Cascade wakes (metadata.kind == "cascade") above this cap are left
+// unfired (pending) for the next call. Notification and cron wakes are
+// unaffected by this cap. Default value: 3.
+const MaxCascadeWakePerCheck = 3
+
 // ScheduleWake persists a new pending wake. Mirrors handleScheduleWake.
 //
 // target_time may be an absolute unix epoch (seconds) or a relative
@@ -119,6 +125,12 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 //   - kinds is a specific list: surface only wakes whose metadata.kind
 //     matches one of the entries (json_extract IN (...)). Wakes with
 //     no kind set are excluded by this branch.
+//
+// Cascade wake cap:
+//   When kinds includes "cascade" (or is "*"), cascade wakes
+//   (metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
+//   call. Notification and cron wakes are unaffected. Uncapped cascade
+//   wakes remain pending for the next call.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
@@ -194,8 +206,38 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		return nil, fmt.Errorf("iterate wake rows: %w", err)
 	}
 	rows.Close()
-	out := make([]map[string]interface{}, 0, len(batch))
+
+	// Separate cascade from non-cascade rows so we can apply the per-check
+	// cap only to cascade wakes. This preserves full delivery of notification
+	// and cron wakes regardless of how many cascade wakes are queued.
+	var cascadeBatch, nonCascadeBatch []pending
 	for _, p := range batch {
+		if p.metadata != nil && strings.Contains(*p.metadata, `"kind":"cascade"`) {
+			cascadeBatch = append(cascadeBatch, p)
+		} else {
+			nonCascadeBatch = append(nonCascadeBatch, p)
+		}
+	}
+
+	// Apply cascade cap. Rows beyond the cap are left in the DB (not marked
+	// fired) so a subsequent call will deliver them.
+	if len(cascadeBatch) > MaxCascadeWakePerCheck {
+		cascadeBatch = cascadeBatch[:MaxCascadeWakePerCheck]
+	}
+
+	// Interleave: non-cascade first (chronological), then capped cascade.
+	// ORDER BY target_time ASC over the full batch already placed them in
+	// chronological order; splitting and re-combining preserves that order.
+	out := make([]map[string]interface{}, 0, len(nonCascadeBatch)+len(cascadeBatch))
+	for _, p := range nonCascadeBatch {
+		out = append(out, dm.wakeRowToMap(p, nowUnix))
+	}
+	for _, p := range cascadeBatch {
+		out = append(out, dm.wakeRowToMap(p, nowUnix))
+	}
+
+	// Mark all selected rows fired in a single batch.
+	for _, p := range append(nonCascadeBatch, cascadeBatch...) {
 		_, err := tx.Exec(
 			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
 			nowUnix, p.id,
@@ -203,29 +245,44 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		if err != nil {
 			return nil, fmt.Errorf("mark wake fired: %w", err)
 		}
-		row := map[string]interface{}{
-			"id":           p.id,
-			"target_time":  p.targetTime,
-			"reason":       p.reason,
-			"theory_id":    nullableString(p.theoryID),
-			"recurring_rule": nullableString(p.recurringRule),
-			"created_by":   p.createdBy,
-			"created_at":   p.createdAt,
-			"fired_at":     nowUnix,
-			"overdue_secs": nowUnix - p.targetTime,
-		}
-		if p.metadata != nil && *p.metadata != "" {
-			var meta map[string]interface{}
-			if json.Unmarshal([]byte(*p.metadata), &meta) == nil {
-				row["metadata"] = meta
-			}
-		}
-		out = append(out, row)
 	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit wake tx: %w", err)
 	}
 	return out, nil
+}
+
+// wakeRowToMap converts a pending wake row to the map format returned by
+// CheckPendingWakes, without any database side effects.
+func (dm *DatabaseManager) wakeRowToMap(p struct {
+	id            string
+	targetTime    int64
+	reason        string
+	theoryID      *string
+	recurringRule *string
+	createdBy     string
+	metadata      *string
+	createdAt     string
+}, nowUnix int64) map[string]interface{} {
+	row := map[string]interface{}{
+		"id":             p.id,
+		"target_time":     p.targetTime,
+		"reason":         p.reason,
+		"theory_id":      nullableString(p.theoryID),
+		"recurring_rule": nullableString(p.recurringRule),
+		"created_by":     p.createdBy,
+		"created_at":     p.createdAt,
+		"fired_at":       nowUnix,
+		"overdue_secs":   nowUnix - p.targetTime,
+	}
+	if p.metadata != nil && *p.metadata != "" {
+		var meta map[string]interface{}
+		if json.Unmarshal([]byte(*p.metadata), &meta) == nil {
+			row["metadata"] = meta
+		}
+	}
+	return row
 }
 
 // ListScheduledWakes returns wakes filtered by fired state. Defaults to

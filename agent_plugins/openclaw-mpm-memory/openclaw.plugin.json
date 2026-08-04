@@ -1,0 +1,43 @@
+{
+  "id": "openclaw-mpm-memory",
+  "name": "MPM Memory",
+  "description": "Memory slot backed by MPM (Memory Persistence Module). Routes memory_search/memory_get through `mpm call query_long_term_memory`. FTS5-only recall (no semantic vector). Replaces the default memory-core. Requires MPM installed on PATH and the agent configured with `plugins.slots.memory = \"openclaw-mpm-memory\"` to clear the `core/doctor/memory-search` 'No active memory plugin' warning.",
+  "activation": {
+    "onStartup": false
+  },
+  "kind": "memory",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_get"
+    ]
+  },
+  "enabledByDefault": false,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mpmBin": {
+        "type": "string",
+        "description": "Path to the mpm binary. Default 'mpm' (PATH-resolved)."
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000,
+        "description": "Subprocess timeout in ms. Default 5000."
+      },
+      "scope": {
+        "type": "string",
+        "enum": ["all", "local", "shared"],
+        "description": "MPM query scope. Default 'all' (federated local + shared MPM DBs)."
+      },
+      "limitDefault": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "Default memory_search limit when maxResults is omitted. Default 6."
+      }
+    }
+  }
+}
