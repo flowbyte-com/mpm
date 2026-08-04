@@ -587,7 +587,7 @@ func loadPoisonPhrasesFromFile() ([]string, error) {
 		phrases = defaultPhrases
 		// Write default phrases to file
 		content := strings.Join(phrases, "\n") + "\n"
-		if err := os.WriteFile(poisonFilePath, []byte(content), 0644); err == nil {
+		if err := os.WriteFile(poisonFilePath, []byte(content), 0600); err == nil {
 			fmt.Fprintf(os.Stderr, "✅ Poison phrases seeded: %d default phrases\n", len(phrases))
 		}
 	}
@@ -1015,7 +1015,7 @@ func (s *MemoryStore) appendToMirror(mem *Memory) error {
 			"reason", "collection not in mirror allow-list")
 		return nil
 	}
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
@@ -1052,7 +1052,7 @@ func isMirroredCollection(collection string) bool {
 
 // appendBlockedAttempt logs a blocked content attempt to the mirror file
 func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) error {
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}

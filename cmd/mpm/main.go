@@ -181,6 +181,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// File-perms sweep: tighten existing data-plane files to 0600.
+	// Non-fatal — failures (e.g., files owned by another user from
+	// an old sudo run) are logged at WARN and counted in the report.
+	// Forward enforcement (new file creations use 0600) makes this
+	// a one-shot migration; subsequent boots are no-ops.
+	if _, err := config.TightenFilePerms0600(config.GetMPMDir()); err != nil {
+		// Sweep infrastructure failure (rare); log but don't fatal —
+		// the dir-perms gate already passed.
+		fmt.Fprintln(os.Stderr, "warn: file perms sweep failed to start:", err)
+	}
+
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
 		exitCode := 0

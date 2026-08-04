@@ -78,7 +78,7 @@ func SaveActiveJSON(s *ActiveState) error {
 	if err != nil {
 		return fmt.Errorf("marshal active.json: %w", err)
 	}
-	return os.WriteFile(ActiveJSONPath(), data, 0644)
+	return os.WriteFile(ActiveJSONPath(), data, 0600)
 }
 
 // ── Auto-mode detection (the "is the agent in auto-mode?" gate) ──────────────
