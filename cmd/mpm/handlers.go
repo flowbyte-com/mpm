@@ -28,14 +28,23 @@ var activePersona string
 
 // detectActiveContext reads the current mode and persona from config files.
 // These values are injected into memory metadata on every AddMemory call.
+//
+// v spec 2026-08-04: each requested name is run through
+// internal.ResolveActivePersona / ResolveActiveMode so a stale
+// legacy config/current_* file pointing at a deleted .md file falls
+// back to system/standard instead of silently injecting a dangling
+// name into memory metadata.
 func detectActiveContext() (mode, persona string) {
+	dm := getDBConcrete()
 	modePath := filepath.Join(config.GetMPMDir(), "config", "current_mode")
 	if data, err := os.ReadFile(modePath); err == nil {
-		mode = strings.TrimSpace(string(data))
+		rawMode := strings.TrimSpace(string(data))
+		mode = internal.ResolveActiveMode(dm, rawMode)
 	}
 	personaPath := filepath.Join(config.GetMPMDir(), "config", "current_persona")
 	if data, err := os.ReadFile(personaPath); err == nil {
-		persona = strings.TrimSpace(string(data))
+		rawPersona := strings.TrimSpace(string(data))
+		persona = internal.ResolveActivePersona(dm, rawPersona)
 	}
 	return
 }
