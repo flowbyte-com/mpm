@@ -25,7 +25,7 @@ Instead of assigning arbitrary confidence scores, confidence is derived from evi
 
 Instead of rewriting memories, beliefs evolve while history remains intact.
 
-One persistent cognitive substrate. One SQLite database. One headless daemon. No vector database. No distributed infrastructure. No web UI.
+One persistent cognitive substrate. One SQLite database. Four cooperating binaries. No vector database. No distributed infrastructure. No web UI.
 
 `mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. The CLI is an operational convenience for inspecting the daemon's state — not a human-facing application.
 
@@ -1459,9 +1459,9 @@ The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`,
 `mpm ops stance assume <mode> <persona> <rationale>` switches mode/persona at runtime with no restart. The new directive prints to stdout — OpenClaw captures it and injects into session chat history, so the agent reads and adopts it on the very next turn. `mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt; `mpm ops stance promote` flushes it to a permanent `.md` file.
 #### Security Scanning
 
-*20 regex patterns gate every memory write — blocked content goes to the mirror log but never reaches the database.*
+*19 regex patterns gate every memory write — blocked content goes to the mirror log but never reaches the database.*
 
-Content scanned against **20 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
+Content scanned against **19 regex patterns** (API keys, JWTs, SSH keys, connection strings, password patterns) before any database write. Blocked content goes to `mirror.jsonl` but never reaches the database. Coverage enforced by a static-analysis test that walks every function containing a literal `INSERT INTO memories` and verifies the function (or its caller) calls the scanner.
 #### Directives (Prime Operating Principles)
 
 *Prime operating principles stored as memories — non-negotiable behavioral rules that govern every turn.*
