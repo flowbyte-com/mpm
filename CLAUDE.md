@@ -66,7 +66,7 @@ mpm/
 │   ├── embeddings.go         # Embedding provider abstraction
 │   ├── versioning.go         # Memory revisions (point-in-time reconstruction)
 │   ├── web_db.go             # Shared query helpers (CLI + MCP consumers)
-│   ├── core.go               # CoreDB interface (~130 methods) + compile-time assertion
+│   ├── core.go               # CoreDB interface (~180 methods) + compile-time assertion
 │   ├── admission.go          # AdmitResult, AdmitChainEntry (exported)
 │   └── go.mod                # Standalone module; main go.mod has replace directive
 ├── src/db/mpm.db             # Single canonical database (WAL mode)
@@ -99,7 +99,7 @@ mpm/
 
 **Key types:**
 - `DatabaseManager` (`internal/core/db.go`) — the *only* connection pool. All writes go through it (often via `ExecTracked` for watchdog visibility). Enforces 5s `busy_timeout`, WAL, foreign keys.
-- `MemoryStore` (`internal/core/memory.go`) — higher-level wrapper. Note: the 20-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned`) was pushed down into `SaveMemoryNode` in the 2026-07-07 security push, so **all** write paths go through it (not just `MemoryStore.AddMemory`). Coverage is enforced by the static-analysis test `TestScannerCoverage_AllMemoriesWritersScanContent`.
+- `MemoryStore` (`internal/core/memory.go`) — higher-level wrapper. Note: the 19-pattern secret/poison scanner (`isSensitiveContent` + `isPoisoned`) was pushed down into `SaveMemoryNode` in the 2026-07-07 security push, so **all** write paths go through it (not just `MemoryStore.AddMemory`). Coverage is enforced by the static-analysis test `TestScannerCoverage_AllMemoriesWritersScanContent`.
 - `SynthesisWorker` (`internal/core/synthesis_isolation.go`) — isolated goroutine pool (`maxWorkers=3`) with its own event channel, semaphore, and DLQ for failed LLM synth attempts.
 
 **Relevance scoring** (in `hybrid_search.go`):
