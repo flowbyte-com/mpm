@@ -246,6 +246,53 @@ Where the choice is open, prefer:
 - "Epistemology" over "knowledge management" when the lifecycle matters
 - "Substrate" over "database" when the system is the point
 
+### 3.5 The epistemic snapshot
+
+Every memory saved through `mcp-mcp` carries a `metadata._epistemic_snapshot`
+block — a system-stamped envelope that captures the epistemic environment
+at the exact moment the memory was written. Five sub-blocks under one JSON
+key (the leading underscore signals system-owned; agents and operators
+should treat the block as substrate-internal):
+
+| Sub-block | What it captures |
+|---|---|
+| `execution` | Active mode + persona + agent's self-assessment (`confidence_band`, `reasoning_depth`) |
+| `provenance` | The tool observation that preceded this save, if any (within a 60-second window) |
+| `context` | Literal snapshot of the agent's working goal text at save time (≤200 chars) |
+| `creator` | Agent ID + session ID + runtime model |
+| `validation` | Current evidence-based epistemic state (unvalidated / corroborated / contradicted), with `trigger_evidence_id` pointing at the row that flipped the state *(omitted when unvalidated)* |
+
+Why this exists: without the snapshot, debugging a strange decision weeks
+later requires walking the audit log, the evidence table, and the session
+scratchpad to reconstruct "what was the agent thinking when it wrote
+this?". With the snapshot, the answer is in the row itself.
+
+**Privacy stance.** `goal_snapshot` is captured by default and may
+contain sensitive context (the agent's working goal text at save time).
+Operators running MPM on multi-tenant hosts should review this field.
+The resolver does not redact — redaction is a v0.2 concern. Operators
+who need to suppress the snapshot can call `SaveMemoryWithContext`
+instead of `SaveMemoryWithContextAndSnapshot` (the legacy entry point
+still works and never stamps a snapshot).
+
+**Observation window.** Tool calls older than 60 seconds are dropped
+from `provenance` — claiming "this memory was inspired by that file"
+requires the tool call to have happened recently. Stale calls are
+dropped, never weakened. Tunable per install via
+`system_config.epistemic_snapshot.max_observation_window_ms`
+(default `60000`).
+
+**CLI vs MCP asymmetry.** The CLI (`mpm call save_to_memory …`) does
+not stamp `provenance` by default — it has no persistent tool buffer.
+The MCP server, being long-lived, instruments every tool invocation
+through `internal/core/tools/registry_intercept.go` and attributes saves
+back to the observation that inspired them. Both paths stamp
+`execution`, `context`, and `creator`.
+
+**Schema versioning.** The block carries a `schema_version` field (currently
+`1.0.0`) stamped at write time. Future format changes will bump it; readers
+must skip unknown fields and refuse to deserialize a future MAJOR version.
+
 ---
 
 ## 4. Belief Lifecycle
