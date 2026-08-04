@@ -114,6 +114,83 @@ func IsAutoActive() bool {
 	return CheckAutoActive().Active
 }
 
+// ── Active file validation + fallback ────────────────────────────────────────
+//
+// v spec 2026-08-04: an operator can rename / delete a mode or persona
+// .md file while active.json (or the legacy config/current_* files)
+// still references the old name. If we passed the dangling name
+// through to the LLM, the agent would boot with a blank context
+// window. The fallback layer below catches os.ErrNotExist at every
+// load point and substitutes the safe default (system / standard),
+// logging to the audit table so operators see the substitution.
+//
+// "Safe default" = the alpha-baseline professional identities:
+//   - persona → "system"   (utilitarian, no-fluff execution)
+//   - mode    → "standard"  (balanced retrieval for routine work)
+// These names MUST exist on disk; the resolver falls back to empty
+// string if neither the requested nor the default file is present,
+// in which case the caller treats empty as "no override" rather than
+// crashing.
+
+// ResolveActivePersona returns the persona name to use given a
+// caller-supplied requested name. Validates that the persona file
+// exists on disk; if not, logs a warning to the audit table (if dm
+// is non-nil) and falls back to "system". Empty input also falls
+// back to "system".
+//
+// The check is a single os.Stat — cheap; safe to call from every
+// wake-context load and every MCP call resolution.
+func ResolveActivePersona(dm *DatabaseManager, requested string) string {
+	return resolveActiveComponent(dm, "persona", requested, "system")
+}
+
+// ResolveActiveMode is the mode-equivalent of ResolveActivePersona.
+// Falls back to "standard" when the requested mode file is missing.
+func ResolveActiveMode(dm *DatabaseManager, requested string) string {
+	return resolveActiveComponent(dm, "mode", requested, "standard")
+}
+
+// resolveActiveComponent is the shared fallback for both kinds.
+// kind is "persona" or "mode"; defaultName is the safe-substitute
+// ("system" or "standard"). Returns the resolved name — never an
+// error. If BOTH the requested and default files are missing,
+// returns empty string (caller treats empty as "no override").
+func resolveActiveComponent(dm *DatabaseManager, kind, requested, defaultName string) string {
+	mpmDir := config.GetMPMDir()
+
+	// Try the requested component first.
+	if requested != "" {
+		path := filepath.Join(mpmDir, kind, requested+".md")
+		if _, err := os.Stat(path); err == nil {
+			return requested
+		}
+		// Requested is missing — fall through to default.
+		if dm != nil {
+			dm.LogAudit(AuditWarn, "router",
+				fmt.Sprintf("%s %q not found on disk; falling back to %q", kind, requested, defaultName),
+				"",
+				AuditContext{
+					"requested": requested,
+					"fallback":  defaultName,
+					"path":      filepath.Join(mpmDir, kind, requested+".md"),
+				})
+		}
+	}
+
+	// Try the safe default. If even that is missing, log + empty.
+	defPath := filepath.Join(mpmDir, kind, defaultName+".md")
+	if _, err := os.Stat(defPath); err == nil {
+		return defaultName
+	}
+	if dm != nil {
+		dm.LogAudit(AuditError, "router",
+			fmt.Sprintf("%s fallback %q also missing on disk; agent will boot without %s context", kind, defaultName, kind),
+			"",
+			AuditContext{"fallback": defaultName, "path": defPath})
+	}
+	return ""
+}
+
 // ── ActiveContext (the agent-supplied provenance for write methods) ───────
 
 // ActiveContext carries the agent's active mode/persona for provenance

@@ -116,15 +116,23 @@ type WakeContextRule struct {
 // readActiveState reads {MPM_DIR}/active.json via the shared loader in
 // xitl.go. Missing/unreadable file returns empty strings with no error —
 // the wake context is still useful without mode/persona metadata.
-func readActiveState() (mode, persona string) {
+//
+// v spec 2026-08-04: each requested name is run through
+// ResolveActivePersona / ResolveActiveMode so a stale active.json
+// pointing at a deleted .md file falls back to system/standard with
+// an audit-log entry, instead of booting the agent with a blank
+// context window. dm is passed through so the fallback path can log.
+func readActiveState(dm *DatabaseManager) (mode, persona string) {
 	active, err := LoadActiveJSON()
 	if err != nil {
 		return "", ""
 	}
 	if len(active.Modes) > 0 {
-		mode = strings.Join(active.Modes, ", ")
+		rawMode := strings.Join(active.Modes, ", ")
+		mode = ResolveActiveMode(dm, rawMode)
 	}
-	return mode, active.Persona
+	persona = ResolveActivePersona(dm, active.Persona)
+	return mode, persona
 }
 
 // GatherWakeContext returns the wake context, populating active mode/persona
@@ -158,7 +166,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 		data.LastHandoff = h
 	}
 
-	data.ActiveMode, data.ActivePersona = readActiveState()
+	data.ActiveMode, data.ActivePersona = readActiveState(dm)
 	// Budget envelope (locked 2026-07-06): 5 tactical + 5 strategic.
 	// Recent Memories was pulled at limit=10 but the renderer caps at 5,
 	// so the 10→5 swap at the DB layer matches the rendering budget and
