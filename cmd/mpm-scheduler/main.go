@@ -56,6 +56,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// File-perms sweep: tighten existing data-plane files to 0600.
+	// Non-fatal — failures are logged via the configured slog handler.
+	if _, err := mpmcore_config.TightenFilePerms0600(mpmcore_config.GetMPMDir()); err != nil {
+		logger.Warn("file perms sweep failed to start", "err", err)
+	}
+
 	// Singleton enforcement. Two scheduler instances must not race on the
 	// same wake batch — flock prevents that at the kernel level.
 	lockFile, err := scheduler.AcquireLock(*lockPath)
