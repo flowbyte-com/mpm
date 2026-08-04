@@ -239,7 +239,7 @@ func (s *MemoryStore) InitSQLite() error {
 		return nil
 	}
 
-	err := os.MkdirAll(filepath.Dir(s.SQLiteDBPath), 0755)
+	err := os.MkdirAll(filepath.Dir(s.SQLiteDBPath), 0700)
 	if err != nil {
 		return fmt.Errorf("failed to create db dir: %w", err)
 	}

@@ -227,7 +227,7 @@ func writeConfigCurrentMode(activeJSONPath string, modes []string) {
 	for _, m := range modes {
 		if m != "" && m != "auto" {
 			path := filepath.Join(mpmDir, "config", "current_mode")
-			_ = os.MkdirAll(filepath.Dir(path), 0755)
+			_ = os.MkdirAll(filepath.Dir(path), 0700)
 			_ = os.WriteFile(path, []byte(m), 0644)
 			return
 		}

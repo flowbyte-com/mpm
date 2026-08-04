@@ -201,7 +201,7 @@ func handleOpsPromote() int {
 	// Format as markdown and write to personas/<name>.md
 	md := mpminternal.FormatEphemeralPersonaAsMarkdown(ep)
 	personaDir := filepath.Join(config.GetMPMDir(), "persona")
-	if err := os.MkdirAll(personaDir, 0755); err != nil {
+	if err := os.MkdirAll(personaDir, 0700); err != nil {
 		return respond("", fmt.Sprintf("Error creating persona directory: %v\n", err), 1)
 	}
 	path := filepath.Join(personaDir, ep.Name+".md")

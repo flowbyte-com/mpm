@@ -36,7 +36,7 @@ func handleBackup(args []string) int {
 	}
 
 	// Ensure target directory exists.
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
 		return respond("", fmt.Sprintf("Backup failed (mkdir): %v\n", err), 1)
 	}
 
