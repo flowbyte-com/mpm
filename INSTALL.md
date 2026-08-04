@@ -353,6 +353,36 @@ without losing agent state; runtime data persists across `git pull`.
 
 ---
 
+## `_epistemic_snapshot` configuration
+
+Default values (override via `system_config`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `epistemic_snapshot.max_observation_window_ms` | `60000` | Drop tool calls older than this from `provenance` |
+| `goal_snapshot` overflow cap | `200` chars | Reject (don't truncate) on overflow |
+| `provenance.uri` overflow cap | `2048` chars | Reject (don't truncate) on overflow |
+
+Override example:
+
+```bash
+mpm ops config set epistemic_snapshot.max_observation_window_ms 90000
+```
+
+**Backfill for legacy databases** (alpha testers importing databases
+that pre-date this release):
+
+```bash
+mpm ops maintain backfill-snapshots
+```
+
+Derives `creator` (from existing `created_by` field) and `validation`
+(from the evidence table) for every existing memory. Other sub-blocks
+(`execution`, `provenance`, `context`) are unrecoverable for memories
+saved before the resolver existed — those rows carry partial snapshots.
+
+---
+
 ## See also
 
 - [README.md](README.md) — cognitive model, design, full reference
