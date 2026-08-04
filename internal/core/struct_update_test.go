@@ -153,7 +153,7 @@ func TestDatabaseManager_AddLesson_PersistsInitialConfidence(t *testing.T) {
 // MemoryStore.AddMemory → InitialConfidence("decision") = 0.6.
 func TestRecordDecision_SetsInitialConfidence(t *testing.T) {
 	dm := newTestDM(t)
-	res, err := dm.RecordDecision("ctx", "chose X over Y", "because", "", nil, ActiveContext{})
+	res, err := dm.RecordDecision("ctx", "chose X over Y", "because", "", nil, nil, ActiveContext{})
 	require.NoError(t, err)
 	id, _ := res["id"].(string)
 	require.NotEmpty(t, id)
@@ -168,7 +168,7 @@ func TestRecordDecision_SetsInitialConfidence(t *testing.T) {
 // MemoryStore.AddMemory → InitialConfidence("theory") = 0.5.
 func TestProposeTheory_SetsInitialConfidence(t *testing.T) {
 	dm := newTestDM(t)
-	res, err := dm.ProposeTheory("theory hypothesis", "criteria", nil, nil)
+	res, err := dm.ProposeTheory("theory hypothesis", "criteria", nil, nil, nil)
 	require.NoError(t, err)
 	id, _ := res["id"].(string)
 	require.NotEmpty(t, id)

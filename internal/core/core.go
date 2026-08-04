@@ -185,12 +185,22 @@ type CoreDB interface {
 	GetExternalDBCursor(label string) (string, error)
 
 	// ─── Epistemology ────────────────────────────────────────────────
-	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, tags []string) (map[string]interface{}, error)
+	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error)
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
-	RecordDecision(contextText, choice, rationale, outcome string, tags []string, ac ActiveContext) (map[string]interface{}, error)
+	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error)
+
+	// ─── Cascade provenance (Task 2) ──────────────────────────────────
+	// Typed citation log so the cascade materializer can walk the
+	// dependency graph for a dead source without having to scan
+	// retrieval_metadata (which is observability-only and not
+	// type-filtered). Empty sourceType on RecordProvenance triggers
+	// resolution against the local memories/lessons tables so legacy
+	// untyped IDs land with the correct type column.
+	RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error
+	ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error)
 
 	// ─── Handoffs ────────────────────────────────────────────────────
 	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error)

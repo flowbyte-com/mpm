@@ -58,7 +58,20 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 // (soft or hard), FireStaleFoundationWakes emits a wake per dependent
 // theory so the agent can re-evaluate. Empty/nil is fine — that's the
 // default for theories with no forward dependencies.
-func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, tags []string) (map[string]interface{}, error) {
+//
+// sourceIDs: optional list of artifact IDs this theory cites in its
+// provenance (retrieval-time citations the agent recorded as evidence
+// for the hypothesis). Unlike dependencies, source_ids do not fire
+// deletion wakes — they are retrospective citations that the cascade
+// materializer uses to discover dependency edges when an upstream
+// artifact is invalidated. Each entry becomes one row in
+// epistemic_provenance with downstream_type='theory'.
+//
+// The two surfaces coexist on purpose: `dependencies` is the
+// forward-looking "I will be stale if X goes away" edge,
+// `source_ids` is the retrospective "I drew on X to reason about
+// this" edge. The cascade materializer unions both at lookup time.
+func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -92,6 +105,14 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 		); err != nil {
 			return nil, fmt.Errorf("persist dependencies: %w", err)
 		}
+	}
+	// Persist source_ids as typed provenance citations so the
+	// cascade materializer can discover dependency edges during
+	// invalidation. Event id is the theory's own id — this is the
+	// "explicit decision/time citation" case in the design spec
+	// (vs. retrieval-time citations whose event_id is the wake id).
+	if err := dm.recordSourceCitations(sourceIDs, mem.ID, "theory"); err != nil {
+		return nil, fmt.Errorf("persist theory source_ids: %w", err)
 	}
 	topicID, _ := dm.GetOrCreateTopic("theories")
 	dm.AddMemoryToTopic(mem.ID, topicID, "primary")
@@ -157,7 +178,13 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 // RecordDecision logs an architectural decision. Mirrors callRecordDecision.
 // ac injects provenance + active mode/persona into meta so downstream
 // consumers can attribute the decision to the agent's runtime context.
-func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcome string, tags []string, ac ActiveContext) (map[string]interface{}, error) {
+//
+// sourceIDs: optional list of artifact IDs the agent cited as evidence
+// for this decision. Each entry becomes one row in epistemic_provenance
+// with downstream_type='decision', so the cascade materializer can walk
+// the dependency graph when an upstream artifact is invalidated. Empty
+// or nil is fine — most decisions are made without named citations.
+func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -186,11 +213,53 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 	if err != nil {
 		return nil, fmt.Errorf("record decision: %w", err)
 	}
+	// Persist source_ids as typed provenance citations. Event id is
+	// the decision's own id — same convention as ProposeTheory.
+	if err := dm.recordSourceCitations(sourceIDs, mem.ID, "decision"); err != nil {
+		return nil, fmt.Errorf("persist decision source_ids: %w", err)
+	}
 	return map[string]interface{}{
 		"success": true,
 		"id":      mem.ID,
 		"choice":  choice,
 	}, nil
+}
+
+// recordSourceCitations writes one epistemic_provenance row per
+// non-empty source id, using the supplied downstream id and type.
+// Shared helper so ProposeTheory and RecordDecision share one code
+// path — the cascade materializer relies on the citation shape being
+// uniform across both artifact kinds.
+//
+// Errors are returned to the caller. The caller (the DM method
+// itself) decides whether to roll back the artifact or surface the
+// error. Today we surface: a half-written decision with no citations
+// is recoverable on the next call, and the alternative (silent
+// success) is worse for audit trails.
+//
+// Empty / nil sourceIDs is a clean no-op (no rows to write).
+func (dm *DatabaseManager) recordSourceCitations(sourceIDs []string, downstreamID, downstreamType string) error {
+	if len(sourceIDs) == 0 {
+		return nil
+	}
+	if downstreamID == "" {
+		return fmt.Errorf("recordSourceCitations: downstream_id is empty")
+	}
+	if downstreamType == "" {
+		return fmt.Errorf("recordSourceCitations: downstream_type is empty")
+	}
+	for _, src := range sourceIDs {
+		if src == "" {
+			// Skip empties rather than fail — the source_ids JSON
+			// sometimes carries a trailing empty from upstream
+			// parsers and the user's intent is "ignore blanks".
+			continue
+		}
+		if err := dm.RecordProvenance(src, "", downstreamID, downstreamType, downstreamID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReviewMemories returns memories due for spaced reinforcement review:
