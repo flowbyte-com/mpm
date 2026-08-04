@@ -458,10 +458,28 @@ func (dm *DatabaseManager) RecentWatchdogOps(n int, opPrefix string) ([]Watchdog
 // transaction (against *txNode). RecomputeConfidence and its helpers take
 // a DBNode so callers can choose to wrap multi-statement atomic operations
 // in a transaction via DatabaseManager.WithTx.
+//
+// Tx() exposes the underlying *sql.Tx so callers that need to pass a
+// raw transaction to a low-level helper (e.g., the cascade outbox
+// EnqueueCascadeInvalidation which the brief pins as *sql.Tx) can
+// reach it from inside a WithTx callback. Calling Tx() on a non-tx
+// DBNode (i.e., *DatabaseManager used outside a transaction) is a
+// programming error — the cascade invalidation hook MUST be called
+// from inside a WithTx callback so the root mutation and the
+// cascade intent commit atomically.
+//
+// DM() exposes the owning *DatabaseManager so helpers like
+// RecomputeConfidence can call higher-level methods (e.g.,
+// EnqueueCascadeInvalidation) while still passing the active tx
+// for the cascade intent write. Returns the receiver for
+// *DatabaseManager (no-op) and the txNode's captured *DatabaseManager
+// for transactions.
 type DBNode interface {
 	ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error)
 	QueryTracked(query string, args ...interface{}) (*sql.Rows, error)
 	QueryRowTracked(query string, args ...interface{}) *sql.Row
+	Tx() *sql.Tx
+	DM() *DatabaseManager
 }
 
 // Compile-time assertion that DatabaseManager satisfies DBNode.
@@ -538,6 +556,37 @@ func (t *txNode) QueryRowTracked(query string, args ...interface{}) *sql.Row {
 	}
 	t.dm.logWatchdog(entry)
 	return row
+}
+
+// Tx exposes the underlying *sql.Tx so the cascade invalidation hook
+// (EnqueueCascadeInvalidation, brief-pinned to take *sql.Tx) can be
+// called from inside a WithTx callback. Standalone DatabaseManager
+// callers that hit this method have a programming error — see the
+// DBNode interface comment for the contract.
+func (t *txNode) Tx() *sql.Tx {
+	return t.tx
+}
+
+// Tx on DatabaseManager returns nil. This is intentionally a runtime
+// error path, not a panic, so the cascade hook's nil-tx guard surfaces
+// a clean error rather than crashing the process.
+func (dm *DatabaseManager) Tx() *sql.Tx {
+	return nil
+}
+
+// DM returns the receiver for *DatabaseManager (no-op identity) so the
+// DBNode interface contract holds symmetrically across both
+// implementations. For *txNode, DM() returns the captured
+// *DatabaseManager so helpers can reach higher-level methods.
+func (dm *DatabaseManager) DM() *DatabaseManager {
+	return dm
+}
+
+// DM on a txNode returns the captured *DatabaseManager so helpers like
+// RecomputeConfidence can call methods on the owning DM (e.g.,
+// EnqueueCascadeInvalidation) while passing the active tx.
+func (t *txNode) DM() *DatabaseManager {
+	return t.dm
 }
 
 // WithTx executes fn inside a transaction. The transaction commits when fn

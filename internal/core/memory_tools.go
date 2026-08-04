@@ -468,6 +468,24 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 // shipped but the production code was missing — the lesson-handling
 // tests (shred_lesson_aware_test.go, shred_cascade_test.go) were
 // untracked and the cascade wrapper silently no-op'd on lesson IDs.
+//
+// 2026-08-04 (Task 4): cascade invalidation hook. The memory path
+// enqueues cascade intents for every downstream decision/theory that
+// cited the shredded memory (via explicit `dependencies` JSON or
+// typed `epistemic_provenance` citations) inside the same tx as the
+// root DELETE. The lesson path remains non-cascading: lessons have
+// no reasoning dependents and the design spec excludes them from
+// the cascade target surface. The number of enqueued intents is
+// reported as `cascade_intents` in the result map (zero is a clean
+// no-op when no downstream dependents exist).
+//
+// Idempotency: a shred of a non-existent id is a success no-op
+// (preserves the legacy contract). The cascade intent write is
+// also idempotent on the schema's UNIQUE key
+// (dead, downstream, event), so a re-shred against the same id
+// cannot duplicate intents. When the memory row is already gone
+// the cascade discovery returns an empty target list (no
+// dependents surface a dead id), so the enqueue is a clean zero.
 func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]interface{}, error) {
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
@@ -502,11 +520,23 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		}
 	}
 
+	// Atomicity boundary: topic_memberships cleanup + theory purge +
+	// memory DELETE + cascade intent enqueue all live in one tx. A
+	// failure in any step rolls back every preceding step so the
+	// substrate never sees an orphan topic_memberships row, a half-
+	// purged theory, or a memory that vanished without a cascade
+	// intent.
+	var cascadeIntents int
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("shred: begin: %w", err)
 	}
-	defer tx.Rollback()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	if _, err := tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, memoryID); err != nil {
 		return nil, fmt.Errorf("shred: delete memberships: %w", err)
@@ -516,17 +546,38 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 			return nil, fmt.Errorf("shred: delete theory: %w", err)
 		}
 	}
+
+	// Cascade invalidation hook: enqueue intents for every downstream
+	// decision/theory that cited the about-to-be-deleted memory.
+	// Must happen BEFORE the memory DELETE so the
+	// discoverCascadeTargets helper can still observe the
+	// dependencies JSON + epistemic_provenance rows pointing at this
+	// id. The schema's UNIQUE key makes a re-shred a clean no-op even
+	// when intents already exist from a prior (now-rolled-back)
+	// attempt.
+	if n, err := dm.EnqueueCascadeInvalidation(
+		tx,
+		memoryID, "memory",
+		"memory_shredded", "", 0,
+	); err != nil {
+		return nil, fmt.Errorf("shred: cascade enqueue: %w", err)
+	} else {
+		cascadeIntents = n
+	}
+
 	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, memoryID); err != nil {
 		return nil, fmt.Errorf("shred: delete memory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("shred: commit: %w", err)
 	}
+	committed = true
 
 	result := map[string]interface{}{
-		"success":   true,
-		"memory_id": memoryID,
-		"shredded":  true,
+		"success":         true,
+		"memory_id":       memoryID,
+		"shredded":        true,
+		"cascade_intents": cascadeIntents,
 	}
 	if theoryID != "" {
 		result["theory_purged"] = theoryID

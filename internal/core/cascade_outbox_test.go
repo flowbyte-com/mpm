@@ -752,7 +752,7 @@ func TestOutbox_DiscoveryCombinesDependenciesAndProvenance(t *testing.T) {
 	require.NoError(t, err)
 	theoryID, _ := theoryResult["id"].(string)
 
-	targets, err := dm.discoverCascadeTargets(memID)
+	targets, err := dm.discoverCascadeTargets(nil, memID)
 	require.NoError(t, err)
 
 	// Both targets must surface.
@@ -802,7 +802,7 @@ func TestOutbox_DiscoveryDedupesAcrossPaths(t *testing.T) {
 		`["`+memID+`"]`, decID)
 	require.NoError(t, err)
 
-	targets, err := dm.discoverCascadeTargets(memID)
+	targets, err := dm.discoverCascadeTargets(nil, memID)
 	require.NoError(t, err)
 
 	count := 0
@@ -854,7 +854,7 @@ func TestOutbox_DiscoveryExcludesLessons(t *testing.T) {
 	// case where a future schema adds it), the discovery path must
 	// not return it because the collection is 'lessons', not
 	// 'decisions' / 'theories'.
-	targets, err := dm.discoverCascadeTargets(memID)
+	targets, err := dm.discoverCascadeTargets(nil, memID)
 	require.NoError(t, err)
 
 	for _, tgt := range targets {
@@ -876,7 +876,7 @@ func TestOutbox_DiscoveryExcludesLessons(t *testing.T) {
 func TestOutbox_DiscoveryReturnsEmptyForUnknownSource(t *testing.T) {
 	dm := hermeticDatabaseManager(t)
 
-	targets, err := dm.discoverCascadeTargets("mem-nonexistent")
+	targets, err := dm.discoverCascadeTargets(nil, "mem-nonexistent")
 	require.NoError(t, err)
 	require.NotNil(t, targets, "empty-result branch must return non-nil slice for JSON-friendliness")
 	assert.Len(t, targets, 0)
@@ -935,7 +935,7 @@ func TestOutbox_EndToEnd_DiscoveryThenEnqueue(t *testing.T) {
 	theoryID, _ := theoryResult["id"].(string)
 
 	// Discover targets.
-	targets, err := dm.discoverCascadeTargets(memID)
+	targets, err := dm.discoverCascadeTargets(nil, memID)
 	require.NoError(t, err)
 	require.Len(t, targets, 2, "discovery must find both downstream artifacts")
 

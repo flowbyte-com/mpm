@@ -151,6 +151,19 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 //   - idle_dream (for decay_tick recompute)
 //   - Manual CLI (`mpm ops confidence recompute`)
 //   - Future calibration/challenge code
+//
+// 2026-08-04 (Task 4): hard-confidence invalidation hook. The recompute
+// detects a CROSSING of the configured threshold (old >= threshold AND
+// new < threshold) and enqueues one cascade intent per downstream
+// dependent inside the same tx as the confidence update + history
+// INSERT. Ordinary weakening (e.g., 0.7 → 0.5) is a no-op at the
+// outbox level; a recompute that leaves the artifact already below
+// the threshold is also a no-op (the cross is the event, not the
+// absolute value). The hook only fires when the recompute is run
+// transactionally (node.Tx() != nil); standalone callers that hit the
+// crossing silently skip the cascade — that matches the existing
+// pre-cascade behavior where AddEvidence's WithTx wrapper was the
+// only path that mattered.
 func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason RecomputeReason) error {
 	// Validate artifact existence. Without this, a recompute against a
 	// nonexistent artifact silently succeeds: loadEvidenceForRecompute
@@ -169,6 +182,13 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 	}
 
 	now := time.Now()
+
+	// Snapshot the OLD confidence before the recompute. The crossing
+	// detector compares old (this read) vs new (the post-recompute
+	// value) — a recompute that stays above the threshold does not
+	// cascade, and an artifact that is already below the threshold
+	// does not re-cascade on a subsequent recompute.
+	oldConf, hasOldConf := readArtifactConfidence(node, artifactID, artifactType)
 
 	// Load the evidence set.
 	ev, lastPositiveAt, err := loadEvidenceForRecompute(node, artifactID, artifactType, now)
@@ -193,7 +213,49 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 	if err != nil {
 		return fmt.Errorf("insert history row: %w", err)
 	}
+
+	// Hard-confidence invalidation hook (Task 4). Enqueue cascade
+	// intents only on the crossing transition: old >= threshold AND
+	// new < threshold. The threshold constant is shared with the
+	// cascade outbox surface so the storage layer, the recompute
+	// path, and the tests all read the same number.
+	if tx := node.Tx(); tx != nil {
+		crossed := (!hasOldConf || oldConf >= HardConfidenceInvalidationThreshold) &&
+			conf < HardConfidenceInvalidationThreshold
+		if crossed {
+			if _, err := node.DM().EnqueueCascadeInvalidation(
+				tx,
+				artifactID, artifactType,
+				"confidence_floor", "", 0,
+			); err != nil {
+				return fmt.Errorf("confidence cascade enqueue: %w", err)
+			}
+		}
+	}
+
 	return nil
+}
+
+// readArtifactConfidence reads the live confidence column from the
+// artifact table. Returns (0, false) when the row is missing (the
+// caller can fall back to the initial confidence or treat it as
+// "already below threshold"). The cascade crossing detector in
+// RecomputeConfidence uses this to distinguish "never had confidence"
+// (treat as above threshold) from "had confidence and crossed".
+func readArtifactConfidence(node DBNode, artifactID, artifactType string) (float64, bool) {
+	var table string
+	switch artifactType {
+	case "lesson":
+		table = "lessons"
+	default:
+		table = "memories"
+	}
+	var conf float64
+	err := node.QueryRowTracked(fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, table), artifactID).Scan(&conf)
+	if err != nil {
+		return 0, false
+	}
+	return conf, true
 }
 
 // loadEvidenceForRecompute returns the evidence set and the most recent

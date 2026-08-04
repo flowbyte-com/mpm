@@ -163,6 +163,33 @@ func encodeDependencyList(deps []string) (string, error) {
 }
 
 // ResolveTheory marks a theory as proven or disproven. Mirrors callResolveTheory.
+//
+// Cascade hook (Task 4 of the 2026-08-04 epistemic cascade plan): a
+// transition to status="disproven" enqueues one cascade intent per
+// downstream decision/theory that cited this theory (via explicit
+// `dependencies` JSON or typed `epistemic_provenance` citations).
+// The status update, the +1 reinforcement, and the cascade intents
+// commit inside a single WithTx transaction so a partial failure
+// cannot leave the theory in an inconsistent state.
+//
+// Trigger policy (pinned by the brief and the design spec):
+//
+//   - status="proven"             → NO cascade (a proven theory is
+//                                   load-bearing, not invalidated).
+//   - status="disproven" with
+//     prior status="pending"      → cascade (the invalidation event).
+//   - status="disproven" with
+//     prior status="disproven"    → NO cascade (idempotent; the
+//                                   downstream intents already exist
+//                                   or were never created).
+//
+// The "transition" check is enforced by an in-tx UPDATE that
+// filters on status='pending'; a second disprove call updates zero
+// rows, the cascade hook is skipped, and the caller sees a
+// successful response (consistent with the legacy pre-cascade
+// behavior). The downstream intent dedup key
+// (dead, downstream, event) collapses any race-condition duplicates
+// at the storage layer regardless.
 func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error) {
 	if newStatus != "proven" && newStatus != "disproven" {
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
@@ -174,17 +201,69 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 	if coll, _ := mem["collection"].(string); coll != "theories" {
 		return nil, fmt.Errorf("memory %s is not a theory (collection: %s)", theoryID, coll)
 	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
-	patch := map[string]interface{}{
-		"status":      newStatus,
-		"conclusion":  conclusion,
-		"resolved_at": now,
+
+	// Atomicity boundary: status update + reinforcement + cascade
+	// enqueue all live in one tx. Proven and disproven both enter the
+	// tx; only the disprove branch enqueues cascade intents, so the
+	// brief's "only a transition to disproven" policy is structurally
+	// enforced.
+	var transitioned bool
+	err = dm.WithTx(func(node DBNode) error {
+		patch := map[string]interface{}{
+			"status":      newStatus,
+			"conclusion":  conclusion,
+			"resolved_at": now,
+			"resolved_by": "call:resolve_theory",
+			"resolved_by_via": "manual",
+		}
+		patchJSON, err := json.Marshal(patch)
+		if err != nil {
+			return fmt.Errorf("marshal patch: %w", err)
+		}
+
+		// Atomic UPDATE: the WHERE filter on status='pending' is the
+		// transition detector. A second disprove call (status is
+		// already 'disproven') updates zero rows and transitioned
+		// stays false → cascade hook skipped.
+		//
+		// The +1 reinforcement is folded into the same UPDATE so it
+		// participates in the transition filter (no reinforcement
+		// on a no-op resolve).
+		res, err := node.ExecTracked(`
+			UPDATE memories
+			SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
+			    weight = MIN(weight + 1, 100),
+			    last_accessed_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
+			  AND json_extract(metadata, '$.status') = 'pending'
+		`, 0, string(patchJSON), theoryID)
+		if err != nil {
+			return fmt.Errorf("resolve theory: %w", err)
+		}
+		rows, _ := res.RowsAffected()
+		transitioned = rows > 0
+
+		// Cascade hook: only enqueue on a real transition to
+		// disproven. A proven transition (or a repeated disprove on
+		// an already-disproven theory) updates zero rows above and
+		// skipped the cascade.
+		if transitioned && newStatus == "disproven" {
+			if _, err := dm.EnqueueCascadeInvalidation(
+				node.Tx(), // see DBNode extension below
+				theoryID, "theory",
+				"theory_disproven", "", 0,
+			); err != nil {
+				return fmt.Errorf("cascade enqueue: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	patchJSON, _ := json.Marshal(patch)
-	if err := dm.UpdateMemoryMetadata(theoryID, string(patchJSON)); err != nil {
-		return nil, fmt.Errorf("resolve theory: %w", err)
-	}
-	dm.ReinforceMemory(theoryID, 1)
+
 	return map[string]interface{}{
 		"success":     true,
 		"id":          theoryID,

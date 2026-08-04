@@ -42,6 +42,7 @@
 package internal
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -214,6 +215,23 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 // processes events in order can replay the citation history
 // deterministically.
 func (dm *DatabaseManager) ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error) {
+	return dm.listDownstreamCitationsOn(nil, sourceID, allowedTypes)
+}
+
+// listDownstreamCitationsOn is the tx-aware variant of
+// ListDownstreamCitations. Passing a non-nil tx makes the read
+// observe the in-flight state — used by the cascade invalidation
+// hook (Task 4) so discoverCascadeTargets can run inside the same
+// transaction as the root mutation without tripping SQLite's
+// table-locked isolation. Passing nil falls through to dm.db.Query
+// for the standalone path.
+//
+// Same federated logic as ListDownstreamCitations: when shared is
+// attached, local + shared UNION ALL with semantic-key dedup. The
+// tx path inherits the same behavior — a citation that landed in
+// shared but not local (because the local write rolled back) still
+// surfaces here.
+func (dm *DatabaseManager) listDownstreamCitationsOn(tx *sql.Tx, sourceID string, allowedTypes []string) ([]ProvenanceCitation, error) {
 	out := make([]ProvenanceCitation, 0)
 	if sourceID == "" {
 		return out, nil
@@ -278,7 +296,11 @@ func (dm *DatabaseManager) ListDownstreamCitations(sourceID string, allowedTypes
 		}
 	}
 
-	rows, err := dm.db.Query(query, args...)
+	queryFn := dm.db.Query
+	if tx != nil {
+		queryFn = tx.Query
+	}
+	rows, err := queryFn(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ListDownstreamCitations(%q): %w", sourceID, err)
 	}

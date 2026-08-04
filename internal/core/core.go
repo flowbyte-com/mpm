@@ -213,6 +213,17 @@ type CoreDB interface {
 	EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvalidation, targets []ProvenanceTarget) (int, error)
 	ListPendingCascadeIntents(limit int) ([]CascadeIntent, error)
 
+	// ─── Cascade invalidation hook (Task 4) ──────────────────────────
+	// Transaction-aware helper that captures the evidence snapshot,
+	// mints the event, discovers downstream targets, and enqueues
+	// intents — all inside the supplied *sql.Tx so the root mutation
+	// (theory disprove, memory shred, confidence cross) and the
+	// cascade intents commit atomically. The three explicit
+	// invalidation paths in Task 4 route through this single
+	// integration point so a partial failure rolls back the root
+	// mutation rather than diverging.
+	EnqueueCascadeInvalidation(tx *sql.Tx, deadArtifactID, deadArtifactType, reason, triggerEvidenceID string, depth int) (int, error)
+
 	// ─── Handoffs ────────────────────────────────────────────────────
 	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error)
 	GetLatestHandoff() (*Handoff, error)

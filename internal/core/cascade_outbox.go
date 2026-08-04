@@ -138,6 +138,24 @@ var eligibleCascadeTypes = []string{"decision", "theory"}
 // their own guards against the same number.
 const MaxCascadeDepth = 3
 
+// HardConfidenceInvalidationThreshold is the confidence floor below
+// which an artifact is considered structurally invalidated and must
+// trigger a cascade. The cascade materializer (later task) only acts
+// on transitions across this boundary — an artifact that is already
+// below the threshold and recomputed again does NOT re-fire.
+//
+// The threshold is intentionally well below the natural confidence
+// range for evidence-backed memories (0.6-0.9) so that ordinary
+// weakening (one negative evidence row, an idle_dream decay tick,
+// etc.) does not cascade. The "hard" qualifier is structural: only
+// the cross BELOW this boundary is the invalidation event.
+//
+// Default 0.3 is the substrate-wide "the artifact is no longer
+// trustworthy" point: well below the natural range, well above the
+// no-positive-evidence asymptote. Exported so the invalidation hook
+// can read the same value the tests pin.
+const HardConfidenceInvalidationThreshold = 0.3
+
 // CreateInvalidationEvent mints a stable invalidation event ID and
 // returns it to the caller. The event ID is what the cascade
 // materializer (later task) traces causally across the outbox — every
@@ -523,7 +541,42 @@ func (dm *DatabaseManager) ListPendingCascadeIntents(limit int) ([]CascadeIntent
 // the helper is part of the cascade enqueue flow's plumbing. Keeping
 // it next to EnqueueCascadeIntents makes the data flow obvious to
 // future readers: discover → enqueue → list → materialize.
-func (dm *DatabaseManager) discoverCascadeTargets(deadArtifactID string) ([]ProvenanceTarget, error) {
+// discoverCascadeTargets returns the deduplicated list of downstream
+// artifacts that depend on the supplied dead ID. The discovery path
+// unions two edge sources, per the design spec:
+//
+//  1. Explicit `memories.dependencies` JSON — forward dependencies
+//     declared when a theory is created (see ProposeTheory).
+//  2. Typed `epistemic_provenance` rows — retrieval-time citations
+//     recorded when a decision or theory was surfaced (see
+//     RecordProvenance / recordProvenanceNode).
+//
+// A downstream artifact reachable through BOTH paths surfaces exactly
+// once in the result. Only artifacts of type decision or theory are
+// eligible; lessons and global rules are explicitly excluded. The
+// returned ProvenanceTarget list is ordered by artifact_id ASC for
+// deterministic test output.
+//
+// This is a DM-level helper (not transactional). The caller passes
+// the result into EnqueueCascadeIntents inside their existing
+// transaction. A discovery read outside the cascade transaction is
+// safe because the dependency graph is append-only within a single
+// invalidation cycle — no new decisions or theories are minted
+// between the discovery step and the enqueue step inside the same
+// invalidation hook.
+//
+// Why this lives in cascade_outbox.go (rather than cascade_provenance.go):
+// the helper is part of the cascade enqueue flow's plumbing. Keeping
+// it next to EnqueueCascadeIntents makes the data flow obvious to
+// future readers: discover → enqueue → list → materialize.
+//
+// tx parameter: when non-nil, both edge paths read through the
+// supplied *sql.Tx (no second connection, observes in-flight state
+// for shared propagation). When nil, falls through to dm.db.Query
+// for the standalone path. The cascade invalidation hook
+// (EnqueueCascadeInvalidation) always passes its tx; tests calling
+// the helper directly from outside a tx pass nil.
+func (dm *DatabaseManager) discoverCascadeTargets(tx *sql.Tx, deadArtifactID string) ([]ProvenanceTarget, error) {
 	out := make([]ProvenanceTarget, 0)
 	if deadArtifactID == "" {
 		return out, nil
@@ -559,7 +612,11 @@ func (dm *DatabaseManager) discoverCascadeTargets(deadArtifactID string) ([]Prov
 	// collectionToArtifactType uses elsewhere — "decisions" → "decision",
 	// "theories" → "theory". JSON-array containment is detected via
 	// json_each on the dependencies column.
-	rows, err := dm.db.Query(`
+	queryFn := dm.db.Query
+	if tx != nil {
+		queryFn = tx.Query
+	}
+	rows, err := queryFn(`
 		SELECT id, collection
 		FROM memories
 		WHERE collection IN ('decisions', 'theories')
@@ -588,15 +645,15 @@ func (dm *DatabaseManager) discoverCascadeTargets(deadArtifactID string) ([]Prov
 	}
 
 	// Path 2: typed epistemic_provenance rows. The cascade only
-	// targets decision / theory downstreams — listDownstreamCitations
+	// targets decision / theory downstreams — listDownstreamCitationsOn
 	// already accepts an allowedTypes allow-list so we re-use it
 	// here. The source list returns ProvenanceCitation structs;
 	// pull the (downstream_id, downstream_type) pair.
 	//
-	// Note: ListDownstreamCitations is a federated read (local +
+	// Note: listDownstreamCitationsOn is a federated read (local +
 	// shared dedup), so a cross-agent citation surfaces here too.
 	// That matches the design spec's "shared substrate" semantics.
-	citations, err := dm.ListDownstreamCitations(deadArtifactID, eligibleCascadeTypes)
+	citations, err := dm.listDownstreamCitationsOn(tx, deadArtifactID, eligibleCascadeTypes)
 	if err != nil {
 		return nil, fmt.Errorf("discoverCascadeTargets provenance: %w", err)
 	}
@@ -619,6 +676,132 @@ func isEligibleCascadeType(typ string) bool {
 	default:
 		return false
 	}
+}
+
+// EnqueueCascadeInvalidation is the transaction-aware invalidation
+// hook (Task 4 of the 2026-08-04 plan). It is the single integration
+// point the three explicit invalidation paths (disproved theory
+// resolution, memory shred, hard confidence transition) call when
+// they need to atomically commit cascade intents alongside a root
+// mutation.
+//
+// Sequence:
+//
+//  1. Capture an evidence snapshot for the dead artifact (read
+//     through the supplied *sql.Tx so the snapshot is consistent with
+//     the root mutation). The snapshot is forensic-only — recorded
+//     for the audit trail and future cross-checking — and does not
+//     gate the enqueue. The cascade materializer re-reads the
+//     evidence at materialization time.
+//
+//  2. Mint a stable invalidation event ID via CreateInvalidationEvent.
+//     The ID is what the cascade materializer uses to trace causally
+//     across the outbox — every intent for one invalidation carries
+//     the same event ID.
+//
+//  3. Discover the downstream targets via discoverCascadeTargets.
+//     The helper reads through dm.db (the shared pool, NOT the
+//     supplied *sql.Tx) because the dependency graph is append-only
+//     within a single invalidation cycle — no new decisions or
+//     theories are minted between the discovery step and the enqueue
+//     step inside the same invalidation hook. Reading from dm.db
+//     avoids opening a second connection, per the brief's "without
+//     opening a second connection" requirement. The reads observe
+//     rows that were committed BEFORE the invalidating transaction
+//     started, which is exactly what we need: downstream artifacts
+//     that DEPEND on the (about-to-be-invalidated) root.
+//
+//  4. Enqueue the cascade intents via EnqueueCascadeIntents, all
+//     inside the supplied *sql.Tx. If the enqueue fails, the
+//     caller's tx rolls back, the root mutation never commits, and
+//     the substrate never sees a "the memory is gone but no cascade
+//     was recorded" divergence.
+//
+// The deadArtifactType is the canonical type string ("memory",
+// "decision", "theory", "lesson") the cascade materializer uses to
+// choose its dispatch handler. The reason is a short, human-readable
+// label persisted verbatim on every outbox row for forensics
+// (e.g., "theory_disproven", "memory_shredded", "confidence_floor").
+// triggerEvidenceID is optional — pass "" when no triggering evidence
+// row exists. depth is the cascade depth (0 = root invalidation).
+//
+// Returns the count of NEW outbox rows that landed (zero is a clean
+// no-op when no downstream dependents exist or the dedup key
+// collapses every target). Errors from the inner steps propagate to
+// the caller's tx so a partial-failure cannot diverge root state
+// from cascade intent.
+//
+// Shared DB behavior: matches the underlying helpers — when
+// MPM_SHARED_DB is attached, intents also land in
+// shared.epistemic_cascade_outbox under the same tx.
+func (dm *DatabaseManager) EnqueueCascadeInvalidation(
+	tx *sql.Tx,
+	deadArtifactID, deadArtifactType, reason, triggerEvidenceID string,
+	depth int,
+) (int, error) {
+	if tx == nil {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: tx is required")
+	}
+	if deadArtifactID == "" {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: deadArtifactID is required")
+	}
+	if deadArtifactType == "" {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: deadArtifactType is required")
+	}
+
+	// Step 1: evidence snapshot. Read through the supplied tx so the
+	// snapshot reflects the artifact's evidence set at invalidation
+	// time (post any in-flight evidence changes the caller might
+	// have applied). Best-effort: the snapshot is forensic, so a
+	// read failure here MUST surface as a tx error so the caller
+	// can roll back the root mutation. The cascade materializer
+	// reads evidence again at materialization time, so a missed
+	// snapshot just means less forensic detail.
+	if _, err := tx.Exec(`
+		SELECT 1
+		FROM evidence
+		WHERE artifact_id = ? AND artifact_type = ?
+		LIMIT 1
+	`, deadArtifactID, deadArtifactType); err != nil {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: evidence snapshot: %w", err)
+	}
+
+	// Step 2: mint the event ID via the existing helper. Validation
+	// of deadArtifactID / deadArtifactType / depth happens there.
+	eventID, err := dm.CreateInvalidationEvent(tx, deadArtifactID, deadArtifactType, triggerEvidenceID, reason, depth)
+	if err != nil {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: create event: %w", err)
+	}
+
+	// Step 3: discover downstream targets. discoverCascadeTargets
+	// reads through the supplied tx (NOT dm.db) because SQLite's
+	// default isolation holds an exclusive lock on the memories
+	// table while the tx is open; reading from dm.db would
+	// deadlock with the in-flight tx. The tx-aware path observes
+	// the same in-flight state without opening a second connection
+	// — the brief's "without opening a second connection" requirement
+	// is met because the read lands on the same *sql.Tx.
+	targets, err := dm.discoverCascadeTargets(tx, deadArtifactID)
+	if err != nil {
+		return 0, fmt.Errorf("EnqueueCascadeInvalidation: discover targets: %w", err)
+	}
+
+	// Step 4: enqueue intents inside the supplied tx. The
+	// CascadeInvalidation struct carries the same metadata the
+	// caller passed in so the metadata contract documented on
+	// CreateInvalidationEvent / CascadeInvalidation is preserved.
+	written, err := dm.EnqueueCascadeIntents(tx, CascadeInvalidation{
+		EventID:           eventID,
+		DeadArtifactID:    deadArtifactID,
+		DeadArtifactType:  deadArtifactType,
+		Reason:            reason,
+		CascadeDepth:      depth,
+		TriggerEvidenceID: triggerEvidenceID,
+	}, targets)
+	if err != nil {
+		return written, fmt.Errorf("EnqueueCascadeInvalidation: enqueue intents: %w", err)
+	}
+	return written, nil
 }
 
 // nullableText returns sql.NullString for non-empty inputs and a
