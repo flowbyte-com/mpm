@@ -37,6 +37,7 @@ type CoreDB interface {
 	// ─── Cascade Materializer ─────────────────────────────────────────
 	StartCascadeMaterializer(ctx context.Context)
 	StopCascadeMaterializer()
+	MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error)
 
 	// ─── Memory CRUD ─────────────────────────────────────────────────
 	SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error)

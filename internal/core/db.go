@@ -2031,6 +2031,19 @@ func (dm *DatabaseManager) StopCascadeMaterializer() {
 	}
 }
 
+// MaterializeCascadeIntents claims and processes up to `limit` pending cascade
+// intents through the running materializer. It is safe to call even when the
+// materializer is not running (returns an empty report).
+func (dm *DatabaseManager) MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error) {
+	dm.cascadeMatMu.Lock()
+	cm := dm.cascadeMaterializer
+	dm.cascadeMatMu.Unlock()
+	if cm == nil {
+		return MaterializationReport{}, nil
+	}
+	return cm.MaterializeBatch(ctx, limit)
+}
+
 // ==================== CRUD OPERATIONS ====================
 
 // UpdateSessionSummary upserts the LLM-generated summary for a session.

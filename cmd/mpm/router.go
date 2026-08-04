@@ -63,6 +63,7 @@ func NewRouter() *CommandRouter {
 		"memory":    {Name: "memory", Description: "Memory operations", MinArgs: 1},
 
 		"ingest":  {Name: "ingest", Description: "Import memories from external SQLite sources"},
+		"cascade": {Name: "cascade", Description: "Materialize pending cascade intents (epistemic cascades)"},
 		"migrate": {Name: "migrate", Description: "Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)"},
 
 		// Working Context (cognitive-interface RFC Wave 1)
@@ -205,6 +206,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRecall(args)
 	case "ingest":
 		return handleIngest(args)
+	case "cascade":
+		return handleCascade(args)
 	case "migrate":
 		return handleMigrate(args)
 	case "work":
@@ -531,6 +534,8 @@ func handleOps(args []string) int {
 	// — Backup & Restore & Ingest —
 	case "ingest":
 		return handleIngest(append([]string{"ingest"}, subArgs...))
+	case "cascade":
+		return handleCascade(append([]string{"cascade"}, subArgs...))
 	case "migrate":
 		return handleMigrate(append([]string{"migrate"}, subArgs...))
 
