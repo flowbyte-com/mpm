@@ -52,13 +52,31 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, fmt.Errorf("fact is required")
 	}
 
-	out, _, err := dm.SaveMemoryWithContext(
+	// Build the WrapperContext for snapshot injection. RecentTool is
+	// pulled from the process-local buffer that the registry
+	// interceptor populates; if no tool preceded this save, RecentTool
+	// is nil and the resolver simply omits the provenance block.
+	//
+	// _confidence_band and _reasoning_depth are optional payload
+	// fields the LLM can supply for richer snapshots. Default empty
+	// (the validator accepts empty). Documented in the tool schema.
+	wc := &mpminternal.WrapperContext{
+		AgentID:        ac.Agent,
+		SessionID:      ac.SessionID,
+		Model:          ac.Model,
+		RecentTool:     mpminternal.GlobalToolBuffer().Head(ac.SessionID),
+		ConfidenceBand: internal.ParseStringOr(p["_confidence_band"], ""),
+		ReasoningDepth: internal.ParseStringOr(p["_reasoning_depth"], ""),
+	}
+
+	out, _, err := dm.SaveMemoryWithContextAndSnapshot(
 		fact,
 		internal.ParseStringOr(p["collection"], "memories"),
 		internal.ParseStringSliceOr(p["tags"]),
 		internal.ParseFloatOr(p["weight"], 0.5),
 		internal.ParseStringOr(p["ttl"], ""),
 		ac,
+		wc,
 	)
 	if err != nil {
 		return nil, err
@@ -128,13 +146,26 @@ func handleCommitMilestone(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		tags = append([]string{typeTag}, tags...)
 	}
 
-	out, _, err := dm.SaveMemoryWithContext(
+	// Same WrapperContext pattern as handleSaveToMemory — milestones
+	// benefit from provenance ("shipped X because I just read Y")
+	// and the cost is one extra map merge.
+	wc := &mpminternal.WrapperContext{
+		AgentID:        ac.Agent,
+		SessionID:      ac.SessionID,
+		Model:          ac.Model,
+		RecentTool:     mpminternal.GlobalToolBuffer().Head(ac.SessionID),
+		ConfidenceBand: internal.ParseStringOr(p["_confidence_band"], ""),
+		ReasoningDepth: internal.ParseStringOr(p["_reasoning_depth"], ""),
+	}
+
+	out, _, err := dm.SaveMemoryWithContextAndSnapshot(
 		summary,
 		"memories",
 		tags,
 		0.5,
 		"",
 		ac,
+		wc,
 	)
 	if err != nil {
 		return nil, err

@@ -48,6 +48,46 @@ func (dm *DatabaseManager) SaveMemoryWithContext(
 	ttl string,
 	ac ActiveContext,
 ) (map[string]interface{}, *Memory, error) {
+	return dm.saveMemoryWithContextImpl(fact, collection, tags, weight, ttl, ac, nil)
+}
+
+// SaveMemoryWithContextAndSnapshot is the snapshot-enabled entry point.
+// Same semantics as SaveMemoryWithContext but additionally injects an
+// _epistemic_snapshot block into metadata before the INSERT, computed
+// from the supplied WrapperContext (agent/session/model + recent tool
+// observation + confidence/depth self-assessment).
+//
+// wc == nil is equivalent to calling SaveMemoryWithContext — the
+// legacy path is fully preserved for callers that don't have a
+// WrapperContext to supply.
+//
+// On snapshot resolution failure (resolver returns an error), the
+// memory is still saved — the snapshot block is simply omitted and
+// a warning is logged. Snapshot instrumentation is best-effort; it
+// must never fail the user's save.
+func (dm *DatabaseManager) SaveMemoryWithContextAndSnapshot(
+	fact, collection string,
+	tags []string,
+	weight float64,
+	ttl string,
+	ac ActiveContext,
+	wc *WrapperContext,
+) (map[string]interface{}, *Memory, error) {
+	return dm.saveMemoryWithContextImpl(fact, collection, tags, weight, ttl, ac, wc)
+}
+
+// saveMemoryWithContextImpl is the shared body. The wc parameter
+// gates the snapshot injection; nil = legacy path, non-nil = snapshot
+// path. Single source of truth for both entry points so the two
+// never drift apart.
+func (dm *DatabaseManager) saveMemoryWithContextImpl(
+	fact, collection string,
+	tags []string,
+	weight float64,
+	ttl string,
+	ac ActiveContext,
+	wc *WrapperContext,
+) (map[string]interface{}, *Memory, error) {
 	if collection == "" {
 		collection = "memories"
 	}
@@ -56,6 +96,21 @@ func (dm *DatabaseManager) SaveMemoryWithContext(
 	}
 
 	meta := ac.withActiveContextMeta(nil)
+
+	// Snapshot injection (alpha, 2026-08-04). For brand-new memories
+	// we pass artifactID="" so the resolver omits the validation block
+	// (no evidence exists yet for a row that hasn't been written).
+	// Single-statement INSERT is preserved — the snapshot is merged
+	// into meta before the write, no post-write UPDATE needed.
+	if wc != nil {
+		snap, err := ResolveSnapshot(context.Background(), dm, *wc, "", "")
+		if err != nil {
+			slog.Warn("epistemic_snapshot resolution failed (saving without snapshot)",
+				"session_id", wc.SessionID, "error", err.Error())
+		} else {
+			meta = snap.MergeInto(meta)
+		}
+	}
 
 	store, err := dm.getSharedStore()
 	if err != nil {
