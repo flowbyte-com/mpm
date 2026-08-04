@@ -117,6 +117,8 @@ var CanonicalMPMSchema = []string{
 	"audit_cluster_proposals",
 	"confidence_history",
 	"ephemeral_scratchpad",
+	"epistemic_cascade_outbox",
+	"epistemic_provenance",
 	"evidence",
 	"external_db_cursors",
 	"lessons",

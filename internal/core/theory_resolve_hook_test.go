@@ -141,7 +141,7 @@ func TestSaveMemoryWithContext_HookFires_TagBased(t *testing.T) {
 	resp, err := dm.ProposeTheory(
 		"Test theory: Swiatek loses Wimbledon",
 		"Confirm: loses in R3",
-		nil,
+		nil, nil,
 		[]string{"test"},
 	)
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestSaveMemoryWithContext_HookFires_ContentBased(t *testing.T) {
 	resp, err := dm.ProposeTheory(
 		"Content-based test theory.",
 		"v=42",
-		nil,
+		nil, nil,
 		[]string{"test"},
 	)
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestSaveMemoryWithContext_HookFires_ContentBased(t *testing.T) {
 
 func TestSaveMemoryWithContext_NoHookWithoutOutcome(t *testing.T) {
 	dm := NewTestDM(t)
-	resp, err := dm.ProposeTheory("Bare ref test.", "", nil, []string{"test"})
+	resp, err := dm.ProposeTheory("Bare ref test.", "", nil, nil, []string{"test"})
 	require.NoError(t, err)
 	theoryID := resp["id"].(string)
 
@@ -227,7 +227,7 @@ func TestSaveMemoryWithContext_NoHookWithoutOutcome(t *testing.T) {
 
 func TestSaveMemoryWithContext_IdempotentOnAlreadyResolved(t *testing.T) {
 	dm := NewTestDM(t)
-	resp, err := dm.ProposeTheory("Idempotency test.", "", nil, []string{"test"})
+	resp, err := dm.ProposeTheory("Idempotency test.", "", nil, nil, []string{"test"})
 	require.NoError(t, err)
 	theoryID := resp["id"].(string)
 

@@ -253,8 +253,12 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if dependencies == nil {
 		dependencies = []string{}
 	}
+	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
+	if sourceIDs == nil {
+		sourceIDs = []string{}
+	}
 
-	result, err := dm.ProposeTheory(hypothesis, validationCriteria, dependencies, tags)
+	result, err := dm.ProposeTheory(hypothesis, validationCriteria, dependencies, sourceIDs, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +360,10 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	if tags == nil {
 		tags = []string{}
 	}
+	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
+	if sourceIDs == nil {
+		sourceIDs = []string{}
+	}
 
 	return dm.RecordDecision(
 		internal.ParseStringOr(p["context"], ""),
@@ -363,6 +371,7 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		internal.ParseStringOr(p["rationale"], ""),
 		internal.ParseStringOr(p["outcome"], ""),
 		tags,
+		sourceIDs,
 		ac,
 	)
 }

@@ -73,7 +73,7 @@ func TestCascadingDecay_TheoryConfidenceUnchangedWhenUnderlyingMemoryDeleted(t *
 	// The validation_criteria text mentions memID — that's the only place
 	// the dependency is recorded in the current schema.
 	hypothesis := fmt.Sprintf("T depends on memory %s being true", memID)
-	res, err := dm.ProposeTheory(hypothesis, "if M is shredded, T should be re-evaluated", nil, []string{"test", "cascading-decay"})
+	res, err := dm.ProposeTheory(hypothesis, "if M is shredded, T should be re-evaluated", nil, nil, []string{"test", "cascading-decay"})
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
 	require.NotEmpty(t, theoryID)
@@ -172,6 +172,7 @@ func TestStaleFoundationWake_FiresOnDeclaredDependencyRemoval(t *testing.T) {
 		"T depends on M",
 		"if M is shredded, T is orphaned",
 		[]string{memID}, // <-- the new dependencies parameter
+		nil, // source_ids
 		[]string{"test", "stale-foundation"},
 	)
 	require.NoError(t, err)
@@ -223,7 +224,7 @@ func TestStaleFoundationWake_NoWakeForUnrelatedDelete(t *testing.T) {
 	// Memory M1, theory T1 that depends on M1.
 	mem1ID, err := dm.SaveMemory("memories", "M1 is foundational.", "", nil, nil, nil, false, 5)
 	require.NoError(t, err)
-	_, err = dm.ProposeTheory("T1 depends on M1", "", []string{mem1ID}, []string{"test"})
+	_, err = dm.ProposeTheory("T1 depends on M1", "", []string{mem1ID}, nil, []string{"test"})
 	require.NoError(t, err)
 
 	// Unrelated memory M2 — no theory depends on it.
@@ -252,7 +253,7 @@ func TestStaleFoundationWake_TheoryWithNoDependenciesStillClean(t *testing.T) {
 	require.NoError(t, err)
 
 	// Theory with NO declared dependencies (legacy-style propose).
-	_, err = dm.ProposeTheory("T makes no dependency claims", "", nil, []string{"test"})
+	_, err = dm.ProposeTheory("T makes no dependency claims", "", nil, nil, []string{"test"})
 	require.NoError(t, err)
 
 	store := &MemoryStore{DM: dm, DB: &SQLiteConnection{DB: dm.SQLDB()}}
