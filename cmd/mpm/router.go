@@ -507,6 +507,8 @@ func handleOps(args []string) int {
 		return handleGC(append([]string{"gc"}, subArgs...))
 	case "backfill-embeddings":
 		return handleBackfillEmbeddings(subArgs)
+	case "backfill-snapshots":
+		return handleBackfillSnapshots(subArgs)
 	case "rebalance":
 		return handleOpsRebalance(subArgs)
 	case "resolve-contradictions":
@@ -607,6 +609,7 @@ var opsSubcommandDescs = []struct {
 	{"synthesize [--dry-run]", "LLM synthesis on all memories"},
 	{"gc [--dry-run/--review/--purge/--shred-negative]", "Memory decay sweep"},
 	{"backfill-embeddings [--batch-size/--collection/--dry-run]", "Backfill embeddings for existing memories"},
+	{"backfill-snapshots [--batch-size/--dry-run]", "Derive _epistemic_snapshot blocks for pre-resolver memories"},
 	{"review", "Spaced reinforcement review"},
 	{"stats", "Memory statistics"},
 	{"prune", "Prune expired memories"},
