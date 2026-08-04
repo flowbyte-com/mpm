@@ -814,10 +814,10 @@ func TestMaterializer_ConcurrentClaim(t *testing.T) {
 	totalClaimed := r1.Claimed + r2.Claimed
 	totalMaterialized := r1.Materialized + r2.Materialized
 
-	assert.LessOrEqual(t, totalClaimed, 4,
-		"concurrent claims must not exceed total pending intents")
-	assert.LessOrEqual(t, totalMaterialized, 4,
-		"concurrent materializations must not create more theories than intents")
+	assert.Equal(t, 4, totalClaimed,
+		"concurrent claims must equal total pending intents (exactly once each)")
+	assert.Equal(t, 4, totalMaterialized,
+		"concurrent materializations must create exactly 4 theories")
 }
 
 // TestMaterializer_ClaimWithStrSliceToInterface asserts that the

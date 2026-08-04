@@ -34,6 +34,10 @@ type CoreDB interface {
 	RecentWatchdogOps(n int, opPrefix string) ([]WatchdogOp, error)
 	NewSession() (CoreDB, error)
 
+	// ─── Cascade Materializer ─────────────────────────────────────────
+	StartCascadeMaterializer(ctx context.Context)
+	StopCascadeMaterializer()
+
 	// ─── Memory CRUD ─────────────────────────────────────────────────
 	SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error)
 	SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)

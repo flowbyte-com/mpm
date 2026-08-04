@@ -453,6 +453,10 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 	// ids, then UPDATE ... WHERE id IN (...) to avoid TOCTOU races.
 	// The subquery orders by created_at ASC so the oldest intents are
 	// processed first (FIFO).
+	// claimStartedAt is the timestamp at which we begin the claim window;
+	// the Step 4 re-read filters to rows with updated_at >= claimStartedAt
+	// so we only return rows THIS call's UPDATE actually flipped.
+	claimStartedAt := now
 	claimedIDs, err := func() ([]string, error) {
 		rows, err := cm.dm.db.Query(`
 			WITH pending_cte AS (
@@ -510,7 +514,9 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		return nil, fmt.Errorf("claim intents: %w", err)
 	}
 
-	// Step 4: re-read the claimed rows to return the full CascadeIntent.
+	// Step 4: re-read only the rows this call's UPDATE actually flipped.
+	// Filtering to updated_at >= claimStartedAt excludes rows that were
+	// flipped by a concurrent call while our UPDATE ran (TOCTOU fix).
 	inClause := ""
 	args = []interface{}{}
 	for i, id := range claimedIDs {
@@ -520,6 +526,7 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		inClause += "?"
 		args = append(args, id)
 	}
+	args = append(args, claimStartedAt)
 	query := fmt.Sprintf(`
 		SELECT id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
 		       downstream_artifact_id, downstream_artifact_type,
@@ -527,7 +534,7 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		       materialized_theory_id, attempt_count, next_retry_at,
 		       terminal_error, created_at, updated_at
 		FROM epistemic_cascade_outbox
-		WHERE id IN (%s)
+		WHERE id IN (%s) AND updated_at >= ?
 	`, inClause)
 
 	rows, err := cm.dm.db.Query(query, args...)

@@ -6,6 +6,7 @@ package internal
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -236,6 +237,12 @@ type DatabaseManager struct {
 	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
 	sharedPath     string
 	sharedAttached bool
+
+	// cascadeMaterializer is the async cascade theory materializer. It is
+	// nil until StartCascadeMaterializer is called, and is stopped by
+	// Close(). Access is protected by cascadeMatMu.
+	cascadeMaterializer *CascadeMaterializer
+	cascadeMatMu       sync.Mutex
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
@@ -1987,10 +1994,41 @@ func (dm *DatabaseManager) backfillFTSTables() error {
 }
 
 func (dm *DatabaseManager) Close() error {
+	dm.cascadeMatMu.Lock()
+	if dm.cascadeMaterializer != nil {
+		dm.cascadeMaterializer.Stop()
+		dm.cascadeMaterializer = nil
+	}
+	dm.cascadeMatMu.Unlock()
+
 	if dm.db != nil {
 		return dm.db.Close()
 	}
 	return nil
+}
+
+// StartCascadeMaterializer starts the async cascade materializer goroutine
+// if it is not already running. It is idempotent — subsequent calls are no-ops.
+func (dm *DatabaseManager) StartCascadeMaterializer(ctx context.Context) {
+	dm.cascadeMatMu.Lock()
+	defer dm.cascadeMatMu.Unlock()
+	if dm.cascadeMaterializer != nil {
+		return
+	}
+	opts := DefaultCascadeMaterializerOptions()
+	dm.cascadeMaterializer = NewCascadeMaterializer(dm, opts)
+	dm.cascadeMaterializer.Start(ctx)
+}
+
+// StopCascadeMaterializer stops the cascade materializer if it is running.
+// Idempotent — subsequent calls are no-ops.
+func (dm *DatabaseManager) StopCascadeMaterializer() {
+	dm.cascadeMatMu.Lock()
+	defer dm.cascadeMatMu.Unlock()
+	if dm.cascadeMaterializer != nil {
+		dm.cascadeMaterializer.Stop()
+		dm.cascadeMaterializer = nil
+	}
 }
 
 // ==================== CRUD OPERATIONS ====================
