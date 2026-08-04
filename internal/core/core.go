@@ -44,6 +44,7 @@ type CoreDB interface {
 	ShredMemory(id string) error
 	ShredMemoryWithCascade(memoryID string) (map[string]interface{}, error)
 	SaveMemoryWithContext(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext) (map[string]interface{}, *Memory, error)
+	SaveMemoryWithContextAndSnapshot(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext, wc *WrapperContext) (map[string]interface{}, *Memory, error)
 	SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
 
 	// ─── Memory Search & Query ───────────────────────────────────────
