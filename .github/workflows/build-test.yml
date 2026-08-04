@@ -36,6 +36,31 @@ jobs:
       - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context)
         run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
 
+      - name: Run full test suite with coverage
+        env:
+          CGO_ENABLED: 1
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5=1"
+        run: |
+          # Run tests and write atomic coverage profile
+          go test -tags fts5 -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+          # Print per-function and total coverage percentage to workflow logs
+          go tool cover -func=coverage.out
+
+      - name: Generate Workflow Step Summary
+        run: |
+          echo "### 🧪 Go Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out | tail -n 15 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpm-coverage-report
+          path: coverage.out
+          retention-days: 14
+
   full-suite:
     name: Full test suite (tracking only)
     runs-on: ubuntu-latest
