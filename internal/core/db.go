@@ -154,7 +154,7 @@ type SQLiteConnection struct {
 // NewSQLiteConnection opens a new SQLite database connection (for backwards compatibility)
 func NewSQLiteConnection(dbPath string) (*SQLiteConnection, error) {
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 	db, err := sql.Open("sqlite3", dbPath)
@@ -707,7 +707,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		mpmDir = config.GetMPMDir()
 	}
 	dbDir := filepath.Join(mpmDir, "src", "db")
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
@@ -814,7 +814,7 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 // continues. SharedAttached() returns "" until this succeeds.
 func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	// Ensure the directory exists so the file can be created on first write.
-	if err := os.MkdirAll(filepath.Dir(sharedPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(sharedPath), 0700); err != nil {
 		return fmt.Errorf("mkdir shared db dir: %w", err)
 	}
 

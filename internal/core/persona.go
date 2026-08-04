@@ -201,7 +201,7 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 	// same value the user just selected. Skip the "auto" sentinel.
 	if active.Persona != "" && active.Persona != "auto" {
 		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")
-		_ = os.MkdirAll(filepath.Dir(path), 0755)
+		_ = os.MkdirAll(filepath.Dir(path), 0700)
 		_ = os.WriteFile(path, []byte(active.Persona), 0644)
 	} else {
 		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")

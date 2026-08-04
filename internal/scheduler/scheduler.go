@@ -375,7 +375,7 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 // AcquireLock grabs an exclusive flock on path. Returns the file handle
 // (caller must defer Release) or an error if another instance holds it.
 func AcquireLock(path string) (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir lock dir: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
@@ -419,7 +419,7 @@ func SnapshotHandler(w Wake) error {
 	if env := os.Getenv("MPM_BACKUP_DIR"); env != "" {
 		backupDir = env
 	}
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir backup dir: %w", err)
 	}
 

@@ -422,7 +422,7 @@ func GetOpenClawDBPath() string {
 // persistent background service.
 func GetMPMDir() string {
 	if envPath := os.Getenv("MPM_WORKSPACE"); envPath != "" {
-		os.MkdirAll(envPath, 0755)
+		os.MkdirAll(envPath, 0700)
 		return envPath
 	}
 
@@ -439,7 +439,7 @@ func GetMPMDir() string {
 	}
 
 	defaultPath := filepath.Join(home, ".mpm")
-	os.MkdirAll(defaultPath, 0755)
+	os.MkdirAll(defaultPath, 0700)
 	return defaultPath
 }
 
