@@ -22,13 +22,22 @@
 //     (typed edges, allow-list filtered, materialized at write time
 //     so the materializer doesn't have to walk retrieval_metadata).
 //
-// The decision and theory write paths (RecordDecision, ProposeTheory)
-// call RecordProvenance from their new source_ids hooks (see
-// epistemology_tools.go) so a citation is persisted atomically with
-// the artifact it justifies. Lesson source_ids continue to flow
-// through IncrementSuccess only — see the comment in
-// tools/handlers.go's handleSaveLesson for why the lesson surface
-// stays telemetry-only.
+// Shared DB behavior: when MPM_SHARED_DB is attached, RecordProvenance
+// writes to BOTH `epistemic_provenance` (local) AND
+// `shared.epistemic_provenance` (shared) under the same transaction.
+// ListDownstreamCitations UNIONs both scopes and dedupes by the
+// unique key (source_id, downstream_id, event_id) so the cascade
+// materializer sees each citation exactly once regardless of which
+// DB the row was written to. This matches the substrate's existing
+// "write to local AND shared when shared is attached" pattern (see
+// arbitrary.go's applyArbitrationResolution, which writes both
+// shared.memories and shared.evidence under one tx).
+//
+// Lesson surface stays telemetry-only: the save_lesson handler
+// credits source_ids via IncrementSuccess (retrieval_metadata
+// success_count) and does NOT route through RecordProvenance. This
+// keeps the cascade materializer's "decision-or-theory-only" filter
+// clean — see tools/handlers.go's handleSaveLesson for the rationale.
 
 package internal
 
@@ -55,9 +64,10 @@ type ProvenanceCitation struct {
 }
 
 // RecordProvenance persists one (source, downstream, event) citation
-// row. Idempotent on the unique key (source_id, downstream_id,
-// event_id): a second call with the same triple returns nil without
-// writing a duplicate.
+// row, in BOTH the local epistemic_provenance table AND the shared
+// table (if MPM_SHARED_DB is attached). Idempotent on the unique key
+// (source_id, downstream_id, event_id): a second call with the same
+// triple returns nil without writing a duplicate.
 //
 // Empty source_id, downstream_id, or event_id are rejected at the
 // domain boundary — better than letting SQLite's NOT NULL surface a
@@ -76,13 +86,36 @@ type ProvenanceCitation struct {
 // the cascade materializer validates downstream reachability against
 // the artifacts view when it consumes the citation.
 //
-// Shared DB behavior: when MPM_SHARED_DB is attached, citations
-// follow the same shared/local split as the rest of the substrate.
-// For Task 2 the implementation writes to the local table only —
-// shared-DB citation propagation is a follow-up once the
-// materializer's invalidation dispatch lands (later task in the
-// cascade plan).
+// Atomicity: the local + shared writes happen inside a single
+// transaction (via WithTx). If either write fails, neither row
+// lands. This matches the rest of the substrate's shared-write
+// pattern (see arbitration.go's applyArbitrationResolution).
 func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error {
+	return dm.WithTx(func(node DBNode) error {
+		return dm.recordProvenanceNode(node, sourceID, sourceType, downstreamID, downstreamType, eventID)
+	})
+}
+
+// recordProvenanceNode is the transactional inner core of
+// RecordProvenance. It accepts a DBNode so it can be called from
+// inside a larger transaction (e.g. ProposeTheory wraps the artifact
+// insert + citation loop in one WithTx so a mid-loop failure rolls
+// back the artifact itself).
+//
+// When MPM_SHARED_DB is attached, the citation is written to BOTH
+// local and shared schemas under the same transaction. The shared
+// write is a no-op when shared is not attached (the shared table
+// doesn't exist). The unique key collapse is per-table, so a
+// duplicate within local collapses to one row, and a duplicate
+// within shared also collapses to one row — but a write to local
+// and a write to shared are independent rows. The read surface
+// (ListDownstreamCitations) dedupes by the unique key in the
+// application layer.
+//
+// The INSERT uses ON CONFLICT(... ) DO NOTHING so the
+// idempotency contract holds when the same citation is written
+// twice (e.g. by a noisy recall turn or a retry).
+func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceType, downstreamID, downstreamType, eventID string) error {
 	if sourceID == "" {
 		return fmt.Errorf("RecordProvenance: source_id is required")
 	}
@@ -99,6 +132,11 @@ func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, 
 	// callers that pre-date the typed-source contract and pass bare
 	// IDs from prior-session recall. The downstream side is NOT
 	// resolved because callers know what they just minted.
+	//
+	// Resolution happens against the DM (not node) because the
+	// ResolveArtifactType lookup is a read that doesn't need to be
+	// in the transaction. The caller may already be inside a tx,
+	// so we use dm.db directly rather than node.
 	if sourceType == "" {
 		resolved, err := dm.ResolveArtifactType(sourceID)
 		if err != nil {
@@ -112,19 +150,42 @@ func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, 
 		}
 	}
 
-	if sourceType == "" {
-		sourceType = "memory"
-	}
-
-	_, err := dm.db.Exec(`
+	// Local write. Always executes — the local table is the
+	// always-on substrate.
+	if _, err := node.ExecTracked(`
 		INSERT INTO epistemic_provenance
 			(id, source_id, source_type, downstream_id, downstream_type, event_id)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
-	`, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID)
-	if err != nil {
-		return fmt.Errorf("RecordProvenance(%q, %q, %q, %q, %q): %w",
-			sourceID, sourceType, downstreamID, downstreamType, eventID, err)
+	`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID); err != nil {
+		return fmt.Errorf("RecordProvenance local write: %w", err)
+	}
+
+	// Shared write. Skipped when MPM_SHARED_DB is not attached
+	// (shared table does not exist in local-only mode). The
+	// ON CONFLICT clause is the same shape — idempotent per-table.
+	//
+	// Failure modes that propagate as errors (and thus roll back
+	// the local write via the outer tx):
+	//   - source_id/downstream_id/event_id fail shared's NOT NULL
+	//     check (shouldn't happen — already validated above).
+	//   - shared DB is read-only (test fixture).
+	//   - shared DB schema is missing the table (init drift).
+	//
+	// All of these are operator-visible failures (the local write
+	// succeeded but the shared copy didn't, so the substrate is
+	// inconsistent). Rolling back the local copy is the correct
+	// outcome: a half-written citation is worse than a clean
+	// failure.
+	if dm.sharedAttached {
+		if _, err := node.ExecTracked(`
+			INSERT INTO shared.epistemic_provenance
+				(id, source_id, source_type, downstream_id, downstream_type, event_id)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
+		`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID); err != nil {
+			return fmt.Errorf("RecordProvenance shared write: %w", err)
+		}
 	}
 	return nil
 }
@@ -135,6 +196,14 @@ func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, 
 // the cascade materializer's "anything downstream" sweep path uses
 // this shape.
 //
+// Federated read: when MPM_SHARED_DB is attached, this query UNIONs
+// the local and shared tables and dedupes by the unique key
+// (source_id, downstream_id, event_id). The cascade materializer
+// never sees a citation twice regardless of which DB it landed in.
+// The created_at column comes from the row that won the dedup — for
+// the cascade materializer that's a stable timestamp one would
+// inspect via a separate query if needed.
+//
 // The result is non-nil even when no citations match; the empty-
 // result branch returns ([]ProvenanceCitation{}, nil) so JSON
 // marshalling produces `[]` rather than `null` (caller contract:
@@ -143,51 +212,73 @@ func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, 
 //
 // Ordering is by created_at ASC so a downstream consumer that
 // processes events in order can replay the citation history
-// deterministically. The unique key guarantees at most one row per
-// (source, downstream, event), so ASC ordering is stable across
-// queries.
+// deterministically.
 func (dm *DatabaseManager) ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error) {
 	out := make([]ProvenanceCitation, 0)
 	if sourceID == "" {
 		return out, nil
 	}
 
-	// Build a parameterized IN clause. Empty allowedTypes means "any
-	// downstream type"; the WHERE filter is skipped in that case.
-	var (
-		rows interface {
-			Next() bool
-			Scan(...interface{}) error
-			Close() error
-			Err() error
-		}
-		err error
-	)
-	if len(allowedTypes) == 0 {
-		rows, err = dm.db.Query(`
-			SELECT source_id, source_type, downstream_id, downstream_type, event_id, created_at
-			FROM epistemic_provenance
-			WHERE source_id = ?
-			ORDER BY created_at ASC, id ASC
-		`, sourceID)
-	} else {
-		// Expand into ? placeholders.
+	// Build the type allow-list clause. Empty allowedTypes means
+	// "any downstream type" — the WHERE filter is skipped.
+	allowedClause := ""
+	args := []interface{}{sourceID}
+	if len(allowedTypes) > 0 {
 		placeholders := make([]string, len(allowedTypes))
-		args := make([]interface{}, 0, len(allowedTypes)+1)
-		args = append(args, sourceID)
 		for i, t := range allowedTypes {
 			placeholders[i] = "?"
 			args = append(args, t)
 		}
-		query := fmt.Sprintf(`
+		allowedClause = fmt.Sprintf("AND downstream_type IN (%s)", strings.Join(placeholders, ","))
+	}
+
+	// Local-only query when shared is not attached.
+	query := fmt.Sprintf(`
+		SELECT source_id, source_type, downstream_id, downstream_type, event_id, MIN(created_at)
+		FROM (
 			SELECT source_id, source_type, downstream_id, downstream_type, event_id, created_at
 			FROM epistemic_provenance
-			WHERE source_id = ?
-			  AND downstream_type IN (%s)
-			ORDER BY created_at ASC, id ASC
-		`, strings.Join(placeholders, ","))
-		rows, err = dm.db.Query(query, args...)
+			WHERE source_id = ? %s
+			%s
+		)
+		GROUP BY source_id, downstream_id, event_id
+		ORDER BY MIN(created_at) ASC
+	`, allowedClause, "")
+	if dm.sharedAttached {
+		// Federated query: UNION ALL local + shared, dedup by the
+		// unique key. The outer SELECT collapses the duplicate and
+		// keeps the earliest created_at so the dedup is stable.
+		//
+		// Args layout for the federated query: source_id (local),
+		// allowedTypes (local), source_id (shared), allowedTypes
+		// (shared). Reconstruct from scratch rather than appending
+		// to the original args slice to keep the order obvious.
+		query = fmt.Sprintf(`
+			SELECT source_id, source_type, downstream_id, downstream_type, event_id, MIN(created_at)
+			FROM (
+				SELECT source_id, source_type, downstream_id, downstream_type, event_id, created_at
+				FROM epistemic_provenance
+				WHERE source_id = ? %s
+				UNION ALL
+				SELECT source_id, source_type, downstream_id, downstream_type, event_id, created_at
+				FROM shared.epistemic_provenance
+				WHERE source_id = ? %s
+			)
+			GROUP BY source_id, downstream_id, event_id
+			ORDER BY MIN(created_at) ASC
+		`, allowedClause, allowedClause)
+		args = make([]interface{}, 0, 2*(1+len(allowedTypes)))
+		args = append(args, sourceID)
+		for _, t := range allowedTypes {
+			args = append(args, t)
+		}
+		args = append(args, sourceID)
+		for _, t := range allowedTypes {
+			args = append(args, t)
+		}
 	}
+
+	rows, err := dm.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ListDownstreamCitations(%q): %w", sourceID, err)
 	}
@@ -254,6 +345,20 @@ func (dm *DatabaseManager) ResolveArtifactType(id string) (string, error) {
 	).Scan(&lessonID)
 	if err == nil && lessonID != "" {
 		return "lesson", nil
+	}
+
+	// Shared lookup: when MPM_SHARED_DB is attached, a cited
+	// artifact may live in shared.memories (cross-agent / global
+	// rules). Same collection mapping applies.
+	if dm.sharedAttached {
+		var sharedCollection string
+		err := dm.db.QueryRow(
+			`SELECT collection FROM shared.memories WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+			id,
+		).Scan(&sharedCollection)
+		if err == nil {
+			return collectionToArtifactType(sharedCollection), nil
+		}
 	}
 
 	return "", fmt.Errorf("ResolveArtifactType(%q): not found", id)

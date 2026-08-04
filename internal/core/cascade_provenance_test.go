@@ -6,14 +6,18 @@
 // behavior the Task 2 brief calls out:
 //
 //   - RecordProvenance: writes a typed citation row, validates inputs,
-//     dedupes on (source_id, downstream_id, event_id).
+//     dedupes on (source_id, downstream_id, event_id), and propagates
+//     to the shared DB when MPM_SHARED_DB is attached.
 //   - ListDownstreamCitations: returns only citations whose
-//     downstream_type matches the allowedTypes allow-list.
+//     downstream_type matches the allowedTypes allow-list, federated
+//     across local + shared when shared is attached.
 //   - Compatibility: legacy untyped source IDs (no `skill:`, `lesson:`,
 //     `dec-`, `theory:` prefix) are resolved against the local memory
 //     store before insertion so the row lands with the right
 //     source_type and the `idx_epistemic_provenance_source` index is
 //     useful for discovery.
+//   - Atomicity: artifact insert + citation writes run inside a single
+//     transaction so a mid-loop failure rolls back the artifact.
 //
 // Why these tests matter: the cascade materializer (later task) walks
 // citations to discover dependency edges. If a citation is silently
@@ -26,9 +30,8 @@ package internal
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
-	"strings"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,6 +92,48 @@ func newProvenanceFixture(t *testing.T) *provenanceFixture {
 	require.NotEmpty(t, theoryID)
 
 	return &provenanceFixture{dm: dm, memID: memID, decID: decID, theoryID: theoryID}
+}
+
+// newProvenanceFixtureWithShared extends the shared-DB tests with a
+// hermetic DatabaseManager that has MPM_SHARED_DB attached to a
+// temp file. MPM_SHARED_DB goes through attachShared which runs the
+// cascade DDL (epistemic_provenance + indexes) in both local AND
+// shared schemas, so the test exercises the real federated path.
+func newProvenanceFixtureWithShared(t *testing.T) *provenanceFixture {
+	t.Helper()
+	workspace := t.TempDir()
+	sharedPath := filepath.Join(workspace, "shared.db")
+	t.Setenv("MPM_WORKSPACE", workspace)
+	t.Setenv("MPM_SHARED_DB", sharedPath)
+	t.Setenv("MPM_SHARED_READONLY", "")
+
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err)
+	t.Cleanup(func() { dm.Close() })
+	require.Equal(t, sharedPath, dm.SharedAttached(),
+		"shared DB must be attached for federated test")
+
+	memID := "mem-" + GenerateID()
+	_, err = dm.db.Exec(`
+		INSERT INTO memories (id, collection, content)
+		VALUES (?, 'memories', 'provenance-shared fixture source')
+	`, memID)
+	require.NoError(t, err)
+
+	decResult, err := dm.RecordDecision(
+		"shared fixture context",
+		"shared fixture choice",
+		"because the shared fixture requires a downstream artifact",
+		"",
+		[]string{"fixture"},
+		nil,
+		ActiveContext{},
+	)
+	require.NoError(t, err)
+	decID, _ := decResult["id"].(string)
+	require.NotEmpty(t, decID)
+
+	return &provenanceFixture{dm: dm, memID: memID, decID: decID}
 }
 
 // TestProvenance_RecordAndListRoundtrip is the happy-path contract:
@@ -392,21 +437,29 @@ func TestProvenance_ListIsEmptyForUnknownSource(t *testing.T) {
 	assert.Len(t, citations, 0)
 }
 
-// TestProvenance_InterfaceImplemented pins the compile-time guarantee
-// that *DatabaseManager satisfies the CoreDB interface with the new
-// provenance methods. The test will fail to build if the interface
-// signature drifts from the implementation.
-//
-// Failure mode the test catches: someone renames
-// RecordProvenance/ListDownstreamCitations without updating CoreDB
-// or the tools/handlers.go path that consumes it.
+// Compile-time assertion that *DatabaseManager satisfies the
+// CoreDB interface with the new provenance methods. This is the
+// real interface check — the runtime typed-nil assertion the
+// previous version of this test used (`var dm *DatabaseManager;
+// var iface CoreDB = dm`) is misleading because Go's interface
+// conversion of a typed nil *DatabaseManager produces a non-nil
+// interface, so the subsequent `assert.Nil` would assert against
+// a non-nil interface and could pass even when the implementation
+// is broken. The compile-time assertion below is the version that
+// actually catches a signature drift.
+var _ CoreDB = (*DatabaseManager)(nil)
+
+// TestProvenance_InterfaceImplemented exists so the file has a
+// runnable test entry. The build-time assertion at the top of the
+// file is the load-bearing check; this test just keeps the file
+// discoverable in `go test -list` and `go test -run` output.
 func TestProvenance_InterfaceImplemented(t *testing.T) {
-	// The compile-time assertion is the test. If this file builds,
-	// *DatabaseManager satisfies the interface. Add a runtime sanity
-	// check so the test reads as a test even without -run=Test.
-	var dm *DatabaseManager = nil
-	var iface CoreDB = dm
-	assert.Nil(t, iface, "interface check is compile-time only; runtime sanity")
+	// Build-time assertion (above) is the contract. The runtime
+	// check is a no-op confirmation that the DM is constructible
+	// (the fixture factory already proved this; here we just
+	// publish a test name).
+	var dm *DatabaseManager
+	_ = dm // forces the compile-time assertion to be re-evaluated
 }
 
 // TestProvenance_RecordDecisionPersistsCitations asserts that the
@@ -523,6 +576,350 @@ func TestProvenance_LessonSourceIDsStayTelemetryOnly(t *testing.T) {
 	_ = lessonID // referenced for the lesson-id-only assertion above
 }
 
+// TestProvenance_SharedWritePropagation is the I-1 fix coverage:
+// when MPM_SHARED_DB is attached, RecordProvenance must persist the
+// citation to BOTH local and shared tables. The federated
+// ListDownstreamCitations must surface the citation exactly once
+// (dedup by unique key) so the cascade materializer doesn't
+// double-count.
+//
+// Failure mode the test catches: someone removes the shared write
+// branch in recordProvenanceNode and the cascade materializer misses
+// citations that other agents can see.
+func TestProvenance_SharedWritePropagation(t *testing.T) {
+	fx := newProvenanceFixtureWithShared(t)
+
+	require.NoError(t, fx.dm.RecordProvenance(
+		fx.memID, "memory",
+		fx.decID, "decision", "evt-shared-write",
+	))
+
+	// Local row exists.
+	var localN int
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance
+		 WHERE source_id = ? AND downstream_id = ? AND event_id = ?`,
+		fx.memID, fx.decID, "evt-shared-write",
+	).Scan(&localN))
+	assert.Equal(t, 1, localN, "local citation must land")
+
+	// Shared row exists.
+	var sharedN int
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM shared.epistemic_provenance
+		 WHERE source_id = ? AND downstream_id = ? AND event_id = ?`,
+		fx.memID, fx.decID, "evt-shared-write",
+	).Scan(&sharedN))
+	assert.Equal(t, 1, sharedN, "shared citation must land when MPM_SHARED_DB is attached")
+
+	// Federated read surfaces the citation exactly once — the
+	// UNION ALL + GROUP BY dedup must collapse the two underlying
+	// rows into one ProvenanceCitation.
+	citations, err := fx.dm.ListDownstreamCitations(fx.memID, []string{"decision"})
+	require.NoError(t, err)
+	require.Len(t, citations, 1,
+		"federated read must dedup by (source, downstream, event) so the materializer sees each citation once")
+	assert.Equal(t, fx.decID, citations[0].DownstreamID)
+}
+
+// TestProvenance_SharedWriteIdempotent is the per-table idempotency
+// guard for the shared write path. A second RecordProvenance with
+// the same triple must produce ONE row in each table (no duplicates
+// from the local AND shared idempotency path).
+//
+// Failure mode the test catches: someone drops the ON CONFLICT
+// clause from the shared INSERT and the second write fails the
+// UNIQUE constraint.
+func TestProvenance_SharedWriteIdempotent(t *testing.T) {
+	fx := newProvenanceFixtureWithShared(t)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, fx.dm.RecordProvenance(
+			fx.memID, "memory",
+			fx.decID, "decision", "evt-shared-idem",
+		), "RecordProvenance must be idempotent on iteration %d", i)
+	}
+
+	// One row per table, not three.
+	var localN, sharedN int
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE event_id = ?`,
+		"evt-shared-idem",
+	).Scan(&localN))
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM shared.epistemic_provenance WHERE event_id = ?`,
+		"evt-shared-idem",
+	).Scan(&sharedN))
+	assert.Equal(t, 1, localN, "local citation must collapse to one row")
+	assert.Equal(t, 1, sharedN, "shared citation must collapse to one row")
+
+	// Federated read still surfaces one citation.
+	citations, err := fx.dm.ListDownstreamCitations(fx.memID, []string{"decision"})
+	require.NoError(t, err)
+	require.Len(t, citations, 1)
+}
+
+// TestProvenance_SharedListFederation is the read-side companion to
+// TestProvenance_SharedWritePropagation. When a citation lives in
+// LOCAL only (e.g. a legacy row written before shared was attached),
+// the federated read must still surface it.
+//
+// Failure mode the test catches: someone implements the federated
+// query with INTERSECT instead of UNION ALL and only surfaces rows
+// that exist in both tables.
+func TestProvenance_SharedListFederation(t *testing.T) {
+	fx := newProvenanceFixtureWithShared(t)
+
+	// Write a citation through the API — both local and shared get
+	// the row.
+	require.NoError(t, fx.dm.RecordProvenance(
+		fx.memID, "memory",
+		fx.decID, "decision", "evt-fed",
+	))
+
+	// Manually delete the shared row so the citation exists ONLY
+	// in local. The federated read must still surface it.
+	_, err := fx.dm.db.Exec(
+		`DELETE FROM shared.epistemic_provenance WHERE event_id = ?`,
+		"evt-fed",
+	)
+	require.NoError(t, err)
+
+	citations, err := fx.dm.ListDownstreamCitations(fx.memID, []string{"decision"})
+	require.NoError(t, err)
+	require.Len(t, citations, 1, "federated read must surface local-only citations")
+	assert.Equal(t, fx.decID, citations[0].DownstreamID)
+}
+
+// TestProvenance_RecordDecisionRollsBackOnCitationFailure is the
+// I-2 fix coverage. The original "artifact-first, citations-second"
+// ordering could leave a decision row in the DB with no citations
+// if the citation loop failed mid-way. The fix wraps the artifact
+// insert + citation loop in a single WithTx transaction; a
+// citation failure rolls back the decision row.
+//
+// Failure mode the test catches: someone removes the WithTx wrapper
+// from RecordDecision and the substrate regresses to the artifact-
+// first ordering.
+//
+// Test technique: drop the shared cascade table to force the
+// shared INSERT to fail. The local write succeeds, the shared
+// write fails inside the tx, the WithTx wrapper rolls back the
+// local write. This is the real production failure mode — schema
+// drift between local and shared — not a synthetic injection.
+func TestProvenance_RecordDecisionRollsBackOnCitationFailure(t *testing.T) {
+	// Build the shared fixture but DON'T create the upstream
+	// decision via the fixture factory — we want a clean count
+	// of decisions created AFTER the schema-drop injection.
+	workspace := t.TempDir()
+	sharedPath := filepath.Join(workspace, "shared.db")
+	t.Setenv("MPM_WORKSPACE", workspace)
+	t.Setenv("MPM_SHARED_DB", sharedPath)
+	t.Setenv("MPM_SHARED_READONLY", "")
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err)
+	t.Cleanup(func() { dm.Close() })
+	require.Equal(t, sharedPath, dm.SharedAttached())
+
+	// Seed a source memory for the citation.
+	memID := "mem-" + GenerateID()
+	_, err = dm.db.Exec(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'cite this')`, memID)
+	require.NoError(t, err)
+
+	// Drop the shared cascade table to force the shared write to
+	// fail. This simulates a schema drift / migration failure
+	// between local and shared.
+	_, err = dm.db.Exec(`DROP TABLE shared.epistemic_provenance`)
+	require.NoError(t, err)
+
+	// RecordDecision must error because the shared write fails.
+	res, err := dm.RecordDecision(
+		"rollback-test context",
+		"rollback-test choice",
+		"because the shared write must fail",
+		"",
+		[]string{"fixture"},
+		[]string{memID},
+		ActiveContext{},
+	)
+	require.Error(t, err, "RecordDecision must error when shared write fails")
+	assert.Contains(t, err.Error(), "shared write",
+		"error must surface the shared-write failure, not a generic SQL error")
+	_ = res
+
+	// The decision row must NOT be in the local memories table.
+	// The fixture is empty (we did not call RecordDecision before
+	// the drop), so a strict count of 0 is the correct assertion.
+	var localN int
+	require.NoError(t, dm.db.QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE collection = 'decisions'`,
+	).Scan(&localN))
+	assert.Equal(t, 0, localN,
+		"the decision row must be rolled back when the shared citation write fails")
+
+	// The local citation must also be rolled back (atomicity).
+	var localCiteN int
+	require.NoError(t, dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_type = 'decision'`,
+	).Scan(&localCiteN))
+	assert.Equal(t, 0, localCiteN,
+		"local citation must be rolled back when the shared write fails")
+}
+
+// TestProvenance_ProposeTheoryRollsBackOnCitationFailure is the
+// I-2 fix coverage for the theory path. The same WithTx wrapper
+// that protects RecordDecision protects ProposeTheory. We use
+// the same shared-table-drop injection — when the shared cascade
+// schema is missing, the local write (and the local citation) must
+// roll back.
+//
+// Failure mode the test catches: someone applies the WithTx wrapper
+// to RecordDecision but forgets ProposeTheory.
+func TestProvenance_ProposeTheoryRollsBackOnCitationFailure(t *testing.T) {
+	// Build the shared fixture but skip the upstream decision
+	// creation in the fixture factory — we want a clean count of
+	// theories created AFTER the schema-drop injection.
+	workspace := t.TempDir()
+	sharedPath := filepath.Join(workspace, "shared.db")
+	t.Setenv("MPM_WORKSPACE", workspace)
+	t.Setenv("MPM_SHARED_DB", sharedPath)
+	t.Setenv("MPM_SHARED_READONLY", "")
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err)
+	t.Cleanup(func() { dm.Close() })
+	require.Equal(t, sharedPath, dm.SharedAttached())
+
+	// Seed a source memory for the citation.
+	memID := "mem-" + GenerateID()
+	_, err = dm.db.Exec(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'cite this')`, memID)
+	require.NoError(t, err)
+
+	// Drop the shared cascade table to force the shared write to
+	// fail.
+	_, err = dm.db.Exec(`DROP TABLE shared.epistemic_provenance`)
+	require.NoError(t, err)
+
+	res, err := dm.ProposeTheory(
+		"rollback-test theory",
+		"rollback-test validation",
+		nil,
+		[]string{memID},
+		[]string{"fixture"},
+	)
+	require.Error(t, err, "ProposeTheory must error when shared write fails")
+	_ = res
+
+	// The theory row must NOT be in the local memories table.
+	var localN int
+	require.NoError(t, dm.db.QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE collection = 'theories'`,
+	).Scan(&localN))
+	assert.Equal(t, 0, localN,
+		"the theory row must be rolled back when the shared citation write fails")
+
+	// The local citation must also be rolled back.
+	var localCiteN int
+	require.NoError(t, dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_type = 'theory'`,
+	).Scan(&localCiteN))
+	assert.Equal(t, 0, localCiteN,
+		"local citation must be rolled back when the shared write fails")
+}
+
+// TestProvenance_ValidationFailureLeavesNoRows is the empty-fields
+// rollback contract: a validation failure inside RecordProvenance
+// (empty source_id, downstream_id, or event_id) must not write any
+// row, even when invoked via the transactional path. The existing
+// TestProvenance_ValidationRejectsEmptyFields covers the row count
+// via the un-transactional surface; this test pins the same
+// contract for the recordProvenanceNode path that ProposeTheory
+// and RecordDecision use internally.
+//
+// Failure mode the test catches: someone removes the validation
+// guards from recordProvenanceNode and the artifact path silently
+// writes citations with empty fields.
+func TestProvenance_ValidationFailureLeavesNoRows(t *testing.T) {
+	fx := newProvenanceFixtureWithShared(t)
+
+	// Use the transactional internal entry point directly. The
+	// public RecordProvenance wraps the same node call in its
+	// own WithTx, but the validation has to fail before any
+	// INSERT runs.
+	err := fx.dm.recordProvenanceNode(fx.dm, "", "memory", fx.decID, "decision", "evt-bad")
+	require.Error(t, err)
+
+	// Both local and shared must be untouched.
+	var localN, sharedN int
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE event_id = ?`, "evt-bad",
+	).Scan(&localN))
+	localNTotal := 0
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance`,
+	).Scan(&localNTotal))
+	assert.Equal(t, 0, localNTotal, "local must have zero rows after validation failure")
+
+	if fx.dm.sharedAttached {
+		require.NoError(t, fx.dm.db.QueryRow(
+			`SELECT COUNT(*) FROM shared.epistemic_provenance`,
+		).Scan(&sharedN))
+		assert.Equal(t, 0, sharedN, "shared must have zero rows after validation failure")
+	}
+}
+
+// TestProvenance_ArtifactExistsWithCitations is the positive-space
+// guard for the WithTx wrapper: when the citation loop succeeds,
+// the artifact row AND the citation rows must all land. This is the
+// non-rollback half of the atomicity contract.
+//
+// Failure mode the test catches: someone wraps the RecordDecision
+// in WithTx but the inner fn forgets to commit by leaving the
+// DBNode commit un-driven (e.g. swallowing the error). The
+// artifact row would be lost.
+func TestProvenance_ArtifactExistsWithCitations(t *testing.T) {
+	fx := newProvenanceFixtureWithShared(t)
+
+	memID := "mem-" + GenerateID()
+	_, err := fx.dm.db.Exec(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'cite this')`, memID)
+	require.NoError(t, err)
+
+	res, err := fx.dm.RecordDecision(
+		"atomicity-check context",
+		"atomicity-check choice",
+		"because the atomicity check requires a downstream artifact",
+		"",
+		[]string{"fixture"},
+		[]string{memID},
+		ActiveContext{},
+	)
+	require.NoError(t, err)
+	decID, _ := res["id"].(string)
+	require.NotEmpty(t, decID)
+
+	// Local artifact + local citation must land.
+	var localDecN, localCiteN int
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE id = ? AND collection = 'decisions'`,
+		decID,
+	).Scan(&localDecN))
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_id = ?`,
+		decID,
+	).Scan(&localCiteN))
+	assert.Equal(t, 1, localDecN, "local decision row must exist")
+	assert.Equal(t, 1, localCiteN, "local citation row must exist")
+
+	// Shared citation must also land (when shared is attached).
+	if fx.dm.sharedAttached {
+		var sharedCiteN int
+		require.NoError(t, fx.dm.db.QueryRow(
+			`SELECT COUNT(*) FROM shared.epistemic_provenance WHERE downstream_id = ?`,
+			decID,
+		).Scan(&sharedCiteN))
+		assert.Equal(t, 1, sharedCiteN, "shared citation row must exist after atomicity-positive write")
+	}
+}
+
 // citationsCountBySource is a small helper used by the legacy-ID
 // resolution test to assert the row landed.
 func citationsCountBySource(t *testing.T, db *sql.DB, sourceID string) int {
@@ -559,19 +956,3 @@ func citationRowsByDownstream(t *testing.T, db *sql.DB, downstreamID string) []s
 	}
 	return out
 }
-
-// errIsStringContains is a small matcher that asserts an error message
-// contains a substring without pinning exact wording. Used by tests
-// that exercise domain errors but want to remain tolerant of future
-// rewording.
-func errIsStringContains(err error, substr string) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), substr)
-}
-
-// Reference: keep `errors` imported for future matchers. The current
-// contract uses errIsStringContains; if a future patch wants
-// errors.Is-style matching, the import is already in place.
-var _ = errors.Is

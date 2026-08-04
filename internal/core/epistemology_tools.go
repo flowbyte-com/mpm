@@ -71,6 +71,14 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 // forward-looking "I will be stale if X goes away" edge,
 // `source_ids` is the retrospective "I drew on X to reason about
 // this" edge. The cascade materializer unions both at lookup time.
+//
+// Atomicity: the artifact insert + dependencies column update +
+// citation loop run inside a single WithTx transaction. A failure
+// in any of those steps rolls back the entire theory row, so a
+// half-written theory with no citations cannot exist. The
+// topic-link step (AddMemoryToTopic) runs outside the transaction
+// because topic memberships are observability metadata, not
+// load-bearing for the cascade materializer.
 func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
@@ -88,37 +96,48 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 		"validation_criteria": validationCriteria,
 		"dependencies":        dependencies,
 	}
-	store, err := dm.getSharedStore()
-	if err != nil {
-		return nil, fmt.Errorf("get memory store: %w", err)
-	}
-	mem, err := store.AddMemory(content, "theories", tags, meta, "", "call")
-	if err != nil {
-		return nil, fmt.Errorf("propose theory: %w", err)
-	}
-	// Persist dependencies in the dedicated column. AddMemory doesn't
-	// accept a column-list, so we patch via the SQL interface directly.
-	if depsJSON != "" {
-		if _, err := dm.db.Exec(
-			`UPDATE memories SET dependencies = ? WHERE id = ? AND collection = 'theories'`,
-			depsJSON, mem.ID,
-		); err != nil {
-			return nil, fmt.Errorf("persist dependencies: %w", err)
+
+	var memID string
+	err = dm.WithTx(func(node DBNode) error {
+		id, err := dm.SaveMemoryNode(node, "theories", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "")
+		if err != nil {
+			return fmt.Errorf("propose theory: %w", err)
 		}
+		// Persist dependencies in the dedicated column. SaveMemoryNode
+		// doesn't accept a column-list, so we patch via the SQL
+		// interface directly inside the same transaction.
+		if depsJSON != "" {
+			if _, err := node.ExecTracked(
+				`UPDATE memories SET dependencies = ? WHERE id = ? AND collection = 'theories'`,
+				0, depsJSON, id,
+			); err != nil {
+				return fmt.Errorf("persist dependencies: %w", err)
+			}
+		}
+		// Persist source_ids as typed provenance citations so the
+		// cascade materializer can discover dependency edges during
+		// invalidation. Event id is the theory's own id — this is the
+		// "explicit decision/time citation" case in the design spec
+		// (vs. retrieval-time citations whose event_id is the wake id).
+		if err := dm.recordSourceCitationsNode(node, sourceIDs, id, "theory"); err != nil {
+			return fmt.Errorf("persist theory source_ids: %w", err)
+		}
+		memID = id
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	// Persist source_ids as typed provenance citations so the
-	// cascade materializer can discover dependency edges during
-	// invalidation. Event id is the theory's own id — this is the
-	// "explicit decision/time citation" case in the design spec
-	// (vs. retrieval-time citations whose event_id is the wake id).
-	if err := dm.recordSourceCitations(sourceIDs, mem.ID, "theory"); err != nil {
-		return nil, fmt.Errorf("persist theory source_ids: %w", err)
-	}
+
+	// Topic link is outside the tx — topic_memberships is
+	// observability, not load-bearing for the cascade materializer.
+	// A failure here is non-fatal and the user still gets a
+	// successful theory id.
 	topicID, _ := dm.GetOrCreateTopic("theories")
-	dm.AddMemoryToTopic(mem.ID, topicID, "primary")
+	_ = dm.AddMemoryToTopic(memID, topicID, "primary")
 	return map[string]interface{}{
 		"success":      true,
-		"id":           mem.ID,
+		"id":           memID,
 		"status":       "pending",
 		"hypothesis":   hypothesis,
 		"dependencies": dependencies,
@@ -184,6 +203,12 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 // with downstream_type='decision', so the cascade materializer can walk
 // the dependency graph when an upstream artifact is invalidated. Empty
 // or nil is fine — most decisions are made without named citations.
+//
+// Atomicity: the artifact insert + citation loop run inside a single
+// WithTx transaction. A failure in the citation loop rolls back the
+// decision row, so a half-written decision with no citations cannot
+// exist. This is the fix for the original "artifact-first, citations
+// second" ordering — see the Task 2 review note for the failure mode.
 func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
@@ -205,40 +230,44 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 	if rationale != "" {
 		meta["rationale"] = rationale
 	}
-	store, err := dm.getSharedStore()
+
+	var memID string
+	err := dm.WithTx(func(node DBNode) error {
+		id, err := dm.SaveMemoryNode(node, "decisions", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "")
+		if err != nil {
+			return fmt.Errorf("record decision: %w", err)
+		}
+		// Persist source_ids as typed provenance citations. Event id
+		// is the decision's own id — same convention as ProposeTheory.
+		if err := dm.recordSourceCitationsNode(node, sourceIDs, id, "decision"); err != nil {
+			return fmt.Errorf("persist decision source_ids: %w", err)
+		}
+		memID = id
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get memory store: %w", err)
-	}
-	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "call")
-	if err != nil {
-		return nil, fmt.Errorf("record decision: %w", err)
-	}
-	// Persist source_ids as typed provenance citations. Event id is
-	// the decision's own id — same convention as ProposeTheory.
-	if err := dm.recordSourceCitations(sourceIDs, mem.ID, "decision"); err != nil {
-		return nil, fmt.Errorf("persist decision source_ids: %w", err)
+		return nil, err
 	}
 	return map[string]interface{}{
 		"success": true,
-		"id":      mem.ID,
+		"id":      memID,
 		"choice":  choice,
 	}, nil
 }
 
-// recordSourceCitations writes one epistemic_provenance row per
+// recordSourceCitationsNode writes one epistemic_provenance row per
 // non-empty source id, using the supplied downstream id and type.
 // Shared helper so ProposeTheory and RecordDecision share one code
 // path — the cascade materializer relies on the citation shape being
 // uniform across both artifact kinds.
 //
-// Errors are returned to the caller. The caller (the DM method
-// itself) decides whether to roll back the artifact or surface the
-// error. Today we surface: a half-written decision with no citations
-// is recoverable on the next call, and the alternative (silent
-// success) is worse for audit trails.
+// The DBNode parameter lets the caller run the citation writes inside
+// an active transaction (e.g. ProposeTheory wraps the artifact insert
+// + citation loop in one WithTx so a mid-loop failure rolls back the
+// artifact itself).
 //
 // Empty / nil sourceIDs is a clean no-op (no rows to write).
-func (dm *DatabaseManager) recordSourceCitations(sourceIDs []string, downstreamID, downstreamType string) error {
+func (dm *DatabaseManager) recordSourceCitationsNode(node DBNode, sourceIDs []string, downstreamID, downstreamType string) error {
 	if len(sourceIDs) == 0 {
 		return nil
 	}
@@ -255,7 +284,7 @@ func (dm *DatabaseManager) recordSourceCitations(sourceIDs []string, downstreamI
 			// parsers and the user's intent is "ignore blanks".
 			continue
 		}
-		if err := dm.RecordProvenance(src, "", downstreamID, downstreamType, downstreamID); err != nil {
+		if err := dm.recordProvenanceNode(node, src, "", downstreamID, downstreamType, downstreamID); err != nil {
 			return err
 		}
 	}
