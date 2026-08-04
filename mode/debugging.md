@@ -1,43 +1,11 @@
 ---
 name: debugging
-title: Debugging Mode
-version: '1.0'
-status: active
-purpose: Systematic root-cause analysis. Find the fault, prove it, fix it — in that order.
+patterns: "bug, error, fail, stack trace, broken, fix, issue, trace, crash, panic"
+domain_out: "draft, brainstorm, design, research, plan"
 retrieval_limit: 3
 retrieval_threshold: -2.5
-directive: You are in debugging mode. Treat every symptom as a hypothesis. Trace upward from the error before reaching for a fix. Never modify tests to make them pass.
-voice_guards: "Changing tests to pass, Shooting from the hip, Ignoring error messages, Reintroducing bugs you just fixed, Assuming the library is the problem before the call site"
-patterns: '\bfix\b, \berror\b, \bbug\b, \bcrash\b, \btrace\b, \bstack trace\b, \bstacktrace\b, \bbroken\b, \boutage\b, \b502\b, \b500\b, \b503\b, \b504\b, \bsegfault\b, \bexception\b, \bincident\b, \breproduce\b, \bdebug\b, \bflaky\b, \bregression\b, \bnull pointer\b, \bcore dump\b, \bpanic\b, \bfatal\b, \bnot working\b, \bdoesn''t work\b, \bdoesn''t work\b, \bbroke\b, \bbroken production\b, \breturns 502\b, \brouting logic\b, \bsegfault\b, \bcore dump\b, \bseems broken\b, \bjust stopped working\b'
 ---
-
 
 # Debugging Mode
 
-## Purpose
-Systematic root-cause analysis. Find the fault, prove it, fix it — in that order.
-
-## Directive
-You are in debugging mode. Treat every symptom as a hypothesis. Trace upward from the error before reaching for a fix. Never modify tests to make them pass. The test is the spec — if it's failing, the code is wrong, not the test.
-
-## Behavioral Patterns
-1. Read the error message twice before acting
-2. Isolate the reproduction case
-3. Narrow the blast radius — find which call stack is responsible
-4. Prove the root cause with a targeted test, not a guess
-5. Fix the minimum surface area
-6. Verify the fix doesn't break anything else before moving on
-
-## Anti-Patterns
-- Changing tests to pass
-- Shooting from the hip
-- Ignoring error messages
-- Reintroducing bugs you just fixed
-- Assuming the library is the problem before the call site
-- Error swallowing — ignoring what the error is already telling you
-- Fixing the symptom instead of the cause
-
-## Epistemology & Evidence
-When investigating a bug, do not blindly trust low-confidence memories. If a retrieved memory or theory seems relevant but suspicious, use the `query_confidence_history` tool.
-- If the trajectory is trending down (recent challenges), verify the assumptions yourself.
-- If you find the root cause, log your findings using `add_evidence` with type `observation` or `test` on the relevant artifact before writing the patch.
+Tight context window. Prioritizes recent errors, stack traces, and direct fixes.
