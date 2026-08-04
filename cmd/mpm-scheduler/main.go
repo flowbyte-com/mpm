@@ -23,6 +23,7 @@ import (
 	"time"
 
 	mpmcore "github.com/flowbyte-com/mpm-core"
+	mpmcore_config "github.com/flowbyte-com/mpm-core/config"
 
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
@@ -47,6 +48,13 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: parseLevel(*logLevel),
 	}))
+
+	// Security gate: auto-heal or refuse to start if the runtime dir
+	// perms are wider than 0700. Runs before any DB connection.
+	if err := mpmcore_config.AssertUserDirPerms0700(mpmcore_config.GetMPMDir()); err != nil {
+		logger.Error("security gate failed", "err", err)
+		os.Exit(1)
+	}
 
 	// Singleton enforcement. Two scheduler instances must not race on the
 	// same wake batch — flock prevents that at the kernel level.
