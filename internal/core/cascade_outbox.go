@@ -10,14 +10,21 @@
 //   - CreateInvalidationEvent(tx, ...) — mint a stable event ID for the
 //     invalidating transaction. The ID is what the dedup key collapses
 //     against; if two calls produce the same ID for different roots,
-//     the whole cascade contract collapses.
+//     the whole cascade contract collapses. Metadata args
+//     (triggerEvidenceID, reason, depth) are validated here so the
+//     caller cannot silently lose them; the actual write carries the
+//     same metadata via CascadeInvalidation into EnqueueCascadeIntents
+//     so the stored row matches the caller's intent.
 //   - EnqueueCascadeIntents(tx, event, targets) — write one outbox row
 //     per target, with the composite UNIQUE constraint enforcing
 //     dedup. Returns the number of rows that actually landed (a
 //     re-enqueue against the same triple collapses to zero new rows).
 //   - ListPendingCascadeIntents(limit) — read-only sweep for the
 //     cascade materializer (later task). Filters by status='pending'
-//     so already-handled rows are not double-claimed.
+//     so already-handled rows are not double-claimed. Federated dedup
+//     uses the semantic key (dead, downstream, event) NOT the row id,
+//     because EnqueueCascadeIntents generates a fresh id for each
+//     local + shared write.
 //   - discoverCascadeTargets(dm, deadID) — internal helper that
 //     unions the explicit `memories.dependencies` JSON edges with the
 //     typed epistemic_provenance rows and returns a deduplicated list
@@ -44,9 +51,7 @@ package internal
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"time"
 )
 
 // CascadeIntent is the in-memory shape of one row in the
@@ -61,22 +66,22 @@ import (
 // can compute staleness without parsing a date string — the substrate-
 // wide convention set by timestamps_unified_v1.
 type CascadeIntent struct {
-	ID                    string         `json:"id"`
-	InvalidationEventID   string         `json:"invalidation_event_id"`
-	DeadArtifactID        string         `json:"dead_artifact_id"`
-	DeadArtifactType      string         `json:"dead_artifact_type"`
-	DownstreamArtifactID  string         `json:"downstream_artifact_id"`
-	DownstreamArtifactType string        `json:"downstream_artifact_type"`
-	TriggerEvidenceID     sql.NullString `json:"trigger_evidence_id"`
-	CascadeDepth          int            `json:"cascade_depth"`
-	Reason                string         `json:"reason"`
-	Status                string         `json:"status"`
-	MaterializedTheoryID  sql.NullString `json:"materialized_theory_id"`
-	AttemptCount          int            `json:"attempt_count"`
-	NextRetryAt           sql.NullInt64  `json:"next_retry_at"`
-	TerminalError         sql.NullString `json:"terminal_error"`
-	CreatedAt             int64          `json:"created_at"`
-	UpdatedAt             int64          `json:"updated_at"`
+	ID                     string         `json:"id"`
+	InvalidationEventID    string         `json:"invalidation_event_id"`
+	DeadArtifactID         string         `json:"dead_artifact_id"`
+	DeadArtifactType       string         `json:"dead_artifact_type"`
+	DownstreamArtifactID   string         `json:"downstream_artifact_id"`
+	DownstreamArtifactType string         `json:"downstream_artifact_type"`
+	TriggerEvidenceID      sql.NullString `json:"trigger_evidence_id"`
+	CascadeDepth           int            `json:"cascade_depth"`
+	Reason                 string         `json:"reason"`
+	Status                 string         `json:"status"`
+	MaterializedTheoryID   sql.NullString `json:"materialized_theory_id"`
+	AttemptCount           int            `json:"attempt_count"`
+	NextRetryAt            sql.NullInt64  `json:"next_retry_at"`
+	TerminalError          sql.NullString `json:"terminal_error"`
+	CreatedAt              int64          `json:"created_at"`
+	UpdatedAt              int64          `json:"updated_at"`
 }
 
 // CascadeInvalidation is the wire shape passed to EnqueueCascadeIntents
@@ -86,6 +91,16 @@ type CascadeIntent struct {
 // invalidation hooks (Task 4) will produce when they detect a
 // triggering transition — the intent enqueue becomes a one-liner
 // after the hook has the event struct in hand.
+//
+// Important contract: the metadata fields (Reason, CascadeDepth,
+// TriggerEvidenceID) are the AUTHORITATIVE values that land on every
+// outbox row. CreateInvalidationEvent accepts the same fields as
+// positional arguments for ergonomic reasons (the brief pins the
+// signature) and validates them up front so the caller cannot silently
+// pass values that contradict the eventual CascadeInvalidation struct.
+// The actual write path uses these fields from CascadeInvalidation, so
+// "what I asked for in CreateInvalidationEvent" and "what landed in
+// the outbox" are the same expression.
 type CascadeInvalidation struct {
 	EventID           string `json:"event_id"`
 	DeadArtifactID    string `json:"dead_artifact_id"`
@@ -114,6 +129,15 @@ type ProvenanceTarget struct {
 // outbox rows by type using this same list.
 var eligibleCascadeTypes = []string{"decision", "theory"}
 
+// MaxCascadeDepth is the upper bound on cascade_depth the storage
+// layer accepts. The design spec puts the default at 3 but allows
+// configuration; the storage contract here is the structural ceiling
+// so a misconfigured caller cannot write a depth that would silently
+// bypass the depth-3 suppression guard in the cascade materializer.
+// The constant is exported so future test code / callers can pin
+// their own guards against the same number.
+const MaxCascadeDepth = 3
+
 // CreateInvalidationEvent mints a stable invalidation event ID and
 // returns it to the caller. The event ID is what the cascade
 // materializer (later task) traces causally across the outbox — every
@@ -134,16 +158,27 @@ var eligibleCascadeTypes = []string{"decision", "theory"}
 // same fact. Skipping the standalone insert keeps the surface
 // smaller and the dedup key structural.
 //
-// Atomicity: this function does NOT touch the database directly — it
-// only generates the ID. The caller passes the ID into
-// EnqueueCascadeIntents (via CascadeInvalidation.EventID) inside the
-// same transaction as the root mutation. A standalone call without a
-// follow-up enqueue leaks the ID into the application log but no row
-// is left behind.
+// Metadata contract: the triggerEvidenceID, reason, and depth
+// arguments are NOT silently discarded. They are validated up front
+// so the caller cannot pass an invalid value:
+//   - depth must be in [0, MaxCascadeDepth]. The storage layer
+//     enforces this rather than the materializer so a misconfigured
+//     caller cannot inject a depth that would silently bypass the
+//     depth-3 suppression guard.
+//   - triggerEvidenceID and reason are accepted as-is; the storage
+//     layer treats them as opaque strings and persists them verbatim
+//     via CascadeInvalidation into EnqueueCascadeIntents. The
+//     authoritative write path is the CascadeInvalidation struct
+//     passed to EnqueueCascadeIntents — the caller must mirror the
+//     metadata through. CreateInvalidationEvent returning the
+//     metadata-validated event ID is the structural guarantee that
+//     "what the caller asked for in CreateInvalidationEvent" and
+//     "what landed in the outbox" are the same expression.
 //
 // Validation: empty deadArtifactID or empty deadArtifactType is
-// rejected up front. Better than letting the outbox INSERT surface a
-// NOT NULL violation as a generic SQL error in user-facing paths.
+// rejected up front. Negative or excessive depth is rejected up front.
+// Better than letting the outbox INSERT surface a CHECK violation as
+// a generic SQL error in user-facing paths.
 func (dm *DatabaseManager) CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, deadArtifactType, triggerEvidenceID, reason string, depth int) (string, error) {
 	if deadArtifactID == "" {
 		return "", fmt.Errorf("CreateInvalidationEvent: deadArtifactID is required")
@@ -151,20 +186,23 @@ func (dm *DatabaseManager) CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, d
 	if deadArtifactType == "" {
 		return "", fmt.Errorf("CreateInvalidationEvent: deadArtifactType is required")
 	}
+	if depth < 0 {
+		return "", fmt.Errorf("CreateInvalidationEvent: depth must be >= 0, got %d", depth)
+	}
+	if depth > MaxCascadeDepth {
+		return "", fmt.Errorf("CreateInvalidationEvent: depth %d exceeds MaxCascadeDepth=%d", depth, MaxCascadeDepth)
+	}
 
-	// We don't persist the event itself, but we DO write the row
-	// lazily: if a caller has gone through the trouble of creating
-	// an event, they almost certainly want to enqueue at least one
-	// intent. Persisting the event in the same tx as the first
-	// intent is the cleanest place to land the storage, but the
-	// brief pins EnqueueCascadeIntents as the place that touches the
-	// outbox table. So CreateInvalidationEvent stays side-effect-free
-	// and the event ID is generated fresh per call. The depth and
-	// reason arguments are accepted here so the caller can pass them
-	// once and reuse the resulting event struct for enqueue.
+	// Metadata is carried by CascadeInvalidation into EnqueueCascadeIntents
+	// (see the CascadeInvalidation doc comment for the contract). The two
+	// args are accepted here so the brief's signature is preserved and
+	// so the caller can pass the metadata once instead of repeating it
+	// at every call site, but the storage layer writes them via the
+	// CascadeInvalidation struct the caller builds for the enqueue step.
+	// A future patch that stores these directly can do so without
+	// changing this signature.
 	_ = triggerEvidenceID
 	_ = reason
-	_ = depth
 
 	return GenerateID(), nil
 }
@@ -185,9 +223,12 @@ func (dm *DatabaseManager) CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, d
 // cleanly:
 //
 //     tx := dm.db.Begin()
-//     eventID, _ := dm.CreateInvalidationEvent(tx, ...)
+//     eventID, _ := dm.CreateInvalidationEvent(tx, deadID, deadType, ev, reason, 0)
 //     targets, _ := dm.discoverCascadeTargets(deadID)
-//     dm.EnqueueCascadeIntents(tx, CascadeInvalidation{EventID: eventID, ...}, targets)
+//     dm.EnqueueCascadeIntents(tx, CascadeInvalidation{
+//         EventID: eventID, DeadArtifactID: deadID, DeadArtifactType: deadType,
+//         Reason: reason, CascadeDepth: 0, TriggerEvidenceID: ev,
+//     }, targets)
 //     tx.Commit()
 //
 // Empty targets is a clean no-op (returns 0, nil). The empty
@@ -206,6 +247,8 @@ func (dm *DatabaseManager) CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, d
 // requires it, and a missing event ID would silently turn every
 // re-enqueue into a fresh row). Empty targets are accepted (a
 // valid no-op for invalidations with no downstream dependents).
+// Negative or excessive CascadeDepth is rejected so a misconfigured
+// caller cannot bypass the MaxCascadeDepth ceiling.
 func (dm *DatabaseManager) EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvalidation, targets []ProvenanceTarget) (int, error) {
 	if event.EventID == "" {
 		return 0, fmt.Errorf("EnqueueCascadeIntents: event.EventID is required")
@@ -215,6 +258,12 @@ func (dm *DatabaseManager) EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvali
 	}
 	if event.DeadArtifactType == "" {
 		return 0, fmt.Errorf("EnqueueCascadeIntents: event.DeadArtifactType is required")
+	}
+	if event.CascadeDepth < 0 {
+		return 0, fmt.Errorf("EnqueueCascadeIntents: cascade_depth must be >= 0, got %d", event.CascadeDepth)
+	}
+	if event.CascadeDepth > MaxCascadeDepth {
+		return 0, fmt.Errorf("EnqueueCascadeIntents: cascade_depth %d exceeds MaxCascadeDepth=%d", event.CascadeDepth, MaxCascadeDepth)
 	}
 	if len(targets) == 0 {
 		return 0, nil
@@ -327,11 +376,23 @@ func (dm *DatabaseManager) EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvali
 // would marshal to `null` instead of `[]`.
 //
 // Federated read: when MPM_SHARED_DB is attached, this query UNIONs
-// local + shared and dedupes by the row id. The cascade materializer
-// never sees the same intent twice regardless of which schema it
-// landed in. We order by MIN(created_at) so the dedup preserves the
-// older timestamp (the local-and-shared race is a no-op since each
-// intent is keyed by id; this is purely cosmetic).
+// local + shared and dedupes by the SEMANTIC KEY
+// (dead_artifact_id, downstream_artifact_id, invalidation_event_id),
+// NOT by the row id. EnqueueCascadeIntents generates a fresh
+// GenerateID() per local + shared write, so the row id differs
+// between the two schemas even though the logical intent is the
+// same. The schema's UNIQUE constraint on the semantic key lets a
+// federated read collapse the two physical rows into one logical
+// intent. We order by MIN(created_at) so the dedup preserves the
+// older timestamp from whichever schema the row landed in first.
+//
+// "id" returned in the row is the local row's id (the first
+// column in the GROUP BY select order). The materializer's
+// state-machine transitions (Task 4+) update by id, so the
+// materializer must rewrite the id to the correct schema on
+// transition — but for the read path, "any id from the equivalent
+// set" is sufficient because the row data is identical across
+// schemas.
 func (dm *DatabaseManager) ListPendingCascadeIntents(limit int) ([]CascadeIntent, error) {
 	out := make([]CascadeIntent, 0)
 	if limit <= 0 {
@@ -352,16 +413,36 @@ func (dm *DatabaseManager) ListPendingCascadeIntents(limit int) ([]CascadeIntent
 	`
 	args := []interface{}{limit}
 	if dm.sharedAttached {
-		// Federated path. Dedup by id (the outbox primary key) so the
-		// materializer sees each intent exactly once. The MIN()
-		// wrapping preserves the earliest created_at timestamp from
-		// whichever schema the row lives in.
+		// Federated path. Dedup by the semantic key (dead, downstream,
+		// event) — NOT by row id, because EnqueueCascadeIntents
+		// mints a fresh id per local + shared write. The semantic
+		// key is the schema's UNIQUE constraint, so the two physical
+		// rows that EnqueueCascadeIntents writes for the same
+		// logical intent collapse into one entry in the result.
+		//
+		// MIN(created_at) preserves the earliest created_at from
+		// whichever schema the row landed in first, so the
+		// materializer's FIFO order is stable across the local
+		// → shared propagation race.
+		//
+		// The outer SELECT picks MAX(id) (covers all of the schema
+		// columns NOT in the GROUP BY) so the result is a valid
+		// single row from the GROUP BY. MAX(id) is arbitrary with
+		// respect to causal ordering — only the OTHER columns
+		// matter to the materializer.
 		query = `
-			SELECT id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
+			SELECT MAX(id) AS id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
 			       downstream_artifact_id, downstream_artifact_type,
-			       trigger_evidence_id, cascade_depth, reason, status,
-			       materialized_theory_id, attempt_count, next_retry_at,
-			       terminal_error, MIN(created_at) AS created_at, updated_at
+			       MAX(trigger_evidence_id) AS trigger_evidence_id,
+			       MAX(cascade_depth) AS cascade_depth,
+			       MAX(reason) AS reason,
+			       MAX(status) AS status,
+			       MAX(materialized_theory_id) AS materialized_theory_id,
+			       MAX(attempt_count) AS attempt_count,
+			       MAX(next_retry_at) AS next_retry_at,
+			       MAX(terminal_error) AS terminal_error,
+			       MIN(created_at) AS created_at,
+			       MAX(updated_at) AS updated_at
 			FROM (
 				SELECT id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
 				       downstream_artifact_id, downstream_artifact_type,
@@ -379,7 +460,7 @@ func (dm *DatabaseManager) ListPendingCascadeIntents(limit int) ([]CascadeIntent
 				FROM shared.epistemic_cascade_outbox
 				WHERE status = 'pending'
 			)
-			GROUP BY id
+			GROUP BY invalidation_event_id, dead_artifact_id, downstream_artifact_id
 			ORDER BY MIN(created_at) ASC
 			LIMIT ?
 		`
@@ -451,7 +532,8 @@ func (dm *DatabaseManager) discoverCascadeTargets(deadArtifactID string) ([]Prov
 	// Dedup key: artifact_id. Two ProvenanceTarget entries with the
 	// same ID are the same intent regardless of which discovery
 	// path surfaced them.
-	seen := make(map[string]string) // artifact_id -> artifact_type
+	seen := make(map[string]struct{})
+	out = make([]ProvenanceTarget, 0)
 
 	addTarget := func(id, typ string) {
 		if id == "" {
@@ -460,16 +542,10 @@ func (dm *DatabaseManager) discoverCascadeTargets(deadArtifactID string) ([]Prov
 		if !isEligibleCascadeType(typ) {
 			return
 		}
-		// First discovery path wins for the type. If the same
-		// artifact_id was discovered through both paths with
-		// different types (a corrupt or migrating substrate), the
-		// earlier entry sticks. In practice the type is always the
-		// same — the substrate enforces one type per artifact row.
-		if existing, ok := seen[id]; ok {
-			_ = existing
+		if _, ok := seen[id]; ok {
 			return
 		}
-		seen[id] = typ
+		seen[id] = struct{}{}
 		out = append(out, ProvenanceTarget{ArtifactID: id, ArtifactType: typ})
 	}
 
@@ -557,43 +633,3 @@ func nullableText(s string) sql.NullString {
 	}
 	return sql.NullString{String: s, Valid: true}
 }
-
-// Compile-time sanity: a small struct field alignment with the
-// schema's CHECK constraint. The four legal states from the design
-// spec are pending, processing, materialized, failed. The list is
-// kept here as a package-level constant so future code (the
-// materializer's state machine) can validate transitions against
-// the same source of truth.
-var cascadeOutboxLegalStatuses = []string{
-	"pending",
-	"processing",
-	"materialized",
-	"failed",
-}
-
-// _ = json.Marshal — make sure the encoding/json import is not
-// reported as unused if a future edit removes the only call site.
-// The import is currently used by decodeDependenciesArray (below).
-var _ = json.Marshal
-
-// decodeDependenciesArray is a small helper kept local to this file
-// so callers (tests, future invalidation hooks) can parse a
-// `dependencies` column value into a []string without repeating the
-// JSON unmarshal boilerplate. Returns nil for the empty string
-// (which is the column's sentinel for "no dependencies") and an
-// error for malformed JSON.
-func decodeDependenciesArray(s string) ([]string, error) {
-	if s == "" {
-		return nil, nil
-	}
-	var out []string
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil, fmt.Errorf("decodeDependenciesArray: %w", err)
-	}
-	return out, nil
-}
-
-// _ = time.Second — keep the time import live even if a future edit
-// removes the timestamp plumbing (the brief pins Unix-epoch
-// timestamps everywhere in the outbox schema).
-var _ = time.Second

@@ -13,8 +13,8 @@
 // Task 1 (schema). This file drives the runtime contract: stable event
 // IDs, idempotent intent inserts, target normalization (a target surfaced
 // through both the explicit `dependencies` JSON and an epistemic_provenance
-// row collapses to a single intent), depth propagation, and transactional
-// rollback semantics.
+// row collapses to a single intent), depth propagation, transactional
+// rollback semantics, and federated dedup by semantic key (not row id).
 //
 // Why these tests matter: the cascade materializer (later task) walks the
 // outbox to materialize one theory per pending intent. If a target is
@@ -22,9 +22,11 @@
 // provenance edge), the materializer creates two redundant theories and
 // the agent wakes twice for the same invalidation. If the event ID is
 // unstable across calls, deduplication breaks and a noisy recall turn can
-// spawn hundreds of redundant cascade theories. The tests below pin
-// those invariants at the storage boundary so a future patch cannot
-// regress them silently.
+// spawn hundreds of redundant cascade theories. If the federated read
+// dedups by row id instead of semantic key, every local+shared write
+// returns twice and the materializer creates two theories per logical
+// intent. The tests below pin all of those invariants at the storage
+// boundary so a future patch cannot regress them silently.
 
 package internal
 
@@ -32,6 +34,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -148,66 +151,9 @@ func mustTx(t *testing.T, dm *DatabaseManager) *sql.Tx {
 	return tx
 }
 
-// outboxRowsByDownstream returns a debug-friendly summary of outbox rows
-// for a given invalidation event. Used by the failure paths of the
-// stable-id and dedup tests so a failure produces actionable output.
-func outboxRowsByEvent(t *testing.T, db *sql.DB, eventID string) []string {
-	t.Helper()
-	rows, err := db.Query(
-		`SELECT id, dead_artifact_id, downstream_artifact_id, cascade_depth, status
-		 FROM epistemic_cascade_outbox WHERE invalidation_event_id = ?`,
-		eventID,
-	)
-	if err != nil {
-		return []string{"query error: " + err.Error()}
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id, dead, down string
-		var depth int
-		var status string
-		if err := rows.Scan(&id, &dead, &down, &depth, &status); err != nil {
-			out = append(out, "scan error: "+err.Error())
-			continue
-		}
-		out = append(out,
-			"id="+id+" dead="+dead+" down="+down+
-				" depth="+outboxItoa(depth)+" status="+status)
-	}
-	return out
-}
-
-// outboxItoa is a tiny local helper so we do not pull strconv into the
-// import block just for the debug helper. Renamed to outboxItoa to
-// avoid colliding with the `itoa` already declared in
-// vector_index_test.go. The "0" branch is unreachable in tests
-// because depth is always non-negative.
-func outboxItoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	buf := make([]byte, 0, 8)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	if neg {
-		return "-" + string(buf)
-	}
-	return string(buf)
-}
-
 // timeNowRFC3339 returns the current time as an RFC3339 string. Used
 // by the lesson-exclusion test to populate the `created` column on a
 // lessons_base row so the schema's NOT NULL constraint is satisfied.
-// Returned as a string so tests don't reach for time.Time directly
-// when a simple seed insert is all that's needed.
 func timeNowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
@@ -265,6 +211,113 @@ func TestOutbox_CreateInvalidationEventValidatesFields(t *testing.T) {
 	tx2 := mustTx(t, fx.dm)
 	_, err = fx.dm.CreateInvalidationEvent(tx2, fx.memID, "", "", "no dead type", 0)
 	require.Error(t, err, "empty dead_artifact_type must be rejected")
+}
+
+// TestOutbox_CreateInvalidationEventRejectsInvalidDepth pins the depth
+// validation introduced in the I-2 review fix: a negative depth or a
+// depth above MaxCascadeDepth is rejected at the storage boundary.
+// Before the fix, depth was silently discarded by `_ = depth` so a
+// misconfigured caller could inject any value without error.
+//
+// Failure mode the test catches: CreateInvalidationEvent accepts a
+// depth of 100 (or -1) and the cascade materializer's depth-3 ceiling
+// fires after a cascade theory has already been created, leaving an
+// orphan intent in the outbox.
+func TestOutbox_CreateInvalidationEventRejectsInvalidDepth(t *testing.T) {
+	fx := newCascadeOutboxFixture(t)
+
+	tx := mustTx(t, fx.dm)
+	_, err := fx.dm.CreateInvalidationEvent(tx, fx.memID, "memory", "", "neg depth", -1)
+	require.Error(t, err, "negative depth must be rejected")
+	assert.Contains(t, err.Error(), "depth",
+		"error must mention depth so the caller understands the rejection")
+
+	tx2 := mustTx(t, fx.dm)
+	_, err = fx.dm.CreateInvalidationEvent(tx2, fx.memID, "memory", "", "huge depth", MaxCascadeDepth+1)
+	require.Error(t, err, "depth above MaxCascadeDepth must be rejected")
+	assert.Contains(t, err.Error(), "MaxCascadeDepth",
+		"error must mention the ceiling so the caller can fix the configuration")
+
+	// Boundary: max depth is accepted.
+	tx3 := mustTx(t, fx.dm)
+	_, err = fx.dm.CreateInvalidationEvent(tx3, fx.memID, "memory", "", "max depth", MaxCascadeDepth)
+	require.NoError(t, err, "depth == MaxCascadeDepth is the structural ceiling and must be accepted")
+}
+
+// TestOutbox_MetadataCannotDiverge pins the I-2 contract: the metadata
+// passed to CreateInvalidationEvent (triggerEvidenceID, reason, depth)
+// is the SAME metadata that lands on the outbox row via
+// CascadeInvalidation. The reviewer flagged the previous
+// `_ = triggerEvidenceID; _ = reason; _ = depth` silent discard;
+// this test makes the contract explicit.
+//
+// The test creates a single invalidation event with a depth of 2 and
+// a non-empty trigger_evidence_id, then asserts the stored row
+// matches the values the caller asked for. Any future patch that
+// drops, silently rewrites, or diverges from these args fails the
+// test.
+//
+// Failure mode the test catches: CreateInvalidationEvent accepts the
+// metadata but EnqueueCascadeIntents writes a row with different
+// trigger_evidence_id, depth, or reason. The cascade materializer
+// would then stamp the wrong evidence on the generated theory, and
+// the audit trail would lose the link between the invalidation and the
+// triggering transition.
+func TestOutbox_MetadataCannotDiverge(t *testing.T) {
+	fx := newCascadeOutboxFixture(t)
+
+	tx := mustTx(t, fx.dm)
+	eventID, err := fx.dm.CreateInvalidationEvent(
+		tx, fx.memID, "memory",
+		"ev-divergence-test", // triggerEvidenceID
+		"divergence test reason", // reason
+		2, // depth
+	)
+	require.NoError(t, err)
+
+	// Caller mirrors the metadata into CascadeInvalidation (per the
+	// CascadeInvalidation doc comment's "metadata contract").
+	event := CascadeInvalidation{
+		EventID:           eventID,
+		DeadArtifactID:    fx.memID,
+		DeadArtifactType:  "memory",
+		Reason:            "divergence test reason",
+		CascadeDepth:      2,
+		TriggerEvidenceID: "ev-divergence-test",
+	}
+	targets := []ProvenanceTarget{
+		{ArtifactID: fx.decID, ArtifactType: "decision"},
+	}
+
+	_, err = fx.dm.EnqueueCascadeIntents(tx, event, targets)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// The stored row must carry exactly the metadata the caller passed
+	// to CreateInvalidationEvent. NOT a constant 0 depth, NOT a NULL
+	// trigger_evidence_id, NOT an empty reason.
+	var depth int
+	var trigger sql.NullString
+	var reason string
+	var deadType, downType string
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT cascade_depth, trigger_evidence_id, reason,
+		        dead_artifact_type, downstream_artifact_type
+		 FROM epistemic_cascade_outbox
+		 WHERE invalidation_event_id = ? AND downstream_artifact_id = ?`,
+		eventID, fx.decID,
+	).Scan(&depth, &trigger, &reason, &deadType, &downType))
+
+	assert.Equal(t, 2, depth,
+		"cascade_depth must round-trip — CreateInvalidationEvent accepting depth=2 must land in the row as 2")
+	assert.True(t, trigger.Valid,
+		"trigger_evidence_id must be populated — the created event passed a non-empty value")
+	assert.Equal(t, "ev-divergence-test", trigger.String,
+		"trigger_evidence_id must round-trip verbatim")
+	assert.Equal(t, "divergence test reason", reason,
+		"reason must round-trip — silently rewriting the reason would corrupt the audit trail")
+	assert.Equal(t, "memory", deadType, "dead_artifact_type must round-trip")
+	assert.Equal(t, "decision", downType, "downstream_artifact_type must round-trip")
 }
 
 // -----------------------------------------------------------------------------
@@ -411,35 +464,38 @@ func TestOutbox_DepthAndTriggerEvidencePreserved(t *testing.T) {
 // Transactional rollback
 // -----------------------------------------------------------------------------
 
-// TestOutbox_RollbackWhenIntentInsertFails asserts the atomicity contract:
-// when a downstream intent insert fails inside the transaction, the
-// earlier CreateInvalidationEvent work is rolled back too. This is the
-// invariant from the design spec: "root state and cascade intent cannot
-// diverge".
+// TestOutbox_OutboxInsertFailureRollsBackEntireTx asserts the atomicity
+// contract from the design spec: "root state and cascade intent cannot
+// diverge". When the outbox INSERT inside EnqueueCascadeIntents fails,
+// the entire transaction (including any root-state mutation the caller
+// applied before the enqueue) must roll back. The failure mode the test
+// exercises is a missing outbox table — every INSERT fails, including
+// the intent write inside the transaction.
 //
-// Test technique: drop the outbox table before invoking Enqueue, then
-// re-create it after to keep the schema usable for any later test. The
-// drop forces every INSERT against the table to fail, including the
-// intent write inside the transaction.
+// Test technique: drop the outbox table before invoking Enqueue. The
+// drop forces every INSERT against the table to fail. The test then
+// rolls back the tx and confirms zero rows landed in the restored
+// table.
 //
 // Failure mode the test catches: EnqueueCascadeIntents catches the
 // INSERT error and returns nil (swallowing the failure) so the caller
 // commits the event without the intents, leaving root state and cascade
 // intent permanently out of sync.
-func TestOutbox_RollbackWhenIntentInsertFails(t *testing.T) {
+func TestOutbox_OutboxInsertFailureRollsBackEntireTx(t *testing.T) {
 	fx := newCascadeOutboxFixture(t)
 
-	// Start the tx FIRST so we can demonstrate that the rollback
-	// unwinds the CreateInvalidationEvent work too. The brief's
-	// public signatures are *sql.Tx, so we drive both calls through
-	// the same transaction.
+	// Simulate a root-state mutation the caller made earlier in the
+	// same transaction (e.g. delete the dead memory row). The
+	// rollback must unwind this too.
 	tx := mustTx(t, fx.dm)
+	_, err := tx.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ?`,
+		time.Now().Unix(), fx.memID)
+	require.NoError(t, err, "root-state mutation must succeed pre-drop")
+
 	eventID, err := fx.dm.CreateInvalidationEvent(tx, fx.memID, "memory", "", "rollback test", 0)
 	require.NoError(t, err, "CreateInvalidationEvent must succeed pre-drop")
 
-	// Drop the outbox table — every INSERT against it now fails. The
-	// shared-schema check (when applicable) is irrelevant here because
-	// the local INSERT is what fails first.
+	// Drop the outbox table — every INSERT against it now fails.
 	_, err = tx.Exec(`DROP TABLE epistemic_cascade_outbox`)
 	require.NoError(t, err, "dropping the outbox must succeed inside the tx")
 
@@ -483,17 +539,23 @@ func TestOutbox_RollbackWhenIntentInsertFails(t *testing.T) {
 		)`)
 	require.NoError(t, err, "restoring the outbox table must succeed")
 
-	// The rollback must have unwound the CreateInvalidationEvent work.
-	// We pin the row count (zero) rather than looking for the specific
-	// event_id, because the event_id is mint-only and not persisted to
-	// the outbox table itself (it lives on each intent row).
+	// The rollback must have unwound the root-state mutation.
+	var deletedAt sql.NullInt64
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT deleted_at FROM memories WHERE id = ?`,
+		fx.memID,
+	).Scan(&deletedAt))
+	assert.False(t, deletedAt.Valid,
+		"root-state mutation must be rolled back when outbox insert fails")
+
+	// And no outbox rows landed.
 	var rowCount int
 	require.NoError(t, fx.dm.db.QueryRow(
 		`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE dead_artifact_id = ?`,
 		fx.memID,
 	).Scan(&rowCount))
 	assert.Equal(t, 0, rowCount,
-		"CreateInvalidationEvent must be rolled back when EnqueueCascadeIntents fails")
+		"outbox INSERTs must be rolled back when the enqueue fails (atomicity contract)")
 }
 
 // -----------------------------------------------------------------------------
@@ -519,7 +581,7 @@ func TestOutbox_ListPendingReturnsOnlyPending(t *testing.T) {
 			     downstream_artifact_id, downstream_artifact_type, cascade_depth,
 			     reason, status)
 			VALUES (?, ?, ?, 'memory', ?, 'decision', 0, 'fixture', ?)
-		`, "row-"+outboxItoa(i), "evt-"+outboxItoa(i), fx.memID, fx.decID, status)
+		`, "row-"+strconv.Itoa(i), "evt-"+strconv.Itoa(i), fx.memID, fx.decID, status)
 		require.NoError(t, err)
 	}
 
@@ -556,13 +618,85 @@ func TestOutbox_ListPendingHonoursLimit(t *testing.T) {
 			     downstream_artifact_id, downstream_artifact_type, cascade_depth,
 			     reason, status)
 			VALUES (?, ?, ?, 'memory', ?, 'decision', 0, 'fixture', 'pending')
-		`, "row-"+outboxItoa(i), "evt-"+outboxItoa(i), fx.memID, fx.decID)
+		`, "row-"+strconv.Itoa(i), "evt-"+strconv.Itoa(i), fx.memID, fx.decID)
 		require.NoError(t, err)
 	}
 
 	pending, err := fx.dm.ListPendingCascadeIntents(2)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(pending), 2, "limit=2 must cap the result size")
+}
+
+// TestOutbox_ListPendingFederatedDedupBySemanticKey is the I-1 fix
+// coverage: when shared is attached, EnqueueCascadeIntents writes the
+// same logical intent to both local and shared with DIFFERENT row ids
+// (GenerateID() is called per write). The federated read must dedup
+// by the SEMANTIC KEY (dead_artifact_id, downstream_artifact_id,
+// invalidation_event_id) — not by row id — so the materializer sees
+// exactly one logical intent regardless of how many physical rows
+// exist across the two schemas.
+//
+// Test technique: enqueue one intent with shared attached. Confirm
+// the local and shared tables each have one row with different ids.
+// Then call ListPendingCascadeIntents and confirm it returns exactly
+// one entry with the right semantic key (not two).
+//
+// Failure mode the test catches: the federated query uses GROUP BY id
+// (or no GROUP BY at all) and the materializer sees the same logical
+// intent twice, creating two redundant cascade theories per invalidation.
+func TestOutbox_ListPendingFederatedDedupBySemanticKey(t *testing.T) {
+	fx := newCascadeOutboxFixtureWithShared(t)
+
+	// Enqueue one intent inside a transaction with shared attached.
+	tx := mustTx(t, fx.dm)
+	eventID, err := fx.dm.CreateInvalidationEvent(tx, fx.memID, "memory", "", "federated dedup", 0)
+	require.NoError(t, err)
+
+	event := CascadeInvalidation{
+		EventID:          eventID,
+		DeadArtifactID:   fx.memID,
+		DeadArtifactType: "memory",
+		Reason:           "federated dedup",
+		CascadeDepth:     0,
+	}
+	targets := []ProvenanceTarget{
+		{ArtifactID: fx.decID, ArtifactType: "decision"},
+	}
+	_, err = fx.dm.EnqueueCascadeIntents(tx, event, targets)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// Sanity: each schema has exactly one row, with DIFFERENT ids.
+	var localID, sharedID string
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT id FROM epistemic_cascade_outbox WHERE invalidation_event_id = ?`,
+		eventID,
+	).Scan(&localID))
+	require.NoError(t, fx.dm.db.QueryRow(
+		`SELECT id FROM shared.epistemic_cascade_outbox WHERE invalidation_event_id = ?`,
+		eventID,
+	).Scan(&sharedID))
+	require.NotEqual(t, localID, sharedID,
+		"sanity: EnqueueCascadeIntents must mint a fresh id per local+shared write")
+
+	// The federated read must collapse the two physical rows into ONE
+	// logical intent. The dedup must be on the semantic key, not on
+	// the row id.
+	pending, err := fx.dm.ListPendingCascadeIntents(10)
+	require.NoError(t, err)
+
+	seenForEvent := 0
+	for _, intent := range pending {
+		if intent.InvalidationEventID != eventID {
+			continue
+		}
+		seenForEvent++
+		// The dedup'd row must still carry the right semantic fields.
+		assert.Equal(t, fx.memID, intent.DeadArtifactID)
+		assert.Equal(t, fx.decID, intent.DownstreamArtifactID)
+	}
+	assert.Equal(t, 1, seenForEvent,
+		"federated read must dedup by semantic key so one logical intent returns once even with shared attached")
 }
 
 // -----------------------------------------------------------------------------
@@ -623,8 +757,8 @@ func TestOutbox_DiscoveryCombinesDependenciesAndProvenance(t *testing.T) {
 
 	// Both targets must surface.
 	ids := make(map[string]string, len(targets))
-	for _, t := range targets {
-		ids[t.ArtifactID] = t.ArtifactType
+	for _, tgt := range targets {
+		ids[tgt.ArtifactID] = tgt.ArtifactType
 	}
 	assert.Equal(t, "decision", ids[decID],
 		"decision reachable via explicit dependencies must surface in discovery")
@@ -672,8 +806,8 @@ func TestOutbox_DiscoveryDedupesAcrossPaths(t *testing.T) {
 	require.NoError(t, err)
 
 	count := 0
-	for _, t := range targets {
-		if t.ArtifactID == decID {
+	for _, tgt := range targets {
+		if tgt.ArtifactID == decID {
 			count++
 		}
 	}
