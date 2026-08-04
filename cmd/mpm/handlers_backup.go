@@ -55,7 +55,7 @@ func handleBackup(args []string) int {
 		return respond("", fmt.Sprintf("Backup failed (sqlite3 .dump): %v\n", err), 1)
 	}
 
-	if err := os.WriteFile(outputPath, dump, 0o644); err != nil {
+	if err := os.WriteFile(outputPath, dump, 0o600); err != nil {
 		return respond("", fmt.Sprintf("Backup failed (write): %v\n", err), 1)
 	}
 
