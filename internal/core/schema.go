@@ -238,6 +238,95 @@ var BaseTables = []string{
 		run_count    INTEGER NOT NULL DEFAULT 1,
 		result_memory_id TEXT
 	);`,
+
+	// ── Epistemic Cascades (2026-08-04) ─────────────────────────────
+	//
+	// Two-table substrate for the cascade feature. The outbox holds
+	// one row per (invalidation_event, downstream_artifact) pair — the
+	// dedup key from the design spec — and the materializer claims
+	// `pending` rows, writes a theory per row, and stamps
+	// `materialized_theory_id`. The provenance table is the
+	// (source, downstream) citation log: a theory's `dependencies` JSON
+	// provides the explicit edge, and a retrieval-time citation (the
+	// `source_ids` recorded when a decision/theory was surfaced) provides
+	// the implicit one. Both edges are unioned during dependency
+	// discovery so a downstream artifact can be cascade-targeted even
+	// without an explicit `dependencies` declaration.
+	//
+	// Outbox fields follow the design spec
+	// (docs/superpowers/specs/2026-08-04-epistemic-cascades-design.md):
+	//   id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
+	//   downstream_artifact_id, downstream_artifact_type,
+	//   trigger_evidence_id (nullable), cascade_depth, reason,
+	//   status, materialized_theory_id (nullable), retry metadata,
+	//   timestamps.
+	//
+	// The status CHECK enforces the four legal states
+	// (pending|processing|materialized|failed) so a typo in a future
+	// materializer patch is rejected at the storage boundary rather
+	// than silently producing rows that no worker claims.
+	//
+	// The UNIQUE (dead_artifact_id, downstream_artifact_id,
+	// invalidation_event_id) is the dedup key — two invalidations of
+	// the same dead artifact against the same downstream collapse
+	// into one intent, but two different downstream artifacts each
+	// get their own row.
+	//
+	// Timestamps are INTEGER Unix-epoch seconds, matching the
+	// codebase-wide convention set by the timestamps_unified_v1
+	// migration (see migration_timestamps.go).
+	`CREATE TABLE IF NOT EXISTS epistemic_cascade_outbox (
+		id                        TEXT PRIMARY KEY,
+		invalidation_event_id     TEXT NOT NULL,
+		dead_artifact_id          TEXT NOT NULL,
+		dead_artifact_type        TEXT NOT NULL,
+		downstream_artifact_id    TEXT NOT NULL,
+		downstream_artifact_type  TEXT NOT NULL,
+		trigger_evidence_id       TEXT,
+		cascade_depth             INTEGER NOT NULL DEFAULT 0,
+		reason                    TEXT NOT NULL DEFAULT '',
+		status                    TEXT NOT NULL DEFAULT 'pending'
+		                          CHECK (status IN ('pending','processing','materialized','failed')),
+		materialized_theory_id    TEXT,
+		attempt_count             INTEGER NOT NULL DEFAULT 0,
+		next_retry_at             INTEGER,
+		terminal_error            TEXT,
+		created_at                INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at                INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		UNIQUE (dead_artifact_id, downstream_artifact_id, invalidation_event_id)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_epistemic_cascade_outbox_event
+		ON epistemic_cascade_outbox(invalidation_event_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_epistemic_cascade_outbox_dead
+		ON epistemic_cascade_outbox(dead_artifact_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_epistemic_cascade_outbox_status_retry
+		ON epistemic_cascade_outbox(status, next_retry_at);`,
+
+	// epistemic_provenance: typed citation log. One row per
+	// (source, downstream, event) — recorded when a decision or theory
+	// cites another artifact in context. Together with the explicit
+	// `memories.dependencies` JSON, this gives the cascade dependency
+	// discovery both kinds of edges the design spec calls out.
+	//
+	// event_id is the invalidation/recall event that produced the
+	// citation; for retrieval-time citations it is the wake id, for
+	// explicit `record_decision` citations it is the decision's own
+	// id. The pair (source_id, downstream_id, event_id) is unique
+	// so re-recording the same citation is a no-op.
+	`CREATE TABLE IF NOT EXISTS epistemic_provenance (
+		id              TEXT PRIMARY KEY,
+		source_id       TEXT NOT NULL,
+		source_type     TEXT NOT NULL,
+		downstream_id   TEXT NOT NULL,
+		downstream_type TEXT NOT NULL,
+		event_id        TEXT NOT NULL,
+		created_at      INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		UNIQUE (source_id, downstream_id, event_id)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_epistemic_provenance_source
+		ON epistemic_provenance(source_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_epistemic_provenance_downstream
+		ON epistemic_provenance(downstream_id);`,
 }
 
 // ReferenceTables contains the reference-library table creation statements.
@@ -389,7 +478,7 @@ var CommonIndexes = []string{
 	// to stay in sync — see the IMPORTANT note on that function.
 	`CREATE TABLE IF NOT EXISTS system_audit_log (
 		id          TEXT PRIMARY KEY,
-		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal')),
+		level       TEXT NOT NULL CHECK (level IN ('info','warn','error','fatal','critical')),
 		component   TEXT NOT NULL,
 		message     TEXT NOT NULL,
 		stack_trace TEXT,

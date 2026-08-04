@@ -105,7 +105,12 @@ func getTableColumns(t *testing.T, db *sql.DB, name string) []string {
 	for rows.Next() {
 		var cid, cname, ctype string
 		var notnull, pk int
-		var dflt interface{}
+		// dflt_value is NULL for non-defaulted columns; using sql.NullString
+		// keeps the scan from tripping on those rows (the previous
+		// interface{} target hits a Go 1.26 driver-internal
+		// NULL-to-int conversion failure on tables that have any
+		// TEXT-default column like epistemic_cascade_outbox.status='pending').
+		var dflt sql.NullString
 		require.NoError(t, rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk))
 		out = append(out, cname)
 	}

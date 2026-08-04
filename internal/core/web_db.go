@@ -636,10 +636,92 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 // Fires stale-foundation wakes for any theory whose dependencies reference
 // this memory — the hard-delete equivalent of the soft-delete hook in
 // MemoryStore.DeleteMemory.
+//
+// 2026-08-04 (Task 4): cascade invalidation hook. The standalone
+// wrapper now enqueues cascade intents for every downstream
+// decision/theory that cited the shredded memory (via explicit
+// `dependencies` JSON or typed `epistemic_provenance` citations).
+// The intent enqueue and the root DELETE share a single tx so a
+// partial failure rolls back both. The lesson-aware behavior (the
+// lessons view INSTEAD OF trigger + lessons_base + lessons_fts
+// atomic delete) is preserved by routing through the existing
+// standalone `ShredMemory(db, id)` function. The cascade hook
+// only fires on the memory path because the lesson path has no
+// reasoning dependents.
+//
+// Why this is now `error` returning: the cascade enqueue runs
+// inside the same tx as the memory DELETE, so a partial failure
+// surfaces as a non-nil error rather than silently no-op'ing. The
+// legacy contract was permissive (`return nil` on success, error
+// otherwise); that contract is preserved. The FireStaleFoundationWakes
+// hook is unchanged — it still fires AFTER the tx commits because
+// wakes are an out-of-band wake path, not a transactionally-coupled
+// invariant.
+//
+// Idempotency: the standalone ShredMemory(db, id) helper already
+// treats a missing row as a clean no-op (idempotent). The cascade
+// intent write is also idempotent on the schema's UNIQUE key.
+// Calling ShredMemory twice on the same id returns success on
+// both calls and does not duplicate intents.
 func (dm *DatabaseManager) ShredMemory(id string) error {
-	if err := ShredMemory(dm.db, id); err != nil {
-		return err
+	if id == "" {
+		return fmt.Errorf("shred: id is required")
 	}
+
+	// Probe lessons_base. Lessons path has no cascade hook (no
+	// reasoning dependents); use the existing standalone helper
+	// which already handles the lessons INSTEAD OF DELETE trigger.
+	var lessonCount int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, id).Scan(&lessonCount); err != nil {
+		return fmt.Errorf("shred: probe lessons_base: %w", err)
+	}
+	if lessonCount > 0 {
+		if err := ShredMemory(dm.db, id); err != nil {
+			return err
+		}
+		_, _ = dm.FireStaleFoundationWakes(id)
+		return nil
+	}
+
+	// Memory path: DELETE + cascade intent enqueue in one tx. The
+	// standalone ShredMemory helper opens its own tx internally; we
+	// can't reuse it for the memory path because we need our own tx
+	// to add the cascade hook. Inline the DELETE here so the cascade
+	// hook lives in the same transaction.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("shred: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Cascade invalidation hook first — must happen BEFORE the
+	// DELETE so the discoverCascadeTargets helper can still observe
+	// the dependencies JSON + epistemic_provenance rows pointing at
+	// this id.
+	if _, err := dm.EnqueueCascadeInvalidation(
+		tx,
+		id, "memory",
+		"memory_shredded", "", 0,
+	); err != nil {
+		return fmt.Errorf("shred: cascade enqueue: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("shred: delete memory: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("shred: commit: %w", err)
+	}
+	committed = true
+
+	// Fire stale-foundation wakes AFTER commit. Wakes are an
+	// out-of-band notification path (not transactionally-coupled),
+	// so they live outside the tx.
 	_, _ = dm.FireStaleFoundationWakes(id)
 	return nil
 }

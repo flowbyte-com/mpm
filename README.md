@@ -147,6 +147,8 @@ Every persistent object inside MPM exists because it answers a different cogniti
 
 The distinction matters.
 
+The artifacts interlock through **provenance edges** (`source_ids`, `trigger_evidence_id`). When a load-bearing artifact is invalidated, **epistemic cascades** (§4.8) propagate the invalidation to every downstream decision or theory that depended on it — surfacing a pending theory for each one rather than silently rewriting the artifact.
+
 A decision is not a memory.
 
 A theory is not a lesson.
@@ -417,7 +419,7 @@ FTS5 keyword extraction detects semantic overlap with the current context and pu
 
 MPM models reasoning under uncertainty. Mistakes happen. The system is designed around explicit recovery — every bad outcome has a paper trail and a documented path back. Nothing is silently overwritten.
 
-Five canonical failure modes and the mechanism that handles each:
+Six canonical failure modes and the mechanism that handles each:
 
 **Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` weakens the memory's weight by 3, atomically creates a back-linked theory in pending status, and preserves the original artifact. The memory is not deleted — the original artifact is preserved. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
 
@@ -429,7 +431,69 @@ Five canonical failure modes and the mechanism that handles each:
 
 **Embedding model change.** Operator upgrades from one embedding model to another; cosine similarities shift; "similar to X" links become noisy. *Recovery:* this is the hardest case. Mitigations: (1) BM25 keyword search is independent of embeddings, so the recall path still works for exact-term queries; (2) embedding backfill is a separate phase (`mpm ops backfill-embeddings`) and can be re-run on demand; (3) the hybrid score weights keyword ranking alongside semantic recall, so semantic noise degrades gracefully rather than breaking recall outright. There is no automatic re-embedding-on-model-change — this remains an operator-driven migration.
 
+**Dependency collapse via cascade.** A foundational memory (or rule) was disproven or shredded, and downstream decisions or theories that depended on it now rest on a false foundation. A naïve system would silently leave the downstream artifacts holding outdated context. *Recovery:* §4.8 Epistemic Cascades. Invalidating a foundation atomically enqueues an `epistemic_cascade_outbox` intent for every downstream decision or theory (lessons and global rules are deliberately excluded). `mpm cascade materialize` then drains the outbox into pending theories challenging the downstream artifacts — depth-capped at 3, with a CRITICAL audit at depth 4. The cascade envelope is durable; a crash mid-materialize leaves the outbox intact for the next run.
+
 The common pattern: every recovery path leaves a theory, a log entry, or a `concept_drift` flag. History is the system.
+
+### 4.8 Epistemic Cascades
+
+*The upstream-side complement to the challenge lifecycle: when a foundation collapses, every downstream artifact that depended on it gets a pending theory.*
+
+The challenge lifecycle (§4.5) handles a single artifact at a time: one memory is challenged, one theory is created. But reasoning is a graph. A foundational memory underpins many decisions and theories; a decision rests on memories that may themselves be invalidated later. When a load-bearing artifact collapses, the downstream artifacts that *referenced it* through provenance edges (`source_ids`, `trigger_evidence_id`) become stale — but they don't know it yet.
+
+**Epistemic cascades** solve this by propagating invalidations. When a foundation is disproven or shredded, the substrate autonomously spawns pending theories challenging every downstream decision or theory that depended on it. The downstream artifacts are not edited — they get a back-linked theory in pending status, exactly like a manual `mpm challenge`, and the operator (or the next agent) decides what to do with each one.
+
+**What's in scope, and what isn't.**
+
+| In scope (cascaded) | Out of scope (not cascaded) | Why |
+|---|---|---|
+| Decisions | Lessons | Lessons are reusable cross-task knowledge; they outlive the artifact that inspired them. Stale-flagging a lesson on a foundation collapse would be a regression — the lesson may still apply to other contexts. |
+| Theories | Global rules | House rules are operator-gated and frequently cross-project. Silently invalidating a rule from a downstream artifact would bypass the `record_global_rule` operator gate. |
+
+**The architecture: transactional outbox + bounded materializer.**
+
+The cascade is split into two phases because the invalidation path is hot (every challenge could trigger a cascade) and the materialization path is cold (creating theories is LLM+DB work).
+
+```
+  Invalidation event                  Materialization
+  ─────────────────                   ──────────────
+  foundation disproven / shredded
+        │
+        ▼
+  SELECT descendants      ◀── atomic ──▶  mpm cascade materialize
+  via provenance edges                                                │
+        │                                                            │
+        ▼                                                            ▼
+  INSERT epistemic_cascade_outbox                             claim → process → retry
+  (status='pending')                                       (depth ≤ 3, audit at 4)
+        │
+        ▼
+  return to caller in <1ms
+```
+
+The invalidation transaction writes the intent (`status='pending'`) and returns within the same atomic transaction as the trigger. The materialization is asynchronous — operators run `mpm cascade materialize` from `cron` or `systemd` timers, and each invocation drains the outbox then exits. There is no new daemon and no per-CLI latency tax.
+
+**Depth limit and the depth-4 audit.**
+
+The cascade recurses: invalidating a downstream artifact may itself be a foundation for further artifacts. The depth is capped at **3** (`CascadeMaxDepth`) — beyond that, the substrate still records the intent but appends a CRITICAL audit entry and suppresses the spawn, preventing pathological fan-out from a single root invalidation. The audit log carries the chain so an operator can examine what was suppressed and decide whether to widen the cap.
+
+**The wake throttle.**
+
+When cascade intents materialize into pending theories, the change must surface to the agent's wake context. `check_wakes` caps **cascade-kind wakes at 3 per call** (`MaxCascadeWakePerCheck`) — so a 50-intent cascade materialization doesn't flood the agent on the next call. Non-cascade wakes (notification, cron, system) are interleaved normally and unaffected by the cap; the throttle is per-call, not global.
+
+**Why a CLI subcommand, not a daemon.** MPM is CLI-only — the watch daemon was deprecated in commit `e1bc707`, and the materializer is invoked from `mpm cascade materialize`. Operators schedule the invocation from `cron` or `systemd`, each call drains the outbox and exits. This avoids the latency tax of a hidden per-CLI background drain and respects the architecture's "no moving parts" principle.
+
+**Inspecting dead letters.**
+
+Reasons a cascade intent might end up dead-lettered (`status='failed'`): the scanner rejected the synthesized theory, the FTS5 insert failed, or the SQLite write was retried past `MaxRetries` (default 5). Inspect with `mpm cascade list-dead-letters` — both the failed intent's `terminal_error` and the outbox summary (`pending / processing / materialized / failed`) are surfaced for the operator.
+
+```
+mpm cascade materialize            # drain the outbox (default: until empty)
+mpm cascade materialize --once     # process one batch and exit
+mpm cascade list-dead-letters      # show failed intents and outbox summary
+```
+
+The outbox is durable; a crash mid-materialize leaves the row with `status='processing'` and the next materialization reclaims it via stale-recovery (`updated_at` filter). Every operation is in `docs/EPISTEMIC_CASCADES.md` (operator-facing schema, queries, knob reference).
 
 ---
 
@@ -1144,6 +1208,40 @@ mpm debug show <id>
 mpm debug gc [--dry-run]
 ```
 
+### `cascade` — Epistemic Cascade Materializer
+
+CLI surface for the cascade materializer (§4.8). The materializer drains pending `epistemic_cascade_outbox` intents into pending theories. Operators schedule from `cron` or `systemd` — each invocation drains the outbox and exits; there is no long-running daemon.
+
+```bash
+mpm cascade                                              # Show help
+mpm cascade materialize [--once] [--max-iterations N] [--poll-interval T]
+        # Drain the outbox. Default: loop until pending=0
+        # --once          : process one batch and exit
+        # --max-iterations: bound iterations (0=unbounded; exit 2 on timeout)
+        # --poll-interval : sleep between empty-queue polls (5s default, min 1s)
+mpm cascade list-dead-letters
+        # Show failed intents (status='failed') with terminal_error, plus
+        # an outbox summary: pending / processing / materialized / failed
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | Outbox drained (no pending intents) |
+| 1 | Runtime error (DB unavailable, scanner rejection, etc.) |
+| 2 | Timeout — `--max-iterations` exceeded before drain |
+
+**Drain confirmation.** The materializer polls the outbox and exits only when two consecutive polls confirm `pending=0 AND processing=0`. This prevents a race where a concurrent invalidation enqueues a new intent that the single confirmation miss would not catch.
+
+**Operator pattern.** Schedule from `cron` every 5 minutes, or run from `systemd` on a 60s timer:
+
+```cron
+*/5 * * * * /usr/local/bin/mpm cascade materialize --max-iterations 50
+```
+
+The `--max-iterations` bound is a safety valve — the operator's job is to keep the outbox at zero (or near it), not to let a single invocation spend unbounded time churning through a blast-radius cascade.
+
 <!-- cli:begin — auto-generated by `go run ./cmd/gen-cli`. Do not edit by hand. -->
 
 ### Command Catalogue (auto-generated)
@@ -1153,6 +1251,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`add`** — Add a new memory
 - **`backup`** — Export database to timestamped .sql dump (optional path arg)
 - **`call`** — Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
+- **`cascade`** — Materialize pending cascade intents (epistemic cascades)
 - **`challenge`** — Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)
 - **`config`** — Configure the AI provider (interactive wizard or scripted set|get|show|edit)
 - **`continue`** — Session resumption dashboard — composes working context, wake context, decisions, skills, theories

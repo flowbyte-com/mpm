@@ -34,6 +34,11 @@ type CoreDB interface {
 	RecentWatchdogOps(n int, opPrefix string) ([]WatchdogOp, error)
 	NewSession() (CoreDB, error)
 
+	// ─── Cascade Materializer ─────────────────────────────────────────
+	StartCascadeMaterializer(ctx context.Context)
+	StopCascadeMaterializer()
+	MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error)
+
 	// ─── Memory CRUD ─────────────────────────────────────────────────
 	SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error)
 	SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
@@ -185,12 +190,45 @@ type CoreDB interface {
 	GetExternalDBCursor(label string) (string, error)
 
 	// ─── Epistemology ────────────────────────────────────────────────
-	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, tags []string) (map[string]interface{}, error)
+	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error)
+	ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error)
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
-	RecordDecision(contextText, choice, rationale, outcome string, tags []string, ac ActiveContext) (map[string]interface{}, error)
+	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error)
+
+	// ─── Cascade provenance (Task 2) ──────────────────────────────────
+	// Typed citation log so the cascade materializer can walk the
+	// dependency graph for a dead source without having to scan
+	// retrieval_metadata (which is observability-only and not
+	// type-filtered). Empty sourceType on RecordProvenance triggers
+	// resolution against the local memories/lessons tables so legacy
+	// untyped IDs land with the correct type column.
+	RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error
+	ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error)
+
+	// ─── Cascade outbox (Task 3) ──────────────────────────────────────
+	// Transactional capture of invalidation events and per-target
+	// cascade intents. The outbox dedupes on (dead, downstream,
+	// event) so a noisy recall turn cannot produce redundant intents
+	// for the same invalidation. ListPendingCascadeIntents is the
+	// materializer's working-set read; only status='pending' rows
+	// surface so already-handled intents are not re-claimed.
+	CreateInvalidationEvent(tx *sql.Tx, deadArtifactID, deadArtifactType, triggerEvidenceID, reason string, depth int) (string, error)
+	EnqueueCascadeIntents(tx *sql.Tx, event CascadeInvalidation, targets []ProvenanceTarget) (int, error)
+	ListPendingCascadeIntents(limit int) ([]CascadeIntent, error)
+
+	// ─── Cascade invalidation hook (Task 4) ──────────────────────────
+	// Transaction-aware helper that captures the evidence snapshot,
+	// mints the event, discovers downstream targets, and enqueues
+	// intents — all inside the supplied *sql.Tx so the root mutation
+	// (theory disprove, memory shred, confidence cross) and the
+	// cascade intents commit atomically. The three explicit
+	// invalidation paths in Task 4 route through this single
+	// integration point so a partial failure rolls back the root
+	// mutation rather than diverging.
+	EnqueueCascadeInvalidation(tx *sql.Tx, deadArtifactID, deadArtifactType, reason, triggerEvidenceID string, depth int) (int, error)
 
 	// ─── Handoffs ────────────────────────────────────────────────────
 	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error)

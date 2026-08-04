@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -621,5 +622,158 @@ func TestCheckPendingWakes_KindsFilter_StarShortCircuitsList(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("kinds=[notification,*,cron]: got %d, want 3 (star short-circuits)", len(got))
+	}
+}
+
+// TestCheckPendingWakes_CascadeWakeCap verifies that cascade wakes
+// (metadata.kind == "cascade") are capped at MaxCascadeWakePerCheck per
+// call, leaving remainder pending for subsequent calls. Notification and
+// cron wakes are unaffected by the cap.
+func TestCheckPendingWakes_CascadeWakeCap(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+
+	// Seed 5 cascade wakes, all overdue.
+	for i := 0; i < 5; i++ {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+			 VALUES (?, ?, ?, 0, 'cascade-materializer', '{"kind":"cascade","theory_id":"th-%d"}')`,
+			fmt.Sprintf("wk-cascade-%d", i), now-60, fmt.Sprintf("cascade theory %d", i), i,
+		)
+		if err != nil {
+			t.Fatalf("insert cascade wake %d: %v", i, err)
+		}
+	}
+
+	// First check: only MaxCascadeWakePerCheck (3) should be returned.
+	first, err := dm.CheckPendingWakes(time.Now(), []string{"cascade"})
+	if err != nil {
+		t.Fatalf("first check: %v", err)
+	}
+	if len(first) != MaxCascadeWakePerCheck {
+		t.Errorf("first check: got %d cascade wakes, want %d (cap applied)", len(first), MaxCascadeWakePerCheck)
+	}
+
+	// Second check: the remaining 2 should now be delivered.
+	second, err := dm.CheckPendingWakes(time.Now(), []string{"cascade"})
+	if err != nil {
+		t.Fatalf("second check: %v", err)
+	}
+	if len(second) != 2 {
+		t.Errorf("second check: got %d cascade wakes, want 2 (remainder)", len(second))
+	}
+
+	// Third check: none left.
+	third, err := dm.CheckPendingWakes(time.Now(), []string{"cascade"})
+	if err != nil {
+		t.Fatalf("third check: %v", err)
+	}
+	if len(third) != 0 {
+		t.Errorf("third check: got %d, want 0 (all drained)", len(third))
+	}
+}
+
+// TestCheckPendingWakes_CascadeCapDoesNotAffectNotification verifies that
+// the cascade cap does not bleed into notification wakes — they are fully
+// delivered regardless of how many cascade wakes were already returned.
+func TestCheckPendingWakes_CascadeCapDoesNotAffectNotification(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+
+	// 3 cascade wakes.
+	for i := 0; i < 3; i++ {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+			 VALUES (?, ?, ?, 0, 'cascade-materializer', '{"kind":"cascade","theory_id":"th-%d"}')`,
+			fmt.Sprintf("wk-cascade-%d", i), now-60, fmt.Sprintf("cascade %d", i), i,
+		)
+		if err != nil {
+			t.Fatalf("insert cascade wake %d: %v", i, err)
+		}
+	}
+
+	// 5 notification wakes.
+	for i := 0; i < 5; i++ {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+			 VALUES (?, ?, ?, 0, 'test-agent', '{"kind":"notification"}')`,
+			fmt.Sprintf("wk-notif-%d", i), now-60, fmt.Sprintf("notification %d", i),
+		)
+		if err != nil {
+			t.Fatalf("insert notification wake %d: %v", i, err)
+		}
+	}
+
+	// First check with kinds=["*"] delivers all 3 cascade + all 5 notifications.
+	got, err := dm.CheckPendingWakes(time.Now(), []string{"*"})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(got) != 8 {
+		t.Errorf("kinds=[*]: got %d wakes, want 8 (3 cascade + 5 notification, cap does not affect notification)", len(got))
+	}
+}
+
+// TestCheckPendingWakes_CascadeCapConcurrentSafety verifies that under
+// concurrent checks the transactional mark-fired prevents double-delivery
+// of cascade wakes.
+func TestCheckPendingWakes_CascadeCapConcurrentSafety(t *testing.T) {
+	dm := newTestWakeDM(t)
+	_, _ = dm.SQLDB().Exec(`DELETE FROM scheduled_wakes`)
+
+	now := time.Now().Unix()
+
+	// 5 cascade wakes.
+	for i := 0; i < 5; i++ {
+		_, err := dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+			 VALUES (?, ?, ?, 0, 'cascade-materializer', '{"kind":"cascade"}')`,
+			fmt.Sprintf("wk-cascade-%d", i), now-60, fmt.Sprintf("cascade %d", i),
+		)
+		if err != nil {
+			t.Fatalf("insert cascade wake %d: %v", i, err)
+		}
+	}
+
+	// Fire two concurrent checks. Each should see at most MaxCascadeWakePerCheck
+	// unique rows; between the two checks all 5 should be delivered exactly once.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var first, second []map[string]interface{}
+	var firstErr, secondErr error
+
+	go func() {
+		defer wg.Done()
+		first, firstErr = dm.CheckPendingWakes(time.Now(), []string{"cascade"})
+	}()
+	go func() {
+		defer wg.Done()
+		second, secondErr = dm.CheckPendingWakes(time.Now(), []string{"cascade"})
+	}()
+
+	wg.Wait()
+
+	if firstErr != nil {
+		t.Fatalf("first goroutine: %v", firstErr)
+	}
+	if secondErr != nil {
+		t.Fatalf("second goroutine: %v", secondErr)
+	}
+
+	total := len(first) + len(second)
+	if total != 5 {
+		t.Errorf("total delivered across both goroutines: got %d, want 5 (no double-delivery)", total)
+	}
+
+	// Neither call should exceed the cap.
+	if len(first) > MaxCascadeWakePerCheck {
+		t.Errorf("first goroutine: got %d, want <= %d", len(first), MaxCascadeWakePerCheck)
+	}
+	if len(second) > MaxCascadeWakePerCheck {
+		t.Errorf("second goroutine: got %d, want <= %d", len(second), MaxCascadeWakePerCheck)
 	}
 }
