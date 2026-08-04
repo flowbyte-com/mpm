@@ -433,15 +433,26 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		limit = cm.opts.BatchSize
 	}
 
-	now := time.Now().Unix()
+	// BEGIN IMMEDIATE acquires a write transaction immediately, blocking
+	// concurrent writers until we commit. Two concurrent callers serialize:
+	// A's BEGIN runs first and holds the lock; B's BEGIN blocks. When A
+	// commits (or rolls back), B's BEGIN proceeds and sees the post-commit
+	// state — no TOCTOU possible.
+	tx, err := cm.dm.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin claim transaction: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
-	// Step 1: restart recovery. Reclaim any 'processing' rows that have
-	// been stuck for more than 5 minutes (300 seconds). These belong to
-	// a previous materializer run that died while processing.
-	// Using updated_at as the staleness marker; updated_at advances on
-	// each state transition.
+	now := time.Now().Unix()
 	const staleTimeoutSeconds int64 = 300
-	if _, err := cm.dm.db.Exec(`
+
+	// Restart recovery: reclaim abandoned 'processing' rows inside the tx.
+	if _, err := tx.Exec(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'pending', attempt_count = 0, updated_at = ?
 		WHERE status = 'processing' AND updated_at < ?
@@ -449,55 +460,46 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		return nil, fmt.Errorf("restart recovery: %w", err)
 	}
 
-	// Step 2: claim the next pending rows. Use a CTE to select pending
-	// ids, then UPDATE ... WHERE id IN (...) to avoid TOCTOU races.
-	// The subquery orders by created_at ASC so the oldest intents are
-	// processed first (FIFO).
-	// claimStartedAt is the timestamp at which we begin the claim window;
-	// the Step 4 re-read filters to rows with updated_at >= claimStartedAt
-	// so we only return rows THIS call's UPDATE actually flipped.
-	claimStartedAt := now
-	claimedIDs, err := func() ([]string, error) {
-		rows, err := cm.dm.db.Query(`
-			WITH pending_cte AS (
-				SELECT id FROM epistemic_cascade_outbox
-				WHERE status = 'pending'
-				  AND (next_retry_at IS NULL OR next_retry_at <= ?)
-				ORDER BY created_at ASC
-				LIMIT ?
-			)
-			SELECT id FROM pending_cte
-		`, now, limit)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return nil, err
-			}
-			ids = append(ids, id)
-		}
-		return ids, rows.Err()
-	}()
+	// Step 1: select the next batch of pending ids (within the tx).
+	rows, err := tx.Query(`
+		WITH pending_cte AS (
+			SELECT id FROM epistemic_cascade_outbox
+			WHERE status = 'pending'
+			  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+			ORDER BY created_at ASC
+			LIMIT ?
+		)
+		SELECT id FROM pending_cte
+	`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("collect pending ids: %w", err)
 	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	if len(claimedIDs) == 0 {
+	if len(ids) == 0 {
+		// Nothing to claim — rollback the empty tx and return nil.
+		_ = tx.Rollback()
+		tx = nil
 		return nil, nil
 	}
 
-	// Step 3: atomically claim them.
-	// Build a dynamic IN clause with exactly len(claimedIDs) placeholders.
-	// args order: [now, id1, id2, ..., idN] matching "? = updated_at, id1, id2, ..."
+	// Step 2: atomically claim them. Build dynamic IN clause.
 	idPlaceholders := ""
-	args := make([]interface{}, 0, 1+len(claimedIDs))
+	args := make([]interface{}, 0, 1+len(ids))
 	args = append(args, now)
-	for i, id := range claimedIDs {
+	for i, id := range ids {
 		if i > 0 {
 			idPlaceholders += ","
 		}
@@ -507,26 +509,31 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 	claimQuery := fmt.Sprintf(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'processing', updated_at = ?
-		WHERE id IN (%s)
-		  AND status = 'pending'
+		WHERE id IN (%s) AND status = 'pending'
 	`, idPlaceholders)
-	if _, err := cm.dm.db.Exec(claimQuery, args...); err != nil {
+	res, err := tx.Exec(claimQuery, args...)
+	if err != nil {
 		return nil, fmt.Errorf("claim intents: %w", err)
 	}
+	nFlipped, _ := res.RowsAffected()
+	if nFlipped == 0 {
+		// No rows were actually flipped — another caller claimed them all
+		// between our SELECT and UPDATE. Roll back and return nil.
+		_ = tx.Rollback()
+		tx = nil
+		return nil, nil
+	}
 
-	// Step 4: re-read only the rows this call's UPDATE actually flipped.
-	// Filtering to updated_at >= claimStartedAt excludes rows that were
-	// flipped by a concurrent call while our UPDATE ran (TOCTOU fix).
+	// Step 3: re-read the rows this call flipped (within the tx, post-UPDATE).
 	inClause := ""
-	args = []interface{}{}
-	for i, id := range claimedIDs {
+	reReadArgs := make([]interface{}, 0, len(ids))
+	for i, id := range ids {
 		if i > 0 {
 			inClause += ","
 		}
 		inClause += "?"
-		args = append(args, id)
+		reReadArgs = append(reReadArgs, id)
 	}
-	args = append(args, claimStartedAt)
 	query := fmt.Sprintf(`
 		SELECT id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
 		       downstream_artifact_id, downstream_artifact_type,
@@ -534,16 +541,13 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 		       materialized_theory_id, attempt_count, next_retry_at,
 		       terminal_error, created_at, updated_at
 		FROM epistemic_cascade_outbox
-		WHERE id IN (%s) AND updated_at >= ?
+		WHERE id IN (%s)
 	`, inClause)
-
-	rows, err := cm.dm.db.Query(query, args...)
+	rows, err = tx.Query(query, reReadArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("re-read claimed intents: %w", err)
 	}
-	defer rows.Close()
-
-	intents := make([]CascadeIntent, 0, len(claimedIDs))
+	intents := make([]CascadeIntent, 0, len(ids))
 	for rows.Next() {
 		var intent CascadeIntent
 		if err := rows.Scan(
@@ -556,11 +560,22 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 			&intent.NextRetryAt, &intent.TerminalError,
 			&intent.CreatedAt, &intent.UpdatedAt,
 		); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan claimed intent: %w", err)
 		}
 		intents = append(intents, intent)
 	}
-	return intents, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Commit the transaction.
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit claim transaction: %w", err)
+	}
+	tx = nil // prevent deferred rollback
+	return intents, nil
 }
 
 // markMaterialized records the generated theory ID on the outbox row.
