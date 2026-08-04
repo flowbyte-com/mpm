@@ -449,7 +449,7 @@ cd ~/mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
 ```
 
-The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all four binaries to `/usr/local/bin`. The companion daemons `mpm-mcp` and `mpm-scheduler` install separately when you want autonomous operation — see §5.2.)
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all four binaries to `$HOME/.local/bin`. For a full systemd + OpenClaw install, run `./scripts/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
@@ -459,7 +459,7 @@ For autonomous operation — the scheduler dispatches system-kind wakes (critic 
 git clone https://github.com/flowbyte-com/mpm
 cd mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
-make install         # optional — copies all four to /usr/local/bin
+make install         # optional — copies all four to $HOME/.local/bin (no sudo)
 ```
 
 **Install the scheduler as a systemd user service:**

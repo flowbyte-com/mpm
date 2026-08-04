@@ -1,20 +1,19 @@
 [Unit]
-Description=MPM universal wake executor (USER-level, opt-in)
+Description=MPM universal wake executor (USER-level, alpha default)
 # MPM is a headless cognitive substrate. See the project README:
 #   https://github.com/yourorg/mpm#52-run-it-as-a-daemon
 #
-# ⚠ OPT-IN ONLY. The default install target is the SYSTEM-level unit
-# (mpm-scheduler.service.system), installed by scripts/install.sh to
-# /etc/systemd/system/. Use THIS user-level unit only if:
-#   - You cannot sudo (shared host, container without root, etc.)
-#   - You want all MPM state under $HOME for portability
-#   - Your home directory is NOT encrypted (eCryptfs/LUKS)
+# This is the USER-level unit and the DEFAULT install target as of
+# the alpha release. scripts/install.sh installs it to
+# $HOME/.config/systemd/user/mpm-scheduler.service and the install
+# flow does NOT require root. The system-level alternative
+# (mpm-scheduler.service.system) is reachable via `sudo ./install.sh --system`.
 #
-# On hosts with encrypted home, this unit silently fails at boot because
-# user@UID.service starts via linger but cannot read binaries in
-# /home/$USER/ until login + decrypt. Restart=on-failure does not recover
-# because the failure is during initial ExecStart, not runtime crash.
-# See lesson 071911bc.
+# On hosts with encrypted home, this unit may silently fail at boot
+# because user@UID.service starts via linger but cannot read binaries
+# in /home/$USER/ until login + decrypt. Restart=on-failure does not
+# recover because the failure is during initial ExecStart, not runtime
+# crash. See lesson 071911bc.
 After=default.target
 
 [Service]

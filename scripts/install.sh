@@ -1,33 +1,57 @@
 #!/usr/bin/env bash
 #
-# scripts/install.sh — MPM full system install
+# scripts/install.sh — MPM user-space install (alpha baseline)
 #
-# Provisions the MPM cognitive substrate on a Linux host:
+# Provisions the MPM cognitive substrate in a single user's context,
+# no root required. This is the alpha baseline install path; the
+# legacy /var/lib/mpm + system systemd install is reachable via
+# `MPM_SYSTEM=1 sudo ./scripts/install.sh` for operators who genuinely
+# want shared system state.
+#
+# What this script does:
 #   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic)
-#   2. Installs binaries to ${PREFIX}/bin/
-#   3. Replaces /usr/local/bin/mpm with a workspace-setting wrapper
-#   4. Creates /var/lib/mpm/ as the runtime data root (unencrypted)
-#   5. Installs and enables the SYSTEM-level systemd service
-#      (boots with the machine, independent of session/encryption)
-#   6. Registers the MCP server with OpenClaw if present
-#   7. Validates end-to-end
+#   2. Installs binaries to $HOME/.local/bin/ (XDG user-local)
+#   3. Writes a workspace-setting wrapper at $HOME/.local/bin/mpm
+#   4. Creates $HOME/.mpm/ as the runtime data root (0700/0600 enforced
+#      by the binary's startup gate)
+#   5. Installs and enables the USER-level systemd service at
+#      $HOME/.config/systemd/user/mpm-scheduler.service
+#   6. Enables systemd user lingering (loginctl enable-linger) so the
+#      scheduler survives logout
+#   7. Tears down any LEGACY /etc/systemd/system/mpm-scheduler.service
+#      that may still be polling /var/lib/mpm — prevents split-brain
+#      dual-scheduler scenario for upgrading alpha testers
+#   8. Warns loudly if legacy data exists at /var/lib/mpm/mpm.db —
+#      operator must migrate manually if they want to keep it
+#   9. Registers the MCP server with OpenClaw if present
+#  10. Validates end-to-end
+#
+# Multi-tenant / multi-user safety:
+#   - No root required for the default flow; everything lives in $HOME
+#   - Runtime data perms are 0700/0600 (enforced by the binary at startup,
+#     not by this script)
+#   - No global state mutations outside $HOME
 #
 # Usage:
-#   sudo ./scripts/install.sh              # full install
-#   sudo ./scripts/install.sh --check      # preflight only (no changes)
-#   sudo ./scripts/install.sh --dry-run    # print intended actions
-#   sudo ./scripts/install.sh --validate   # post-install check
-#   sudo ./scripts/install.sh --uninstall  # remove installed artifacts
+#   ./scripts/install.sh              # full user-space install (no sudo)
+#   ./scripts/install.sh --check      # preflight only (no changes)
+#   ./scripts/install.sh --dry-run    # print intended actions
+#   ./scripts/install.sh --validate   # post-install check
+#   ./scripts/install.sh --uninstall  # remove installed artifacts
+#   sudo ./scripts/install.sh --system # legacy system install path
+#   MPM_SYSTEM=1 ./scripts/install.sh # same as --system (env form)
 #
-# Environment overrides:
-#   PREFIX      Install prefix (default: /usr/local)
-#   DATA_ROOT   Runtime data root (default: /var/lib/mpm)
-#   USER_NAME   Target user (default: SUDO_USER or $USER)
+# Environment overrides (work in both user and system modes):
+#   PREFIX       Install prefix (default: $HOME/.local/bin or /usr/local)
+#   DATA_ROOT    Runtime data root (default: $HOME/.mpm or /var/lib/mpm)
+#   USER_NAME    Target user (default: current user)
 #
 # Idempotency:
 #   Re-running on an existing install detects the state and acts
 #   accordingly. It does NOT auto-delete data. Existing mpm binary at
 #   $PREFIX/bin/mpm is backed up before the wrapper overwrites it.
+#   Legacy system-service teardown is gated behind a confirmation
+#   prompt unless --yes is passed.
 #
 # Exit codes:
 #   0  success
@@ -43,18 +67,28 @@ set -euo pipefail
 readonly SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-readonly PREFIX="${PREFIX:-/usr/local}"
-readonly DATA_ROOT="${DATA_ROOT:-/var/lib/mpm}"
 readonly SERVICE_NAME="mpm-scheduler"
-readonly SERVICE_SRC="${PROJECT_ROOT}/contrib/systemd/${SERVICE_NAME}.service.system"
-readonly SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}.service"
-readonly USER_LEGACY_UNIT="${HOME}/.config/systemd/user/${SERVICE_NAME}.service"
+readonly LEGACY_SYSTEM_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+readonly LEGACY_DATA="/var/lib/mpm"
 readonly LOG_PREFIX="[mpm-install]"
+
+# ---------- mode resolution ----------
+# User mode = default. System mode = legacy /var/lib/mpm install path.
+# System mode is opt-in (--system flag OR MPM_SYSTEM=1) and requires root.
+USE_SYSTEM=0
+if [ "${MPM_SYSTEM:-0}" = "1" ]; then
+    USE_SYSTEM=1
+fi
 
 # ---------- mutable state (set by parse_args / preflight) ----------
 MODE="install"
 ASSUME_YES=0
-USER_NAME="${SUDO_USER:-${USER:-}}"
+USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
+
+# ---------- paths (depend on USE_SYSTEM; resolved after parse_args) ----------
+PREFIX=""
+DATA_ROOT=""
+SERVICE_DST=""
 
 # ---------- logging ----------
 log()  { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
@@ -66,35 +100,36 @@ note() { printf '\n%s ===== %s =====\n' "$LOG_PREFIX" "$*" >&2; }
 # ---------- helpers ----------
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        die "this script must run as root (use sudo). Try: sudo $SCRIPT_NAME"
+        die "this mode requires root (use sudo). Try: sudo $SCRIPT_NAME --system" 1
     fi
 }
 
 resolve_user_home() {
     if [ -z "$USER_NAME" ]; then
-        die "cannot determine target user (no SUDO_USER or USER env var)"
+        die "cannot determine target user" 1
     fi
     if ! id "$USER_NAME" >/dev/null 2>&1; then
-        die "user '$USER_NAME' does not exist"
+        die "user '$USER_NAME' does not exist" 1
+    fi
+}
+
+# Resolve PREFIX / DATA_ROOT / SERVICE_DST based on USE_SYSTEM.
+# Called after parse_args so --system flag has been processed.
+resolve_paths() {
+    if [ $USE_SYSTEM -eq 1 ]; then
+        PREFIX="${PREFIX:-/usr/local}"
+        DATA_ROOT="${DATA_ROOT:-/var/lib/mpm}"
+        SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}.service"
+    else
+        PREFIX="${PREFIX:-$HOME/.local/bin}"
+        DATA_ROOT="${DATA_ROOT:-$HOME/.mpm}"
+        SERVICE_DST="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
     fi
 }
 
 # ---------- detection ----------
-detect_encryption() {
-    # Returns: 'none', 'ecryptfs', 'luks', or 'unknown'
-    local home_mount
-    home_mount=$(findmnt -n -o FSTYPE /home 2>/dev/null || true)
-    case "$home_mount" in
-        ecryptfs) echo "ecryptfs" ;;
-        *crypt*)  echo "luks" ;;
-        "")       echo "none" ;;
-        *)        echo "none" ;;
-    esac
-}
-
 detect_os() {
     if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
         . /etc/os-release
         echo "${ID:-linux}"
     else
@@ -103,8 +138,8 @@ detect_os() {
 }
 
 detect_init_system() {
-    if [ "$(id -u)" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && \
-       [ -d /run/systemd/system ]; then
+    if command -v systemctl >/dev/null 2>&1 && \
+       ([ -d /run/systemd/system ] || [ -d /run/user/"$(id -u)"/systemd ]); then
         echo "systemd"
     else
         echo "none"
@@ -119,27 +154,101 @@ detect_openclaw() {
     fi
 }
 
+# ---------- legacy detection ----------
+# For alpha testers upgrading from the old /var/lib/mpm + system
+# systemd install. Detects:
+#   1. Old system unit at /etc/systemd/system/mpm-scheduler.service
+#   2. Old data at /var/lib/mpm
+# Both are non-fatal — we warn and let the operator decide. The
+# teardown of the old service is opt-in (prompts by default, auto
+# with --yes) because killing a running scheduler without explicit
+# consent is rude even when migrating to a replacement.
+detect_legacy() {
+    local legacy_unit_present=0 legacy_data_present=0
+    [ -f "$LEGACY_SYSTEM_UNIT" ] && legacy_unit_present=1
+    [ -f "$LEGACY_DATA/src/db/mpm.db" ] && legacy_data_present=1
+
+    if [ $legacy_unit_present -eq 1 ]; then
+        warn "════════════════════════════════════════════════════════════════"
+        warn "LEGACY SYSTEM-SERVICE DETECTED"
+        warn "  $LEGACY_SYSTEM_UNIT exists (from old /var/lib/mpm install)"
+        warn "  it polls the OLD database at $LEGACY_DATA and will keep"
+        warn "  running until you disable it. Running this new install"
+        warn "  alongside it = split-brain dual-scheduler scenario."
+        warn "════════════════════════════════════════════════════════════════"
+        if [ $ASSUME_YES -eq 1 ]; then
+            log "  --yes: auto-disabling legacy unit"
+            teardown_legacy_unit
+        else
+            local ans
+            printf '%s Disable and stop the legacy system service now? [y/N] ' "$LOG_PREFIX"
+            read -r ans
+            case "$ans" in
+                y|Y|yes|YES) teardown_legacy_unit ;;
+                *)            warn "  legacy service left running — you can disable it later with:" \
+                                   warn "    sudo systemctl disable --now $SERVICE_NAME" ;;
+            esac
+        fi
+    fi
+
+    if [ $legacy_data_present -eq 1 ]; then
+        warn "════════════════════════════════════════════════════════════════"
+        warn "LEGACY DATA DETECTED"
+        warn "  $LEGACY_DATA/src/db/mpm.db exists from an old install"
+        warn "  this new install creates a FRESH database at $DATA_ROOT"
+        warn "  if you want to preserve your old memories/decisions/theories,"
+        warn "  migrate manually before continuing:"
+        warn "    sudo systemctl stop $SERVICE_NAME"
+        warn "    sudo cp -a $LEGACY_DATA/src/db/mpm.db* $DATA_ROOT/src/db/"
+        warn "    sudo chown -R \$USER:\$USER $DATA_ROOT"
+        warn "    sudo systemctl start $SERVICE_NAME"
+        warn "════════════════════════════════════════════════════════════════"
+    fi
+}
+
+# teardown_legacy_unit disables and removes the old /etc/systemd/system/
+# unit. Requires root (the unit is owned by root). If we don't have
+# root, log loud and bail — operator can run sudo systemctl manually.
+teardown_legacy_unit() {
+    if [ "$(id -u)" -ne 0 ]; then
+        warn "  cannot disable legacy unit without root (it lives at $LEGACY_SYSTEM_UNIT)"
+        warn "  run: sudo systemctl disable --now $SERVICE_NAME"
+        warn "  then re-run this script"
+        return 0
+    fi
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log "  stopping legacy $SERVICE_NAME"
+        systemctl stop "$SERVICE_NAME" || warn "  stop failed (continuing)"
+    fi
+    if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        log "  disabling legacy $SERVICE_NAME"
+        systemctl disable "$SERVICE_NAME" || warn "  disable failed (continuing)"
+    fi
+    if [ -f "$LEGACY_SYSTEM_UNIT" ]; then
+        rm -f "$LEGACY_SYSTEM_UNIT"
+        log "  removed $LEGACY_SYSTEM_UNIT"
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+}
+
 # ---------- state inspection ----------
 inspect_existing_state() {
-    local has_data=0 has_service=0 has_binaries=0 has_wrapper=0 has_user_legacy=0
+    local has_data=0 has_service=0 has_binaries=0 has_wrapper=0 has_user_unit=0
     [ -f "$DATA_ROOT/src/db/mpm.db" ] && has_data=1
     [ -f "$SERVICE_DST" ] && has_service=1
     [ -x "$PREFIX/bin/mpm-scheduler" ] && has_binaries=1
     [ -f "$PREFIX/bin/mpm" ] && has_wrapper=1
-    [ -f "$USER_LEGACY_UNIT" ] && has_user_legacy=1
+    [ -f "$HOME/.config/systemd/user/${SERVICE_NAME}.service" ] && has_user_unit=1
 
+    log "install mode:    $([ $USE_SYSTEM -eq 1 ] && echo system || echo user)"
     log "existing install state:"
-    log "  data dir:   $([ -d "$DATA_ROOT" ] && echo present || echo absent)"
-    log "  database:   $([ $has_data -eq 1 ] && echo present || echo absent)"
-    log "  service:    $([ $has_service -eq 1 ] && echo installed || echo absent)"
-    log "  binaries:   $([ $has_binaries -eq 1 ] && echo present || echo absent)"
-    log "  mpm wrapper: $([ $has_wrapper -eq 1 ] && echo present || echo absent)"
-    log "  legacy user unit: $([ $has_user_legacy -eq 1 ] && echo present || echo absent)"
-
-    if [ $has_user_legacy -eq 1 ]; then
-        warn "legacy user-level unit found at $USER_LEGACY_UNIT"
-        warn "  it is superseded by the system unit but not removed automatically"
-        warn "  to remove: rm $USER_LEGACY_UNIT && systemctl --user daemon-reload"
+    log "  data dir:      $([ -d "$DATA_ROOT" ] && echo present || echo absent)"
+    log "  database:      $([ $has_data -eq 1 ] && echo present || echo absent)"
+    log "  service unit:  $([ $has_service -eq 1 ] && echo installed || echo absent)"
+    log "  binaries:      $([ $has_binaries -eq 1 ] && echo present || echo absent)"
+    log "  mpm wrapper:   $([ $has_wrapper -eq 1 ] && echo present || echo absent)"
+    if [ $USE_SYSTEM -eq 0 ]; then
+        log "  user unit:     $([ $has_user_unit -eq 1 ] && echo present || echo absent)"
     fi
 }
 
@@ -150,46 +259,42 @@ check_prereqs() {
     command -v systemctl >/dev/null 2>&1 || die "systemctl not found (systemd required)" 1
     [ -d "$PROJECT_ROOT" ] || die "project root not found: $PROJECT_ROOT" 1
     [ -f "$PROJECT_ROOT/Makefile" ] || die "Makefile not found in $PROJECT_ROOT" 1
-    [ -f "$SERVICE_SRC" ] || die "system unit template not found: $SERVICE_SRC" 1
-    log "  ✓ go:    $(command -v go)"
-    log "  ✓ systemd: present"
-    log "  ✓ project: $PROJECT_ROOT"
+    log "  ✓ go:       $(command -v go)"
+    log "  ✓ systemd:  present"
+    log "  ✓ project:  $PROJECT_ROOT"
 }
 
 preflight() {
     note "PREFLIGHT"
-    require_root
+    [ $USE_SYSTEM -eq 1 ] && require_root
     resolve_user_home
-    local home_dir
-    home_dir=$(getent passwd "$USER_NAME" | cut -d: -f6)
-    log "target user: $USER_NAME (home: $home_dir)"
-    log "project:     $PROJECT_ROOT"
-    log "prefix:      $PREFIX"
-    log "data root:   $DATA_ROOT"
+    log "target user:  $USER_NAME"
+    log "project:      $PROJECT_ROOT"
+    log "prefix:       $PREFIX"
+    log "data root:    $DATA_ROOT"
+
+    if [ $USE_SYSTEM -eq 0 ]; then
+        log "install mode: USER-SPACE (no sudo required)"
+        log "  systemd unit: $SERVICE_DST"
+    else
+        log "install mode: SYSTEM (legacy /var/lib/mpm path)"
+    fi
 
     local init_sys
     init_sys=$(detect_init_system)
-    log "init system: $init_sys"
+    log "init system:  $init_sys"
     [ "$init_sys" = "systemd" ] || die "systemd required (got: $init_sys)" 1
-
-    local encryption
-    encryption=$(detect_encryption)
-    log "home encryption: $encryption"
-    if [ "$encryption" != "none" ]; then
-        warn "home directory uses $encryption encryption"
-        warn "this install will use a system-level service + unencrypted /var/lib/mpm"
-        warn "a user-level service would silently fail on boot in this environment"
-    fi
 
     local os
     os=$(detect_os)
-    log "OS: $os (tested on Ubuntu 24.04)"
+    log "OS:           $os (tested on Ubuntu 24.04)"
 
     local openclaw
     openclaw=$(detect_openclaw)
-    log "openclaw: $openclaw"
+    log "openclaw:     $openclaw"
 
     check_prereqs
+    detect_legacy
     inspect_existing_state
     log "preflight ok"
 }
@@ -208,13 +313,11 @@ phase_build() {
 }
 
 # Backup any pre-existing binary at $1 if it's an ELF (not a wrapper).
-# Returns the backup path if backup was performed, empty otherwise.
 backup_raw_binary_if_present() {
     local target="$1"
     if [ ! -e "$target" ]; then
         return 0
     fi
-    # A wrapper script starts with '#!'. If it does, treat as already-installed.
     local first_bytes
     first_bytes=$(head -c 2 "$target" 2>/dev/null || true)
     if [ "$first_bytes" = "#!" ]; then
@@ -233,13 +336,13 @@ phase_binaries() {
     note "BINARIES"
     install -d -m 0755 "$PREFIX/bin"
 
-    # 3 daemon binaries (raw ELF, root-owned)
+    # 3 daemon binaries (raw ELF, owned by current user in user mode)
     for bin in mpm-scheduler mpm-critic mpm-mcp; do
         install -m 0755 "$PROJECT_ROOT/bin/$bin" "$PREFIX/bin/$bin"
         log "  installed $PREFIX/bin/$bin"
     done
 
-    # Real mpm binary (renamed to .real so the wrapper can claim /usr/local/bin/mpm)
+    # Real mpm binary (renamed to .real so the wrapper can claim the canonical name)
     install -m 0755 "$PROJECT_ROOT/bin/mpm" "$PREFIX/bin/mpm.real"
     log "  installed $PREFIX/bin/mpm.real"
 
@@ -250,7 +353,7 @@ phase_binaries() {
     cat > "$PREFIX/bin/mpm" <<WRAPPER
 #!/bin/sh
 # mpm CLI wrapper — installed by scripts/install.sh
-# Routes CLI to the system-wide workspace regardless of CWD.
+# Routes CLI to the per-user workspace regardless of CWD.
 exec env MPM_WORKSPACE=${DATA_ROOT} ${PREFIX}/bin/mpm.real "\$@"
 WRAPPER
     chmod 0755 "$PREFIX/bin/mpm"
@@ -259,9 +362,11 @@ WRAPPER
 
 phase_data_dir() {
     note "DATA DIRECTORY"
-    install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" \
-        "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
-    log "  created $DATA_ROOT/{src/db,backups/critic-pre} (owner: $USER_NAME)"
+    # Runtime perms enforced by the binary at startup (AssertUserDirPerms0700
+    # + TightenFilePerms0600). Here we just create the structure; the binary
+    # tightens perms before opening the DB.
+    install -d -m 0755 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
+    log "  created $DATA_ROOT/{src/db,backups/critic-pre}"
 
     if [ ! -f "$DATA_ROOT/src/db/mpm.db" ]; then
         log "  no database at $DATA_ROOT/src/db/mpm.db"
@@ -273,27 +378,71 @@ phase_data_dir() {
 
 phase_service() {
     note "SYSTEMD SERVICE"
-    install -m 0644 "$SERVICE_SRC" "$SERVICE_DST"
+    install -d -m 0755 "$(dirname "$SERVICE_DST")"
+
+    # Pick the right unit template (user vs system). Both templates
+    # exist in contrib/systemd/ for the alpha; the .user template is
+    # the canonical one going forward.
+    local service_src
+    if [ -f "${PROJECT_ROOT}/contrib/systemd/${SERVICE_NAME}.service.user" ]; then
+        service_src="${PROJECT_ROOT}/contrib/systemd/${SERVICE_NAME}.service.user"
+    else
+        service_src="${PROJECT_ROOT}/contrib/systemd/${SERVICE_NAME}.service.system"
+    fi
+
+    install -m 0644 "$service_src" "$SERVICE_DST"
     log "  installed $SERVICE_DST"
 
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-    log "  enabled $SERVICE_NAME"
-
-    # Restart (or start) and verify
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        systemctl restart "$SERVICE_NAME"
+    if [ $USE_SYSTEM -eq 1 ]; then
+        systemctl daemon-reload
+        systemctl enable "$SERVICE_NAME"
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            systemctl restart "$SERVICE_NAME"
+        else
+            systemctl start "$SERVICE_NAME"
+        fi
+        sleep 2
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log "  ✓ $SERVICE_NAME active (system)"
+        else
+            err "  ✗ $SERVICE_NAME failed to start"
+            err "  diagnostics: journalctl -u $SERVICE_NAME -n 20 --no-pager"
+            die "service failed to start" 4
+        fi
     else
-        systemctl start "$SERVICE_NAME"
-    fi
-    sleep 2
+        # User-space service. Two extra concerns vs system:
+        #   1. Need loginctl enable-linger so the user service survives
+        #      logout / session end (default user services die with the
+        #      session — fatal for a long-running scheduler).
+        #   2. systemctl --user needs XDG_RUNTIME_DIR; the env var may
+        #      need to be set explicitly for non-interactive shells.
+        local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        if [ ! -d "$runtime_dir" ]; then
+            warn "XDG_RUNTIME_DIR ($runtime_dir) not present"
+            warn "user systemd services may not start until you log in interactively"
+        fi
 
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        log "  ✓ $SERVICE_NAME active"
-    else
-        err "  ✗ $SERVICE_NAME failed to start"
-        err "  diagnostics: journalctl -u $SERVICE_NAME -n 20 --no-pager"
-        die "service failed to start" 4
+        log "  enabling user lingering (loginctl enable-linger)"
+        loginctl enable-linger "$USER_NAME" 2>/dev/null \
+            || warn "  loginctl enable-linger failed (the service will stop at logout)"
+
+        systemctl --user daemon-reload
+        systemctl --user enable "$SERVICE_NAME"
+        log "  enabled $SERVICE_NAME (user)"
+
+        if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            systemctl --user restart "$SERVICE_NAME"
+        else
+            systemctl --user start "$SERVICE_NAME"
+        fi
+        sleep 2
+        if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            log "  ✓ $SERVICE_NAME active (user)"
+        else
+            err "  ✗ $SERVICE_NAME failed to start"
+            err "  diagnostics: journalctl --user -u $SERVICE_NAME -n 20 --no-pager"
+            die "user service failed to start" 4
+        fi
     fi
 }
 
@@ -308,8 +457,9 @@ phase_host_integration() {
 
     log "openclaw detected — registering mpm MCP"
 
-    local mcp_json
-    mcp_json=$(cat <<JSON
+    if openclaw mcp list 2>/dev/null | grep -q -- '^- mpm$'; then
+        log "  mpm MCP exists — updating via 'set'"
+        openclaw mcp set mpm "$(cat <<JSON
 {
   "command": "$PREFIX/bin/mpm-mcp",
   "env": {
@@ -319,13 +469,7 @@ phase_host_integration() {
   }
 }
 JSON
-)
-
-    # Use 'set' to update existing registration, 'add' to create new.
-    # 'add' is a silent no-op on existing server, so check first.
-    if openclaw mcp list 2>/dev/null | grep -q -- '^- mpm$'; then
-        log "  mpm MCP exists — updating via 'set'"
-        openclaw mcp set mpm "$mcp_json"
+)"
     else
         log "  mpm MCP not registered — adding"
         openclaw mcp add mpm \
@@ -347,15 +491,24 @@ phase_validate() {
     note "VALIDATION"
     local errors=0
 
-    # 1. Service
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        log "  ✓ systemd service active"
+    # 1. Service (active under either user or system scope)
+    if [ $USE_SYSTEM -eq 1 ]; then
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log "  ✓ systemd service active (system scope)"
+        else
+            err "  ✗ systemd service NOT active (system scope)"
+            errors=$((errors + 1))
+        fi
     else
-        err "  ✗ systemd service NOT active"
-        errors=$((errors + 1))
+        if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            log "  ✓ systemd service active (user scope)"
+        else
+            err "  ✗ systemd service NOT active (user scope)"
+            errors=$((errors + 1))
+        fi
     fi
 
-    # 2. CLI wrapper
+    # 2. CLI wrapper (uses wrapper which sets MPM_WORKSPACE)
     if "$PREFIX/bin/mpm" call health_check --payload '{}' 2>/dev/null \
         | grep -q '"ok":true'; then
         log "  ✓ CLI wrapper functional (health_check ok)"
@@ -381,11 +534,6 @@ phase_validate() {
     fi
 
     # 5. Prime directives seeded (warn-only — install does not auto-seed)
-    # Directives are cognitive state, deliberately separate from
-    # infrastructure. Operators who want the baseline bootstrap run:
-    #   mpm ops init directives
-    # If neither baseline nor custom directives exist, the agent boots
-    # without cognitive bootstrap. Warn loudly so this is not silent.
     local directives_count=0
     local directives_json
     directives_json=$("$PREFIX/bin/mpm" call read_directives --payload '{}' 2>/dev/null \
@@ -417,10 +565,20 @@ mode_install() {
     phase_host_integration
     phase_validate
     note "INSTALL COMPLETE"
+    if [ $USE_SYSTEM -eq 1 ]; then
+        log "  Mode:       SYSTEM (legacy /var/lib/mpm)"
+    else
+        log "  Mode:       USER-SPACE"
+    fi
     log "  CLI:        $PREFIX/bin/mpm (wrapper) -> $PREFIX/bin/mpm.real"
-    log "  Daemon:     $(systemctl is-active $SERVICE_NAME) ($SERVICE_DST)"
+    if [ $USE_SYSTEM -eq 1 ]; then
+        log "  Daemon:     $(systemctl is-active $SERVICE_NAME) ($SERVICE_DST)"
+        log "  Logs:       journalctl -u $SERVICE_NAME -f"
+    else
+        log "  Daemon:     $(systemctl --user is-active $SERVICE_NAME) ($SERVICE_DST)"
+        log "  Logs:       journalctl --user -u $SERVICE_NAME -f"
+    fi
     log "  Data root:  $DATA_ROOT"
-    log "  Logs:       journalctl -u $SERVICE_NAME -f"
     log ""
     log "next steps (manual):"
     log "  mpm ops init directives   # seed prime directives (cognitive rules)"
@@ -445,9 +603,14 @@ mode_dry_run() {
     log "  install -m 0755 .../bin/mpm           -> $PREFIX/bin/mpm.real"
     log "  write wrapper $PREFIX/bin/mpm"
     log "  mkdir -p $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre"
-    log "  chown -R $USER_NAME:$USER_NAME $DATA_ROOT"
-    log "  install -m 0644 $SERVICE_SRC $SERVICE_DST"
-    log "  systemctl daemon-reload && enable --now $SERVICE_NAME"
+    if [ $USE_SYSTEM -eq 1 ]; then
+        log "  install -m 0644 .../contrib/systemd/${SERVICE_NAME}.service.system -> $SERVICE_DST"
+        log "  systemctl daemon-reload && enable --now $SERVICE_NAME"
+    else
+        log "  loginctl enable-linger $USER_NAME"
+        log "  install -m 0644 .../contrib/systemd/${SERVICE_NAME}.service.user -> $SERVICE_DST"
+        log "  systemctl --user daemon-reload && enable --now $SERVICE_NAME"
+    fi
     log "  openclaw mcp add/set mpm (if openclaw detected)"
     log "  validate via systemctl status + mpm health_check"
     log ""
@@ -455,24 +618,34 @@ mode_dry_run() {
 }
 
 mode_validate() {
-    # Validate doesn't require root, just read-only checks
     log "VALIDATE (read-only)"
-    if [ ! -f "$SERVICE_DST" ] && [ ! -f "$USER_LEGACY_UNIT" ]; then
-        die "no MPM service found — run install first" 5
+    if [ ! -f "$SERVICE_DST" ]; then
+        die "no MPM service found at $SERVICE_DST — run install first" 5
     fi
     phase_validate
 }
 
 mode_uninstall() {
     note "UNINSTALL"
-    log "this removes installed artifacts but PRESERVES /var/lib/mpm data"
+    log "this removes installed artifacts but PRESERVES $DATA_ROOT"
     log "to remove data too: rm -rf $DATA_ROOT (after this script completes)"
 
-    if [ -f "$SERVICE_DST" ]; then
-        systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-        rm -f "$SERVICE_DST"
-        systemctl daemon-reload
-        log "  removed $SERVICE_DST"
+    if [ $USE_SYSTEM -eq 1 ]; then
+        if [ -f "$SERVICE_DST" ]; then
+            [ "$(id -u)" -eq 0 ] && systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+            rm -f "$SERVICE_DST"
+            systemctl daemon-reload 2>/dev/null || true
+            log "  removed $SERVICE_DST"
+        fi
+    else
+        if [ -f "$SERVICE_DST" ]; then
+            systemctl --user disable --now "$SERVICE_NAME" 2>/dev/null || true
+            rm -f "$SERVICE_DST"
+            systemctl --user daemon-reload 2>/dev/null || true
+            log "  removed $SERVICE_DST"
+        fi
+        # Note: loginctl enable-linger is intentionally NOT undone —
+        # operator may have other user services that benefit.
     fi
 
     for bin in mpm mpm.real mpm-scheduler mpm-critic mpm-mcp; do
@@ -485,15 +658,15 @@ mode_uninstall() {
     log "uninstall complete"
     log "  source code at $PROJECT_ROOT is untouched"
     log "  data at $DATA_ROOT is preserved (remove manually if desired)"
-    log "  legacy user unit at $USER_LEGACY_UNIT is preserved (remove manually)"
+    log "  legacy system unit at $LEGACY_SYSTEM_UNIT is preserved (remove manually)"
 }
 
 # ---------- arg parsing ----------
 usage() {
     cat <<USAGE
-$SCRIPT_NAME — MPM full system install
+$SCRIPT_NAME — MPM install (user-space by default)
 
-Usage: sudo $SCRIPT_NAME [mode] [options]
+Usage: $SCRIPT_NAME [mode] [options]
 
 Modes (default: install):
   (default)       Full install: preflight, build, install binaries + service
@@ -503,18 +676,24 @@ Modes (default: install):
   --uninstall     Remove installed artifacts (data preserved)
 
 Options:
-  --prefix <path>   Install prefix (default: /usr/local)
-  --data-root <path> Runtime data root (default: /var/lib/mpm)
-  --user <name>     Target user (default: SUDO_USER)
-  --yes             Skip confirmation prompts
-  -h, --help        Show this help
+  --prefix <path>      Install prefix (user default: \$HOME/.local/bin;
+                        system default: /usr/local)
+  --data-root <path>   Runtime data root (user default: \$HOME/.mpm;
+                        system default: /var/lib/mpm)
+  --user <name>        Target user (default: current user)
+  --system             Use legacy /var/lib/mpm + system systemd install
+                        (requires root via sudo). Default is user-space.
+  --yes                Skip confirmation prompts (auto-disable legacy unit
+                        when detected, accept default DATA_ROOT, etc.)
+  -h, --help           Show this help
 
 Examples:
-  sudo $SCRIPT_NAME              # full install
-  sudo $SCRIPT_NAME --check      # environment check (no changes)
-  sudo $SCRIPT_NAME --dry-run    # show intended actions
-  sudo $SCRIPT_NAME --validate   # verify install
-  sudo $SCRIPT_NAME --uninstall  # remove install (data preserved)
+  $SCRIPT_NAME                  # full user-space install (no sudo)
+  $SCRIPT_NAME --check          # environment check (no changes)
+  $SCRIPT_NAME --dry-run        # show intended actions
+  $SCRIPT_NAME --validate       # verify install
+  $SCRIPT_NAME --uninstall      # remove install (data preserved)
+  sudo $SCRIPT_NAME --system    # legacy /var/lib/mpm + system service
 
 Exit codes:
   0  success
@@ -523,6 +702,13 @@ Exit codes:
   3  install failed
   4  service start failed
   5  validation failed
+
+Notes:
+  - The default (user-space) install requires no root.
+  - Legacy /var/lib/mpm + sudo installs are still supported via --system
+    for operators who genuinely need shared system state.
+  - On upgrade from a legacy install, the script detects the old system
+    unit and offers to disable it before installing the new user unit.
 USAGE
 }
 
@@ -533,6 +719,7 @@ parse_args() {
             --dry-run)      MODE="dry_run"; shift ;;
             --validate)     MODE="validate"; shift ;;
             --uninstall)    MODE="uninstall"; shift ;;
+            --system)       USE_SYSTEM=1; shift ;;
             --prefix)       PREFIX="$2"; shift 2 ;;
             --data-root)    DATA_ROOT="$2"; shift 2 ;;
             --user)         USER_NAME="$2"; shift 2 ;;
@@ -545,6 +732,7 @@ parse_args() {
 
 main() {
     parse_args "$@"
+    resolve_paths
 
     case "$MODE" in
         install)   mode_install ;;

@@ -3,10 +3,12 @@
 > **Audience:** both humans and agents. Prose explains *why*. Commands are the
 > *what*. Both finish the section with the same understanding.
 >
-> **TL;DR:** `sudo ./scripts/install.sh` — done.
+> **TL;DR:** `./scripts/install.sh` — done. No sudo required.
 
-Install the MPM cognitive substrate and wire it to your host. Result: a
-production-grade agent stack that survives reboots and encrypted home directories.
+Install the MPM cognitive substrate in your user context. Result: a
+production-grade agent stack with everything in `$HOME`, isolated from
+other users on the host, secured at 0700/0600 by the binary's startup
+gate.
 
 For background and design rationale, see [README.md](README.md).
 
@@ -14,12 +16,12 @@ For background and design rationale, see [README.md](README.md).
 
 ## Choose your install path
 
-| Path | Sudo? | Survives encrypted home? | Use when |
-|------|-------|--------------------------|----------|
-| **`sudo ./scripts/install.sh`** (recommended) | yes | yes | Default. Hosts with eCryptfs/LUKS, production use, anything that needs to outlive your login session |
-| Legacy user-level (`make service-scheduler`) | no | **no** | No-sudo environments, throwaway containers. Fails silently on encrypted home directories. |
+| Path | Sudo? | Data root | Use when |
+|------|-------|-----------|----------|
+| **`./scripts/install.sh`** (recommended) | no | `$HOME/.mpm` | Default. Multi-tenant hosts, personal machines, anything where state should be isolated to the operator. Linger enables the scheduler to survive logout. |
+| System mode (`sudo ./scripts/install.sh --system`) | yes | `/var/lib/mpm` | Dedicated headless VMs where shared system state is intentional. Uses a system systemd unit (no linger needed). |
 
-**Pick the first unless you have a specific reason not to.**
+**Pick the first unless you specifically need shared system state.**
 
 ---
 
@@ -27,68 +29,72 @@ For background and design rationale, see [README.md](README.md).
 
 | Requirement | Verify with | Pass criterion |
 |---|---|---|
-| Linux with systemd | `systemctl --version` | systemd ≥ 240 |
+| Linux with systemd (any user) | `systemctl --version` | systemd ≥ 240 |
 | Go 1.26+ | `go version` | version ≥ go1.26 |
 | Node.js (host tooling only) | `node -v` | version ≥ v22 |
 | LLM API key | configured in host config | auth block present |
-| sudo / root access | `sudo -n true` | exits 0 |
 
-The `enable-linger` step is **no longer required** — the recommended install
-uses a system-level service that boots with the machine, not with your login.
+`sudo` is **not required** for the default install. The system-mode
+install (`--system`) does require root; use it only when you specifically
+need a system-wide service.
 
 ---
 
-## 1. Recommended install: `sudo ./scripts/install.sh`
+## 1. Recommended install: `./scripts/install.sh`
 
-> **Why this is the default:** a single command that does the right thing on
-> every host. Handles encryption detection, idempotent re-runs, MCP registration,
-> and post-install validation. The script logs each phase and fails loudly on
-> any error.
+> **Why this is the default:** a single command, no sudo, runs entirely in
+> your user context. The script detects existing legacy system services and
+> offers to tear them down before installing the new user-space one. Handles
+> idempotent re-runs, MCP registration, lingering enable, and post-install
+> validation. The script logs each phase and fails loudly on any error.
 
 ### 1a. Clone and install
 
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
-sudo ./scripts/install.sh
+./scripts/install.sh
 ```
 
 What the script does, in order:
-1. **Preflight** — detects home encryption (warns if eCryptfs/LUKS), checks
-   sudo, Go, systemd, project layout
+1. **Preflight** — checks Go, systemd, project layout. Detects legacy
+   `/etc/systemd/system/mpm-scheduler.service` and offers to disable it
+   (avoids split-brain dual-scheduler scenario for upgrading testers).
+   Detects legacy data at `/var/lib/mpm/mpm.db` and warns about migration.
 2. **Build** — `make build` produces all four binaries
 3. **Binaries** — installs `mpm-scheduler`, `mpm-critic`, `mpm-mcp` to
-   `/usr/local/bin/`. Installs `mpm.real` and a workspace wrapper at
-   `/usr/local/bin/mpm`
-4. **Data directory** — creates `/var/lib/mpm/{src/db,backups/critic-pre}`,
-   owned by the invoking user
-5. **Systemd service** — installs `/etc/systemd/system/mpm-scheduler.service`,
-   enables and starts it
+   `$HOME/.local/bin/`. Installs `mpm.real` and a workspace wrapper at
+   `$HOME/.local/bin/mpm`
+4. **Data directory** — creates `$HOME/.mpm/{src/db,backups/critic-pre}`.
+   Runtime perms are tightened to 0700/0600 by the binary's startup gate
+5. **Systemd service (user)** — installs
+   `$HOME/.config/systemd/user/mpm-scheduler.service`, enables lingering
+   via `loginctl enable-linger`, enables and starts the service
 6. **Host integration** — if OpenClaw is detected, registers `mpm` MCP server
-   with `MPM_WORKSPACE=/var/lib/mpm` and restarts the gateway
-7. **Validation** — verifies service active, CLI health check passes, MCP
-   points at correct workspace
+   with `MPM_WORKSPACE=$HOME/.mpm` and restarts the gateway
+7. **Validation** — verifies service active (user scope), CLI health check
+   passes, MCP points at correct workspace
 
 ### 1b. Validate
 
 ```bash
-sudo ./scripts/install.sh --validate     # same checks the install script runs
+./scripts/install.sh --validate       # same checks the install script runs
 ```
 
 Or manually:
 
 ```bash
-systemctl status mpm-scheduler                       # expect: active
-/usr/local/bin/mpm call health_check --payload '{}'  # expect: "ok":true
-journalctl -u mpm-scheduler -n 20 --no-pager         # expect: "scheduler running"
+systemctl --user status mpm-scheduler                    # expect: active
+~/.local/bin/mpm call health_check --payload '{}'        # expect: "ok":true
+journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler running"
 ```
 
 ### 1c. Bootstrap cognitive state
 
 ```bash
-/usr/local/bin/mpm ops init directives    # seed prime directives (idempotent)
-/usr/local/bin/mpm status                # verify DB reachable
-/usr/local/bin/mpm call read_wake_context   # first agent tool call
+~/.local/bin/mpm ops init directives          # seed prime directives (idempotent)
+~/.local/bin/mpm status                      # verify DB reachable
+~/.local/bin/mpm call read_wake_context        # first agent tool call
 ```
 
 `ops init directives` is the *only* command that touches cognitive state during
@@ -99,54 +105,83 @@ into the database. Re-running is safe — local edits are preserved.
 
 | Mode | Purpose |
 |------|---------|
-| `(default)` | Full install |
+| `(default)` | Full install (user-space) |
 | `--check` | Preflight only — verify environment, no changes |
 | `--dry-run` | Print intended actions, no changes |
 | `--validate` | Post-install validation (read-only) |
-| `--uninstall` | Remove installed artifacts. Data at `/var/lib/mpm/` is preserved |
-| `--prefix <path>` | Override install prefix (default `/usr/local`) |
-| `--data-root <path>` | Override data root (default `/var/lib/mpm`) |
+| `--uninstall` | Remove installed artifacts. Data at `$HOME/.mpm/` is preserved |
+| `--system` | Use legacy `/var/lib/mpm` + system systemd (requires sudo) |
+| `--prefix <path>` | Override install prefix (default `$HOME/.local/bin`) |
+| `--data-root <path>` | Override data root (default `$HOME/.mpm`) |
+| `--user <name>` | Override target user (default: current user) |
+| `--yes` | Skip confirmation prompts (auto-disable legacy unit when detected) |
 
 ```bash
-sudo ./scripts/install.sh --check       # safe, no changes
-sudo ./scripts/install.sh --dry-run     # show what would happen
-sudo ./scripts/install.sh --uninstall   # remove artifacts (data preserved)
+./scripts/install.sh --check           # safe, no changes
+./scripts/install.sh --dry-run         # show what would happen
+./scripts/install.sh --uninstall       # remove artifacts (data preserved)
+sudo ./scripts/install.sh --system     # legacy /var/lib/mpm + system service
 ```
 
 ---
 
-## 2. Legacy / opt-in: user-level install
+## 2. Legacy / opt-in: system install (`--system`)
 
-> **Skip this section unless** you cannot use sudo (shared host, restricted
-> container) and you are NOT on an encrypted home directory.
+> **Skip this section unless** you specifically need shared system state —
+> for example, a dedicated headless VM running MPM under a service
+> account. For personal machines, multi-tenant hosts, and most alpha
+> use cases, the user-space install (Section 1) is correct.
 >
-> **Why this is opt-in:** systemd user services start at session/login via
-> `loginctl enable-linger`. On hosts with encrypted home (eCryptfs/LUKS),
-> `user@UID.service` starts at boot but cannot read binaries in
-> `/home/$USER/` until login + decrypt. The mpm-scheduler unit silently
-> fails to start and `Restart=on-failure` does not recover (the failure
-> is during initial `ExecStart`, not runtime).
+> **Why this is opt-in:** the system install puts MPM state at
+> `/var/lib/mpm` with root-owned systemd units. That's the right shape
+> for production servers but the wrong shape for personal / multi-tenant
+> use where state should be isolated to a single user. The alpha
+> baseline defaults to user-space for security reasons.
 >
-> See lesson `071911bc` in MPM for the full postmortem.
+> Operators who specifically need `/var/lib/mpm` (e.g., shared across
+> multiple service accounts on the same host) use this path.
 
-### 2a. User-level install (no sudo)
+### 2a. System install (requires sudo)
 
 ```bash
 cd ~/projects/mpm
-make build                              # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
-sudo make install                       # binaries to /usr/local/bin (sudo needed for system paths)
-sudo loginctl enable-linger $USER       # required for user-level autostart
-make service-scheduler                  # copies unit to ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now mpm-scheduler
+sudo ./scripts/install.sh --system
+```
+
+This is identical to the default install but:
+- Writes binaries to `/usr/local/bin/` (instead of `$HOME/.local/bin/`)
+- Creates `/var/lib/mpm/{src/db,backups/critic-pre}` (instead of `$HOME/.mpm/`)
+- Installs the system unit to `/etc/systemd/system/mpm-scheduler.service`
+- Uses plain `systemctl` (no `--user`)
+- Does NOT call `loginctl enable-linger` (not needed for system services)
+- Requires root at every step
+
+You can also pass `MPM_SYSTEM=1` instead of `--system`:
+
+```bash
+sudo MPM_SYSTEM=1 ./scripts/install.sh
 ```
 
 ### 2b. Validate
 
 ```bash
-systemctl --user is-active mpm-scheduler    # expect: active
-loginctl show-user $USER --property=Linger  # expect: Linger=yes
+sudo ./scripts/install.sh --validate       # re-run from any mode
 ```
+
+Or manually:
+
+```bash
+sudo systemctl status mpm-scheduler                       # expect: active
+sudo /usr/local/bin/mpm call health_check --payload '{}'  # expect: "ok":true
+sudo journalctl -u mpm-scheduler -n 20 --no-pager         # expect: "scheduler running"
+```
+
+**Migrating from system to user-space** (you've decided the system
+install was wrong): uninstall first (`sudo ./scripts/install.sh --uninstall`),
+then run the default install (`./scripts/install.sh`) which copies
+data over (it does NOT — see Section 4 for the manual migration recipe).
+The default install's preflight detects the legacy system unit and
+offers to tear it down before proceeding.
 
 ### 2c. Override paths
 
