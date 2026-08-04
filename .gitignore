@@ -77,3 +77,4 @@ backups/
 # in-flight refactors — the git log narrates the outcome, not the plan.
 # Keep the dir local; regenerate per refactor as needed.
 docs/superpowers/
+active.json
