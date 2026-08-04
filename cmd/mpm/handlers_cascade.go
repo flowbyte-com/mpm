@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/usererror"
@@ -35,6 +36,8 @@ func handleCascade(args []string) int {
 		return 0
 	case "materialize":
 		return handleCascadeMaterialize(args[2:])
+	case "list-dead-letters":
+		return handleListDeadLetters(args[2:])
 	default:
 		usererror.Error("Unknown cascade subcommand: %s", subcommand)
 		printCascadeHelp()
@@ -48,7 +51,8 @@ func printCascadeHelp() {
 Usage: mpm cascade <subcommand> [flags]
 
 Subcommands:
-    materialize     Materialize pending cascade intents into theories
+    materialize        Materialize pending cascade intents into theories
+    list-dead-letters  List failed (dead-letter) cascade intents
 
 Flags for materialize:
     --once              Run one batch and exit
@@ -183,4 +187,92 @@ func processingCount() int {
 	var n int
 	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n)
 	return n
+}
+
+// handleListDeadLetters runs `mpm cascade list-dead-letters`.
+// It queries the outbox for status='failed' rows and prints them.
+func handleListDeadLetters(args []string) int {
+	dm := getDB()
+	if dm == nil {
+		usererror.Error("database not available")
+		return 1
+	}
+
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
+		       downstream_artifact_id, downstream_artifact_type,
+		       cascade_depth, reason, status, terminal_error,
+		       attempt_count, created_at, updated_at
+		FROM epistemic_cascade_outbox
+		WHERE status = 'failed'
+		ORDER BY updated_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		usererror.Error("query dead-letter intents: %v", err)
+		return 1
+	}
+	defer rows.Close()
+
+	count := 0
+	fmt.Println("CASCADE DEAD-LETTER INTENTS (status=failed)")
+	fmt.Println(strings.Repeat("-", 120))
+
+	header := fmt.Sprintf("%-36s %-10s %-10s %-12s %-12s %-6s %-8s %s",
+		"ID", "EVENT_ID", "DEAD_TYPE", "DOWN_TYPE", "DOWN_ID", "DEPTH", "ATTEMPTS", "TERMINAL_ERROR")
+	fmt.Println(header)
+	fmt.Println(strings.Repeat("-", 120))
+
+	for rows.Next() {
+		var (
+			id, eventID, deadArtifactID, deadArtifactType string
+			downstreamArtifactID, downstreamArtifactType  string
+			cascadeDepth                                  int
+			reason, status, terminalError                string
+			attemptCount                                 int
+			createdAt, updatedAt                         int64
+		)
+		if err := rows.Scan(&id, &eventID, &deadArtifactID, &deadArtifactType,
+			&downstreamArtifactID, &downstreamArtifactType,
+			&cascadeDepth, &reason, &status, &terminalError,
+			&attemptCount, &createdAt, &updatedAt); err != nil {
+			usererror.Error("scan dead-letter row: %v", err)
+			return 1
+		}
+		createdTime := time.Unix(createdAt, 0).UTC().Format(time.RFC3339)
+		updatedTime := time.Unix(updatedAt, 0).UTC().Format(time.RFC3339)
+		shortID := id
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		shortDown := downstreamArtifactID
+		if len(shortDown) > 10 {
+			shortDown = shortDown[:10]
+		}
+		fmt.Printf("%-36s %-10s %-10s %-12s %-12s %-6d %-8d %s\n",
+			shortID, eventID[:8], deadArtifactType, downstreamArtifactType,
+			shortDown, cascadeDepth, attemptCount, terminalError)
+		_ = createdTime
+		_ = updatedTime
+		_ = reason
+		_ = status
+		count++
+	}
+
+	if count == 0 {
+		fmt.Println("No dead-letter intents (status=failed).")
+	} else {
+		fmt.Printf("\nTotal dead-letter intents: %d\n", count)
+	}
+
+	// Also print a summary of all non-pending states.
+	var pending, processing, materialized, failed int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&pending)
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&processing)
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(&materialized)
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(&failed)
+
+	fmt.Printf("\nOutbox summary — pending=%d processing=%d materialized=%d failed=%d\n",
+		pending, processing, materialized, failed)
+	return 0
 }
