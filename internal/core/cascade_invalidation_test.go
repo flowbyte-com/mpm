@@ -231,9 +231,20 @@ func TestInvalidation_RepeatedDisproveDoesNotReEnqueue(t *testing.T) {
 // ── Shred invalidation path ─────────────────────────────────────────────────
 
 // TestInvalidation_ShredMemoryEnqueuesIntents pins the memory-path
-// shred wrapper: a memory that a downstream decision/theory depends on
-// must produce one cascade intent per dependent when shredded via
-// ShredMemoryWithCascade.
+// shred wrapper: a memory that two distinct downstream reasoning
+// artifacts depend on must produce exactly one cascade intent per
+// dependent when shredded via ShredMemoryWithCascade.
+//
+// Setup: foundation memory M, theory T (depends on M via both
+// `dependencies` JSON and `source_ids`), and decision D (cites M
+// directly via `source_ids`). When M is shredded, the cascade
+// discovery surfaces BOTH T and D — T via both dependency
+// surfaces (deduped), D via its source_id citation — yielding
+// exactly two outbox intents. The tight Equal(2) catches a
+// partial failure where one discovery path silently regresses
+// (e.g., a future patch breaks the dependencies JSON scan but
+// the provenance scan still works; an Equal(2) assertion fails
+// the test rather than passing with a count of 1).
 func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 	dm := hermeticDatabaseManager(t)
 
@@ -244,7 +255,10 @@ func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Theory depends on memID.
+	// Theory T depends on M (both via dependencies JSON AND via
+	// source_ids — both discovery paths surface T, but the
+	// discovery helper dedupes by artifact_id so T counts as
+	// one target).
 	res, err := dm.ProposeTheory(
 		"T depends on M",
 		"validation",
@@ -253,11 +267,13 @@ func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 		[]string{"cascade-test"},
 	)
 	require.NoError(t, err)
-	theoryID, _ := res["id"].(string)
+	_, _ = res["id"]
 
-	// Decision cites the theory.
+	// Decision D cites M directly via source_ids (no dependencies
+	// JSON edge — a different downstream reasoning artifact than
+	// T, surfaced via a different discovery path).
 	_, err = dm.RecordDecision("ctx", "choice", "rationale", "",
-		[]string{"cascade-test"}, []string{theoryID}, ActiveContext{})
+		[]string{"cascade-test"}, []string{memID}, ActiveContext{})
 	require.NoError(t, err)
 
 	// Sanity: no intents yet.
@@ -269,14 +285,25 @@ func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 	require.NotNil(t, shredResult)
 	assert.True(t, shredResult["success"].(bool))
 
-	// Post-condition: at least one intent exists targeting downstream
-	// reasoning artifacts (the decision and/or the theory). The exact
-	// count depends on whether the theory was also cascade-purged by
-	// ShredMemoryWithCascade (it isn't — only the memory's challenged
-	// theory is purged, and this memory didn't challenge any).
+	// Post-condition: exactly two intents exist — one targeting T
+	// (theory), one targeting D (decision). The dedup key on
+	// (dead, downstream, event) collapses any duplicates within
+	// the same invalidation event.
 	rows := outboxRowsFor(t, dm, memID)
-	assert.GreaterOrEqual(t, len(rows), 1,
-		"shred should enqueue at least one cascade intent for downstream dependents")
+	assert.Equal(t, 2, len(rows),
+		"shred should enqueue exactly one cascade intent per downstream dependent (theory + decision)")
+
+	// Verify both downstream types are represented.
+	types := map[string]int{}
+	for _, id := range rows {
+		var downType string
+		require.NoError(t, dm.db.QueryRow(
+			`SELECT downstream_artifact_type FROM epistemic_cascade_outbox WHERE id = ?`, id,
+		).Scan(&downType))
+		types[downType]++
+	}
+	assert.Equal(t, 1, types["theory"], "one intent for the dependent theory")
+	assert.Equal(t, 1, types["decision"], "one intent for the dependent decision")
 
 	// Verify the dead artifact type is "memory".
 	var deadType string

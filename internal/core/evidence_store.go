@@ -243,6 +243,13 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 // RecomputeConfidence uses this to distinguish "never had confidence"
 // (treat as above threshold) from "had confidence and crossed".
 func readArtifactConfidence(node DBNode, artifactID, artifactType string) (float64, bool) {
+	// Table identifier is constrained by this switch — not user-
+	// controllable. artifactType is one of the hardcoded values
+	// ("memory", "decision", "theory", "lesson") that the cascade
+	// materializer accepts; the `fmt.Sprintf` below is safe because
+	// the table name is one of two constants. Mirrors ArtifactTable
+	// in artifact_table.go; keeping both in lockstep is enforced by
+	// the canonical-schema allow-list in canonical_dump.go.
 	var table string
 	switch artifactType {
 	case "lesson":

@@ -529,53 +529,17 @@ func (dm *DatabaseManager) ListPendingCascadeIntents(limit int) ([]CascadeIntent
 // returned ProvenanceTarget list is ordered by artifact_id ASC for
 // deterministic test output.
 //
-// This is a DM-level helper (not transactional). The caller passes
-// the result into EnqueueCascadeIntents inside their existing
-// transaction. A discovery read outside the cascade transaction is
-// safe because the dependency graph is append-only within a single
-// invalidation cycle — no new decisions or theories are minted
-// between the discovery step and the enqueue step inside the same
-// invalidation hook.
-//
-// Why this lives in cascade_outbox.go (rather than cascade_provenance.go):
-// the helper is part of the cascade enqueue flow's plumbing. Keeping
-// it next to EnqueueCascadeIntents makes the data flow obvious to
-// future readers: discover → enqueue → list → materialize.
-// discoverCascadeTargets returns the deduplicated list of downstream
-// artifacts that depend on the supplied dead ID. The discovery path
-// unions two edge sources, per the design spec:
-//
-//  1. Explicit `memories.dependencies` JSON — forward dependencies
-//     declared when a theory is created (see ProposeTheory).
-//  2. Typed `epistemic_provenance` rows — retrieval-time citations
-//     recorded when a decision or theory was surfaced (see
-//     RecordProvenance / recordProvenanceNode).
-//
-// A downstream artifact reachable through BOTH paths surfaces exactly
-// once in the result. Only artifacts of type decision or theory are
-// eligible; lessons and global rules are explicitly excluded. The
-// returned ProvenanceTarget list is ordered by artifact_id ASC for
-// deterministic test output.
-//
-// This is a DM-level helper (not transactional). The caller passes
-// the result into EnqueueCascadeIntents inside their existing
-// transaction. A discovery read outside the cascade transaction is
-// safe because the dependency graph is append-only within a single
-// invalidation cycle — no new decisions or theories are minted
-// between the discovery step and the enqueue step inside the same
-// invalidation hook.
-//
 // Why this lives in cascade_outbox.go (rather than cascade_provenance.go):
 // the helper is part of the cascade enqueue flow's plumbing. Keeping
 // it next to EnqueueCascadeIntents makes the data flow obvious to
 // future readers: discover → enqueue → list → materialize.
 //
 // tx parameter: when non-nil, both edge paths read through the
-// supplied *sql.Tx (no second connection, observes in-flight state
-// for shared propagation). When nil, falls through to dm.db.Query
-// for the standalone path. The cascade invalidation hook
-// (EnqueueCascadeInvalidation) always passes its tx; tests calling
-// the helper directly from outside a tx pass nil.
+// supplied *sql.Tx (same connection as the caller's tx; observes
+// in-flight state for shared propagation). When nil, falls through
+// to dm.db.Query for the standalone path. The cascade invalidation
+// hook (EnqueueCascadeInvalidation) always passes its tx; tests
+// calling the helper directly from outside a tx pass nil.
 func (dm *DatabaseManager) discoverCascadeTargets(tx *sql.Tx, deadArtifactID string) ([]ProvenanceTarget, error) {
 	out := make([]ProvenanceTarget, 0)
 	if deadArtifactID == "" {
@@ -687,31 +651,20 @@ func isEligibleCascadeType(typ string) bool {
 //
 // Sequence:
 //
-//  1. Capture an evidence snapshot for the dead artifact (read
-//     through the supplied *sql.Tx so the snapshot is consistent with
-//     the root mutation). The snapshot is forensic-only — recorded
-//     for the audit trail and future cross-checking — and does not
-//     gate the enqueue. The cascade materializer re-reads the
-//     evidence at materialization time.
-//
-//  2. Mint a stable invalidation event ID via CreateInvalidationEvent.
+//  1. Mint a stable invalidation event ID via CreateInvalidationEvent.
 //     The ID is what the cascade materializer uses to trace causally
 //     across the outbox — every intent for one invalidation carries
 //     the same event ID.
 //
-//  3. Discover the downstream targets via discoverCascadeTargets.
-//     The helper reads through dm.db (the shared pool, NOT the
-//     supplied *sql.Tx) because the dependency graph is append-only
-//     within a single invalidation cycle — no new decisions or
-//     theories are minted between the discovery step and the enqueue
-//     step inside the same invalidation hook. Reading from dm.db
-//     avoids opening a second connection, per the brief's "without
-//     opening a second connection" requirement. The reads observe
-//     rows that were committed BEFORE the invalidating transaction
-//     started, which is exactly what we need: downstream artifacts
-//     that DEPEND on the (about-to-be-invalidated) root.
+//  2. Discover the downstream targets via discoverCascadeTargets,
+//     passing the supplied *sql.Tx. The helper reads through the
+//     supplied tx (NOT dm.db) to avoid SQLite's table-locked
+//     isolation deadlock while the invalidating transaction is
+//     open. The brief's "without opening a second connection"
+//     requirement is met because the read lands on the same
+//     *sql.Tx the caller already owns.
 //
-//  4. Enqueue the cascade intents via EnqueueCascadeIntents, all
+//  3. Enqueue the cascade intents via EnqueueCascadeIntents, all
 //     inside the supplied *sql.Tx. If the enqueue fails, the
 //     caller's tx rolls back, the root mutation never commits, and
 //     the substrate never sees a "the memory is gone but no cascade
@@ -749,31 +702,14 @@ func (dm *DatabaseManager) EnqueueCascadeInvalidation(
 		return 0, fmt.Errorf("EnqueueCascadeInvalidation: deadArtifactType is required")
 	}
 
-	// Step 1: evidence snapshot. Read through the supplied tx so the
-	// snapshot reflects the artifact's evidence set at invalidation
-	// time (post any in-flight evidence changes the caller might
-	// have applied). Best-effort: the snapshot is forensic, so a
-	// read failure here MUST surface as a tx error so the caller
-	// can roll back the root mutation. The cascade materializer
-	// reads evidence again at materialization time, so a missed
-	// snapshot just means less forensic detail.
-	if _, err := tx.Exec(`
-		SELECT 1
-		FROM evidence
-		WHERE artifact_id = ? AND artifact_type = ?
-		LIMIT 1
-	`, deadArtifactID, deadArtifactType); err != nil {
-		return 0, fmt.Errorf("EnqueueCascadeInvalidation: evidence snapshot: %w", err)
-	}
-
-	// Step 2: mint the event ID via the existing helper. Validation
+	// Step 1: mint the event ID via the existing helper. Validation
 	// of deadArtifactID / deadArtifactType / depth happens there.
 	eventID, err := dm.CreateInvalidationEvent(tx, deadArtifactID, deadArtifactType, triggerEvidenceID, reason, depth)
 	if err != nil {
 		return 0, fmt.Errorf("EnqueueCascadeInvalidation: create event: %w", err)
 	}
 
-	// Step 3: discover downstream targets. discoverCascadeTargets
+	// Step 2: discover downstream targets. discoverCascadeTargets
 	// reads through the supplied tx (NOT dm.db) because SQLite's
 	// default isolation holds an exclusive lock on the memories
 	// table while the tx is open; reading from dm.db would
