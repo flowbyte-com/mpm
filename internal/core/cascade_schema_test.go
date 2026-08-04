@@ -11,17 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cascadeSchemaTestStore centralizes the new-schema test fixture so each test
-// can stand on its own fresh database without rebuilding the boilerplate.
-func cascadeSchemaTestStore(t *testing.T) *MemoryStore {
-	t.Helper()
-	tmpDir := t.TempDir()
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = filepath.Join(tmpDir, "test.db")
-	require.NoError(t, store.InitSQLite())
-	return store
-}
-
 // tableExists returns whether the named table is present in the (main) schema.
 // A PRAGMA on an unknown table returns zero rows rather than erroring, so we
 // just count.
@@ -42,26 +31,40 @@ func indexExists(t *testing.T, db *sql.DB, name string) bool {
 	return n > 0
 }
 
-// columnNamesOnTable returns the column names of a table.
-func columnNamesOnTable(t *testing.T, db *sql.DB, name string) []string {
+// sharedIndexExists returns whether the named index exists in the `shared`
+// schema of an attached shared DB. We must query through the same *sql.DB
+// that ran the ATTACH — opening a separate connection would not see the
+// attached schema.
+func sharedIndexExists(t *testing.T, dm *DatabaseManager, name string) bool {
 	t.Helper()
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", name))
-	require.NoError(t, err)
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var cid, cname, ctype string
-		var notnull, pk int
-		// dflt_value is the only column whose Go target type matters here;
-		// TEXT-default columns (e.g. status='pending') come back as
-		// strings, INTEGER-default columns as int64, and undefaulted
-		// columns as NULL. Use sql.NullString so the scan never trips on
-		// the NULL case.
-		var dflt sql.NullString
-		require.NoError(t, rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk))
-		out = append(out, cname)
-	}
-	return out
+	var n int
+	row := dm.db.QueryRow(
+		"SELECT COUNT(*) FROM shared.sqlite_master WHERE type = 'index' AND name = ?",
+		name,
+	)
+	require.NoError(t, row.Scan(&n))
+	return n > 0
+}
+
+// hermeticDatabaseManager opens a DatabaseManager rooted at t.TempDir() so
+// the test cannot touch the real production DB under $MPM_WORKSPACE. The
+// shared DB (when opted into) lives in the same temp dir; NewDatabaseManager
+// falls through to GetMPMDir which honours MPM_WORKSPACE.
+//
+// MPM_WORKSPACE has three purposes here:
+//  1. Stop the production /home/v/.openclaw/.../mpm.db from being migrated.
+//  2. Keep every artifact (DB file, watchdog.jsonl, mirror.jsonl) inside
+//     the test's t.TempDir, so cleanup is automatic.
+//  3. Match the contract other hermetic tests (config_workspace_test.go)
+//     already establish.
+func hermeticDatabaseManager(t *testing.T) *DatabaseManager {
+	t.Helper()
+	workspace := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", workspace)
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err, "NewDatabaseManager(%q)", workspace)
+	t.Cleanup(func() { dm.Close() })
+	return dm
 }
 
 // TestSchema_EpistemicCascadeOutboxTable asserts that the canonical schema
@@ -72,13 +75,13 @@ func columnNamesOnTable(t *testing.T, db *sql.DB, name string) []string {
 // from BaseTables, renames a column, or forgets to ship the migration. All
 // of those are silent until the materializer hits a SQL error at runtime.
 func TestSchema_EpistemicCascadeOutboxTable(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	require.True(t, tableExists(t, store.DB.DB, "epistemic_cascade_outbox"),
 		"epistemic_cascade_outbox table must exist after initUnifiedSchema")
 
-	cols := columnNamesOnTable(t, store.DB.DB, "epistemic_cascade_outbox")
+	cols := getTableColumns(t, store.DB.DB, "epistemic_cascade_outbox")
 	required := []string{
 		"id",
 		"invalidation_event_id",
@@ -106,13 +109,13 @@ func TestSchema_EpistemicCascadeOutboxTable(t *testing.T) {
 // the provenance citation table with the columns required by the design
 // (typed source/downstream IDs, event ID, and timestamps).
 func TestSchema_EpistemicProvenanceTable(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	require.True(t, tableExists(t, store.DB.DB, "epistemic_provenance"),
 		"epistemic_provenance table must exist after initUnifiedSchema")
 
-	cols := columnNamesOnTable(t, store.DB.DB, "epistemic_provenance")
+	cols := getTableColumns(t, store.DB.DB, "epistemic_provenance")
 	required := []string{
 		"id",
 		"source_id",
@@ -136,7 +139,7 @@ func TestSchema_EpistemicProvenanceTable(t *testing.T) {
 // status='failed'. Without the CHECK, a typo silently creates rows that
 // the worker will never pick up.
 func TestSchema_CascadeOutboxStatusCheck(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	// Insert a row with a clearly-invalid status. The CHECK must reject it.
@@ -172,7 +175,7 @@ func TestSchema_CascadeOutboxStatusCheck(t *testing.T) {
 // Two intents with the same triple must be rejected; a re-managed intent
 // (different ID, same triple) must collapse into one row.
 func TestSchema_CascadeOutboxUniqueKey(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	// First row with the canonical triple.
@@ -216,75 +219,12 @@ func TestSchema_CascadeOutboxUniqueKey(t *testing.T) {
 	require.NoError(t, err, "different invalidation_event_id must be accepted")
 }
 
-// TestSchema_CascadeOutboxIndexes asserts the indexes required by the two
-// hot-path reads described in the design: invalidation lookup (by event
-// id) and worker claim (by status + next_retry_at).
-//
-// Materializer hot path: "find pending or reclaimable rows ordered by next_retry_at".
-// Invalidation-trace path: "find all intents stemming from a given event_id".
-func TestSchema_CascadeOutboxIndexes(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
-	defer store.DB.Close()
-
-	// We don't pin the exact index names — that is an internal detail the
-	// implementation can evolve. Instead, exercise the query plans and
-	// assert the EXPLAIN QUERY PLAN reports an index-driven scan rather
-	// than a full table scan.
-	// Use literal values instead of placeholders so EXPLAIN QUERY PLAN
-	// runs without parameter binding (the test only cares about plan
-	// shape, not values).
-	checks := []struct {
-		filter string
-		column string
-	}{
-		{"WHERE invalidation_event_id = 'evt-1'", "invalidation_event_id"},
-		{"WHERE dead_artifact_id = 'dead-A'", "dead_artifact_id"},
-		{"WHERE status = 'pending'", "status"},
-		{"WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= 1000)", "status"},
-	}
-
-	for _, c := range checks {
-		plan := func() string {
-			rows, err := store.DB.DB.Query(
-				"EXPLAIN QUERY PLAN SELECT id FROM epistemic_cascade_outbox " + c.filter,
-			)
-			if err != nil {
-				return ""
-			}
-			defer rows.Close()
-			var sb strings.Builder
-			for rows.Next() {
-				var id, parent, notused int
-				var detail string
-				if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-					return ""
-				}
-				sb.WriteString(detail)
-				sb.WriteString("\n")
-			}
-			return sb.String()
-		}()
-
-		// Empty plan means the table itself is missing — the test before
-		// this one would already fail; bail with a clear assertion.
-		if plan == "" {
-			t.Fatalf("no plan returned for filter %q (table missing?)", c.filter)
-		}
-		// Look for either a USING INDEX clause on the requested column or
-		// an AUTO-COVERING index scan. SQLite's plan vocabulary for
-		// index-driven reads is "USING INDEX <name>".
-		hasIndex := strings.Contains(plan, "USING INDEX") || strings.Contains(plan, "USING ROWID")
-		assert.Truef(t, hasIndex,
-			"filter %q should use an index, plan: %s", c.filter, plan)
-	}
-}
-
 // TestSchema_CascadeOutboxIndexesPresent asserts the named indexes are
 // explicitly present (idempotent naming gives the audit trail in
 // sqlite_master). Names follow the idx_<table>_<columns> convention used
 // elsewhere in the schema.
 func TestSchema_CascadeOutboxIndexesPresent(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	required := []string{
@@ -298,11 +238,11 @@ func TestSchema_CascadeOutboxIndexesPresent(t *testing.T) {
 	}
 }
 
-// TestSchema_EpistemicProvenanceIndexes asserts the indexes required by
+// TestSchema_EpistemicProvenanceIndexesPresent asserts the indexes required by
 // the provenance lookup paths: source_id (for dependency discovery) and
 // downstream_id (for reverse lookups).
 func TestSchema_EpistemicProvenanceIndexesPresent(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	required := []string{
@@ -320,7 +260,7 @@ func TestSchema_EpistemicProvenanceIndexesPresent(t *testing.T) {
 // the codebase-wide convention set by the timestamps_unified_v1 migration
 // (see MigrationTimestamps in schema documentation).
 func TestSchema_CascadeTablesTimestampsAreInteger(t *testing.T) {
-	store := cascadeSchemaTestStore(t)
+	store := newTestStore(t)
 	defer store.DB.Close()
 
 	for _, c := range []struct{ table, column string }{
@@ -335,10 +275,6 @@ func TestSchema_CascadeTablesTimestampsAreInteger(t *testing.T) {
 		for rows.Next() {
 			var cid, cname, ctype string
 			var notnull, pk int
-			// dflt_value can be NULL for non-defaulted columns; use
-			// sql.NullString so the scan never trips on a NULL
-			// (mattn/go-sqlite3 returns NULL as the underlying type
-			// rather than a Go nil).
 			var dflt sql.NullString
 			require.NoError(t, rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk))
 			if cname != c.column {
@@ -354,22 +290,11 @@ func TestSchema_CascadeTablesTimestampsAreInteger(t *testing.T) {
 }
 
 // TestSchema_CascadeTablesIdempotentInit verifies that running
-// DatabaseManager init twice on the same database does not error and
-// does not duplicate tables/indexes. This is the property that makes the
+// DatabaseManager init twice on the same database does not error and does
+// not duplicate tables/indexes. This is the property that makes the
 // post-upgrade migration safe to re-run on every boot.
 func TestSchema_CascadeTablesIdempotentInit(t *testing.T) {
-	// Build a fresh DatabaseManager on a tmp DB so we can call the
-	// exported InitSchema twice. (MemoryStore.InitSQLite bypasses the
-	// DatabaseManager path; the idempotent guarantee we care about is
-	// the DatabaseManager one, since it is the production boot path.)
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	sqlDB, err := sql.Open("sqlite3", dbPath)
-	require.NoError(t, err)
-	defer sqlDB.Close()
-
-	dm := NewDatabaseManagerForDB(sqlDB)
-	require.NoError(t, dm.InitSchema(), "first init must succeed")
+	dm := hermeticDatabaseManager(t)
 
 	// Second init must be a clean no-op (CREATE TABLE IF NOT EXISTS,
 	// CREATE INDEX IF NOT EXISTS, SafeMigrations skip-on-duplicate).
@@ -378,9 +303,96 @@ func TestSchema_CascadeTablesIdempotentInit(t *testing.T) {
 
 	// The tables still exist.
 	for _, table := range []string{"epistemic_cascade_outbox", "epistemic_provenance"} {
-		assert.True(t, tableExists(t, sqlDB, table),
+		assert.True(t, tableExists(t, dm.db, table),
 			"%s must still exist after second init", table)
 	}
+}
+
+// TestSchema_CascadeTablesUpgradeFromPreCascadeSchema is the real
+// upgrade-path test for this task: a database that pre-dates the
+// cascade feature (no epistemic_* tables, no cascade indexes) is
+// upgraded by re-running InitSchema, and is left with the cascade
+// tables and indexes in place.
+//
+// Why this matters: TestSchema_CascadeTablesIdempotentInit is the
+// re-run-with-no-change case. It would pass even if the schema were
+// unconditionally CREATE TABLE (no IF NOT EXISTS guard), because the
+// existing tables would already be there from a prior call. The
+// pre-cascade-schema fixture is what proves the IF NOT EXISTS path
+// actually applies — no rows to migrate, just CREATE TABLE /
+// CREATE INDEX IF NOT EXISTS firing on first call after the upgrade.
+func TestSchema_CascadeTablesUpgradeFromPreCascadeSchema(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "pre-cascade.db")
+	sqlDB, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	// Build a pre-cascade schema: every BaseTables statement EXCEPT
+	// the cascade tables and cascade indexes. This is the shape a
+	// database would have had before the 2026-08-04 schema flip.
+	for _, ddl := range preCascadeBaseTables() {
+		_, err := sqlDB.Exec(ddl)
+		require.NoError(t, err, "pre-cascade DDL (first 80 chars): %s", truncateDDL(ddl, 80))
+	}
+
+	// Sanity: the cascade tables are NOT yet present.
+	assert.False(t, tableExists(t, sqlDB, "epistemic_cascade_outbox"),
+		"pre-cascade schema must not contain epistemic_cascade_outbox yet")
+	assert.False(t, tableExists(t, sqlDB, "epistemic_provenance"),
+		"pre-cascade schema must not contain epistemic_provenance yet")
+
+	// Now run InitSchema — the canonical migration entry point.
+	dm := NewDatabaseManagerForDB(sqlDB)
+	require.NoError(t, dm.InitSchema(),
+		"InitSchema must succeed against pre-cascade DB")
+
+	// After init, both tables and all cascade indexes must be present.
+	for _, table := range []string{"epistemic_cascade_outbox", "epistemic_provenance"} {
+		assert.True(t, tableExists(t, sqlDB, table),
+			"after upgrade, %s must exist", table)
+	}
+	for _, idx := range []string{
+		"idx_epistemic_cascade_outbox_event",
+		"idx_epistemic_cascade_outbox_dead",
+		"idx_epistemic_cascade_outbox_status_retry",
+		"idx_epistemic_provenance_source",
+		"idx_epistemic_provenance_downstream",
+	} {
+		assert.True(t, indexExists(t, sqlDB, idx),
+			"after upgrade, index %s must exist", idx)
+	}
+
+	// And the pre-existing tables must still be intact — the upgrade
+	// path must not destroy data.
+	for _, table := range []string{"memories", "evidence", "scheduled_wakes"} {
+		assert.True(t, tableExists(t, sqlDB, table),
+			"after upgrade, pre-cascade table %s must still exist", table)
+	}
+}
+
+// preCascadeBaseTables returns the BaseTables slice with the cascade
+// additions removed. It is the fixture for the upgrade-path test.
+// Cascade additions are detected by table/index name substring so the
+// test is robust against minor rearrangements of the schema slice.
+func preCascadeBaseTables() []string {
+	out := make([]string, 0, len(BaseTables))
+	for _, ddl := range BaseTables {
+		if strings.Contains(ddl, "epistemic_cascade_outbox") ||
+			strings.Contains(ddl, "epistemic_provenance") {
+			continue
+		}
+		out = append(out, ddl)
+	}
+	return out
+}
+
+// truncateDDL returns the first n bytes of s, or s itself if shorter.
+func truncateDDL(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // TestSchema_CascadeTablesInSharedAttach verifies that a fresh shared
@@ -391,16 +403,18 @@ func TestSchema_CascadeTablesIdempotentInit(t *testing.T) {
 // Note: the `shared` schema is only visible to the connection that ran
 // ATTACH. We must query via dm.db directly rather than opening a fresh
 // connection to the shared file.
+//
+// The shared DB lives in the same temp dir as MPM_WORKSPACE so cleanup is
+// hermetic — no risk of bumping the production shared DB.
 func TestSchema_CascadeTablesInSharedAttach(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
+	workspace := t.TempDir()
+	sharedPath := filepath.Join(workspace, "shared.db")
+	t.Setenv("MPM_WORKSPACE", workspace)
 	t.Setenv("MPM_SHARED_DB", sharedPath)
 	t.Setenv("MPM_SHARED_READONLY", "")
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err)
 	defer dm.Close()
 
 	for _, table := range []string{"epistemic_cascade_outbox", "epistemic_provenance"} {
@@ -411,5 +425,39 @@ func TestSchema_CascadeTablesInSharedAttach(t *testing.T) {
 		).Scan(&n)
 		require.NoError(t, err, "probe shared schema for %s", table)
 		assert.Equalf(t, 1, n, "shared.%s must exist after attach", table)
+	}
+}
+
+// TestSchema_CascadeIndexesInSharedAttach verifies that the cascade
+// indexes also propagate to the attached shared schema. The attach code
+// must rewrite CREATE INDEX statements in addition to CREATE TABLE so
+// the materializer's claim hot-path (status, next_retry_at) is served by
+// an index in the shared DB.
+//
+// This is the test the original share-check was missing — the table
+// presence test passes when only CREATE TABLE is propagated, but the
+// materializer's working-set query degenerates to a full scan if the
+// index never lands.
+func TestSchema_CascadeIndexesInSharedAttach(t *testing.T) {
+	workspace := t.TempDir()
+	sharedPath := filepath.Join(workspace, "shared.db")
+	t.Setenv("MPM_WORKSPACE", workspace)
+	t.Setenv("MPM_SHARED_DB", sharedPath)
+	t.Setenv("MPM_SHARED_READONLY", "")
+
+	dm, err := NewDatabaseManager(workspace)
+	require.NoError(t, err)
+	defer dm.Close()
+
+	required := []string{
+		"idx_epistemic_cascade_outbox_event",
+		"idx_epistemic_cascade_outbox_dead",
+		"idx_epistemic_cascade_outbox_status_retry",
+		"idx_epistemic_provenance_source",
+		"idx_epistemic_provenance_downstream",
+	}
+	for _, name := range required {
+		assert.Truef(t, sharedIndexExists(t, dm, name),
+			"shared schema must include index %q", name)
 	}
 }

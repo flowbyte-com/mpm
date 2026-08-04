@@ -199,8 +199,6 @@ func (sc *SQLiteConnection) WipeRecord(tier, id string) error {
 	return err
 }
 
-
-
 // MarshalJSON is a helper for JSON marshaling (for backwards compatibility)
 func MarshalJSON(v interface{}) (string, error) {
 	bytes, err := json.Marshal(v)
@@ -857,6 +855,32 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		}
 	}
 
+	// Index propagation loop — the cascade tables (epistemic_cascade_outbox,
+	// epistemic_provenance) live in BaseTables with their indexes alongside.
+	// The CREATE TABLE loop above creates them in the shared schema, but the
+	// matching indexes never land there unless we rewrite and re-run them.
+	// Without indexes, the materializer's claim hot-path
+	// ("WHERE status='pending' AND next_retry_at<=?") degenerates to a
+	// full scan in the shared DB — acceptable at small row counts but a
+	// hidden regression as the shared substrate grows.
+	//
+	// We only rewrite indexes whose base tables live in BaseTables — those
+	// in CommonIndexes reference tables that are not in the shared schema
+	// (vector_clusters, vector_assignments) and would fail on missing-table.
+	// Indexed pre-existing tables (sessions, evidence, memories, …) are
+	// already shared-resident from an earlier attach, so this loop is a
+	// no-op for them — harmlessly idempotent.
+	for _, ddl := range BaseTables {
+		if !strings.HasPrefix(ddl, "CREATE INDEX") {
+			continue
+		}
+		sharedDDL := rewriteIndexPrefix(ddl, "shared.")
+		if _, err := dm.db.Exec(sharedDDL); err != nil {
+			slog.Warn("shared index DDL failed",
+				"sql_prefix", sharedDDLTruncate(sharedDDL, 60), "error", err.Error())
+		}
+	}
+
 	// Migration: detect and remove the pre-2026-07-07 schema
 	// (contentless design with `content='memories', content_rowid='rowid'`).
 	// That schema produced tombstone artifacts on DELETE that broke
@@ -1075,6 +1099,74 @@ func rewriteTablePrefix(ddl, prefix string) string {
 		return ddl
 	}
 	return ddl[:afterMarker] + prefix + ddl[afterMarker:]
+}
+
+// rewriteIndexPrefix prepends `prefix.` to the INDEX NAME in a CREATE INDEX
+// statement — NOT to the table reference. SQLite's CREATE INDEX grammar
+// accepts schema-qualified index names but rejects schema-qualified table
+// references in the ON clause ("near '.': syntax error"), so the only
+// rewrite that works for an attached-schema index is on the index name:
+//
+//	CREATE INDEX [IF NOT EXISTS] schema.idx_name ON table_name(columns);
+//
+// The DDL in schema.go is multi-line (newline + tabs between the index
+// name and ON), so we scan for the index-name token (between the IF NOT
+// EXISTS marker, if present, and the first whitespace). Returns the input
+// unchanged if either marker is missing; callers filter against the
+// "CREATE INDEX" prefix before calling.
+//
+// Why this works: when the index name carries a schema prefix, SQLite
+// resolves the unqualified table name in the same schema. So the
+// shared-schema attach loop can emit the index under a shared-schema name
+// and the table-name lookup resolves to shared.epistemic_cascade_outbox
+// (etc.), which the CREATE TABLE loop already created.
+func rewriteIndexPrefix(ddl, prefix string) string {
+	// Locate the start of the index-name token. It follows either
+	// "CREATE INDEX " or "CREATE INDEX IF NOT EXISTS ", depending on
+	// whether the schema-side DDL guards against re-creation.
+	start := -1
+	if i := strings.Index(ddl, "CREATE INDEX IF NOT EXISTS "); i >= 0 {
+		start = i + len("CREATE INDEX IF NOT EXISTS ")
+	} else if i := strings.Index(ddl, "CREATE INDEX "); i >= 0 {
+		start = i + len("CREATE INDEX ")
+	}
+	if start < 0 {
+		return ddl
+	}
+
+	// Walk to the end of the index-name token: stop at whitespace.
+	end := start
+	for end < len(ddl) && !isIndexRewriteSpace(ddl[end]) {
+		// tolerate quoted string literal (none in our DDL but the cost
+		// is negligible).
+		if ddl[end] == '\'' {
+			for end++; end < len(ddl); end++ {
+				if ddl[end] == '\'' {
+					end++
+					break
+				}
+			}
+			continue
+		}
+		end++
+	}
+	if end <= start {
+		return ddl
+	}
+	// Guard against double-prefixing if the same loop runs twice (e.g.
+	// a follow-up migration that re-attaches the shared DB).
+	if strings.HasPrefix(ddl[start:start+len(prefix)], prefix) {
+		return ddl
+	}
+	return ddl[:start] + prefix + ddl[start:]
+}
+
+func isIndexRewriteSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
 }
 
 func sharedDDLTruncate(s string, n int) string {
@@ -1531,8 +1623,8 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		name, def string
 	}{
 		{"retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
-		{"importance",         "REAL NOT NULL DEFAULT 0.5"},
-		{"confidence",          "REAL NOT NULL DEFAULT 0.7"},
+		{"importance", "REAL NOT NULL DEFAULT 0.5"},
+		{"confidence", "REAL NOT NULL DEFAULT 0.7"},
 	} {
 		dm.db.Exec(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def))
 	}
@@ -1661,7 +1753,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE TRIGGER IF NOT EXISTS sessions_ad AFTER DELETE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS sessions_au AFTER UPDATE ON sessions BEGIN DELETE FROM sessions_fts WHERE rowid = old.rowid; INSERT INTO sessions_fts(rowid, content, session_id, content_hash) VALUES (new.rowid, new.content, new.session_id, new.content_hash); END;`,
 
-						`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.deleted_at IS NULL AND new.deleted_at IS NOT NULL BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; END;`,
 		`CREATE TRIGGER IF NOT EXISTS memories_au_content AFTER UPDATE ON memories WHEN NOT (old.deleted_at IS NULL AND new.deleted_at IS NOT NULL) BEGIN DELETE FROM memories_fts WHERE rowid = old.rowid; INSERT INTO memories_fts(rowid, content, collection, session_id, tags) VALUES (new.rowid, new.content, new.collection, new.session_id, new.tags); END;`,
@@ -2493,14 +2585,14 @@ func (dm *DatabaseManager) WipeRecord(tier, id string) error {
 // re-applies the fix for real.
 //
 // Routing contract:
-//   1. Probe lessons_base for the id. If present, route through the
-//      `lessons` view — that view's INSTEAD OF DELETE trigger (created
-//      in migrateLessonsToView) removes the row from lessons_base AND
-//      lessons_fts atomically.
-//   2. Else fall through to DELETE FROM memories. (Lessons and memories
-//      share the 16-char hex id space, so probing first is required —
-//      a plain DELETE FROM memories WHERE id=? would not trigger the
-//      lessons view's INSTEAD OF DELETE.)
+//  1. Probe lessons_base for the id. If present, route through the
+//     `lessons` view — that view's INSTEAD OF DELETE trigger (created
+//     in migrateLessonsToView) removes the row from lessons_base AND
+//     lessons_fts atomically.
+//  2. Else fall through to DELETE FROM memories. (Lessons and memories
+//     share the 16-char hex id space, so probing first is required —
+//     a plain DELETE FROM memories WHERE id=? would not trigger the
+//     lessons view's INSTEAD OF DELETE.)
 //
 // Returns nil on either successful delete OR a non-existent id (idempotent:
 // callers can shred without a separate existence check).
