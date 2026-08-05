@@ -154,4 +154,15 @@ type SeedSummary struct {
 	Created []string // StableIDs that were inserted as new rows
 	Skipped []string // StableIDs that already existed with matching content
 	Updated []string // StableIDs where the local row's content drifted from the seed (operator's edit preserved; flagged for visibility)
+
+	// Drifted is the capability-specific drift bucket. It
+	// carries the same meaning as Updated but is named
+	// differently because capabilities have a stricter
+	// contract (the source_code IS the executable; drift is
+	// a behavioral change, not just a content edit). Skills
+	// and directives use Updated; capabilities use Drifted
+	// to make the contract difference explicit in the
+	// summary report. CLI / MCP render both buckets
+	// identically — the name difference is internal.
+	Drifted []string
 }

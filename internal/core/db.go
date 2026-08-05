@@ -699,6 +699,16 @@ func (dm *DatabaseManager) QueryRowTracked(query string, args ...interface{}) *s
 
 // isBusyError returns true when the error is an SQLITE_BUSY / database-locked.
 func isBusyError(err error) bool {
+	return IsBusyError(err)
+}
+
+// IsBusyError is the exported variant of isBusyError. Available
+// to consumers in sibling packages (notably the capability
+// package's RecordInvocation retry loop) so they can classify
+// SQLite lock contention the same way DatabaseManager does
+// internally. Single source of truth — if the classification
+// rules ever change, both paths stay aligned.
+func IsBusyError(err error) bool {
 	if err == nil {
 		return false
 	}

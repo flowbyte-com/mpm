@@ -327,6 +327,149 @@ var BaseTables = []string{
 		ON epistemic_provenance(source_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_epistemic_provenance_downstream
 		ON epistemic_provenance(downstream_id);`,
+
+	// ── Capability Lifecycle (2026-08-05) ─────────────────────────────
+	//
+	// Four-table substrate for the capability lifecycle subsystem.
+	// Spec: docs/capability-lifecycle-spec.md
+	//
+	//   capabilities:           stateful artifact ledger. State machine
+	//                           CHECK enforced at storage boundary;
+	//                           "live version" is `state='active' AND
+	//                           superseded_by_id IS NULL` (single query,
+	//                           no JOIN).
+	//
+	//   capability_invocations: high-write execution telemetry. Strict
+	//                           separation from capability_events so the
+	//                           metrics aggregation pipeline never has
+	//                           to filter synthetic state-change events
+	//                           out of real execution data.
+	//
+	//   capability_dependencies: junction table for dependency graph.
+	//                           Reverse lookups power the recursive CTE
+	//                           cascade walkers (fracture + rollback).
+	//                           FKs are self-referencing with ON DELETE
+	//                           CASCADE so a retired capability's
+	//                           dependency rows vacuum with it.
+	//
+	//   capability_events:      state transitions and synthetic events
+	//                           (rollback, dependency_shatter, promotion,
+	//                           source_hash_mismatch). What `mpm skill
+	//                           audit <id>` reads for the lineage diff.
+	//
+	// Foreign key targets:
+	//   - capabilities.author_theory_id → memories(id) (the application
+	//     layer enforces `collection='theories'`; SQLite FK can't
+	//     enforce collection since it's just a column value).
+	//   - capabilities.created_from_id  → capabilities(id) (self-ref,
+	//     supports the revision/fork lineage walker in §5.2).
+	//   - capabilities.superseded_by_id → capabilities(id) (self-ref,
+	//     shadow flag for the live-version query).
+	`CREATE TABLE IF NOT EXISTS capabilities (
+		id              TEXT PRIMARY KEY,
+		name            TEXT NOT NULL UNIQUE,
+		purpose         TEXT NOT NULL,
+		source_code     TEXT NOT NULL,
+		source_language TEXT NOT NULL DEFAULT 'bash',
+		source_hash     TEXT NOT NULL,
+
+		state            TEXT NOT NULL DEFAULT 'draft'
+		                 CHECK (state IN (
+		                     'draft','linted','validated','probation','active',
+		                     'degraded','needs_revision','fractured','rolled_back','retired'
+		                 )),
+		execution_domain TEXT NOT NULL DEFAULT 'sandbox'
+		                 CHECK (execution_domain IN (
+		                     'sandbox','restricted','trusted','operator'
+		                 )),
+		state_changed_at INTEGER NOT NULL,
+
+		author_theory_id TEXT,
+		author_agent     TEXT,
+		created_from_id  TEXT,
+		superseded_by_id TEXT,
+
+		success_count       INTEGER NOT NULL DEFAULT 0,
+		failure_count       INTEGER NOT NULL DEFAULT 0,
+		fracture_count      INTEGER NOT NULL DEFAULT 0,
+		last_invoked_at     INTEGER,
+		last_failure_at     INTEGER,
+		last_failure_stderr TEXT,
+		avg_latency_ms      REAL    NOT NULL DEFAULT 0,
+
+		probation_required_success_count INTEGER NOT NULL DEFAULT 5,
+		probation_max_failure_rate       REAL    NOT NULL DEFAULT 0.10,
+		promoted_at                      INTEGER,
+
+		embedding BLOB,
+		tags     TEXT NOT NULL DEFAULT '[]',
+
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		deleted_at INTEGER,
+		metadata   TEXT NOT NULL DEFAULT '{}',
+
+		FOREIGN KEY (author_theory_id)  REFERENCES memories(id)     ON DELETE SET NULL,
+		FOREIGN KEY (created_from_id)   REFERENCES capabilities(id) ON DELETE SET NULL,
+		FOREIGN KEY (superseded_by_id)  REFERENCES capabilities(id) ON DELETE SET NULL
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_state        ON capabilities(state);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_domain       ON capabilities(execution_domain);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_author       ON capabilities(author_theory_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_superseded   ON capabilities(superseded_by_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_last_invoked ON capabilities(last_invoked_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_capabilities_observation  ON capabilities(state, promoted_at);`,
+
+	// capability_invocations: pure execution telemetry. Synthetic
+	// state-change events go to capability_events — never here.
+	`CREATE TABLE IF NOT EXISTS capability_invocations (
+		id                  TEXT PRIMARY KEY,
+		capability_id       TEXT NOT NULL,
+		invoked_at          INTEGER NOT NULL,
+		exit_code           INTEGER NOT NULL,
+		duration_ms         INTEGER NOT NULL,
+		stderr              TEXT,
+		invocation_context  TEXT,
+		cascade_invalidated INTEGER NOT NULL DEFAULT 0,
+
+		FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_invocations_capability_time ON capability_invocations(capability_id, invoked_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_invocations_recent_failures ON capability_invocations(capability_id, exit_code);`,
+	`CREATE INDEX IF NOT EXISTS idx_invocations_gc              ON capability_invocations(invoked_at);`,
+
+	// capability_dependencies: reverse-lookup junction for the
+	// cascade walkers. ON DELETE CASCADE on both FKs so a retired
+	// capability's dependency rows vacuum with it.
+	`CREATE TABLE IF NOT EXISTS capability_dependencies (
+		capability_id TEXT NOT NULL,
+		depends_on_id TEXT NOT NULL,
+		added_at      INTEGER NOT NULL,
+		PRIMARY KEY (capability_id, depends_on_id),
+		FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE,
+		FOREIGN KEY (depends_on_id)  REFERENCES capabilities(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON capability_dependencies(depends_on_id);`,
+
+	// capability_events: state transitions and synthetic events.
+	// Strict separation from capability_invocations.
+	`CREATE TABLE IF NOT EXISTS capability_events (
+		id            TEXT PRIMARY KEY,
+		capability_id TEXT NOT NULL,
+		event_type    TEXT NOT NULL,
+		occurred_at   INTEGER NOT NULL,
+		actor         TEXT NOT NULL,
+		from_state    TEXT,
+		to_state      TEXT,
+		reason        TEXT,
+		related_id    TEXT,
+		metadata      TEXT NOT NULL DEFAULT '{}',
+
+		FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_events_capability_time ON capability_events(capability_id, occurred_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_events_type           ON capability_events(event_type, occurred_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_events_actor          ON capability_events(actor);`,
 }
 
 // ReferenceTables contains the reference-library table creation statements.

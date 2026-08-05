@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "description": "Tier 1 read-only primitive set shipped with mpm. Loaded by LoadBundledCapabilities; merged into SeedCapabilities at init. Operators can ship a custom version by placing bundled_capabilities.json in their MPM_WORKSPACE; the loader reads MPM_WORKSPACE/bundled_capabilities.json first, then falls back to the embedded default.",
+  "capabilities": [
+    {
+      "stable_id": "cap-seed-list-capabilities",
+      "name": "list_capabilities",
+      "purpose": "List all live capabilities, optionally filtered by --state and --domain.",
+      "source_language": "bash",
+      "requested_domain": "sandbox",
+      "tags": ["capability", "discovery", "tier-1", "read-only"],
+      "depends_on": [],
+      "metadata": {
+        "tier": "1",
+        "primitive": "true",
+        "risk_class": "low"
+      },
+      "notes": "Day-1 discovery query. Read-only, no args required."
+    },
+    {
+      "stable_id": "cap-seed-get-capability",
+      "name": "get_capability",
+      "purpose": "Fetch a single capability by id or name with full state, lineage, and metrics.",
+      "source_language": "bash",
+      "requested_domain": "sandbox",
+      "tags": ["capability", "discovery", "tier-1", "read-only"],
+      "depends_on": [],
+      "metadata": {
+        "tier": "1",
+        "primitive": "true",
+        "risk_class": "low"
+      },
+      "notes": "Inspect-before-invoke. Read-only, single target."
+    },
+    {
+      "stable_id": "cap-seed-capability-lineage",
+      "name": "capability_lineage",
+      "purpose": "Show dependencies (upstream) and dependents (downstream) for a capability.",
+      "source_language": "bash",
+      "requested_domain": "sandbox",
+      "tags": ["capability", "discovery", "lineage", "tier-1", "read-only"],
+      "depends_on": [],
+      "metadata": {
+        "tier": "1",
+        "primitive": "true",
+        "risk_class": "low"
+      },
+      "notes": "Pre-invocation blast-radius check; post-fracture impact analysis."
+    },
+    {
+      "stable_id": "cap-seed-capability-health",
+      "name": "capability_health",
+      "purpose": "Health summary: failure rate, fracture count, last invocation, last failure trace.",
+      "source_language": "bash",
+      "requested_domain": "sandbox",
+      "tags": ["capability", "discovery", "health", "tier-1", "read-only"],
+      "depends_on": [],
+      "metadata": {
+        "tier": "1",
+        "primitive": "true",
+        "risk_class": "low"
+      },
+      "notes": "Pre-invocation safety check."
+    }
+  ]
+}

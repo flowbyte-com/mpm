@@ -115,6 +115,10 @@ type DumpValidator struct {
 var CanonicalMPMSchema = []string{
 	"admission_log",
 	"audit_cluster_proposals",
+	"capabilities",
+	"capability_dependencies",
+	"capability_events",
+	"capability_invocations",
 	"confidence_history",
 	"ephemeral_scratchpad",
 	"epistemic_cascade_outbox",
