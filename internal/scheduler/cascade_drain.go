@@ -11,7 +11,9 @@
 package scheduler
 
 import (
+	"context"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	core "github.com/flowbyte-com/mpm-core"
@@ -68,3 +70,80 @@ func (h *CascadeDrainHandler) Budget() time.Duration { return h.budget }
 
 // BatchSize returns the configured per-iteration claim size.
 func (h *CascadeDrainHandler) BatchSize() int { return h.batchSize }
+
+// Run is a HandlerFunc-compatible adapter. Currently unused — the handler
+// is registered via Scheduler.RegisterTickHandler — but kept for future
+// flexibility.
+func (h *CascadeDrainHandler) Run(w Wake) error {
+	return h.tickHandler(context.Background())
+}
+
+// TickHandler returns a function suitable for Scheduler.RegisterTickHandler.
+// The function runs the inner drain loop under a per-call time budget.
+func (h *CascadeDrainHandler) TickHandler() func(ctx context.Context) error {
+	return h.tickHandler
+}
+
+// tickHandler drains the cascade outbox within a per-call time budget.
+// On every iteration it checks (in order): context cancellation, deadline
+// exhaustion, batch result. The first time any of those triggers, it
+// emits a single "cascade drain yielded" log line with the yield_reason
+// and returns nil.
+//
+// A panic in the materializer is caught and logged; the scheduler
+// must never die from a cascade drain failure.
+func (h *CascadeDrainHandler) tickHandler(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = nil // never propagate; keep scheduler alive
+			h.logger.Error("cascade drain panicked",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
+	start := time.Now()
+	deadline := start.Add(h.budget)
+	var totalProcessed, totalFailed int
+
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			h.logYield(totalProcessed, totalFailed, "context_cancelled", time.Since(start))
+			return nil
+		}
+		if time.Now().After(deadline) {
+			h.logYield(totalProcessed, totalFailed, "budget_exhausted", time.Since(start))
+			return nil
+		}
+
+		report, err := h.materializer.MaterializeBatch(ctx, h.batchSize)
+		if err != nil {
+			h.logger.Error("cascade drain batch failed", "err", err)
+			h.logYield(totalProcessed, totalFailed, "error", time.Since(start))
+			return nil
+		}
+		totalProcessed += report.Materialized
+		totalFailed += report.Failed
+
+		if report.Claimed == 0 {
+			h.logYield(totalProcessed, totalFailed, "queue_empty", time.Since(start))
+			return nil
+		}
+	}
+}
+
+// logYield emits the structured log line that records the handler's exit.
+// yield_reason is the operationally-important field: queue_empty means
+// normal exit, budget_exhausted means the per-tick ceiling was hit,
+// context_cancelled means the scheduler shut down, error means a DB-level
+// failure during a batch.
+func (h *CascadeDrainHandler) logYield(processed, failed int, reason string, elapsed time.Duration) {
+	h.logger.Info("cascade drain yielded",
+		"yield_reason", reason,
+		"intents_materialized", processed,
+		"intents_failed", failed,
+		"elapsed_ms", elapsed.Milliseconds(),
+		"budget_ms", h.budget.Milliseconds(),
+	)
+}
