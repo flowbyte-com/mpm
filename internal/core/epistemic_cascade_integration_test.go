@@ -115,8 +115,6 @@ func TestIntegration_E2E_FoundationToWakeDelivery(t *testing.T) {
 	// 7. Materialize the outbox: call MaterializeCascadeIntents until empty.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	totalMaterialized := 0
 	for i := 0; i < 20; i++ {
@@ -409,8 +407,6 @@ func TestIntegration_RecursiveDepthChain(t *testing.T) {
 	// Materialize the depth-1 intent.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	report1, err := mat.MaterializeBatch(ctx, 10)
 	require.NoError(t, err)
@@ -491,8 +487,6 @@ func TestIntegration_Depth4SuppressedWithAudit(t *testing.T) {
 	// The materializer should suppress this and emit a CRITICAL audit.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	report, err := mat.MaterializeBatch(ctx, 10)
 	require.NoError(t, err)
@@ -589,8 +583,6 @@ func TestIntegration_ScannerRejectionProducesDeadLetter(t *testing.T) {
 	// The materializer should skip the already-failed intent.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	report, err := mat.MaterializeBatch(ctx, 10)
 	require.NoError(t, err)
@@ -642,8 +634,6 @@ func TestIntegration_RestartRecovery(t *testing.T) {
 	// Start a fresh materializer — it should recover the abandoned intent.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	report, err := mat.MaterializeBatch(ctx, 10)
 	require.NoError(t, err)
@@ -686,8 +676,6 @@ func TestIntegration_DeadLetterVisibleViaQuery(t *testing.T) {
 	// Materialize to trigger dead-letter.
 	mat := NewCascadeMaterializer(dm, DefaultCascadeMaterializerOptions())
 	ctx := context.Background()
-	mat.Start(ctx)
-	defer mat.Stop()
 
 	_, err = mat.MaterializeBatch(ctx, 10)
 	require.NoError(t, err)
