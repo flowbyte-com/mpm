@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**MPM** (Memory Persistence Module) is a SQLite-native memory and reasoning infrastructure for autonomous AI agents. It persists not just facts, but the *reasoning* behind them — decisions, theories, evidence, and lessons — so agents can continue building on prior knowledge rather than re-discovering conclusions.
+**MPM** is an observable substrate for long-lived autonomous systems. Persistent memory is just one observable. Capabilities, decisions, theories, and execution telemetry are all governed by the same self-observing foundation.
+
+The substrate persists not just facts, but the *reasoning* behind them — so agents can continue building on prior knowledge rather than re-discovering conclusions.
 
 Core capabilities (the "Epistemology Engine"):
 - **Memories** — weighted, searchable facts with reinforcement and decay
@@ -15,6 +17,23 @@ Core capabilities (the "Epistemology Engine"):
 - **Challenges** — workflow for self-correcting stale knowledge
 
 Everything lives in a single SQLite database (`src/db/mpm.db`). `mpm` is a headless daemon — a hardened SQLite data plane with an autonomous 03:00 UTC diagnostic critic and an MCP server (`mpm-mcp`) for machine-to-machine integration. No external services, no vector database.
+
+### The Projection Test
+
+Before adding any new table, column, cache, score, or summary, apply this test:
+
+1. Can this be computed from authoritative state at read time?
+2. Will read latency be acceptable at expected rates?
+
+If **yes** to both: Do not persist it. Compute at read.
+
+If **no**: The burden of proof is on persistence. Explain why persistence is necessary and what guarantees it won't drift.
+
+*Rule: A derived value may only be persisted if it is updated atomically with every authoritative mutation. Otherwise, it must be computed on read.*
+
+*(Note: Database indexes are not persistence of state. Add them freely.)*
+
+This is the operational form of the [Projection Principle](docs/architecture.md). Both say the same thing; the Test is what you apply at PR review, the Principle is what the architecture is built on.
 
 ## Build & Test
 

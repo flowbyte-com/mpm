@@ -1,10 +1,10 @@
 # MPM
 
-> **A persistent reasoning substrate for AI agents.**
+> **An observable substrate for long-lived autonomous systems.**
 
 > **Looking to install?** See [INSTALL.md](INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
 
-MPM stands for **Mnemonic Persistence Maintainer**. It is a *persistent reasoning substrate* — a small, opinionated binary that turns an agent's transient thinking into a durable epistemic trail.
+MPM stands for **Mnemonic Persistence Maintainer**. It is an observable substrate for long-lived autonomous systems. Persistent memory is just one observable. Capabilities, decisions, theories, and execution telemetry are all governed by the same self-observing foundation. The substrate is closed under observation: every operation on MPM is itself observable through MPM's own tools.
 
 Traditional memory systems answer one question:
 
@@ -1985,6 +1985,10 @@ The conceptual vocabulary of MPM. Implementation-specific terms (decay, wake, LT
 **Evidence.** A piece of information that supports or challenges another artifact. Confidence is derived from the evidence ledger.
 
 **Memory.** A general fact, observation, or synthesized insight.
+
+**Projection Principle.** The substrate records facts, and records facts about facts (events, invocations). The substrate never records views of facts (projections, scores, summaries). Every view is computed from authoritative state at read time. Commands and CLI surfaces may evolve. Truth may not. See `docs/architecture.md`.
+
+**Projection Test.** A design constraint applied before adding any new table, column, cache, score, or summary: if the value can be computed from authoritative state at read time, do not persist it. The burden of proof is on persistence. See CLAUDE.md.
 
 **Runtime.** The evolvable part of MPM: wake, scheduling, personas, modes, directives, routing, audit, review. Changes here are cheap; changes to Core are not.
 

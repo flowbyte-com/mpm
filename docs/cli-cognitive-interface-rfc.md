@@ -546,7 +546,7 @@ Optimise for trust and introspection rather than additional capability.
 
 MPM's differentiator is no longer persistent memory.
 
-It is an introspectable cognitive substrate.
+It is an observable substrate — closed under observation: every operation on MPM is itself observable through MPM's own tools.
 
 Whenever there is a choice between exposing more storage operations or making the existing cognition more observable, prefer observability.
 
