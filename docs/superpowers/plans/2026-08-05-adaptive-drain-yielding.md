@@ -13,6 +13,7 @@
 These apply to every task. Copied verbatim from the spec.
 
 - The core `MaterializeBatch` and `CascadeMaterializer` are **never modified** in their processing logic. Only lifecycle and ownership changes.
+  - **Exception (added 2026-08-05 during Task 3 resolution):** when a deleted lifecycle channel/field leaves a `select` arm in `MaterializeBatch` unreachable, that dead arm is removed as part of the same task. Behavior is preserved — `<-ctx.Done()` still aborts the loop, and `revertToPending` still runs for unprocessed intents. Approved by operator.
 - The CLI `mpm cascade materialize` keeps its current signature and behavior — it is the foreground escape hatch.
 - Normal CLI commands and the MCP server **must never** spawn a hidden cascade thread.
 - Cascade draining is owned by exactly one background process: `mpm-scheduler`.
@@ -218,7 +219,23 @@ type CascadeMaterializer struct {
 
 Delete the entire `Start` method (lines 122-144), `Stop` method (lines 146-160), and `runLoop` (lines 162-188).
 
-- [ ] **Step 6: Update imports**
+- [ ] **Step 6: Remove dead `<-cm.stopC` arm from `MaterializeBatch`'s select**
+
+After Step 5, `MaterializeBatch`'s main loop (lines 227-238) still references `cm.stopC` in a `select` arm. The channel is being deleted, so this arm is unreachable. Per the global-constraints exception, remove only the unreachable `<-cm.stopC:` arm — keep `<-ctx.Done():` and `default:`. The result:
+
+```go
+for _, intent := range intents {
+    select {
+    case <-ctx.Done():
+        cm.revertToPending(intent.ID)
+        continue
+    default:
+    }
+```
+
+Behavior is preserved: ctx cancellation still aborts the loop, intents still revert to pending, default still falls through to processIntent.
+
+- [ ] **Step 7: Update imports**
 
 Remove `sync` from the import block (lines 40-45) — no longer used:
 
@@ -230,12 +247,12 @@ import (
 )
 ```
 
-- [ ] **Step 7: Build to verify it compiles**
+- [ ] **Step 8: Build to verify**
 
 Run: `cd /home/v/workspace/projects/mpm && make build 2>&1 | tail -30`
 Expected: **Fails** with errors about `dm.StartCascadeMaterializer` and `dm.StopCascadeMaterializer` (callers in `cmd/mpm/handlers_cascade.go`, `internal/core/db.go`). This is expected — Task 4 removes the DatabaseManager methods and Task 5 fixes the CLI.
 
-- [ ] **Step 8: Commit (build is broken; this commit is the deletion half)**
+- [ ] **Step 9: Commit (build is broken; this commit is the deletion half)**
 
 ```bash
 cd /home/v/workspace/projects/mpm
