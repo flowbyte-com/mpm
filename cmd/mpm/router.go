@@ -128,6 +128,9 @@ func NewRouter() *CommandRouter {
 		// Knowledge Base — entity-centric namespace (reads + writes)
 		"kb":    {Name: "kb", Description: "Knowledge base: memory, topic, lesson, session, reference", MinArgs: 0},
 		"debug": {Name: "debug", Description: "Low-level inspection tools for human troubleshooting", MinArgs: 0},
+
+		// Capability namespace — executable primitives (seed, lifecycle)
+		"capability": {Name: "capability", Description: "Capability operations: seed, lifecycle, governance", MinArgs: 0},
 	}
 
 	return r
@@ -318,6 +321,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleKB(args)
 	case "debug":
 		return handleDebug(args)
+	case "capability":
+		return handleCapability(args)
 	case "call":
 		return handleCall(args[1:])
 	case "evidence":
@@ -851,6 +856,81 @@ func printDebugHelp() {
 	for _, sc := range debugSubcommandDescs {
 		fmt.Printf("  %-22s %s\n", sc.name, sc.desc)
 	}
+	fmt.Println()
+}
+
+// ============================================================================
+// Capability Namespace — Executable primitives (seed, lifecycle, governance)
+// ============================================================================
+//
+// Capabilities are stateful, executable artifacts with a lifecycle
+// (draft → linted → validated → probation → active → degraded →
+// fractured). This namespace surfaces the operator-facing commands
+// for bringing the Tier 1 read-only primitive set online and
+// governing the lifecycle. Future subcommands (e.g. `invoke`,
+// `fracture`, `grant-operator`) will be added here.
+//
+// Note: `mpm config capability` is a separate namespace used for
+// config binding (which capabilities are bound to which components).
+// This namespace is for capability *operations*: bringing a bundle
+// into the database, stamping governance metadata, etc.
+
+// handleCapability routes to the appropriate capability subcommand.
+// Pattern mirrors handleKB / handleDebug.
+func handleCapability(args []string) int {
+	if len(args) < 2 {
+		printCapabilityHelp()
+		return 0
+	}
+
+	subCmd := args[1]
+	subArgs := args[2:]
+
+	switch subCmd {
+	// — Bundle installation —
+	case "seed":
+		return handleCapabilitySeed(subArgs)
+
+	// — Operator approval (CS-3) —
+	case "grant-operator":
+		return handleCapabilityGrantOperator(subArgs)
+
+	// — Help —
+	case "help":
+		printCapabilityHelp()
+		return 0
+
+	default:
+		printCapabilityHelp()
+		return 0
+	}
+}
+
+// capabilitySubcommandDescs is the canonical list of capability
+// subcommands and their descriptions. Drives printCapabilityHelp.
+var capabilitySubcommandDescs = []struct {
+	name string
+	desc string
+}{
+	{"seed [--sidecar <path>]", "Install / refresh the Tier 1 capability bundle (idempotent)"},
+	{"grant-operator <id>", "Stamp operator_approved_at so the executor's operator-domain gate admits it"},
+	{"help", "Show this help"},
+}
+
+func printCapabilityHelp() {
+	fmt.Println()
+	fmt.Println("mpm capability — Executable primitives: seed, lifecycle, governance")
+	fmt.Println()
+	fmt.Println("Usage: mpm capability <subcommand> [arguments]")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	for _, sc := range capabilitySubcommandDescs {
+		fmt.Printf("  %-22s %s\n", sc.name, sc.desc)
+	}
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  mpm capability seed")
+	fmt.Println("  mpm capability seed --sidecar /etc/mpm/bundled_capabilities.json")
 	fmt.Println()
 }
 
