@@ -119,11 +119,20 @@ func main() {
 	// critic_audit     → Critic audit cycle (lands once internal/critic ships)
 	// gc               → MPM garbage collection sweep
 	// broadcast        → active dissemination fan-out to receiving agents
+	// cascade_drain    → per-tick cascade outbox drain (30s budget)
 	// (anything else)  → notification kind, passes through to opportunistic fold
 	s.Register("snapshot", scheduler.SnapshotHandler)
 	s.Register("critic_audit", scheduler.CriticAuditHandler)
 	s.Register("gc", scheduler.GCHandler)
 	s.Register("broadcast", scheduler.BroadcastHandler)
+	s.RegisterTickHandler("cascade_drain", scheduler.NewCascadeDrainHandler(
+		dm,
+		logger,
+		scheduler.CascadeDrainOptions{
+			Budget:    30 * time.Second,
+			BatchSize: 10,
+		},
+	).TickHandler())
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
