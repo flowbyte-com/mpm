@@ -196,3 +196,53 @@ func TestCascadeDrain_YieldsError(t *testing.T) {
 		t.Errorf("expected yield_reason=error, got logs: %v", logs)
 	}
 }
+
+// panickingMaterializer wraps the real CascadeMaterializer and panics on
+// MaterializeBatch. Used to verify the handler's panic-safety net.
+type panickingMaterializer struct {
+	*core.CascadeMaterializer
+}
+
+func (p *panickingMaterializer) MaterializeBatch(ctx context.Context, limit int) (core.MaterializationReport, error) {
+	panic("materializer exploded")
+}
+
+func TestCascadeDrain_DoesNotPanicScheduler(t *testing.T) {
+	dm := core.NewTestDM(t)
+	logger, drain := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{Budget: 5 * time.Second})
+	// Swap in a panicking materializer.
+	h.materializer = &panickingMaterializer{h.concrete()}
+
+	err := h.tickHandler(context.Background())
+	if err != nil {
+		t.Fatalf("tickHandler must swallow panic and return nil; got err=%v", err)
+	}
+	logs := drain()
+	if !logsContain(logs, "msg", "cascade drain panicked") {
+		t.Errorf("expected panic log entry, got: %v", logs)
+	}
+}
+
+func TestCascadeDrain_NoIntentsLeftInProcessing(t *testing.T) {
+	dm := core.NewTestDM(t)
+	eventID := seedCascadeOutbox(t, dm, 30)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    1 * time.Millisecond,
+		BatchSize: 10,
+	})
+
+	_ = h.tickHandler(context.Background())
+
+	var stuck int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE invalidation_event_id = ? AND status = 'processing'`,
+		eventID,
+	).Scan(&stuck); err != nil {
+		t.Fatalf("count processing: %v", err)
+	}
+	if stuck != 0 {
+		t.Errorf("expected 0 intents in 'processing' after handler exit; got %d", stuck)
+	}
+}
