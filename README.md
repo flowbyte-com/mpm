@@ -1659,6 +1659,44 @@ mpm ops init skills
 ```
 
 Idempotent. Local edits to a seeded skill are preserved and surfaced as drift in the report (Created / Skipped / Drifted buckets, same shape as the directives bootstrap). The reference registry lives in `internal/core/seed/skills.go`; the engine in `internal/core/seed/engine.go` routes new rows through `dm.SaveSkill(...)` so every seeded row passes through the scanner. Re-running is a no-op.
+
+#### Capabilities (Executable Primitives)
+
+*Stateful, executable artifacts with a lifecycle (draft → linted → validated → probation → active → degraded → fractured) — discoverable via `mpm capability <subcommand>`, sealed at the storage-layer CHECK constraint.*
+
+Capabilities are MPM's answer to "how does an agent actually *do* something with the substrate, not just remember about it?" Where a skill says *how* (a procedure the agent interprets), a capability is the artifact that gets *invoked* — a typed source-code payload (bash / python / jq), a declared execution domain (sandbox / restricted / trusted / operator), and a telemetry trail that feeds the fracture detector. The full lifecycle is specified in `docs/capability-lifecycle-spec.md`; this section is the operator-facing surface.
+
+##### Bootstrapping the Tier 1 primitive set
+
+Fresh installs get four read-only primitives (`list_capabilities`, `get_capability`, `capability_lineage`, `capability_health`) seeded into the `capabilities` table by:
+
+```bash
+mpm capability seed
+```
+
+Idempotent. The seed engine (`internal/core/seed/engine_capabilities.go`) uses deterministic stable IDs (`cap.<name>`) so re-runs are clean no-ops against rows whose `source_code` still matches the bundle. Operator edits to a seeded primitive surface in the `Drifted` bucket and are never silently overwritten. A custom bundle can be merged in via `--sidecar <path>`, overriding shipped entries or adding new ones — the loader at `internal/core/seed/capabilities_loader.go` merges the sidecar into the compiled registry before the apply phase. After seeding, primitives live in `state='validated'`; the forge tick promotes them to `probation` on first invocation, then `probation` → `active` is earned by hitting the success threshold stamped at proposal time.
+
+##### Operator-domain approval
+
+The executor's operator-domain gate (the only execution_domain that can touch host resources outside the bwrap sandbox) refuses to invoke a capability unless `metadata.operator_approved_at` is non-zero. The bootstrap sequence is:
+
+```bash
+mpm capability seed                                     # 1. install Tier 1 primitives
+mpm capability grant-operator cap.<name>                # 2. stamp operator_approved_at
+                                                        #    (atomic: metadata + audit event in one tx)
+mpm capability grant-operator cap.<name> --actor alice  #    optional: record who approved
+                                              --reason "reviewed by sec-team"  #    optional: free-form rationale
+```
+
+`Store.MarkOperatorApproved` (`internal/core/capability/operator_approval.go`) writes both the metadata stamp and a `capability_events` row with `event_type='operator_approval'` in a single transaction, so the gate's metadata can never disagree with `mpm skill audit <id>`. Two metadata fields are stamped: `operator_approved_at` (int64 unix epoch — the field the executor's `int64FromMeta` gate reads) and `operator_approved_at_rfc3339` (human-readable sibling for the audit trail). Idempotent: re-running refreshes the timestamp + actor and writes a fresh event row. Refused on `retired` and `fractured` states (surface as `ErrOperatorApprovalRefused`, distinct from `ErrNotFound`); soft-deleted rows surface as `ErrNotFound`.
+
+##### Storage-layer guarantees
+
+The lifecycle matrix is enforced twice: once at runtime by `CapabilityState.CanTransitionTo`, and once at the storage layer by a `CHECK (state IN (...))` constraint generated from `AllCapabilityStates()`. The two MUST stay in sync — adding a state without updating the CHECK is a forge bug, caught by static-analysis tests in the capability package. Telemetry writes (success/failure counts, latency, invocation context) live in `capability_invocations`; synthetic state-change events live in `capability_events`. The hard separation keeps the metrics aggregation pipeline free of state-change filtering, and lets `mpm skill audit <id>` render a clean human-readable timeline without joining two tables.
+
+##### Bootstrapping is the only way in
+
+There is no auto-seed at install. The "Truth is external" + "no auto-noise" principles forbid silent state mutation, so an operator runs `mpm capability seed` when they want the baseline online. After CS-3 the bootstrapping sequence is complete: install primitives → review → grant-operator → invoke. Re-running `seed` is safe; re-running `grant-operator` is safe; both are idempotent and never overwrite operator drift.
 #### Modes & Personas (File-Based)
 
 *File-based retrieval parameters with auto-selection — no database, no compile step, hot-reload on mtime change.*
