@@ -35,7 +35,22 @@ type CascadeDrainHandler struct {
 	logger       *slog.Logger
 	budget       time.Duration
 	batchSize    int
-	materializer *core.CascadeMaterializer
+	materializer materializer   // interface; production uses concrete impl
+	impl         *core.CascadeMaterializer // backing concrete; accessed via materializer()
+}
+
+// materializer is the surface CascadeDrainHandler needs from the
+// materializer. Defined locally so tests can inject panicking or
+// otherwise-malformed implementations.
+type materializer interface {
+	MaterializeBatch(ctx context.Context, limit int) (core.MaterializationReport, error)
+}
+
+// concrete returns the concrete *core.CascadeMaterializer so tests can
+// wrap it with embed-and-override. The returned value is the same one the
+// handler uses internally.
+func (h *CascadeDrainHandler) concrete() *core.CascadeMaterializer {
+	return h.impl
 }
 
 // NewCascadeDrainHandler constructs a handler bound to the supplied
@@ -52,16 +67,18 @@ func NewCascadeDrainHandler(dm *core.DatabaseManager, logger *slog.Logger, opts 
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 10
 	}
+	mat := dm.NewCascadeMaterializer(core.CascadeMaterializerOptions{
+		MaxCascadeDepth: 3,
+		MaxRetries:      3,
+		WakeDelay:       1 * time.Second,
+	})
 	return &CascadeDrainHandler{
 		dm:        dm,
 		logger:    logger,
 		budget:    opts.Budget,
 		batchSize: opts.BatchSize,
-		materializer: dm.NewCascadeMaterializer(core.CascadeMaterializerOptions{
-			MaxCascadeDepth: 3,
-			MaxRetries:      3,
-			WakeDelay:       1 * time.Second,
-		}),
+		impl:      mat,
+		materializer: mat, // satisfies materializer interface
 	}
 }
 
