@@ -35,8 +35,6 @@ type CoreDB interface {
 	NewSession() (CoreDB, error)
 
 	// ─── Cascade Materializer ─────────────────────────────────────────
-	StartCascadeMaterializer(ctx context.Context)
-	StopCascadeMaterializer()
 	MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error)
 
 	// ─── Memory CRUD ─────────────────────────────────────────────────
