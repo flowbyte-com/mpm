@@ -2007,6 +2007,15 @@ func (dm *DatabaseManager) Close() error {
 	return nil
 }
 
+// NewCascadeMaterializer constructs a CascadeMaterializer bound to this
+// DatabaseManager. The returned materializer carries no mutable state beyond
+// the dm reference; safe to share across goroutines. The caller is expected
+// to invoke MaterializeBatch directly (background drain is owned by
+// mpm-scheduler; the CLI calls MaterializeCascadeIntents).
+func (dm *DatabaseManager) NewCascadeMaterializer(opts CascadeMaterializerOptions) *CascadeMaterializer {
+	return NewCascadeMaterializer(dm, opts)
+}
+
 // StartCascadeMaterializer starts the async cascade materializer goroutine
 // if it is not already running. It is idempotent — subsequent calls are no-ops.
 func (dm *DatabaseManager) StartCascadeMaterializer(ctx context.Context) {
