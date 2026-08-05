@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -134,5 +135,64 @@ func TestCascadeDrain_YieldsBudgetExhausted(t *testing.T) {
 	}
 	if pending == 0 {
 		t.Errorf("expected pending intents remaining after budget_exhausted, got 0")
+	}
+}
+
+func TestCascadeDrain_YieldsContextCancelled(t *testing.T) {
+	dm := core.NewTestDM(t)
+	// Seed intents so the handler enters the inner loop.
+	seedCascadeOutbox(t, dm, 50)
+
+	logger, drain := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    30 * time.Second,
+		BatchSize: 10,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before tickHandler runs
+
+	err := h.tickHandler(ctx)
+	if err != nil {
+		t.Fatalf("tickHandler returned error: %v", err)
+	}
+	logs := drain()
+	if !logsContain(logs, "yield_reason", "context_cancelled") {
+		t.Errorf("expected yield_reason=context_cancelled, got logs: %v", logs)
+	}
+}
+
+func TestCascadeDrain_YieldsError(t *testing.T) {
+	// Construct a DatabaseManager directly so we control Close.
+	// Mirrors internal/core/testhelpers.go:NewTestDM but skips the auto-close.
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:mpm-cancel-%d?mode=memory&cache=shared", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	dm := core.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		_ = db.Close()
+		t.Fatalf("InitSchema: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	logger, drain := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    30 * time.Second,
+		BatchSize: 10,
+	})
+
+	// Force MaterializeBatch to fail by closing the underlying sql.DB
+	// before the handler runs. The handler's panic-safety net will not
+	// engage here — we expect a normal DB error.
+	_ = db.Close()
+
+	err = h.tickHandler(context.Background())
+	if err != nil {
+		t.Fatalf("tickHandler returned error: %v", err)
+	}
+	logs := drain()
+	if !logsContain(logs, "yield_reason", "error") {
+		t.Errorf("expected yield_reason=error, got logs: %v", logs)
 	}
 }
