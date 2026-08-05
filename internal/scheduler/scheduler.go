@@ -74,11 +74,12 @@ type HandlerFunc func(w Wake) error
 
 // Scheduler is the long-running wake executor.
 type Scheduler struct {
-	db       *sql.DB
-	dbPath   string
-	log      *slog.Logger
-	handlers map[string]HandlerFunc
-	mu       sync.RWMutex
+	db           *sql.DB
+	dbPath       string
+	log          *slog.Logger
+	handlers     map[string]HandlerFunc
+	tickHandlers map[string]func(ctx context.Context) error
+	mu           sync.RWMutex
 
 	// tickCount increments on every ticker fire (including idle ticks).
 	// heartbeatEvery controls how often a heartbeat log line is emitted
@@ -119,6 +120,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		dbPath:         "<managed-by-DatabaseManager>",
 		log:            log,
 		handlers:       make(map[string]HandlerFunc),
+		tickHandlers:   make(map[string]func(ctx context.Context) error),
 		heartbeatEvery: 100, // ~100 min at 60s interval; override with SetHeartbeat
 	}, nil
 }
@@ -148,6 +150,20 @@ func (s *Scheduler) Register(kind string, h HandlerFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handlers[kind] = h
+}
+
+// RegisterTickHandler attaches a function to run on every Tick, after
+// ProcessScheduledTasks and the wake dispatch. Tick handlers are not
+// gated by wake presence — they fire unconditionally on each Tick so the
+// scheduler can drive its own periodic work (e.g. cascade drain).
+//
+// Tick handlers run sequentially after wake dispatch completes. A handler
+// that returns a non-nil error is logged but does not prevent later
+// tick handlers from running.
+func (s *Scheduler) RegisterTickHandler(name string, fn func(ctx context.Context) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tickHandlers[name] = fn
 }
 
 // QueryDueWakes returns all unfired wakes with target_time <= now.
@@ -204,6 +220,10 @@ func (s *Scheduler) MarkFired(id string, lastError string) error {
 // Tick runs one scheduler iteration. Pulls due wakes, dispatches each
 // according to its kind. Returns the number of system wakes executed.
 func (s *Scheduler) Tick(ctx context.Context) (int, error) {
+	// Tick handlers fire unconditionally on every tick, regardless of
+	// wake state. Dispatch happens after wake processing completes.
+	defer s.dispatchTickHandlers(ctx)
+
 	// Phase 1: poll scheduled_tasks (Agentic Cron). Any task whose
 	// next_run_at has passed gets a standard scheduled_wakes row
 	// injected in the same transaction as its next_run_at rollover —
@@ -271,6 +291,34 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 	}
 	wg.Wait()
 	return executed, nil
+}
+
+// dispatchTickHandlers runs all registered tick handlers sequentially.
+// A handler that returns a non-nil error is logged but does not prevent
+// later tick handlers from running. The handler list is snapshotted
+// under the read lock so a handler that re-registers itself cannot
+// deadlock against the read lock.
+func (s *Scheduler) dispatchTickHandlers(ctx context.Context) {
+	s.mu.RLock()
+	tickFns := make([]struct {
+		name string
+		fn   func(ctx context.Context) error
+	}, 0, len(s.tickHandlers))
+	for name, fn := range s.tickHandlers {
+		tickFns = append(tickFns, struct {
+			name string
+			fn   func(ctx context.Context) error
+		}{name, fn})
+	}
+	s.mu.RUnlock()
+
+	for _, h := range tickFns {
+		if err := h.fn(ctx); err != nil {
+			s.log.Error("tick handler failed",
+				"handler", h.name,
+				"err", err)
+		}
+	}
 }
 
 // executeOne runs a single wake's handler under a goroutine, with context
