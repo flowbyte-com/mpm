@@ -80,10 +80,11 @@ func newTestScheduler(t *testing.T) *Scheduler {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	return &Scheduler{
-		db:       db,
-		dbPath:   path,
-		log:      log,
-		handlers: make(map[string]HandlerFunc),
+		db:           db,
+		dbPath:       path,
+		log:          log,
+		handlers:     make(map[string]HandlerFunc),
+		tickHandlers: make(map[string]func(ctx context.Context) error),
 	}
 }
 
@@ -470,6 +471,86 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestRegisterTickHandler_FiresOnEveryTick verifies a registered tick handler
+// runs on every Tick, not just on ticks with wakes.
+func TestRegisterTickHandler_FiresOnEveryTick(t *testing.T) {
+	s := newTestScheduler(t)
+
+	var count int
+	var mu sync.Mutex
+	s.RegisterTickHandler("test_counter", func(ctx context.Context) error {
+		mu.Lock()
+		count++
+		mu.Unlock()
+		return nil
+	})
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Tick(context.Background()); err != nil {
+			t.Fatalf("Tick %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 3 {
+		t.Errorf("tick handler ran %d times, expected 3", count)
+	}
+}
+
+// TestRegisterTickHandler_FailureDoesNotBlock verifies a handler that returns
+// an error does not prevent subsequent tick handlers from running.
+func TestRegisterTickHandler_FailureDoesNotBlock(t *testing.T) {
+	s := newTestScheduler(t)
+
+	var ranAfterFailure bool
+	s.RegisterTickHandler("always_errors", func(ctx context.Context) error {
+		return fmt.Errorf("boom")
+	})
+	s.RegisterTickHandler("second", func(ctx context.Context) error {
+		ranAfterFailure = true
+		return nil
+	})
+
+	_, err := s.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick returned error: %v", err)
+	}
+	if !ranAfterFailure {
+		t.Errorf("second tick handler did not run after first handler errored")
+	}
+}
+
+// TestRegisterTickHandler_FiresEvenWithNoWakes is the critical idempotency
+// test: tick handlers must fire even when there are no wakes (the wake
+// dispatch returns early). The defer pattern in Tick makes this work — without
+// it, the early return at len(wakes)==0 would skip tick dispatch entirely.
+func TestRegisterTickHandler_FiresEvenWithNoWakes(t *testing.T) {
+	s := newTestScheduler(t)
+
+	var fired bool
+	var mu sync.Mutex
+	s.RegisterTickHandler("fires_on_idle", func(ctx context.Context) error {
+		mu.Lock()
+		fired = true
+		mu.Unlock()
+		return nil
+	})
+
+	// Tick with an empty outbox — the existing wake dispatch returns early,
+	// but tick handlers must still fire.
+	_, err := s.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !fired {
+		t.Errorf("tick handler did not fire on idle tick")
+	}
 }
 
 // avoid unused-import warning if sync becomes unreferenced in some builds
