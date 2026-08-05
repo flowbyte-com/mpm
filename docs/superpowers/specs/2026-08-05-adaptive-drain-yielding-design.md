@@ -170,7 +170,6 @@ func NewCascadeDrainHandler(dm *core.DatabaseManager, logger *slog.Logger, opts 
         }),
     }
 }
-
 // Budget and BatchSize are exported accessors used by tests and any future
 // observability surface that needs to read the configured values without
 // holding the options struct.
