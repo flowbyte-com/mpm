@@ -40,7 +40,6 @@ package internal
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 )
 
@@ -49,9 +48,6 @@ type CascadeMaterializerOptions struct {
 	// BatchSize is the max number of pending intents to claim per
 	// MaterializeBatch call. Default 10.
 	BatchSize int
-	// PollInterval controls how often the worker loop checks for new
-	// work when the working set is empty. Default 5 seconds.
-	PollInterval time.Duration
 	// MaxRetries is the number of retries before an intent is moved
 	// to dead-letter state. Default 3.
 	MaxRetries int
@@ -62,43 +58,32 @@ type CascadeMaterializerOptions struct {
 	// scheduled after a successful materialization. Default 1 second.
 	// Set to 0 to disable.
 	WakeDelay time.Duration
-	// Workers is the number of concurrent materialization goroutines.
-	// Default 2.
-	Workers int
 }
 
 // DefaultCascadeMaterializerOptions returns the standard option set.
 func DefaultCascadeMaterializerOptions() CascadeMaterializerOptions {
 	return CascadeMaterializerOptions{
-		BatchSize:        10,
-		PollInterval:     5 * time.Second,
-		MaxRetries:       3,
-		MaxCascadeDepth:  MaxCascadeDepth,
-		WakeDelay:        1 * time.Second,
-		Workers:          2,
+		BatchSize:       10,
+		MaxRetries:      3,
+		MaxCascadeDepth: MaxCascadeDepth,
+		WakeDelay:       1 * time.Second,
 	}
 }
 
 // CascadeMaterializer consumes pending cascade intents and materializes
 // one theory per intent through the normal write path.
 type CascadeMaterializer struct {
-	dm       *DatabaseManager
-	opts     CascadeMaterializerOptions
-	stopC    chan struct{}
-	stopOnce sync.Once // guards against double close of stopC
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	run      bool // protected by mu
+	dm   *DatabaseManager
+	opts CascadeMaterializerOptions
 }
 
-// NewCascadeMaterializer builds a new materializer bound to the supplied
-// DatabaseManager. The worker is not started until Start is called.
+// NewCascadeMaterializer builds a stateless materializer bound to the
+// supplied DatabaseManager. The returned value carries no goroutines;
+// callers invoke MaterializeBatch directly. The background drain is
+// owned by mpm-scheduler; the CLI calls MaterializeCascadeIntents.
 func NewCascadeMaterializer(dm *DatabaseManager, opts CascadeMaterializerOptions) *CascadeMaterializer {
 	if opts.BatchSize <= 0 {
 		opts.BatchSize = 10
-	}
-	if opts.PollInterval <= 0 {
-		opts.PollInterval = 5 * time.Second
 	}
 	if opts.MaxRetries <= 0 {
 		opts.MaxRetries = 3
@@ -109,81 +94,9 @@ func NewCascadeMaterializer(dm *DatabaseManager, opts CascadeMaterializerOptions
 	if opts.WakeDelay < 0 {
 		opts.WakeDelay = 1 * time.Second
 	}
-	if opts.Workers <= 0 {
-		opts.Workers = 2
-	}
 	return &CascadeMaterializer{
-		dm:    dm,
-		opts:  opts,
-		stopC: make(chan struct{}),
-	}
-}
-
-// Start launches the materializer worker goroutines. It is safe to
-// call multiple times — subsequent calls after the first are no-ops
-// (idempotent start).
-func (cm *CascadeMaterializer) Start(ctx context.Context) {
-	cm.mu.Lock()
-	if cm.run {
-		cm.mu.Unlock()
-		return
-	}
-	cm.run = true
-	// Re-create stopC so a fresh (unclosed) channel exists for the new
-	// goroutine. Without this, a second Start() after a Stop() would
-	// immediately hit the closed channel and the goroutine would exit
-	// without processing any intents.
-	cm.stopC = make(chan struct{})
-	cm.mu.Unlock()
-
-	cm.wg.Add(1)
-	go func() {
-		defer cm.wg.Done()
-		cm.runLoop(ctx)
-	}()
-}
-
-// Stop gracefully terminates the materializer. In-flight materializations
-// are allowed to complete before the goroutines exit. It is safe to
-// call multiple times (idempotent stop).
-func (cm *CascadeMaterializer) Stop() {
-	cm.mu.Lock()
-	if !cm.run {
-		cm.mu.Unlock()
-		return
-	}
-	cm.run = false
-	cm.mu.Unlock()
-
-	cm.stopOnce.Do(func() { close(cm.stopC) })
-	cm.wg.Wait()
-}
-
-// runLoop is the materializer's main polling loop. It continuously
-// claims and processes batches of pending intents until Stop is called
-// or the context is cancelled.
-func (cm *CascadeMaterializer) runLoop(ctx context.Context) {
-	pollInterval := cm.opts.PollInterval
-	for {
-		select {
-		case <-cm.stopC:
-			return
-		case <-ctx.Done():
-			return
-		case <-time.After(pollInterval):
-			// Poll interval elapsed — run a batch.
-		}
-
-		report, err := cm.MaterializeBatch(ctx, cm.opts.BatchSize)
-		if err != nil {
-			// Non-retryable error; log and back off.
-			cm.dm.LogAudit(AuditError, "cascade-materializer", fmt.Sprintf("materialize batch error: %v", err), "", nil)
-			continue
-		}
-
-		// If the batch produced no forward progress, the timer already
-		// handled the idle delay above (timer fired or was stopped).
-		_ = report
+		dm:   dm,
+		opts: opts,
 	}
 }
 
@@ -226,11 +139,6 @@ func (cm *CascadeMaterializer) MaterializeBatch(ctx context.Context, limit int) 
 
 	for _, intent := range intents {
 		select {
-		case <-cm.stopC:
-			// Stop requested — abandon remaining intents by reverting
-			// them to 'pending' so a future run can reprocess them.
-			cm.revertToPending(intent.ID)
-			continue
 		case <-ctx.Done():
 			cm.revertToPending(intent.ID)
 			continue
