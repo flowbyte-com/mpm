@@ -2040,17 +2040,13 @@ func (dm *DatabaseManager) StopCascadeMaterializer() {
 	}
 }
 
-// MaterializeCascadeIntents claims and processes up to `limit` pending cascade
-// intents through the running materializer. It is safe to call even when the
-// materializer is not running (returns an empty report).
+// MaterializeCascadeIntents is a one-shot convenience for CLI callers (the
+// foreground escape hatch). It constructs a default-config materializer
+// per call and runs one batch. The background drain is owned by
+// mpm-scheduler; there is no shared long-lived materializer on
+// DatabaseManager.
 func (dm *DatabaseManager) MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error) {
-	dm.cascadeMatMu.Lock()
-	cm := dm.cascadeMaterializer
-	dm.cascadeMatMu.Unlock()
-	if cm == nil {
-		return MaterializationReport{}, nil
-	}
-	return cm.MaterializeBatch(ctx, limit)
+	return dm.NewCascadeMaterializer(DefaultCascadeMaterializerOptions()).MaterializeBatch(ctx, limit)
 }
 
 // ==================== CRUD OPERATIONS ====================
