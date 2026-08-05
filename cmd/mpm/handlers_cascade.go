@@ -1,8 +1,10 @@
 // handlers_cascade.go — mpm cascade materialize subcommand.
 //
-// Wires the cascade materializer into the CLI process. The materializer
-// runs as a background goroutine; this handler loops until the outbox is
-// drained (or a bounded limit is reached) then exits.
+// Foreground escape hatch for operators who don't want to run mpm-scheduler.
+// The handler calls dm.MaterializeCascadeIntents directly in a loop until
+// the outbox is drained (or --max-iterations is hit). Background draining
+// is owned exclusively by mpm-scheduler — this CLI never spawns a hidden
+// cascade thread.
 //
 // Exit codes:
 //   0 = drained (queue empty)
@@ -89,21 +91,12 @@ func handleCascadeMaterialize(args []string) int {
 		return 1
 	}
 
-	// context.Background() is the long-lived context for the materializer's
-	// polling loop. This matches the reviewer's Important finding: the ctx
-	// must outlive the request-scoped ctx that may be cancelled.
+	// Context for the synchronous MaterializeCascadeIntents calls below.
+	// This is the foreground escape hatch — no background goroutine, no
+	// lifecycle management. The CLI process owns one call sequence.
 	ctx := context.Background()
 
 	start := time.Now()
-
-	// Ensure the materializer is stopped on every exit path.
-	// The defer fires in LIFO order; Stop is idempotent so this is safe
-	// even if Start was never called or Stop was already called.
-	defer dm.StopCascadeMaterializer()
-
-	// Start the materializer with a background context so it outlives any
-	// request-scoped context that may be cancelled.
-	dm.StartCascadeMaterializer(ctx)
 
 	if *once {
 		// Run one batch and exit.
