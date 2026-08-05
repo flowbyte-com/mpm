@@ -222,3 +222,44 @@ When `MPM_SHARED_DB` is attached, cascade intents are written to both local and 
 | `HardConfidenceInvalidationThreshold` | `0.3` | Confidence floor for cascade trigger |
 
 All are constants in `internal/core/`; the materializer options are also settable via `NewCascadeMaterializer(dm, opts)`.
+
+## Operational notes — scheduler-driven cascade drain
+
+Cascade intent draining is now driven exclusively by the `cascade_drain`
+handler in `mpm-scheduler`. There is no longer an auto-starting
+background goroutine on the DatabaseManager.
+
+### Confirm draining is happening
+
+`mpm-scheduler` logs a `cascade drain yielded` line on every tick where
+the handler runs, with one of four `yield_reason` values:
+
+| reason              | meaning                                              |
+|---------------------|------------------------------------------------------|
+| `queue_empty`       | outbox drained, normal exit                          |
+| `budget_exhausted`  | budget (default 30s) ran out, more pending           |
+| `context_cancelled` | scheduler shutdown mid-tick, expected on `mpm stop`  |
+| `error`             | DB-level error during a batch, investigate logs      |
+
+### "I shredded a root directive but the cascade hasn't materialized"
+
+1. Is `mpm-scheduler` running? Look for `cascade drain yielded` log lines.
+2. Is the outbox non-empty?
+   ```sql
+   sqlite3 src/db/mpm.db \
+     "SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status='pending';"
+   ```
+3. Is the handler yielding `budget_exhausted` consistently? Check
+   `intents_materialized` per tick; raise `CascadeDrainOptions.Budget` if
+   you need faster drain after large blasts.
+4. Are intents in `status='failed'`? Inspect with `mpm cascade list-dead-letters`.
+
+### Foreground escape hatch
+
+If you don't want to run `mpm-scheduler`, use `mpm cascade materialize`.
+No time budget — the operator chose to wait.
+
+### Tuning the budget
+
+`CascadeDrainOptions.Budget` defaults to 30s. The handler yields when
+the budget runs out; the scheduler's 60s tick has 30s of headroom.
