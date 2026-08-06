@@ -341,7 +341,9 @@ func handleMaintain(args []string) int {
 
 	// Deferred VACUUM: reclaim space from hard deletes during idle maintenance
 	var deletedCount int
-	dm.SQLDB().QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL").Scan(&deletedCount)
+	if err := dm.SQLDB().QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL").Scan(&deletedCount); err != nil {
+		usererror.Warn("handleMaintain: failed to count deleted memories for vacuum, defaulting to 0: %v", err)
+	}
 	if deletedCount > 0 {
 		if _, vacErr := dm.SQLDB().Exec("PRAGMA incremental_vacuum"); vacErr != nil {
 			slog.Warn("incremental_vacuum failed", "error", vacErr.Error())

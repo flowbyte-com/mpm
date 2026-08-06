@@ -224,27 +224,28 @@ func handleRecall(args []string) int {
 	defer rows.Close()
 
 	var entries []recallEntry
-	for rows.Next() {
-		var id, content string
-		var createdAt int64
-		var nullableSessionID, nullableTags sql.NullString
-		var reinforcementCount, weight float64
-		var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
-		if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
-			&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
-			continue
-		}
-		if content == "" {
-			continue
-		}
-		sessionID := ""
-		if nullableSessionID.Valid {
-			sessionID = nullableSessionID.String
-		}
-		refID := ""
-		if nullableRefID.Valid {
-			refID = nullableRefID.String
-		}
+	scanErr := func() error {
+		for rows.Next() {
+			var id, content string
+			var createdAt int64
+			var nullableSessionID, nullableTags sql.NullString
+			var reinforcementCount, weight float64
+			var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
+			if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
+				&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
+				return fmt.Errorf("scanning recall entry row: %w", err)
+			}
+			if content == "" {
+				continue
+			}
+			sessionID := ""
+			if nullableSessionID.Valid {
+				sessionID = nullableSessionID.String
+			}
+			refID := ""
+			if nullableRefID.Valid {
+				refID = nullableRefID.String
+			}
 		entry := recallEntry{
 			id:                 id,
 			content:            content,
@@ -266,6 +267,12 @@ func handleRecall(args []string) int {
 		}
 		returnedIDs[id] = true
 		entries = append(entries, entry)
+		}
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handleRecall: %v", scanErr)
+		return 1
 	}
 
 	// Sort by recency — must happen before empty check for JSON mode

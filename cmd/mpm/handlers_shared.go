@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 func handleOpsShared(args []string) int {
@@ -62,12 +64,9 @@ func handleOpsShared(args []string) int {
 	// Count is_global rows specifically.
 	var globalCount int
 	row = dm.SQLDB().QueryRow("SELECT COUNT(*) FROM shared.memories WHERE is_global = 1")
-	if err := row.Scan(&count); err == nil {
-		// Reuse count for globalCount — first err case above already returned.
-	}
-	_ = row
-	row = dm.SQLDB().QueryRow("SELECT COUNT(*) FROM shared.memories WHERE is_global = 1")
-	if err := row.Scan(&globalCount); err == nil {
+	if err := row.Scan(&globalCount); err != nil {
+		usererror.Warn("handleOpsShared: failed to count shared.memories is_global rows, defaulting to 0: %v", err)
+	} else {
 		fmt.Printf("  is_global rows:       %d\n", globalCount)
 	}
 

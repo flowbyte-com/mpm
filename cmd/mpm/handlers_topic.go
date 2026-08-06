@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 func handleTopic(args []string) int {
@@ -209,7 +210,10 @@ func handleTopicShow(args []string) int {
 		if rows, err := db.Query("SELECT memory_id FROM topic_memberships WHERE topic_id = ?", id); err == nil {
 			for rows.Next() {
 				var mid string
-				rows.Scan(&mid)
+				if err := rows.Scan(&mid); err != nil {
+					usererror.Warn("handleTopicShow: failed to scan topic membership row, skipping: %v", err)
+					continue
+				}
 				memoryIDs = append(memoryIDs, mid)
 			}
 			rows.Close()
@@ -301,17 +305,24 @@ func handleTopicList(args []string) int {
 			CreatedAt   string `json:"created_at"`
 		}
 		result := make([]topicEntry, 0)
-		for rows.Next() {
-			var id, name, description, created string
-			if err := rows.Scan(&id, &name, &description, &created); err != nil {
-				continue
+		scanErr := func() error {
+			for rows.Next() {
+				var id, name, description, created string
+				if err := rows.Scan(&id, &name, &description, &created); err != nil {
+					return fmt.Errorf("scanning topic list row: %w", err)
+				}
+				result = append(result, topicEntry{
+					ID:          id,
+					Name:        name,
+					Description: description,
+					CreatedAt:   created,
+				})
 			}
-			result = append(result, topicEntry{
-				ID:          id,
-				Name:        name,
-				Description: description,
-				CreatedAt:   created,
-			})
+			return nil
+		}()
+		if scanErr != nil {
+			usererror.Warn("handleTopicList: %v", scanErr)
+			return 1
 		}
 		data, _ := json.Marshal(map[string]interface{}{"topics": result})
 		fmt.Println(string(data))
@@ -321,18 +332,25 @@ func handleTopicList(args []string) int {
 	var output strings.Builder
 	output.WriteString("Topics:\n\n")
 
-	for rows.Next() {
-		var id, name, description, created string
-		if err := rows.Scan(&id, &name, &description, &created); err != nil {
-			continue
+	scanErr := func() error {
+		for rows.Next() {
+			var id, name, description, created string
+			if err := rows.Scan(&id, &name, &description, &created); err != nil {
+				return fmt.Errorf("scanning topic output row: %w", err)
+			}
+			if len(description) > 100 {
+				description = description[:100] + "..."
+			}
+			output.WriteString(fmt.Sprintf("[%s] %s\n", id, name))
+			if description != "" {
+				output.WriteString(fmt.Sprintf("    %s\n", description))
+			}
 		}
-		if len(description) > 100 {
-			description = description[:100] + "..."
-		}
-		output.WriteString(fmt.Sprintf("[%s] %s\n", id, name))
-		if description != "" {
-			output.WriteString(fmt.Sprintf("    %s\n", description))
-		}
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handleTopicList: %v", scanErr)
+		return 1
 	}
 
 	return respond(output.String(), "", 0)

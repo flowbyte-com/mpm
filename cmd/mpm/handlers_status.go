@@ -252,8 +252,10 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 		query = "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND " + where
 	}
 	var count int
-	err := dm.SQLDB().QueryRow(query, args...).Scan(&count)
-	return count, err
+	if err := dm.SQLDB().QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("countMemories: %w", err)
+	}
+	return count, nil
 }
 
 func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int, error) {
@@ -261,19 +263,23 @@ func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int,
 	query := `SELECT COUNT(*) FROM memories
 		WHERE collection = 'theories' AND deleted_at IS NULL
 		AND json_extract(metadata, '$.status') = ?`
-	err := dm.SQLDB().QueryRow(query, status).Scan(&count)
-	return count, err
+	if err := dm.SQLDB().QueryRow(query, status).Scan(&count); err != nil {
+		return 0, fmt.Errorf("countTheoriesByStatus: %w", err)
+	}
+	return count, nil
 }
 
 func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {
 	var count int
 	var lastTime string
-	dm.SQLDB().QueryRow(`
+	if err := dm.SQLDB().QueryRow(`
 		SELECT COUNT(*), MAX(json_extract(metadata, '$.synthesized_at'))
 		FROM memories
 		WHERE deleted_at IS NULL
 		AND json_extract(metadata, '$.synthesized') = 'true'
-	`).Scan(&count, &lastTime)
+	`).Scan(&count, &lastTime); err != nil {
+		usererror.Warn("getSynthesisStats: failed to query synthesis stats, defaulting to (0, never): %v", err)
+	}
 	if lastTime == "" {
 		lastTime = "never"
 	}

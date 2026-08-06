@@ -452,10 +452,19 @@ func fetchTopDirectives(workspace string, limit int) string {
 			Content    string
 			Confidence float64
 		}
-		if err := rows.Scan(&d.ID, &d.Content, &d.Confidence); err != nil {
-			continue
+		scanErr := func() error {
+			for rows.Next() {
+				if err := rows.Scan(&d.ID, &d.Content, &d.Confidence); err != nil {
+					return fmt.Errorf("scanning directive row for route: %w", err)
+				}
+				directives = append(directives, d)
+			}
+			return nil
+		}()
+		if scanErr != nil {
+			usererror.Warn("fetchTopDirectives: %v", scanErr)
+			return ""
 		}
-		directives = append(directives, d)
 	}
 	if len(directives) == 0 {
 		return ""

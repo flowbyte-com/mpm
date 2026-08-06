@@ -4,12 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
@@ -151,13 +151,13 @@ func handleWake(args []string) int {
 	`)
 	if err == nil {
 		defer rows.Close()
-		for rows.Next() {
-			var memID, collection, content, createdAt string
-			var tagsJSON, metadataJSON sql.NullString
-			if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
-				slog.Warn("handleWake: rows.Scan failed", "error", err)
-				break
-			}
+		scanErr := func() error {
+			for rows.Next() {
+				var memID, collection, content, createdAt string
+				var tagsJSON, metadataJSON sql.NullString
+				if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
+					return fmt.Errorf("scanning wake context memory row: %w", err)
+				}
 			var tags []string
 			var memMeta map[string]interface{}
 			if tagsJSON.Valid {
@@ -175,6 +175,12 @@ func handleWake(args []string) int {
 				"created_at": createdAt,
 			})
 		}
+			return nil
+		}()
+		if scanErr != nil {
+			usererror.Warn("handleWake: %v", scanErr)
+			return 1
+		}
 	}
 
 	// Query recent lessons for additional cold-start context
@@ -187,11 +193,12 @@ func handleWake(args []string) int {
 	`)
 	if err == nil {
 		defer lrows.Close()
-		for lrows.Next() {
-			var lessonID, lessonType, content, tagsJSON, created string
-			if err := lrows.Scan(&lessonID, &lessonType, &content, &tagsJSON, &created); err != nil {
-				break
-			}
+		scanErrL := func() error {
+			for lrows.Next() {
+				var lessonID, lessonType, content, tagsJSON, created string
+				if err := lrows.Scan(&lessonID, &lessonType, &content, &tagsJSON, &created); err != nil {
+					return fmt.Errorf("scanning wake context lesson row: %w", err)
+				}
 			var tagList []string
 			if tagsJSON != "" {
 				json.Unmarshal([]byte(tagsJSON), &tagList)
@@ -203,6 +210,12 @@ func handleWake(args []string) int {
 				"tags":    tagList,
 				"created": created,
 			})
+		}
+			return nil
+		}()
+		if scanErrL != nil {
+			usererror.Warn("handleWake: %v", scanErrL)
+			return 1
 		}
 	}
 
@@ -267,7 +280,11 @@ func handleWake(args []string) int {
 		})
 	}
 
-	topics := dm.GetRecentUserTopics(5)
+	topics, err := dm.GetRecentUserTopics(5)
+	if err != nil {
+		usererror.Warn("handleWake: failed to get recent user topics: %v", err)
+		return 1
+	}
 
 	result := wakeResult{
 		SessionID:      sessionID,
@@ -439,12 +456,19 @@ func handleSessionList(args []string) int {
 		Created string
 	}
 	var sessions []sessionItem
-	for rows.Next() {
-		var s sessionItem
-		if err := rows.Scan(&s.ID, &s.Content, &s.Created); err != nil {
-			continue
+	scanErr := func() error {
+		for rows.Next() {
+			var s sessionItem
+			if err := rows.Scan(&s.ID, &s.Content, &s.Created); err != nil {
+				return fmt.Errorf("scanning session list row: %w", err)
+			}
+			sessions = append(sessions, s)
 		}
-		sessions = append(sessions, s)
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handleSessionList: %v", scanErr)
+		return 1
 	}
 
 	if len(sessions) == 0 {

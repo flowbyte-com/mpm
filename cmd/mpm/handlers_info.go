@@ -170,12 +170,14 @@ func listSkillsForInfo(dm *mpminternal.DatabaseManager) []string {
 	out := []string{}
 	for rows.Next() {
 		var id, name string
-		if err := rows.Scan(&id, &name); err == nil {
-			if name != "" {
-				out = append(out, name)
-			} else {
-				out = append(out, id)
-			}
+		if err := rows.Scan(&id, &name); err != nil {
+			usererror.Warn("listSkillsForInfo: failed to scan skill row, skipping: %v", err)
+			continue
+		}
+		if name != "" {
+			out = append(out, name)
+		} else {
+			out = append(out, id)
 		}
 	}
 	return out
@@ -204,9 +206,11 @@ func listScheduledTasksForInfo(dm *mpminternal.DatabaseManager) []scheduledTaskI
 	out := []scheduledTaskInfo{}
 	for rows.Next() {
 		var id, nextRun string
-		if err := rows.Scan(&id, &nextRun); err == nil {
-			out = append(out, scheduledTaskInfo{id: id, nextRun: nextRun})
+		if err := rows.Scan(&id, &nextRun); err != nil {
+			usererror.Warn("listScheduledTasksForInfo: failed to scan task row, skipping: %v", err)
+			continue
 		}
+		out = append(out, scheduledTaskInfo{id: id, nextRun: nextRun})
 	}
 	return out
 }

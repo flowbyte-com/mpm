@@ -65,12 +65,19 @@ func handleSynthesize(args []string) int {
 		Content string
 	}
 	var all []memInfo
-	for rows.Next() {
-		var m memInfo
-		if err := rows.Scan(&m.ID, &m.Content); err != nil {
-			continue
+	scanErr := func() error {
+		for rows.Next() {
+			var m memInfo
+			if err := rows.Scan(&m.ID, &m.Content); err != nil {
+				return fmt.Errorf("scanning memory row for synthesize: %w", err)
+			}
+			all = append(all, m)
 		}
-		all = append(all, m)
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handleSynthesize: %v", scanErr)
+		return 1
 	}
 	rows.Close()
 

@@ -72,15 +72,21 @@ func DetectSchema(dbPath string) (*Schema, error) {
 
 	// Check for OpenClaw signature: chunks table with known columns
 	var tableCount int
-	db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&tableCount)
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&tableCount); err != nil {
+		return nil, fmt.Errorf("detect schema: count tables: %w", err)
+	}
 
 	var chunksExists int
-	db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'").Scan(&chunksExists)
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'").Scan(&chunksExists); err != nil {
+		return nil, fmt.Errorf("detect schema: probe chunks: %w", err)
+	}
 
 	if chunksExists == 1 {
 		// Verify expected columns
 		var colList string
-		db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')").Scan(&colList)
+		if err := db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')").Scan(&colList); err != nil {
+			return nil, fmt.Errorf("detect schema: pragma_table_info: %w", err)
+		}
 		if strings.Contains(colList, "hash") && strings.Contains(colList, "text") && strings.Contains(colList, "updated_at") {
 			return &Schema{
 				DBType: "openclaw",
@@ -230,8 +236,10 @@ func (dm *DatabaseManager) insertRawMemory(raw *RawMemory) error {
 // contentHashExistsInMemory checks if a content hash is already in the memory table.
 func (dm *DatabaseManager) contentHashExistsInMemory(contentHash string) (bool, error) {
 	var count int
-	err := dm.db.QueryRow("SELECT COUNT(*) FROM memories WHERE content_hash = ?", contentHash).Scan(&count)
-	return count > 0, err
+	if err := dm.db.QueryRow("SELECT COUNT(*) FROM memories WHERE content_hash = ?", contentHash).Scan(&count); err != nil {
+		return false, fmt.Errorf("content hash existence check: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetRawMemoriesByStatus returns all raw_memories with a given status.

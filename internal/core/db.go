@@ -301,10 +301,14 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 
 	// Page-level stats (cheap, no scan).
 	var pageCount, freelistCount sql.NullInt64
-	if err := dm.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err == nil && pageCount.Valid {
+	if err := dm.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		dm.LogAudit(AuditWarn, "health", fmt.Sprintf("PRAGMA page_count scan failed, skipping: %v", err), "", AuditContext{})
+	} else if pageCount.Valid {
 		out["page_count"] = pageCount.Int64
 	}
-	if err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err == nil && freelistCount.Valid {
+	if err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err != nil {
+		dm.LogAudit(AuditWarn, "health", fmt.Sprintf("PRAGMA freelist_count scan failed, skipping: %v", err), "", AuditContext{})
+	} else if freelistCount.Valid {
 		out["freelist_count"] = freelistCount.Int64
 	}
 
@@ -328,8 +332,10 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 		}
 		if err == nil {
 			out[q.key] = n
+		} else {
+			// Non-fatal — log audit and skip on error.
+			dm.LogAudit(AuditWarn, "health", fmt.Sprintf("HealthCheck stat %q scan failed, skipping: %v", q.key, err), "", AuditContext{})
 		}
-		// Non-fatal — skip on error.
 	}
 
 	return out, nil
@@ -960,7 +966,9 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		SELECT COUNT(*) FROM shared.sqlite_master
 		WHERE type = 'table' AND name = 'memories_fts'
 		  AND sql LIKE '%content=''memories''%'
-	`).Scan(&hasOldSchema); err == nil && hasOldSchema > 0 {
+	`).Scan(&hasOldSchema); err != nil {
+		slog.Warn("shared FTS5 migration: schema probe failed, skipping detection", "error", err.Error())
+	} else if hasOldSchema > 0 {
 		if _, err := dm.db.Exec(`DROP TABLE shared.memories_fts`); err != nil {
 			slog.Warn("shared FTS5 migration: failed to drop old contentless schema",
 				"error", err.Error())
@@ -1663,7 +1671,9 @@ func (dm *DatabaseManager) dropFTS5Triggers() {
 // Idempotent — safe to call on every startup.
 func (dm *DatabaseManager) migrateLessonsToView() {
 	var baseExists int
-	dm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists)
+	if err := dm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists); err != nil {
+		slog.Warn("migrateLessonsToView: probe lessons_base, treating as absent", "error", err)
+	}
 
 	// If lessons_base exists, the rename already happened. Still need to drop any
 	// leftover AFTER triggers on lessons_base (from a prior partial migration) so
@@ -1777,7 +1787,9 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 func (dm *DatabaseManager) initFTSTables() error {
 	// Robust FTS5 availability check
 	var available int
-	dm.db.QueryRow("SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'").Scan(&available)
+	if err := dm.db.QueryRow("SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'").Scan(&available); err != nil {
+		slog.Warn("initFTSTables: probe FTS5 compile options, treating as unavailable", "error", err)
+	}
 	if available == 0 {
 		// Fallback test: try creating a real FTS5 table in-memory
 		testDB, err := sql.Open("sqlite3", ":memory:")
@@ -1897,7 +1909,9 @@ func (dm *DatabaseManager) initFTSTables() error {
 	ftsNeedsMigration := false
 	if err := dm.db.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts' AND sql LIKE '%tags UNINDEXED%'`,
-	).Scan(&ftsNeedsMigration); err == nil && ftsNeedsMigration {
+	).Scan(&ftsNeedsMigration); err != nil {
+		slog.Warn("mpm: FTS5 schema probe failed, skipping migration detection", "error", err.Error())
+	} else if ftsNeedsMigration {
 		slog.Info("mpm: FTS5 migration detected (memories_fts with tags UNINDEXED); rebuilding with tags indexed")
 		// Drop the old FTS table. Triggers reference it and will
 		// re-fire on subsequent writes; backfill below catches
@@ -1986,7 +2000,9 @@ func (dm *DatabaseManager) backfillFTSTables() error {
 	for _, b := range backfills {
 		// Check if FTS table already has data (avoid duplicate backfills)
 		var count int
-		dm.db.QueryRow("SELECT COUNT(*) FROM " + b.destTable).Scan(&count)
+		if err := dm.db.QueryRow("SELECT COUNT(*) FROM " + b.destTable).Scan(&count); err != nil {
+			slog.Warn("backfillFTSTables: count check failed, treating as empty: %v", "table", b.destTable)
+		}
 		if count > 0 {
 			continue // already populated
 		}
@@ -3541,6 +3557,8 @@ func (dm *DatabaseManager) GetLessonStats() (map[string]interface{}, error) {
 		err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons WHERE type = ?`, t).Scan(&count)
 		if err == nil {
 			typeCounts[string(t)] = count
+		} else {
+			dm.LogAudit(AuditWarn, "db", fmt.Sprintf("GetLessonStats: lesson type %q count failed, skipping: %v", t, err), "", AuditContext{})
 		}
 	}
 	stats["by_type"] = typeCounts

@@ -45,12 +45,16 @@ func (a *MPMAdapter) Name() string {
 
 func (a *MPMAdapter) Detect(db *sql.DB) bool {
 	var memoriesExists int
-	db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'").Scan(&memoriesExists)
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'").Scan(&memoriesExists); err != nil {
+		return false
+	}
 	if memoriesExists != 1 {
 		return false
 	}
 	var colList string
-	db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('memories')").Scan(&colList)
+	if err := db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('memories')").Scan(&colList); err != nil {
+		return false
+	}
 	return strings.Contains(colList, "content") && strings.Contains(colList, "created_at")
 }
 
@@ -103,12 +107,16 @@ func (a *OpenClawAdapter) Name() string {
 
 func (a *OpenClawAdapter) Detect(db *sql.DB) bool {
 	var chunksExists int
-	db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'").Scan(&chunksExists)
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'").Scan(&chunksExists); err != nil {
+		return false
+	}
 	if chunksExists != 1 {
 		return false
 	}
 	var colList string
-	db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')").Scan(&colList)
+	if err := db.QueryRow("SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')").Scan(&colList); err != nil {
+		return false
+	}
 	return strings.Contains(colList, "hash") && strings.Contains(colList, "text") && strings.Contains(colList, "updated_at")
 }
 

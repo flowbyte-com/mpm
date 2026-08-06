@@ -228,12 +228,14 @@ func BackfillSnapshots(
 // JSON path: json_extract(metadata, '$._epistemic_snapshot') IS NULL.
 func countMemoriesWithoutSnapshot(db *sql.DB) (int, error) {
 	var n int
-	err := db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM memories
 		WHERE deleted_at IS NULL
 		  AND json_extract(metadata, '$._epistemic_snapshot') IS NULL
-	`).Scan(&n)
-	return n, err
+	`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count memories without snapshot: %w", err)
+	}
+	return n, nil
 }
 
 // memoryRow is a memory that needs a snapshot stamped.

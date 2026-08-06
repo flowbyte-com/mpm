@@ -239,7 +239,7 @@ func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 		var lastAccess, createdAt int64
 
 		if err := rows.Scan(&id, &collection, &content, &reinforcementCount, &weight, &lastAccess, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning memory row during spaced review: %w", err)
 		}
 		result = append(result, map[string]interface{}{
 			"id":                  id,
