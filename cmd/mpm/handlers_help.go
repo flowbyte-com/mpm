@@ -65,7 +65,7 @@ var cognitiveHelpSections = []cogHelpSection{
 	{
 		title: "Create",
 		cmds: []helpCmd{
-			{"remember", "Create a memory (alias for mpm add)", false},
+			{"remember", "Persist knowledge (alias for mpm add)", false},
 			{"learn", "Curate a lesson (alias for mpm lesson add)", false},
 			{"decide", "Record a decision (alias for mpm record_decision)", false},
 			{"theorize", "Propose a theory (alias for mpm propose_theory)", false},

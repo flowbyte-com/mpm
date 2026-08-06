@@ -1248,76 +1248,77 @@ The `--max-iterations` bound is a safety valve — the operator's job is to keep
 
 Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. `mpm kb memory list`, `mpm ops gc`) are dispatched via `handlers_*.go` and documented manually in the subsections above. Regenerate this block with `go run ./cmd/gen-cli`.
 
-- **`add`** — Add a new memory
-- **`backup`** — Export database to timestamped .sql dump (optional path arg)
-- **`call`** — Universal machine interface: mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
-- **`cascade`** — Materialize pending cascade intents (epistemic cascades)
-- **`challenge`** — Challenge a memory as obsolete — atomic theory + patch (use 'restore' subcommand to undo)
-- **`config`** — Configure the AI provider (interactive wizard or scripted set|get|show|edit)
-- **`continue`** — Session resumption dashboard — composes working context, wake context, decisions, skills, theories
-- **`debug`** — Low-level inspection tools for human troubleshooting
-- **`decide`** — Record a decision (cognitive verb for record_decision)
-- **`decision`** — Decision ledger (add|resolve)
-- **`decisions`** — Show decision ledger
+- **`add`** — Persist knowledge
+- **`backup`** — Export database to SQL dump (optional path arg)
+- **`call`** — Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
+- **`capability`** — Manage capabilities (seed, lifecycle, governance)
+- **`cascade`** — Materialize cascade intents
+- **`challenge`** — Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)
+- **`config`** — Configure AI provider (interactive wizard or scripted set|get|show|edit)
+- **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
+- **`debug`** — Low-level debugging tools
+- **`decide`** — Record decision (cognitive verb for 'record_decision')
+- **`decision`** — Decision CRUD
+- **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Run diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
-- **`evidence`** — Evidence operations (add|list) — confidence/evidence foundation
+- **`doctor`** — Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
+- **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
-- **`gc`** — Run memory decay sweep (--dry-run, --review, --purge)
-- **`help`** — Show this help
-- **`hint`** — Check conversation context for relevant decisions/theories
-- **`info`** — Installation identity (version, database, models, scheduler, skills, persona, counts)
-- **`ingest`** — Import memories from external SQLite sources
-- **`kb`** — Knowledge base: memory, topic, lesson, session, reference
-- **`learn`** — Create a lesson (cognitive verb for mpm lesson add)
-- **`lesson`** — Lesson operations
-- **`lint`** — Validate persona/mode router frontmatter (YAML + regex compile)
+- **`gc`** — Run decay sweep (--dry-run, --review, --purge)
+- **`help`** — Show CLI catalogue
+- **`hint`** — Surface context-relevant artifacts
+- **`info`** — Show install identity (version, database, models, scheduler, skills, persona, counts)
+- **`ingest`** — Import from external SQLite
+- **`kb`** — Knowledge-base operations (memory|topic|lesson|reference)
+- **`learn`** — Curate lesson (cognitive verb for 'mpm lesson add')
+- **`lesson`** — Manage lessons
+- **`lint`** — Validate router frontmatter (YAML + regex compile)
 - **`list-skills`** — List skills (scope: all|local|shared)
 - **`ls`** — List memories
-- **`maintain`** — Run self-maintenance (decay, consolidate, prune)
-- **`memory`** — Memory operations
-- **`migrate`** — Import memories from markdown/JSON files (alias to ingest for non-SQLite sources)
-- **`mode`** — Mode operations
-- **`ops`** — Maintenance, diagnostics, and engine-room tools
-- **`patch-memory`** — Patch metadata JSON in-place
-- **`persona`** — Persona operations
-- **`promote`** — Make memory LTM
-- **`propose_theory`** — Record a hypothesis with validation criteria
-- **`prune`** — Prune old/expired memories
-- **`read-skill`** — Read a skill by name (or id) and optional version
-- **`recall`** _(aliases: s)_ — Search memories for context
-- **`record_decision`** — Record a decision with context, choice, and rationale
-- **`reference`** — Reference library
-- **`reinforce`** — Reinforce a memory
-- **`remember`** — Create a memory (cognitive verb for mpm add)
-- **`resolve_theory`** — Mark a theory as resolved
-- **`restore`** — Restore a soft-deleted memory
-- **`restore-db`** — Import a .sql dump to restore full database state
-- **`review`** — Spaced reinforcement review
-- **`rm`** — Delete a memory
-- **`route`** — Render mode+persona for a prompt (Claude Code hook input)
-- **`save-skill`** — Save a skill from a markdown file (--file, --name, --version, --force)
-- **`session`** — Session operations
-- **`set-weight`** — Set memory weight
+- **`maintain`** — Run self-maintenance sweep
+- **`memory`** — Manage memories
+- **`migrate`** — Import from markdown/JSON (alias to ingest for non-SQLite sources)
+- **`mode`** — Manage modes
+- **`ops`** — Engine-room operations (maintenance, diagnostics)
+- **`patch-memory`** — Patch memory metadata
+- **`persona`** — Manage personas
+- **`promote`** — Mark as durable (exempt from decay)
+- **`propose_theory`** — Propose hypothesis
+- **`prune`** — Prune expired memories
+- **`read-skill`** — Read skill by name (or id) and optional version
+- **`recall`** _(aliases: s)_ — Recall relevant context
+- **`record_decision`** — Record decision (full substrate form: context, choice, rationale)
+- **`reference`** — Manage reference documents
+- **`reinforce`** — Raise retrieval priority
+- **`remember`** — Persist knowledge (cognitive verb for 'mpm add')
+- **`resolve_theory`** — Resolve theory
+- **`restore`** — Restore soft-deleted memory
+- **`restore-db`** — Restore database from SQL dump
+- **`review`** — Start spaced-repetition review
+- **`rm`** — Delete memory
+- **`route`** — Route prompt to mode/persona (Claude Code hook input)
+- **`save-skill`** — Save skill from markdown file (--file, --name, --version, --force)
+- **`session`** — Manage sessions
+- **`set-weight`** — Override retrieval priority
 - **`show`** — Show memory details
-- **`shred`** — Secure delete memory
-- **`skill`** — Skill library (add|list|show|search)
-- **`snooze`** — Bump memory relevance
+- **`shred`** — Hard-delete memory
+- **`skill`** — Skill CRUD
+- **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics
-- **`status`** — System status dashboard
-- **`switch`** — Interactive UI to change persona/mode
-- **`synthesize`** — Merge near-duplicate memories via LLM synthesis
-- **`tasks`** — Manage Agentic Cron tasks (upsert|list|delete)
+- **`status`** — Show system status
+- **`switch`** — Switch persona/mode interactively
+- **`synthesize`** — Merge near-duplicate memories
+- **`tasks`** — Manage scheduled tasks (upsert|list|delete)
 - **`theories`** — List theories [pending|resolved|all]
-- **`theorize`** — Propose a theory (cognitive verb for propose_theory)
-- **`theory`** — Theory tracker (add|resolve)
-- **`topic`** — Topic management
-- **`tour`** — Interactive walkthrough of the cognitive verbs (--demo auto-runs each step; --step N jumps)
-- **`version`** — Show version info
-- **`wake`** — Show last session context (--json, --strict)
-- **`weaken`** — Weaken a memory
-- **`why`** — Why does this artifact exist? — one-level provenance (evidence + confidence + retrieval)
-- **`work`** — Working Context (ephemeral execution state) — status|show|clear|promote
+- **`theorize`** — Propose theory (cognitive verb for 'propose_theory')
+- **`theory`** — Theory CRUD
+- **`topic`** — Manage topics
+- **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
+- **`version`** — Show version + build identity
+- **`wake`** — Show wake context (--json, --strict)
+- **`weaken`** — Lower retrieval priority
+- **`why`** — Show artifact provenance (evidence + confidence + retrieval)
+- **`work`** — Working context scratchpad — status|show|clear|promote
 
 <!-- cli:end — auto-generated by `go run ./cmd/gen-cli`. Do not edit by hand. -->
 
