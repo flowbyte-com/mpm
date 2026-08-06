@@ -273,10 +273,12 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 	// string when no compaction has happened — agents branch on
 	// non-empty rather than parsing the string.
 	var lastCompacted string
-	_ = dm.SQLDB().QueryRow(`
+	if err := dm.SQLDB().QueryRow(`
 		SELECT COALESCE(json_extract(raw_json, '$.last_run_at'), '')
 		FROM system_config WHERE key = 'compaction.last_run'
-	`).Scan(&lastCompacted)
+	`).Scan(&lastCompacted); err != nil {
+		lastCompacted = ""
+	}
 
 	// Divide-by-zero guard. With LessonCount == 0 the ratio is undefined;
 	// emit 0.0 so the JSON marshaller produces a valid number instead of

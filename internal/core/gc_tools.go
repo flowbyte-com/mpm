@@ -160,7 +160,9 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 
 		if newW <= 0.0 && !lifetimeLTM {
 			var preview string
-			_ = dm.db.QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&preview)
+			if err := dm.db.QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&preview); err != nil {
+				preview = ""
+			}
 			result.DeadMemories = append(result.DeadMemories, map[string]interface{}{
 				"id":      id,
 				"content": preview,

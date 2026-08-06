@@ -57,6 +57,9 @@ func ApplyDirectives(dm interface {
 			`SELECT id, content FROM memories WHERE id = ? AND deleted_at IS NULL`,
 			sd.StableID,
 		).Scan(&existingID, &existingContent)
+		if err != nil && err != sql.ErrNoRows {
+			return summary, fmt.Errorf("seed lookup %s: %w", sd.StableID, err)
+		}
 
 		switch {
 		case err == sql.ErrNoRows:

@@ -167,7 +167,9 @@ func pendingCount() int {
 		return -1
 	}
 	var n int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n)
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
+		usererror.Warn("pendingCount: failed to count pending cascade outbox rows, defaulting to 0: %v", err)
+	}
 	return n
 }
 
@@ -178,7 +180,9 @@ func processingCount() int {
 		return -1
 	}
 	var n int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n)
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n); err != nil {
+		usererror.Warn("processingCount: failed to count processing cascade outbox rows, defaulting to 0: %v", err)
+	}
 	return n
 }
 
@@ -258,12 +262,21 @@ func handleListDeadLetters(args []string) int {
 		fmt.Printf("\nTotal dead-letter intents: %d\n", count)
 	}
 
-	// Also print a summary of all non-pending states.
+	// Also print a summary of all non-pending states. Best-effort counts;
+	// each one logs a warning and defaults to 0 on failure.
 	var pending, processing, materialized, failed int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&pending)
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&processing)
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(&materialized)
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(&failed)
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&pending); err != nil {
+		usererror.Warn("handleListDeadLetters: failed to count pending cascade outbox rows, defaulting to 0: %v", err)
+	}
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&processing); err != nil {
+		usererror.Warn("handleListDeadLetters: failed to count processing cascade outbox rows, defaulting to 0: %v", err)
+	}
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(&materialized); err != nil {
+		usererror.Warn("handleListDeadLetters: failed to count materialized cascade outbox rows, defaulting to 0: %v", err)
+	}
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(&failed); err != nil {
+		usererror.Warn("handleListDeadLetters: failed to count failed cascade outbox rows, defaulting to 0: %v", err)
+	}
 
 	fmt.Printf("\nOutbox summary — pending=%d processing=%d materialized=%d failed=%d\n",
 		pending, processing, materialized, failed)

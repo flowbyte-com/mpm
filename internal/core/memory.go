@@ -216,7 +216,9 @@ func (s *MemoryStore) addColumnIfNotExists(table, column, colType string) error 
 		var cid, name, ctype string
 		var notnull, pk int
 		var dflt interface{}
-		rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("addColumnIfNotExists: scan column info: %w", err)
+		}
 		if name == column {
 			return nil // Column already exists
 		}
@@ -1146,8 +1148,10 @@ func (s *MemoryStore) GetMemoryCount() (int, error) {
 	}
 
 	var count int
-	err := s.DB.QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL").Scan(&count)
-	return count, err
+	if err := s.DB.QueryRow("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL").Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active memories: %w", err)
+	}
+	return count, nil
 }
 
 // GetTopicCount returns the number of active topics
@@ -1159,8 +1163,10 @@ func (s *MemoryStore) GetTopicCount() (int, error) {
 	}
 
 	var count int
-	err := s.DB.QueryRow("SELECT COUNT(*) FROM topics WHERE is_active = 1").Scan(&count)
-	return count, err
+	if err := s.DB.QueryRow("SELECT COUNT(*) FROM topics WHERE is_active = 1").Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active topics: %w", err)
+	}
+	return count, nil
 }
 
 // splitLines splits text into lines
@@ -1432,13 +1438,17 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		var m memKey
 		var tags string
 		var embeddingJSON []byte
-		if rows.Scan(&m.id, &m.collection, &m.content, &tags, &embeddingJSON, &m.createdAt, &m.weight, &m.reinforce) == nil {
-			if len(embeddingJSON) > 0 {
-				json.Unmarshal(embeddingJSON, &m.embedding)
+		if err := rows.Scan(&m.id, &m.collection, &m.content, &tags, &embeddingJSON, &m.createdAt, &m.weight, &m.reinforce); err != nil {
+			if s.DM != nil {
+				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("ConsolidateMemories: scan failed, skipping: %v", err), "", AuditContext{})
 			}
-			m.tags = tags
-			memories = append(memories, m)
+			continue
 		}
+		if len(embeddingJSON) > 0 {
+			json.Unmarshal(embeddingJSON, &m.embedding)
+		}
+		m.tags = tags
+		memories = append(memories, m)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1736,21 +1746,29 @@ func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 	// Get never-accessed count
 	if s.DB != nil {
 		var count int
-		s.DB.QueryRow(`
+		if err := s.DB.QueryRow(`
 			SELECT COUNT(*) FROM memories
 			WHERE deleted_at IS NULL
 			  AND last_accessed_at IS NULL
 			  AND reinforcement_count = 0
-		`).Scan(&count)
+		`).Scan(&count); err != nil {
+			if s.DM != nil {
+				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: never-accessed count failed, defaulting to 0: %v", err), "", AuditContext{})
+			}
+		}
 		stats.NeverAccessed = count
 
 		var lowWeight int
-		s.DB.QueryRow(`
+		if err := s.DB.QueryRow(`
 			SELECT COUNT(*) FROM memories
 			WHERE deleted_at IS NULL
 			  AND weight = 1
 			  AND reinforcement_count = 0
-		`).Scan(&lowWeight)
+		`).Scan(&lowWeight); err != nil {
+			if s.DM != nil {
+				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: low-weight count failed, defaulting to 0: %v", err), "", AuditContext{})
+			}
+		}
 		stats.LowWeight = lowWeight
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
@@ -315,15 +316,16 @@ func backfillEpistemologyTopics() {
 
 	linked := 0
 	now := time.Now().UTC().Format(time.RFC3339)
-	for rows.Next() {
-		var id, collection string
-		if err := rows.Scan(&id, &collection); err != nil {
-			continue
-		}
-		topicID, tErr := dm.GetOrCreateTopic(collection)
-		if tErr != nil {
-			continue
-		}
+	scanErr := func() error {
+		for rows.Next() {
+			var id, collection string
+			if err := rows.Scan(&id, &collection); err != nil {
+				return fmt.Errorf("scanning memory row for epistemology topic backfill: %w", err)
+			}
+			topicID, tErr := dm.GetOrCreateTopic(collection)
+			if tErr != nil {
+				continue
+			}
 		res, execErr := dm.SQLDB().Exec(
 			`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
 			id, topicID, now, "primary",
@@ -333,6 +335,11 @@ func backfillEpistemologyTopics() {
 				linked++
 			}
 		}
+		}
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("backfillEpistemologyTopics: %v", scanErr)
 	}
 
 	if linked > 0 {

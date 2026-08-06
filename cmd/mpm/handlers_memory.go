@@ -11,6 +11,7 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/synth"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // ============================================================================
@@ -50,17 +51,24 @@ func handlePrimeDirectives() int {
 			CreatedAt  string `json:"created_at"`
 		}
 		directives := make([]directiveEntry, 0)
-		for rows.Next() {
-			var id, collection, content, metadata, created string
-			if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
-				continue
+		scanErr := func() error {
+			for rows.Next() {
+				var id, collection, content, metadata, created string
+				if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
+					return fmt.Errorf("scanning prime directive row: %w", err)
+				}
+				directives = append(directives, directiveEntry{
+					ID:         id,
+					Collection: collection,
+					Content:    content,
+					CreatedAt:  created,
+				})
 			}
-			directives = append(directives, directiveEntry{
-				ID:         id,
-				Collection: collection,
-				Content:    content,
-				CreatedAt:  created,
-			})
+			return nil
+		}()
+		if scanErr != nil {
+			usererror.Warn("handlePrimeDirectives: %v", scanErr)
+			return 1
 		}
 		if len(directives) == 0 {
 			fmt.Println(`{"directives": [], "message": "No prime directives found"}`)
@@ -76,22 +84,29 @@ func handlePrimeDirectives() int {
 	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n\n")
 
 	count := 0
-	for rows.Next() {
-		var id, collection, content, metadata, created string
-		if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
-			continue
-		}
-		output.WriteString(fmt.Sprintf("[%s] %s\n\n", id, collection))
-		content = strings.TrimSpace(content)
-		for i := 0; i < len(content); i += 70 {
-			end := i + 70
-			if end > len(content) {
-				end = len(content)
+	scanErr := func() error {
+		for rows.Next() {
+			var id, collection, content, metadata, created string
+			if err := rows.Scan(&id, &collection, &content, &metadata, &created); err != nil {
+				return fmt.Errorf("scanning prime directive output row: %w", err)
 			}
-			output.WriteString(content[i:end] + "\n")
+			output.WriteString(fmt.Sprintf("[%s] %s\n\n", id, collection))
+			content = strings.TrimSpace(content)
+			for i := 0; i < len(content); i += 70 {
+				end := i + 70
+				if end > len(content) {
+					end = len(content)
+				}
+				output.WriteString(content[i:end] + "\n")
+			}
+			output.WriteString("\n")
+			count++
 		}
-		output.WriteString("\n")
-		count++
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handlePrimeDirectives: %v", scanErr)
+		return 1
 	}
 
 	if count == 0 {

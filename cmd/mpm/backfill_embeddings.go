@@ -162,7 +162,7 @@ func fetchMemoriesWithoutEmbedding(db *sql.DB, collection string, limit, offset 
 	for rows.Next() {
 		var m memRow
 		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning memory without embedding row: %w", err)
 		}
 		results = append(results, m)
 	}

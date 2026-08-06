@@ -233,7 +233,10 @@ func handleGC(args []string) int {
 		var lastAccessed, createdAt *int64
 		var isLongTerm bool
 
-		rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm)
+		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm); err != nil {
+			usererror.Warn("handleGC: scan failed for memory row, skipping: %v", err)
+			continue
+		}
 
 		// Compute days since access using captured monotonic time
 		lastAccessInt := lastAccessed
@@ -274,7 +277,9 @@ func handleGC(args []string) int {
 		isLTM := deltas[len(deltas)-1].isLTM
 		if newWeight <= 0.0 && !isLTM {
 			var deadContent string
-			dm.SQLDB().QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&deadContent)
+			if err := dm.SQLDB().QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(&deadContent); err != nil {
+				usererror.Warn("handleGC: failed to fetch dead memory content, defaulting to empty: %v", err)
+			}
 			deadMemories = append(deadMemories, map[string]interface{}{
 				"id":      id,
 				"content": deadContent,

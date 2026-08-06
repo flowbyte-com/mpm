@@ -337,9 +337,12 @@ func (dm *DatabaseManager) GetMemoryTopics(memoryID string) ([]TopicRef, error) 
 	var refs []TopicRef
 	for rows.Next() {
 		var r TopicRef
-		if err := rows.Scan(&r.ID, &r.Name, &r.Role); err == nil {
-			refs = append(refs, r)
+		if err := rows.Scan(&r.ID, &r.Name, &r.Role); err != nil {
+			// Diagnostic — skip this row but keep going.
+			dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryTopics: scan failed, skipping row: %v", err), "", AuditContext{"memory_id": memoryID})
+			continue
 		}
+		refs = append(refs, r)
 	}
 	if refs == nil {
 		refs = []TopicRef{}
@@ -388,21 +391,26 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 	for rows.Next() {
 		var r MemoryRef
 		var content string
-		if err := rows.Scan(&r.ID, &content, &r.Collection, &r.Weight); err == nil {
-			if len(content) > 120 {
-				r.Content = content[:120] + "…"
-			} else {
-				r.Content = content
-			}
-			refs = append(refs, r)
+		if err := rows.Scan(&r.ID, &content, &r.Collection, &r.Weight); err != nil {
+			// Diagnostic — skip this row but keep going.
+			dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetTopicTopMemories: scan failed, skipping row: %v", err), "", AuditContext{"topic_id": topicID})
+			continue
 		}
+		if len(content) > 120 {
+			r.Content = content[:120] + "…"
+		} else {
+			r.Content = content
+		}
+		refs = append(refs, r)
 	}
 	if refs == nil {
 		refs = []MemoryRef{}
 	}
 
 	var total int
-	dm.db.QueryRow(`SELECT COUNT(*) FROM topic_memberships WHERE topic_id = ? AND memory_id IS NOT NULL`, topicID).Scan(&total)
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM topic_memberships WHERE topic_id = ? AND memory_id IS NOT NULL`, topicID).Scan(&total); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetTopicTopMemories: total count failed, defaulting to 0: %v", err), "", AuditContext{"topic_id": topicID})
+	}
 
 	return refs, total, rows.Err()
 }
@@ -843,14 +851,16 @@ func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, e
 		for rows.Next() {
 			var chunkID, section, content string
 			var chunkIndex int
-			if rows.Scan(&chunkID, &chunkIndex, &section, &content) == nil {
-				chunks = append(chunks, map[string]interface{}{
-					"id":          chunkID,
-					"chunk_index": chunkIndex,
-					"section":     section,
-					"content":     content,
-				})
+			if err := rows.Scan(&chunkID, &chunkIndex, &section, &content); err != nil {
+				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetReference: scan failed for chunk, skipping: %v", err), "", AuditContext{"ref_id": refID})
+				continue
 			}
+			chunks = append(chunks, map[string]interface{}{
+				"id":          chunkID,
+				"chunk_index": chunkIndex,
+				"section":     section,
+				"content":     content,
+			})
 		}
 		ref["chunks"] = chunks
 	}
@@ -893,18 +903,20 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 	for rows.Next() {
 		var id, title, filePath, sourceType, tags, lastIndexed, createdAt string
 		var totalChunks int
-		if rows.Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt) == nil {
-			refs = append(refs, map[string]interface{}{
-				"id":           id,
-				"title":        title,
-				"file_path":    filePath,
-				"source_type":  sourceType,
-				"tags":         tags,
-				"total_chunks": totalChunks,
-				"last_indexed": lastIndexed,
-				"created_at":   createdAt,
-			})
+		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt); err != nil {
+			dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("SearchReferences: scan failed for ref, skipping: %v", err), "", AuditContext{})
+			continue
 		}
+		refs = append(refs, map[string]interface{}{
+			"id":           id,
+			"title":        title,
+			"file_path":    filePath,
+			"source_type":  sourceType,
+			"tags":         tags,
+			"total_chunks": totalChunks,
+			"last_indexed": lastIndexed,
+			"created_at":   createdAt,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1181,7 +1193,10 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 	topics := []map[string]interface{}{}
 	for rows.Next() {
 		var id, name, description, createdAt, tags string
-		rows.Scan(&id, &name, &description, &createdAt, &tags)
+		if err := rows.Scan(&id, &name, &description, &createdAt, &tags); err != nil {
+			dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("SearchTopics: scan failed, skipping: %v", err), "", AuditContext{})
+			continue
+		}
 		topics = append(topics, map[string]interface{}{
 			"id": id, "name": name, "description": description,
 			"created_at": createdAt, "tags": tags,
@@ -1197,18 +1212,30 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
-	// Basic counts
+	// Basic counts. Each one is best-effort — log audit and default to 0 on failure.
 	var total, active, deleted, ltm, reinforced, neverAccessed, expired int
 	err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&total)
 	if err != nil {
 		return nil, err
 	}
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(&active)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(&deleted)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(&ltm)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL`).Scan(&reinforced)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(&neverAccessed)
-	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')`).Scan(&expired)
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(&active); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: active count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(&deleted); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: deleted count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(&ltm); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: ltm count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL`).Scan(&reinforced); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: reinforced count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(&neverAccessed); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: never_accessed count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')`).Scan(&expired); err != nil {
+		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: expired count failed, defaulting to 0: %v", err), "", AuditContext{})
+	}
 
 	stats["total"] = total
 	stats["active"] = active
@@ -1229,9 +1256,11 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		for rows.Next() {
 			var coll string
 			var count int
-			if rows.Scan(&coll, &count) == nil {
-				byCollection = append(byCollection, map[string]interface{}{"collection": coll, "count": count})
+			if err := rows.Scan(&coll, &count); err != nil {
+				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: by_collection scan failed, skipping: %v", err), "", AuditContext{})
+				continue
 			}
+			byCollection = append(byCollection, map[string]interface{}{"collection": coll, "count": count})
 		}
 		stats["by_collection"] = byCollection
 	}
@@ -1251,9 +1280,11 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		for rows.Next() {
 			var tag string
 			var count int
-			if rows.Scan(&tag, &count) == nil {
-				byTag = append(byTag, map[string]interface{}{"tag": tag, "count": count})
+			if err := rows.Scan(&tag, &count); err != nil {
+				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: by_tag scan failed, skipping: %v", err), "", AuditContext{})
+				continue
 			}
+			byTag = append(byTag, map[string]interface{}{"tag": tag, "count": count})
 		}
 		stats["by_tag"] = byTag
 	}
@@ -1269,9 +1300,11 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		var dist []map[string]interface{}
 		for rows.Next() {
 			var rc, count int
-			if rows.Scan(&rc, &count) == nil {
-				dist = append(dist, map[string]interface{}{"reinforcement_count": rc, "count": count})
+			if err := rows.Scan(&rc, &count); err != nil {
+				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: reinforce_dist scan failed, skipping: %v", err), "", AuditContext{})
+				continue
 			}
+			dist = append(dist, map[string]interface{}{"reinforcement_count": rc, "count": count})
 		}
 		stats["reinforce_dist"] = dist
 	}
@@ -1318,9 +1351,12 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		for rows.Next() {
 			var agent, model, compute, persona sql.NullString
 			var total, active int
-			if rows.Scan(&agent, &model, &compute, &persona, &total, &active) == nil {
-				a := agent.String
-				ai, ok := agentIndex[a]
+			if err := rows.Scan(&agent, &model, &compute, &persona, &total, &active); err != nil {
+				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: ISR scan failed, skipping: %v", err), "", AuditContext{})
+				continue
+			}
+			a := agent.String
+			ai, ok := agentIndex[a]
 				if !ok {
 					ai = len(agents)
 					agentIndex[a] = ai
@@ -1347,7 +1383,6 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 					total:   total,
 					active:  active,
 				})
-			}
 		}
 
 		// Serialize to nested maps for JSON/display compatibility

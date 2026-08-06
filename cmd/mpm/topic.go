@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -145,7 +146,7 @@ func suggestTopicsForMemory(dm *mpminternal.DatabaseManager, memoryID, content s
 	for rows.Next() {
 		var id, name, description string
 		if err := rows.Scan(&id, &name, &description); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning suggested topic row: %w", err)
 		}
 
 		// Compute confidence using topic name (and description, take max)

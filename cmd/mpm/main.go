@@ -483,7 +483,7 @@ func runDeepScanCheck(dbPath string) (*DeepScanResult, error) {
 			var rid int64
 			var label sql.NullString
 			if err := rows.Scan(&rid, &label); err != nil {
-				continue
+				return nil, fmt.Errorf("scanning FTS index sample row: %w", err)
 			}
 			count++
 			if len(samples) < 5 {
@@ -704,7 +704,10 @@ LIMIT 10`
 	var detail string
 	for rows.Next() {
 		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			usererror.Warn("Scan error: %v", err)
+			// runDoctorExplain is void; we can't propagate. Log the
+			// wrapped error so the operator sees the failure context,
+			// then continue with remaining rows.
+			usererror.Warn("runDoctorExplain: failed to scan EXPLAIN row: %v", err)
 			continue
 		}
 		indent := ""
@@ -977,7 +980,9 @@ func runDoctorDatabaseChecks(report *DoctorReport) {
 
 	// Quick stats
 	var tableCount int
-	sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&tableCount)
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&tableCount); err != nil {
+		usererror.Warn("runDoctorDatabaseChecks: failed to count tables, defaulting to 0: %v", err)
+	}
 	check.Details = append(check.Details, fmt.Sprintf("Tables: %d", tableCount))
 
 	report.Passed++
@@ -1404,7 +1409,11 @@ func PrintQuicklinks() {
 		// resolved". The substrate tracks these natively; surfacing
 		// them here is honest information composition rather than
 		// workflow recommendation.
-		theories := loadPendingTheoriesForQuicklinks(dm, 3)
+		theories, err := loadPendingTheoriesForQuicklinks(dm, 3)
+	if err != nil {
+		usererror.Warn("dashboard: failed to load pending theories: %v", err)
+		theories = nil
+	}
 		if len(theories) == 0 {
 			fmt.Println(" \u2022 (no open theories)")
 		} else {
@@ -1485,9 +1494,9 @@ func PrintQuicklinks() {
 // dashboard. We parse it into a clean "<id>: <criteria>" form
 // here so the Quicklinks surface reads as information, not raw
 // protocol. Unknown shapes pass through unchanged.
-func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int) []string {
+func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int) ([]string, error) {
 	if dm == nil || limit <= 0 {
-		return nil
+		return nil, nil
 	}
 	rows, err := dm.QueryTracked(
 		`SELECT id, content FROM memories
@@ -1499,18 +1508,18 @@ func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int
 		limit,
 	)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	out := []string{}
 	for rows.Next() {
 		var id, content string
 		if err := rows.Scan(&id, &content); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning pending theory quicklink row: %w", err)
 		}
 		out = append(out, formatTheoryPreview(content, id))
 	}
-	return out
+	return out, nil
 }
 
 // formatTheoryPreview renders a pending-theory content row as a

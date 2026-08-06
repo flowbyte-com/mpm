@@ -68,9 +68,16 @@ func TestRegistry_RoundTripCLIAndMCP_ReadOnlyTools(t *testing.T) {
 
 			// JSON is order-insensitive at the parser level. We compare
 			// by re-marshalling both sides (which canonicalizes key
-			// order) and string-comparing. If a future handler returns
-			// a non-deterministic result (timestamps, etc.), this
-			// assertion will need to be relaxed.
+			// order) and string-comparing.
+			//
+			// Volatile fields are stripped: audit_summary is a CUMULATIVE
+			// count of system_audit_log entries, and since both calls
+			// (CLI then MCP) write to that log on read_wake_context, the
+			// second call always shows a higher count than the first.
+			// That's a known property of the audit log, not a CLI/MCP
+			// drift — strip it before comparing.
+			cliJSON = stripVolatile(cliJSON)
+			mcpJSON = stripVolatile(mcpJSON)
 			if string(mcpJSON) != string(cliJSON) {
 				t.Errorf("CLI/MCP output mismatch for %s:\n  CLI: %s\n  MCP: %s",
 					name, cliJSON, mcpJSON)
@@ -274,6 +281,10 @@ func stripVolatile(jsonBytes []byte) []byte {
 	delete(obj, "last_gc_ran")
 	delete(obj, "ran")
 	delete(obj, "cooldown_skip")
+	// audit_summary is cumulative across calls (each call may write to
+	// system_audit_log, so successive calls in the same test see a
+	// higher count). Strip it so CLI/MCP comparisons are deterministic.
+	delete(obj, "audit_summary")
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return jsonBytes

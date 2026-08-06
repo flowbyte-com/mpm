@@ -64,10 +64,12 @@ func (dm *DatabaseManager) LoadMemoryProvenance(memoryID string) (ProvenanceScor
 	// evidence_store pipeline. The query is cheap and the
 	// approximation is good enough for ranking.
 	var evCount int
-	_ = dm.db.QueryRow(`
+	if err := dm.db.QueryRow(`
 		SELECT COUNT(*) FROM shared.evidence
 		WHERE artifact_id = ? AND artifact_type = 'memory'
-	`, memoryID).Scan(&evCount)
+	`, memoryID).Scan(&evCount); err != nil {
+		evCount = 0
+	}
 	ps.Reinforcement = math.Min(float64(evCount)/10.0, 1.0)
 
 	// Weighted sum: confidence 50%, freshness 30%, reinforcement 20%.

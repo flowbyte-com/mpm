@@ -361,10 +361,12 @@ func (dm *DatabaseManager) loadProvenanceInTx(tx *sql.Tx, memoryID string) (Prov
 		ps.AgeDays = time.Since(t).Hours() / 24.0
 	}
 	var evCount int
-	_ = tx.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT COUNT(*) FROM shared.evidence
 		WHERE artifact_id = ? AND artifact_type = 'memory'
-	`, memoryID).Scan(&evCount)
+	`, memoryID).Scan(&evCount); err != nil {
+		evCount = 0
+	}
 	ps.Reinforcement = math.Min(float64(evCount)/10.0, 1.0)
 	ps.Score = 0.5*ps.Confidence + 0.3*(1.0/(1.0+ps.AgeDays)) + 0.2*ps.Reinforcement
 	return ps, nil

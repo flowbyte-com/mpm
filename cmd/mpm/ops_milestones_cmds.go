@@ -108,17 +108,24 @@ func handleOpsMilestones(args []string) int {
 		flavor    string
 	}
 	var entries []entry
-	for rows.Next() {
-		var e entry
-		var tagsJSON string
-		if err := rows.Scan(&e.id, &e.content, &e.createdAt, &tagsJSON); err != nil {
-			continue
+	scanErr := func() error {
+		for rows.Next() {
+			var e entry
+			var tagsJSON string
+			if err := rows.Scan(&e.id, &e.content, &e.createdAt, &tagsJSON); err != nil {
+				return fmt.Errorf("scanning ops milestone row: %w", err)
+			}
+			e.flavor = extractFlavor(tagsJSON)
+			if flavorFilter != "" && e.flavor != flavorFilter {
+				continue
+			}
+			entries = append(entries, e)
 		}
-		e.flavor = extractFlavor(tagsJSON)
-		if flavorFilter != "" && e.flavor != flavorFilter {
-			continue
-		}
-		entries = append(entries, e)
+		return nil
+	}()
+	if scanErr != nil {
+		usererror.Warn("handleOpsMilestones: %v", scanErr)
+		return 1
 	}
 
 	fmt.Println("Recent Milestones")
