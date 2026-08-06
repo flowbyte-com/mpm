@@ -1,0 +1,4811 @@
+{
+  "total": 267,
+  "sites": [
+    {
+      "file": "cmd/mpm/backfill_embeddings.go",
+      "line": 139,
+      "column": 12,
+      "func_name": "countMemoriesWithoutEmbedding",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  136: \t\targs = append(args, collection)",
+        "  137: \t}",
+        "  138: \trow := db.QueryRow(query, args...)",
+        "\u003e 139: \tif err := row.Scan(\u0026count); err != nil {",
+        "  140: \t\treturn 0, err",
+        "  141: \t}",
+        "  142: \treturn count, nil"
+      ]
+    },
+    {
+      "file": "cmd/mpm/backfill_embeddings.go",
+      "line": 164,
+      "column": 13,
+      "func_name": "fetchMemoriesWithoutEmbedding",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  161: \tvar results []memRow",
+        "  162: \tfor rows.Next() {",
+        "  163: \t\tvar m memRow",
+        "\u003e 164: \t\tif err := rows.Scan(\u0026m.ID, \u0026m.Content, \u0026m.CreatedAt); err != nil {",
+        "  165: \t\t\treturn nil, fmt.Errorf(\"scanning memory without embedding row: %w\", err)",
+        "  166: \t\t}",
+        "  167: \t\tresults = append(results, m)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 170,
+      "column": 6,
+      "func_name": "pendingCount",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  167: \t\treturn -1",
+        "  168: \t}",
+        "  169: \tvar n int",
+        "\u003e 170: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(\u0026n)",
+        "  171: \treturn n",
+        "  172: }",
+        "  173: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 181,
+      "column": 6,
+      "func_name": "processingCount",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  178: \t\treturn -1",
+        "  179: \t}",
+        "  180: \tvar n int",
+        "\u003e 181: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(\u0026n)",
+        "  182: \treturn n",
+        "  183: }",
+        "  184: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 228,
+      "column": 13,
+      "func_name": "handleListDeadLetters",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  225: \t\t\tattemptCount                                 int",
+        "  226: \t\t\tcreatedAt, updatedAt                         int64",
+        "  227: \t\t)",
+        "\u003e 228: \t\tif err := rows.Scan(\u0026id, \u0026eventID, \u0026deadArtifactID, \u0026deadArtifactType,",
+        "  229: \t\t\t\u0026downstreamArtifactID, \u0026downstreamArtifactType,",
+        "  230: \t\t\t\u0026cascadeDepth, \u0026reason, \u0026status, \u0026terminalError,",
+        "  231: \t\t\t\u0026attemptCount, \u0026createdAt, \u0026updatedAt); err != nil {"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 263,
+      "column": 6,
+      "func_name": "handleListDeadLetters",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  260: ",
+        "  261: \t// Also print a summary of all non-pending states.",
+        "  262: \tvar pending, processing, materialized, failed int",
+        "\u003e 263: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(\u0026pending)",
+        "  264: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(\u0026processing)",
+        "  265: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(\u0026materialized)",
+        "  266: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(\u0026failed)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 264,
+      "column": 6,
+      "func_name": "handleListDeadLetters",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  261: \t// Also print a summary of all non-pending states.",
+        "  262: \tvar pending, processing, materialized, failed int",
+        "  263: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(\u0026pending)",
+        "\u003e 264: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(\u0026processing)",
+        "  265: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(\u0026materialized)",
+        "  266: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(\u0026failed)",
+        "  267: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 265,
+      "column": 6,
+      "func_name": "handleListDeadLetters",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  262: \tvar pending, processing, materialized, failed int",
+        "  263: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(\u0026pending)",
+        "  264: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(\u0026processing)",
+        "\u003e 265: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(\u0026materialized)",
+        "  266: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(\u0026failed)",
+        "  267: ",
+        "  268: \tfmt.Printf(\"\\nOutbox summary — pending=%d processing=%d materialized=%d failed=%d\\n\","
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_cascade.go",
+      "line": 266,
+      "column": 6,
+      "func_name": "handleListDeadLetters",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  263: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(\u0026pending)",
+        "  264: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(\u0026processing)",
+        "  265: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(\u0026materialized)",
+        "\u003e 266: \t_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(\u0026failed)",
+        "  267: ",
+        "  268: \tfmt.Printf(\"\\nOutbox summary — pending=%d processing=%d materialized=%d failed=%d\\n\",",
+        "  269: \t\tpending, processing, materialized, failed)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_epistemology.go",
+      "line": 322,
+      "column": 14,
+      "func_name": "backfillEpistemologyTopics",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  319: \tscanErr := func() error {",
+        "  320: \t\tfor rows.Next() {",
+        "  321: \t\t\tvar id, collection string",
+        "\u003e 322: \t\t\tif err := rows.Scan(\u0026id, \u0026collection); err != nil {",
+        "  323: \t\t\t\treturn fmt.Errorf(\"scanning memory row for epistemology topic backfill: %w\", err)",
+        "  324: \t\t\t}",
+        "  325: \t\t\ttopicID, tErr := dm.GetOrCreateTopic(collection)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_gc.go",
+      "line": 236,
+      "column": 3,
+      "func_name": "handleGC",
+      "pattern": "rows.Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  233: \t\tvar lastAccessed, createdAt *int64",
+        "  234: \t\tvar isLongTerm bool",
+        "  235: ",
+        "\u003e 236: \t\trows.Scan(\u0026id, \u0026weight, \u0026lastAccessed, \u0026createdAt, \u0026isLongTerm)",
+        "  237: ",
+        "  238: \t\t// Compute days since access using captured monotonic time",
+        "  239: \t\tlastAccessInt := lastAccessed"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_gc.go",
+      "line": 277,
+      "column": 4,
+      "func_name": "handleGC",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  274: \t\tisLTM := deltas[len(deltas)-1].isLTM",
+        "  275: \t\tif newWeight \u003c= 0.0 \u0026\u0026 !isLTM {",
+        "  276: \t\t\tvar deadContent string",
+        "\u003e 277: \t\t\tdm.SQLDB().QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(\u0026deadContent)",
+        "  278: \t\t\tdeadMemories = append(deadMemories, map[string]interface{}{",
+        "  279: \t\t\t\t\"id\":      id,",
+        "  280: \t\t\t\t\"content\": deadContent,"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_info.go",
+      "line": 173,
+      "column": 13,
+      "func_name": "listSkillsForInfo",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  170: \tout := []string{}",
+        "  171: \tfor rows.Next() {",
+        "  172: \t\tvar id, name string",
+        "\u003e 173: \t\tif err := rows.Scan(\u0026id, \u0026name); err == nil {",
+        "  174: \t\t\tif name != \"\" {",
+        "  175: \t\t\t\tout = append(out, name)",
+        "  176: \t\t\t} else {"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_info.go",
+      "line": 207,
+      "column": 13,
+      "func_name": "listScheduledTasksForInfo",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  204: \tout := []scheduledTaskInfo{}",
+        "  205: \tfor rows.Next() {",
+        "  206: \t\tvar id, nextRun string",
+        "\u003e 207: \t\tif err := rows.Scan(\u0026id, \u0026nextRun); err == nil {",
+        "  208: \t\t\tout = append(out, scheduledTaskInfo{id: id, nextRun: nextRun})",
+        "  209: \t\t}",
+        "  210: \t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_memory.go",
+      "line": 57,
+      "column": 15,
+      "func_name": "handlePrimeDirectives",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  54: \t\tscanErr := func() error {",
+        "  55: \t\t\tfor rows.Next() {",
+        "  56: \t\t\t\tvar id, collection, content, metadata, created string",
+        "\u003e 57: \t\t\t\tif err := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026metadata, \u0026created); err != nil {",
+        "  58: \t\t\t\t\treturn fmt.Errorf(\"scanning prime directive row: %w\", err)",
+        "  59: \t\t\t\t}",
+        "  60: \t\t\t\tdirectives = append(directives, directiveEntry{"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_memory.go",
+      "line": 90,
+      "column": 14,
+      "func_name": "handlePrimeDirectives",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  87: \tscanErr := func() error {",
+        "  88: \t\tfor rows.Next() {",
+        "  89: \t\t\tvar id, collection, content, metadata, created string",
+        "\u003e 90: \t\t\tif err := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026metadata, \u0026created); err != nil {",
+        "  91: \t\t\t\treturn fmt.Errorf(\"scanning prime directive output row: %w\", err)",
+        "  92: \t\t\t}",
+        "  93: \t\t\toutput.WriteString(fmt.Sprintf(\"[%s] %s\\n\\n\", id, collection))"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_restore.go",
+      "line": 24,
+      "column": 8,
+      "func_name": "handleRestore",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  21: \tvar currentIsLTM int",
+        "  22: \tvar currentWeight int",
+        "  23: \tvar err error",
+        "\u003e 24: \terr = dm.SQLDB().QueryRow(",
+        "  25: \t\t`SELECT COALESCE(is_long_term, 0), COALESCE(weight, 1) FROM memories WHERE id = ?`,",
+        "  26: \t\tid,",
+        "  27: \t).Scan(\u0026currentIsLTM, \u0026currentWeight)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_session.go",
+      "line": 158,
+      "column": 14,
+      "func_name": "handleWake",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  155: \t\tfor rows.Next() {",
+        "  156: \t\t\tvar memID, collection, content, createdAt string",
+        "  157: \t\t\tvar tagsJSON, metadataJSON sql.NullString",
+        "\u003e 158: \t\t\tif err := rows.Scan(\u0026memID, \u0026collection, \u0026content, \u0026tagsJSON, \u0026metadataJSON, \u0026createdAt); err != nil {",
+        "  159: \t\t\t\tslog.Warn(\"handleWake: rows.Scan failed\", \"error\", err)",
+        "  160: \t\t\t\tbreak",
+        "  161: \t\t\t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_session.go",
+      "line": 193,
+      "column": 14,
+      "func_name": "handleWake",
+      "pattern": "lrows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  190: \t\tdefer lrows.Close()",
+        "  191: \t\tfor lrows.Next() {",
+        "  192: \t\t\tvar lessonID, lessonType, content, tagsJSON, created string",
+        "\u003e 193: \t\t\tif err := lrows.Scan(\u0026lessonID, \u0026lessonType, \u0026content, \u0026tagsJSON, \u0026created); err != nil {",
+        "  194: \t\t\t\tbreak",
+        "  195: \t\t\t}",
+        "  196: \t\t\tvar tagList []string"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_session.go",
+      "line": 450,
+      "column": 14,
+      "func_name": "handleSessionList",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  447: \tscanErr := func() error {",
+        "  448: \t\tfor rows.Next() {",
+        "  449: \t\t\tvar s sessionItem",
+        "\u003e 450: \t\t\tif err := rows.Scan(\u0026s.ID, \u0026s.Content, \u0026s.Created); err != nil {",
+        "  451: \t\t\t\treturn fmt.Errorf(\"scanning session list row: %w\", err)",
+        "  452: \t\t\t}",
+        "  453: \t\t\tsessions = append(sessions, s)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_shared.go",
+      "line": 56,
+      "column": 12,
+      "func_name": "handleOpsShared",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  53: \t// Count rows in the shared schema's memories table.",
+        "  54: \tvar count int",
+        "  55: \trow := dm.SQLDB().QueryRow(\"SELECT COUNT(*) FROM shared.memories\")",
+        "\u003e 56: \tif err := row.Scan(\u0026count); err != nil {",
+        "  57: \t\tfmt.Printf(\"  shared.memories:      error: %v\\n\", err)",
+        "  58: \t\treturn 0",
+        "  59: \t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_shared.go",
+      "line": 65,
+      "column": 12,
+      "func_name": "handleOpsShared",
+      "pattern": "row.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  62: \t// Count is_global rows specifically.",
+        "  63: \tvar globalCount int",
+        "  64: \trow = dm.SQLDB().QueryRow(\"SELECT COUNT(*) FROM shared.memories WHERE is_global = 1\")",
+        "\u003e 65: \tif err := row.Scan(\u0026count); err == nil {",
+        "  66: \t\t// Reuse count for globalCount — first err case above already returned.",
+        "  67: \t}",
+        "  68: \t_ = row"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_shared.go",
+      "line": 70,
+      "column": 12,
+      "func_name": "handleOpsShared",
+      "pattern": "row.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  67: \t}",
+        "  68: \t_ = row",
+        "  69: \trow = dm.SQLDB().QueryRow(\"SELECT COUNT(*) FROM shared.memories WHERE is_global = 1\")",
+        "\u003e 70: \tif err := row.Scan(\u0026globalCount); err == nil {",
+        "  71: \t\tfmt.Printf(\"  is_global rows:       %d\\n\", globalCount)",
+        "  72: \t}",
+        "  73: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_shred.go",
+      "line": 254,
+      "column": 9,
+      "func_name": "handleShredTopic",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  251: \t// (name, description) only — hex IDs are not tokenized, so they never",
+        "  252: \t// match. Direct primary-key check is the right tool for ID-based lookups.",
+        "  253: \tvar exists int",
+        "\u003e 254: \terr := db.QueryRow(\"SELECT 1 FROM topics WHERE id = ?\", id).Scan(\u0026exists)",
+        "  255: \tif err == sql.ErrNoRows {",
+        "  256: \t\treturn respond(\"\", fmt.Sprintf(\"Topic not found: %s\\n\", id), 1)",
+        "  257: \t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_status.go",
+      "line": 255,
+      "column": 9,
+      "func_name": "countMemories",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  252: \t\tquery = \"SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND \" + where",
+        "  253: \t}",
+        "  254: \tvar count int",
+        "\u003e 255: \terr := dm.SQLDB().QueryRow(query, args...).Scan(\u0026count)",
+        "  256: \treturn count, err",
+        "  257: }",
+        "  258: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_status.go",
+      "line": 264,
+      "column": 9,
+      "func_name": "countTheoriesByStatus",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  261: \tquery := `SELECT COUNT(*) FROM memories",
+        "  262: \t\tWHERE collection = 'theories' AND deleted_at IS NULL",
+        "  263: \t\tAND json_extract(metadata, '$.status') = ?`",
+        "\u003e 264: \terr := dm.SQLDB().QueryRow(query, status).Scan(\u0026count)",
+        "  265: \treturn count, err",
+        "  266: }",
+        "  267: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_status.go",
+      "line": 271,
+      "column": 2,
+      "func_name": "getSynthesisStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  268: func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {",
+        "  269: \tvar count int",
+        "  270: \tvar lastTime string",
+        "\u003e 271: \tdm.SQLDB().QueryRow(`",
+        "  272: \t\tSELECT COUNT(*), MAX(json_extract(metadata, '$.synthesized_at'))",
+        "  273: \t\tFROM memories",
+        "  274: \t\tWHERE deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_tasks.go",
+      "line": 101,
+      "column": 12,
+      "func_name": "handleTasksUpsert",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  98: \t\t`SELECT id FROM memories WHERE id = ? AND collection = 'directives' AND deleted_at IS NULL LIMIT 1`,",
+        "  99: \t\tdirectiveID,",
+        "  100: \t)",
+        "\u003e 101: \tif err := row.Scan(\u0026found); err != nil {",
+        "  102: \t\tusererror.Error(\"directive_id %q not found in memories where collection='directives'\", directiveID)",
+        "  103: \t\treturn 1",
+        "  104: \t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_topic.go",
+      "line": 193,
+      "column": 9,
+      "func_name": "handleTopicShow",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  190: \tdb := store.DB",
+        "  191: ",
+        "  192: \tvar name, description, created string",
+        "\u003e 193: \terr := db.QueryRow(`",
+        "  194: \t\tSELECT name, description, created_at FROM topics WHERE id = ?",
+        "  195: \t`, id).Scan(\u0026name, \u0026description, \u0026created)",
+        "  196: "
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_topic.go",
+      "line": 213,
+      "column": 5,
+      "func_name": "handleTopicShow",
+      "pattern": "rows.Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  210: \t\tif rows, err := db.Query(\"SELECT memory_id FROM topic_memberships WHERE topic_id = ?\", id); err == nil {",
+        "  211: \t\t\tfor rows.Next() {",
+        "  212: \t\t\t\tvar mid string",
+        "\u003e 213: \t\t\t\trows.Scan(\u0026mid)",
+        "  214: \t\t\t\tmemoryIDs = append(memoryIDs, mid)",
+        "  215: \t\t\t}",
+        "  216: \t\t\trows.Close()"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_topic.go",
+      "line": 308,
+      "column": 15,
+      "func_name": "handleTopicList",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  305: \t\tscanErr := func() error {",
+        "  306: \t\t\tfor rows.Next() {",
+        "  307: \t\t\t\tvar id, name, description, created string",
+        "\u003e 308: \t\t\t\tif err := rows.Scan(\u0026id, \u0026name, \u0026description, \u0026created); err != nil {",
+        "  309: \t\t\t\t\treturn fmt.Errorf(\"scanning topic list row: %w\", err)",
+        "  310: \t\t\t\t}",
+        "  311: \t\t\t\tresult = append(result, topicEntry{"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_topic.go",
+      "line": 335,
+      "column": 14,
+      "func_name": "handleTopicList",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  332: \tscanErr := func() error {",
+        "  333: \t\tfor rows.Next() {",
+        "  334: \t\t\tvar id, name, description, created string",
+        "\u003e 335: \t\t\tif err := rows.Scan(\u0026id, \u0026name, \u0026description, \u0026created); err != nil {",
+        "  336: \t\t\t\treturn fmt.Errorf(\"scanning topic output row: %w\", err)",
+        "  337: \t\t\t}",
+        "  338: \t\t\tif len(description) \u003e 100 {"
+      ]
+    },
+    {
+      "file": "cmd/mpm/handlers_tour.go",
+      "line": 211,
+      "column": 14,
+      "func_name": "runTourDemo",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  208: \t\t\trow := dm.QueryRowTracked(",
+        "  209: \t\t\t\t`SELECT id FROM memories WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`,",
+        "  210: \t\t\t)",
+        "\u003e 211: \t\t\tif err := row.Scan(\u0026id); err != nil || id == \"\" {",
+        "  212: \t\t\t\tfmt.Fprintln(os.Stdout, \"  (no memories yet — run 'mpm remember' first, then 'mpm why \u003cid\u003e')\")",
+        "  213: \t\t\t\treturn 0",
+        "  214: \t\t\t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 485,
+      "column": 14,
+      "func_name": "runDeepScanCheck",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  482: \t\tfor rows.Next() {",
+        "  483: \t\t\tvar rid int64",
+        "  484: \t\t\tvar label sql.NullString",
+        "\u003e 485: \t\t\tif err := rows.Scan(\u0026rid, \u0026label); err != nil {",
+        "  486: \t\t\t\treturn nil, fmt.Errorf(\"scanning FTS index sample row: %w\", err)",
+        "  487: \t\t\t}",
+        "  488: \t\t\tcount++"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 528,
+      "column": 12,
+      "func_name": "runDeepScanCheck",
+      "pattern": "sqlDB.QueryRow(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  525: ",
+        "  526: \t// — Check 3: dangling topic memberships —",
+        "  527: \tvar count int",
+        "\u003e 528: \tif err := sqlDB.QueryRow(",
+        "  529: \t\t\"SELECT COUNT(*) FROM topic_memberships tm LEFT JOIN topics t ON tm.topic_id = t.id WHERE t.id IS NULL\",",
+        "  530: \t).Scan(\u0026count); err != nil {",
+        "  531: \t\tres.QueryErrors[\"dangling_memberships\"] = err.Error()"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 706,
+      "column": 13,
+      "func_name": "runDoctorExplain",
+      "pattern": "rows.Scan",
+      "classification": "silent-continue",
+      "err_var": "err",
+      "code": [
+        "  703: \tvar id, parent, notused int",
+        "  704: \tvar detail string",
+        "  705: \tfor rows.Next() {",
+        "\u003e 706: \t\tif err := rows.Scan(\u0026id, \u0026parent, \u0026notused, \u0026detail); err != nil {",
+        "  707: \t\t\t// runDoctorExplain is void; we can't propagate. Log the",
+        "  708: \t\t\t// wrapped error so the operator sees the failure context,",
+        "  709: \t\t\t// then continue with remaining rows."
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 961,
+      "column": 12,
+      "func_name": "runDoctorDatabaseChecks",
+      "pattern": "sqlDB.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  958: ",
+        "  959: \t// Run integrity check",
+        "  960: \tvar integrityResult string",
+        "\u003e 961: \tif err := sqlDB.QueryRow(\"PRAGMA integrity_check\").Scan(\u0026integrityResult); err != nil {",
+        "  962: \t\tcheck.Status = \"FAIL\"",
+        "  963: \t\tcheck.Details = append(check.Details, \"Integrity check failed: \"+err.Error())",
+        "  964: \t\treport.Failed++"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 983,
+      "column": 2,
+      "func_name": "runDoctorDatabaseChecks",
+      "pattern": "sqlDB.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  980: ",
+        "  981: \t// Quick stats",
+        "  982: \tvar tableCount int",
+        "\u003e 983: \tsqlDB.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table'\").Scan(\u0026tableCount)",
+        "  984: \tcheck.Details = append(check.Details, fmt.Sprintf(\"Tables: %d\", tableCount))",
+        "  985: ",
+        "  986: \treport.Passed++"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 1449,
+      "column": 13,
+      "func_name": "PrintQuicklinks",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1446: \t\t\t`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND collection = ?`,",
+        "  1447: \t\t\tcollection,",
+        "  1448: \t\t)",
+        "\u003e 1449: \t\tif err := row.Scan(\u0026n); err != nil {",
+        "  1450: \t\t\treturn \"?\"",
+        "  1451: \t\t}",
+        "  1452: \t\treturn fmt.Sprintf(\"%d\", n)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/main.go",
+      "line": 1515,
+      "column": 13,
+      "func_name": "loadPendingTheoriesForQuicklinks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1512: \tout := []string{}",
+        "  1513: \tfor rows.Next() {",
+        "  1514: \t\tvar id, content string",
+        "\u003e 1515: \t\tif err := rows.Scan(\u0026id, \u0026content); err != nil {",
+        "  1516: \t\t\treturn nil, fmt.Errorf(\"scanning pending theory quicklink row: %w\", err)",
+        "  1517: \t\t}",
+        "  1518: \t\tout = append(out, formatTheoryPreview(content, id))"
+      ]
+    },
+    {
+      "file": "cmd/mpm/maint_cmds.go",
+      "line": 344,
+      "column": 2,
+      "func_name": "handleMaintain",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  341: ",
+        "  342: \t// Deferred VACUUM: reclaim space from hard deletes during idle maintenance",
+        "  343: \tvar deletedCount int",
+        "\u003e 344: \tdm.SQLDB().QueryRow(\"SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL\").Scan(\u0026deletedCount)",
+        "  345: \tif deletedCount \u003e 0 {",
+        "  346: \t\tif _, vacErr := dm.SQLDB().Exec(\"PRAGMA incremental_vacuum\"); vacErr != nil {",
+        "  347: \t\t\tslog.Warn(\"incremental_vacuum failed\", \"error\", vacErr.Error())"
+      ]
+    },
+    {
+      "file": "cmd/mpm/ops_milestones_cmds.go",
+      "line": 115,
+      "column": 14,
+      "func_name": "handleOpsMilestones",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  112: \t\tfor rows.Next() {",
+        "  113: \t\t\tvar e entry",
+        "  114: \t\t\tvar tagsJSON string",
+        "\u003e 115: \t\t\tif err := rows.Scan(\u0026e.id, \u0026e.content, \u0026e.createdAt, \u0026tagsJSON); err != nil {",
+        "  116: \t\t\t\treturn fmt.Errorf(\"scanning ops milestone row: %w\", err)",
+        "  117: \t\t\t}",
+        "  118: \t\t\te.flavor = extractFlavor(tagsJSON)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/readiness.go",
+      "line": 360,
+      "column": 12,
+      "func_name": "checkPendingTheoriesCount",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  357: \t\t   AND deleted_at IS NULL",
+        "  358: \t\t   AND json_extract(metadata, '$.status') = 'pending'`,",
+        "  359: \t)",
+        "\u003e 360: \tif err := row.Scan(\u0026n); err != nil {",
+        "  361: \t\treturn ReadinessItem{Name: \"Open theories\", OK: true, Detail: \"(count unavailable)\"}",
+        "  362: \t}",
+        "  363: \titem := ReadinessItem{Name: \"Open theories\", OK: true}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/recall.go",
+      "line": 234,
+      "column": 14,
+      "func_name": "handleRecall",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  231: \t\t\tvar nullableSessionID, nullableTags sql.NullString",
+        "  232: \t\t\tvar reinforcementCount, weight float64",
+        "  233: \t\t\tvar nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString",
+        "\u003e 234: \t\t\tif err := rows.Scan(\u0026id, \u0026content, \u0026nullableSessionID, \u0026nullableTags, \u0026nullableMetadata, \u0026createdAt,",
+        "  235: \t\t\t\t\u0026reinforcementCount, \u0026weight, \u0026nullableLastAccessed, \u0026nullableRefID); err != nil {",
+        "  236: \t\t\t\treturn fmt.Errorf(\"scanning recall entry row: %w\", err)",
+        "  237: \t\t\t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/review.go",
+      "line": 241,
+      "column": 13,
+      "func_name": "scanMemoriesFromRows",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  238: \t\tvar reinforcementCount, weight int64",
+        "  239: \t\tvar lastAccess, createdAt int64",
+        "  240: ",
+        "\u003e 241: \t\tif err := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026reinforcementCount, \u0026weight, \u0026lastAccess, \u0026createdAt); err != nil {",
+        "  242: \t\t\treturn nil, fmt.Errorf(\"scanning memory row during spaced review: %w\", err)",
+        "  243: \t\t}",
+        "  244: \t\tresult = append(result, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "cmd/mpm/route_render.go",
+      "line": 457,
+      "column": 15,
+      "func_name": "fetchTopDirectives",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  454: \t\t}",
+        "  455: \t\tscanErr := func() error {",
+        "  456: \t\t\tfor rows.Next() {",
+        "\u003e 457: \t\t\t\tif err := rows.Scan(\u0026d.ID, \u0026d.Content, \u0026d.Confidence); err != nil {",
+        "  458: \t\t\t\t\treturn fmt.Errorf(\"scanning directive row for route: %w\", err)",
+        "  459: \t\t\t\t}",
+        "  460: \t\t\t\tdirectives = append(directives, d)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/self_heal.go",
+      "line": 75,
+      "column": 12,
+      "func_name": "loadSelfHealState",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  72: \t\tSelfHealStateID,",
+        "  73: \t)",
+        "  74: \tvar metaStr sql.NullString",
+        "\u003e 75: \tif err := row.Scan(\u0026metaStr); err != nil {",
+        "  76: \t\tif err == sql.ErrNoRows {",
+        "  77: \t\t\treturn \u0026SelfHealState{}, nil",
+        "  78: \t\t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/service_continue.go",
+      "line": 273,
+      "column": 12,
+      "func_name": "formatStatIntRaw",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  270: \t}",
+        "  271: \tvar n int",
+        "  272: \trow := dm.QueryRowTracked(query, args...)",
+        "\u003e 273: \tif err := row.Scan(\u0026n); err != nil {",
+        "  274: \t\treturn \"(error)\"",
+        "  275: \t}",
+        "  276: \treturn fmt.Sprintf(\"%d\", n)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/service_why.go",
+      "line": 269,
+      "column": 12,
+      "func_name": "fetchFromCollection",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  266: \tvar weight float64",
+        "  267: \tvar isLTM bool",
+        "  268: ",
+        "\u003e 269: \tif err := row.Scan(\u0026outID, \u0026content, \u0026sessID, \u0026tagsJSON, \u0026weight, \u0026isLTM, \u0026metaStr, \u0026coll, \u0026createdAt, \u0026updatedAt, \u0026lastAccessed); err != nil {",
+        "  270: \t\treturn nil, err",
+        "  271: \t}",
+        "  272: \tout := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "cmd/mpm/store_working_context.go",
+      "line": 95,
+      "column": 12,
+      "func_name": "Load",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  92: \t\t WHERE session_id = ?`,",
+        "  93: \t\tsessionID,",
+        "  94: \t)",
+        "\u003e 95: \tif err := row.Scan(\u0026wc.SessionID, \u0026wc.Thesis, \u0026wc.Supporting, \u0026updatedAt, \u0026expiresAt); err != nil {",
+        "  96: \t\tif errors.Is(err, sql.ErrNoRows) {",
+        "  97: \t\t\treturn nil, ErrWorkingContextNotFound",
+        "  98: \t\t}"
+      ]
+    },
+    {
+      "file": "cmd/mpm/synthesize_cmds.go",
+      "line": 71,
+      "column": 14,
+      "func_name": "handleSynthesize",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  68: \tscanErr := func() error {",
+        "  69: \t\tfor rows.Next() {",
+        "  70: \t\t\tvar m memInfo",
+        "\u003e 71: \t\t\tif err := rows.Scan(\u0026m.ID, \u0026m.Content); err != nil {",
+        "  72: \t\t\t\treturn fmt.Errorf(\"scanning memory row for synthesize: %w\", err)",
+        "  73: \t\t\t}",
+        "  74: \t\t\tall = append(all, m)"
+      ]
+    },
+    {
+      "file": "cmd/mpm/topic.go",
+      "line": 148,
+      "column": 13,
+      "func_name": "suggestTopicsForMemory",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  145: \tvar suggestions []map[string]interface{}",
+        "  146: \tfor rows.Next() {",
+        "  147: \t\tvar id, name, description string",
+        "\u003e 148: \t\tif err := rows.Scan(\u0026id, \u0026name, \u0026description); err != nil {",
+        "  149: \t\t\treturn nil, fmt.Errorf(\"scanning suggested topic row: %w\", err)",
+        "  150: \t\t}",
+        "  151: "
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 48,
+      "column": 2,
+      "func_name": "Detect",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  45: ",
+        "  46: func (a *MPMAdapter) Detect(db *sql.DB) bool {",
+        "  47: \tvar memoriesExists int",
+        "\u003e 48: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'\").Scan(\u0026memoriesExists)",
+        "  49: \tif memoriesExists != 1 {",
+        "  50: \t\treturn false",
+        "  51: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 53,
+      "column": 2,
+      "func_name": "Detect",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  50: \t\treturn false",
+        "  51: \t}",
+        "  52: \tvar colList string",
+        "\u003e 53: \tdb.QueryRow(\"SELECT GROUP_CONCAT(name) FROM pragma_table_info('memories')\").Scan(\u0026colList)",
+        "  54: \treturn strings.Contains(colList, \"content\") \u0026\u0026 strings.Contains(colList, \"created_at\")",
+        "  55: }",
+        "  56: "
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 76,
+      "column": 13,
+      "func_name": "FetchNew",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  73: \tvar latestCursor string",
+        "  74: \tfor rows.Next() {",
+        "  75: \t\tvar id, content, sessionID, tags, createdAt string",
+        "\u003e 76: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026sessionID, \u0026tags, \u0026createdAt); err != nil {",
+        "  77: \t\t\treturn nil, \"\", fmt.Errorf(\"scanning MPM memory row in FetchNew: %w\", err)",
+        "  78: \t\t}",
+        "  79: \t\tlatestCursor = createdAt"
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 106,
+      "column": 2,
+      "func_name": "Detect",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  103: ",
+        "  104: func (a *OpenClawAdapter) Detect(db *sql.DB) bool {",
+        "  105: \tvar chunksExists int",
+        "\u003e 106: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'\").Scan(\u0026chunksExists)",
+        "  107: \tif chunksExists != 1 {",
+        "  108: \t\treturn false",
+        "  109: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 111,
+      "column": 2,
+      "func_name": "Detect",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  108: \t\treturn false",
+        "  109: \t}",
+        "  110: \tvar colList string",
+        "\u003e 111: \tdb.QueryRow(\"SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')\").Scan(\u0026colList)",
+        "  112: \treturn strings.Contains(colList, \"hash\") \u0026\u0026 strings.Contains(colList, \"text\") \u0026\u0026 strings.Contains(colList, \"updated_at\")",
+        "  113: }",
+        "  114: "
+      ]
+    },
+    {
+      "file": "internal/core/adapters.go",
+      "line": 146,
+      "column": 13,
+      "func_name": "FetchNew",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  143: \t\tvar id, path, source, hash, model, text string",
+        "  144: \t\tvar startLine, endLine int",
+        "  145: \t\tvar updatedAt int64",
+        "\u003e 146: \t\tif err := rows.Scan(\u0026id, \u0026path, \u0026source, \u0026startLine, \u0026endLine, \u0026hash, \u0026model, \u0026text, \u0026updatedAt); err != nil {",
+        "  147: \t\t\treturn nil, \"\", fmt.Errorf(\"scanning OpenClaw chunk row in FetchNew: %w\", err)",
+        "  148: \t\t}",
+        "  149: \t\tlastUpdatedAt = updatedAt"
+      ]
+    },
+    {
+      "file": "internal/core/admission_db.go",
+      "line": 62,
+      "column": 13,
+      "func_name": "FindAdmissionCandidates",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  59: \tfor rows.Next() {",
+        "  60: \t\tvar chunkID, docID, title, importReason, content string",
+        "  61: \t\tvar hits, distinctQueries int",
+        "\u003e 62: \t\tif err := rows.Scan(\u0026chunkID, \u0026docID, \u0026title, \u0026importReason, \u0026content, \u0026hits, \u0026distinctQueries); err != nil {",
+        "  63: \t\t\treturn nil, fmt.Errorf(\"scanning admission candidate row: %w\", err)",
+        "  64: \t\t}",
+        "  65: \t\tcandidate := \u0026AdmissionCandidate{"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 84,
+      "column": 9,
+      "func_name": "ResolveArbitrationTheory",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  81: \t\tdepsJSON sql.NullString",
+        "  82: \t\tqueueIDV sql.NullInt64",
+        "  83: \t)",
+        "\u003e 84: \terr := dm.db.QueryRow(`",
+        "  85: \t\tSELECT collection, dependencies, json_extract(metadata, '$.arbitration_for_queue_id')",
+        "  86: \t\tFROM shared.memories",
+        "  87: \t\tWHERE id = ? AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 247,
+      "column": 8,
+      "func_name": "applyArbitrationResolution",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  244: ",
+        "  245: \t// Slash the loser. Same UPDATE shape as applyResolution.",
+        "  246: \tvar exists bool",
+        "\u003e 247: \terr = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM shared.memories WHERE id = ? AND deleted_at IS NULL)`, loserID).Scan(\u0026exists)",
+        "  248: \tif err != nil {",
+        "  249: \t\treturn nil, fmt.Errorf(\"applyArbitrationResolution: loser check: %w\", err)",
+        "  250: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 257,
+      "column": 13,
+      "func_name": "applyArbitrationResolution",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  254: \t\t// single JSON object. String concat (`||`) would produce",
+        "  255: \t\t// invalid JSON.",
+        "  256: \t\tvar existingMetaRaw sql.NullString",
+        "\u003e 257: \t\tif err := tx.QueryRow(`SELECT metadata FROM shared.memories WHERE id = ?`, loserID).Scan(\u0026existingMetaRaw); err != nil {",
+        "  258: \t\t\treturn nil, fmt.Errorf(\"applyArbitrationResolution: read loser metadata: %w\", err)",
+        "  259: \t\t}",
+        "  260: \t\tloserPatch := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 342,
+      "column": 9,
+      "func_name": "loadProvenanceInTx",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  339: \t\tupdatedAt    sql.NullString",
+        "  340: \t\tretrievalPri sql.NullFloat64",
+        "  341: \t)",
+        "\u003e 342: \terr := tx.QueryRow(`",
+        "  343: \t\tSELECT",
+        "  344: \t\t\tCOALESCE(confidence, 0.5),",
+        "  345: \t\t\tCOALESCE(updated_at, CURRENT_TIMESTAMP),"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 364,
+      "column": 6,
+      "func_name": "loadProvenanceInTx",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  361: \t\tps.AgeDays = time.Since(t).Hours() / 24.0",
+        "  362: \t}",
+        "  363: \tvar evCount int",
+        "\u003e 364: \t_ = tx.QueryRow(`",
+        "  365: \t\tSELECT COUNT(*) FROM shared.evidence",
+        "  366: \t\tWHERE artifact_id = ? AND artifact_type = 'memory'",
+        "  367: \t`, memoryID).Scan(\u0026evCount)"
+      ]
+    },
+    {
+      "file": "internal/core/arbitration.go",
+      "line": 405,
+      "column": 8,
+      "func_name": "UpdateSharedMemoryMetadata",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  402: ",
+        "  403: \t// Read existing metadata.",
+        "  404: \tvar existingRaw sql.NullString",
+        "\u003e 405: \terr = tx.QueryRow(`SELECT metadata FROM shared.memories WHERE id = ? AND deleted_at IS NULL`, id).Scan(\u0026existingRaw)",
+        "  406: \tif err == sql.ErrNoRows {",
+        "  407: \t\treturn fmt.Errorf(\"UpdateSharedMemoryMetadata: memory %s not found\", id)",
+        "  408: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/audit.go",
+      "line": 191,
+      "column": 13,
+      "func_name": "QueryAuditLog",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  188: \t\t\tstack                       sql.NullString",
+        "  189: \t\t\tctxRaw                      sql.NullString",
+        "  190: \t\t)",
+        "\u003e 191: \t\tif err := rows.Scan(\u0026id, \u0026lvl, \u0026comp, \u0026msg, \u0026stack, \u0026ctxRaw, \u0026created); err != nil {",
+        "  192: \t\t\treturn nil, fmt.Errorf(\"scanning audit log row: %w\", err)",
+        "  193: \t\t}",
+        "  194: \t\trow := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/audit.go",
+      "line": 317,
+      "column": 9,
+      "func_name": "migrateAuditLevelConstraint",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  314: \t// 1. Read the current CREATE statement for system_audit_log.",
+        "  315: \t// sqlite_master.sql is the canonical source for the live schema.",
+        "  316: \tvar createSQL string",
+        "\u003e 317: \terr := dm.db.QueryRow(`",
+        "  318: \t\tSELECT sql FROM sqlite_master",
+        "  319: \t\tWHERE type = 'table' AND name = 'system_audit_log'",
+        "  320: \t`).Scan(\u0026createSQL)"
+      ]
+    },
+    {
+      "file": "internal/core/backfill_snapshots.go",
+      "line": 231,
+      "column": 9,
+      "func_name": "countMemoriesWithoutSnapshot",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  228: // JSON path: json_extract(metadata, '$._epistemic_snapshot') IS NULL.",
+        "  229: func countMemoriesWithoutSnapshot(db *sql.DB) (int, error) {",
+        "  230: \tvar n int",
+        "\u003e 231: \terr := db.QueryRow(`",
+        "  232: \t\tSELECT COUNT(*) FROM memories",
+        "  233: \t\tWHERE deleted_at IS NULL",
+        "  234: \t\t  AND json_extract(metadata, '$._epistemic_snapshot') IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/backfill_snapshots.go",
+      "line": 276,
+      "column": 13,
+      "func_name": "fetchMemoriesWithoutSnapshot",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  273: \tvar out []memoryRow",
+        "  274: \tfor rows.Next() {",
+        "  275: \t\tvar m memoryRow",
+        "\u003e 276: \t\tif err := rows.Scan(\u0026m.ID, \u0026m.SessionID, \u0026m.Metadata); err != nil {",
+        "  277: \t\t\treturn nil, err",
+        "  278: \t\t}",
+        "  279: \t\tout = append(out, m)"
+      ]
+    },
+    {
+      "file": "internal/core/backfill_snapshots.go",
+      "line": 323,
+      "column": 13,
+      "func_name": "processBatch",
+      "pattern": "tx.QueryRowContext(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  320: \t\t// Re-check under the transaction in case a concurrent save",
+        "  321: \t\t// stamped this row between our fetch and our update.",
+        "  322: \t\tvar stillMissing bool",
+        "\u003e 323: \t\tif err := tx.QueryRowContext(ctx, `",
+        "  324: \t\t\tSELECT json_extract(metadata, '$._epistemic_snapshot') IS NULL",
+        "  325: \t\t\tFROM memories WHERE id = ?",
+        "  326: \t\t`, mem.ID).Scan(\u0026stillMissing); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/broadcast.go",
+      "line": 131,
+      "column": 9,
+      "func_name": "BroadcastMemory",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  128: \tvar content, collection string",
+        "  129: \tvar tagsJSON sql.NullString",
+        "  130: \tvar metadataJSON sql.NullString",
+        "\u003e 131: \terr := dm.db.QueryRow(`",
+        "  132: \t\tSELECT content, collection, tags, metadata",
+        "  133: \t\tFROM shared.memories",
+        "  134: \t\tWHERE id = ? AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/broadcast.go",
+      "line": 175,
+      "column": 11,
+      "func_name": "BroadcastMemory",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  172: \t\t// refuse on any offline agent.",
+        "  173: \t\tfor _, agentID := range opts.ToAgents {",
+        "  174: \t\t\tvar sessionID string",
+        "\u003e 175: \t\t\terr := dm.db.QueryRow(`",
+        "  176: \t\t\t\tSELECT session_id FROM shared.bcast_sessions",
+        "  177: \t\t\t\tWHERE agent_id = ? AND last_heartbeat \u003e datetime('now', '-' || ? || ' hours')",
+        "  178: \t\t\t\tORDER BY last_heartbeat DESC LIMIT 1"
+      ]
+    },
+    {
+      "file": "internal/core/broadcast.go",
+      "line": 202,
+      "column": 14,
+      "func_name": "BroadcastMemory",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  199: \t\tdefer rows.Close()",
+        "  200: \t\tfor rows.Next() {",
+        "  201: \t\t\tvar sid, aid string",
+        "\u003e 202: \t\t\tif err := rows.Scan(\u0026sid, \u0026aid); err != nil {",
+        "  203: \t\t\t\treturn nil, fmt.Errorf(\"broadcast: scan session: %w\", err)",
+        "  204: \t\t\t}",
+        "  205: \t\t\t// Skip self."
+      ]
+    },
+    {
+      "file": "internal/core/broadcast.go",
+      "line": 327,
+      "column": 13,
+      "func_name": "CheckPendingEventWakes",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  324: \tfor rows.Next() {",
+        "  325: \t\tvar w EventWake",
+        "  326: \t\tvar createdAt string",
+        "\u003e 327: \t\tif err := rows.Scan(\u0026w.WakeID, \u0026w.SourceAgent, \u0026w.MemoryID, \u0026w.Kind,",
+        "  328: \t\t\t\u0026w.ContentHash, \u0026w.Rationale, \u0026createdAt, \u0026w.Metadata); err != nil {",
+        "  329: \t\t\treturn nil, fmt.Errorf(\"CheckPendingEventWakes: scan: %w\", err)",
+        "  330: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/broadcast.go",
+      "line": 469,
+      "column": 13,
+      "func_name": "DiscoverActiveSessions",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  466: \tvar out []ActiveSession",
+        "  467: \tfor rows.Next() {",
+        "  468: \t\tvar s ActiveSession",
+        "\u003e 469: \t\tif err := rows.Scan(\u0026s.SessionID, \u0026s.AgentID, \u0026s.Hostname,",
+        "  470: \t\t\t\u0026s.LastHeartbeat, \u0026s.BootAt, \u0026s.Metadata); err != nil {",
+        "  471: \t\t\treturn nil, fmt.Errorf(\"discover active sessions: scan: %w\", err)",
+        "  472: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/capability/forge_probation.go",
+      "line": 82,
+      "column": 13,
+      "func_name": "CheckProbationCompletion",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  79: \tvar probationIDs []string",
+        "  80: \tfor rows.Next() {",
+        "  81: \t\tvar id string",
+        "\u003e 82: \t\tif err := rows.Scan(\u0026id); err != nil {",
+        "  83: \t\t\trows.Close()",
+        "  84: \t\t\treturn nil, fmt.Errorf(\"capability: probation tick: scan: %w\", err)",
+        "  85: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_cascade.go",
+      "line": 290,
+      "column": 13,
+      "func_name": "shatterDownstreamTx",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  287: \tvar nodes []shatteredNode",
+        "  288: \tfor rows.Next() {",
+        "  289: \t\tvar node shatteredNode",
+        "\u003e 290: \t\tif err := rows.Scan(\u0026node.id, \u0026node.depth, \u0026node.path, \u0026node.fromState); err != nil {",
+        "  291: \t\t\trows.Close()",
+        "  292: \t\t\treturn 0, wrapDBError(\"shatterDownstreamTx:scan\", err)",
+        "  293: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_forge.go",
+      "line": 260,
+      "column": 13,
+      "func_name": "checkDependenciesActive",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  257: \tlive := make(map[string]bool, len(deps))",
+        "  258: \tfor rows.Next() {",
+        "  259: \t\tvar id string",
+        "\u003e 260: \t\tif err := rows.Scan(\u0026id); err != nil {",
+        "  261: \t\t\treturn wrapDBError(\"checkDependenciesActive\", err)",
+        "  262: \t\t}",
+        "  263: \t\tlive[id] = true"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_invocation.go",
+      "line": 374,
+      "column": 13,
+      "func_name": "RecentInvocations",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  371: \t\tvar inv Invocation",
+        "  372: \t\tvar stderr sql.NullString",
+        "  373: \t\tvar invCtx sql.NullString",
+        "\u003e 374: \t\tif err := rows.Scan(",
+        "  375: \t\t\t\u0026inv.ID, \u0026inv.CapabilityID, \u0026inv.InvokedAt, \u0026inv.ExitCode,",
+        "  376: \t\t\t\u0026inv.DurationMs, \u0026stderr, \u0026invCtx, \u0026inv.CascadeInvalidated,",
+        "  377: \t\t); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_query.go",
+      "line": 42,
+      "column": 9,
+      "func_name": "scanCapability",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  39: // rows cursor (rows.Next).",
+        "  40: func scanCapability(row interface{ Scan(...interface{}) error }) (*Capability, error) {",
+        "  41: \tvar c Capability",
+        "\u003e 42: \terr := row.Scan(",
+        "  43: \t\t\u0026c.ID, \u0026c.Name, \u0026c.Purpose, \u0026c.SourceCode, \u0026c.SourceLanguage, \u0026c.SourceHash,",
+        "  44: \t\t\u0026c.State, \u0026c.ExecutionDomain, \u0026c.StateChangedAt,",
+        "  45: \t\t\u0026c.AuthorTheoryID, \u0026c.AuthorAgent, \u0026c.CreatedFromID, \u0026c.SupersededByID,"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_query.go",
+      "line": 257,
+      "column": 13,
+      "func_name": "GetInvocationHistory",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  254: \tvar out []*Invocation",
+        "  255: \tfor rows.Next() {",
+        "  256: \t\tvar inv Invocation",
+        "\u003e 257: \t\tif err := rows.Scan(",
+        "  258: \t\t\t\u0026inv.ID, \u0026inv.CapabilityID, \u0026inv.InvokedAt, \u0026inv.ExitCode,",
+        "  259: \t\t\t\u0026inv.DurationMs, \u0026inv.Stderr, \u0026inv.InvocationContext,",
+        "  260: \t\t\t\u0026inv.CascadeInvalidated,"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_query.go",
+      "line": 310,
+      "column": 13,
+      "func_name": "GetEvents",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  307: \t\t// *CapabilityState. Scanners handle sql.NullString natively",
+        "  308: \t\t// because the underlying type is a string-based enum.",
+        "  309: \t\tvar fromState, toState sql.NullString",
+        "\u003e 310: \t\tif err := rows.Scan(",
+        "  311: \t\t\t\u0026ev.ID, \u0026ev.CapabilityID, \u0026ev.EventType, \u0026ev.OccurredAt,",
+        "  312: \t\t\t\u0026ev.Actor, \u0026fromState, \u0026toState, \u0026ev.Reason, \u0026ev.RelatedID,",
+        "  313: \t\t\t\u0026ev.Metadata,"
+      ]
+    },
+    {
+      "file": "internal/core/capability/store_query.go",
+      "line": 394,
+      "column": 13,
+      "func_name": "ListNonRetiredEmbeddings",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  391: \tfor rows.Next() {",
+        "  392: \t\tref := \u0026EmbeddingRef{}",
+        "  393: \t\tvar state string",
+        "\u003e 394: \t\tif err := rows.Scan(\u0026ref.ID, \u0026ref.Name, \u0026state, \u0026ref.Embedding); err != nil {",
+        "  395: \t\t\treturn nil, wrapDBError(\"ListNonRetiredEmbeddings:scan\", err)",
+        "  396: \t\t}",
+        "  397: \t\tref.State = CapabilityState(state)"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_materializer.go",
+      "line": 392,
+      "column": 13,
+      "func_name": "claimCascadeIntents",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  389: \tvar ids []string",
+        "  390: \tfor rows.Next() {",
+        "  391: \t\tvar id string",
+        "\u003e 392: \t\tif err := rows.Scan(\u0026id); err != nil {",
+        "  393: \t\t\trows.Close()",
+        "  394: \t\t\treturn nil, err",
+        "  395: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_materializer.go",
+      "line": 465,
+      "column": 13,
+      "func_name": "claimCascadeIntents",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  462: \tintents := make([]CascadeIntent, 0, len(ids))",
+        "  463: \tfor rows.Next() {",
+        "  464: \t\tvar intent CascadeIntent",
+        "\u003e 465: \t\tif err := rows.Scan(",
+        "  466: \t\t\t\u0026intent.ID, \u0026intent.InvalidationEventID,",
+        "  467: \t\t\t\u0026intent.DeadArtifactID, \u0026intent.DeadArtifactType,",
+        "  468: \t\t\t\u0026intent.DownstreamArtifactID, \u0026intent.DownstreamArtifactType,"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_outbox.go",
+      "line": 496,
+      "column": 13,
+      "func_name": "ListPendingCascadeIntents",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  493: ",
+        "  494: \tfor rows.Next() {",
+        "  495: \t\tvar intent CascadeIntent",
+        "\u003e 496: \t\tif err := rows.Scan(",
+        "  497: \t\t\t\u0026intent.ID, \u0026intent.InvalidationEventID,",
+        "  498: \t\t\t\u0026intent.DeadArtifactID, \u0026intent.DeadArtifactType,",
+        "  499: \t\t\t\u0026intent.DownstreamArtifactID, \u0026intent.DownstreamArtifactType,"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_outbox.go",
+      "line": 600,
+      "column": 13,
+      "func_name": "discoverCascadeTargets",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  597: \t}",
+        "  598: \tfor rows.Next() {",
+        "  599: \t\tvar id, collection string",
+        "\u003e 600: \t\tif err := rows.Scan(\u0026id, \u0026collection); err != nil {",
+        "  601: \t\t\trows.Close()",
+        "  602: \t\t\treturn nil, fmt.Errorf(\"discoverCascadeTargets dependencies scan: %w\", err)",
+        "  603: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_provenance.go",
+      "line": 311,
+      "column": 13,
+      "func_name": "listDownstreamCitationsOn",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  308: ",
+        "  309: \tfor rows.Next() {",
+        "  310: \t\tvar c ProvenanceCitation",
+        "\u003e 311: \t\tif err := rows.Scan(\u0026c.SourceID, \u0026c.SourceType, \u0026c.DownstreamID, \u0026c.DownstreamType, \u0026c.EventID, \u0026c.CreatedAt); err != nil {",
+        "  312: \t\t\treturn nil, fmt.Errorf(\"ListDownstreamCitations scan: %w\", err)",
+        "  313: \t\t}",
+        "  314: \t\tout = append(out, c)"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_provenance.go",
+      "line": 352,
+      "column": 9,
+      "func_name": "ResolveArtifactType",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  349: \t// migration_lessons_to_base.go). One row, one type — the first",
+        "  350: \t// match wins.",
+        "  351: \tvar collection string",
+        "\u003e 352: \terr := dm.db.QueryRow(",
+        "  353: \t\t`SELECT collection FROM memories WHERE id = ? AND deleted_at IS NULL LIMIT 1`,",
+        "  354: \t\tid,",
+        "  355: \t).Scan(\u0026collection)"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_provenance.go",
+      "line": 364,
+      "column": 8,
+      "func_name": "ResolveArtifactType",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  361: \t// into `lessons_base` + `lessons_fts`; both rows are queries",
+        "  362: \t// against the same id space.",
+        "  363: \tvar lessonID string",
+        "\u003e 364: \terr = dm.db.QueryRow(",
+        "  365: \t\t`SELECT id FROM lessons_base WHERE id = ? LIMIT 1`,",
+        "  366: \t\tid,",
+        "  367: \t).Scan(\u0026lessonID)"
+      ]
+    },
+    {
+      "file": "internal/core/cascade_provenance.go",
+      "line": 377,
+      "column": 10,
+      "func_name": "ResolveArtifactType",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  374: \t// rules). Same collection mapping applies.",
+        "  375: \tif dm.sharedAttached {",
+        "  376: \t\tvar sharedCollection string",
+        "\u003e 377: \t\terr := dm.db.QueryRow(",
+        "  378: \t\t\t`SELECT collection FROM shared.memories WHERE id = ? AND deleted_at IS NULL LIMIT 1`,",
+        "  379: \t\t\tid,",
+        "  380: \t\t).Scan(\u0026sharedCollection)"
+      ]
+    },
+    {
+      "file": "internal/core/changelog_synthesis.go",
+      "line": 108,
+      "column": 13,
+      "func_name": "FetchChangelogMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  105: \tindexed = make(map[string][]ChangelogMemory)",
+        "  106: \tfor rows.Next() {",
+        "  107: \t\tvar id, content, tagsJSON string",
+        "\u003e 108: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026tagsJSON); err != nil {",
+        "  109: \t\t\treturn nil, nil, fmt.Errorf(\"FetchChangelogMemories: scan: %w\", err)",
+        "  110: \t\t}",
+        "  111: \t\tvar tags []string"
+      ]
+    },
+    {
+      "file": "internal/core/cluster_proposals.go",
+      "line": 116,
+      "column": 13,
+      "func_name": "ActiveClusters",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  113: \tvar clusters []ClusterProposal",
+        "  114: \tfor rows.Next() {",
+        "  115: \t\tvar c ClusterProposal",
+        "\u003e 116: \t\tif err := rows.Scan(\u0026c.Key, \u0026c.Component, \u0026c.Count, \u0026c.FirstSeen, \u0026c.LastSeen, \u0026c.Status); err != nil {",
+        "  117: \t\t\treturn nil, nil, fmt.Errorf(\"scanning cluster proposal row: %w\", err)",
+        "  118: \t\t}",
+        "  119: \t\tclusters = append(clusters, c)"
+      ]
+    },
+    {
+      "file": "internal/core/cluster_proposals.go",
+      "line": 212,
+      "column": 12,
+      "func_name": "SetClusterStatus",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  209: \t// which masks typos.",
+        "  210: \tvar existingStatus string",
+        "  211: \tvar existingCount int",
+        "\u003e 212: \tif err := dm.db.QueryRow(",
+        "  213: \t\t`SELECT status, count FROM audit_cluster_proposals WHERE cluster_key = ?`,",
+        "  214: \t\tclusterKey,",
+        "  215: \t).Scan(\u0026existingStatus, \u0026existingCount); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/cluster_proposals.go",
+      "line": 341,
+      "column": 12,
+      "func_name": "AnnotateCluster",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  338: \t// check SetClusterStatus uses.",
+        "  339: \tvar existingStatus string",
+        "  340: \tvar existingCount int",
+        "\u003e 341: \tif err := dm.db.QueryRow(",
+        "  342: \t\t`SELECT status, count FROM audit_cluster_proposals WHERE cluster_key = ?`,",
+        "  343: \t\tclusterKey,",
+        "  344: \t).Scan(\u0026existingStatus, \u0026existingCount); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/compact.go",
+      "line": 174,
+      "column": 12,
+      "func_name": "compactPreCheck",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  171: \t\t  ) AS threshold",
+        "  172: \t\tFROM epistemic_pressure_v",
+        "  173: \t`)",
+        "\u003e 174: \tif err := row.Scan(\u0026rawCount, \u0026threshold); err != nil {",
+        "  175: \t\treturn 0, 0, err",
+        "  176: \t}",
+        "  177: \treturn rawCount, threshold, nil"
+      ]
+    },
+    {
+      "file": "internal/core/compact.go",
+      "line": 199,
+      "column": 13,
+      "func_name": "extractRawBatch",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  196: \tdefer rows.Close()",
+        "  197: \tfor rows.Next() {",
+        "  198: \t\tvar id, content string",
+        "\u003e 199: \t\tif err := rows.Scan(\u0026id, \u0026content); err != nil {",
+        "  200: \t\t\treturn nil, nil, err",
+        "  201: \t\t}",
+        "  202: \t\tids = append(ids, id)"
+      ]
+    },
+    {
+      "file": "internal/core/compact.go",
+      "line": 257,
+      "column": 8,
+      "func_name": "commitLessonAndMark",
+      "pattern": "tx.QueryRowContext(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  254: \t// prefixed with \"les-\" to match the existing lesson id pattern",
+        "  255: \t// (lessons_base.id is TEXT, no length constraint).",
+        "  256: \tvar lessonID string",
+        "\u003e 257: \terr = tx.QueryRowContext(ctx, `",
+        "  258: \t\tINSERT INTO lessons (id, type, content, tags, created, content_hash)",
+        "  259: \t\tVALUES ('les-' || lower(hex(randomblob(16))), 'insight', ?, ?, ?, ?)",
+        "  260: \t\tRETURNING id"
+      ]
+    },
+    {
+      "file": "internal/core/contradiction_log.go",
+      "line": 170,
+      "column": 13,
+      "func_name": "LoadContradictionQueue",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  167: \t\t\tid, a, b, evidence, detectedAt, detectedBy sql.NullString",
+        "  168: \t\t\tsimilarity                                  sql.NullFloat64",
+        "  169: \t\t)",
+        "\u003e 170: \t\tif err := rows.Scan(\u0026id, \u0026a, \u0026b, \u0026evidence, \u0026similarity, \u0026detectedAt, \u0026detectedBy); err != nil {",
+        "  171: \t\t\treturn nil, fmt.Errorf(\"LoadContradictionQueue: scan: %w\", err)",
+        "  172: \t\t}",
+        "  173: \t\tout = append(out, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 292,
+      "column": 12,
+      "func_name": "HealthCheck",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  289: ",
+        "  290: \t// Integrity check (PRAGMA quick_check is cheap, runs in \u003c100ms).",
+        "  291: \tvar integrity string",
+        "\u003e 292: \tif err := dm.db.QueryRow(`PRAGMA quick_check`).Scan(\u0026integrity); err != nil {",
+        "  293: \t\tout[\"ok\"] = false",
+        "  294: \t\tout[\"integrity_error\"] = err.Error()",
+        "  295: \t\treturn out, fmt.Errorf(\"integrity check: %w\", err)"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 304,
+      "column": 12,
+      "func_name": "HealthCheck",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  301: ",
+        "  302: \t// Page-level stats (cheap, no scan).",
+        "  303: \tvar pageCount, freelistCount sql.NullInt64",
+        "\u003e 304: \tif err := dm.db.QueryRow(`PRAGMA page_count`).Scan(\u0026pageCount); err == nil \u0026\u0026 pageCount.Valid {",
+        "  305: \t\tout[\"page_count\"] = pageCount.Int64",
+        "  306: \t}",
+        "  307: \tif err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(\u0026freelistCount); err == nil \u0026\u0026 freelistCount.Valid {"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 307,
+      "column": 12,
+      "func_name": "HealthCheck",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  304: \tif err := dm.db.QueryRow(`PRAGMA page_count`).Scan(\u0026pageCount); err == nil \u0026\u0026 pageCount.Valid {",
+        "  305: \t\tout[\"page_count\"] = pageCount.Int64",
+        "  306: \t}",
+        "\u003e 307: \tif err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(\u0026freelistCount); err == nil \u0026\u0026 freelistCount.Valid {",
+        "  308: \t\tout[\"freelist_count\"] = freelistCount.Int64",
+        "  309: \t}",
+        "  310: "
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 325,
+      "column": 10,
+      "func_name": "HealthCheck",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  322: \t\tvar n int64",
+        "  323: \t\tvar err error",
+        "  324: \t\tif q.key == \"wakes_overdue\" {",
+        "\u003e 325: \t\t\terr = dm.db.QueryRow(q.sql, now).Scan(\u0026n)",
+        "  326: \t\t} else {",
+        "  327: \t\t\terr = dm.db.QueryRow(q.sql).Scan(\u0026n)",
+        "  328: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 327,
+      "column": 10,
+      "func_name": "HealthCheck",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  324: \t\tif q.key == \"wakes_overdue\" {",
+        "  325: \t\t\terr = dm.db.QueryRow(q.sql, now).Scan(\u0026n)",
+        "  326: \t\t} else {",
+        "\u003e 327: \t\t\terr = dm.db.QueryRow(q.sql).Scan(\u0026n)",
+        "  328: \t\t}",
+        "  329: \t\tif err == nil {",
+        "  330: \t\t\tout[q.key] = n"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 959,
+      "column": 12,
+      "func_name": "attachShared",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  956: \t// CREATE VIRTUAL TABLE IF NOT EXISTS. The DROP is destructive but",
+        "  957: \t// the re-population via triggers is automatic on next open.",
+        "  958: \tvar hasOldSchema int",
+        "\u003e 959: \tif err := dm.db.QueryRow(`",
+        "  960: \t\tSELECT COUNT(*) FROM shared.sqlite_master",
+        "  961: \t\tWHERE type = 'table' AND name = 'memories_fts'",
+        "  962: \t\t  AND sql LIKE '%content=''memories''%'"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1356,
+      "column": 13,
+      "func_name": "scanGlobalRuleRows",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1353: \t\tvar id, content, coll sql.NullString",
+        "  1354: \t\tvar tags, meta, createdAt, updatedAt sql.NullString",
+        "  1355: \t\tvar weight, reinforcement, isGlobal sql.NullInt64",
+        "\u003e 1356: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026coll, \u0026tags, \u0026meta, \u0026weight, \u0026reinforcement,",
+        "  1357: \t\t\t\u0026createdAt, \u0026updatedAt, \u0026isGlobal); err != nil {",
+        "  1358: \t\t\treturn nil, fmt.Errorf(\"scanning global rule row: %w\", err)",
+        "  1359: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1394,
+      "column": 12,
+      "func_name": "backfillSharedFTSIfEmpty",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1391: \t\treturn nil",
+        "  1392: \t}",
+        "  1393: \tvar memCount, ftsCount int",
+        "\u003e 1394: \tif err := dm.db.QueryRow(\"SELECT COUNT(*) FROM shared.memories WHERE is_global = 1\").Scan(\u0026memCount); err != nil {",
+        "  1395: \t\treturn fmt.Errorf(\"count shared.memories: %w\", err)",
+        "  1396: \t}",
+        "  1397: \tif err := dm.db.QueryRow(\"SELECT COUNT(*) FROM shared.memories_fts\").Scan(\u0026ftsCount); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1397,
+      "column": 12,
+      "func_name": "backfillSharedFTSIfEmpty",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1394: \tif err := dm.db.QueryRow(\"SELECT COUNT(*) FROM shared.memories WHERE is_global = 1\").Scan(\u0026memCount); err != nil {",
+        "  1395: \t\treturn fmt.Errorf(\"count shared.memories: %w\", err)",
+        "  1396: \t}",
+        "\u003e 1397: \tif err := dm.db.QueryRow(\"SELECT COUNT(*) FROM shared.memories_fts\").Scan(\u0026ftsCount); err != nil {",
+        "  1398: \t\t// FTS table doesn't exist — backfill would fail. Caller falls",
+        "  1399: \t\t// back to LIKE via the QueryGlobalRules fallback path.",
+        "  1400: \t\treturn fmt.Errorf(\"count shared.memories_fts: %w\", err)"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1666,
+      "column": 2,
+      "func_name": "migrateLessonsToView",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1663: // Idempotent — safe to call on every startup.",
+        "  1664: func (dm *DatabaseManager) migrateLessonsToView() {",
+        "  1665: \tvar baseExists int",
+        "\u003e 1666: \tdm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(\u0026baseExists)",
+        "  1667: ",
+        "  1668: \t// If lessons_base exists, the rename already happened. Still need to drop any",
+        "  1669: \t// leftover AFTER triggers on lessons_base (from a prior partial migration) so"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1780,
+      "column": 2,
+      "func_name": "initFTSTables",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1777: func (dm *DatabaseManager) initFTSTables() error {",
+        "  1778: \t// Robust FTS5 availability check",
+        "  1779: \tvar available int",
+        "\u003e 1780: \tdm.db.QueryRow(\"SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'\").Scan(\u0026available)",
+        "  1781: \tif available == 0 {",
+        "  1782: \t\t// Fallback test: try creating a real FTS5 table in-memory",
+        "  1783: \t\ttestDB, err := sql.Open(\"sqlite3\", \":memory:\")"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1898,
+      "column": 12,
+      "func_name": "initFTSTables",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  1895: \t// does nothing. On an existing install with the old schema, this",
+        "  1896: \t// runs once and rebuilds the index.",
+        "  1897: \tftsNeedsMigration := false",
+        "\u003e 1898: \tif err := dm.db.QueryRow(",
+        "  1899: \t\t`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts' AND sql LIKE '%tags UNINDEXED%'`,",
+        "  1900: \t).Scan(\u0026ftsNeedsMigration); err == nil \u0026\u0026 ftsNeedsMigration {",
+        "  1901: \t\tslog.Info(\"mpm: FTS5 migration detected (memories_fts with tags UNINDEXED); rebuilding with tags indexed\")"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 1989,
+      "column": 3,
+      "func_name": "backfillFTSTables",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1986: \tfor _, b := range backfills {",
+        "  1987: \t\t// Check if FTS table already has data (avoid duplicate backfills)",
+        "  1988: \t\tvar count int",
+        "\u003e 1989: \t\tdm.db.QueryRow(\"SELECT COUNT(*) FROM \" + b.destTable).Scan(\u0026count)",
+        "  1990: \t\tif count \u003e 0 {",
+        "  1991: \t\t\tcontinue // already populated",
+        "  1992: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2043,
+      "column": 9,
+      "func_name": "GetLastSession",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2040: \tvar id, sessionID, content, contentHash, sourcePath, metadataJSON string",
+        "  2041: \tvar createdAt int64",
+        "  2042: ",
+        "\u003e 2043: \terr := dm.db.QueryRow(`SELECT id, session_id, content, content_hash, source_path, metadata, created_at FROM sessions ORDER BY created_at DESC LIMIT 1`).",
+        "  2044: \t\tScan(\u0026id, \u0026sessionID, \u0026content, \u0026contentHash, \u0026sourcePath, \u0026metadataJSON, \u0026createdAt)",
+        "  2045: \tif err != nil {",
+        "  2046: \t\treturn nil, err"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2089,
+      "column": 13,
+      "func_name": "GetSessionMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2086: \tvar results []map[string]interface{}",
+        "  2087: \tfor rows.Next() {",
+        "  2088: \t\tvar memID, collection, content, tagsJSON, metadataJSON, createdAt string",
+        "\u003e 2089: \t\tif err := rows.Scan(\u0026memID, \u0026collection, \u0026content, \u0026tagsJSON, \u0026metadataJSON, \u0026createdAt); err != nil {",
+        "  2090: \t\t\treturn nil, err",
+        "  2091: \t\t}",
+        "  2092: \t\tvar tags []string"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2333,
+      "column": 9,
+      "func_name": "SaveSystemConfig",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2330: // Returns (updated bool, error)",
+        "  2331: func (dm *DatabaseManager) SaveSystemConfig(key, rawJSON, contentHash string, snapshotJSON string) (bool, error) {",
+        "  2332: \tvar existingHash string",
+        "\u003e 2333: \terr := dm.db.QueryRow(`SELECT content_hash FROM system_config WHERE key = ?`, key).Scan(\u0026existingHash)",
+        "  2334: \tif err == nil \u0026\u0026 subtle.ConstantTimeCompare([]byte(existingHash), []byte(contentHash)) == 1 {",
+        "  2335: \t\t// Unchanged — skip the write",
+        "  2336: \t\treturn false, nil"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2359,
+      "column": 9,
+      "func_name": "GetSystemConfig",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2356: \t// updated_at is stored as INTEGER Unix-epoch seconds (see migration",
+        "  2357: \t// timestamps_unified_v1).",
+        "  2358: \tvar updatedAt int64",
+        "\u003e 2359: \terr := dm.db.QueryRow(`SELECT raw_json, content_hash, updated_at, config_snapshot FROM system_config WHERE key = ?`, key).",
+        "  2360: \t\tScan(\u0026rawJSON, \u0026contentHash, \u0026updatedAt, \u0026snapshotJSON)",
+        "  2361: \tif err != nil {",
+        "  2362: \t\treturn nil, err"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2396,
+      "column": 13,
+      "func_name": "GetAllSystemConfigs",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2393: \tfor rows.Next() {",
+        "  2394: \t\tvar key, rawJSON, contentHash, snapshotJSON string",
+        "  2395: \t\tvar updatedAt int64",
+        "\u003e 2396: \t\tif err := rows.Scan(\u0026key, \u0026rawJSON, \u0026contentHash, \u0026updatedAt, \u0026snapshotJSON); err != nil {",
+        "  2397: \t\t\treturn nil, err",
+        "  2398: \t\t}",
+        "  2399: \t\tvar snapshot map[string]interface{}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2588,
+      "column": 14,
+      "func_name": "VectorSearch",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2585: \t\t\t\t\terr = fmt.Errorf(\"VectorSearch: panic in rows loop: %v\", r)",
+        "  2586: \t\t\t\t}",
+        "  2587: \t\t\t}()",
+        "\u003e 2588: \t\t\tif err := rows.Scan(\u0026id, \u0026content, \u0026embeddingJSON, \u0026createdAt); err != nil {",
+        "  2589: \t\t\t\treturn",
+        "  2590: \t\t\t}",
+        "  2591: "
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2693,
+      "column": 12,
+      "func_name": "ShredMemory",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2690: \tdefer tx.Rollback()",
+        "  2691: ",
+        "  2692: \tvar lessonCount int",
+        "\u003e 2693: \tif err := tx.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, id).Scan(\u0026lessonCount); err != nil {",
+        "  2694: \t\treturn fmt.Errorf(\"shred: probe lessons_base: %w\", err)",
+        "  2695: \t}",
+        "  2696: \tif lessonCount \u003e 0 {"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2763,
+      "column": 9,
+      "func_name": "GetOrCreateTopic",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2760: // GetOrCreateTopic looks up a topic by name, creating it if not found",
+        "  2761: func (dm *DatabaseManager) GetOrCreateTopic(name string) (string, error) {",
+        "  2762: \tvar id string",
+        "\u003e 2763: \terr := dm.db.QueryRow(`SELECT id FROM topics WHERE name = ? AND is_active = 1`, name).Scan(\u0026id)",
+        "  2764: \tif err == nil {",
+        "  2765: \t\treturn id, nil",
+        "  2766: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2776,
+      "column": 9,
+      "func_name": "GetTopicByName",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  2773: // GetTopicByName returns a topic ID by name",
+        "  2774: func (dm *DatabaseManager) GetTopicByName(name string) (string, error) {",
+        "  2775: \tvar id string",
+        "\u003e 2776: \terr := dm.db.QueryRow(`SELECT id FROM topics WHERE name = ? AND is_active = 1`, name).Scan(\u0026id)",
+        "  2777: \tif err == sql.ErrNoRows {",
+        "  2778: \t\treturn \"\", fmt.Errorf(\"topic not found\")",
+        "  2779: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2786,
+      "column": 9,
+      "func_name": "GetTopic",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  2783: // GetTopic returns a topic record by ID",
+        "  2784: func (dm *DatabaseManager) GetTopic(id string) (map[string]interface{}, error) {",
+        "  2785: \tvar name, desc, createdAt, tagsJSON string",
+        "\u003e 2786: \terr := dm.db.QueryRow(",
+        "  2787: \t\t`SELECT name, COALESCE(description,''), created_at, COALESCE(tags,'{}') FROM topics WHERE id = ?`, id).Scan(",
+        "  2788: \t\t\u0026name, \u0026desc, \u0026createdAt, \u0026tagsJSON)",
+        "  2789: \tif err == sql.ErrNoRows {"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2830,
+      "column": 13,
+      "func_name": "ListTopics",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2827: \tfor rows.Next() {",
+        "  2828: \t\tvar id, name, createdAt, tagsJSON string",
+        "  2829: \t\tvar memoryCount int",
+        "\u003e 2830: \t\tif err := rows.Scan(\u0026id, \u0026name, \u0026createdAt, \u0026tagsJSON, \u0026memoryCount); err != nil {",
+        "  2831: \t\t\treturn nil, fmt.Errorf(\"scanning topic row: %w\", err)",
+        "  2832: \t\t}",
+        "  2833: \t\tm := map[string]interface{}{\"id\": id, \"name\": name, \"created_at\": createdAt, \"memory_count\": memoryCount, \"tags\": tagsJSON}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 2875,
+      "column": 13,
+      "func_name": "GetTopicMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2872: ",
+        "  2873: \tfor rows.Next() {",
+        "  2874: \t\tvar memID, content, sessionID, tags, createdAt, role string",
+        "\u003e 2875: \t\tif err := rows.Scan(\u0026memID, \u0026content, \u0026sessionID, \u0026tags, \u0026createdAt, \u0026role); err != nil {",
+        "  2876: \t\t\treturn nil, fmt.Errorf(\"scanning topic memory row: %w\", err)",
+        "  2877: \t\t}",
+        "  2878: \t\tseen[memID] = true"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3017,
+      "column": 9,
+      "func_name": "AddLesson",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3014: ",
+        "  3015: \t// Check for existing lesson with same content",
+        "  3016: \tvar existingID string",
+        "\u003e 3017: \terr := dm.db.QueryRow(`SELECT id FROM lessons WHERE content_hash = ?`, contentHash).Scan(\u0026existingID)",
+        "  3018: \tif err == nil {",
+        "  3019: \t\t// Reinforce existing lesson",
+        "  3020: \t\t_, err = dm.db.Exec(`UPDATE lessons SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, existingID)"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3061,
+      "column": 9,
+      "func_name": "GetLesson",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3058: func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {",
+        "  3059: \tvar lesson Lesson",
+        "  3060: \tvar tagsJSON string",
+        "\u003e 3061: \terr := dm.db.QueryRow(`",
+        "  3062: \t\tSELECT id, type, content, tags, reinforcement_count, source_session_id, created",
+        "  3063: \t\tFROM lessons WHERE id = ?",
+        "  3064: \t`, id).Scan(\u0026lesson.ID, \u0026lesson.Type, \u0026lesson.Content, \u0026tagsJSON, \u0026lesson.ReinforcementCount, \u0026lesson.SourceSessionID, \u0026lesson.Created)"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3094,
+      "column": 10,
+      "func_name": "ListLessons",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3091: \tfor rows.Next() {",
+        "  3092: \t\tvar lesson Lesson",
+        "  3093: \t\tvar tagsJSON string",
+        "\u003e 3094: \t\terr := rows.Scan(\u0026lesson.ID, \u0026lesson.Type, \u0026lesson.Content, \u0026tagsJSON, \u0026lesson.ReinforcementCount, \u0026lesson.SourceSessionID, \u0026lesson.Created)",
+        "  3095: \t\tif err != nil {",
+        "  3096: \t\t\treturn nil, fmt.Errorf(\"scanning lesson row: %w\", err)",
+        "  3097: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3150,
+      "column": 10,
+      "func_name": "SearchLessons",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3147: \tfor rows.Next() {",
+        "  3148: \t\tvar lesson Lesson",
+        "  3149: \t\tvar tagsJSON string",
+        "\u003e 3150: \t\terr := rows.Scan(\u0026lesson.ID, \u0026lesson.Type, \u0026lesson.Content, \u0026tagsJSON, \u0026lesson.ReinforcementCount, \u0026lesson.SourceSessionID, \u0026lesson.Created)",
+        "  3151: \t\tif err != nil {",
+        "  3152: \t\t\treturn nil, fmt.Errorf(\"scanning lesson search row: %w\", err)",
+        "  3153: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3187,
+      "column": 10,
+      "func_name": "searchLessonsLike",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3184: \tfor rows.Next() {",
+        "  3185: \t\tvar lesson Lesson",
+        "  3186: \t\tvar tagsJSON string",
+        "\u003e 3187: \t\terr := rows.Scan(\u0026lesson.ID, \u0026lesson.Type, \u0026lesson.Content, \u0026tagsJSON, \u0026lesson.ReinforcementCount, \u0026lesson.SourceSessionID, \u0026lesson.Created)",
+        "  3188: \t\tif err != nil {",
+        "  3189: \t\t\treturn nil, fmt.Errorf(\"scanning lesson LIKE row: %w\", err)",
+        "  3190: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3245,
+      "column": 13,
+      "func_name": "GetMemoryRevisions",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3242: \tvar revisions []MemoryRevision",
+        "  3243: \tfor rows.Next() {",
+        "  3244: \t\tvar r MemoryRevision",
+        "\u003e 3245: \t\tif err := rows.Scan(\u0026r.ID, \u0026r.MemoryID, \u0026r.Version, \u0026r.Content,",
+        "  3246: \t\t\t\u0026r.Weight, \u0026r.Collection, \u0026r.IsLongTerm, \u0026r.IsChallenged,",
+        "  3247: \t\t\t\u0026r.ChallengedTheoryID, \u0026r.CreatedAt); err != nil {",
+        "  3248: \t\t\treturn nil, fmt.Errorf(\"scanning memory revision row: %w\", err)"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3266,
+      "column": 9,
+      "func_name": "GetMemoryRevisionAtTime",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3263: func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Time) (*MemoryRevision, error) {",
+        "  3264: \t// First verify the memory existed at that time",
+        "  3265: \tvar createdAt int64",
+        "\u003e 3266: \terr := dm.db.QueryRow(`SELECT created_at FROM memories WHERE id = ?`, memoryID).Scan(\u0026createdAt)",
+        "  3267: \tif err != nil {",
+        "  3268: \t\treturn nil, nil // memory doesn't exist",
+        "  3269: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3276,
+      "column": 8,
+      "func_name": "GetMemoryRevisionAtTime",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3273: ",
+        "  3274: \t// Check if the memory was soft-deleted before asOf",
+        "  3275: \tvar deletedAt sql.NullInt64",
+        "\u003e 3276: \terr = dm.db.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, memoryID).Scan(\u0026deletedAt)",
+        "  3277: \tif err == nil \u0026\u0026 deletedAt.Valid \u0026\u0026 deletedAt.Int64 \u003e 0 \u0026\u0026 deletedAt.Int64 \u003c asOf.Unix() {",
+        "  3278: \t\treturn nil, nil // memory was deleted before asOf",
+        "  3279: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3292,
+      "column": 8,
+      "func_name": "GetMemoryRevisionAtTime",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3289: \t`, memoryID, asOf.Unix())",
+        "  3290: ",
+        "  3291: \tvar r MemoryRevision",
+        "\u003e 3292: \terr = row.Scan(\u0026r.ID, \u0026r.MemoryID, \u0026r.Version, \u0026r.Content,",
+        "  3293: \t\t\u0026r.Weight, \u0026r.Collection, \u0026r.IsLongTerm, \u0026r.IsChallenged,",
+        "  3294: \t\t\u0026r.ChallengedTheoryID, \u0026r.CreatedAt)",
+        "  3295: \tif err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3357,
+      "column": 8,
+      "func_name": "ChallengeMemory",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3354: \t// so a concurrent soft-delete between the check and the writes is caught",
+        "  3355: \t// by the WHERE-deleted_at-IS-NULL clause on each subsequent UPDATE.",
+        "  3356: \tvar exists bool",
+        "\u003e 3357: \terr = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM memories WHERE id = ? AND deleted_at IS NULL)`, memoryID).Scan(\u0026exists)",
+        "  3358: \tif err != nil {",
+        "  3359: \t\treturn fmt.Errorf(\"ChallengeMemory: select check: %w\", err)",
+        "  3360: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3532,
+      "column": 9,
+      "func_name": "GetLessonStats",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  3529: \t}",
+        "  3530: ",
+        "  3531: \tvar total int",
+        "\u003e 3532: \terr := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(\u0026total)",
+        "  3533: \tif err != nil {",
+        "  3534: \t\treturn stats, err",
+        "  3535: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3541,
+      "column": 10,
+      "func_name": "GetLessonStats",
+      "pattern": "(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  3538: \ttypeCounts := map[string]int{}",
+        "  3539: \tfor _, t := range []LessonType{LessonTypeWarning, LessonTypePractice, LessonTypeInsight} {",
+        "  3540: \t\tvar count int",
+        "\u003e 3541: \t\terr := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons WHERE type = ?`, t).Scan(\u0026count)",
+        "  3542: \t\tif err == nil {",
+        "  3543: \t\t\ttypeCounts[string(t)] = count",
+        "  3544: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/db.go",
+      "line": 3649,
+      "column": 9,
+      "func_name": "PromoteToGlobal",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  3646: \tvar content, collection string",
+        "  3647: \tvar tagsNS, metaNS sql.NullString",
+        "  3648: \tvar weight, reinforcement int",
+        "\u003e 3649: \terr := dm.db.QueryRow(`",
+        "  3650: \t\tSELECT content, collection, tags, metadata, weight, COALESCE(reinforcement_count, 0)",
+        "  3651: \t\tFROM memories",
+        "  3652: \t\tWHERE id = ? AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/directive_tools.go",
+      "line": 41,
+      "column": 13,
+      "func_name": "ReadDirectives",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  38: \tfor rows.Next() {",
+        "  39: \t\tvar id, content, createdAt string",
+        "  40: \t\tvar metaJSON *string",
+        "\u003e 41: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026metaJSON, \u0026createdAt); err != nil {",
+        "  42: \t\t\treturn nil, fmt.Errorf(\"scanning directive row: %w\", err)",
+        "  43: \t\t}",
+        "  44: \t\tvar meta map[string]interface{}"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 291,
+      "column": 13,
+      "func_name": "loadEvidenceForRecompute",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  288: \t\tvar strength, independence float64",
+        "  289: \t\tvar createdAt int64",
+        "  290: \t\tvar expiresAt sql.NullInt64",
+        "\u003e 291: \t\tif err := rows.Scan(\u0026strength, \u0026independence, \u0026createdAt, \u0026expiresAt); err != nil {",
+        "  292: \t\t\treturn nil, time.Time{}, err",
+        "  293: \t\t}",
+        "  294: \t\t// Skip expired evidence."
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 484,
+      "column": 13,
+      "func_name": "ExplainConfidence",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  481: \t\tvar strength, independence float64",
+        "  482: \t\tvar createdAt int64",
+        "  483: \t\tvar expiresAt sql.NullInt64",
+        "\u003e 484: \t\tif err := rows.Scan(\u0026id, \u0026evType, \u0026source, \u0026by, \u0026strength, \u0026independence, \u0026createdAt, \u0026expiresAt); err != nil {",
+        "  485: \t\t\treturn nil, err",
+        "  486: \t\t}",
+        "  487: \t\tts := time.Unix(createdAt, 0)"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 659,
+      "column": 13,
+      "func_name": "ListEvidenceForArtifact",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  656: \t\tvar e Evidence",
+        "  657: \t\tvar createdAt int64",
+        "  658: \t\tvar expiresAt sql.NullInt64",
+        "\u003e 659: \t\tif err := rows.Scan(\u0026e.ID, \u0026e.ArtifactID, \u0026e.ArtifactType, \u0026e.Type, \u0026e.SourceGroup,",
+        "  660: \t\t\t\u0026e.Strength, \u0026e.IndependenceFactor, \u0026e.CreatedBy, \u0026createdAt, \u0026expiresAt, \u0026e.Notes); err != nil {",
+        "  661: \t\t\treturn nil, fmt.Errorf(\"scan: %w\", err)",
+        "  662: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 733,
+      "column": 13,
+      "func_name": "GetConfidenceForArtifact",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  730: \tfor rows.Next() {",
+        "  731: \t\tvar h ConfidenceHistoryRow",
+        "  732: \t\tvar computedAt int64",
+        "\u003e 733: \t\tif err := rows.Scan(\u0026h.Confidence, \u0026computedAt, \u0026h.EvidenceCount, \u0026h.Trigger); err != nil {",
+        "  734: \t\t\treturn nil, fmt.Errorf(\"scan history: %w\", err)",
+        "  735: \t\t}",
+        "  736: \t\th.ComputedAt = time.Unix(computedAt, 0)"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 840,
+      "column": 13,
+      "func_name": "QueryConfidenceChanges",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  837: \tfor rows.Next() {",
+        "  838: \t\tvar c ConfidenceChange",
+        "  839: \t\tvar computedAt int64",
+        "\u003e 840: \t\tif err := rows.Scan(\u0026c.ArtifactID, \u0026c.ArtifactType, \u0026c.NewConfidence,",
+        "  841: \t\t\t\u0026c.OldConfidence, \u0026c.Delta, \u0026c.Trigger, \u0026c.EvidenceCount, \u0026computedAt); err != nil {",
+        "  842: \t\t\treturn nil, fmt.Errorf(\"scan: %w\", err)",
+        "  843: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 923,
+      "column": 13,
+      "func_name": "QueryConfidenceTrend",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  920: \tfor rows.Next() {",
+        "  921: \t\tvar conf float64",
+        "  922: \t\tvar computedAt int64",
+        "\u003e 923: \t\tif err := rows.Scan(\u0026conf, \u0026computedAt); err != nil {",
+        "  924: \t\t\treturn nil, fmt.Errorf(\"scan: %w\", err)",
+        "  925: \t\t}",
+        "  926: \t\ttDays := float64(computedAt-windowStart.Unix()) / 86400.0"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_store.go",
+      "line": 1029,
+      "column": 13,
+      "func_name": "QueryMemoryQualityBySource",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1026: \tfor rows.Next() {",
+        "  1027: \t\tvar s string",
+        "  1028: \t\tvar n int",
+        "\u003e 1029: \t\tif err := rows.Scan(\u0026s, \u0026n); err != nil {",
+        "  1030: \t\t\trows.Close()",
+        "  1031: \t\t\treturn nil, err",
+        "  1032: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_tools.go",
+      "line": 113,
+      "column": 13,
+      "func_name": "ListEvidence",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  110: \t\tvar strength, ind float64",
+        "  111: \t\tvar createdAt int64",
+        "  112: \t\tvar expiresAt *int64",
+        "\u003e 113: \t\tif err := rows.Scan(\u0026id, \u0026aid, \u0026atype, \u0026t, \u0026src, \u0026strength, \u0026ind, \u0026by, \u0026createdAt, \u0026expiresAt, \u0026notes); err != nil {",
+        "  114: \t\t\treturn nil, err",
+        "  115: \t\t}",
+        "  116: \t\trow := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/evidence_tools.go",
+      "line": 169,
+      "column": 13,
+      "func_name": "QueryConfidenceHistory",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  166: \t\tvar conf float64",
+        "  167: \t\tvar evidenceCount int",
+        "  168: \t\tvar trigger string",
+        "\u003e 169: \t\tif err := rows.Scan(\u0026computedAt, \u0026conf, \u0026evidenceCount, \u0026trigger); err != nil {",
+        "  170: \t\t\treturn nil, err",
+        "  171: \t\t}",
+        "  172: \t\tout = append(out, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/gc_tools.go",
+      "line": 133,
+      "column": 13,
+      "func_name": "RunGC",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  130: \t\tvar weight int",
+        "  131: \t\tvar lastAccessed, createdAt *int64",
+        "  132: \t\tvar isLTM bool",
+        "\u003e 133: \t\tif err := rows.Scan(\u0026id, \u0026weight, \u0026lastAccessed, \u0026createdAt, \u0026isLTM); err != nil {",
+        "  134: \t\t\treturn nil, fmt.Errorf(\"scanning GC candidate memory row: %w\", err)",
+        "  135: \t\t}",
+        "  136: \t\tlast := lastAccessed"
+      ]
+    },
+    {
+      "file": "internal/core/gc_tools.go",
+      "line": 163,
+      "column": 8,
+      "func_name": "RunGC",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  160: ",
+        "  161: \t\tif newW \u003c= 0.0 \u0026\u0026 !lifetimeLTM {",
+        "  162: \t\t\tvar preview string",
+        "\u003e 163: \t\t\t_ = dm.db.QueryRow(`SELECT SUBSTR(content, 1, 60) FROM memories WHERE id = ?`, id).Scan(\u0026preview)",
+        "  164: \t\t\tresult.DeadMemories = append(result.DeadMemories, map[string]interface{}{",
+        "  165: \t\t\t\t\"id\":      id,",
+        "  166: \t\t\t\t\"content\": preview,"
+      ]
+    },
+    {
+      "file": "internal/core/handoff.go",
+      "line": 176,
+      "column": 12,
+      "func_name": "getHandoffBySessionID",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  173: \t\tFROM session_handoffs WHERE session_id = ?`, sessionID)",
+        "  174: \tvar h Handoff",
+        "  175: \tvar commitJSON, questionJSON []byte",
+        "\u003e 176: \tif err := row.Scan(\u0026h.ID, \u0026h.SessionID, \u0026h.EndedAt, \u0026h.EndedState, \u0026h.Summary,",
+        "  177: \t\t\u0026commitJSON, \u0026questionJSON, \u0026h.CreatedAt); err != nil {",
+        "  178: \t\treturn nil, err",
+        "  179: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/handoff.go",
+      "line": 345,
+      "column": 9,
+      "func_name": "scanHandoff",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  342: \t\treadAt       sql.NullInt64",
+        "  343: \t\treadBy       sql.NullString",
+        "  344: \t)",
+        "\u003e 345: \terr := row.Scan(",
+        "  346: \t\t\u0026h.ID, \u0026h.SessionID, \u0026h.EndedAt, \u0026h.EndedState, \u0026h.Summary,",
+        "  347: \t\t\u0026commitJSON, \u0026questionJSON, \u0026readAt, \u0026readBy, \u0026h.CreatedAt,",
+        "  348: \t)"
+      ]
+    },
+    {
+      "file": "internal/core/handoff.go",
+      "line": 377,
+      "column": 9,
+      "func_name": "scanHandoffRows",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  374: \t\treadAt       sql.NullInt64",
+        "  375: \t\treadBy       sql.NullString",
+        "  376: \t)",
+        "\u003e 377: \terr := rows.Scan(",
+        "  378: \t\t\u0026h.ID, \u0026h.SessionID, \u0026h.EndedAt, \u0026h.EndedState, \u0026h.Summary,",
+        "  379: \t\t\u0026commitJSON, \u0026questionJSON, \u0026readAt, \u0026readBy, \u0026h.CreatedAt,",
+        "  380: \t)"
+      ]
+    },
+    {
+      "file": "internal/core/hybrid_search.go",
+      "line": 297,
+      "column": 15,
+      "func_name": "HybridSearch",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  294: \t\tif err == nil {",
+        "  295: \t\t\tfor rows.Next() {",
+        "  296: \t\t\t\tvar id, embStr, contentStr, metaStr string",
+        "\u003e 297: \t\t\t\tif err := rows.Scan(\u0026id, \u0026embStr, \u0026contentStr, \u0026metaStr); err == nil \u0026\u0026 embStr != \"\" {",
+        "  298: \t\t\t\t\tvar emb []float32",
+        "  299: \t\t\t\t\tif json.Unmarshal([]byte(embStr), \u0026emb) == nil \u0026\u0026 len(emb) \u003e 0 {",
+        "  300: \t\t\t\t\t\tcandMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr}"
+      ]
+    },
+    {
+      "file": "internal/core/hybrid_search.go",
+      "line": 605,
+      "column": 13,
+      "func_name": "scanFTSEntries",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  602: \t\tvar e ftsEntry",
+        "  603: \t\tvar nullableTags, nullableMetadata, nullableRefID sql.NullString",
+        "  604: \t\tvar nullableLastAccessed, nullableMetaLastRetrieved sql.NullInt64",
+        "\u003e 605: \t\tif err := rows.Scan(\u0026e.ID, \u0026e.Content, \u0026e.Collection, \u0026nullableTags, \u0026nullableMetadata,",
+        "  606: \t\t\t\u0026e.CreatedAt, \u0026e.ReinforcementCount, \u0026e.Weight,",
+        "  607: \t\t\t\u0026nullableLastAccessed, \u0026nullableRefID, \u0026e.Score,",
+        "  608: \t\t\t\u0026e.ReuseCount, \u0026nullableMetaLastRetrieved, \u0026e.SuccessCount); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/hybrid_search.go",
+      "line": 678,
+      "column": 13,
+      "func_name": "VectorMatch",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  675: \tif maxScan \u003e 0 {",
+        "  676: \t\tcountQuery := `SELECT COUNT(*) FROM ` + memTable + ` WHERE ` + strings.Join(whereClauses, \" AND \")",
+        "  677: \t\tvar rowCount int",
+        "\u003e 678: \t\tif err := dm.SQLDB().QueryRow(countQuery, args...).Scan(\u0026rowCount); err != nil {",
+        "  679: \t\t\treturn nil, fmt.Errorf(\"vector scan preflight count: %w\", err)",
+        "  680: \t\t}",
+        "  681: \t\tif rowCount \u003e maxScan {"
+      ]
+    },
+    {
+      "file": "internal/core/hybrid_search.go",
+      "line": 704,
+      "column": 13,
+      "func_name": "VectorMatch",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  701: \tfor rows.Next() {",
+        "  702: \t\tvar id, content, embeddingJSON string",
+        "  703: \t\tvar createdAt int64",
+        "\u003e 704: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026createdAt, \u0026embeddingJSON); err != nil {",
+        "  705: \t\t\treturn nil, fmt.Errorf(\"scanning VectorMatch memory row: %w\", err)",
+        "  706: \t\t}",
+        "  707: \t\tvar dbEmbedding []float32"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 75,
+      "column": 2,
+      "func_name": "DetectSchema",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  72: ",
+        "  73: \t// Check for OpenClaw signature: chunks table with known columns",
+        "  74: \tvar tableCount int",
+        "\u003e 75: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table'\").Scan(\u0026tableCount)",
+        "  76: ",
+        "  77: \tvar chunksExists int",
+        "  78: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'\").Scan(\u0026chunksExists)"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 78,
+      "column": 2,
+      "func_name": "DetectSchema",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  75: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table'\").Scan(\u0026tableCount)",
+        "  76: ",
+        "  77: \tvar chunksExists int",
+        "\u003e 78: \tdb.QueryRow(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'\").Scan(\u0026chunksExists)",
+        "  79: ",
+        "  80: \tif chunksExists == 1 {",
+        "  81: \t\t// Verify expected columns"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 83,
+      "column": 3,
+      "func_name": "DetectSchema",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  80: \tif chunksExists == 1 {",
+        "  81: \t\t// Verify expected columns",
+        "  82: \t\tvar colList string",
+        "\u003e 83: \t\tdb.QueryRow(\"SELECT GROUP_CONCAT(name) FROM pragma_table_info('chunks')\").Scan(\u0026colList)",
+        "  84: \t\tif strings.Contains(colList, \"hash\") \u0026\u0026 strings.Contains(colList, \"text\") \u0026\u0026 strings.Contains(colList, \"updated_at\") {",
+        "  85: \t\t\treturn \u0026Schema{",
+        "  86: \t\t\t\tDBType: \"openclaw\","
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 233,
+      "column": 9,
+      "func_name": "contentHashExistsInMemory",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  230: // contentHashExistsInMemory checks if a content hash is already in the memory table.",
+        "  231: func (dm *DatabaseManager) contentHashExistsInMemory(contentHash string) (bool, error) {",
+        "  232: \tvar count int",
+        "\u003e 233: \terr := dm.db.QueryRow(\"SELECT COUNT(*) FROM memories WHERE content_hash = ?\", contentHash).Scan(\u0026count)",
+        "  234: \treturn count \u003e 0, err",
+        "  235: }",
+        "  236: "
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 259,
+      "column": 13,
+      "func_name": "GetRawMemoriesByStatus",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  256: \t\tvar r RawMemory",
+        "  257: \t\tvar llmVerdict, llmNotes, reviewerPrompt *string",
+        "  258: \t\tvar expiresAt *float64",
+        "\u003e 259: \t\tif err := rows.Scan(\u0026r.ID, \u0026r.SourceID, \u0026r.SourceDB, \u0026r.ContentHash, \u0026r.Text, \u0026r.Metadata, \u0026r.IngestedAt, \u0026r.Status, \u0026llmVerdict, \u0026llmNotes, \u0026reviewerPrompt, \u0026expiresAt, \u0026r.ImportBatch, \u0026r.UpdatedAt); err != nil {",
+        "  260: \t\t\treturn nil, fmt.Errorf(\"scanning raw memory row: %w\", err)",
+        "  261: \t\t}",
+        "  262: \t\tif llmVerdict != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 307,
+      "column": 13,
+      "func_name": "GetIngestStatus",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  304: \tfor rows.Next() {",
+        "  305: \t\tvar status string",
+        "  306: \t\tvar count int",
+        "\u003e 307: \t\tif err := rows.Scan(\u0026status, \u0026count); err == nil {",
+        "  308: \t\t\tcounts[status] = count",
+        "  309: \t\t}",
+        "  310: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 332,
+      "column": 13,
+      "func_name": "ListIngestBatches",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  329: \t\tvar batch string",
+        "  330: \t\tvar status string",
+        "  331: \t\tvar count int",
+        "\u003e 332: \t\tif err := rows.Scan(\u0026batch, \u0026status, \u0026count); err != nil {",
+        "  333: \t\t\treturn nil, fmt.Errorf(\"scanning ingest batch row: %w\", err)",
+        "  334: \t\t}",
+        "  335: \t\tif _, ok := batches[batch]; !ok {"
+      ]
+    },
+    {
+      "file": "internal/core/ingest.go",
+      "line": 355,
+      "column": 9,
+      "func_name": "GetExternalDBCursor",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  352: // Returns (\"\", nil) if no cursor exists yet.",
+        "  353: func (dm *DatabaseManager) GetExternalDBCursor(label string) (string, error) {",
+        "  354: \tvar cursor string",
+        "\u003e 355: \terr := dm.db.QueryRow(`SELECT last_cursor FROM external_db_cursors WHERE db_label = ?`, label).Scan(\u0026cursor)",
+        "  356: \tif err == sql.ErrNoRows {",
+        "  357: \t\treturn \"\", nil",
+        "  358: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/keywords.go",
+      "line": 99,
+      "column": 13,
+      "func_name": "FindEpistemologyOverlaps",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  96: \t\tvar createdAt string",
+        "  97: \t\tvar score float64",
+        "  98: ",
+        "\u003e 99: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026collection, \u0026tags, \u0026metadata, \u0026createdAt, \u0026score); err != nil {",
+        "  100: \t\t\treturn nil, fmt.Errorf(\"scanning keyword overlap memory row: %w\", err)",
+        "  101: \t\t}",
+        "  102: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 219,
+      "column": 3,
+      "func_name": "addColumnIfNotExists",
+      "pattern": "rows.Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  216: \t\tvar cid, name, ctype string",
+        "  217: \t\tvar notnull, pk int",
+        "  218: \t\tvar dflt interface{}",
+        "\u003e 219: \t\trows.Scan(\u0026cid, \u0026name, \u0026ctype, \u0026notnull, \u0026dflt, \u0026pk)",
+        "  220: \t\tif name == column {",
+        "  221: \t\t\treturn nil // Column already exists",
+        "  222: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 789,
+      "column": 10,
+      "func_name": "QueryMemory",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  786: \t\tvar sessionID sql.NullString",
+        "  787: \t\tvar embeddingJSON []byte",
+        "  788: \t\tvar rank int",
+        "\u003e 789: \t\terr := rows.Scan(\u0026id, \u0026coll, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026embeddingJSON, \u0026createdAt, \u0026rank)",
+        "  790: \t\tif err != nil {",
+        "  791: \t\t\treturn nil, fmt.Errorf(\"scanning query memory row: %w\", err)",
+        "  792: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 890,
+      "column": 9,
+      "func_name": "GetByID",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  887: \tvar createdAt int64",
+        "  888: \tvar sessionID sql.NullString",
+        "  889: ",
+        "\u003e 890: \terr := s.DB.QueryRow(\"SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL\"+MemoryExpireClause, id, collection).Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt)",
+        "  891: \tif err != nil {",
+        "  892: \t\tif err == sql.ErrNoRows {",
+        "  893: \t\t\treturn nil, nil"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 950,
+      "column": 10,
+      "func_name": "GetRecent",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  947: \t\tvar createdAt int64",
+        "  948: \t\tvar sessionID sql.NullString",
+        "  949: ",
+        "\u003e 950: \t\terr := rows.Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt)",
+        "  951: \t\tif err != nil {",
+        "  952: \t\t\treturn nil, fmt.Errorf(\"scanning recent memory row: %w\", err)",
+        "  953: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1085,
+      "column": 9,
+      "func_name": "GetLatestByCollection",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  1082: \tvar createdAt int64",
+        "  1083: \tvar sessionID sql.NullString",
+        "  1084: ",
+        "\u003e 1085: \terr := s.DB.QueryRow(",
+        "  1086: \t\t`SELECT id, collection, content, session_id, tags, metadata, embedding, created_at",
+        "  1087: \t\t FROM memories WHERE collection = ? AND deleted_at IS NULL`+MemoryExpireClause+`",
+        "  1088: \t\t ORDER BY created_at DESC LIMIT 1`, collection,"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1149,
+      "column": 9,
+      "func_name": "GetMemoryCount",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  1146: \t}",
+        "  1147: ",
+        "  1148: \tvar count int",
+        "\u003e 1149: \terr := s.DB.QueryRow(\"SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL\").Scan(\u0026count)",
+        "  1150: \treturn count, err",
+        "  1151: }",
+        "  1152: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1162,
+      "column": 9,
+      "func_name": "GetTopicCount",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  1159: \t}",
+        "  1160: ",
+        "  1161: \tvar count int",
+        "\u003e 1162: \terr := s.DB.QueryRow(\"SELECT COUNT(*) FROM topics WHERE is_active = 1\").Scan(\u0026count)",
+        "  1163: \treturn count, err",
+        "  1164: }",
+        "  1165: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1190,
+      "column": 10,
+      "func_name": "scanMemoryRows",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1187: \t\tvar id, coll, content, tagsJSON, metadataJSON, createdAt string",
+        "  1188: \t\tvar sessionID sql.NullString",
+        "  1189: \t\tvar embeddingJSON []byte",
+        "\u003e 1190: \t\terr := rows.Scan(\u0026id, \u0026coll, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026embeddingJSON, \u0026createdAt)",
+        "  1191: \t\tif err != nil {",
+        "  1192: \t\t\treturn nil, fmt.Errorf(\"scanning memory row in scanMemoryRows: %w\", err)",
+        "  1193: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1435,
+      "column": 6,
+      "func_name": "ConsolidateMemories",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  1432: \t\tvar m memKey",
+        "  1433: \t\tvar tags string",
+        "  1434: \t\tvar embeddingJSON []byte",
+        "\u003e 1435: \t\tif rows.Scan(\u0026m.id, \u0026m.collection, \u0026m.content, \u0026tags, \u0026embeddingJSON, \u0026m.createdAt, \u0026m.weight, \u0026m.reinforce) == nil {",
+        "  1436: \t\t\tif len(embeddingJSON) \u003e 0 {",
+        "  1437: \t\t\t\tjson.Unmarshal(embeddingJSON, \u0026m.embedding)",
+        "  1438: \t\t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1568,
+      "column": 10,
+      "func_name": "SpacedReinforcementReview",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1565: \t\tvar lastAccessed *int64",
+        "  1566: \t\tvar sessionID sql.NullString",
+        "  1567: ",
+        "\u003e 1568: \t\terr := rows.Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID,",
+        "  1569: \t\t\t\u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt,",
+        "  1570: \t\t\t\u0026mem.ReinforcementCount, \u0026mem.Weight, \u0026lastAccessed)",
+        "  1571: \t\tif err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1665,
+      "column": 10,
+      "func_name": "GetContextualMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1662: \t\tvar lastAccessed *int64",
+        "  1663: \t\tvar sessionID sql.NullString",
+        "  1664: ",
+        "\u003e 1665: \t\terr := rows.Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID,",
+        "  1666: \t\t\t\u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt,",
+        "  1667: \t\t\t\u0026mem.ReinforcementCount, \u0026mem.Weight, \u0026lastAccessed)",
+        "  1668: \t\tif err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1739,
+      "column": 3,
+      "func_name": "RunSelfMaintenance",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1736: \t// Get never-accessed count",
+        "  1737: \tif s.DB != nil {",
+        "  1738: \t\tvar count int",
+        "\u003e 1739: \t\ts.DB.QueryRow(`",
+        "  1740: \t\t\tSELECT COUNT(*) FROM memories",
+        "  1741: \t\t\tWHERE deleted_at IS NULL",
+        "  1742: \t\t\t  AND last_accessed_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1748,
+      "column": 3,
+      "func_name": "RunSelfMaintenance",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1745: \t\tstats.NeverAccessed = count",
+        "  1746: ",
+        "  1747: \t\tvar lowWeight int",
+        "\u003e 1748: \t\ts.DB.QueryRow(`",
+        "  1749: \t\t\tSELECT COUNT(*) FROM memories",
+        "  1750: \t\t\tWHERE deleted_at IS NULL",
+        "  1751: \t\t\t  AND weight = 1"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1889,
+      "column": 10,
+      "func_name": "MetadataFilter",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1886: \t\tvar createdAt int64",
+        "  1887: \t\tvar sessionID sql.NullString",
+        "  1888: ",
+        "\u003e 1889: \t\terr := rows.Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt)",
+        "  1890: \t\tif err != nil {",
+        "  1891: \t\t\treturn nil, fmt.Errorf(\"scanning metadata-filtered memory row: %w\", err)",
+        "  1892: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 1964,
+      "column": 9,
+      "func_name": "PromoteTopicToMemory",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  1961: \t// First, check if the topic exists",
+        "  1962: \tvar topicName, topicDesc string",
+        "  1963: \tvar isActive int",
+        "\u003e 1964: \terr := s.DB.QueryRow(`",
+        "  1965: \t\tSELECT name, description, is_active FROM topics WHERE id = ?",
+        "  1966: \t`, topicID).Scan(\u0026topicName, \u0026topicDesc, \u0026isActive)",
+        "  1967: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 2049,
+      "column": 13,
+      "func_name": "SearchSessions",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2046: \t\tvar m Memory",
+        "  2047: \t\tvar tagsJSON, metadataJSON sql.NullString",
+        "  2048: ",
+        "\u003e 2049: \t\tif err := rows.Scan(\u0026m.ID, \u0026m.Collection, \u0026m.Content, \u0026m.CreatedAt, \u0026metadataJSON, \u0026tagsJSON); err != nil {",
+        "  2050: \t\t\treturn nil, fmt.Errorf(\"scanning session row: %w\", err)",
+        "  2051: \t\t}",
+        "  2052: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 2158,
+      "column": 13,
+      "func_name": "SearchTopics",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2155: ",
+        "  2156: \tfor rows.Next() {",
+        "  2157: \t\tvar id, name, description, created string",
+        "\u003e 2158: \t\tif err := rows.Scan(\u0026id, \u0026name, \u0026description, \u0026created); err != nil {",
+        "  2159: \t\t\treturn nil, fmt.Errorf(\"scanning topic row: %w\", err)",
+        "  2160: \t\t}",
+        "  2161: "
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 2285,
+      "column": 13,
+      "func_name": "DedupeMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2282: \tvar dupeIDs []string",
+        "  2283: \tfor rows.Next() {",
+        "  2284: \t\tvar id, content, createdAt string",
+        "\u003e 2285: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026createdAt); err != nil {",
+        "  2286: \t\t\treturn nil, fmt.Errorf(\"scanning duplicate memory row: %w\", err)",
+        "  2287: \t\t}",
+        "  2288: \t\tdupeIDs = append(dupeIDs, id)"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 2511,
+      "column": 13,
+      "func_name": "BackfillSessionIDs",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2508: \tupdated := 0",
+        "  2509: \tfor rows.Next() {",
+        "  2510: \t\tvar memID, createdAt string",
+        "\u003e 2511: \t\tif err := rows.Scan(\u0026memID, \u0026createdAt); err != nil {",
+        "  2512: \t\t\treturn 0, fmt.Errorf(\"scanning memory for session backfill: %w\", err)",
+        "  2513: \t\t}",
+        "  2514: \t\tmemTime, err := time.Parse(time.RFC3339, createdAt)"
+      ]
+    },
+    {
+      "file": "internal/core/memory.go",
+      "line": 2903,
+      "column": 10,
+      "func_name": "GetMemoriesByRelevance",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2900: \t\tvar createdAt int64",
+        "  2901: \t\tvar sessionID sql.NullString",
+        "  2902: ",
+        "\u003e 2903: \t\terr := rows.Scan(\u0026mem.ID, \u0026mem.Collection, \u0026mem.Content, \u0026sessionID,",
+        "  2904: \t\t\t\u0026tagsJSON, \u0026metadataJSON, \u0026embedding, \u0026createdAt,",
+        "  2905: \t\t\t\u0026mem.ReinforcementCount, \u0026mem.Weight)",
+        "  2906: \t\tif err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/memory_tools.go",
+      "line": 497,
+      "column": 12,
+      "func_name": "ShredMemoryWithCascade",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  494: \t// Probe lessons_base first. If the id is a lesson, route through",
+        "  495: \t// the lessons view (lessons_cascade test) and return lesson_id.",
+        "  496: \tvar lessonCount int",
+        "\u003e 497: \tif err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, memoryID).Scan(\u0026lessonCount); err != nil {",
+        "  498: \t\treturn nil, fmt.Errorf(\"shred: probe lessons_base: %w\", err)",
+        "  499: \t}",
+        "  500: \tif lessonCount \u003e 0 {"
+      ]
+    },
+    {
+      "file": "internal/core/migrate_md.go",
+      "line": 370,
+      "column": 13,
+      "func_name": "PromoteRawMemoryBatch",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  367: \t}",
+        "  368: \tfor rows.Next() {",
+        "  369: \t\tvar p pending",
+        "\u003e 370: \t\tif err := rows.Scan(\u0026p.id, \u0026p.sourceID, \u0026p.sourceDB, \u0026p.contentHash, \u0026p.text, \u0026p.metaJSON); err != nil {",
+        "  371: \t\t\treturn 0, fmt.Errorf(\"scanning pending raw memory row for promotion: %w\", err)",
+        "  372: \t\t}",
+        "  373: \t\tpendings = append(pendings, p)"
+      ]
+    },
+    {
+      "file": "internal/core/migration_deleted_at.go",
+      "line": 27,
+      "column": 9,
+      "func_name": "MigrateDeletedAtToUnixEpoch",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  24: func MigrateDeletedAtToUnixEpoch(tx *sql.Tx) error {",
+        "  25: \t// 1. Sentinel check — bail if already applied.",
+        "  26: \tvar applied int",
+        "\u003e 27: \terr := tx.QueryRow(",
+        "  28: \t\t`SELECT COUNT(*) FROM schema_migrations WHERE id = ?`,",
+        "  29: \t\t\"deleted_at_unified_v1\",",
+        "  30: \t).Scan(\u0026applied)"
+      ]
+    },
+    {
+      "file": "internal/core/migration_timestamps.go",
+      "line": 112,
+      "column": 12,
+      "func_name": "columnExists",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  109: \t\t`SELECT COUNT(*) FROM pragma_table_info(%q) WHERE name = %q`,",
+        "  110: \t\ttable, col,",
+        "  111: \t)",
+        "\u003e 112: \tif err := tx.QueryRow(q).Scan(\u0026n); err != nil {",
+        "  113: \t\treturn false, fmt.Errorf(\"pragma_table_info(%s, %s): %w\", table, col, err)",
+        "  114: \t}",
+        "  115: \treturn n \u003e 0, nil"
+      ]
+    },
+    {
+      "file": "internal/core/migration_timestamps.go",
+      "line": 134,
+      "column": 9,
+      "func_name": "columnHasTextAffinity",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  131: \t\t`SELECT type FROM pragma_table_info(%q) WHERE name = %q`,",
+        "  132: \t\ttable, col,",
+        "  133: \t)",
+        "\u003e 134: \terr := tx.QueryRow(q).Scan(\u0026affinity)",
+        "  135: \tif err == sql.ErrNoRows {",
+        "  136: \t\treturn false, nil",
+        "  137: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/migration_timestamps.go",
+      "line": 165,
+      "column": 12,
+      "func_name": "hasTextResidueInColumn",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  162: \t\t`SELECT COUNT(*) FROM (SELECT 1 FROM %s WHERE typeof(%s) = 'text' LIMIT 1)`,",
+        "  163: \t\ttable, col,",
+        "  164: \t)",
+        "\u003e 165: \tif err := tx.QueryRow(q).Scan(\u0026n); err != nil {",
+        "  166: \t\treturn false, fmt.Errorf(\"text-residue probe %s.%s: %w\", table, col, err)",
+        "  167: \t}",
+        "  168: \treturn n \u003e 0, nil"
+      ]
+    },
+    {
+      "file": "internal/core/migration_timestamps.go",
+      "line": 277,
+      "column": 9,
+      "func_name": "MigrateAllTimestampsToUnixEpoch",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  274: func MigrateAllTimestampsToUnixEpoch(tx *sql.Tx) error {",
+        "  275: \t// 1. Sentinel check — bail if already applied.",
+        "  276: \tvar applied int",
+        "\u003e 277: \terr := tx.QueryRow(",
+        "  278: \t\t`SELECT COUNT(*) FROM schema_migrations WHERE id = ?`,",
+        "  279: \t\t\"timestamps_unified_v1\",",
+        "  280: \t).Scan(\u0026applied)"
+      ]
+    },
+    {
+      "file": "internal/core/reference_db.go",
+      "line": 231,
+      "column": 17,
+      "func_name": "EmbedReferenceChunks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "scanErr",
+      "code": [
+        "  228: \tvar batch []pending",
+        "  229: \tfor rows.Next() {",
+        "  230: \t\tvar p pending",
+        "\u003e 231: \t\tif scanErr := rows.Scan(\u0026p.id, \u0026p.content); scanErr != nil {",
+        "  232: \t\t\trows.Close()",
+        "  233: \t\t\treturn embedded, failed, fmt.Errorf(\"EmbedReferenceChunks: scan: %w\", scanErr)",
+        "  234: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/reference_query.go",
+      "line": 43,
+      "column": 9,
+      "func_name": "FindReferenceBySourcePath",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  40: \t}",
+        "  41: \tvar doc ReferenceDoc",
+        "  42: \tvar tagsJSON sql.NullString",
+        "\u003e 43: \terr := db.QueryRow(`",
+        "  44: \t\tSELECT id, title, file_path, source_type, tags,",
+        "  45: \t\t       content, content_hash, import_reason,",
+        "  46: \t\t       total_chunks, last_indexed, created_at"
+      ]
+    },
+    {
+      "file": "internal/core/reference_query.go",
+      "line": 132,
+      "column": 13,
+      "func_name": "DiffChunks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  129: \texistingIDs := make(map[string]bool)      // all ids (for orphan detection)",
+        "  130: \tfor rows.Next() {",
+        "  131: \t\tvar id, hash sql.NullString",
+        "\u003e 132: \t\tif err := rows.Scan(\u0026id, \u0026hash); err != nil {",
+        "  133: \t\t\trows.Close()",
+        "  134: \t\t\treturn nil, fmt.Errorf(\"DiffChunks: scan: %w\", err)",
+        "  135: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/resolve.go",
+      "line": 41,
+      "column": 9,
+      "func_name": "LoadMemoryProvenance",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  38: \t\tupdatedAt      sql.NullString",
+        "  39: \t\tretrievalPri   sql.NullFloat64",
+        "  40: \t)",
+        "\u003e 41: \terr := dm.db.QueryRow(`",
+        "  42: \t\tSELECT",
+        "  43: \t\t\tCOALESCE(confidence, 0.5),",
+        "  44: \t\t\tCOALESCE(updated_at, CURRENT_TIMESTAMP),"
+      ]
+    },
+    {
+      "file": "internal/core/resolve.go",
+      "line": 67,
+      "column": 6,
+      "func_name": "LoadMemoryProvenance",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  64: \t// evidence_store pipeline. The query is cheap and the",
+        "  65: \t// approximation is good enough for ranking.",
+        "  66: \tvar evCount int",
+        "\u003e 67: \t_ = dm.db.QueryRow(`",
+        "  68: \t\tSELECT COUNT(*) FROM shared.evidence",
+        "  69: \t\tWHERE artifact_id = ? AND artifact_type = 'memory'",
+        "  70: \t`, memoryID).Scan(\u0026evCount)"
+      ]
+    },
+    {
+      "file": "internal/core/resolve.go",
+      "line": 235,
+      "column": 8,
+      "func_name": "applyResolution",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  232: \t// AFTER the resolution memory write so resolutionID is in",
+        "  233: \t// scope for the loser's metadata patch.",
+        "  234: \tvar exists bool",
+        "\u003e 235: \terr = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM shared.memories WHERE id = ? AND deleted_at IS NULL)`, dec.LoserID).Scan(\u0026exists)",
+        "  236: \tif err != nil {",
+        "  237: \t\treturn fmt.Errorf(\"applyResolution: loser check: %w\", err)",
+        "  238: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/resolve.go",
+      "line": 251,
+      "column": 13,
+      "func_name": "applyResolution",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  248: \t\t// `||`) so existing metadata fields are preserved. The",
+        "  249: \t\t// patch's keys win on collision.",
+        "  250: \t\tvar existingMetaRaw sql.NullString",
+        "\u003e 251: \t\tif err := tx.QueryRow(`SELECT metadata FROM shared.memories WHERE id = ?`, dec.LoserID).Scan(\u0026existingMetaRaw); err != nil {",
+        "  252: \t\t\treturn fmt.Errorf(\"applyResolution: read loser metadata: %w\", err)",
+        "  253: \t\t}",
+        "  254: \t\tloserPatch := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/retrieval_metadata.go",
+      "line": 128,
+      "column": 9,
+      "func_name": "GetRetrievalMetadata",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  125: \t\treuseCount, successCount            int",
+        "  126: \t\tlastRetrievedAt                     *int64",
+        "  127: \t)",
+        "\u003e 128: \terr := dm.db.QueryRow(`",
+        "  129: \t\tSELECT node_type, reuse_count, last_retrieved_at, success_count",
+        "  130: \t\tFROM retrieval_metadata",
+        "  131: \t\tWHERE node_id = ?"
+      ]
+    },
+    {
+      "file": "internal/core/scheduled_tasks.go",
+      "line": 208,
+      "column": 13,
+      "func_name": "ProcessScheduledTasks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  205: \tvar due []dueTask",
+        "  206: \tfor rows.Next() {",
+        "  207: \t\tvar t dueTask",
+        "\u003e 208: \t\tif err := rows.Scan(\u0026t.id, \u0026t.cronExpr, \u0026t.directiveID); err != nil {",
+        "  209: \t\t\trows.Close()",
+        "  210: \t\t\treturn 0, fmt.Errorf(\"scan due task: %w\", err)",
+        "  211: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/scheduled_tasks.go",
+      "line": 303,
+      "column": 13,
+      "func_name": "ListScheduledTasks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  300: \tfor rows.Next() {",
+        "  301: \t\tvar t ScheduledTask",
+        "  302: \t\tvar lastRun sql.NullInt64",
+        "\u003e 303: \t\tif err := rows.Scan(",
+        "  304: \t\t\t\u0026t.ID, \u0026t.Name, \u0026t.CronExpr, \u0026t.DirectiveID, \u0026t.Status,",
+        "  305: \t\t\t\u0026lastRun, \u0026t.NextRunAt, \u0026t.CreatedAt, \u0026t.UpdatedAt,",
+        "  306: \t\t); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/seed/engine.go",
+      "line": 56,
+      "column": 10,
+      "func_name": "ApplyDirectives",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "no-check",
+      "err_var": "err",
+      "code": [
+        "  53: \t\t// 1. Look up existing row by id.",
+        "  54: \t\tvar existingContent string",
+        "  55: \t\tvar existingID string",
+        "\u003e 56: \t\terr := db.QueryRow(",
+        "  57: \t\t\t`SELECT id, content FROM memories WHERE id = ? AND deleted_at IS NULL`,",
+        "  58: \t\t\tsd.StableID,",
+        "  59: \t\t).Scan(\u0026existingID, \u0026existingContent)"
+      ]
+    },
+    {
+      "file": "internal/core/seed/engine.go",
+      "line": 161,
+      "column": 9,
+      "func_name": "ApplySkills",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  158: \t\t// treated as absent so a re-init after an accidental shred",
+        "  159: \t\t// can recover them.",
+        "  160: \t\tvar existingContent string",
+        "\u003e 161: \t\terr = db.QueryRow(",
+        "  162: \t\t\t`SELECT content FROM memories WHERE id = ? AND deleted_at IS NULL`,",
+        "  163: \t\t\tsavedID,",
+        "  164: \t\t).Scan(\u0026existingContent)"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 45,
+      "column": 9,
+      "func_name": "ReadSkill",
+      "pattern": "row.Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  42: \t\tLIMIT 1",
+        "  43: \t`, nameOrID)",
+        "  44: ",
+        "\u003e 45: \terr := row.Scan(\u0026id, \u0026collection, \u0026content, \u0026tagsJSON, \u0026metaJSON,",
+        "  46: \t\t\u0026isGlobal, \u0026isPrime, \u0026weight, \u0026createdAt, \u0026deletedAt)",
+        "  47: \tif err == sql.ErrNoRows {",
+        "  48: \t\t// Fall back to name lookup: find the highest-versioned row."
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 58,
+      "column": 9,
+      "func_name": "ReadSkill",
+      "pattern": "row.Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  55: \t\t\tORDER BY id DESC",
+        "  56: \t\t\tLIMIT 1",
+        "  57: \t\t`, nameOrID)",
+        "\u003e 58: \t\terr = row.Scan(\u0026id, \u0026collection, \u0026content, \u0026tagsJSON, \u0026metaJSON,",
+        "  59: \t\t\t\u0026isGlobal, \u0026isPrime, \u0026weight, \u0026createdAt, \u0026deletedAt)",
+        "  60: \t}",
+        "  61: \tif err == sql.ErrNoRows {"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 148,
+      "column": 13,
+      "func_name": "ListSkills",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  145: \tfor rows.Next() {",
+        "  146: \t\tvar id, content string",
+        "  147: \t\tvar isGlobal, weight int",
+        "\u003e 148: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026isGlobal, \u0026weight); err != nil {",
+        "  149: \t\t\treturn nil, fmt.Errorf(\"scanning skill row: %w\", err)",
+        "  150: \t\t}",
+        "  151: \t\tfm, _, err := ParseSkillFrontmatter(content)"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 238,
+      "column": 8,
+      "func_name": "SaveSkill",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  235: \t// Existence check — does a non-deleted row already own this id?",
+        "  236: \tvar existing string",
+        "  237: \trow := db.QueryRow(`SELECT id FROM memories WHERE id = ? AND deleted_at IS NULL`, id)",
+        "\u003e 238: \terr = row.Scan(\u0026existing)",
+        "  239: \texists := err == nil",
+        "  240: \tif err != nil \u0026\u0026 err != sql.ErrNoRows {",
+        "  241: \t\treturn \"\", fmt.Errorf(\"lookup existing skill: %w\", err)"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 298,
+      "column": 9,
+      "func_name": "SaveSkill",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  295: \t\t\totherID      string",
+        "  296: \t\t\totherVersion string",
+        "  297: \t\t)",
+        "\u003e 298: \t\terr = db.QueryRow(`",
+        "  299: \t\t\tSELECT id, json_extract(metadata, '$.version')",
+        "  300: \t\t\tFROM memories",
+        "  301: \t\t\tWHERE collection = 'skills' AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 368,
+      "column": 8,
+      "func_name": "SaveSkill",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  365: \t\texistingVersion string",
+        "  366: \t)",
+        "  367: \tprefix := \"skill:\" + name + \"-v\"",
+        "\u003e 368: \terr = tx.QueryRow(`",
+        "  369: \t\tSELECT id, json_extract(metadata, '$.version')",
+        "  370: \t\tFROM memories",
+        "  371: \t\tWHERE collection = 'skills' AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/skill_db.go",
+      "line": 482,
+      "column": 9,
+      "func_name": "PromoteSkillToGlobal",
+      "pattern": "db.QueryRow(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  479: ",
+        "  480: \t// Verify the row exists AND is actually a skill.",
+        "  481: \tvar existing string",
+        "\u003e 482: \terr := db.QueryRow(`SELECT id FROM memories WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL`, skillID).Scan(\u0026existing)",
+        "  483: \tif err == sql.ErrNoRows {",
+        "  484: \t\treturn fmt.Errorf(\"skill %s not found\", skillID)",
+        "  485: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/synthesis_auto.go",
+      "line": 179,
+      "column": 9,
+      "func_name": "synthHasContentHash",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  176: \t\treturn false, 0",
+        "  177: \t}",
+        "  178: \tvar runCount int",
+        "\u003e 179: \terr := dm.SQLDB().QueryRow(",
+        "  180: \t\t`SELECT run_count FROM synth_runs WHERE content_hash = ?`,",
+        "  181: \t\tcontentHash,",
+        "  182: \t).Scan(\u0026runCount)"
+      ]
+    },
+    {
+      "file": "internal/core/synthesis_auto.go",
+      "line": 304,
+      "column": 13,
+      "func_name": "DetectNearMiss",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  301: \tfor rows.Next() {",
+        "  302: \t\tvar c nearMissCandidate",
+        "  303: \t\tvar score float64",
+        "\u003e 304: \t\tif err := rows.Scan(\u0026c.ID, \u0026c.Content, \u0026score, \u0026c.Tags); err != nil {",
+        "  305: \t\t\treturn nil, fmt.Errorf(\"scanning near-miss candidate row: %w\", err)",
+        "  306: \t\t}",
+        "  307: \t\t// bm25: more negative = stronger match"
+      ]
+    },
+    {
+      "file": "internal/core/synthesis_auto.go",
+      "line": 504,
+      "column": 8,
+      "func_name": "AutoSynthesize",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  501: \t\tidPlaceholders[i] = \"?\"",
+        "  502: \t\tidArgs[i] = id",
+        "  503: \t}",
+        "\u003e 504: \terr = dm.SQLDB().QueryRow(",
+        "  505: \t\t`SELECT MIN(created_at) FROM memories WHERE id IN (`+strings.Join(idPlaceholders, \",\")+`)`,",
+        "  506: \t\tidArgs...,",
+        "  507: \t).Scan(\u0026oldestCreatedAt)"
+      ]
+    },
+    {
+      "file": "internal/core/theory_resolve_hook.go",
+      "line": 191,
+      "column": 9,
+      "func_name": "lookupTheoryStatus",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  188: func (dm *DatabaseManager) lookupTheoryStatus(theoryID string) (string, bool, error) {",
+        "  189: \tvar status string",
+        "  190: \tvar collection string",
+        "\u003e 191: \terr := dm.db.QueryRow(`",
+        "  192: \t\tSELECT json_extract(metadata, '$.status'), collection",
+        "  193: \t\tFROM memories",
+        "  194: \t\tWHERE id = ? AND deleted_at IS NULL"
+      ]
+    },
+    {
+      "file": "internal/core/tools/handlers.go",
+      "line": 2136,
+      "column": 12,
+      "func_name": "handleUpsertScheduledTask",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  2133: \t\t`SELECT id FROM memories WHERE id = ? AND collection = 'directives' AND deleted_at IS NULL LIMIT 1`,",
+        "  2134: \t\tdirectiveID,",
+        "  2135: \t)",
+        "\u003e 2136: \tif err := row.Scan(\u0026foundID); err != nil {",
+        "  2137: \t\tif err == sql.ErrNoRows {",
+        "  2138: \t\t\treturn nil, fmt.Errorf(\"directive_id %q not found in memories where collection='directives'\", directiveID)",
+        "  2139: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/vector_index.go",
+      "line": 132,
+      "column": 13,
+      "func_name": "LoadVectorCentroids",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  129: \tfor rows.Next() {",
+        "  130: \t\tvar c VectorCluster",
+        "  131: \t\tvar centroidBytes []byte",
+        "\u003e 132: \t\tif err := rows.Scan(\u0026c.ClusterID, \u0026centroidBytes, \u0026c.NVectors, \u0026c.Variance); err != nil {",
+        "  133: \t\t\treturn nil, fmt.Errorf(\"scanning vector cluster row: %w\", err)",
+        "  134: \t\t}",
+        "  135: \t\tc.Centroid = decodeFloats(centroidBytes)"
+      ]
+    },
+    {
+      "file": "internal/core/vector_index.go",
+      "line": 240,
+      "column": 13,
+      "func_name": "IVFSearch",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  237: \tfor rows.Next() {",
+        "  238: \t\tvar id, content, embeddingJSON string",
+        "  239: \t\tvar createdAt int64",
+        "\u003e 240: \t\tif err := rows.Scan(\u0026id, \u0026content, \u0026createdAt, \u0026embeddingJSON); err != nil {",
+        "  241: \t\t\treturn nil, fmt.Errorf(\"scanning IVF search memory row: %w\", err)",
+        "  242: \t\t}",
+        "  243: \t\tvar dbEmbedding []float32"
+      ]
+    },
+    {
+      "file": "internal/core/vector_index.go",
+      "line": 614,
+      "column": 13,
+      "func_name": "Rebalance",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  611: \tdim := -1",
+        "  612: \tfor rows.Next() {",
+        "  613: \t\tvar id, embeddingJSON string",
+        "\u003e 614: \t\tif err := rows.Scan(\u0026id, \u0026embeddingJSON); err != nil {",
+        "  615: \t\t\treturn KMeansResult{}, 0, fmt.Errorf(\"scanning rebalance memory row: %w\", err)",
+        "  616: \t\t}",
+        "  617: \t\tvar vec []float32"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 251,
+      "column": 9,
+      "func_name": "gatherEpistemicPressure",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  248: \t\tlessonCount int",
+        "  249: \t\tthreshold   int",
+        "  250: \t)",
+        "\u003e 251: \terr := dm.SQLDB().QueryRow(`",
+        "  252: \t\tSELECT",
+        "  253: \t\t  raw_count,",
+        "  254: \t\t  lesson_count,"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 276,
+      "column": 6,
+      "func_name": "gatherEpistemicPressure",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "_",
+      "code": [
+        "  273: \t// string when no compaction has happened — agents branch on",
+        "  274: \t// non-empty rather than parsing the string.",
+        "  275: \tvar lastCompacted string",
+        "\u003e 276: \t_ = dm.SQLDB().QueryRow(`",
+        "  277: \t\tSELECT COALESCE(json_extract(raw_json, '$.last_run_at'), '')",
+        "  278: \t\tFROM system_config WHERE key = 'compaction.last_run'",
+        "  279: \t`).Scan(\u0026lastCompacted)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 314,
+      "column": 13,
+      "func_name": "recentMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  311: \tvar out []WakeContextMemory",
+        "  312: \tfor rows.Next() {",
+        "  313: \t\tvar m WakeContextMemory",
+        "\u003e 314: \t\tif err := rows.Scan(\u0026m.ID, \u0026m.Content, \u0026m.CreatedAt); err != nil {",
+        "  315: \t\t\treturn nil, fmt.Errorf(\"scanning wake context recent memory row: %w\", err)",
+        "  316: \t\t}",
+        "  317: \t\tout = append(out, m)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 357,
+      "column": 13,
+      "func_name": "recentMilestones",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  354: \tvar out []WakeContextMemory",
+        "  355: \tfor rows.Next() {",
+        "  356: \t\tvar m WakeContextMemory",
+        "\u003e 357: \t\tif err := rows.Scan(\u0026m.ID, \u0026m.Content, \u0026m.CreatedAt); err != nil {",
+        "  358: \t\t\treturn nil, fmt.Errorf(\"scanning wake context recent milestone row: %w\", err)",
+        "  359: \t\t}",
+        "  360: \t\tout = append(out, m)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 400,
+      "column": 13,
+      "func_name": "GetRecentUserTopics",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  397: \tvar out []string",
+        "  398: \tfor rows.Next() {",
+        "  399: \t\tvar name string",
+        "\u003e 400: \t\tif err := rows.Scan(\u0026name); err != nil {",
+        "  401: \t\t\treturn nil, fmt.Errorf(\"scanning user topic name row: %w\", err)",
+        "  402: \t\t}",
+        "  403: \t\tout = append(out, name)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 561,
+      "column": 12,
+      "func_name": "auditSummaryRich",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  558: \t\t\tCOALESCE(SUM(CASE WHEN level = 'warn'  THEN 1 ELSE 0 END), 0)",
+        "  559: \t\tFROM system_audit_log",
+        "  560: \t\tWHERE created_at \u003e= CAST(strftime('%s','now', '-7 days') AS INTEGER)`)",
+        "\u003e 561: \tif err := row.Scan(\u0026errCount, \u0026warnCount); err != nil {",
+        "  562: \t\t// Non-fatal: degrade to silent so a transient DB hiccup never",
+        "  563: \t\t// floods wake context. The agent still has query_audit_log.",
+        "  564: \t\treturn \"\""
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 687,
+      "column": 13,
+      "func_name": "ScratchpadOrphansSummary",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  684: \tfor rows.Next() {",
+        "  685: \t\tvar id, thesis string",
+        "  686: \t\tvar ageHours float64",
+        "\u003e 687: \t\tif err := rows.Scan(\u0026id, \u0026thesis, \u0026ageHours); err != nil {",
+        "  688: \t\t\treturn \"\", fmt.Errorf(\"scanning scratchpad orphan row: %w\", err)",
+        "  689: \t\t}",
+        "  690: \t\ttag := scratchpadAgeTag(ageHours)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_context.go",
+      "line": 768,
+      "column": 12,
+      "func_name": "clusterKeyKnownByEpistemology",
+      "pattern": "row.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  765: \t\t\t\t  AND created_at \u003e= CAST(strftime('%s','now', '-30 days') AS INTEGER)",
+        "  766: \t\t\t\t  AND content LIKE ? ESCAPE '\\'",
+        "  767: \t\t\t)`, pattern, pattern, pattern)",
+        "\u003e 768: \tif err := row.Scan(\u0026matched); err != nil {",
+        "  769: \t\treturn false, err",
+        "  770: \t}",
+        "  771: \treturn matched != 0, nil"
+      ]
+    },
+    {
+      "file": "internal/core/wake_tools.go",
+      "line": 200,
+      "column": 13,
+      "func_name": "CheckPendingWakes",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  197: \tvar batch []pending",
+        "  198: \tfor rows.Next() {",
+        "  199: \t\tvar p pending",
+        "\u003e 200: \t\tif err := rows.Scan(\u0026p.id, \u0026p.targetTime, \u0026p.reason, \u0026p.theoryID, \u0026p.recurringRule, \u0026p.createdBy, \u0026p.metadata, \u0026p.createdAt); err != nil {",
+        "  201: \t\t\treturn nil, fmt.Errorf(\"scan wake row: %w\", err)",
+        "  202: \t\t}",
+        "  203: \t\tbatch = append(batch, p)"
+      ]
+    },
+    {
+      "file": "internal/core/wake_tools.go",
+      "line": 329,
+      "column": 13,
+      "func_name": "ListScheduledWakes",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  326: \t\t\tfiredAt                          *int64",
+        "  327: \t\t\tmetadata                         *string",
+        "  328: \t\t)",
+        "\u003e 329: \t\tif err := rows.Scan(\u0026id, \u0026targetTime, \u0026reason, \u0026theoryID, \u0026recurringRule, \u0026fired, \u0026firedAt, \u0026createdBy, \u0026metadata, \u0026createdAt); err != nil {",
+        "  330: \t\t\treturn nil, fmt.Errorf(\"scan wake list row: %w\", err)",
+        "  331: \t\t}",
+        "  332: \t\trow := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/wake_tools.go",
+      "line": 407,
+      "column": 13,
+      "func_name": "DigestScheduledWakes",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  404: \t\tvar id, reason string",
+        "  405: \t\tvar targetTime int64",
+        "  406: \t\tvar theoryID *string",
+        "\u003e 407: \t\tif err := rows.Scan(\u0026id, \u0026targetTime, \u0026reason, \u0026theoryID); err != nil {",
+        "  408: \t\t\treturn nil, fmt.Errorf(\"scan overdue wake row: %w\", err)",
+        "  409: \t\t}",
+        "  410: \t\toverdueSecs := nowUnix - targetTime"
+      ]
+    },
+    {
+      "file": "internal/core/wake_tools.go",
+      "line": 454,
+      "column": 12,
+      "func_name": "DigestScheduledWakes",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  451: \t// Pending future count (fired=0, target_time \u003e= now). Just a count —",
+        "  452: \t// the digest doesn't enumerate them.",
+        "  453: \tvar pendingFuture int",
+        "\u003e 454: \tif err := dm.db.QueryRow(",
+        "  455: \t\t`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time \u003e= ?`,",
+        "  456: \t\tnowUnix,",
+        "  457: \t).Scan(\u0026pendingFuture); err != nil {"
+      ]
+    },
+    {
+      "file": "internal/core/wake_tools.go",
+      "line": 529,
+      "column": 13,
+      "func_name": "FireStaleFoundationWakes",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  526: \tfor rows.Next() {",
+        "  527: \t\tvar theoryID string",
+        "  528: \t\tvar depsJSON sql.NullString",
+        "\u003e 529: \t\tif err := rows.Scan(\u0026theoryID, \u0026depsJSON); err != nil {",
+        "  530: \t\t\treturn fired, fmt.Errorf(\"scan dependent theory row: %w\", err)",
+        "  531: \t\t}",
+        "  532: \t\t// Target ~60s in the future so the deleting operation can"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 105,
+      "column": 13,
+      "func_name": "QueryMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  102: \t\tvar sessionID, sourceDB, sourceID *string",
+        "  103: \t\tvar promotedAt *float64",
+        "  104: ",
+        "\u003e 105: \t\tif err := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026createdAt, \u0026sourceDB, \u0026sourceID, \u0026promotedAt); err != nil {",
+        "  106: \t\t\treturn nil, fmt.Errorf(\"scanning query memory row: %w\", err)",
+        "  107: \t\t}",
+        "  108: "
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 202,
+      "column": 13,
+      "func_name": "SearchMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  199: \t\tvar sessionID, sourceDB, sourceID *string",
+        "  200: \t\tvar promotedAt *float64",
+        "  201: ",
+        "\u003e 202: \t\tif err := rows.Scan(\u0026id, \u0026coll, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026createdAt, \u0026sourceDB, \u0026sourceID, \u0026promotedAt); err != nil {",
+        "  203: \t\t\treturn nil, fmt.Errorf(\"scanning search memory row: %w\", err)",
+        "  204: \t\t}",
+        "  205: "
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 249,
+      "column": 9,
+      "func_name": "GetMemory",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  246: \tvar promotedAt *float64",
+        "  247: \tvar weight int",
+        "  248: ",
+        "\u003e 249: \terr := dm.db.QueryRow(`",
+        "  250: \t\tSELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at",
+        "  251: \t\tFROM memories WHERE id = ? AND deleted_at IS NULL`+MemoryExpireClause+`",
+        "  252: \t    `, id).Scan(\u0026collection, \u0026content, \u0026sessionID, \u0026tagsNS, \u0026metadataNS, \u0026createdAt, \u0026weight, \u0026sourceDB, \u0026sourceID, \u0026promotedAt)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 298,
+      "column": 9,
+      "func_name": "GetMemoryByExternalID",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  295: \tvar sessionID *string",
+        "  296: \tvar promotedAt *float64",
+        "  297: ",
+        "\u003e 298: \terr := dm.db.QueryRow(`",
+        "  299: \t\tSELECT id, collection, content, session_id, tags, metadata, created_at, promoted_at",
+        "  300: \t\tFROM memories WHERE source_db = ? AND source_id = ?",
+        "  301: \t`, sourceDB, sourceID).Scan(\u0026id, \u0026collection, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON, \u0026createdAt, \u0026promotedAt)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 340,
+      "column": 13,
+      "func_name": "GetMemoryTopics",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  337: \tvar refs []TopicRef",
+        "  338: \tfor rows.Next() {",
+        "  339: \t\tvar r TopicRef",
+        "\u003e 340: \t\tif err := rows.Scan(\u0026r.ID, \u0026r.Name, \u0026r.Role); err == nil {",
+        "  341: \t\t\trefs = append(refs, r)",
+        "  342: \t\t}",
+        "  343: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 356,
+      "column": 9,
+      "func_name": "GetReferenceDoc",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  353: \t\treturn nil, nil",
+        "  354: \t}",
+        "  355: \tvar title, filePath string",
+        "\u003e 356: \terr := dm.db.QueryRow(`SELECT title, file_path FROM reference_docs WHERE id = ?`, docID).Scan(\u0026title, \u0026filePath)",
+        "  357: \tif err == sql.ErrNoRows {",
+        "  358: \t\treturn nil, nil",
+        "  359: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 391,
+      "column": 13,
+      "func_name": "GetTopicTopMemories",
+      "pattern": "rows.Scan",
+      "classification": "logged-swallow",
+      "err_var": "err",
+      "code": [
+        "  388: \tfor rows.Next() {",
+        "  389: \t\tvar r MemoryRef",
+        "  390: \t\tvar content string",
+        "\u003e 391: \t\tif err := rows.Scan(\u0026r.ID, \u0026content, \u0026r.Collection, \u0026r.Weight); err == nil {",
+        "  392: \t\t\tif len(content) \u003e 120 {",
+        "  393: \t\t\t\tr.Content = content[:120] + \"…\"",
+        "  394: \t\t\t} else {"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 405,
+      "column": 2,
+      "func_name": "GetTopicTopMemories",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  402: \t}",
+        "  403: ",
+        "  404: \tvar total int",
+        "\u003e 405: \tdm.db.QueryRow(`SELECT COUNT(*) FROM topic_memberships WHERE topic_id = ? AND memory_id IS NOT NULL`, topicID).Scan(\u0026total)",
+        "  406: ",
+        "  407: \treturn refs, total, rows.Err()",
+        "  408: }"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 475,
+      "column": 8,
+      "func_name": "ChallengeAndReinforce",
+      "pattern": "tx.QueryRow(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  472: ",
+        "  473: \t// Fetch challenged_theory_id from memory metadata",
+        "  474: \tvar metaStr string",
+        "\u003e 475: \terr = tx.QueryRow(`SELECT metadata FROM memories WHERE id = ?`, id).Scan(\u0026metaStr)",
+        "  476: \tif err != nil {",
+        "  477: \t\treturn err",
+        "  478: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 605,
+      "column": 10,
+      "func_name": "GetMemoriesByRelevance",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  602: \t\tvar reinforcementCount, weight int",
+        "  603: \t\tvar lastAccessedAt, expiresAt *string",
+        "  604: ",
+        "\u003e 605: \t\terr := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026sessionID, \u0026tagsJSON, \u0026metadataJSON,",
+        "  606: \t\t\t\u0026createdAt, \u0026reinforcementCount, \u0026weight, \u0026lastAccessedAt, \u0026expiresAt)",
+        "  607: \t\tif err != nil {",
+        "  608: \t\t\treturn nil, fmt.Errorf(\"scanning relevance memory row: %w\", err)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 675,
+      "column": 12,
+      "func_name": "ShredMemory",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  672: \t// reasoning dependents); use the existing standalone helper",
+        "  673: \t// which already handles the lessons INSTEAD OF DELETE trigger.",
+        "  674: \tvar lessonCount int",
+        "\u003e 675: \tif err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons_base WHERE id = ?`, id).Scan(\u0026lessonCount); err != nil {",
+        "  676: \t\treturn fmt.Errorf(\"shred: probe lessons_base: %w\", err)",
+        "  677: \t}",
+        "  678: \tif lessonCount \u003e 0 {"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 744,
+      "column": 13,
+      "func_name": "GetNegativeWeightMemories",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  741: \tfor rows.Next() {",
+        "  742: \t\tvar id, collection, content, metadata, createdAt string",
+        "  743: \t\tvar weight int",
+        "\u003e 744: \t\tif err := rows.Scan(\u0026id, \u0026collection, \u0026content, \u0026weight, \u0026metadata, \u0026createdAt); err != nil {",
+        "  745: \t\t\treturn nil, fmt.Errorf(\"scanning negative-weight memory row: %w\", err)",
+        "  746: \t\t}",
+        "  747: \t\tresults = append(results, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 759,
+      "column": 9,
+      "func_name": "GetProvenTheoryForMemory",
+      "pattern": "(...).Scan",
+      "classification": "ErrNoRows-tolerated",
+      "err_var": "err",
+      "code": [
+        "  756: // references the given memory ID. Returns nil if no proven theory exists.",
+        "  757: func (dm *DatabaseManager) GetProvenTheoryForMemory(memoryID string) (map[string]interface{}, error) {",
+        "  758: \tvar id, content, metadata string",
+        "\u003e 759: \terr := dm.db.QueryRow(`",
+        "  760: \t\tSELECT id, content, metadata FROM memories",
+        "  761: \t\tWHERE collection = 'theories' AND deleted_at IS NULL",
+        "  762: \t\tAND json_extract(metadata, '$.status') = 'resolved'"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 793,
+      "column": 13,
+      "func_name": "ListReferences",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  790: \tfor rows.Next() {",
+        "  791: \t\tvar id, title, filePath, sourceType, tags, importReason, lastIndexed, createdAt string",
+        "  792: \t\tvar totalChunks int",
+        "\u003e 793: \t\tif err := rows.Scan(\u0026id, \u0026title, \u0026filePath, \u0026sourceType, \u0026tags, \u0026importReason, \u0026totalChunks, \u0026lastIndexed, \u0026createdAt); err != nil {",
+        "  794: \t\t\treturn nil, fmt.Errorf(\"scanning reference list row: %w\", err)",
+        "  795: \t\t}",
+        "  796: \t\trefs = append(refs, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 818,
+      "column": 9,
+      "func_name": "GetReference",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  815: func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, error) {",
+        "  816: \tvar id, title, filePath, sourceType, tags, lastIndexed, createdAt, importReason string",
+        "  817: \tvar totalChunks int",
+        "\u003e 818: \terr := dm.db.QueryRow(`",
+        "  819: \t\tSELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at, import_reason",
+        "  820: \t\tFROM reference_docs WHERE id = ?",
+        "  821: \t`, refID).Scan(\u0026id, \u0026title, \u0026filePath, \u0026sourceType, \u0026tags, \u0026totalChunks, \u0026lastIndexed, \u0026createdAt, \u0026importReason)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 846,
+      "column": 7,
+      "func_name": "GetReference",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  843: \t\tfor rows.Next() {",
+        "  844: \t\t\tvar chunkID, section, content string",
+        "  845: \t\t\tvar chunkIndex int",
+        "\u003e 846: \t\t\tif rows.Scan(\u0026chunkID, \u0026chunkIndex, \u0026section, \u0026content) == nil {",
+        "  847: \t\t\t\tchunks = append(chunks, map[string]interface{}{",
+        "  848: \t\t\t\t\t\"id\":          chunkID,",
+        "  849: \t\t\t\t\t\"chunk_index\": chunkIndex,"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 896,
+      "column": 6,
+      "func_name": "SearchReferences",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  893: \tfor rows.Next() {",
+        "  894: \t\tvar id, title, filePath, sourceType, tags, lastIndexed, createdAt string",
+        "  895: \t\tvar totalChunks int",
+        "\u003e 896: \t\tif rows.Scan(\u0026id, \u0026title, \u0026filePath, \u0026sourceType, \u0026tags, \u0026totalChunks, \u0026lastIndexed, \u0026createdAt) == nil {",
+        "  897: \t\t\trefs = append(refs, map[string]interface{}{",
+        "  898: \t\t\t\t\"id\":           id,",
+        "  899: \t\t\t\t\"title\":        title,"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 955,
+      "column": 14,
+      "func_name": "SearchReferenceChunks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  952: \t\tvar chunkIndex int",
+        "  953: \t\tvar score sql.NullFloat64",
+        "  954: \t\tif found {",
+        "\u003e 955: \t\t\tif err := rows.Scan(\u0026id, \u0026docID, \u0026chunkIndex, \u0026section, \u0026content, \u0026title, \u0026score); err != nil {",
+        "  956: \t\t\t\treturn nil, fmt.Errorf(\"scanning reference chunk row: %w\", err)",
+        "  957: \t\t\t}",
+        "  958: \t\t} else {"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 959,
+      "column": 14,
+      "func_name": "SearchReferenceChunks",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  956: \t\t\t\treturn nil, fmt.Errorf(\"scanning reference chunk row: %w\", err)",
+        "  957: \t\t\t}",
+        "  958: \t\t} else {",
+        "\u003e 959: \t\t\tif err := rows.Scan(\u0026id, \u0026docID, \u0026chunkIndex, \u0026section, \u0026content, \u0026title); err != nil {",
+        "  960: \t\t\t\treturn nil, fmt.Errorf(\"scanning reference chunk row: %w\", err)",
+        "  961: \t\t\t}",
+        "  962: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1020,
+      "column": 13,
+      "func_name": "GetRecentInteractions",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1017: \t\tvar chunkID, importReason sql.NullString",
+        "  1018: \t\tvar rank int",
+        "  1019: \t\tvar score sql.NullFloat64",
+        "\u003e 1020: \t\tif err := rows.Scan(\u0026id, \u0026docID, \u0026chunkID, \u0026query, \u0026searchKind, \u0026rank, \u0026score, \u0026createdAt, \u0026title, \u0026importReason); err != nil {",
+        "  1021: \t\t\treturn nil, fmt.Errorf(\"scanning recent interaction row: %w\", err)",
+        "  1022: \t\t}",
+        "  1023: \t\tentry := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1066,
+      "column": 13,
+      "func_name": "GetInteractionsForDoc",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1063: \t\tvar chunkID sql.NullString",
+        "  1064: \t\tvar rank int",
+        "  1065: \t\tvar score sql.NullFloat64",
+        "\u003e 1066: \t\tif err := rows.Scan(\u0026id, \u0026chunkID, \u0026query, \u0026searchKind, \u0026rank, \u0026score, \u0026createdAt); err != nil {",
+        "  1067: \t\t\treturn nil, fmt.Errorf(\"scanning interaction row: %w\", err)",
+        "  1068: \t\t}",
+        "  1069: \t\tentry := map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1110,
+      "column": 13,
+      "func_name": "GetMostUsedReferences",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1107: \tfor rows.Next() {",
+        "  1108: \t\tvar id, title, importReason string",
+        "  1109: \t\tvar hits, distinctQueries int",
+        "\u003e 1110: \t\tif err := rows.Scan(\u0026id, \u0026title, \u0026importReason, \u0026hits, \u0026distinctQueries); err != nil {",
+        "  1111: \t\t\treturn nil, fmt.Errorf(\"scanning most-used reference row: %w\", err)",
+        "  1112: \t\t}",
+        "  1113: \t\tout = append(out, map[string]interface{}{"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1184,
+      "column": 3,
+      "func_name": "SearchTopics",
+      "pattern": "rows.Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1181: \ttopics := []map[string]interface{}{}",
+        "  1182: \tfor rows.Next() {",
+        "  1183: \t\tvar id, name, description, createdAt, tags string",
+        "\u003e 1184: \t\trows.Scan(\u0026id, \u0026name, \u0026description, \u0026createdAt, \u0026tags)",
+        "  1185: \t\ttopics = append(topics, map[string]interface{}{",
+        "  1186: \t\t\t\"id\": id, \"name\": name, \"description\": description,",
+        "  1187: \t\t\t\"created_at\": createdAt, \"tags\": tags,"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1202,
+      "column": 9,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1199: ",
+        "  1200: \t// Basic counts",
+        "  1201: \tvar total, active, deleted, ltm, reinforced, neverAccessed, expired int",
+        "\u003e 1202: \terr := dm.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(\u0026total)",
+        "  1203: \tif err != nil {",
+        "  1204: \t\treturn nil, err",
+        "  1205: \t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1206,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1203: \tif err != nil {",
+        "  1204: \t\treturn nil, err",
+        "  1205: \t}",
+        "\u003e 1206: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(\u0026active)",
+        "  1207: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(\u0026deleted)",
+        "  1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "  1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1207,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1204: \t\treturn nil, err",
+        "  1205: \t}",
+        "  1206: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(\u0026active)",
+        "\u003e 1207: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(\u0026deleted)",
+        "  1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "  1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)",
+        "  1210: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(\u0026neverAccessed)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1208,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1205: \t}",
+        "  1206: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(\u0026active)",
+        "  1207: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(\u0026deleted)",
+        "\u003e 1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "  1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)",
+        "  1210: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(\u0026neverAccessed)",
+        "  1211: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at \u003c strftime('%s','now')`).Scan(\u0026expired)"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1209,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1206: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(\u0026active)",
+        "  1207: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(\u0026deleted)",
+        "  1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "\u003e 1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)",
+        "  1210: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(\u0026neverAccessed)",
+        "  1211: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at \u003c strftime('%s','now')`).Scan(\u0026expired)",
+        "  1212: "
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1210,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1207: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(\u0026deleted)",
+        "  1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "  1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)",
+        "\u003e 1210: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(\u0026neverAccessed)",
+        "  1211: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at \u003c strftime('%s','now')`).Scan(\u0026expired)",
+        "  1212: ",
+        "  1213: \tstats[\"total\"] = total"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1211,
+      "column": 2,
+      "func_name": "GetMemoryStats",
+      "pattern": "(...).Scan",
+      "classification": "no-check",
+      "err_var": "",
+      "code": [
+        "  1208: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(\u0026ltm)",
+        "  1209: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count \u003e 0 AND deleted_at IS NULL`).Scan(\u0026reinforced)",
+        "  1210: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(\u0026neverAccessed)",
+        "\u003e 1211: \tdm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at \u003c strftime('%s','now')`).Scan(\u0026expired)",
+        "  1212: ",
+        "  1213: \tstats[\"total\"] = total",
+        "  1214: \tstats[\"active\"] = active"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1232,
+      "column": 7,
+      "func_name": "GetMemoryStats",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  1229: \t\tfor rows.Next() {",
+        "  1230: \t\t\tvar coll string",
+        "  1231: \t\t\tvar count int",
+        "\u003e 1232: \t\t\tif rows.Scan(\u0026coll, \u0026count) == nil {",
+        "  1233: \t\t\t\tbyCollection = append(byCollection, map[string]interface{}{\"collection\": coll, \"count\": count})",
+        "  1234: \t\t\t}",
+        "  1235: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1254,
+      "column": 7,
+      "func_name": "GetMemoryStats",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  1251: \t\tfor rows.Next() {",
+        "  1252: \t\t\tvar tag string",
+        "  1253: \t\t\tvar count int",
+        "\u003e 1254: \t\t\tif rows.Scan(\u0026tag, \u0026count) == nil {",
+        "  1255: \t\t\t\tbyTag = append(byTag, map[string]interface{}{\"tag\": tag, \"count\": count})",
+        "  1256: \t\t\t}",
+        "  1257: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1272,
+      "column": 7,
+      "func_name": "GetMemoryStats",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  1269: \t\tvar dist []map[string]interface{}",
+        "  1270: \t\tfor rows.Next() {",
+        "  1271: \t\t\tvar rc, count int",
+        "\u003e 1272: \t\t\tif rows.Scan(\u0026rc, \u0026count) == nil {",
+        "  1273: \t\t\t\tdist = append(dist, map[string]interface{}{\"reinforcement_count\": rc, \"count\": count})",
+        "  1274: \t\t\t}",
+        "  1275: \t\t}"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1321,
+      "column": 7,
+      "func_name": "GetMemoryStats",
+      "pattern": "rows.Scan",
+      "classification": "unknown",
+      "err_var": "",
+      "code": [
+        "  1318: \t\tfor rows.Next() {",
+        "  1319: \t\t\tvar agent, model, compute, persona sql.NullString",
+        "  1320: \t\t\tvar total, active int",
+        "\u003e 1321: \t\t\tif rows.Scan(\u0026agent, \u0026model, \u0026compute, \u0026persona, \u0026total, \u0026active) == nil {",
+        "  1322: \t\t\t\ta := agent.String",
+        "  1323: \t\t\t\tai, ok := agentIndex[a]",
+        "  1324: \t\t\t\tif !ok {"
+      ]
+    },
+    {
+      "file": "internal/core/web_db.go",
+      "line": 1462,
+      "column": 10,
+      "func_name": "GetMemoriesForExport",
+      "pattern": "rows.Scan",
+      "classification": "hard-fail",
+      "err_var": "err",
+      "code": [
+        "  1459: \tfor rows.Next() {",
+        "  1460: \t\tvar id, coll, content, tags, metadata, createdAt, lastAccessed, expiresAt string",
+        "  1461: \t\tvar rc, weight, isLongTerm int",
+        "\u003e 1462: \t\terr := rows.Scan(\u0026id, \u0026coll, \u0026content, \u0026tags, \u0026metadata, \u0026createdAt, \u0026rc, \u0026weight, \u0026isLongTerm, \u0026lastAccessed, \u0026expiresAt)",
+        "  1463: \t\tif err != nil {",
+        "  1464: \t\t\treturn nil, fmt.Errorf(\"scanning export memory row: %w\", err)",
+        "  1465: \t\t}"
+      ]
+    }
+  ]
+}

@@ -1355,7 +1355,7 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 		var weight, reinforcement, isGlobal sql.NullInt64
 		if err := rows.Scan(&id, &content, &coll, &tags, &meta, &weight, &reinforcement,
 			&createdAt, &updatedAt, &isGlobal); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning global rule row: %w", err)
 		}
 		results = append(results, map[string]interface{}{
 			"id":                  id.String,
@@ -2828,7 +2828,7 @@ func (dm *DatabaseManager) ListTopics() ([]map[string]interface{}, error) {
 		var id, name, createdAt, tagsJSON string
 		var memoryCount int
 		if err := rows.Scan(&id, &name, &createdAt, &tagsJSON, &memoryCount); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning topic row: %w", err)
 		}
 		m := map[string]interface{}{"id": id, "name": name, "created_at": createdAt, "memory_count": memoryCount, "tags": tagsJSON}
 		if strings.Contains(tagsJSON, "from_date") {
@@ -2873,7 +2873,7 @@ func (dm *DatabaseManager) GetTopicMemories(topicID string) ([]map[string]interf
 	for rows.Next() {
 		var memID, content, sessionID, tags, createdAt, role string
 		if err := rows.Scan(&memID, &content, &sessionID, &tags, &createdAt, &role); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning topic memory row: %w", err)
 		}
 		seen[memID] = true
 		memories = append(memories, map[string]interface{}{
@@ -3093,7 +3093,7 @@ func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
 		var tagsJSON string
 		err := rows.Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning lesson row: %w", err)
 		}
 		if tagsJSON != "" {
 			UnmarshalJSON(tagsJSON, &lesson.Tags)
@@ -3149,7 +3149,7 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 		var tagsJSON string
 		err := rows.Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning lesson search row: %w", err)
 		}
 		if tagsJSON != "" {
 			UnmarshalJSON(tagsJSON, &lesson.Tags)
@@ -3186,7 +3186,7 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 		var tagsJSON string
 		err := rows.Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning lesson LIKE row: %w", err)
 		}
 		if tagsJSON != "" {
 			UnmarshalJSON(tagsJSON, &lesson.Tags)
@@ -3245,7 +3245,7 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 		if err := rows.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
 			&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
 			&r.ChallengedTheoryID, &r.CreatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning memory revision row: %w", err)
 		}
 		revisions = append(revisions, r)
 	}

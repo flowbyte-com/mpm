@@ -257,7 +257,7 @@ func (dm *DatabaseManager) GetRawMemoriesByStatus(status string, limit int) ([]*
 		var llmVerdict, llmNotes, reviewerPrompt *string
 		var expiresAt *float64
 		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceDB, &r.ContentHash, &r.Text, &r.Metadata, &r.IngestedAt, &r.Status, &llmVerdict, &llmNotes, &reviewerPrompt, &expiresAt, &r.ImportBatch, &r.UpdatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning raw memory row: %w", err)
 		}
 		if llmVerdict != nil {
 			r.LLMVerdict = *llmVerdict
@@ -330,7 +330,7 @@ func (dm *DatabaseManager) ListIngestBatches() ([]map[string]interface{}, error)
 		var status string
 		var count int
 		if err := rows.Scan(&batch, &status, &count); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning ingest batch row: %w", err)
 		}
 		if _, ok := batches[batch]; !ok {
 			batches[batch] = map[string]interface{}{"batch": batch}

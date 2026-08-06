@@ -97,7 +97,7 @@ func FindEpistemologyOverlaps(dm *DatabaseManager, keywords []string, limit int,
 		var score float64
 
 		if err := rows.Scan(&id, &content, &collection, &tags, &metadata, &createdAt, &score); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning keyword overlap memory row: %w", err)
 		}
 
 		if score >= threshold {

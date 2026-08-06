@@ -69,7 +69,8 @@ func TestGetRecentUserTopics_ExcludesStructuralByPattern(t *testing.T) {
 	`, "t-auto-anchor-3", "auto-anchor-3")
 	require.NoError(t, err)
 
-	got := dm.GetRecentUserTopics(10)
+	got, err := dm.GetRecentUserTopics(10)
+	if err != nil { t.Fatal(err) }
 	for _, name := range got {
 		require.NotContains(t, []string{"auto-anchor-1", "auto-anchor-2", "auto-anchor-3"}, name,
 			"structural pattern (empty desc + empty tags) must be filtered")
@@ -84,7 +85,10 @@ func TestGetRecentUserTopics_ExcludesKnownStructuralByName(t *testing.T) {
 	seedTopic(t, dm, "decisions", "All decisions", "[]")
 	seedTopic(t, dm, "theories", "All theories", "[]")
 
-	got := dm.GetRecentUserTopics(10)
+	got, err := dm.GetRecentUserTopics(10)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range got {
 		require.NotContains(t, []string{"decisions", "theories"}, name,
 			"name allowlist must filter known structural topics")
@@ -98,8 +102,10 @@ func TestGetRecentUserTopics_IncludesUserTopics(t *testing.T) {
 	seedTopic(t, dm, "Interface Decoupling", "How to separate concerns", "[]")
 	seedTopic(t, dm, "Concurrency Patterns", "Mutexes and channels", "[]")
 	seedTopic(t, dm, "Decisions Catalog", "User-created catalog of decisions", "[]")
-
-	got := dm.GetRecentUserTopics(10)
+	got, err := dm.GetRecentUserTopics(10)
+	if err != nil {
+		t.Fatal(err)
+	}
 	require.ElementsMatch(t,
 		[]string{"Interface Decoupling", "Concurrency Patterns", "Decisions Catalog"},
 		got,
@@ -111,7 +117,10 @@ func TestGetRecentUserTopics_RespectsLimit(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		seedTopic(t, dm, "user-topic-"+string(rune('a'+i)), "desc", "[]")
 	}
-	got := dm.GetRecentUserTopics(3)
+	got, err := dm.GetRecentUserTopics(3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	require.Len(t, got, 3, "limit must be respected")
 }
 
@@ -123,7 +132,10 @@ func TestGetRecentUserTopics_OrderedNewestFirst(t *testing.T) {
 	seedTopicAt(t, dm, "user-topic-a", "first", "[]", "2026-06-24 10:00:00")
 	seedTopicAt(t, dm, "user-topic-b", "second", "[]", "2026-06-24 11:00:00")
 	seedTopicAt(t, dm, "user-topic-c", "third", "[]", "2026-06-24 12:00:00")
-	got := dm.GetRecentUserTopics(3)
+	got, err := dm.GetRecentUserTopics(3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	require.Equal(t, []string{"user-topic-c", "user-topic-b", "user-topic-a"}, got,
 		"newest topic must come first")
 }

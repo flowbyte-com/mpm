@@ -130,7 +130,7 @@ func LoadVectorCentroids(db *sql.DB, schemaPrefix string) ([]VectorCluster, erro
 		var c VectorCluster
 		var centroidBytes []byte
 		if err := rows.Scan(&c.ClusterID, &centroidBytes, &c.NVectors, &c.Variance); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning vector cluster row: %w", err)
 		}
 		c.Centroid = decodeFloats(centroidBytes)
 		if len(c.Centroid) == 0 {
@@ -238,7 +238,7 @@ func IVFSearch(db *sql.DB, queryEmbedding []float32, collection string, cfg IVFC
 		var id, content, embeddingJSON string
 		var createdAt int64
 		if err := rows.Scan(&id, &content, &createdAt, &embeddingJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning IVF search memory row: %w", err)
 		}
 		var dbEmbedding []float32
 		if err := json.Unmarshal([]byte(embeddingJSON), &dbEmbedding); err != nil || len(dbEmbedding) != len(queryEmbedding) {
@@ -612,7 +612,7 @@ func Rebalance(db *sql.DB, schemaPrefix string) (KMeansResult, int, error) {
 	for rows.Next() {
 		var id, embeddingJSON string
 		if err := rows.Scan(&id, &embeddingJSON); err != nil {
-			continue
+			return KMeansResult{}, 0, fmt.Errorf("scanning rebalance memory row: %w", err)
 		}
 		var vec []float32
 		if err := json.Unmarshal([]byte(embeddingJSON), &vec); err != nil || len(vec) == 0 {

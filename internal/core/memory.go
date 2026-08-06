@@ -788,7 +788,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		var rank int
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt, &rank)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning query memory row: %w", err)
 		}
 
 		mem := &Memory{
@@ -949,7 +949,7 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning recent memory row: %w", err)
 		}
 
 		if sessionID.Valid {
@@ -1189,7 +1189,7 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 		var embeddingJSON []byte
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning memory row in scanMemoryRows: %w", err)
 		}
 		mem := &Memory{
 			ID:         id,
@@ -1569,7 +1569,7 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
 			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning spaced reinforcement memory row: %w", err)
 		}
 
 		if sessionID.Valid {
@@ -1666,7 +1666,7 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
 			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning contextual memory row: %w", err)
 		}
 
 		if sessionID.Valid {
@@ -1888,7 +1888,7 @@ func (s *MemoryStore) MetadataFilter(filters map[string]interface{}, collection 
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning metadata-filtered memory row: %w", err)
 		}
 
 		mem.SessionID = sessionID.String
@@ -2047,7 +2047,7 @@ func (s *MemoryStore) SearchSessions(query string, limit int) ([]*Memory, error)
 		var tagsJSON, metadataJSON sql.NullString
 
 		if err := rows.Scan(&m.ID, &m.Collection, &m.Content, &m.CreatedAt, &metadataJSON, &tagsJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning session row: %w", err)
 		}
 
 		// Parse tags
@@ -2156,7 +2156,7 @@ func (s *MemoryStore) SearchTopics(query string, limit int) ([]*SearchResult, er
 	for rows.Next() {
 		var id, name, description, created string
 		if err := rows.Scan(&id, &name, &description, &created); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning topic row: %w", err)
 		}
 
 		result := &SearchResult{
@@ -2283,7 +2283,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 	for rows.Next() {
 		var id, content, createdAt string
 		if err := rows.Scan(&id, &content, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning duplicate memory row: %w", err)
 		}
 		dupeIDs = append(dupeIDs, id)
 		result.ExactDuplicates++
@@ -2509,7 +2509,7 @@ func (s *MemoryStore) BackfillSessionIDs(sessionsJSONPath string) (int, error) {
 	for rows.Next() {
 		var memID, createdAt string
 		if err := rows.Scan(&memID, &createdAt); err != nil {
-			continue
+			return 0, fmt.Errorf("scanning memory for session backfill: %w", err)
 		}
 		memTime, err := time.Parse(time.RFC3339, createdAt)
 		if err != nil {
@@ -2904,7 +2904,7 @@ func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*M
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
 			&mem.ReinforcementCount, &mem.Weight)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning relevance memory row: %w", err)
 		}
 
 		if sessionID.Valid {

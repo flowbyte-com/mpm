@@ -606,7 +606,7 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 			&e.CreatedAt, &e.ReinforcementCount, &e.Weight,
 			&nullableLastAccessed, &nullableRefID, &e.Score,
 			&e.ReuseCount, &nullableMetaLastRetrieved, &e.SuccessCount); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning FTS entry row: %w", err)
 		}
 		e.Tags = nullableTags.String
 		e.Metadata = nullableMetadata.String
@@ -702,7 +702,7 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 		var id, content, embeddingJSON string
 		var createdAt int64
 		if err := rows.Scan(&id, &content, &createdAt, &embeddingJSON); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning VectorMatch memory row: %w", err)
 		}
 		var dbEmbedding []float32
 		if err := json.Unmarshal([]byte(embeddingJSON), &dbEmbedding); err != nil || len(dbEmbedding) != len(queryEmbedding) {

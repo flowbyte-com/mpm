@@ -104,7 +104,7 @@ type CoreDB interface {
 	DeleteTopic(topicID string) error
 	CreateTopicWithDescription(name, description string) (string, error)
 	GetMemoryTopics(memoryID string) ([]TopicRef, error)
-	GetRecentUserTopics(limit int) []string
+	GetRecentUserTopics(limit int) ([]string, error)
 
 	// ─── Lessons ─────────────────────────────────────────────────────
 	AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error)
@@ -269,7 +269,7 @@ type CoreDB interface {
 	// ─── Wake Context ────────────────────────────────────────────────
 	GatherWakeContext() (WakeContextData, error)
 	ReadWakeContext() (string, error)
-	ScratchpadOrphansSummary() string
+	ScratchpadOrphansSummary() (string, error)
 
 	// ─── Global / Shared ─────────────────────────────────────────────
 	QueryGlobalRules(query string, limit int) ([]map[string]interface{}, error)

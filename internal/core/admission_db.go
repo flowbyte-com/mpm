@@ -10,6 +10,7 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -59,7 +60,7 @@ func (dm *DatabaseManager) FindAdmissionCandidates(limit int) ([]*AdmissionCandi
 		var chunkID, docID, title, importReason, content string
 		var hits, distinctQueries int
 		if err := rows.Scan(&chunkID, &docID, &title, &importReason, &content, &hits, &distinctQueries); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning admission candidate row: %w", err)
 		}
 		candidate := &AdmissionCandidate{
 			DocID:           docID,

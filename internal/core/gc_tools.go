@@ -131,7 +131,7 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		var lastAccessed, createdAt *int64
 		var isLTM bool
 		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning GC candidate memory row: %w", err)
 		}
 		last := lastAccessed
 		if last == nil {

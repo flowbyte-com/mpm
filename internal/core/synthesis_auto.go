@@ -302,7 +302,7 @@ func DetectNearMiss(dm CoreDB, content string, newID string, threshold float64, 
 		var c nearMissCandidate
 		var score float64
 		if err := rows.Scan(&c.ID, &c.Content, &score, &c.Tags); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning near-miss candidate row: %w", err)
 		}
 		// bm25: more negative = stronger match
 		if score < threshold {
