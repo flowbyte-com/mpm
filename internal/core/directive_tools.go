@@ -39,7 +39,7 @@ func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 		var id, content, createdAt string
 		var metaJSON *string
 		if err := rows.Scan(&id, &content, &metaJSON, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning directive row: %w", err)
 		}
 		var meta map[string]interface{}
 		if metaJSON != nil && *metaJSON != "" {

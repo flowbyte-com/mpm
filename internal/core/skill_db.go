@@ -146,7 +146,7 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 		var id, content string
 		var isGlobal, weight int
 		if err := rows.Scan(&id, &content, &isGlobal, &weight); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning skill row: %w", err)
 		}
 		fm, _, err := ParseSkillFrontmatter(content)
 		if err != nil {

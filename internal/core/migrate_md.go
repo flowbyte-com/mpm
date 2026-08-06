@@ -368,7 +368,7 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 	for rows.Next() {
 		var p pending
 		if err := rows.Scan(&p.id, &p.sourceID, &p.sourceDB, &p.contentHash, &p.text, &p.metaJSON); err != nil {
-			continue
+			return 0, fmt.Errorf("scanning pending raw memory row for promotion: %w", err)
 		}
 		pendings = append(pendings, p)
 	}

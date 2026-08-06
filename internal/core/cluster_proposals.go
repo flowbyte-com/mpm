@@ -114,7 +114,7 @@ func (dm *DatabaseManager) ActiveClusters() (known, unknown []ClusterProposal, e
 	for rows.Next() {
 		var c ClusterProposal
 		if err := rows.Scan(&c.Key, &c.Component, &c.Count, &c.FirstSeen, &c.LastSeen, &c.Status); err != nil {
-			continue
+			return nil, nil, fmt.Errorf("scanning cluster proposal row: %w", err)
 		}
 		clusters = append(clusters, c)
 	}

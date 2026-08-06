@@ -189,7 +189,7 @@ func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component string, day
 			ctxRaw                      sql.NullString
 		)
 		if err := rows.Scan(&id, &lvl, &comp, &msg, &stack, &ctxRaw, &created); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning audit log row: %w", err)
 		}
 		row := map[string]interface{}{
 			"id":         id,

@@ -172,9 +172,23 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	// so the 10→5 swap at the DB layer matches the rendering budget and
 	// reclaims 5 slots for Recent Milestones. The total wake-context
 	// payload size is unchanged.
-	data.RecentMemories = dm.recentMemories(5)
-	data.RecentMilestones = dm.recentMilestones(5)
-	data.RecentTopics = dm.GetRecentUserTopics(5)
+	memories, err := dm.recentMemories(5)
+	if err != nil {
+		return data, fmt.Errorf("gather recent memories: %w", err)
+	}
+	data.RecentMemories = memories
+
+	milestones, err := dm.recentMilestones(5)
+	if err != nil {
+		return data, fmt.Errorf("gather recent milestones: %w", err)
+	}
+	data.RecentMilestones = milestones
+
+	topics, err := dm.GetRecentUserTopics(5)
+	if err != nil {
+		return data, fmt.Errorf("gather recent user topics: %w", err)
+	}
+	data.RecentTopics = topics
 	data.AuditSummary = dm.AuditSummary()
 
 	// Epistemic pressure — single COUNT query against the view plus
@@ -206,7 +220,11 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 		}
 	}
 
-	data.ScratchpadOrphans = dm.ScratchpadOrphansSummary()
+	orphans, err := dm.ScratchpadOrphansSummary()
+	if err != nil {
+		return data, fmt.Errorf("gather scratchpad orphans: %w", err)
+	}
+	data.ScratchpadOrphans = orphans
 	data.AvailableSkills = populateAvailableSkills(dm, "all")
 
 	return data, nil
@@ -280,13 +298,13 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 }
 
 // recentMemories returns up to `limit` non-deleted memories ordered newest first.
-func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
+func (dm *DatabaseManager) recentMemories(limit int) ([]WakeContextMemory, error) {
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
 		ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -294,11 +312,11 @@ func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
 	for rows.Next() {
 		var m WakeContextMemory
 		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning wake context recent memory row: %w", err)
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, nil
 }
 
 // recentMilestones returns up to `limit` non-deleted memories tagged with
@@ -317,7 +335,7 @@ func (dm *DatabaseManager) recentMemories(limit int) []WakeContextMemory {
 // Across all sessions, the agent wakes up seeing the same recent narrative
 // arc regardless of which session_id it is currently in. Cross-session
 // narrative continuity is the whole point of the architecture.
-func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
+func (dm *DatabaseManager) recentMilestones(limit int) ([]WakeContextMemory, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -329,7 +347,7 @@ func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
 		ORDER BY created_at DESC LIMIT ?`,
 		`%type:milestone-%`+`"`+`%`, limit)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -337,11 +355,11 @@ func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
 	for rows.Next() {
 		var m WakeContextMemory
 		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning wake context recent milestone row: %w", err)
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, nil
 }
 
 // GetRecentUserTopics returns up to `limit` topic names from the topics
@@ -362,7 +380,7 @@ func (dm *DatabaseManager) recentMilestones(limit int) []WakeContextMemory {
 // across the system. Both the human-facing `mpm wake` CLI handler and
 // the machine-facing `read_wake_context` MCP tool call into this method,
 // so the structural-topic filter applies uniformly.
-func (dm *DatabaseManager) GetRecentUserTopics(limit int) []string {
+func (dm *DatabaseManager) GetRecentUserTopics(limit int) ([]string, error) {
 	rows, err := dm.SQLDB().Query(
 		`SELECT name FROM topics
 		 WHERE NOT (
@@ -372,7 +390,7 @@ func (dm *DatabaseManager) GetRecentUserTopics(limit int) []string {
 		 AND name NOT IN ('decisions', 'theories')
 		 ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -380,11 +398,11 @@ func (dm *DatabaseManager) GetRecentUserTopics(limit int) []string {
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning user topic name row: %w", err)
 		}
 		out = append(out, name)
 	}
-	return out
+	return out, nil
 }
 
 // ReadWakeContext returns the formatted wake context string, matching the
@@ -640,9 +658,9 @@ func scratchpadAgeTag(ageHours float64) string {
 //
 // Telemetry mirrors auditSummaryRich: a transient DB hiccup returns
 // "" so wake context isn't flooded by error noise.
-func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
+func (dm *DatabaseManager) ScratchpadOrphansSummary() (string, error) {
 	if dm == nil || dm.db == nil {
-		return ""
+		return "", nil
 	}
 
 	currentSession := ""
@@ -657,7 +675,7 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 		WHERE session_id != ?`,
 		currentSession)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer rows.Close()
 
@@ -667,14 +685,14 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 		var id, thesis string
 		var ageHours float64
 		if err := rows.Scan(&id, &thesis, &ageHours); err != nil {
-			continue
+			return "", fmt.Errorf("scanning scratchpad orphan row: %w", err)
 		}
 		tag := scratchpadAgeTag(ageHours)
 		tagCounts[tag]++
 		lines = append(lines, fmt.Sprintf("  * %s session %s: %s", tag, id, previewThesisTruncated(thesis)))
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", nil
 	}
 
 	// Aggregate header summary. Mirrors the auditSummaryRich pattern
@@ -690,7 +708,7 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() string {
 		tagCounts["[Fresh]"], tagCounts["[Dormant]"], tagCounts["[Expired]"])
 	out := []string{header}
 	out = append(out, lines...)
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n"), nil
 }
 
 // ternaryPlural returns "s" unless count == 1 (matches English

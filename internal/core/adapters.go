@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"strings"
 )
@@ -75,8 +74,7 @@ func (a *MPMAdapter) FetchNew(db *sql.DB, cursor string) ([]Memory, string, erro
 	for rows.Next() {
 		var id, content, sessionID, tags, createdAt string
 		if err := rows.Scan(&id, &content, &sessionID, &tags, &createdAt); err != nil {
-			slog.Warn("failed to scan memory row, skipping", "error", err.Error())
-			continue
+			return nil, "", fmt.Errorf("scanning MPM memory row in FetchNew: %w", err)
 		}
 		latestCursor = createdAt
 		var tagSlice []string
@@ -146,8 +144,7 @@ func (a *OpenClawAdapter) FetchNew(db *sql.DB, cursor string) ([]Memory, string,
 		var startLine, endLine int
 		var updatedAt int64
 		if err := rows.Scan(&id, &path, &source, &startLine, &endLine, &hash, &model, &text, &updatedAt); err != nil {
-			slog.Warn("failed to scan chunk row, skipping", "error", err.Error())
-			continue
+			return nil, "", fmt.Errorf("scanning OpenClaw chunk row in FetchNew: %w", err)
 		}
 		lastUpdatedAt = updatedAt
 		mem := Memory{

@@ -103,7 +103,7 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 		var promotedAt *float64
 
 		if err := rows.Scan(&id, &collection, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &sourceDB, &sourceID, &promotedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning query memory row: %w", err)
 		}
 
 		m := map[string]interface{}{
@@ -200,7 +200,7 @@ func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, 
 		var promotedAt *float64
 
 		if err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &createdAt, &sourceDB, &sourceID, &promotedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning search memory row: %w", err)
 		}
 
 		m := map[string]interface{}{
@@ -605,7 +605,7 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 		err := rows.Scan(&id, &collection, &content, &sessionID, &tagsJSON, &metadataJSON,
 			&createdAt, &reinforcementCount, &weight, &lastAccessedAt, &expiresAt)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning relevance memory row: %w", err)
 		}
 
 		m := map[string]interface{}{
@@ -742,7 +742,7 @@ func (dm *DatabaseManager) GetNegativeWeightMemories() ([]map[string]interface{}
 		var id, collection, content, metadata, createdAt string
 		var weight int
 		if err := rows.Scan(&id, &collection, &content, &weight, &metadata, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning negative-weight memory row: %w", err)
 		}
 		results = append(results, map[string]interface{}{
 			"id": id, "collection": collection, "content": content,
@@ -791,7 +791,7 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 		var id, title, filePath, sourceType, tags, importReason, lastIndexed, createdAt string
 		var totalChunks int
 		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &importReason, &totalChunks, &lastIndexed, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning reference list row: %w", err)
 		}
 		refs = append(refs, map[string]interface{}{
 			"id":            id,
@@ -953,11 +953,11 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 		var score sql.NullFloat64
 		if found {
 			if err := rows.Scan(&id, &docID, &chunkIndex, &section, &content, &title, &score); err != nil {
-				continue
+				return nil, fmt.Errorf("scanning reference chunk row: %w", err)
 			}
 		} else {
 			if err := rows.Scan(&id, &docID, &chunkIndex, &section, &content, &title); err != nil {
-				continue
+				return nil, fmt.Errorf("scanning reference chunk row: %w", err)
 			}
 		}
 		chunks = append(chunks, map[string]interface{}{
@@ -1018,7 +1018,7 @@ func (dm *DatabaseManager) GetRecentInteractions(limit int) ([]map[string]interf
 		var rank int
 		var score sql.NullFloat64
 		if err := rows.Scan(&id, &docID, &chunkID, &query, &searchKind, &rank, &score, &createdAt, &title, &importReason); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning recent interaction row: %w", err)
 		}
 		entry := map[string]interface{}{
 			"id":            id,
@@ -1064,7 +1064,7 @@ func (dm *DatabaseManager) GetInteractionsForDoc(docID string, limit int) ([]map
 		var rank int
 		var score sql.NullFloat64
 		if err := rows.Scan(&id, &chunkID, &query, &searchKind, &rank, &score, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning interaction row: %w", err)
 		}
 		entry := map[string]interface{}{
 			"id":          id,
@@ -1108,7 +1108,7 @@ func (dm *DatabaseManager) GetMostUsedReferences(limit int) ([]map[string]interf
 		var id, title, importReason string
 		var hits, distinctQueries int
 		if err := rows.Scan(&id, &title, &importReason, &hits, &distinctQueries); err != nil {
-			continue
+			return nil, fmt.Errorf("scanning most-used reference row: %w", err)
 		}
 		out = append(out, map[string]interface{}{
 			"id":                id,
@@ -1461,7 +1461,7 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 		var rc, weight, isLongTerm int
 		err := rows.Scan(&id, &coll, &content, &tags, &metadata, &createdAt, &rc, &weight, &isLongTerm, &lastAccessed, &expiresAt)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning export memory row: %w", err)
 		}
 		mem := map[string]interface{}{
 			"id":                  id,

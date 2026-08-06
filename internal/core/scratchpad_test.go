@@ -111,7 +111,7 @@ func TestScratchpadOrphansSummary_FreshTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "[Fresh]") {
 		t.Errorf("expected [Fresh] tag in output:\n%s", out)
 	}
@@ -133,7 +133,7 @@ func TestScratchpadOrphansSummary_ExpiredTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "[Expired]") {
 		t.Errorf("expected [Expired] tag in output:\n%s", out)
 	}
@@ -149,7 +149,7 @@ func TestScratchpadOrphansSummary_DormantTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "[Dormant]") {
 		t.Errorf("expected [Dormant] tag in output:\n%s", out)
 	}
@@ -164,7 +164,7 @@ func TestScratchpadOrphansSummary_TruncatesLongThesis(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "...") {
 		t.Errorf("expected truncation ellipsis in output:\n%s", out)
 	}
@@ -176,7 +176,7 @@ func TestScratchpadOrphansSummary_TruncatesLongThesis(t *testing.T) {
 
 func TestScratchpadOrphansSummary_EmptyWhenNoOrphans(t *testing.T) {
 	dm := scratchpadDM(t)
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if out != "" {
 		t.Errorf("expected empty output for no orphans, got:\n%s", out)
 	}
@@ -203,7 +203,7 @@ func TestScratchpadOrphansSummary_SkipsCurrentSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if strings.Contains(out, "current-sess") {
 		t.Errorf("current-session scratchpad should not surface as orphan, got:\n%s", out)
 	}
@@ -370,7 +370,7 @@ func TestScratchpadOrphansSummary_AggregateHeader_MixedAges(t *testing.T) {
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now', '-10 days') AS INTEGER))`,
 		"orphan-expired-1", "expired one"); err != nil { t.Fatal(err) }
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 
 	if !strings.Contains(out, "4 orphans pending") {
 		t.Errorf("expected '4 orphans pending' header, got:\n%s", out)
@@ -393,7 +393,7 @@ func TestScratchpadOrphansSummary_AggregateHeader_SingularPluralization(t *testi
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
 		"orphan-solo", "lonely"); err != nil { t.Fatal(err) }
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "1 orphan pending") {
 		t.Errorf("expected singular '1 orphan pending' (no 's'), got:\n%s", out)
 	}
@@ -405,7 +405,7 @@ func TestScratchpadOrphansSummary_AggregateHeader_SingularPluralization(t *testi
 func TestScratchpadOrphansSummary_AggregateHeader_PluralZeroAndN(t *testing.T) {
 	dm := scratchpadDM(t)
 	// Zero orphans → no output at all (header only renders with content).
-	if got := dm.ScratchpadOrphansSummary(); got != "" {
+	if got, err := dm.ScratchpadOrphansSummary(); err != nil { t.Fatal(err) } else if got != "" {
 		t.Errorf("zero orphans should produce empty output, got:\n%s", got)
 	}
 }
@@ -416,7 +416,7 @@ func TestScratchpadOrphansSummary_HeaderOnFirstLine(t *testing.T) {
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
 		"orphan-A", "test"); err != nil { t.Fatal(err) }
 
-	out := dm.ScratchpadOrphansSummary()
+	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	lines := strings.Split(out, "\n")
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "- Ephemeral Scratchpads") {
 		t.Errorf("first line should be the header, got:\n%v", lines)

@@ -324,9 +324,7 @@ func processBatch(
 			SELECT json_extract(metadata, '$._epistemic_snapshot') IS NULL
 			FROM memories WHERE id = ?
 		`, mem.ID).Scan(&stillMissing); err != nil {
-			logger.Warn("backfill: re-check failed", "id", mem.ID, "error", err)
-			errorCount++
-			continue
+			return 0, 0, 0, errorCount + 1, fmt.Errorf("backfill re-check scan for memory %s: %w", mem.ID, err)
 		}
 		if !stillMissing {
 			skipped++

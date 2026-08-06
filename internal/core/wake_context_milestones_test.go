@@ -53,7 +53,8 @@ func TestRecentMilestones_OnlyAnchoredRows(t *testing.T) {
 	seedMilestone(t, dm, "another regular memory", []string{"session:abc"}, now)
 	seedMilestone(t, dm, "milestone: learned Y", []string{"type:milestone-insight"}, now)
 
-	got := dm.recentMilestones(5)
+	got, err := dm.recentMilestones(5)
+	if err != nil { t.Fatal(err) }
 	if len(got) != 2 {
 		t.Fatalf("expected 2 milestones (anchored), got %d: %+v", len(got), got)
 	}
@@ -79,7 +80,8 @@ func TestRecentMilestones_Only30DayWindow(t *testing.T) {
 	seedMilestone(t, dm, "edge case: 29d old", []string{"type:milestone-shipped"}, edge)
 	seedMilestone(t, dm, "today: fresh", []string{"type:milestone-insight"}, today)
 
-	got := dm.recentMilestones(5)
+	got, err := dm.recentMilestones(5)
+	if err != nil { t.Fatal(err) }
 	if len(got) != 2 {
 		t.Fatalf("expected 2 milestones in 30d window (edge+today), got %d: %+v", len(got), got)
 	}
@@ -100,8 +102,8 @@ func TestRecentMilestones_Limit(t *testing.T) {
 		ts := now.Add(time.Duration(i) * time.Minute).Unix()
 		seedMilestone(t, dm, "milestone #"+string(rune('A'+i)), []string{"type:milestone-shipped"}, ts)
 	}
-
-	got := dm.recentMilestones(5)
+	got, err := dm.recentMilestones(5)
+	if err != nil { t.Fatal(err) }
 	if len(got) != 5 {
 		t.Fatalf("expected exactly 5 (limit), got %d", len(got))
 	}
@@ -134,9 +136,10 @@ func TestRecentMilestones_DoesNotMisclassifyPrefixes(t *testing.T) {
 	require.NoError(t, err)
 
 	// And a real milestone to make sure the query still works.
+	if err != nil { t.Fatal(err) }
 	seedMilestone(t, dm, "real milestone", []string{"type:milestone-shipped"}, now)
 
-	got := dm.recentMilestones(5)
+	got, err := dm.recentMilestones(5)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 milestone (the trap filtered out), got %d: %+v", len(got), got)
 	}
