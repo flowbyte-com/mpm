@@ -1569,6 +1569,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	if err != nil {
 		return fmt.Errorf("begin migration tx: %w", err)
 	}
+	defer tx.Rollback() // safe no-op after Commit; covers panic / early returns
 	if err := MigrateDeletedAtToUnixEpoch(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("migrate deleted_at: %w", err)

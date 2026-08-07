@@ -86,6 +86,37 @@ if git diff --cached --name-only | grep -qE '\.go$'; then
   echo "[pre-commit] rows-close gate OK"
 fi
 
+echo "[pre-commit] running tx / ctx / goroutine audit gates (audit-tx, audit-ctx, audit-go --gate)..."
+# New-style AST gates wired after the 2026-08-07 tx/ctx/goroutine audits:
+#   - audit-tx  keeps tx-commit-only / tx-no-rollback / tx-explicit-rollback /
+#               tx-unknown at zero: an explicit-but-not-deferred Rollback leaks
+#               the write transaction on every early return (handlers_backup,
+#               handlers_gc, initUnifiedSchema were fixed on 2026-08-07).
+#   - audit-ctx keeps ctx-in-scope-missing at zero (real drops) and ratchets
+#               ctx-plain-missing / ctx-void from their current baselines so any
+#               NEW bare Query/Exec/QueryRow call fails the commit while the
+#               pre-existing backlog is grandfathered (476 / 47 as of 2026-08-07).
+#   - audit-go  keeps go-detached / go-unknown at zero: an unbound goroutine
+#               never returns its lifetime budget; ChallengeMemoryAsync was the
+#               last remain-der and is now mirrorWG-bound (db.go).
+# Run only when Go files are staged, same as audit-scans/audit-closes.
+if git diff --cached --name-only | grep -qE '\.go$'; then
+  for audit in audit-tx audit-ctx audit-go; do
+    if ! "$GO" run "./cmd/$audit" --gate > "/tmp/pre-commit-$audit.md" 2> "/tmp/pre-commit-$audit.err"; then
+      echo "[pre-commit] ABORTING commit: $audit gate failed." >&2
+      echo "[pre-commit] See the audit report:" >&2
+      cat "/tmp/pre-commit-$audit.md" >&2
+      echo "[pre-commit] Gate verdict:" >&2
+      cat "/tmp/pre-commit-$audit.err" >&2
+      rm -f "/tmp/pre-commit-$audit.md" "/tmp/pre-commit-$audit.err"
+      exit 1
+    fi
+    cat "/tmp/pre-commit-$audit.err" >&2
+    rm -f "/tmp/pre-commit-$audit.md" "/tmp/pre-commit-$audit.err"
+    echo "[pre-commit] $audit gate OK"
+  done
+fi
+
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
 # as a standalone Go module — see docs/ARCHITECTURE_SPLIT.md. The pre-commit

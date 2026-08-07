@@ -90,7 +90,8 @@ func sanitiseFTS5Tokens(content string) []string {
 // Cheap on every call: file load + JSON parse. AutoSynthesize is
 // async fire-and-forget so this isn't on the user-facing hot path.
 // Operators can disable synthesis via:
-//   mpm config set synthesis_enabled false
+//
+//	mpm config set synthesis_enabled false
 func synthesisEnabled() bool {
 	cfg, err := config.LoadConfig()
 	if err != nil || cfg == nil {
@@ -405,10 +406,10 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	if hit, runCount := synthHasContentHash(dm, contentHash); hit {
 		bumpSynthDedupCounter(dm, contentHash)
 		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
-			"reason":        "content_hash already synthesized",
-			"content_hash":  contentHash,
-			"prior_runs":    runCount,
-			"timestamp":     time.Now().UTC().Format(time.RFC3339),
+			"reason":       "content_hash already synthesized",
+			"content_hash": contentHash,
+			"prior_runs":   runCount,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339),
 		})
 		return
 	}
@@ -501,11 +502,10 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		idPlaceholders[i] = "?"
 		idArgs[i] = id
 	}
-	err = dm.SQLDB().QueryRow(
+	if err := dm.SQLDB().QueryRowContext(ctx,
 		`SELECT MIN(created_at) FROM memories WHERE id IN (`+strings.Join(idPlaceholders, ",")+`)`,
 		idArgs...,
-	).Scan(&oldestCreatedAt)
-	if err != nil {
+	).Scan(&oldestCreatedAt); err != nil {
 		oldestCreatedAt = nil
 	}
 
@@ -539,7 +539,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	// 9. Preserve oldest created_at from the source fragments
 	if oldestCreatedAt != nil && *oldestCreatedAt != "" {
-		dm.SQLDB().Exec("UPDATE memories SET created_at = ? WHERE id = ?", *oldestCreatedAt, newSynthID)
+		dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = ? WHERE id = ?", *oldestCreatedAt, newSynthID)
 	}
 
 	// 10. Transfer topic_memberships from all source IDs to the new synthetic memory
@@ -552,7 +552,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	for i := range allIDs {
 		topicPlaceholders[i] = "?"
 	}
-	dm.SQLDB().Exec(
+	dm.SQLDB().ExecContext(ctx,
 		`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, role, created_at)
 		 SELECT ?, topic_id, role, created_at
 		 FROM topic_memberships
@@ -562,9 +562,9 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	// 11. Soft-delete originals (candidates + triggering memory)
 	for _, c := range toMerge {
-		dm.SQLDB().Exec("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID)
+		dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID)
 	}
-	dm.SQLDB().Exec("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID)
+	dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID)
 
 	// 12. Persist the synth_runs ledger entry + stamp cooldown on R.
 	// recordSynthRun: content_hash → first/last_run_at + run_count.
