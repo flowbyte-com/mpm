@@ -116,6 +116,10 @@ export default definePluginEntry({
 
       const reminder = sessionReminders.get(sessionKey);
       if (!reminder) return;
+      // Consume-and-clear: bounds the Map at "concurrently processing turns"
+      // (typically ≤1 per session) and prevents stale reminders from a prior
+      // turn being injected when the current turn's `mpm route` returned empty.
+      sessionReminders.delete(sessionKey);
 
       const ctx = event.context;
       const files = ctx?.bootstrapFiles;

@@ -68,6 +68,6 @@ openclaw plugins uninstall mpm-auto-route # remove entirely
 
 ## Post-alpha cleanup
 
-- Module-level `sessionReminders` Map → proper session-context plumbing (so sub-agents and parallel runs don't share a global cache).
+- ~~Module-level `sessionReminders` Map → proper session-context plumbing~~ **Closed 2026-08-05.** Consume-and-clear in the `agent:bootstrap` hook bounds the Map at "concurrently processing turns" (typically ≤1 per session). Leak + stale-injection both closed. Proper per-session plumbing is still architecturally cleaner if/when sub-agents start sharing the cache.
 - Configurable timeout and binary path (already supported via `configSchema`).
 - Test suite (`index.test.js`) covering the public surface.
