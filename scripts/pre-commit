@@ -86,8 +86,8 @@ if git diff --cached --name-only | grep -qE '\.go$'; then
   echo "[pre-commit] rows-close gate OK"
 fi
 
-echo "[pre-commit] running tx / ctx / goroutine audit gates (audit-tx, audit-ctx, audit-go --gate)..."
-# New-style AST gates wired after the 2026-08-07 tx/ctx/goroutine audits:
+echo "[pre-commit] running tx / ctx / goroutine / mutex / sql / fd audit gates..."
+# New-style AST gates wired after the 2026-08-07 audit arcs:
 #   - audit-tx  keeps tx-commit-only / tx-no-rollback / tx-explicit-rollback /
 #               tx-unknown at zero: an explicit-but-not-deferred Rollback leaks
 #               the write transaction on every early return (handlers_backup,
@@ -99,9 +99,24 @@ echo "[pre-commit] running tx / ctx / goroutine audit gates (audit-tx, audit-ctx
 #   - audit-go  keeps go-detached / go-unknown at zero: an unbound goroutine
 #               never returns its lifetime budget; ChallengeMemoryAsync was the
 #               last remain-der and is now mirrorWG-bound (db.go).
+#   - audit-mutex keeps mu-no-unlock / mu-unknown at zero and ratchets
+#               mu-explicit-unlock to its baseline: a Lock() without a
+#               matching Unlock() on every path deadlocks the single shared
+#               connection; the brief-critical-section idiom (13 sites) is
+#               grandfathered while new non-deferred sites fail the commit.
+#   - audit-sql  keeps sql-built at zero (value injection / Sprintf panic
+#               class) and ratchets sql-unknown / sql-fmt-safe / sql-const to
+#               their baselines: constructed SQL with non-literal interpolation
+#               is fatal, identifier-position DDL + ?-placeholder builds are
+#               grandfathered.
+#   - audit-fd   keeps fd-no-close / fd-remove-only at zero and ratchets
+#               fd-explicit-close / fd-unknown to their baselines: an
+#               unclosed *os.File leaks a descriptor from the long-lived
+#               daemon under agent concurrency; the multi-path explicit-close
+#               idiom (CreateTemp wrappers) is grandfathered.
 # Run only when Go files are staged, same as audit-scans/audit-closes.
 if git diff --cached --name-only | grep -qE '\.go$'; then
-  for audit in audit-tx audit-ctx audit-go; do
+  for audit in audit-tx audit-ctx audit-go audit-mutex audit-sql audit-fd; do
     if ! "$GO" run "./cmd/$audit" --gate > "/tmp/pre-commit-$audit.md" 2> "/tmp/pre-commit-$audit.err"; then
       echo "[pre-commit] ABORTING commit: $audit gate failed." >&2
       echo "[pre-commit] See the audit report:" >&2
