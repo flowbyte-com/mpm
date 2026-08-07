@@ -1,5 +1,7 @@
 # MPM
 
+> **License:** [AGPL-3.0](LICENSE) — copyleft with network-use clause. See [LICENSE](LICENSE) for the full text.
+
 > **An observable substrate for long-lived autonomous systems.**
 
 > **Looking to install?** See [INSTALL.md](INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
