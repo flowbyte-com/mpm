@@ -8,9 +8,10 @@
 #
 # Scope of this hook:
 #   - go build ./...            (always — must compile)
-#   - mpm-lint --gate           (when any .go file staged — all eight
+#   - mpm-lint --gate           (when any .go file staged — all nine
 #                                classification gates in one parse: scans,
-#                                closes, tx, ctx, go, mutex, sql, fd)
+#                                closes, tx, ctx, go, mutex, sql, fd,
+#                                imports)
 #   - synthesis/reliability/lifecycle tests  (these are deterministic; some
 #     other test suites have pre-existing data-pollution failures we are not
 #     fixing in this arc — those belong in a CI matrix, not a local gate)
@@ -40,7 +41,7 @@ fi
 
 echo "[pre-commit] build OK"
 
-echo "[pre-commit] running consolidated mpm-lint audit gates (scans/closes/tx/ctx/go/mutex/sql/fd)..."
+echo "[pre-commit] running consolidated mpm-lint audit gates (scans/closes/tx/ctx/go/mutex/sql/fd/imports)..."
 # The consolidated mpm-lint gate replaces the eight standalone audit-*
 # binaries (commit 1e2d517-era wiring). One parse, all rules concurrent:
 #
@@ -65,6 +66,12 @@ echo "[pre-commit] running consolidated mpm-lint audit gates (scans/closes/tx/ct
 #              their baselines.
 #   - fd       keeps fd-no-close / fd-remove-only at zero and ratchets
 #              fd-explicit-close / fd-unknown to their baselines.
+#   - imports  keeps import-forbidden at zero: the architecture boundary
+#              enforcer (core-no-main / audit-no-core / libs-no-cmd) asserts
+#              the internal/ dependency DAG stays acyclic — internal/core is
+#              a standalone module (github.com/flowbyte-com/mpm-core) and must
+#              never import the main module, libs under internal/ must never
+#              reach into cmd/, and internal/audit can't depend on core.
 #   - closes   keeps no-close / rows-discarded / loop-defer / unknown at
 #              zero: an unclosed *sql.Rows never returns its connection to
 #              the pool, and MPM runs a single shared SQLite connection.
