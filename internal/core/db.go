@@ -12,7 +12,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -1544,17 +1543,8 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		return fmt.Errorf("migrate deleted_at: %w", err)
 	}
 	if err := MigrateAllTimestampsToUnixEpoch(tx); err != nil {
-		// A deferral means every convertible column was converted and only
-		// the sentinel was withheld, because some target columns are still
-		// declared TEXT-affinity in the DDL. Commit the partial work and
-		// retry on the next boot; failing init here would make the binary
-		// unusable for the entire window between this migration landing and
-		// the schema DDL flip.
-		if !errors.Is(err, ErrTimestampsMigrationDeferred) {
-			_ = tx.Rollback()
-			return fmt.Errorf("timestamps unification migration failed: %w", err)
-		}
-		slog.Warn("timestamps unification migration deferred", "error", err.Error())
+		_ = tx.Rollback()
+		return fmt.Errorf("timestamps unification migration failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
