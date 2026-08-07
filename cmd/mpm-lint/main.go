@@ -85,6 +85,9 @@ var defaultThresholds = map[string]map[string]int{
 		audit.FDUnknown:       -1,
 		audit.FDExplicitClose: -1,
 	},
+	"imports": {
+		audit.ImportsForbidden: 0,
+	},
 }
 
 // allRules builds the rule set in the canonical order.
@@ -98,6 +101,7 @@ func allRules() []audit.Rule {
 		audit.NewMutexRule(),
 		audit.NewSQLRule(),
 		audit.NewFDRule(),
+		audit.NewImportsRule(),
 	}
 }
 
