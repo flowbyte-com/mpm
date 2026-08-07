@@ -462,7 +462,17 @@ func deriveValidation(memoryID string, dm CoreDB) *ValidationState {
 
 	// dm.ListEvidence orders by created_at DESC (newest first), so
 	// index 0 is the most recent row — no need to walk backwards.
+	// 2026-08-07: filter out auto_capture rows. The memory_source_evidence_ai
+	// trigger fires on every memory INSERT with provenance metadata,
+	// creating an 'observation' evidence row with source_group='auto_capture',
+	// strength=0.5. That's provenance bookkeeping, not user-supplied
+	// validation evidence — including it would mean every memory with
+	// provenance auto-stamps as 'corroborated' on creation, which is
+	// not the validation contract.
 	for _, row := range rowsAny {
+		if sg, _ := row["source_group"].(string); sg == "auto_capture" {
+			continue
+		}
 		t, _ := row["type"].(string)
 		if t == "challenge" {
 			state.Status = "contradicted"
@@ -475,9 +485,15 @@ func deriveValidation(memoryID string, dm CoreDB) *ValidationState {
 			return state
 		}
 	}
+	// Recount after filtering — state.EvidenceCount must reflect
+	// user-supplied rows only.
+	userRowCount := 0
 	for _, row := range rowsAny {
-		strength, _ := row["strength"].(float64)
-		if strength > 0 {
+		if sg, _ := row["source_group"].(string); sg == "auto_capture" {
+			continue
+		}
+		userRowCount++
+		if strength, _ := row["strength"].(float64); strength > 0 {
 			state.Status = "corroborated"
 			state.TriggerEvidenceID, _ = row["id"].(string)
 			if ts, ok := row["created_at"].(float64); ok {
@@ -485,8 +501,12 @@ func deriveValidation(memoryID string, dm CoreDB) *ValidationState {
 			} else if ts, ok := row["created_at"].(int64); ok {
 				state.LastValidatedAt = time.Unix(ts, 0).UTC().Format(time.RFC3339)
 			}
+			state.EvidenceCount = userRowCount
 			return state
 		}
+	}
+	if userRowCount != state.EvidenceCount {
+		state.EvidenceCount = userRowCount
 	}
 	// Evidence exists but no positive signal: stays unvalidated.
 	return state

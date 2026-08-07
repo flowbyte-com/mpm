@@ -1017,7 +1017,7 @@ func (s *MemoryStore) appendToMirror(mem *Memory) error {
 			"reason", "collection not in mirror allow-list")
 		return nil
 	}
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE, 0600)
+	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -1054,7 +1054,7 @@ func isMirroredCollection(collection string) bool {
 
 // appendBlockedAttempt logs a blocked content attempt to the mirror file
 func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) error {
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE, 0600)
+	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
