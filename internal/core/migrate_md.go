@@ -368,14 +368,17 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 	for rows.Next() {
 		var p pending
 		if err := rows.Scan(&p.id, &p.sourceID, &p.sourceDB, &p.contentHash, &p.text, &p.metaJSON); err != nil {
+			rows.Close() // release before the write loop below; defer would deadlock against Exec
 			return 0, fmt.Errorf("scanning pending raw memory row for promotion: %w", err)
 		}
 		pendings = append(pendings, p)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return 0, fmt.Errorf("iterate pending: %w", err)
 	}
+
+	rows.Close()
 
 	promoted := 0
 	for _, p := range pendings {

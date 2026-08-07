@@ -63,6 +63,29 @@ if git diff --cached --name-only | grep -qE '\.go$'; then
   echo "[pre-commit] scan gate OK"
 fi
 
+echo "[pre-commit] running rows-close audit gate (audit-closes --gate)..."
+# Gate keeps no-close / rows-discarded / loop-defer / unknown at absolute
+# zero: an unclosed *sql.Rows never returns its connection to the pool, and
+# MPM runs a single shared SQLite connection — a single regression silently
+# deadlocks the substrate under agent concurrency. explicit-close / delegate
+# pass by design (release-before-write-loop and helper-owned closes are
+# intentional). Run only when Go files are staged, same as audit-scans.
+if git diff --cached --name-only | grep -qE '\.go$'; then
+  if ! "$GO" run ./cmd/audit-closes --gate > /tmp/pre-commit-closes.md 2> /tmp/pre-commit-closes.err; then
+    echo "[pre-commit] ABORTING commit: rows-close audit gate failed." >&2
+    echo "[pre-commit] A connection-leak class site (no-close / rows-discarded / loop-defer) was introduced." >&2
+    echo "[pre-commit] See the audit report:" >&2
+    cat /tmp/pre-commit-closes.md >&2
+    echo "[pre-commit] Gate verdict:" >&2
+    cat /tmp/pre-commit-closes.err >&2
+    rm -f /tmp/pre-commit-closes.md /tmp/pre-commit-closes.err
+    exit 1
+  fi
+  cat /tmp/pre-commit-closes.err >&2
+  rm -f /tmp/pre-commit-closes.md /tmp/pre-commit-closes.err
+  echo "[pre-commit] rows-close gate OK"
+fi
+
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
 # as a standalone Go module — see docs/ARCHITECTURE_SPLIT.md. The pre-commit

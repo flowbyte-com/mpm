@@ -2296,6 +2296,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("exact dedup query failed: %w", err)
 	}
+	defer rows.Close()
 
 	var dupeIDs []string
 	for rows.Next() {
@@ -2306,7 +2307,9 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 		dupeIDs = append(dupeIDs, id)
 		result.ExactDuplicates++
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate exact dupe rows: %w", err)
+	}
 
 	// Soft-delete exact duplicates
 	for _, id := range dupeIDs {
@@ -2324,6 +2327,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("near dedup query failed: %w", err)
 	}
+	defer rows2.Close()
 
 	type memWithEmbed struct {
 		ID        string
@@ -2343,7 +2347,9 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 		}
 		memories = append(memories, m)
 	}
-	rows2.Close()
+	if err := rows2.Err(); err != nil {
+		return nil, fmt.Errorf("iterate near dupe rows: %w", err)
+	}
 
 	// Hash bucketing for near-duplicate detection: O(n²) → O(n*k) where k is avg bucket size
 	// Bucket by first 8 bytes of embedding (first hash prefix) - similar embeddings cluster
