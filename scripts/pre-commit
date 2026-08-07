@@ -8,9 +8,9 @@
 #
 # Scope of this hook:
 #   - go build ./...            (always — must compile)
-#   - audit-scans --gate        (when any .go file staged — keeps silent-continue
-#                                / fake-hard-fail / no-check at zero. The
-#                                migration tripwire depends on this gate.)
+#   - mpm-lint --gate           (when any .go file staged — all eight
+#                                classification gates in one parse: scans,
+#                                closes, tx, ctx, go, mutex, sql, fd)
 #   - synthesis/reliability/lifecycle tests  (these are deterministic; some
 #     other test suites have pre-existing data-pollution failures we are not
 #     fixing in this arc — those belong in a CI matrix, not a local gate)
@@ -40,96 +40,54 @@ fi
 
 echo "[pre-commit] build OK"
 
-echo "[pre-commit] running scan-error audit gate (audit-scans --gate)..."
-# Gate keeps silent-continue / fake-hard-fail / no-check at absolute zero.
-# logged-swallow / ErrNoRows-tolerated / tolerated pass by design. Without
-# this gate, silent-continue sites regress on every commit and the migration
-# tripwire (test suite) becomes a rubber stamp. Run only when Go files are
-# staged — non-Go commits (docs, config, scripts) skip the audit to keep
-# the local gate fast.
+echo "[pre-commit] running consolidated mpm-lint audit gates (scans/closes/tx/ctx/go/mutex/sql/fd)..."
+# The consolidated mpm-lint gate replaces the eight standalone audit-*
+# binaries (commit 1e2d517-era wiring). One parse, all rules concurrent:
+#
+#   - tx       keeps tx-commit-only / tx-no-rollback / tx-explicit-rollback /
+#              tx-unknown at zero: an explicit-but-not-deferred Rollback leaks
+#              the write transaction on every early return (handlers_backup,
+#              handlers_gc, initUnifiedSchema were fixed on 2026-08-07).
+#   - ctx      keeps ctx-in-scope-missing / unknown at zero (real drops) and
+#              ratchets ctx-plain-missing / ctx-void from their baselines so
+#              any NEW bare Query/Exec/QueryRow call fails the commit while
+#              the pre-existing backlog (479/47 as of the consolidation) is
+#              grandfathered.
+#   - go       keeps go-detached / go-unknown at zero: an unbound goroutine
+#              never returns its lifetime budget.
+#   - mutex    keeps mu-no-unlock / mu-unknown at zero and ratchets
+#              mu-explicit-unlock to its baseline: a Lock() without a
+#              matching Unlock() on every path deadlocks the single shared
+#              connection; the brief-critical-section idiom (14 sites) is
+#              grandfathered while new non-deferred sites fail the commit.
+#   - sql      keeps sql-built at zero (value injection / Sprintf panic
+#              class) and ratchets sql-unknown / sql-fmt-safe / sql-const to
+#              their baselines.
+#   - fd       keeps fd-no-close / fd-remove-only at zero and ratchets
+#              fd-explicit-close / fd-unknown to their baselines.
+#   - closes   keeps no-close / rows-discarded / loop-defer / unknown at
+#              zero: an unclosed *sql.Rows never returns its connection to
+#              the pool, and MPM runs a single shared SQLite connection.
+#   - scans    keeps silent-continue / fake-hard-fail / no-check at absolute
+#              zero: the migration tripwire (test suite) depends on this
+#              gate. logged-swallow / ErrNoRows-tolerated / tolerated pass
+#              by design.
+#
+# Run only when Go files are staged, same as the per-audit loop this
+# replaces. mpm-lint parses each file once and runs every rule concurrently.
 if git diff --cached --name-only | grep -qE '\.go$'; then
-  if ! "$GO" run ./cmd/audit-scans --gate > /tmp/pre-commit-audit.md 2> /tmp/pre-commit-audit.err; then
-    echo "[pre-commit] ABORTING commit: scan-error audit gate failed." >&2
-    echo "[pre-commit] A fatal-class site (silent-continue / fake-hard-fail / no-check) was introduced." >&2
+  if ! "$GO" run ./cmd/mpm-lint --gate > "/tmp/pre-commit-mpm-lint.md" 2> "/tmp/pre-commit-mpm-lint.err"; then
+    echo "[pre-commit] ABORTING commit: mpm-lint gate failed." >&2
     echo "[pre-commit] See the audit report:" >&2
-    cat /tmp/pre-commit-audit.md >&2
+    cat "/tmp/pre-commit-mpm-lint.md" >&2
     echo "[pre-commit] Gate verdict:" >&2
-    cat /tmp/pre-commit-audit.err >&2
-    rm -f /tmp/pre-commit-audit.md /tmp/pre-commit-audit.err
+    cat "/tmp/pre-commit-mpm-lint.err" >&2
+    rm -f "/tmp/pre-commit-mpm-lint.md" "/tmp/pre-commit-mpm-lint.err"
     exit 1
   fi
-  cat /tmp/pre-commit-audit.err >&2
-  rm -f /tmp/pre-commit-audit.md /tmp/pre-commit-audit.err
-  echo "[pre-commit] scan gate OK"
-fi
-
-echo "[pre-commit] running rows-close audit gate (audit-closes --gate)..."
-# Gate keeps no-close / rows-discarded / loop-defer / unknown at absolute
-# zero: an unclosed *sql.Rows never returns its connection to the pool, and
-# MPM runs a single shared SQLite connection — a single regression silently
-# deadlocks the substrate under agent concurrency. explicit-close / delegate
-# pass by design (release-before-write-loop and helper-owned closes are
-# intentional). Run only when Go files are staged, same as audit-scans.
-if git diff --cached --name-only | grep -qE '\.go$'; then
-  if ! "$GO" run ./cmd/audit-closes --gate > /tmp/pre-commit-closes.md 2> /tmp/pre-commit-closes.err; then
-    echo "[pre-commit] ABORTING commit: rows-close audit gate failed." >&2
-    echo "[pre-commit] A connection-leak class site (no-close / rows-discarded / loop-defer) was introduced." >&2
-    echo "[pre-commit] See the audit report:" >&2
-    cat /tmp/pre-commit-closes.md >&2
-    echo "[pre-commit] Gate verdict:" >&2
-    cat /tmp/pre-commit-closes.err >&2
-    rm -f /tmp/pre-commit-closes.md /tmp/pre-commit-closes.err
-    exit 1
-  fi
-  cat /tmp/pre-commit-closes.err >&2
-  rm -f /tmp/pre-commit-closes.md /tmp/pre-commit-closes.err
-  echo "[pre-commit] rows-close gate OK"
-fi
-
-echo "[pre-commit] running tx / ctx / goroutine / mutex / sql / fd audit gates..."
-# New-style AST gates wired after the 2026-08-07 audit arcs:
-#   - audit-tx  keeps tx-commit-only / tx-no-rollback / tx-explicit-rollback /
-#               tx-unknown at zero: an explicit-but-not-deferred Rollback leaks
-#               the write transaction on every early return (handlers_backup,
-#               handlers_gc, initUnifiedSchema were fixed on 2026-08-07).
-#   - audit-ctx keeps ctx-in-scope-missing at zero (real drops) and ratchets
-#               ctx-plain-missing / ctx-void from their current baselines so any
-#               NEW bare Query/Exec/QueryRow call fails the commit while the
-#               pre-existing backlog is grandfathered (476 / 47 as of 2026-08-07).
-#   - audit-go  keeps go-detached / go-unknown at zero: an unbound goroutine
-#               never returns its lifetime budget; ChallengeMemoryAsync was the
-#               last remain-der and is now mirrorWG-bound (db.go).
-#   - audit-mutex keeps mu-no-unlock / mu-unknown at zero and ratchets
-#               mu-explicit-unlock to its baseline: a Lock() without a
-#               matching Unlock() on every path deadlocks the single shared
-#               connection; the brief-critical-section idiom (13 sites) is
-#               grandfathered while new non-deferred sites fail the commit.
-#   - audit-sql  keeps sql-built at zero (value injection / Sprintf panic
-#               class) and ratchets sql-unknown / sql-fmt-safe / sql-const to
-#               their baselines: constructed SQL with non-literal interpolation
-#               is fatal, identifier-position DDL + ?-placeholder builds are
-#               grandfathered.
-#   - audit-fd   keeps fd-no-close / fd-remove-only at zero and ratchets
-#               fd-explicit-close / fd-unknown to their baselines: an
-#               unclosed *os.File leaks a descriptor from the long-lived
-#               daemon under agent concurrency; the multi-path explicit-close
-#               idiom (CreateTemp wrappers) is grandfathered.
-# Run only when Go files are staged, same as audit-scans/audit-closes.
-if git diff --cached --name-only | grep -qE '\.go$'; then
-  for audit in audit-tx audit-ctx audit-go audit-mutex audit-sql audit-fd; do
-    if ! "$GO" run "./cmd/$audit" --gate > "/tmp/pre-commit-$audit.md" 2> "/tmp/pre-commit-$audit.err"; then
-      echo "[pre-commit] ABORTING commit: $audit gate failed." >&2
-      echo "[pre-commit] See the audit report:" >&2
-      cat "/tmp/pre-commit-$audit.md" >&2
-      echo "[pre-commit] Gate verdict:" >&2
-      cat "/tmp/pre-commit-$audit.err" >&2
-      rm -f "/tmp/pre-commit-$audit.md" "/tmp/pre-commit-$audit.err"
-      exit 1
-    fi
-    cat "/tmp/pre-commit-$audit.err" >&2
-    rm -f "/tmp/pre-commit-$audit.md" "/tmp/pre-commit-$audit.err"
-    echo "[pre-commit] $audit gate OK"
-  done
+  cat "/tmp/pre-commit-mpm-lint.err" >&2
+  rm -f "/tmp/pre-commit-mpm-lint.md" "/tmp/pre-commit-mpm-lint.err"
+  echo "[pre-commit] mpm-lint gate OK"
 fi
 
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
