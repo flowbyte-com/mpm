@@ -172,9 +172,13 @@ func TestAuditSummary_KnownClusterAlsoMatchesRecentDecision(t *testing.T) {
 
 	seedCluster(t, dm, knownKey, "relay", "abc123def456abc123def456abc12345", "active", 4, now, now)
 	// A recent decision (within last 30d) that mentions the cluster_key.
+	// Use time.Now().Unix() rather than the hardcoded 1783000800 fixture
+	// — the production filter is `created_at >= now() - 30d`, and a
+	// July-2026 fixture is now older than 30 days in real wall-clock time.
+	recent := time.Now().Unix()
 	seedDecision(t, dm, "dec-1",
 		fmt.Sprintf("CONTEXT: handling relay cluster %s in the publish path.\nCHOICE: continue investigating.", knownKey),
-		now)
+		recent)
 
 	out := dm.AuditSummary()
 	require.NotContains(t, out, knownKey,

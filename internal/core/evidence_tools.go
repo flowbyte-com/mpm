@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 )
@@ -106,7 +107,8 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	defer rows.Close()
 	out := []map[string]interface{}{}
 	for rows.Next() {
-		var id, aid, atype, t, src, by, notes string
+		var id, aid, atype, t, src, by string
+		var notes sql.NullString
 		var strength, ind float64
 		var createdAt int64
 		var expiresAt *int64
@@ -117,7 +119,12 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 			"id": id, "artifact_id": aid, "artifact_type": atype,
 			"type": t, "source_group": src, "strength": strength,
 			"independence_factor": ind, "created_by": by,
-			"created_at": createdAt, "notes": notes,
+			"created_at": createdAt,
+		}
+		if notes.Valid {
+			row["notes"] = notes.String
+		} else {
+			row["notes"] = ""
 		}
 		if expiresAt != nil {
 			row["expires_at"] = *expiresAt

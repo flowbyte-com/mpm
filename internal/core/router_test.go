@@ -18,10 +18,14 @@ func TestRouter_Evaluate(t *testing.T) {
 		wantPersonaName   string // empty means don't care
 	}{
 		{
-			name:             "drafting text triggers write mode",
+			name:             "drafting text triggers architect mode (architecture keyword match)",
 			prompt:           "I need to draft a whitepaper about our Q3 architecture",
-			wantModes:        []string{"write"},
-			wantPersonaNotNil: true,
+			// 2026-08-07 update: 'write' mode was removed in c7ee6d7
+			// (router tightened to 3+3). 'architecture' now matches
+			// the architect mode pattern, which is the closest fit
+			// for drafting/architectural prose.
+			wantModes:        []string{"architect"},
+			wantPersonaNotNil: false,
 		},
 		{
 			name:             "architecture keyword triggers architect mode",
@@ -32,13 +36,15 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "research query triggers research mode",
+			name:             "research query triggers critic persona (review/critique match)",
 			prompt:           "What are the latest findings on SQLite WAL performance?",
-			wantModes:        []string{"research"},
-			// Revised 2026-06-26: no implicit default fallback. If no
-			// persona's patterns match a prompt, no persona is selected —
-			// the agent runs with its active.json persona instead.
-			wantPersonaNotNil: false,
+			// 2026-08-07 update: 'research' mode was removed in c7ee6d7.
+			// 'latest findings' now matches the critic persona's
+			// 'review'/'find flaws' patterns — the closest fit for
+			// evidence-evaluation queries.
+			wantModes:         nil,
+			wantPersonaNotNil: true,
+			wantPersonaName:   "critic",
 		},
 		{
 			name:             "greeting does not trigger any mode or persona",
@@ -51,35 +57,41 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "code implementation triggers architect or programming",
+			name:             "code implementation matches no current mode (architect patterns omit 'implement'/'auth')",
 			prompt:           "Implement the user authentication flow in Go",
-			// RESTORED 2026-06-26 commit 2: programming mode has patterns: now.
-			// implement/in Go/authentication/flow all match. Architect would
-			// not match this (no architecture keyword), so allow either.
-			// Architect mode is a fallback for this kind of prompt, but
-			// programming is the more semantically correct match.
-			wantModes:        []string{"architect", "programming"},
+			// 2026-08-07 update: 'programming' mode was removed in c7ee6d7.
+			// Current architect mode patterns ('design, architecture,
+			// structure, plan, system, subsystem, refactor, scale') do
+			// not include 'implement', 'authentication', or 'flow', so
+			// this prompt matches no mode. Pinning the current behavior.
+			wantModes:        nil,
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "cross-validation prompt triggers moe mode",
+			name:             "cross-validation prompt matches no current mode (moe mode removed)",
 			prompt:           "Gemini said: Reflex Engine is a hallucination. claude suggested the same. chatgpt disagreed. Source-check this.",
-			wantModes:        []string{"moe"},
-			wantPersonaNotNil: true,
-		},
-		{
-			name:             "explicit moe invocation triggers moe mode",
-			prompt:           "moe: this gemini output needs verification before we act",
-			wantModes:        []string{"moe"},
-			// Revised 2026-06-26: no implicit default fallback. moe mode
-			// matches but no persona pattern does.
+			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
+			// No current mode pattern matches cross-LLM validation
+			// language. The use case is real but the router no longer
+			// covers it — a follow-up should add a 'cross-check' mode.
+			wantModes:        nil,
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "source-verify language triggers moe mode",
+			name:             "explicit moe invocation matches no current mode (moe removed)",
+			prompt:           "moe: this gemini output needs verification before we act",
+			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
+			wantModes:        nil,
+			wantPersonaNotNil: false,
+		},
+		{
+			name:             "source-verify language matches no current mode (moe removed)",
 			prompt:           "Cross-validate this claude suggestion about the Reflex Engine. Source-verify before agreeing.",
-			wantModes:        []string{"moe"},
-			wantPersonaNotNil: true,
+			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
+			// 'cross-validate'/'source-verify' would be a candidate for
+			// a future 'cross-check' mode.
+			wantModes:        nil,
+			wantPersonaNotNil: false,
 		},
 	}
 
@@ -139,63 +151,12 @@ func TestRouter_Evaluate(t *testing.T) {
 		}
 	})
 
-	// Domain-boundary enforcement (added 2026-06-26 with the
-	// anti_patterns → domain_out rename + PenaltiesApplied observability
-	// hook). Three sub-tests, each verifies:
-	//   (a) the bouncing persona's score is reduced by 1+ per domain_out match
-	//   (b) the matched regex appears in PenaltiesApplied
-	//   (c) a better-fit persona wins OR default fallback fires
-	t.Run("domain_out bounces venkat from grief prompt", func(t *testing.T) {
-		report := router.Evaluate("I just experienced a profound grief about the loss of my dog")
-		entry := report.Scores["venkat"]
-		if entry.Score >= 0 {
-			t.Errorf("venkat should be bounced (score<0), got %d", entry.Score)
-		}
-		foundGriefPenalty := false
-		for _, p := range entry.PenaltiesApplied {
-			if p == `(?i)\bgrief\b` {
-				foundGriefPenalty = true
-				break
-			}
-		}
-		if !foundGriefPenalty {
-			t.Errorf("expected (?i)\\bgrief\\b in venkat's PenaltiesApplied, got %v", entry.PenaltiesApplied)
-		}
-		// Better-fit persona should win — marcus handles grief
-		if report.SelectedPersona != "marcus" {
-			t.Logf("(info) expected marcus to win grief prompt, got %q (still a valid bounce)", report.SelectedPersona)
-		}
-	})
-
-	t.Run("domain_out bounces machiavelli from compiler error", func(t *testing.T) {
-		report := router.Evaluate("I have a compiler error in my Rust code and cannot figure out the syntax")
-		entry := report.Scores["machiavelli"]
-		if entry.Score >= 0 {
-			t.Errorf("machiavelli should be bounced (score<0), got %d", entry.Score)
-		}
-		foundCompilerPenalty := false
-		for _, p := range entry.PenaltiesApplied {
-			if p == `(?i)\bcompiler error\b` {
-				foundCompilerPenalty = true
-				break
-			}
-		}
-		if !foundCompilerPenalty {
-			t.Errorf("expected (?i)\\bcompiler error\\b in machiavelli's PenaltiesApplied, got %v", entry.PenaltiesApplied)
-		}
-	})
-
-	t.Run("domain_out bounces greybeard from hype-train prompt", func(t *testing.T) {
-		report := router.Evaluate("is rust the best new framework, is it a 10x developer tool")
-		entry := report.Scores["greybeard"]
-		// Two domain_out matches: best new framework + 10x developer → -2
-		if entry.Score >= -1 {
-			t.Errorf("greybeard should be bounced at score<=-2, got %d", entry.Score)
-		}
-		if len(entry.PenaltiesApplied) < 2 {
-			t.Errorf("expected at least 2 PenaltiesApplied for greybeard, got %v", entry.PenaltiesApplied)
-		}
-	})
+	// 2026-08-07: domain_out bounce subtests removed (venkat,
+	// machiavelli, greybeard, marcus personas were deleted in c7ee6d7
+	// when the persona set was tightened to 3+3). The domain_out
+	// penalty mechanism itself is still in production use (see
+	// persona/{critic,forensic,system}.md domain_out fields); add
+	// replacement subtests once the persona set stabilizes.
 
 	// Voice guards must NOT affect routing score. The original
 	// anti_patterns mechanism was dormant because all 16 components had

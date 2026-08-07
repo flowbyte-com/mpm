@@ -373,7 +373,7 @@ func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE, 0600)
+	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}
@@ -395,7 +395,7 @@ func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
 	if err := rotateLogIfNeeded(dm.watchdogPath, logRotateThresholdBytes()); err != nil {
 		slog.Warn("watchdog log rotation failed", "err", err)
 	}
-	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE, 0600)
+	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}
@@ -3332,7 +3332,7 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 		if err := rotateLogIfNeeded(mirrorPath, logRotateThresholdBytes()); err != nil {
 			slog.Warn("mirror log rotation failed", "err", err)
 		}
-		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE, 0600)
+		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
 			return
 		}

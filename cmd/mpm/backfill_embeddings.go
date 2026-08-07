@@ -189,7 +189,7 @@ func logEmbeddingFailure(id, content string, err error) {
 	buf.Write(data)
 	buf.WriteByte('\n')
 
-	f, openErr := os.OpenFile(config.GetMirrorPath(), os.O_APPEND|os.O_CREATE, 0600)
+	f, openErr := os.OpenFile(config.GetMirrorPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if openErr != nil {
 		slog.Warn("embedding-backfill: failed to open mirror log", "error", openErr)
 		return

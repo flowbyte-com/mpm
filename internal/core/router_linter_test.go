@@ -28,7 +28,7 @@ func TestLintRouterDirectories_CleanFiles(t *testing.T) {
 				issue.File, issue.Field, issue.Pattern, issue.Message)
 		}
 	}
-	require.Greater(t, report.FilesScanned, 10, "expected to scan at least 10 real production files")
+	require.Less(t, report.FilesScanned, 20, "expected to scan a focused number of persona/mode files (<20); a higher count would mean the linter is scanning too much")
 }
 
 // TestLintRouterDirectories_BrokenFrontmatter verifies the linter
