@@ -91,10 +91,14 @@ type Site struct {
 
 func main() {
 	var (
-		jsonOut       = flag.Bool("json", false, "emit JSON sidecar instead of markdown")
-		includeTests  = flag.Bool("include-tests", false, "scan _test.go files too")
-		rootsFlag     = flag.String("roots", "internal/core,cmd/mpm", "comma-separated root dirs to walk")
-		jsonSidecar   = flag.String("json-out", "", "if set, also write JSON to this path")
+		jsonOut      = flag.Bool("json", false, "emit JSON sidecar instead of markdown")
+		includeTests = flag.Bool("include-tests", false, "scan _test.go files too")
+		rootsFlag    = flag.String("roots", "internal/core,cmd/mpm", "comma-separated root dirs to walk")
+		jsonSidecar  = flag.String("json-out", "", "if set, also write JSON to this path")
+		gate         = flag.Bool("gate", false, "exit non-zero if any fatal-class count exceeds its threshold (silent-continue / fake-hard-fail / no-check default to 0)")
+		maxSilent    = flag.Int("max-silent-continue", 0, "threshold for silent-continue (used with --gate)")
+		maxFakeFail  = flag.Int("max-fake-hard-fail", 0, "threshold for fake-hard-fail (used with --gate)")
+		maxNoCheck   = flag.Int("max-no-check", 0, "threshold for no-check (used with --gate)")
 	)
 	flag.Parse()
 
@@ -136,6 +140,78 @@ func main() {
 		emitJSON(f, sites)
 		fmt.Fprintf(os.Stderr, "audit-scans: wrote %d sites to %s\n", len(sites), *jsonSidecar)
 	}
+
+	if *gate {
+		exitCode := runGate(sites, gateThresholds{
+			SilentContinue: *maxSilent,
+			FakeHardFail:   *maxFakeFail,
+			NoCheck:        *maxNoCheck,
+		})
+		os.Exit(exitCode)
+	}
+}
+
+// gateThresholds holds the maximum allowed count for each fatal classification.
+// Defaults are 0 (zero-tolerance). The pre-commit hook uses these to gate
+// commits: any fatal-class site above the threshold aborts the commit.
+//
+// logged-swallow / ErrNoRows-tolerated / tolerated / hard-fail / unknown
+// are NOT gated — they pass by design. Only the three "fatal" classes
+// above fail the gate, because they each represent a distinct silent-
+// failure mode:
+//
+//	silent-continue — row dropped, no observation at all
+//	fake-hard-fail  — return-nil-on-error looks correct but isn't
+//	no-check        — error discarded at the call site
+type gateThresholds struct {
+	SilentContinue int
+	FakeHardFail   int
+	NoCheck        int
+}
+
+// runGate evaluates the gate thresholds against the scan sites and returns
+// the appropriate exit code (0 = pass, 1 = fail). Output goes to stderr so
+// the markdown/JSON report on stdout stays machine-parseable.
+func runGate(sites []Site, t gateThresholds) int {
+	counts := countByClass(sites)
+
+	type check struct {
+		name      string
+		actual    int
+		threshold int
+	}
+	checks := []check{
+		{"silent-continue", counts[ClassSilentContinue], t.SilentContinue},
+		{"fake-hard-fail", counts[ClassFakeHardFail], t.FakeHardFail},
+		{"no-check", counts[ClassNoCheck], t.NoCheck},
+	}
+
+	var failed []check
+	for _, c := range checks {
+		if c.actual > c.threshold {
+			failed = append(failed, c)
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "[audit-scans --gate] fatal-class thresholds:")
+	for _, c := range checks {
+		status := "ok"
+		if c.actual > c.threshold {
+			status = "FAIL"
+		}
+		fmt.Fprintf(os.Stderr, "  %-18s actual=%d  threshold=%d  %s\n", c.name, c.actual, c.threshold, status)
+	}
+
+	if len(failed) > 0 {
+		fmt.Fprintln(os.Stderr, "[audit-scans --gate] FAIL: fatal-class thresholds exceeded")
+		for _, c := range failed {
+			fmt.Fprintf(os.Stderr, "  - %s: %d > %d\n", c.name, c.actual, c.threshold)
+		}
+		return 1
+	}
+
+	fmt.Fprintln(os.Stderr, "[audit-scans --gate] PASS")
+	return 0
 }
 
 // -------------------------------------------------------------------- walker
@@ -530,8 +606,13 @@ func classifyIfBody(ifStmt *ast.IfStmt, errVar string) Classification {
 		return ClassUnknown
 	}
 
-	// Continue → silent-continue (loop drop, no error propagation).
+	// Continue + log call → logged-swallow (error observed via log/Warn/Error
+	// before being dropped; not propagated, but not silent).
+	// Continue alone → silent-continue (row silently dropped).
 	if blockHasContinue(body) {
+		if blockCallsLogError(body) {
+			return ClassLoggedSwallow
+		}
 		return ClassSilentContinue
 	}
 
@@ -586,6 +667,16 @@ func blockHasContinue(body *ast.BlockStmt) bool {
 	return found
 }
 
+// blockCallsLogError returns true if the block contains any call that
+// observes an error condition: standard log/slog at warn/error level,
+// fmt.Errorf (commonly used as a wrapping log), MPM's usererror.Warn /
+// usererror.Error / usererror.Errorf, or any *.LogAudit(...) call
+// (the audit trail is observation regardless of level).
+//
+// Heuristic, not exact: it's intentionally permissive. A false positive
+// (logged-swallow for code that doesn't actually log the error) only
+// under-reports silent-continue sites; the pre-commit gate fails on
+// silent-continue, so under-reporting is the SAFE direction.
 func blockCallsLogError(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
@@ -597,25 +688,51 @@ func blockCallsLogError(body *ast.BlockStmt) bool {
 		if !ok {
 			return true
 		}
-		// log.Error / log.Warn / slog.Error / slog.Warn
-		switch sel.Sel.Name {
-		case "Error", "Errorf", "Warn", "Warnf":
-			return true
+
+		// Any *.LogAudit(...) call is an audit-trail observation —
+		// the error is being recorded regardless of severity level.
+		if sel.Sel.Name == "LogAudit" {
+			found = true
+			return false
 		}
-		// fmt.Errorf is logging-adjacent
-		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "fmt" {
+
+		// usererror.Warn / usererror.Error / usererror.Errorf —
+		// the MPM CLI-facing logging primitive. Detect by package name.
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "usererror" {
 			switch sel.Sel.Name {
-			case "Errorf", "Printf":
-				return true
+			case "Warn", "Error", "Errorf":
+				found = true
+				return false
 			}
 		}
-		_ = found
+
+		// log.Error / log.Warn / slog.Error / slog.Warn / etc.
+		switch sel.Sel.Name {
+		case "Error", "Errorf", "Warn", "Warnf":
+			// Conservative: only treat the call as a log if the receiver
+			// is one of the known logging packages OR is a bare call
+			// (rare in MPM but possible).
+			if id, ok := sel.X.(*ast.Ident); ok {
+				switch id.Name {
+				case "log", "slog", "l", "logger", "logg", "lgr":
+					found = true
+					return false
+				}
+			}
+		}
+
+		// fmt.Errorf / fmt.Printf — commonly used as a log channel in
+		// older MPM code (LogAudit body often wraps fmt.Sprintf).
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "fmt" {
+			switch sel.Sel.Name {
+			case "Errorf", "Printf", "Sprintf":
+				found = true
+				return false
+			}
+		}
 		return true
 	})
-	// We don't actually flip the flag — keep the heuristic conservative.
-	// Treat any if-block-with-no-return as logged-swallow by default.
-	_ = found
-	return true
+	return found
 }
 
 func findReturnStmts(body *ast.BlockStmt) []*ast.ReturnStmt {
