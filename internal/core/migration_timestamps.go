@@ -2,35 +2,10 @@ package internal
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
-
-// ErrTimestampsMigrationDeferred is returned (wrapped, with the offending
-// column list) when MigrateAllTimestampsToUnixEpoch converted everything it
-// could but at least one target column is still declared with TEXT affinity.
-//
-// Why that blocks the migration: the UPDATE rewrites the rows in place, but
-// SQLite coerces the CAST result back to TEXT on store for a TEXT-affinity
-// column. The `typeof(col) = 'text'` guard is therefore satisfied both before
-// and after the UPDATE, so the migration would otherwise look like it had
-// succeeded while leaving the column entirely unconverted (the C1 finding).
-// The conversion is impossible without first changing the column's declared
-// type in the schema DDL.
-//
-// The migration deliberately does NOT write its sentinel in this case: the
-// work is incomplete, so the next boot must retry. Callers that run the
-// migration as part of schema init should treat this as a warning and commit
-// the partial (but individually correct) conversions — every column that could
-// be converted was. Any other error from the migration is a genuine failure
-// and must roll the transaction back.
-//
-// This is the expected state between the migration landing and the schema DDL
-// flip that changes those columns to INTEGER; once the DDL flip lands, the
-// deferral disappears and the sentinel is written on the next init.
-var ErrTimestampsMigrationDeferred = errors.New("timestamps migration deferred: target columns are still declared with TEXT affinity; schema DDL flip required")
 
 // timestampColumn identifies one (table, column) pair to migrate.
 type timestampColumn struct {
@@ -185,15 +160,14 @@ func hasTextResidueInColumn(tx *sql.Tx, table, col string) (bool, error) {
 //
 // Two distinct failure shapes:
 //
-//   - TEXT-affinity columns → error wrapping ErrTimestampsMigrationDeferred.
-//     Expected, recoverable, and the whole column list is reported at once so
-//     one boot tells you everything the DDL flip still has to cover. Callers
-//     running this during schema init should log and continue.
+//   - TEXT-affinity columns → plain error. With the Phase 7 DDL flip
+//     (18-table INTEGER rebuild) all migration-target columns are now
+//         INTEGER-affinity, making this case structurally unreachable.
+//     The error is kept as a belt-and-suspenders guard against future schema
+//     regressions that might re-introduce a TEXT-affinity column.
 //   - TEXT residue on a NUMERIC-affinity column → plain error. This should be
 //     unreachable and means the UPDATE didn't fire on a row that needed it;
 //     callers must roll back.
-//
-// Either way the sentinel is not written, so no state is lost by continuing.
 func verifyTimestampsMigration(tx *sql.Tx) error {
 	var textAffinityCols []string
 	for _, tc := range allTimestampsToMigrate {
@@ -229,8 +203,10 @@ func verifyTimestampsMigration(tx *sql.Tx) error {
 		}
 	}
 	if len(textAffinityCols) > 0 {
-		return fmt.Errorf("%w (columns: %s)",
-			ErrTimestampsMigrationDeferred, strings.Join(textAffinityCols, ", "))
+		return fmt.Errorf(
+			"timestamps migration deferred: TEXT-affinity columns remain after schema DDL flip "+
+				"(columns: %s); migration cannot proceed",
+			strings.Join(textAffinityCols, ", "))
 	}
 	return nil
 }
@@ -255,10 +231,11 @@ func verifyTimestampsMigration(tx *sql.Tx) error {
 // against the same DB converge cleanly to a single sentinel row instead of
 // failing on PRIMARY KEY.
 //
-// Error contract: an error wrapping ErrTimestampsMigrationDeferred means the
-// migration did all the work it could and withheld the sentinel because some
-// target columns are still declared TEXT-affinity. The transaction is safe to
-// commit in that case. Any other error is a genuine failure — roll back.
+// Error contract: any error from this migration is a genuine failure and must
+// roll back. With the Phase 7 DDL flip (18-table INTEGER rebuild), all
+// migration-target columns are now INTEGER-affinity, so the TEXT-affinity
+// deferral is structurally unreachable. The verification step remains as a
+// belt-and-suspenders guard.
 //
 // Must run AFTER MigrateDeletedAtToUnixEpoch (which establishes the
 // integer-timestamp precedent on memories.deleted_at), AFTER every schema DDL
