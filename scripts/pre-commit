@@ -8,10 +8,14 @@
 #
 # Scope of this hook:
 #   - go build ./...            (always — must compile)
+#   - audit-scans --gate        (when any .go file staged — keeps silent-continue
+#                                / fake-hard-fail / no-check at zero. The
+#                                migration tripwire depends on this gate.)
 #   - synthesis/reliability/lifecycle tests  (these are deterministic; some
 #     other test suites have pre-existing data-pollution failures we are not
 #     fixing in this arc — those belong in a CI matrix, not a local gate)
 #
+# Install: copy this file to .git/hooks/pre-commit (or run `make install-hooks`).
 # Future: when the test suite stabilises, add `go test ./...` (full sweep) and
 # move the flaky tests into a separate CI job with -short + clean DB.
 
@@ -36,9 +40,36 @@ fi
 
 echo "[pre-commit] build OK"
 
+echo "[pre-commit] running scan-error audit gate (audit-scans --gate)..."
+# Gate keeps silent-continue / fake-hard-fail / no-check at absolute zero.
+# logged-swallow / ErrNoRows-tolerated / tolerated pass by design. Without
+# this gate, silent-continue sites regress on every commit and the migration
+# tripwire (test suite) becomes a rubber stamp. Run only when Go files are
+# staged — non-Go commits (docs, config, scripts) skip the audit to keep
+# the local gate fast.
+if git diff --cached --name-only | grep -qE '\.go$'; then
+  if ! "$GO" run ./cmd/audit-scans --gate > /tmp/pre-commit-audit.md 2> /tmp/pre-commit-audit.err; then
+    echo "[pre-commit] ABORTING commit: scan-error audit gate failed." >&2
+    echo "[pre-commit] A fatal-class site (silent-continue / fake-hard-fail / no-check) was introduced." >&2
+    echo "[pre-commit] See the audit report:" >&2
+    cat /tmp/pre-commit-audit.md >&2
+    echo "[pre-commit] Gate verdict:" >&2
+    cat /tmp/pre-commit-audit.err >&2
+    rm -f /tmp/pre-commit-audit.md /tmp/pre-commit-audit.err
+    exit 1
+  fi
+  cat /tmp/pre-commit-audit.err >&2
+  rm -f /tmp/pre-commit-audit.md /tmp/pre-commit-audit.err
+  echo "[pre-commit] scan gate OK"
+fi
+
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
-if ! "$GO" test -short -count=1 ./internal/ \
-     -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"; then
+# Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
+# as a standalone Go module — see docs/ARCHITECTURE_SPLIT.md. The pre-commit
+# gate now runs from inside the Core module because main/ and core/ are
+# separate Go modules (cross-module `./internal/core/...` from main/ fails).
+if ! (cd internal/core && "$GO" test -short -count=1 ./... \
+     -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
   echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
   exit 1
 fi
