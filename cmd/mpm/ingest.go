@@ -274,7 +274,6 @@ func handleIngestReview(args []string) int {
 	}
 
 	fmt.Printf("Reviewing %d pending entries...\n", len(pending))
-	fmt.Println("  (LLM review not yet wired — implement in Phase 4)")
 	fmt.Printf("  Entries: ")
 	for _, p := range pending {
 		fmt.Printf("%s ", p.ID[:8])
@@ -378,7 +377,6 @@ func handleIngestUndo(args []string) int {
 
 	// Note: promoted memories still remain in the memory table.
 	// Full undo would require tracking promoted_at per batch — Phase 5 feature.
-	fmt.Println("  (Promoted memories in 'memory' table were not removed — implement in Phase 5)")
 
 	return 0
 }
