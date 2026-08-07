@@ -258,6 +258,13 @@ type DatabaseManager struct {
 	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
 	sharedPath     string
 	sharedAttached bool
+
+	// mirrorWG tracks in-flight fire-and-forget mirror writes
+	// (ChallengeMemoryAsync) so Close() can join them instead of tearing the
+	// DB down under a live writer. audit-go treats a WaitGroup-bound
+	// goroutine as lifecycle-safe; the mirror writes stay detached from the
+	// search path but are no longer unjoinable.
+	mirrorWG sync.WaitGroup
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
@@ -2029,6 +2036,20 @@ func (dm *DatabaseManager) backfillFTSTables() error {
 }
 
 func (dm *DatabaseManager) Close() error {
+	// Join in-flight mirror writes (ChallengeMemoryAsync) with a bounded
+	// wait so Close can't hang on a wedged mirror writer, but does not tear
+	// the DB down under a live one.
+	done := make(chan struct{})
+	go func() {
+		dm.mirrorWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		slog.Warn("DatabaseManager.Close: mirror writers did not drain within 2s; proceeding")
+	}
+
 	if dm.db != nil {
 		return dm.db.Close()
 	}
@@ -3337,7 +3358,9 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 // the database — only appends to the audit mirror. The evidence parameter
 // describes which memories collided and why.
 func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string) {
+	dm.mirrorWG.Add(1)
 	go func() {
+		defer dm.mirrorWG.Done()
 		mirrorPath := filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl")
 
 		entry := map[string]interface{}{
