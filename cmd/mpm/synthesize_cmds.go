@@ -58,7 +58,9 @@ func handleSynthesize(args []string) int {
 	`)
 	if err != nil {
 		usererror.Error("Query failed: %v", err)
+		return 1
 	}
+	defer rows.Close()
 
 	type memInfo struct {
 		ID      string
@@ -79,7 +81,6 @@ func handleSynthesize(args []string) int {
 		usererror.Warn("handleSynthesize: %v", scanErr)
 		return 1
 	}
-	rows.Close()
 
 	if len(all) == 0 {
 		fmt.Println("No memories found for synthesis scan.")
