@@ -3,9 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"log/slog"
 	"math"
-	"github.com/flowbyte-com/mpm-core/usererror"
 	"strconv"
 	"strings"
 	"time"
@@ -296,6 +296,7 @@ func handleGC(args []string) int {
 		if txErr != nil {
 			usererror.Error("failed to begin transaction: %v", txErr)
 		} else {
+			defer tx.Rollback() // safe no-op after Commit; covers panic / early returns
 			var batchErr error
 			for _, d := range deltas {
 				if d.newWeight == float64(d.oldWeight) {

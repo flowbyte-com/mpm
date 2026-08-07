@@ -156,6 +156,7 @@ func handleRestoreDB(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Restore failed (begin tx): %v\n", err), 1)
 	}
+	defer tx.Rollback() // safe no-op after Commit; covers panic / early returns
 
 	// SECURITY (H-3 side-effect): execute statements one at a time. The
 	// validator already approved each statement against the allow-list; per-
