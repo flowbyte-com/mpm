@@ -142,6 +142,28 @@ func rotateLogIfNeeded(path string, thresholdBytes int64) error {
 	return nil
 }
 
+// sqliteWriteDSN appends the foreign-key pragma to a SQLite DSN so that
+// EVERY pooled connection opens with `PRAGMA foreign_keys = ON`.
+//
+// Why the DSN and not an Exec: `db.Exec("PRAGMA foreign_keys = ON")` only
+// runs on whichever single connection the Exec happens to grab. database/sql
+// lazily creates new connections as concurrency grows, and those new
+// connections open with FK enforcement OFF (the SQLite default) — so the
+// FK-audit cascade guarantees silently evaporate under agent concurrency.
+// mattn/go-sqlite3 turns the `_foreign_keys=1` DSN param into the PRAGMA at
+// connection-open time, making enforcement structural per connection.
+//
+// (busy_timeout / synchronous / cache_size have the same per-connection
+// nature and the same Exec race; the Exec calls are kept as belt-and-
+// suspenders for the first connection, but _foreign_keys is the load-bearing
+// guarantee.)
+func sqliteWriteDSN(path string) string {
+	if strings.Contains(path, "?") {
+		return path + "&_foreign_keys=1"
+	}
+	return path + "?_foreign_keys=1"
+}
+
 // dbFileName is the canonical filename for the MPM database.
 // Previously mpm_memory.db - renamed 2026-04-01 to reflect its unified nature.
 const dbFileName = "mpm.db"
@@ -157,9 +179,9 @@ func NewSQLiteConnection(dbPath string) (*SQLiteConnection, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteWriteDSN(dbPath))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	db.Exec("PRAGMA foreign_keys = ON")
 	db.Exec("PRAGMA journal_mode = WAL")
@@ -236,7 +258,6 @@ type DatabaseManager struct {
 	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
 	sharedPath     string
 	sharedAttached bool
-
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
@@ -776,7 +797,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	}
 
 	dbPath := filepath.Join(dbDir, dbFileName)
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteWriteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -835,7 +856,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 //
 // The caller owns the returned CoreDB and must Close it when done.
 func (dm *DatabaseManager) NewSession() (CoreDB, error) {
-	db, err := sql.Open("sqlite3", dm.dbPath)
+	db, err := sql.Open("sqlite3", sqliteWriteDSN(dm.dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("new session: open: %w", err)
 	}
@@ -1444,10 +1465,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// PRAGMA settings. WAL allows concurrent readers and a single writer;
 	// busy_timeout gives the writer up to 5s to wait.
 	//
-	// We deliberately do NOT enable foreign_keys here. The production
-	// NewDatabaseManager path enables them after InitSchema completes; the
-	// test paths use InitSchema directly with session_ids that may not
-	// have a matching session row, so we leave FK enforcement off (the
+	// We deliberately do NOT enable foreign_keys here. FK enforcement is the
+	// DSN's job: the production open paths (NewDatabaseManager, NewSession,
+	// NewSQLiteConnection) pass a DSN carrying `_foreign_keys=1`, so every
+	// pooled connection enforces FKs structurally. This method is also used
+	// by the test paths (InitSchema over NewDatabaseManagerForDB) with
+	// session_ids that may not have a matching session row, so FK
+	// enforcement stays off on connections whose DSN did not opt in (the
 	// SQLite default) to keep the existing tests green.
 	dm.db.Exec("PRAGMA journal_mode = WAL")
 	dm.db.Exec("PRAGMA busy_timeout = 5000")
