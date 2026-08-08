@@ -380,7 +380,7 @@ res := dm.RecordArtifactProvenance(
 - `decide` / `record_decision` → `saveMemoryNode` → `saveMemoryRow` (collection='decisions') ✓
 - `save_lesson` → `AddLesson` ✓
 - `promote_scratchpad` → `SaveMemoryNode` (collection='memories') ✓
-- `cascade_materializer` → `SaveMemoryNode` (collection='theories') with `parent_artifact_id` set to the dead artifact ✓
+- `cascade_materializer` → `SaveMemoryNode` (collection='theories') — hook fires automatically; threading `parent_artifact_id` of the dead artifact requires an explicit call to the resolver with parent override (one of the cascade integration tasks)
 
 Sessions are excluded. They self-describe via `session_id` and `metadata`.
 
