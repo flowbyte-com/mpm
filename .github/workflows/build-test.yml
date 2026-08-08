@@ -54,6 +54,14 @@ jobs:
       - name: go vet
         run: go vet -tags fts5 ./...
 
+      # Consolidated AST audit gate — mirrors `go run ./cmd/mpm-lint --gate`
+      # in .git/hooks/pre-commit. Nine rules in one parse: scans, closes, tx,
+      # ctx, go, mutex, sql, fd, imports. Fatal classes are zero-tolerance;
+      # review classes ratchet against measured baselines so any NEW site
+      # fails the commit. Keep in sync with scripts/pre-commit.
+      - name: mpm-lint gate
+        run: go run ./cmd/mpm-lint --gate
+
       # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
       # gate gets tighter locally, it gets tighter in CI too.
       - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context)
