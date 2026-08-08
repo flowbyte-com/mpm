@@ -11,9 +11,24 @@ import (
 )
 
 func TestRenderRoute(t *testing.T) {
-	// Use the live workspace — it has known mode/persona files and matches
-	// the pattern in internal/router_test.go. This is integration-level.
-	workspace := "/home/v/workspace/projects/mpm"
+	// Hermetic workspace with synthetic mode/persona files. The previous
+	// version of this test read /home/v/workspace/projects/mpm, which made
+	// it depend on whatever mode/persona files were checked in at the time
+	// and broke any time a content edit drifted prompts out of pattern
+	// match range (e.g. the architect test stopped selecting a persona once
+	// the live persona files no longer matched "architecture"). Build a
+	// controlled workspace so the assertions are stable.
+	workspace := t.TempDir()
+	mustMkdir(t, filepath.Join(workspace, "mode"))
+	mustMkdir(t, filepath.Join(workspace, "persona"))
+	mustWriteFile(t, filepath.Join(workspace, "mode", "architect.md"),
+		"---\nname: architect\npatterns: architecture\n---\n\n# Architect Mode\n\nArchitect mode body.\n")
+	mustWriteFile(t, filepath.Join(workspace, "persona", "venkat.md"),
+		"---\nname: venkat\npatterns: architecture\n---\n\n# Venkat Persona\n\nVenkat persona body.\n")
+	mustWriteFile(t, filepath.Join(workspace, "mode", "reviewer.md"),
+		"---\nname: reviewer\npatterns: review, security\n---\n\n# Reviewer Mode\n\nReviewer mode body.\n")
+	mustWriteFile(t, filepath.Join(workspace, "persona", "marcus.md"),
+		"---\nname: marcus\npatterns: review, security\n---\n\n# Marcus Persona\n\nMarcus persona body.\n")
 
 	tests := []struct {
 		name         string
@@ -785,6 +800,13 @@ func TestApplyRouteToActive(t *testing.T) {
 // TestHandleRoute_ApplyFlag verifies --apply is wired end-to-end through
 // the command dispatcher: invoking `mpm route --apply "<prompt>"` against
 // a hermetic workspace must mutate active.json and not block on errors.
+//
+// The seed active.json sets Persona="auto" because handleRoute's three-state
+// gate only enters the router-and-apply branch when at least one of
+// (persona, modes) is the literal "auto" sentinel. Seeding with concrete
+// values like "default" / "standard" lands in the "manual" branch, which
+// skips the router and ignores --apply — which is correct production
+// behavior but breaks this test's intent.
 func TestHandleRoute_ApplyFlag(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", workspace)
@@ -797,8 +819,8 @@ func TestHandleRoute_ApplyFlag(t *testing.T) {
 	t.Setenv("MPM_ROUTE_WORKSPACE", workspace)
 
 	if err := mpminternal.SaveActiveJSON(&mpminternal.ActiveState{
-		Persona: "default",
-		Modes:   []string{"standard"},
+		Persona: "auto",
+		Modes:   []string{"auto"},
 		Updated: "2026-01-01T00:00:00Z",
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
