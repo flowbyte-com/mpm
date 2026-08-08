@@ -1,7 +1,7 @@
 # Epistemic Cascades — Operator Guide
 
 **Feature added:** 2026-08-04  
-**MPM version:** post-audit-2026-07-16
+**MPM version:** post-2026-07-16 (security audit baseline)
 
 ## Overview
 

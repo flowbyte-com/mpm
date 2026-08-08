@@ -1003,7 +1003,7 @@ Default to no. The threshold for adding is high. The threshold for removing is t
 
 ### The regret log
 
-`workspace/REGRET_LOG.md` (created 2026-06-30) is an append-only collection of things the agent considered but didn't add, and things the agent added that turned out not to matter. It is the empirical record of feature-creep pressure and the source of truth for what to delete next.
+The agent maintains a private regret log of things it considered but didn't add, and things it added that turned out not to matter. It is the empirical record of feature-creep pressure and the source of truth for what to delete next.
 
 ---
 
@@ -1065,7 +1065,7 @@ mpm config              # Interactive AI provider setup wizard (MiniMax, OpenAI,
 mpm config show         # Print current config
 mpm config get <key>    # Print one config value
 mpm config set <k> <v>  # Set one config value and persist
-mpm config edit         # Open mpm_config.json in $EDITOR
+mpm config edit         # Open runtime mpm_config.json (in $MPM_WORKSPACE) in $EDITOR
 mpm config profile add|list|get|set|remove <name>  # Execution profiles (provider/model/temperature/...)
 mpm config component list|get|set <component>     # Component bindings (memory → profile, etc.)
 mpm config capability list|get|set <capability>   # Capability registry (operator-meaningful vocabulary)
@@ -2218,7 +2218,7 @@ The loop closes. The auto-broadcast hook is the final step — every other piece
 
 ## A.5 End-to-end smoke
 
-`scripts/smoke_arc1.sh` (8 steps, all green):
+End-to-end verification (8 steps, all green):
 
 1. Seed two contradictory rules into the shared DB.
 2. Run `mpm ops resolve-contradictions` (dry-run) — see the queue.
@@ -2380,7 +2380,7 @@ The full memory content is NOT in the wake — signal, not transport. 100-target
 - Validation: `TestBroadcastMemory_RejectsNoRationale` — kind=memory without `--rationale` refused
 - Self-skip: `TestBroadcastMemory_SkipsSelf` — source session not in target list
 
-End-to-end: `scripts/smoke_arc2.sh` (6 steps: heartbeat → seed → broadcast → dedup → cross-agent → pickup).
+End-to-end invariant (6 steps): heartbeat → seed → broadcast → dedup → cross-agent → pickup.
 
 ## B.8 SQLite limitations discovered
 

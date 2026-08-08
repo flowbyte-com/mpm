@@ -2,9 +2,9 @@
 
 **Status:** ✅ Shipped 2026-07-07 (all 4 phases complete)
 **Original proposal:** 2026-06-29 (this document, as Proposal)
-**Source critique:** `external-review-chatgpt-2026-06-28.md` §5 — "Mixing two jobs"
+**Source critique:** §5 "Mixing two jobs" (architectural review, 2026-06-28)
 **Implementation log:** `changelog.md` ("Phase 1-4", "Phase 1 — Module Boundary Rename", "Phase 2 — CoreDB Interface", "Phase 3 — Runtime Isolation", "Phase 4 — Standalone Core Module")
-**Security audit that motivated the closure:** `audit.md` (2026-07-07, score 90/100)
+**Security audit that motivated the closure:** 2026-07-07 audit (score 90/100)
 
 ---
 
@@ -80,7 +80,7 @@ All four can now depend on `github.com/flowbyte-com/mpm-core` directly. The main
 
 ## Retrospective — Why This Paid Off
 
-The split earned its keep on the same day it shipped. The 2026-07-07 security audit (`audit.md`, score 90/100) was run against Core in isolation — `go test ./internal/core/...` exercises the scanner, the schema, the search, the lessons, the lessons validation, all without Runtime goroutines firing. That's directly why the audit could close 15 findings in a single morning: the audit surface was bounded by the split.
+The split earned its keep on the same day it shipped. The 2026-07-07 security audit (score 90/100) was run against Core in isolation — `go test ./internal/core/...` exercises the scanner, the schema, the search, the lessons, the lessons validation, all without Runtime goroutines firing. That's directly why the audit could close 15 findings in a single morning: the audit surface was bounded by the split.
 
 Secondary payoff: when `mpm-core` publishes, downstream consumers (`mpm-agent`, OpenClaw plugin, `hermes`, `opencode`) drop the local `replace` directive and import the published module — zero URL churn, zero version-bump migration.
 
@@ -88,4 +88,4 @@ Secondary payoff: when `mpm-core` publishes, downstream consumers (`mpm-agent`, 
 
 ## Source
 
-External review that prompted the proposal: `external-review-chatgpt-2026-06-28.md` §5 — *"The binary mixes two distinct responsibilities under one `DatabaseManager`. A mode bug can corrupt memories, the Runtime's goroutines compete for the same shared connection, and Core is hard to reuse outside MPM."* Each of those complaints is now structurally addressed.
+External review that prompted the proposal (2026-06-28): *"The binary mixes two distinct responsibilities under one `DatabaseManager`. A mode bug can corrupt memories, the Runtime's goroutines compete for the same shared connection, and Core is hard to reuse outside MPM."* Each of those complaints is now structurally addressed.

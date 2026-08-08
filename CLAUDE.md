@@ -90,7 +90,7 @@ mpm/
 │   └── go.mod                # Standalone module; main go.mod has replace directive
 ├── src/db/mpm.db             # Single canonical database (WAL mode)
 ├── mode/ persona/            # JSON / Markdown configs for behavioral modes
-└── docs/                     # ARCHITECTURE_SPLIT.md (shipped retro), external-review-chatgpt-2026-06-28.md, WISHLIST.md
+└── docs/                     # ARCHITECTURE_SPLIT.md (shipped retro), WISHLIST.md
 ```
 
 ## Sibling projects (not under mpm/)
@@ -136,7 +136,7 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 
 ## Security — Read This Before Touching Write Paths
 
-**The 2026-07-07 security audit (`audit.md`) is the source of truth for the current security posture.** It scored 90/100, closed 15 findings, and pushed the scanner down into a centralized location so coverage is structural rather than opt-in. The earlier `docs/security-review-2026-06-15.md` (referenced in pre-audit commits) is superseded by `audit.md`.
+**The 2026-07-07 security push is the source of truth for the current security posture.** It scored 90/100, closed 15 findings, and pushed the scanner down into a centralized location so coverage is structural rather than opt-in.
 
 **Where the moat lives now (read these to understand the new guarantees):**
 
@@ -152,11 +152,11 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 
 ## Configuration
 
-`mpm_config.json` in the workspace root. Loaded by `internal/core/config/config.go`. Contains:
+The runtime config (`mpm_config.json` in `$MPM_WORKSPACE`) is loaded by `internal/core/config/config.go` and written 0600 by `SaveConfig`. Contains:
 - `memory_dirs`, `sessions_dirs` — watched paths
 - `synth.{model, api_key, base_url, max_tokens, timeout_seconds}` — LLM config for synthesis
 
-The file is written 0600 by `SaveConfig` but the shipped sample ships with `0775` and a real `synth.api_key`. **Never commit a populated `mpm_config.json`.** Only `mpm_config.json.example` (template) is safe in git.
+Only `mpm_config.json.example` (template) is tracked in git. Populated runtime configs are blocked by `.gitignore` (`**/mpm_config.json`) so accidental commits are caught before review.
 
 ## Path Resolution
 

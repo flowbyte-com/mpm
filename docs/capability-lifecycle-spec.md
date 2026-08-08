@@ -2,7 +2,7 @@
 
 **Status:** DRAFT
 **Date:** 2026-08-05
-**Precedent:** `docs/audit-2026-07-16.md`, `docs/EPISTEMIC_CASCADES.md`
+**Precedent:** `docs/EPISTEMIC_CASCADES.md`
 **Companion:** `agent_plugins/mpm-auto-route/` (context injection transport)
 
 ---
