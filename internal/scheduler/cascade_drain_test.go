@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -18,7 +19,8 @@ func TestNewCascadeDrainHandler_AppliesDefaults(t *testing.T) {
 	if got, want := h.Budget(), 30*time.Second; got != want {
 		t.Errorf("Budget() = %v, want %v", got, want)
 	}
-	if got, want := h.BatchSize(), 10; got != want {
+	// BatchSize defaults to 50 (system_config cascade_drain.max_intents_per_tick).
+	if got, want := h.BatchSize(), 50; got != want {
 		t.Errorf("BatchSize() = %d, want %d", got, want)
 	}
 }
@@ -325,6 +327,180 @@ func TestCascadeDrain_InsertsSummaryWakeOnBudgetExhaustedWithProgress(t *testing
 	_ = m
 	if got := countCascadeSummaryWakes(t, dm); got != 1 {
 		t.Errorf("after budget_exhausted tick: expected 1 cascade_summary wake, got %d", got)
+	}
+}
+
+// TestCascadeDrain_BudgetReadsFromSystemConfig verifies that when BatchSize
+// is not explicitly provided, the handler reads cascade_drain.max_intents_per_tick
+// from system_config.
+func TestCascadeDrain_BudgetReadsFromSystemConfig(t *testing.T) {
+	dm := core.NewTestDM(t)
+	// Save integer 25 under the config key.
+	_, err := dm.SaveSystemConfig(CascadeDrainBudgetKey, "25", "", "")
+	if err != nil {
+		t.Fatalf("SaveSystemConfig: %v", err)
+	}
+	h := NewCascadeDrainHandler(dm, slog.Default(), CascadeDrainOptions{})
+	if got, want := h.BatchSize(), 25; got != want {
+		t.Errorf("BatchSize() = %d, want %d", got, want)
+	}
+}
+
+// TestCascadeDrain_BudgetFallsBackToDefault verifies that when no config row
+// exists, the handler uses the documented default of 50.
+func TestCascadeDrain_BudgetFallsBackToDefault(t *testing.T) {
+	dm := core.NewTestDM(t)
+	h := NewCascadeDrainHandler(dm, slog.Default(), CascadeDrainOptions{})
+	if got, want := h.BatchSize(), 50; got != want {
+		t.Errorf("BatchSize() = %d, want %d", got, want)
+	}
+}
+
+// TestCascadeDrain_BudgetFloorAtOne verifies that a config value of 0
+// results in BatchSize=1 (max(1, budget) semantic).
+func TestCascadeDrain_BudgetFloorAtOne(t *testing.T) {
+	dm := core.NewTestDM(t)
+	_, err := dm.SaveSystemConfig(CascadeDrainBudgetKey, "0", "", "")
+	if err != nil {
+		t.Fatalf("SaveSystemConfig: %v", err)
+	}
+	h := NewCascadeDrainHandler(dm, slog.Default(), CascadeDrainOptions{})
+	if got, want := h.BatchSize(), 1; got != want {
+		t.Errorf("BatchSize() = %d, want %d", got, want)
+	}
+}
+
+// TestCascadeDrain_BudgetEnvVar verifies that MPM_CASCADE_DRAIN_MAX_INTENTS_PER_TICK
+// env var overrides the default.
+func TestCascadeDrain_BudgetEnvVar(t *testing.T) {
+	t.Setenv("MPM_CASCADE_DRAIN_MAX_INTENTS_PER_TICK", "10")
+	dm := core.NewTestDM(t)
+	h := NewCascadeDrainHandler(dm, slog.Default(), CascadeDrainOptions{})
+	if got, want := h.BatchSize(), 10; got != want {
+		t.Errorf("BatchSize() = %d, want %d", got, want)
+	}
+}
+
+// countCascadeAuditRows returns the number of system_audit_log rows with
+// component='cascade' in the test database.
+func countCascadeAuditRows(t *testing.T, dm *core.DatabaseManager) int {
+	t.Helper()
+	var n int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'cascade'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count cascade audit rows: %v", err)
+	}
+	return n
+}
+
+// TestCascadeDrain_EmitsAuditRowPerBatch verifies that each successful
+// MaterializeBatch call produces one system_audit_log row with level='info'.
+func TestCascadeDrain_EmitsAuditRowPerBatch(t *testing.T) {
+	dm := core.NewTestDM(t)
+	// Seed 30 intents — with BatchSize=10 this produces exactly 3 batches.
+	seedCascadeOutbox(t, dm, 30)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    5 * time.Second,
+		BatchSize: 10,
+	})
+
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("tickHandler: %v", err)
+	}
+
+	if got := countCascadeAuditRows(t, dm); got != 3 {
+		t.Errorf("expected 3 audit rows (one per batch), got %d", got)
+	}
+
+	// Verify level and component on each row.
+	rows, err := dm.SQLDB().QueryContext(context.Background(),
+		`SELECT level, message, context FROM system_audit_log WHERE component = 'cascade' ORDER BY created_at ASC`)
+	if err != nil {
+		t.Fatalf("query audit log: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var level, message string
+		var ctxRaw sql.NullString
+		if err := rows.Scan(&level, &message, &ctxRaw); err != nil {
+			t.Fatalf("scan row: %v", err)
+		}
+		if level != "info" {
+			t.Errorf("expected level=info, got %s", level)
+		}
+		if message != "cascade drain batch" {
+			t.Errorf("expected message='cascade drain batch', got %q", message)
+		}
+		// Verify context contains the expected fields.
+		if !ctxRaw.Valid || ctxRaw.String == "" {
+			t.Errorf("expected non-empty context JSON")
+			continue
+		}
+		var ctx map[string]interface{}
+		if err := json.Unmarshal([]byte(ctxRaw.String), &ctx); err != nil {
+			t.Fatalf("unmarshal context: %v", err)
+		}
+		for _, field := range []string{"materialized", "failed", "claimed"} {
+			if _, ok := ctx[field]; !ok {
+				t.Errorf("expected context field %q present in audit row", field)
+			}
+		}
+	}
+}
+
+// failingMaterializer wraps the real CascadeMaterializer and returns an error
+// on MaterializeBatch. Used to verify audit log emission on failure.
+type failingMaterializer struct {
+	*core.CascadeMaterializer
+}
+
+func (f *failingMaterializer) MaterializeBatch(ctx context.Context, limit int) (core.MaterializationReport, error) {
+	return core.MaterializationReport{}, fmt.Errorf("synthetic drain failure")
+}
+
+// TestCascadeDrain_EmitsAuditWarnOnBatchFailure verifies that a failing
+// MaterializeBatch call produces one system_audit_log row with level='warn'.
+func TestCascadeDrain_EmitsAuditWarnOnBatchFailure(t *testing.T) {
+	dm := core.NewTestDM(t)
+	seedCascadeOutbox(t, dm, 5)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    5 * time.Second,
+		BatchSize: 10,
+	})
+	h.materializer = &failingMaterializer{h.concrete()}
+
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("tickHandler returned error: %v", err)
+	}
+
+	if got := countCascadeAuditRows(t, dm); got != 1 {
+		t.Errorf("expected 1 audit row after batch failure, got %d", got)
+	}
+
+	// Verify level='warn' and err field in context.
+	var level string
+	var ctxRaw sql.NullString
+	if err := dm.SQLDB().QueryRowContext(context.Background(),
+		`SELECT level, context FROM system_audit_log WHERE component = 'cascade'`,
+	).Scan(&level, &ctxRaw); err != nil {
+		t.Fatalf("query audit log: %v", err)
+	}
+	if level != "warn" {
+		t.Errorf("expected level=warn, got %s", level)
+	}
+	if !ctxRaw.Valid {
+		t.Fatalf("expected non-null context")
+	}
+	var ctx map[string]interface{}
+	if err := json.Unmarshal([]byte(ctxRaw.String), &ctx); err != nil {
+		t.Fatalf("unmarshal context: %v", err)
+	}
+	if _, ok := ctx["err"]; !ok {
+		t.Errorf("expected 'err' field in warn audit context")
 	}
 }
 
