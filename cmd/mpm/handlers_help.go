@@ -57,6 +57,7 @@ var cognitiveHelpSections = []cogHelpSection{
 			{"call", "Universal MCP-tool boundary (use for everything not yet aliased)", false},
 			{"status", "System status dashboard (--json for machine output)", false},
 			{"why", "Why does this artifact exist? — provenance flagship", false},
+			{"provenance", "Artifact creation metadata — inspect, model-yield", false},
 			{"doctor", "Trust-signal flagship — db / embeddings / scheduler / review", false},
 			{"info", "Installation identity — version, paths, counts", false},
 			{"version", "Show mpm version + build info", false},
