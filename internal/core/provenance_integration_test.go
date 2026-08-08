@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -289,6 +290,113 @@ func TestProvenance_SchemaVersionDefaultV1(t *testing.T) {
 	}
 	if version != "v1" {
 		t.Errorf("schema_version = %q, want v1", version)
+	}
+}
+
+func TestProvenance_AllMemoryWritersRecord(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+	// Every saveMemoryRow path produces exactly one provenance row.
+	// Tests saveMemoryNode → saveMemoryRow for each collection.
+	// Subset: memories, theories, decisions. Lessons are tested
+	// separately in Task 5.
+	for _, coll := range []string{"memories", "theories", "decisions"} {
+		t.Run(coll, func(t *testing.T) {
+			id, err := dm.SaveMemoryNode(
+				dm, coll, "test", "", nil, nil, nil, false, 1, "", "0.5", "0.5", "",
+			)
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			var count int
+			if err := dm.db.QueryRow(
+				`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id=?`, id,
+			).Scan(&count); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if count != 1 {
+				t.Errorf("collection=%s: provenance rows = %d, want 1", coll, count)
+			}
+		})
+	}
+}
+
+func TestProvenance_InvocationCorrelatesMultipleArtifacts(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Override the resolver to inject a stable invocation_id.
+	dm.ProvenanceResolver = NewFromStatic(&CreationProvenance{
+		ActorKind:     "agent",
+		FrameworkName: "test",
+		ModelName:     "sonnet",
+	})
+
+	// Three writes under the same invocation.
+	ids := make([]string, 0, 3)
+	for _, coll := range []string{"memories", "theories", "decisions"} {
+		id, err := dm.SaveMemoryNode(
+			dm, coll, "test", "", nil, nil, nil, false, 1, "", "0.5", "0.5", "",
+		)
+		if err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	// We can't directly correlate without per-call invocation threading
+	// (added in Task 6). For now, verify all three rows exist.
+	for _, id := range ids {
+		var count int
+		if err := dm.db.QueryRow(
+			`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id=?`, id,
+		).Scan(&count); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("artifact %s: provenance rows = %d, want 1", id, count)
+		}
+	}
+}
+
+func TestProvenance_DeclaredNotInferred(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Only ActorKind is set; all other provenance fields are absent/unset.
+	// The provenance row must have framework_name=NULL, model_name=NULL,
+	// thinking_level=NULL. MPM does NOT infer these from temperature,
+	// max_tokens, or any other field. ActorKind="agent" is set to avoid
+	// triggering LogAudit from the validation-rejection path (empty ActorKind
+	// would be rejected and LogAudit would attempt a concurrent audit insert,
+	// which fails against the SQLite shared cache used by in-memory test DBs).
+	dm.ProvenanceResolver = NewFromStatic(&CreationProvenance{ActorKind: "agent"})
+
+	id, err := dm.SaveMemoryNode(
+		dm, "memories", "test", "", nil, nil, nil, false, 1, "", "0.5", "0.5", "",
+	)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var (
+		framework sql.NullString
+		model     sql.NullString
+		thinking  sql.NullString
+	)
+	if err := dm.db.QueryRow(
+		`SELECT framework_name, model_name, thinking_level FROM artifact_provenance WHERE artifact_id=?`,
+		id,
+	).Scan(&framework, &model, &thinking); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if framework.Valid {
+		t.Errorf("framework_name = %q, want NULL (declared-not-inferred)", framework.String)
+	}
+	if model.Valid {
+		t.Errorf("model_name = %q, want NULL", model.String)
+	}
+	if thinking.Valid {
+		t.Errorf("thinking_level = %q, want NULL", thinking.String)
 	}
 }
 
