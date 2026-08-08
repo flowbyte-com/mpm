@@ -201,12 +201,21 @@ func handleRecall(args []string) int {
 
 	// Hybrid semantic search: FTS5 + vector embeddings blended
 	if *semantic {
+		// UX guard: --semantic needs an embedding provider. Without one, the
+		// probe falls back to NullProvider and HybridSearch degrades to a
+		// noisy FTS5-only result that misleads the user. Fail clean instead.
+		embedCfg := mpminternal.DefaultEmbeddingConfig()
+		if embedCfg.ProviderName == "null" {
+			return usererror.Error("No embedding provider configured for semantic search.\n" +
+				"       Configure one with `mpm config profile set` (api_key + base_url),\n" +
+				"       set OLLAMA_ENDPOINT, or omit --semantic for standard lexical recall.")
+		}
 		cfg := mpminternal.DefaultHybridConfig()
 		cfg.Limit = *limit
 		cfg.VectorWeight = *vectorWeight
 		hybridResults, err := mpminternal.HybridSearch(dm, query, *collection, cfg)
 		if err != nil {
-			usererror.Error("Semantic search failed: %v", err)
+			return usererror.Error("Semantic search failed: %v", err)
 		}
 		if len(hybridResults) == 0 {
 			fmt.Printf("No memories found for: %s\n", query)
@@ -814,7 +823,7 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 			Tags               string  `json:"tags"`
 			CreatedAt          string  `json:"created_at"`
 			ReinforcementCount int     `json:"reinforcement_count"`
-			Weight             int     `json:"weight"`
+			Weight             float64 `json:"weight"`
 			Score              float64 `json:"score"`
 			Source             string  `json:"source"` // "fts5", "vector", "hybrid"
 			FTS5Score          float64 `json:"fts5_score,omitempty"`

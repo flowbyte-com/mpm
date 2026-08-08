@@ -477,7 +477,7 @@ func formatWakeContext(d WakeContextData) string {
 			if len(content) > 100 {
 				content = content[:100] + "…"
 			}
-			lines = append(lines, fmt.Sprintf("  - [w=%d] %s", r.Weight, content))
+			lines = append(lines, fmt.Sprintf("  - [w=%v] %s", r.Weight, content))
 		}
 	}
 	if d.ScratchpadOrphans != "" {

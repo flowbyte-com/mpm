@@ -341,7 +341,7 @@ func (dm *DatabaseManager) fallbackLocal(query, collection string, limit int, pr
 			Content:    m.Content,
 			Collection: m.Collection,
 			Tags:       strings.Join(m.Tags, ","),
-			Weight:     m.Weight,
+			Weight:     float64(m.Weight),
 			Origin:     "local",
 		})
 	}

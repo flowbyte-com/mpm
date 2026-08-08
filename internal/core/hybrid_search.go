@@ -84,7 +84,7 @@ type HybridResult struct {
 	Metadata           string
 	CreatedAt          int64
 	ReinforcementCount int
-	Weight             int
+	Weight             float64
 	LastAccessedAt     *int64
 	ReferenceID        *string
 	FTS5Score          float64 // raw BM25
@@ -490,7 +490,9 @@ type ftsEntry struct {
 	Metadata           string
 	CreatedAt          int64
 	ReinforcementCount int
-	Weight             int
+	Weight             float64 // SQLite REAL — even though the schema declares INTEGER,
+	                          // values like 1.5 are stored as REAL via type affinity,
+	                          // so Scan must use a float destination.
 	LastAccessedAt     *int64
 	ReferenceID        *string
 	Score              float64
