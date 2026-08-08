@@ -17,8 +17,15 @@ env:
   # FTS5 must be enabled for mattn/go-sqlite3 — see Makefile. Pin these at
   # the workflow level so every step inherits them, instead of repeating
   # per-step env: blocks.
+  #
+  # CGO_LDFLAGS=-lm is required because sqlite3-binding.c (which bundles
+  # FTS5's bm25) calls log(), which lives in libm. Modern dev hosts link
+  # libm implicitly so the Makefile's bare -tags fts5 build works locally,
+  # but the GitHub Actions ubuntu-latest runner doesn't — without -lm the
+  # link step fails with "undefined reference to `log`". Pin it here.
   CGO_ENABLED: "1"
   CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5=1"
+  CGO_LDFLAGS: "-lm"
 
 jobs:
   gate:
