@@ -383,6 +383,57 @@ func TestProvenance_InvocationCorrelatesMultipleArtifacts(t *testing.T) {
 	}
 }
 
+func TestProvenance_CascadeMaterializerSetsParent(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Seed a dead artifact (a memory that was invalidated).
+	deadID := "dead-1"
+	if _, err := dm.db.Exec(
+		`INSERT INTO memories (id, collection, content, created_at, weight, confidence)
+		 VALUES (?, 'memories', 'dead', CAST(strftime('%s','now') AS INTEGER), 1, 0.5)`,
+		deadID,
+	); err != nil {
+		t.Fatalf("seed dead: %v", err)
+	}
+
+	// Override the resolver with a known static base.
+	dm.ProvenanceResolver = NewFromStatic(&CreationProvenance{ActorKind: "agent"})
+
+	// Verify the resolver produces the correct parent override.
+	resolver := dm.GetProvenanceResolver()
+	eff := resolver.Resolve("", "", deadID)
+	if eff.ParentArtifactID != deadID {
+		t.Errorf("parent override = %q, want %q", eff.ParentArtifactID, deadID)
+	}
+
+	// Verify WithProvenanceOverride sets and clears the field correctly.
+	parent := deadID
+	var gotProv *EffectiveProvenance
+	err := dm.WithProvenanceOverride(
+		resolver.Resolve("", "", parent),
+		func() error {
+			gotProv = dm.getEffectiveProvenance()
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("WithProvenanceOverride: %v", err)
+	}
+	if gotProv == nil {
+		t.Fatalf("gotProv nil after override")
+	}
+	if gotProv.ParentArtifactID != parent {
+		t.Errorf("effective provenance parent = %q, want %q", gotProv.ParentArtifactID, parent)
+	}
+
+	// After the fn returns, the override must be cleared.
+	cleared := dm.getEffectiveProvenance()
+	if cleared != nil && cleared.ParentArtifactID != "" {
+		t.Errorf("override not cleared: ParentArtifactID = %q", cleared.ParentArtifactID)
+	}
+}
+
 func TestProvenance_DeclaredNotInferred(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
