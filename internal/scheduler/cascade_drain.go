@@ -19,6 +19,10 @@ import (
 	core "github.com/flowbyte-com/mpm-core"
 )
 
+// CascadeDrainBudgetKey is the system_config key for the per-tick
+// intent budget. Default 50.
+const CascadeDrainBudgetKey = "cascade_drain.max_intents_per_tick"
+
 // CascadeDrainOptions configures the cascade drain handler.
 type CascadeDrainOptions struct {
 	// Budget is the maximum wall-clock time the handler may spend
@@ -65,7 +69,10 @@ func NewCascadeDrainHandler(dm *core.DatabaseManager, logger *slog.Logger, opts 
 		opts.Budget = 30 * time.Second
 	}
 	if opts.BatchSize <= 0 {
-		opts.BatchSize = 10
+		opts.BatchSize = dm.GetConfigInt(CascadeDrainBudgetKey, 50)
+	}
+	if opts.BatchSize < 1 {
+		opts.BatchSize = 1
 	}
 	mat := dm.NewCascadeMaterializer(core.CascadeMaterializerOptions{
 		MaxCascadeDepth: 3,
@@ -136,12 +143,30 @@ func (h *CascadeDrainHandler) tickHandler(ctx context.Context) (err error) {
 
 		report, err := h.materializer.MaterializeBatch(ctx, h.batchSize)
 		if err != nil {
+			h.dm.LogAudit(core.AuditWarn, "cascade", "cascade drain batch failed", "", core.AuditContext{
+				"yield_reason": "error",
+				"err":          err.Error(),
+			})
 			h.logger.Error("cascade drain batch failed", "err", err)
 			h.logYield(ctx, totalProcessed, totalFailed, "error", time.Since(start))
 			return nil
 		}
 		totalProcessed += report.Materialized
 		totalFailed += report.Failed
+
+		// Only emit audit row for batches that did actual work.
+		if report.Claimed > 0 {
+			h.dm.LogAudit(core.AuditInfo, "cascade", "cascade drain batch", "", core.AuditContext{
+				"claimed":              report.Claimed,
+				"processed":            report.Processed,
+				"materialized":         report.Materialized,
+				"failed":               report.Failed,
+				"skipped":              report.Skipped,
+				"suppressed":           report.Suppressed,
+				"batch_size":           h.batchSize,
+				"budget_remaining_ms":  time.Until(deadline).Milliseconds(),
+			})
+		}
 
 		if report.Claimed == 0 {
 			h.logYield(ctx, totalProcessed, totalFailed, "queue_empty", time.Since(start))
