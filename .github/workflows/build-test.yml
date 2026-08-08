@@ -59,8 +59,30 @@ jobs:
       # ctx, go, mutex, sql, fd, imports. Fatal classes are zero-tolerance;
       # review classes ratchet against measured baselines so any NEW site
       # fails the commit. Keep in sync with scripts/pre-commit.
+      #
+      # Annotations: build once, then emit ::error workflow commands from the
+      # structured JSON so every violation renders on its exact line in the
+      # PR "Files changed" view (file paths in the report are relative to
+      # $GITHUB_WORKSPACE, which the annotations property maps directly).
+      # The gate step fails the job only if thresholds are exceeded.
       - name: mpm-lint gate
-        run: go run ./cmd/mpm-lint --gate
+        shell: bash
+        run: |
+          go build -tags fts5 -o /tmp/mpm-lint ./cmd/mpm-lint
+          /tmp/mpm-lint --json > /tmp/mpm-lint-report.json
+          python3 - <<'EOF'
+          import json
+          report = json.load(open("/tmp/mpm-lint-report.json"))
+          for rule, doc in report.items():
+              for site in doc["sites"] or []:
+                  msg = site.get("reason") or site["classification"]
+                  if site.get("pattern"):
+                      msg += f" {site['pattern']}"
+                  if site.get("func_name"):
+                      msg += f" ({site['func_name']})"
+                  print(f"::error file={site['file']},line={site['line']},col={site.get('column', 1)}::{rule}: {msg}")
+          EOF
+          /tmp/mpm-lint --gate
 
       # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
       # gate gets tighter locally, it gets tighter in CI too.
