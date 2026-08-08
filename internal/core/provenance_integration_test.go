@@ -97,6 +97,12 @@ func TestProvenance_ViewsReturnExpectedSchema(t *testing.T) {
 				}
 			}
 		}
+
+		// Runtime validation: confirm the view can be instantiated without
+		// error (catches references to non-existent columns).
+		if _, err := dm.db.Query(`SELECT * FROM ` + view + ` LIMIT 0`); err != nil {
+			t.Errorf("view %s cannot be queried at runtime: %v", view, err)
+		}
 	}
 }
 

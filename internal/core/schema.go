@@ -401,6 +401,9 @@ var BaseTables = []string{
 	//   (artifact.deleted_at IS NULL AND artifact.weight >= 1
 	//    AND now - artifact.created_at >= 30 days)
 	//
+	// "Challenged" is defined as: metadata->>'$.status' = 'challenged'
+	// (the challenge system stores status in metadata, not a column).
+	//
 	// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
 	// (see "Analytics views" section). The CLI surface consumes
 	// v_model_memory_yield as `mpm provenance model-yield`. The
@@ -420,7 +423,7 @@ var BaseTables = []string{
 			      / NULLIF(SUM(CASE WHEN (CAST(strftime('%s','now') AS INTEGER) - m.created_at) >= 2592000
 			                        THEN 1 ELSE 0 END), 0) * 100, 1) AS survival_30d_pct,
 			SUM(m.reinforcement_count) AS total_reinforcements,
-			SUM(CASE WHEN m.is_challenged = 1 THEN 1 ELSE 0 END) AS total_challenged
+			SUM(CASE WHEN json_extract(m.metadata, '$.status') = 'challenged' THEN 1 ELSE 0 END) AS total_challenged
 		FROM artifact_provenance p
 		JOIN memories m ON p.artifact_id = m.id AND p.artifact_type = 'memory'
 		GROUP BY p.provider_name, p.model_name, p.framework_name, p.framework_adapter;`,
