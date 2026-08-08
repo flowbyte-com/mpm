@@ -120,11 +120,13 @@ func main() {
 	// gc               → MPM garbage collection sweep
 	// broadcast        → active dissemination fan-out to receiving agents
 	// cascade_drain    → per-tick cascade outbox drain (30s budget)
+	// cascade_summary  → forensic log line for each non-steady-state drain tick
 	// (anything else)  → notification kind, passes through to opportunistic fold
 	s.Register("snapshot", scheduler.SnapshotHandler)
 	s.Register("critic_audit", scheduler.CriticAuditHandler)
 	s.Register("gc", scheduler.GCHandler)
 	s.Register("broadcast", scheduler.BroadcastHandler)
+	s.Register("cascade_summary", scheduler.NewCascadeSummaryHandler(logger))
 	s.RegisterTickHandler("cascade_drain", scheduler.NewCascadeDrainHandler(
 		dm,
 		logger,

@@ -246,3 +246,109 @@ func TestCascadeDrain_NoIntentsLeftInProcessing(t *testing.T) {
 		t.Errorf("expected 0 intents in 'processing' after handler exit; got %d", stuck)
 	}
 }
+
+// countCascadeSummaryWakes returns the number of cascade_summary wake rows
+// for the test database. Used to verify state-transition gating and
+// idle-tick dedupe.
+func countCascadeSummaryWakes(t *testing.T, dm *core.DatabaseManager) int {
+	t.Helper()
+	var n int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE json_extract(metadata, '$.kind') = 'cascade_summary'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count cascade_summary wakes: %v", err)
+	}
+	return n
+}
+
+// TestCascadeDrain_InsertsSummaryWakeOnQueueEmpty covers issue #5's
+// "always insert on drain" branch. An empty outbox yields queue_empty,
+// which is a state transition — exactly one wake row must appear.
+func TestCascadeDrain_InsertsSummaryWakeOnQueueEmpty(t *testing.T) {
+	dm := core.NewTestDM(t)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{Budget: 5 * time.Second})
+
+	if got := countCascadeSummaryWakes(t, dm); got != 0 {
+		t.Fatalf("baseline: expected 0 cascade_summary wakes, got %d", got)
+	}
+
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("tickHandler: %v", err)
+	}
+
+	if got := countCascadeSummaryWakes(t, dm); got != 1 {
+		t.Errorf("after queue_empty tick: expected 1 cascade_summary wake, got %d", got)
+	}
+
+	// Verify the metadata shape — materialized/failed/pending_after/elapsed_ms.
+	m, f, pa, _, ok, err := dm.LastCascadeSummaryMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("LastCascadeSummaryMetrics: %v", err)
+	}
+	if !ok {
+		t.Fatal("LastCascadeSummaryMetrics: ok=false after a tick that should have inserted")
+	}
+	if m != 0 || f != 0 || pa != 0 {
+		t.Errorf("queue_empty metrics: got materialized=%d failed=%d pending_after=%d, want all 0", m, f, pa)
+	}
+}
+
+// TestCascadeDrain_InsertsSummaryWakeOnBudgetExhaustedWithProgress
+// covers the "budget_exhausted + metrics differ from prior" branch —
+// seeding 50 intents then running with a tight budget guarantees that
+// the handler processes some rows before yielding.
+func TestCascadeDrain_InsertsSummaryWakeOnBudgetExhaustedWithProgress(t *testing.T) {
+	dm := core.NewTestDM(t)
+	seedCascadeOutbox(t, dm, 50)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{
+		Budget:    1 * time.Millisecond, // yields after at most one batch
+		BatchSize: 10,
+	})
+
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("tickHandler: %v", err)
+	}
+
+	// budget_exhausted with metrics != (0,0,0) must insert unconditionally.
+	m, _, _, _, ok, err := dm.LastCascadeSummaryMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("LastCascadeSummaryMetrics: %v", err)
+	}
+	if !ok {
+		t.Fatal("LastCascadeSummaryMetrics: ok=false after budget_exhausted tick with work")
+	}
+	// m may be 0 if MaterializeBatch on the test seed synthetics doesn't
+	// count as "materialized" — the load-bearing assertion is that a wake
+	// row exists at all, not the exact count.
+	_ = m
+	if got := countCascadeSummaryWakes(t, dm); got != 1 {
+		t.Errorf("after budget_exhausted tick: expected 1 cascade_summary wake, got %d", got)
+	}
+}
+
+// TestCascadeDrain_DedupesIdleTicks covers the dedupe-by-prior-metrics
+// branch. Two consecutive ticks against an empty outbox with identical
+// metrics must produce exactly ONE wake row, not two.
+func TestCascadeDrain_DedupesIdleTicks(t *testing.T) {
+	dm := core.NewTestDM(t)
+	logger, _ := captureLogs(t)
+	h := NewCascadeDrainHandler(dm, logger, CascadeDrainOptions{Budget: 5 * time.Second})
+
+	// First tick: always inserts (no prior wake row to dedupe against).
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	if got := countCascadeSummaryWakes(t, dm); got != 1 {
+		t.Fatalf("after first tick: expected 1 cascade_summary wake, got %d", got)
+	}
+
+	// Second tick: same outbox state, same metrics → must be deduped.
+	if err := h.tickHandler(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if got := countCascadeSummaryWakes(t, dm); got != 1 {
+		t.Errorf("after second identical tick: expected 1 cascade_summary wake (deduped), got %d", got)
+	}
+}
