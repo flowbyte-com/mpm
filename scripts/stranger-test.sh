@@ -67,32 +67,46 @@ trap cleanup EXIT
 
 # --- helpers ------------------------------------------------------------------
 
-# Run an mpm command, fail loudly on non-zero exit or unexpected output.
+# Run an mpm command, fail loudly on unexpected exit or output.
 # Usage:
-#   step "label" "expected-substring" -- mpm <args...>
-#   step "label" "" -- mpm <args...>             # empty expected = skip check
+#   step "label" "expected-substring" -- mpm <args...>            # exit 0 expected
+#   step "label" "expected-substring" "expected-exit-code" -- mpm <args...>
+#   step "label" -- mpm <args...>                                  # no substring check
+#   step "label" "" "expected-exit-code" -- mpm <args...>          # exit code only
 step() {
     local label="$1"; shift
-    local expected="${1-}"
-    # When called as `step "label" -- mpm ...`, the first arg is "--"; treat as no expected.
-    if [[ "$expected" = "--" ]]; then
-        expected=""
-    else
-        shift
-    fi
+    local expected=""
+    local expected_exit="0"
+    # Two-pass: peel off expected-substring and/or expected-exit-code before the "--".
+    for _ in 1 2; do
+        if [[ "${1:-}" = "--" ]]; then
+            shift
+            break
+        fi
+        # If the next arg is a single digit (0-9), treat as exit code; otherwise substring.
+        if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+            expected_exit="$1"; shift
+        else
+            expected="$1"; shift
+        fi
+    done
+    # Consume the trailing "--" separator if it's still the first arg.
     [[ "${1:-}" = "--" ]] && shift
     if [[ "${VERBOSE}" = "1" ]]; then
         echo "[stranger] $label"
-        echo "[stranger]   \$ $*"
+        echo "[stranger]   \$ $* (expected exit $expected_exit)"
     fi
     local out
-    out="$("$@" 2>&1)" || {
-        echo "❌ [$label] command failed (exit $?)" >&2
+    local rc
+    out="$("$@" 2>&1)"
+    rc=$?
+    if [[ "$rc" != "$expected_exit" ]]; then
+        echo "❌ [$label] unexpected exit code: got $rc, expected $expected_exit" >&2
         echo "  command: $*" >&2
         echo "  output:" >&2
         echo "$out" | sed 's/^/    /' >&2
         exit 1
-    }
+    fi
     if [[ -n "$expected" ]] && ! grep -qF "$expected" <<<"$out"; then
         echo "❌ [$label] output missing expected substring: $expected" >&2
         echo "  command: $*" >&2
@@ -120,16 +134,13 @@ step "2. mpm add (store memory)" "Added memory" -- \
 step "3. mpm recall <token>" "alpha bravo charlie" -- \
     "$MPM_BIN" recall "alpha"
 
-# 4. SKIPPED — `mpm recall --semantic` errors on fresh install:
-#      "Semantic search failed: hybrid search: FTS5/LIKE failed:
-#       scanning FTS entry row: sql: Scan error on column index 7,
-#       name "weight": converting driver.Value type float64 ("1.5")
-#       to a int: invalid syntax"
-#    Root cause: hybrid_search.go scans the `weight` column as int, but
-#    SQLite returns REAL (float64) for that column. Fix is to use
-#    sql.NullFloat64 or float64 in the Scan target. Tracked as a known
-#    issue — see KNOWN_ISSUES at the bottom of this script.
-echo "[stranger] step 4 skipped — semantic search bug (see KNOWN_ISSUES)"
+# 4. --semantic without an embedding provider must fail clean (exit 1,
+#    human-readable error) rather than crash or silently fall through.
+#    The earlier type-mismatch bug and silent FTS5 fallback were both
+#    silent UX failures for first-time users.
+step "4. mpm recall --semantic (no embedding provider → clean error)" \
+    "No embedding provider configured" "1" -- \
+    "$MPM_BIN" recall --semantic "alpha"
 
 # 5. mpm wake — must return recent context containing the stored memory.
 step "5. mpm wake (last context)" "alpha bravo charlie" -- \
@@ -167,10 +178,13 @@ step "11. mpm status (after writes)" "Memories:" -- \
 step "12. mpm doctor" "" -- "$MPM_BIN" doctor
 
 echo
-echo "✅ stranger test passed (11 active steps + 1 skipped, scratch cleaned up)"
+echo "✅ stranger test passed (12 steps, scratch cleaned up)"
 echo
-echo "KNOWN_ISSUES (recorded during the 2026-08-08 alpha audit):"
-echo "  - SKIP-4: mpm recall --semantic returns type-mismatch error on fresh"
-echo "            install. HybridSearch scans weight column as int but the"
-echo "            column is REAL. Fix: change Scan target to float64 /"
-echo "            sql.NullFloat64 in hybrid_search.go."
+echo "Resolved during the 2026-08-08 alpha audit:"
+echo "  - Semantic search type mismatch: weight column scanned as int"
+echo "    despite SQLite REAL storage. Fixed by switching ftsEntry.Weight,"
+echo "    HybridResult.Weight, and hybridEntry.Weight to float64."
+echo "  - Silent --semantic fallback: when no embedding provider was set,"
+echo "    HybridSearch returned a degraded FTS5 result without telling the"
+echo "    user. Fixed by checking DefaultEmbeddingConfig().ProviderName"
+echo "    and returning a clean error before the search runs."
