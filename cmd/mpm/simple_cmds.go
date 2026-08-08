@@ -612,7 +612,17 @@ func handleShredMem(args []string) int {
 
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
-	if len(args) < 2 {
+	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	tag := fs.String("tag", "", "Tags for the reference")
+	reason := fs.String("reason", "", "Import reason (why this is being added)")
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 1
+	}
+
+	if fs.NArg() < 1 {
 		usererror.Usage("mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]")
 // Multi-line usage help text — structured output, not a single error message
 		fmt.Fprintf(os.Stderr, "  --reason: import reason (why this is being added; seed of the admission justification chain)\n")
@@ -621,37 +631,14 @@ func handleRefAdd(args []string) int {
 		return 1
 	}
 
-	filePath := args[1]
+	filePath := fs.Arg(0)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		usererror.Error("File not found: %s", filePath)
+		return usererror.Error("File not found: %s", filePath)
 	}
 
-	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
-	tag := fs.String("tag", "", "Tags for the reference")
-	reason := fs.String("reason", "", "Import reason (why this is being added)")
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
-	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
-	if err := fs.Parse(args[2:]); err != nil {
-		return 1
-	}
-
-	// Pre-scan for --json and --chunk-size since callers may place them after the path
-	var parsedChunkSize int
-	jsonOutputFromArgs, argsWithoutJSON := ExtractJSONFlag(args[2:])
-	*jsonOutput = jsonOutputFromArgs
-
-	for i, arg := range argsWithoutJSON {
-		if arg == "--chunk-size" && i+1 < len(argsWithoutJSON) {
-			fmt.Sscanf(argsWithoutJSON[i+1], "%d", &parsedChunkSize)
-		}
-	}
-
-	// Validate and apply chunk size
-	if parsedChunkSize != 0 {
-		*chunkSize = parsedChunkSize
-	}
+	// Validate chunk size range (flag.Parse already applied the value)
 	if *chunkSize < 64 || *chunkSize > 2048 {
-		usererror.Error("--chunk-size must be between 64 and 2048 (got %d)", *chunkSize)
+		return usererror.Error("--chunk-size must be between 64 and 2048 (got %d)", *chunkSize)
 	}
 
 	dm := getDB()
