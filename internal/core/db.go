@@ -275,6 +275,27 @@ type DatabaseManager struct {
 	ProvenanceResolver *ProvenanceResolver
 }
 
+// GetProvenanceResolver returns the resolver, lazily initializing
+// from env if not set. Tests override the field directly and restore
+// in t.Cleanup. No package-level global mutability.
+func (dm *DatabaseManager) GetProvenanceResolver() *ProvenanceResolver {
+	if dm.ProvenanceResolver == nil {
+		dm.ProvenanceResolver = NewFromEnv()
+	}
+	return dm.ProvenanceResolver
+}
+
+// nodeUnwrapTx returns the *sql.Tx from a DBNode. When DBNode is a
+// txNode (from a WithTx call), the *sql.Tx is extracted so all writes
+// join the same transaction. When DBNode is the standalone DatabaseManager,
+// nil is returned — RecordArtifactProvenance handles that as a fresh tx.
+func nodeUnwrapTx(node DBNode) *sql.Tx {
+	if tn, ok := node.(*txNode); ok {
+		return tn.tx
+	}
+	return nil
+}
+
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
 
 // SQLDB returns the underlying *sql.DB for direct queries.
@@ -2270,6 +2291,49 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash)
 	if err != nil {
 		return id, err
+	}
+
+	// Artifact provenance (best-effort telemetry). RecordArtifactProvenance
+	// is SAVEPOINT-isolated so provenance failures never affect the artifact
+	// tx. For standalone writes (no existing tx), we open a short-lived tx
+	// scoped to just the provenance INSERT. For in-tx writes (via WithTx),
+	// we reuse the caller's tx so both the artifact and provenance INSERTs
+	// commit atomically together.
+	artifactType := artifactTypeFromCollection(collection)
+	if prov := dm.GetProvenanceResolver(); prov != nil {
+		var tx *sql.Tx
+		var err error
+		if existing := nodeUnwrapTx(node); existing != nil {
+			tx = existing
+		} else {
+			tx, err = dm.db.Begin()
+			if err != nil {
+				dm.LogAudit(AuditWarn, "provenance", "begin failed", "", AuditContext{
+					"memory_id": id,
+				})
+			}
+		}
+		if tx != nil {
+			res := dm.RecordArtifactProvenance(
+				tx, id, artifactType, prov.Resolve("", "", ""),
+			)
+			if !res.Recorded {
+				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
+					"memory_id":     id,
+					"artifact_type": artifactType,
+					"reason":        res.ValidationReason,
+					"sql_error":     res.SQLError,
+				})
+			}
+			if nodeUnwrapTx(node) == nil {
+				// Only commit/rollback our own tx; caller tx is managed externally.
+				if res.Recorded {
+					tx.Commit()
+				} else {
+					tx.Rollback()
+				}
+			}
+		}
 	}
 
 	// IVF cluster assignment: best-effort after the memory row is
