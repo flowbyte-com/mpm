@@ -201,7 +201,7 @@ func sectionHelpContent(section string) (string, bool) {
                     patch-memory
     mpm kb lesson   list|show|search|shred|add
     mpm kb skill    list|show|read|save
-    mpm kb topic    list|show|search|shred|add|link
+    mpm kb topic    list|show|search|shred|add
     mpm kb reference list|show|search|shred|add
     mpm kb theory    [pending|resolved|all]
     mpm kb decision  record-decision

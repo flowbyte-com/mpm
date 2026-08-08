@@ -763,7 +763,7 @@ var kbSubcommandDescs = []struct {
 }{
 	{"memory list|show|search|shred", "Memory operations"},
 	{"memory add|reinforce|weaken|snooze|set-weight|promote", "Memory mutations"},
-	{"topic list|show|search|shred|add|link", "Topic operations"},
+	{"topic list|show|search|shred|add", "Topic operations"},
 	{"lesson list|show|search|shred|add", "Lesson operations"},
 	{"session list|get|search|shred|stats", "Session operations"},
 	{"reference list|show|search|shred|add", "Reference library"},
@@ -791,7 +791,6 @@ func printKBHelp() {
 	fmt.Println("  mpm kb memory list")
 	fmt.Println("  mpm kb memory search <query>")
 	fmt.Println("  mpm kb memory shred <id>")
-	fmt.Println("  mpm kb topic link <topicId> <linkTopicId>")
 	fmt.Println("  mpm kb theories pending")
 	fmt.Println()
 }

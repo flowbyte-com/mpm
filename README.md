@@ -1090,7 +1090,6 @@ mpm kb topic add <name> [description]
 mpm kb topic search <query>
 mpm kb topic show <id>
 mpm kb topic shred <id>
-mpm kb topic link <topicId> <linkTopicId>
 
 # Lesson
 mpm kb lesson list
@@ -1181,7 +1180,6 @@ mpm ops persona [list|active|set|clear]
 # XITL Stance (runtime persona hot-swap — no restart)
 mpm ops stance assume <mode> <persona> <rationale>
 mpm ops stance synthesize <name> [flags]
-mpm ops stance promote
 
 # Multi-agent shared epistemology
 mpm ops shared [status]
