@@ -265,6 +265,14 @@ type DatabaseManager struct {
 	// goroutine as lifecycle-safe; the mirror writes stay detached from the
 	// search path but are no longer unjoinable.
 	mirrorWG sync.WaitGroup
+
+	// ProvenanceResolver is the process-wide provenance resolver.
+	// Constructed lazily on first access via GetProvenanceResolver().
+	// Tests override the field directly and restore in t.Cleanup.
+	// No package-level global mutability — tests cannot pollute
+	// parallel tests, and production code cannot be accidentally
+	// affected by test-SetOverride.
+	ProvenanceResolver *ProvenanceResolver
 }
 
 const slowQueryThreshold = 100 * time.Millisecond // queries slower than this are logged as "slow"
