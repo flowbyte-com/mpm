@@ -152,9 +152,18 @@ func TestSaveMemoryWithContext_NoWrapperContext_NoSnapshot(t *testing.T) {
 		t.Errorf("legacy path stamped a snapshot — backward compat broken: %s", rawMeta)
 	}
 
-	// But the legacy provenance block must still be there (DecayWeights contract).
-	if !strings.Contains(rawMeta, `"provenance"`) {
-		t.Error("legacy metadata.provenance block missing — DecayWeights contract broken")
+	// Provenance is now captured in the artifact_provenance table, not in
+	// metadata JSON. Verify the DecayWeights contract (provenance exists
+	// somewhere) by checking the new table.
+	var provCount int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'memory'`,
+		mem.ID,
+	).Scan(&provCount); err != nil {
+		t.Fatalf("read artifact_provenance: %v", err)
+	}
+	if provCount == 0 {
+		t.Error("expected a row in artifact_provenance — DecayWeights contract broken")
 	}
 
 	_ = out

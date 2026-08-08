@@ -217,26 +217,15 @@ type ActiveContext struct {
 	Hostname string
 }
 
-// provenanceMeta returns the per-write provenance block. Always emits
-// the same shape regardless of which fields are set — downstream
-// consumers can rely on the keys existing.
+// provenanceMeta is deprecated. The full provenance block is now
+// captured at the artifact_provenance table by RecordArtifactProvenance.
+// The legacy metadata.provenance.* JSON block is left in existing rows
+// for forensic history but is no longer written to new rows.
+//
+// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+// (see "Migration plan > Legacy metadata.provenance.* JSON").
 func (ac ActiveContext) provenanceMeta() map[string]interface{} {
-	model := ac.Model
-	if model == "" {
-		model = "call"
-	}
-	agent := ac.Agent
-	if agent == "" {
-		agent = "mpm_call"
-	}
-	return map[string]interface{}{
-		"provenance": map[string]interface{}{
-			"source":  "agent",
-			"model":   model,
-			"compute": "relative",
-			"agent":   agent,
-		},
-	}
+	return map[string]interface{}{}
 }
 
 // withActiveContextMeta merges provenance + active-mode/persona into
