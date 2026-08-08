@@ -142,6 +142,9 @@ func NewRouter() *CommandRouter {
 
 		// Capability namespace — executable primitives (seed, lifecycle)
 		"capability": {Name: "capability", Description: "Manage capabilities (seed, lifecycle, governance)", MinArgs: 0},
+
+		// Provenance — artifact creation metadata
+		"provenance": {Name: "provenance", Description: "Show artifact provenance (mpm provenance help for subcommands)", MinArgs: 0},
 	}
 
 	return r
@@ -334,6 +337,31 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleDebug(args)
 	case "capability":
 		return handleCapability(args)
+	case "provenance":
+		if len(args) < 2 {
+			// No subcommand — show brief usage.
+			fmt.Println("Usage: mpm provenance <artifact_id>")
+			fmt.Println("       mpm provenance inspect --invocation <id>")
+			fmt.Println("       mpm provenance model-yield [--days N]")
+			fmt.Println("       mpm provenance help")
+			return 0
+		}
+		sub := args[1]
+		subArgs := args[2:]
+		switch sub {
+		case "inspect":
+			return handleProvenanceInspect(subArgs)
+		case "model-yield":
+			return handleProvenanceModelYield(subArgs)
+		case "help":
+			fmt.Println("Usage: mpm provenance <artifact_id>")
+			fmt.Println("       mpm provenance inspect --invocation <id>")
+			fmt.Println("       mpm provenance model-yield [--days N]")
+			return 0
+		default:
+			// Bare artifact ID.
+			return handleProvenance(args[1:])
+		}
 	case "call":
 		return handleCall(args[1:])
 	case "evidence":
