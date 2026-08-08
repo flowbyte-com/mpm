@@ -293,13 +293,11 @@ func TestProvenance_SchemaVersionDefaultV1(t *testing.T) {
 	}
 }
 
-func TestProvenance_AllMemoryWritersRecord(t *testing.T) {
+func TestProvenance_AllArtifactWritersRecord(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
 	// Every saveMemoryRow path produces exactly one provenance row.
 	// Tests saveMemoryNode → saveMemoryRow for each collection.
-	// Subset: memories, theories, decisions. Lessons are tested
-	// separately in Task 5.
 	for _, coll := range []string{"memories", "theories", "decisions"} {
 		t.Run(coll, func(t *testing.T) {
 			id, err := dm.SaveMemoryNode(
@@ -308,9 +306,19 @@ func TestProvenance_AllMemoryWritersRecord(t *testing.T) {
 			if err != nil {
 				t.Fatalf("save: %v", err)
 			}
+			// Map collection to artifact_type (memories→memory, theories→theory, decisions→decision).
+			artifactType := coll
+			if coll == "memories" {
+				artifactType = "memory"
+			} else if coll == "theories" {
+				artifactType = "theory"
+			} else if coll == "decisions" {
+				artifactType = "decision"
+			}
 			var count int
 			if err := dm.db.QueryRow(
-				`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id=?`, id,
+				`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id=? AND artifact_type=?`,
+				id, artifactType,
 			).Scan(&count); err != nil {
 				t.Fatalf("count: %v", err)
 			}
@@ -319,6 +327,23 @@ func TestProvenance_AllMemoryWritersRecord(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("lesson", func(t *testing.T) {
+		lesson, err := dm.AddLesson("test lesson provenance", LessonType("insight"), nil, "")
+		if err != nil {
+			t.Fatalf("add lesson: %v", err)
+		}
+		var count int
+		if err := dm.db.QueryRow(
+			`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id=? AND artifact_type='lesson'`,
+			lesson.ID,
+		).Scan(&count); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("lesson %s: provenance rows = %d, want 1", lesson.ID, count)
+		}
+	})
 }
 
 func TestProvenance_InvocationCorrelatesMultipleArtifacts(t *testing.T) {

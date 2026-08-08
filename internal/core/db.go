@@ -3164,6 +3164,48 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		return nil, err
 	}
 
+	// Artifact provenance (best-effort telemetry). RecordArtifactProvenance
+	// is SAVEPOINT-isolated so provenance failures never affect the artifact
+	// tx. For standalone writes (no existing tx), we open a short-lived tx
+	// scoped to just the provenance INSERT. For in-tx writes (via WithTx),
+	// we reuse the caller's tx so both the artifact and provenance INSERTs
+	// commit atomically together.
+	if prov := dm.GetProvenanceResolver(); prov != nil {
+		var tx *sql.Tx
+		var err error
+		if existing := nodeUnwrapTx(dm); existing != nil {
+			tx = existing
+		} else {
+			tx, err = dm.db.Begin()
+			if err != nil {
+				dm.LogAudit(AuditWarn, "provenance", "begin failed", "", AuditContext{
+					"lesson_id": id,
+				})
+			}
+		}
+		if tx != nil {
+			res := dm.RecordArtifactProvenance(
+				tx, id, "lesson", prov.Resolve("", "", ""),
+			)
+			if !res.Recorded {
+				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
+					"lesson_id":     id,
+					"artifact_type": "lesson",
+					"reason":        res.ValidationReason,
+					"sql_error":     res.SQLError,
+				})
+			}
+			if nodeUnwrapTx(dm) == nil {
+				// Only commit/rollback our own tx; caller tx is managed externally.
+				if res.Recorded {
+					tx.Commit()
+				} else {
+					tx.Rollback()
+				}
+			}
+		}
+	}
+
 	return &Lesson{
 		ID:                 id,
 		Type:               lessonType,
