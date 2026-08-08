@@ -70,6 +70,12 @@ secrets.env
 **/mpm_config.json
 !mpm_config.json.example
 mpm_config.json.bak
+
+# Root-level toxicphrases.txt is runtime-seeded by memory.go:574 when
+# MPM_WORKSPACE == repo root (this dev env has ~/.openclaw/workspace as
+# a symlink to ~/workspace). The canonical reference template lives at
+# internal/core/toxicphrases.txt.
+/toxicphrases.txt
 src/db/mirror.jsonl
 src/db/mpm.db
 src/db/*.jsonl
