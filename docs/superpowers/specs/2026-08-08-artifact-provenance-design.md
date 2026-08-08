@@ -165,12 +165,10 @@ SELECT
                          THEN 1 ELSE 0 END) AS REAL)
           / NULLIF(SUM(CASE WHEN (CAST(strftime('%s','now') AS INTEGER) - m.created_at) >= 2592000
                             THEN 1 ELSE 0 END), 0) * 100, 1) AS survival_30d_pct,
-    SUM(m.reinforce_count) AS total_reinforcements,
-    SUM(m.challenge_count) AS total_challenges,
-    COUNT(DISTINCT c.memory_id) AS contradicted_count
+    SUM(m.reinforcement_count) AS total_reinforcements,
+    SUM(CASE WHEN m.is_challenged = 1 THEN 1 ELSE 0 END) AS total_challenged
 FROM artifact_provenance p
 JOIN memories m ON p.artifact_id = m.id AND p.artifact_type = 'memory'
-LEFT JOIN contradiction_log c ON m.id = c.memory_id
 GROUP BY p.provider_name, p.model_name, p.framework_name, p.framework_adapter;
 
 CREATE VIEW IF NOT EXISTS v_model_theory_utility AS
