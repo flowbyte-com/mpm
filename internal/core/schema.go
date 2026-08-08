@@ -328,6 +328,114 @@ var BaseTables = []string{
 	`CREATE INDEX IF NOT EXISTS idx_epistemic_provenance_downstream
 		ON epistemic_provenance(downstream_id);`,
 
+	// ── Artifact Provenance (2026-08-08) ─────────────────────────────
+	//
+	// First-class creation telemetry for memories, theories, lessons,
+	// decisions. The schema records the declared execution context at
+	// artifact creation time. Designed to answer:
+	//
+	//   "Which model produced which memory, and what happened to it?"
+	//
+	// One UNIQUE (artifact_id, artifact_type) constraint enforces the
+	// "one provenance row per artifact" invariant at the storage
+	// boundary. A second hook that records provenance for the same
+	// artifact fails with a UNIQUE violation, not a silent duplicate.
+	//
+	// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+	//
+	// schema_version is semantic (not additive). Additive nullable
+	// fields do not require a version bump; a version bump is reserved
+	// for semantic changes to existing fields. Default is 'v1'.
+	//
+	// thinking_visible is INTEGER (0/1) for SQLite portability — the
+	// BOOLEAN alias is not preserved through sql.Dump.
+	//
+	// The two CHECK constraints enforce the artifact_type and
+	// actor_kind vocabularies at the storage boundary; a typo in a
+	// caller is rejected by the database, not silently propagated.
+	`CREATE TABLE IF NOT EXISTS artifact_provenance (
+		id                   TEXT PRIMARY KEY,
+		artifact_id          TEXT NOT NULL,
+		artifact_type        TEXT NOT NULL,
+		created_at           INTEGER NOT NULL,
+		schema_version       TEXT NOT NULL DEFAULT 'v1',
+		actor_kind           TEXT NOT NULL,
+		actor_id             TEXT,
+		framework_name       TEXT,
+		framework_version    TEXT,
+		framework_adapter    TEXT,
+		provider_name        TEXT,
+		model_name           TEXT,
+		model_revision       TEXT,
+		api_endpoint         TEXT,
+		temperature          REAL,
+		max_tokens           INTEGER,
+		reasoning_mode       TEXT,
+		reasoning_effort     REAL,
+		thinking_level       TEXT,
+		thinking_tokens      INTEGER,
+		thinking_visible     INTEGER,
+		session_id           TEXT,
+		invocation_id        TEXT,
+		parent_artifact_id   TEXT,
+		provider_metadata    TEXT,
+		UNIQUE (artifact_id, artifact_type),
+		CHECK (artifact_type IN ('memory','theory','lesson','decision')),
+		CHECK (actor_kind IN ('agent','human','import','system','unknown'))
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_provenance_artifact
+		ON artifact_provenance(artifact_id, artifact_type);`,
+	`CREATE INDEX IF NOT EXISTS idx_provenance_model
+		ON artifact_provenance(provider_name, model_name);`,
+	`CREATE INDEX IF NOT EXISTS idx_provenance_actor
+		ON artifact_provenance(actor_kind, framework_name);`,
+	`CREATE INDEX IF NOT EXISTS idx_provenance_session
+		ON artifact_provenance(session_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_provenance_invocation
+		ON artifact_provenance(invocation_id);`,
+
+	// ── Analytics Views (2026-08-08) ─────────────────────────────
+	//
+	// Both views are descriptive lifecycle measures, NOT quality scores.
+	// "Survived_30d" is mechanically defined as:
+	//   (artifact.deleted_at IS NULL AND artifact.weight >= 1
+	//    AND now - artifact.created_at >= 30 days)
+	//
+	// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+	// (see "Analytics views" section). The CLI surface consumes
+	// v_model_memory_yield as `mpm provenance model-yield`. The
+	// v_model_theory_utility view is reachable via `mpm exec-sql`.
+	`CREATE VIEW IF NOT EXISTS v_model_memory_yield AS
+		SELECT
+			p.provider_name || '/' || p.model_name AS model_spec,
+			p.framework_name,
+			p.framework_adapter,
+			COUNT(m.id) AS total_created,
+			SUM(CASE WHEN m.deleted_at IS NULL AND m.weight >= 1
+			          AND (CAST(strftime('%s','now') AS INTEGER) - m.created_at) >= 2592000
+			         THEN 1 ELSE 0 END) AS survived_30d,
+			ROUND(CAST(SUM(CASE WHEN m.deleted_at IS NULL AND m.weight >= 1
+			                       AND (CAST(strftime('%s','now') AS INTEGER) - m.created_at) >= 2592000
+			                      THEN 1 ELSE 0 END) AS REAL)
+			      / NULLIF(SUM(CASE WHEN (CAST(strftime('%s','now') AS INTEGER) - m.created_at) >= 2592000
+			                        THEN 1 ELSE 0 END), 0) * 100, 1) AS survival_30d_pct,
+			SUM(m.reinforcement_count) AS total_reinforcements,
+			SUM(CASE WHEN m.is_challenged = 1 THEN 1 ELSE 0 END) AS total_challenged
+		FROM artifact_provenance p
+		JOIN memories m ON p.artifact_id = m.id AND p.artifact_type = 'memory'
+		GROUP BY p.provider_name, p.model_name, p.framework_name, p.framework_adapter;`,
+	`CREATE VIEW IF NOT EXISTS v_model_theory_utility AS
+		SELECT
+			p.provider_name || '/' || p.model_name AS model_spec,
+			p.thinking_level,
+			COUNT(t.id) AS theories_proposed,
+			SUM(CASE WHEN json_extract(t.metadata, '$.status') = 'proven' THEN 1 ELSE 0 END) AS theories_proven,
+			SUM(CASE WHEN json_extract(t.metadata, '$.status') = 'disproven' THEN 1 ELSE 0 END) AS theories_refuted,
+			ROUND(AVG(t.confidence), 2) AS avg_final_confidence
+		FROM artifact_provenance p
+		JOIN memories t ON p.artifact_id = t.id AND p.artifact_type = 'theory'
+		GROUP BY p.provider_name, p.model_name, p.thinking_level;`,
+
 	// ── Capability Lifecycle (2026-08-05) ─────────────────────────────
 	//
 	// Four-table substrate for the capability lifecycle subsystem.
