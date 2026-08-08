@@ -1,6 +1,10 @@
 package internal
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -213,17 +217,51 @@ func TestRenderMarkdown_Legacy(t *testing.T) {
 }
 
 func TestFetchGitLog_Integration(t *testing.T) {
-	// Sanity: walking the real MPM git log with --since v1.0.0-hardened
-	// returns a non-trivial number of entries (we have ~116 commits
-	// since that tag). If this test starts failing, the git log has
-	// been broken or the tag deleted.
-	out, err := FetchGitLog(GitLogOptions{Since: "v1.0.0-hardened"})
+	// Hermetic: build a fixture repo with a tag + 60 commits so the test
+	// is deterministic and independent of the real MPM git history
+	// (which has been rewritten and no longer has a "v1.0.0-hardened"
+	// tag). The original test asserted >= 50 entries since that tag
+	// to catch silent breakage of the git log walker; this fixture
+	// version reproduces that guarantee with synthetic data.
+	repo := t.TempDir()
+
+	// Initialize a fresh git repo. `git config` below requires .git to exist;
+	// -b main avoids the "default branch name" warning on modern git.
+	runGit(t, repo, "init", "-b", "main")
+
+	// Seed commits require a user identity for git author/committer.
+	for _, kv := range [][2]string{
+		{"user.name", "Stranger Test"},
+		{"user.email", "stranger@example.com"},
+	} {
+		cmd := exec.Command("git", "-C", repo, "config", kv[0], kv[1])
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s: %v: %s", kv[0], err, out)
+		}
+	}
+
+	// Three seed files before the tag — these will be excluded by --since.
+	for i := 0; i < 3; i++ {
+		writeGitFixtureFile(t, repo, "seed.txt", fmt.Sprintf("seed %d", i))
+		runGit(t, repo, "add", "seed.txt")
+		runGit(t, repo, "commit", "-m", fmt.Sprintf("seed commit %d", i))
+	}
+	runGit(t, repo, "tag", "v0.0.1")
+
+	// 60 commits after the tag — these will be included by --since.
+	for i := 0; i < 60; i++ {
+		writeGitFixtureFile(t, repo, "post.txt", fmt.Sprintf("post %d", i))
+		runGit(t, repo, "add", "post.txt")
+		runGit(t, repo, "commit", "-m", fmt.Sprintf("post commit %d", i))
+	}
+
+	out, err := FetchGitLog(GitLogOptions{RepoDir: repo, Since: "v0.0.1"})
 	if err != nil {
 		t.Fatalf("FetchGitLog: %v", err)
 	}
 	entries := ParseCommitLog(out)
 	if len(entries) < 50 {
-		t.Errorf("expected at least 50 entries since v1.0.0-hardened, got %d", len(entries))
+		t.Errorf("expected at least 50 entries since v0.0.1, got %d", len(entries))
 	}
 	// Every entry must have a non-empty commit hash and a non-empty
 	// author — git log %H and %an are non-optional fields. If these
@@ -235,6 +273,23 @@ func TestFetchGitLog_Integration(t *testing.T) {
 		if e.Author == "" {
 			t.Errorf("entry[%d] missing Author", i)
 		}
+	}
+}
+
+func writeGitFixtureFile(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	full := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", full...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 }
 
