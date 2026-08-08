@@ -13,23 +13,39 @@ on:
 # TestRenderRoute) until the test suite cleanup arc lands. When the noise is
 # fixed, promote full-suite to a gating job by removing `continue-on-error`.
 
+env:
+  # FTS5 must be enabled for mattn/go-sqlite3 — see Makefile. Pin these at
+  # the workflow level so every step inherits them, instead of repeating
+  # per-step env: blocks.
+  CGO_ENABLED: "1"
+  CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5=1"
+
 jobs:
   gate:
     name: Build + core tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26.1'
           cache: true
 
+      # Some downstream steps (full-suite job, changelog scripts, future
+      # release-please integration) need a stable git identity. Configure
+      # it once at the workflow level so child steps don't have to.
+      - name: Configure git identity
+        run: |
+          git config --global user.name "mpm-bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git config --global init.defaultBranch main
+
       - name: Build
-        run: go build ./...
+        run: go build -tags fts5 ./...
 
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags fts5 ./...
 
       # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
       # gate gets tighter locally, it gets tighter in CI too.
@@ -37,9 +53,6 @@ jobs:
         run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
 
       - name: Run full test suite with coverage
-        env:
-          CGO_ENABLED: 1
-          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5=1"
         run: |
           # Run tests and write atomic coverage profile
           go test -tags fts5 -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
@@ -55,7 +68,7 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload coverage profile
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mpm-coverage-report
           path: coverage.out
@@ -66,12 +79,12 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26.1'
           cache: true
 
       - name: Full test sweep
-        run: go test -count=1 ./... 2>&1 | tee test-output.log
+        run: go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
