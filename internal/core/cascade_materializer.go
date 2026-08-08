@@ -309,16 +309,26 @@ func (cm *CascadeMaterializer) materializeTheory(ctx context.Context, intent Cas
 	// Use ProposeTheoryWithExtras to create the theory with cascade fields
 	// stored at top level. Dependencies and standard theory fields are
 	// handled by ProposeTheoryWithExtras; cascadeFields are merged in.
-	result, err := cm.dm.ProposeTheoryWithExtras(
-		hypothesis,
-		validationCriteria,
-		dependencies,
-		nil, // no sourceIDs for cascade theories
-		[]string{fmt.Sprintf("cascade:%s", intent.InvalidationEventID)},
-		cascadeFields,
+	// Wrap in WithProvenanceOverride so the derived theory's provenance row
+	// carries parent_artifact_id = intent.DeadArtifactID.
+	var result map[string]interface{}
+	var theoryErr error
+	theoryErr = cm.dm.WithProvenanceOverride(
+		cm.dm.provenanceWithParent(intent.DeadArtifactID),
+		func() error {
+			result, theoryErr = cm.dm.ProposeTheoryWithExtras(
+				hypothesis,
+				validationCriteria,
+				dependencies,
+				nil, // no sourceIDs for cascade theories
+				[]string{fmt.Sprintf("cascade:%s", intent.InvalidationEventID)},
+				cascadeFields,
+			)
+			return theoryErr
+		},
 	)
-	if err != nil {
-		return "", fmt.Errorf("materialize theory: %w", err)
+	if theoryErr != nil {
+		return "", fmt.Errorf("materialize theory: %w", theoryErr)
 	}
 
 	theoryID, ok := result["id"].(string)

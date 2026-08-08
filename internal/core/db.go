@@ -273,6 +273,13 @@ type DatabaseManager struct {
 	// parallel tests, and production code cannot be accidentally
 	// affected by test-SetOverride.
 	ProvenanceResolver *ProvenanceResolver
+
+	// perCallProvenanceOverride is set by callers that need to inject
+	// per-call provenance (e.g., the cascade materializer setting
+	// parent_artifact_id). It is read once by saveMemoryRow and cleared
+	// before the function returns. Tests use t.Cleanup to ensure the
+	// override is cleared on test exit.
+	perCallProvenanceOverride *EffectiveProvenance
 }
 
 // GetProvenanceResolver returns the resolver, lazily initializing
@@ -283,6 +290,43 @@ func (dm *DatabaseManager) GetProvenanceResolver() *ProvenanceResolver {
 		dm.ProvenanceResolver = NewFromEnv()
 	}
 	return dm.ProvenanceResolver
+}
+
+// WithProvenanceOverride sets a per-call provenance override, calls fn,
+// and clears the override before returning. The override is read once
+// by getEffectiveProvenance inside saveMemoryRow so the wrapped call's
+// provenance row carries the parent_artifact_id.
+func (dm *DatabaseManager) WithProvenanceOverride(prov *EffectiveProvenance, fn func() error) error {
+	dm.perCallProvenanceOverride = prov
+	defer func() { dm.perCallProvenanceOverride = nil }()
+	return fn()
+}
+
+// getEffectiveProvenance returns the effective provenance for a write.
+// It prefers any per-call override (set by WithProvenanceOverride) over
+// the process-wide resolver. This allows the cascade materializer to
+// thread parent_artifact_id into a single SaveMemoryNode call.
+func (dm *DatabaseManager) getEffectiveProvenance() *EffectiveProvenance {
+	if dm.perCallProvenanceOverride != nil {
+		return dm.perCallProvenanceOverride
+	}
+	r := dm.GetProvenanceResolver()
+	if r == nil {
+		return &EffectiveProvenance{ActorKind: "unknown"}
+	}
+	return r.Resolve("", "", "")
+}
+
+// provenanceWithParent returns an effective provenance with
+// parent_artifact_id set to the dead artifact. Used by the
+// cascade materializer so the resulting theory's provenance row
+// carries the causal chain.
+func (dm *DatabaseManager) provenanceWithParent(parentArtifactID string) *EffectiveProvenance {
+	r := dm.GetProvenanceResolver()
+	if r == nil {
+		return &EffectiveProvenance{ActorKind: "unknown", ParentArtifactID: parentArtifactID}
+	}
+	return r.Resolve("", "", parentArtifactID)
 }
 
 // nodeUnwrapTx returns the *sql.Tx from a DBNode. When DBNode is a
@@ -2300,7 +2344,7 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	// we reuse the caller's tx so both the artifact and provenance INSERTs
 	// commit atomically together.
 	artifactType := artifactTypeFromCollection(collection)
-	if prov := dm.GetProvenanceResolver(); prov != nil {
+	if prov := dm.getEffectiveProvenance(); prov != nil {
 		var tx *sql.Tx
 		var err error
 		if existing := nodeUnwrapTx(node); existing != nil {
@@ -2315,7 +2359,7 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 		}
 		if tx != nil {
 			res := dm.RecordArtifactProvenance(
-				tx, id, artifactType, prov.Resolve("", "", ""),
+				tx, id, artifactType, prov,
 			)
 			if !res.Recorded {
 				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
@@ -3170,7 +3214,7 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	// scoped to just the provenance INSERT. For in-tx writes (via WithTx),
 	// we reuse the caller's tx so both the artifact and provenance INSERTs
 	// commit atomically together.
-	if prov := dm.GetProvenanceResolver(); prov != nil {
+	if prov := dm.getEffectiveProvenance(); prov != nil {
 		var tx *sql.Tx
 		var err error
 		if existing := nodeUnwrapTx(dm); existing != nil {
@@ -3185,7 +3229,7 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		}
 		if tx != nil {
 			res := dm.RecordArtifactProvenance(
-				tx, id, "lesson", prov.Resolve("", "", ""),
+				tx, id, "lesson", prov,
 			)
 			if !res.Recorded {
 				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
