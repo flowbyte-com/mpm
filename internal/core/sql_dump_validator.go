@@ -114,6 +114,7 @@ type DumpValidator struct {
 //      to verify the static guard passes
 var CanonicalMPMSchema = []string{
 	"admission_log",
+	"artifact_provenance",
 	"audit_cluster_proposals",
 	"capabilities",
 	"capability_dependencies",
