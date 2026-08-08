@@ -667,8 +667,14 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 	}
 
 	likePattern := "%" + query + "%"
+	// Column order MUST match the FTS5 query above (id, content, session_id,
+	// tags, metadata, created_at, reinforcement_count, weight, last_accessed_at,
+	// reference_id). The Scan destination in handleRecall has 10 args; if
+	// this drifts the count mismatch surfaces as a runtime crash on the
+	// very first recall — which is what bit the stranger test when FTS5
+	// init failed in the hermetic workspace.
 	likeQuery := `
-		SELECT id, content, session_id, tags, created_at,
+		SELECT id, content, session_id, tags, metadata, created_at,
 		       COALESCE(reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(weight, 1) as weight,
 		       last_accessed_at,
