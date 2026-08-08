@@ -29,7 +29,7 @@ Instead of rewriting memories, beliefs evolve while history remains intact.
 
 One persistent cognitive substrate. One SQLite database. Four cooperating binaries. No vector database. No distributed infrastructure. No web UI.
 
-`mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. The CLI is an operational convenience for inspecting the daemon's state — not a human-facing application.
+`mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. Three surfaces share one substrate: the human-facing CLI (`mpm <verb>` cognitive vocabulary), the agent-facing JSON-RPC (`mpm call <tool>`), and the MCP server (`mpm-mcp`) for AI agents.
 
 MPM models reasoning processes — belief formation, evidence weighting, theory tracking, self-correction. It does not claim to reproduce human cognition. "Cognitive" describes *what kind of object is being persisted*, not a claim about machine minds.
 
@@ -92,7 +92,7 @@ At the implementation level, the exclusions are concrete:
 
 - **Not an HTTP server.** No request/response REST surface; machine integration is stdio-only via `mpm-mcp`. The CLI is for operators, not for serving web traffic.
 - **Not generic storage.** Built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
-- **Not a human dashboard.** Machine-to-machine interface is primary; CLI is a convenience layer.
+- **Three surfaces, one substrate.** The CLI is the human-facing cognitive interface (`mpm remember`, `mpm learn`, `mpm decide`, ...); `mpm call` and MCP are the agent-facing tool surfaces. All map to the same `internal/core/tools` registry.
 - **Not a vector database.** A SQLite-native ANN index handles semantic recall. No Pinecone, no Qdrant, no embeddings service.
 - **Not a knowledge graph.** Relationships are first-class artifacts (decisions, theories, evidence, lessons), not edges in a graph store.
 
@@ -885,7 +885,7 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
-Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `DatabaseManager` methods. The 60+ tools in the surface above cover the agent's daily workflow: read/write memory, lessons, topics, references, theories, decisions, evidence, confidence, references, route, wake, directives, log_to_changelog, the memory feedback loop (`shred`/`reinforce`/`weaken`/`snooze`/`set-weight`/`patch`/`promote`), workflow (`review`/`synthesize`/`gc`), audit cluster triage, multi-agent shared epistemology (`record_global_rule`, `query_global_rules`, `commit_milestone`, `check_pending_event_wakes`), and health/diagnostics (`health_check`, `digest_wakes`).
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The tools in the surface above cover the agent's daily workflow: read/write memory, lessons, topics, references, theories, decisions, evidence, confidence, references, route, wake, directives, log_to_changelog, the memory feedback loop (`shred`/`reinforce`/`weaken`/`snooze`/`set-weight`/`patch`/`promote`), workflow (`review`/`synthesize`/`gc`), audit cluster triage, multi-agent shared epistemology (`record_global_rule`, `query_global_rules`, `commit_milestone`, `check_pending_event_wakes`), and health/diagnostics (`health_check`, `digest_wakes`).
 
 A handful of CLI commands are intentionally **NOT** exposed via MCP/call because they are operationally distinct (destructive, cron-friendly, or human-gated):
 
@@ -1009,7 +1009,11 @@ The agent maintains a private regret log of things it considered but didn't add,
 
 ## 8. CLI Reference
 
-The CLI is a convenience surface. The machine-to-machine interface is `mpm call <tool> --payload JSON`. The CLI calls the same handlers internally.
+Three surfaces share one substrate (`internal/core/tools` registry):
+
+- **Human-facing CLI** — `mpm <verb>` cognitive vocabulary (remember, learn, decide, theorize, ...). Designed for developer clarity in the terminal.
+- **Agent-facing JSON-RPC** — `mpm call <tool> --payload JSON`. Designed for shell scripts and structured tool consumers.
+- **MCP server** — `mpm-mcp` speaks the Model Context Protocol for AI agents. Registers every entry in the same registry.
 
 ### Daily Commands (root level)
 
