@@ -26,6 +26,7 @@
 package internal
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -41,6 +42,81 @@ import (
 // unfired (pending) for the next call. Notification and cron wakes are
 // unaffected by this cap. Default value: 3.
 const MaxCascadeWakePerCheck = 3
+
+// ScheduleCascadeSummaryWake persists a typed `cascade_summary` wake that
+// the scheduler will route through its registered CascadeSummaryHandler.
+// Mirrors the CLI's `materialized=... failed=... pending_after=... elapsed=...`
+// summary line so the scheduler log (and any operator grepping the wake
+// table) sees the same four fields the CLI prints.
+//
+// The wake row is consumed by the registered handler in the next tick —
+// it does NOT surface to the agent via `mpm wake` / `check_wakes` because
+// CascadeSummaryHandler is registered (handlers bypass CheckPendingWakes'
+// 3-per-call cap). See CascadeDrainHandler for the dedupe policy that
+// decides whether to call this at all.
+func (dm *DatabaseManager) ScheduleCascadeSummaryWake(ctx context.Context, materialized, failed, pendingAfter int, elapsed time.Duration) error {
+	id := fmt.Sprintf("cascade_summary_%d", time.Now().UnixNano())
+	meta := map[string]interface{}{
+		"kind":          "cascade_summary",
+		"materialized":  materialized,
+		"failed":        failed,
+		"pending_after": pendingAfter,
+		"elapsed_ms":    elapsed.Milliseconds(),
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal cascade summary metadata: %w", err)
+	}
+	_, err = dm.db.ExecContext(ctx,
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
+		 VALUES (?, ?, ?, NULL, NULL, 0, ?, ?)`,
+		id, time.Now().Unix(), "cascade tick summary", "cascade_drain", metaJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("insert cascade summary wake: %w", err)
+	}
+	return nil
+}
+
+// LastCascadeSummaryMetrics returns the materialized/failed/pending_after/
+// elapsed_ms from the most recent cascade_summary wake row, or
+// (zero, zero, zero, zero, false) when no prior summary exists. Used by
+// CascadeDrainHandler to dedupe identical idle ticks before inserting a
+// new wake row.
+//
+// The ok return is false when no cascade_summary row has ever been
+// written, in which case the caller should always insert (no dedupe
+// possible against an empty baseline).
+func (dm *DatabaseManager) LastCascadeSummaryMetrics(ctx context.Context) (materialized, failed, pendingAfter int, elapsedMs int64, ok bool, err error) {
+	var metaJSON string
+	row := dm.db.QueryRowContext(ctx,
+		`SELECT metadata FROM scheduled_wakes
+		 WHERE json_extract(metadata, '$.kind') = 'cascade_summary'
+		 ORDER BY created_at DESC, target_time DESC LIMIT 1`)
+	if err := row.Scan(&metaJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, 0, 0, 0, false, nil
+		}
+		return 0, 0, 0, 0, false, fmt.Errorf("query last cascade summary: %w", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		return 0, 0, 0, 0, false, fmt.Errorf("unmarshal last cascade summary: %w", err)
+	}
+	if v, ok := meta["materialized"].(float64); ok {
+		materialized = int(v)
+	}
+	if v, ok := meta["failed"].(float64); ok {
+		failed = int(v)
+	}
+	if v, ok := meta["pending_after"].(float64); ok {
+		pendingAfter = int(v)
+	}
+	if v, ok := meta["elapsed_ms"].(float64); ok {
+		elapsedMs = int64(v)
+	}
+	return materialized, failed, pendingAfter, elapsedMs, true, nil
+}
 
 // ScheduleWake persists a new pending wake. Mirrors handleScheduleWake.
 //

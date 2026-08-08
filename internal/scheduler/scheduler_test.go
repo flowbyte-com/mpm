@@ -555,3 +555,63 @@ func TestRegisterTickHandler_FiresEvenWithNoWakes(t *testing.T) {
 
 // avoid unused-import warning if sync becomes unreferenced in some builds
 var _ = sync.Once{}
+
+// TestCascadeSummaryHandler_LogsAndReturnsNil covers the cascade_summary
+// wake kind (issue #5). The handler is a closure-captured no-op that
+// emits one structured log line per wake and returns nil — the load-
+// bearing assertions are:
+//
+//  1. nil error (so executeOne marks the wake fired without last_error)
+//  2. the four metadata fields (materialized/failed/pending_after/
+//     elapsed_ms) surface as separate log fields, not embedded JSON
+func TestCascadeSummaryHandler_LogsAndReturnsNil(t *testing.T) {
+	logger, buf, mu := captureLogger()
+	h := NewCascadeSummaryHandler(logger)
+
+	w := Wake{
+		ID:         "cascade_summary_test_1",
+		TargetTime: time.Now().Unix(),
+		Reason:     "cascade tick summary",
+		CreatedBy:  "cascade_drain",
+		CreatedAt:  time.Now().Unix(),
+		Metadata: map[string]interface{}{
+			"kind":          "cascade_summary",
+			"materialized":  float64(3),
+			"failed":        float64(1),
+			"pending_after": float64(7),
+			"elapsed_ms":    float64(4521),
+		},
+	}
+	if err := h(w); err != nil {
+		t.Fatalf("CascadeSummaryHandler: unexpected error: %v", err)
+	}
+
+	logs := captureLogsFrom(buf, mu)
+	if len(logs) == 0 {
+		t.Fatal("CascadeSummaryHandler emitted no log lines")
+	}
+
+	var saw map[string]any
+	for _, rec := range logs {
+		if msg, _ := rec["msg"].(string); msg == "cascade summary" {
+			saw = rec
+			break
+		}
+	}
+	if saw == nil {
+		t.Fatalf("CascadeSummaryHandler log line not found; got: %v", logs)
+	}
+	// JSON unmarshals numbers as float64 — check the underlying value,
+	// not the asserted Go type.
+	mat, _ := saw["materialized"].(float64)
+	fail, _ := saw["failed"].(float64)
+	pa, _ := saw["pending_after"].(float64)
+	em, _ := saw["elapsed_ms"].(float64)
+	if mat != 3 || fail != 1 || pa != 7 || em != 4521 {
+		t.Errorf("log line fields wrong: materialized=%v failed=%v pending_after=%v elapsed_ms=%v (want 3/1/7/4521)",
+			mat, fail, pa, em)
+	}
+	if id, _ := saw["wake_id"].(string); id != w.ID {
+		t.Errorf("log line wake_id = %q, want %q", id, w.ID)
+	}
+}

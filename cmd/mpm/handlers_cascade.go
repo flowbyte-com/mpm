@@ -17,10 +17,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/usererror"
+	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
 // handleCascade is the top-level handler for `mpm cascade`.
@@ -90,6 +92,30 @@ func handleCascadeMaterialize(args []string) int {
 		usererror.Error("database not available")
 		return 1
 	}
+
+	// Defensive flock against overlapping CLI invocations (issue #4).
+	// SQLite WAL + BEGIN IMMEDIATE already prevents data corruption, but a
+	// second concurrent `mpm cascade materialize` would burn CPU on empty
+	// batches. The lock fails fast (LOCK_EX|LOCK_NB) so the loser exits
+	// with a clean error instead of blocking on busy_timeout.
+	//
+	// list-dead-letters is read-only and explicitly does NOT acquire this
+	// lock — operators must be able to inspect the outbox while a drain
+	// is running.
+	lockPath := os.Getenv("MPM_CASCADE_LOCK")
+	if lockPath == "" {
+		if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
+			lockPath = filepath.Join(ws, "cascade.lock")
+		} else {
+			lockPath = "/tmp/mpm-cascade.lock"
+		}
+	}
+	lockFile, err := scheduler.AcquireLock(lockPath)
+	if err != nil {
+		usererror.Error("mpm cascade materialize: another invocation is in progress (%v)", err)
+		return 1
+	}
+	defer func() { _ = lockFile.Close() }()
 
 	// Context for the synchronous MaterializeCascadeIntents calls below.
 	// This is the foreground escape hatch — no background goroutine, no

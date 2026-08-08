@@ -126,36 +126,48 @@ func (h *CascadeDrainHandler) tickHandler(ctx context.Context) (err error) {
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			h.logYield(totalProcessed, totalFailed, "context_cancelled", time.Since(start))
+			h.logYield(ctx, totalProcessed, totalFailed, "context_cancelled", time.Since(start))
 			return nil
 		}
 		if time.Now().After(deadline) {
-			h.logYield(totalProcessed, totalFailed, "budget_exhausted", time.Since(start))
+			h.logYield(ctx, totalProcessed, totalFailed, "budget_exhausted", time.Since(start))
 			return nil
 		}
 
 		report, err := h.materializer.MaterializeBatch(ctx, h.batchSize)
 		if err != nil {
 			h.logger.Error("cascade drain batch failed", "err", err)
-			h.logYield(totalProcessed, totalFailed, "error", time.Since(start))
+			h.logYield(ctx, totalProcessed, totalFailed, "error", time.Since(start))
 			return nil
 		}
 		totalProcessed += report.Materialized
 		totalFailed += report.Failed
 
 		if report.Claimed == 0 {
-			h.logYield(totalProcessed, totalFailed, "queue_empty", time.Since(start))
+			h.logYield(ctx, totalProcessed, totalFailed, "queue_empty", time.Since(start))
 			return nil
 		}
 	}
 }
 
-// logYield emits the structured log line that records the handler's exit.
+// logYield emits the structured log line that records the handler's exit
+// AND, on state transitions, inserts a cascade_summary wake row that the
+// scheduler's CascadeSummaryHandler will log on the next tick.
+//
 // yield_reason is the operationally-important field: queue_empty means
 // normal exit, budget_exhausted means the per-tick ceiling was hit,
 // context_cancelled means the scheduler shut down, error means a DB-level
 // failure during a batch.
-func (h *CascadeDrainHandler) logYield(processed, failed int, reason string, elapsed time.Duration) {
+//
+// State-transition policy (issue #5): insert a wake row whenever the
+// tick produced non-zero materializations or failures — those are
+// always worth surfacing. Steady-state zero ticks (queue_empty with no
+// failures, etc.) are deduped by exact metric match against the prior
+// cascade_summary wake row: only insert if materialized/failed/
+// pending_after/elapsed_ms differ from the most recent. This keeps
+// scheduled_wakes from filling with identical zero-rows on every idle
+// tick while preserving the forensic trail when something changes.
+func (h *CascadeDrainHandler) logYield(ctx context.Context, processed, failed int, reason string, elapsed time.Duration) {
 	h.logger.Info("cascade drain yielded",
 		"yield_reason", reason,
 		"intents_materialized", processed,
@@ -163,4 +175,49 @@ func (h *CascadeDrainHandler) logYield(processed, failed int, reason string, ela
 		"elapsed_ms", elapsed.Milliseconds(),
 		"budget_ms", h.budget.Milliseconds(),
 	)
+
+	// Compute pending_after from the outbox — cheap (indexed COUNT).
+	// On DB error, fall back to 0 so the wake still gets a row written.
+	pendingAfter := 0
+	if h.dm != nil && h.dm.SQLDB() != nil {
+		var n int
+		if err := h.dm.SQLDB().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
+			h.logger.Warn("cascade drain: pending_after query failed; defaulting to 0", "err", err)
+		} else {
+			pendingAfter = n
+		}
+	}
+
+	insert := false
+	if processed > 0 || failed > 0 {
+		// Any non-zero materialization or failure is a state transition —
+		// always emit. The user's intent (issue #5): "drained OR failed>0".
+		// queue_empty with no failures IS the steady state; see the else
+		// branch for the dedupe.
+		insert = true
+	} else {
+		// Steady-state zero tick — dedupe by comparing the four metrics
+		// to the most recent cascade_summary wake. If they're identical,
+		// there's nothing new for an operator to look at; skip the row.
+		prevM, prevF, prevPa, prevMs, ok, err := h.dm.LastCascadeSummaryMetrics(ctx)
+		if err != nil {
+			h.logger.Warn("cascade drain: dedupe lookup failed; inserting wake anyway", "err", err)
+			insert = true
+		} else if !ok {
+			// No prior wake exists; first tick of a fresh scheduler run.
+			insert = true
+		} else if prevM != processed || prevF != failed || prevPa != pendingAfter || prevMs != elapsed.Milliseconds() {
+			insert = true
+		}
+	}
+
+	if !insert {
+		return
+	}
+	if err := h.dm.ScheduleCascadeSummaryWake(ctx, processed, failed, pendingAfter, elapsed); err != nil {
+		// Don't propagate — the wake row is a forensic affordance, not
+		// a correctness mechanism. Log and move on.
+		h.logger.Warn("cascade drain: failed to insert cascade_summary wake", "err", err)
+	}
 }
