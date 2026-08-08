@@ -29,6 +29,12 @@ src/db/mpm.db
 src/db/mpm.db.old
 src/db/mirror.jsonl
 src/db/watchdog.jsonl
+# Internal/core path was never covered by the src/db/ rule above — same
+# runtime files live at internal/core/src/db/ when MPM is consumed as
+# a library. Added 2026-08-08 after both files slipped through.
+# Wildcards cover .jsonl + rotated/compressed siblings (.gz, .old, .1, etc.)
+internal/core/src/db/mirror.jsonl*
+internal/core/src/db/watchdog.jsonl*
 # Vestigial dev-state path (was tracked via git add in early history;
 # removed 2026-07-07 — see MPM lesson on vestigial cleanup).
 internal/src/db/
@@ -58,8 +64,11 @@ src/db/mpm.db.backup-*
 # Local secrets store (chmod 600 — always private)
 secrets.env
 
-# Local config (contains secrets — always private)
-mpm_config.json
+# Local config (contains secrets — always private). Matched broadly so
+# accidental commits from any subdir (e.g. cmd/mpm/) are caught — the
+# mpm_config.json.example template is re-included by the `!` rule below.
+**/mpm_config.json
+!mpm_config.json.example
 mpm_config.json.bak
 src/db/mirror.jsonl
 src/db/mpm.db
@@ -116,3 +125,21 @@ mem.out
 # IDEs. .vscode/ is already ignored; add JetBrains (GoLand) for
 # contributors who prefer it over VS Code.
 .idea/
+
+# Local tool state & agent workspaces (added 2026-08-08 pre-public cleanup).
+# .openclaude/ is the OpenClaw tool's local state dir — never public.
+.openclaude/
+# .superpowers/ at the repo root holds the SDD framework's output (task
+# reports, plan scaffolds). Distinct from docs/superpowers/ (already
+# ignored above), which is the published plans directory.
+.superpowers/
+# workspace/ inside the repo is an agent-runtime scratchpad area.
+# Currently only contains the append-only REGRET_LOG.md.
+workspace/REGRET_LOG.md
+
+# Audit & benchmark dumps from cmd/audit-scans (the static analyzer).
+# These are point-in-time diff baselines — never published.
+scan-audit-*.json
+# Root + docs audit notes (transient devlogs, never published).
+audit.md
+docs/audit-*.md
