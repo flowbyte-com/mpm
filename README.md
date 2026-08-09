@@ -2517,4 +2517,5 @@ This is an alpha release (`mpm-alpha`). APIs, CLI surfaces, on-disk formats, and
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+**License:** GNU Affero General Public License v3.0 (AGPL-3.0).
+MPM is free software and may be used commercially. See [LICENSE](LICENSE) for the complete terms.
