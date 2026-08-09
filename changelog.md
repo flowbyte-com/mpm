@@ -1,5 +1,49 @@
 # Changelog
 
+## 2026-08-09 — mpm-alpha: Epistemic Cascades, Universal Scheduler, Provenance
+
+### Epistemic Cascades (#2, #5, #6)
+- **feat(core): dependency-aware invalidation** — `epistemic_cascade_outbox` + `MaterializeCascadeIntents`; cascades propagate invalidations transitively (max depth 3, max retries 3) so shredding a foundational directive re-materializes dependents
+- **refactor(core): stateless materializer** — dropped the goroutine-pool lifecycle (`Start`/`Stop`/`<-stopC`) in favor of a pure `NewCascadeMaterializer` factory + single-batch `MaterializeBatch`; tests moved to a state-machine model
+- **feat(cli): `mpm cascade materialize`** — out-of-band drain with flock lockfile (`cascade.lock`) to prevent concurrent drains; `mpm cascade list-dead-letters` for dead-letter inspection
+- **feat(scheduler): `cascade_drain` tick handler** — per-tick yield budget (30s time budget, batch size from `system_config.cascade_drain.max_intents_per_tick`, default 50) with yield-reason taxonomy (`queue_empty` / `budget_exhausted` / `context_cancelled` / `error`); panic-safety wrapper; audit row per batch; `cascade_summary` wake kind with idle-tick dedupe
+- Docs: runbook for scheduler-driven cascade drain; adaptive-yield specification (stair-step omitted per design review)
+
+### Universal Scheduler (`mpm-scheduler`)
+- New binary: universal wake executor with flock singleton (`scheduler.lock`), 60s ticker, wake dispatch (`snapshot`, `critic_audit`, `gc`, `broadcast`, `cascade_summary`, `cascade_drain`)
+- `RegisterTickHandler` for unconditional per-tick work; tick handlers run sequentially after wake dispatch so system wakes always fire on cadence
+- Agentic Cron: `scheduled_tasks` polled each tick; `next_run_at` rollover + wake injection in one transaction (crash-safe)
+
+### Artifact Provenance (alpha telemetry)
+- `artifact_provenance` table + analytics views (`v_model_memory_yield`, …); SAVEPOINT-isolated writer with validation; env-var resolver with priority chain
+- Hooks on `saveMemoryRow` / `AddLesson`; cascade materializer threads `parent_artifact_id`; CLI surface via `mpm provenance`
+- Legacy `metadata.provenance` JSON injection removed
+
+### Capability System
+- CS-3 `mpm capability grant-operator` shipped — operator bootstrapping sequence complete
+
+### mpm-lint AST Engine & Audit Gates
+- Unified `mpm-lint` AST engine replacing the legacy per-audit binaries; gates for transactions, contexts, goroutines, mutex, sql, file descriptors, imports (architectural boundary rule), and scan-error handling
+- Wired into pre-commit (consolidated gate run) and GitHub Actions (violations as PR annotations, `--gate` in build-test job)
+- `scripts/stranger-test.sh` added as a permanent release gate; 67/68 silent-continue error sites hardened
+
+### Database Reliability
+- Foreign keys enforced on all pooled SQLite connections; connection-pool leak patches (`audit-closes` gate)
+- Phase 7 of timestamp migration: `ErrTimestampsMigrationDeferred` deferral stripped, full INTEGER rebuild; recall/semantic-search LIKE-fallback column/scan alignment fixes
+
+### Security
+- Data-plane file permissions tightened to 0600; startup permissions check with auto-heal; auto-created directories restricted to 0700
+- AGPL-3.0 license surfaced at top of README
+
+### CLI / UX / CI
+- Install default flipped to user-space (`~/bin`); mode/persona set tightened to 3+3 with safe fallback
+- Route system: three-state gate (blank/auto/manual) for `handleRoute`; route_render supersedes route_apply; hermetic fixtures for route/recall tests
+- CI: coverage reporting in gate job; `CGO_LDFLAGS=-lm` for FTS5 bm25; hermetic `TestCallRoute_ReturnsReport`; ingest no longer leaks roadmap text
+- OpenClaw agent plugins introduced (auto-route, memory) under `agent-plugins/`
+
+### Repo Hygiene
+- Untracked `.opencode/`, `reference/` corpus, and `CLAUDE.md` from git (gitignored; kept locally); scrubbed runtime logs, duplicate phrase lists, ephemeral smoke scripts
+
 ## 2026-07-30 — Unix-Epoch Timestamp Migration
 
 - **feat(core): unify all timestamp columns on unix-epoch seconds** — All 37 (table, column) pairs across 19 tables migrated to INTEGER seconds via `timestamps_unified_v1` sentinel. Go struct fields become `int64` / `*int64`. CLI inputs accept both RFC3339 and unix-epoch integers. Display formatting centralized at `FormatUnixSeconds` / `FormatOptionalUnixSeconds`. **Operators must take `mpm backup-db` before installing this release.**
