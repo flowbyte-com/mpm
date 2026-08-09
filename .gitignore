@@ -153,3 +153,4 @@ docs/audit-*.md
 # Local agent config + reference corpora — never tracked.
 .opencode/
 reference/
+CLAUDE.md
