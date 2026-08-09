@@ -2,7 +2,9 @@
 
 > **Status: alpha.** APIs, CLI surfaces, on-disk formats, and schema may
 > change without notice. Do not assume undocumented behaviour is stable.
-> Pin a commit SHA if you need it to stay that way.
+> Pin a commit SHA if you need it to stay that way. Note: pinning
+> captures *instability*, not security — review what the pinned commit
+> exposes before relying on it for sensitive use.
 
 This is a small project run by a small group of people. Most of the rules
 below exist because the architecture is easy to break in ways that "work"
@@ -46,11 +48,27 @@ is built on. Violations will be rejected in review even when the code
   dependencies. A write path that requires a confidence value to be set
   is wrong. A read path that fails because a confidence value is
   missing is wrong.
-- **All writes go through `SaveMemoryNode`.** The 19-pattern
-  secret/poison scanner is structurally downstream of this single
-  chokepoint in `internal/core/memory.go`. New write paths route
-  through it. The `TestScannerCoverage_AllMemoriesWritersScanContent`
-  test fails if you forget.
+- **All artifact writers pass through the scanner boundary.** Memory
+  writes go through `SaveMemoryNode` in `internal/core/memory.go`;
+  lesson writes go through `AddLesson` in `internal/core/lessons.go`;
+  theories, decisions, and skills go through their respective
+  writers. Every artifact writer must call the security scanner
+  (`isSensitiveContent` + `isPoisoned`) before INSERT. Coverage is
+  enforced by `TestScannerCoverage_AllMemoriesWritersScanContent` —
+  if you add a new write path, the test will tell you to scan it.
+- **Provenance is observational.** Artifact creation must not depend
+  on provenance being recorded successfully. Provenance describes
+  declared execution metadata and must never be used as a correctness
+  or quality signal. A write path that fails because the provenance
+  hook errored is wrong.
+- **Do not rewrite shared history to hide mistakes.** If credentials
+  or sensitive data enter git history, treat it as a security
+  incident and follow [`SECURITY.md`](SECURITY.md). Do not assume
+  `git rm`, `git commit --amend`, or `git filter-branch` makes
+  historical exposure disappear — once a secret is in a commit it is
+  in every clone, fork, mirror, and CI cache that has ever fetched
+  that SHA. Force-pushing history also breaks any collaborator who
+  has already fetched the rewritten SHAs.
 - **One shared connection.** All goroutines use the shared
   `DatabaseManager`. Do not `sql.Open` new connections inside hot
   paths. A static-analysis test enforces the whitelist.
@@ -93,7 +111,11 @@ is built on. Violations will be rejected in review even when the code
   `BaseTables` (DDL), `CommonIndexes` (indexes), and `SafeMigrations`
   (column additions for upgrade-in-place). Add new tables to
   `BaseTables`. Add new columns to existing tables via
-  `SafeMigrations`. Add new indexes freely — indexes are not state.
+  `SafeMigrations`. Add new indexes when they are derivable from
+  existing state and verify query plans and migration/startup
+  behaviour — SQLite/FTS5 indexes in particular can be operationally
+  significant and may require rebuild logic (see the
+  `references_fts` / `reference_docs_fts` triggers for the pattern).
 - FTS5 virtual tables are created in `db.go` (not `schema.go`); that
   separation is intentional and is how tests get a minimal in-memory
   DB without the FTS surface.
@@ -159,8 +181,11 @@ the stranger test or a sibling test should show X happening.
 
 ## License
 
-AGPL-3.0. By submitting a contribution, you agree it will be
-licensed under AGPL-3.0. See [`LICENSE`](LICENSE) for the full text.
+AGPL-3.0. Contributions are accepted under the project's AGPL-3.0
+license. If your situation requires a formal Contributor License
+Agreement (CLA) or Developer Certificate of Origin (DCO), contact
+the maintainer before sending a patch. See [`LICENSE`](LICENSE) for
+the full text.
 
 ---
 
