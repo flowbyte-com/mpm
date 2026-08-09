@@ -2508,6 +2508,13 @@ The discipline is the same in every case: when in doubt, escalate. The agent's w
 
 ---
 
+## Community & Security
+
+* **[Security Policy](SECURITY.md)** — how to report a vulnerability privately, what to expect back, supported versions, and the credential-handling rules specific to MPM.
+* **[Contributing Guide](CONTRIBUTING.md)** — architecture invariants (Projection Test, scanner chokepoint, single-connection invariant, foreign-key posture), testing gates, schema discipline, and PR expectations.
+
+This is an alpha release (`mpm-alpha`). APIs, CLI surfaces, on-disk formats, and schema may change without notice. Pin a commit SHA if you need a specific shape to stay that way.
+
 ## License
 
-See [LICENSE](LICENSE).
+AGPL-3.0. See [LICENSE](LICENSE).
