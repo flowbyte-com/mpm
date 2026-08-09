@@ -149,3 +149,7 @@ scan-audit-*.json
 # Root + docs audit notes (transient devlogs, never published).
 audit.md
 docs/audit-*.md
+
+# Local agent config + reference corpora — never tracked.
+.opencode/
+reference/
