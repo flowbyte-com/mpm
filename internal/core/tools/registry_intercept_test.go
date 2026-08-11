@@ -136,7 +136,32 @@ func TestRegistryIsWrappedAtInit(t *testing.T) {
 
 	// All known cognitive verbs must remain registered (otherwise
 	// the exclusion list is silently incomplete).
-	required := []string{"save_to_memory", "record_decision", "propose_theory", "save_lesson", "commit_milestone"}
+	//
+	// After the 2026-08-11 aggregator redesign, the top-level
+	// Registry entries that the buffer (and the cognitive-verb
+	// exclusion list) actually sees are the mpm_* aggregators.
+	// The underlying handleX granular handlers are still wired
+	// inside each aggregator's switch; they're not top-level
+	// Registry entries anymore. Pinning the aggregator names here
+	// keeps the buffer's exclusion list in sync with what's
+	// actually exposed to agents.
+	required := []string{
+		// Aggregators that surface a substrate write — skipped
+		// from the observation buffer.
+		"mpm_memory",
+		"mpm_lessons",
+		"mpm_decisions",
+		"mpm_theories",
+		"mpm_topics",
+		"mpm_evidence",
+		"mpm_skills",
+		"mpm_references",
+		"mpm_session", // session_end / handoff are cognitive writes
+		"mpm_system", // migrate / commit (no, that's memory) — audit writes
+		// Standalone tools that are still cognitive.
+		"log_to_changelog",
+		"request_review",
+	}
 	for _, name := range required {
 		if _, ok := ByName(name); !ok {
 			t.Errorf("Registry missing %q — registry_list.go out of sync with cognitiveVerbs", name)

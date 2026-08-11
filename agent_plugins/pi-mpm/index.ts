@@ -1,68 +1,28 @@
 /**
- * pi-mpm — Pi extension that wraps MPM (mpm call <tool> --payload '<json>').
+ * pi-mpm — Pi extension that wires MPM's cognitive substrate into Pi.
  *
- * Provides Pi with:
- *   - mpm_recall          : query_long_term_memory  (free-text recall)
- *   - mpm_remember        : save_to_memory          (persist durable info)
- *   - mpm_session_handoff : session_end             (cross-session persistence)
- *   - mpm_explain         : explain_retrieval       (transparency for recall)
- *   - session_start hook  : read_wake_context → cache prior handoff
- *   - before_agent_start  : inject cached handoff into the system prompt once
- *   - /mpm-status command : mpm info                (install identity)
+ * Static, hand-maintained bridge to the 16 MPM tools now exposed by the
+ * mpm registry (13 unified Domain Tools + 3 standalone tools). This is a
+ * deliberate replacement for the previous ~1,500-line, build-generated
+ * file (scripts/gen.py + scripts/build.sh + header/footer.ts are gone).
  *
- * mpm is invoked at its canonical install location ($HOME/.mpm/bin/mpm).
- * Override with the MPM_BIN env var if the install is at a non-standard
- * path. If the canonical binary is missing at extension load time, the
- * extension REFUSES TO LOAD (fail-loud) — silent degradation of memory
- * access is a worse failure mode than a clear install error. Runtime
- * subprocess errors (timeout, transient I/O) still fail-soft at the tool
- * level so the LLM can retry or surface a graceful error.
+ * Until the Phase 1/2 refactor, mpm-mcp exposed 77 granular tools. The
+ * registry now exposes 16: the 13 Domain Tools are "Fat RPC" —
+ * they take {action: string, params: object} and the backend dispatches.
+ * That collapses ~77 distinct tool definitions into 13 near-identical
+ * ones, permanently resolving the ~15KB prompt bloat the old surface
+ * caused.
  *
- * Why this exists: mpm's README explicitly designates `mpm call` (and the
- * `mpm-mcp` stdio server) as the agent-facing integration surface. Pi has no
- * built-in MCP support (per docs/usage.md §303), so the JSON-RPC interface
- * is the correct boundary. This file is a thin transport adapter — every
- * tool/hook here maps 1:1 onto an entry in mpm's internal/core/tools registry.
+ * Transport: each tool spawns `mpm call <tool> --payload '<json>'` as a
+ * subprocess. mpm emits one zap-style log line to stderr and one JSON
+ * envelope to stdout. The parser scans for the last `{…}` line in stdout
+ * (see parseLastJsonLine below). All tools fail-open: if `mpm` is missing
+ * from PATH, the tool returns a soft error envelope instead of throwing.
  */
 
 import { spawn } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
-import { join } from "node:path";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-// --------------------------------------------------------------------------
-// Canonical-binary resolution (alpha install contract).
-// Resolve once at module load. If this throws, the extension fails to
-// load — the operator sees the install error in Pi's startup output.
-// --------------------------------------------------------------------------
-
-function resolveMpmBin(): string {
-	const fromEnv = process.env.MPM_BIN?.trim();
-	const candidates = [
-		fromEnv,
-		join(process.env.HOME ?? "", ".mpm", "bin", "mpm"),
-	].filter((p): p is string => typeof p === "string" && p.length > 0);
-
-	const tried: string[] = [];
-	for (const p of candidates) {
-		tried.push(p);
-		try {
-			accessSync(p, fsConstants.X_OK);
-			return p;
-		} catch {
-			// try next
-		}
-	}
-	throw new Error(
-		`pi-mpm: cannot find a usable mpm binary. Tried: ${tried.join(", ")}. ` +
-			`Install mpm at the canonical location: \`git clone <repo> ~/.mpm && ` +
-			`cd ~/.mpm && make install\` (no sudo required). Or set ` +
-			`MPM_BIN=/absolute/path/to/mpm to override the discovery path.`,
-	);
-}
-
-const MPM_BIN: string = resolveMpmBin();
 
 // --------------------------------------------------------------------------
 // Subprocess adapter — `mpm call <tool> --payload '<json>'`
@@ -77,21 +37,20 @@ interface MpmCallResult {
 	spawnError: string | null;
 }
 
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * Spawn `mpm call <tool> --payload <json>` and return the parsed envelope.
  * mpm emits one zap-style log line to stderr (e.g. "time=... level=INFO msg=...")
  * and a single JSON object to stdout on success. We find the JSON object
- * on stdout by scanning lines for one that parses cleanly — same approach
- * as openclaw-mpm-memory's findJsonInOutput.
+ * on stdout by scanning lines for one that parses cleanly.
  */
 function callMpm(
 	tool: string,
 	payload: Record<string, unknown>,
 	opts: { mpmBin?: string; timeoutMs?: number } = {},
 ): Promise<MpmCallResult> {
-	const bin = opts.mpmBin ?? MPM_BIN;
+	const bin = opts.mpmBin ?? "mpm";
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const json = JSON.stringify(payload);
 
@@ -164,11 +123,6 @@ function callMpm(
 	});
 }
 
-/**
- * Find the last line in `s` that parses as a JSON object. mpm prints
- * zap logs to stderr and one JSON envelope to stdout; we keep this
- * resilient if mpm later adds pre-JSON status output.
- */
 function parseLastJsonLine(s: string): unknown {
 	if (!s) return null;
 	const lines = s.split("\n");
@@ -203,64 +157,15 @@ function formatFailure(tool: string, r: MpmCallResult): string {
 	return `mpm call ${tool} failed.`;
 }
 
-/** Render a JSON payload as compact, LLM-friendly text. */
 function jsonToText(payload: unknown): string {
 	if (payload === null || payload === undefined) return "(no payload)";
 	const obj = payload as Record<string, unknown>;
 	const text = JSON.stringify(obj, null, 2);
-	// cap output to keep token usage bounded
 	return text.length > 8000 ? text.slice(0, 8000) + "\n…(truncated)" : text;
 }
 
 // --------------------------------------------------------------------------
-// Tool parameter schemas (TypeBox)
-// --------------------------------------------------------------------------
-
-const RecallParams = Type.Object({
-	query: Type.String({ description: "Free-text query for MPM's FTS5 + reinforcement-weighted recall." }),
-	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Cap on results returned. Default 6." })),
-	scope: Type.Optional(
-		StringEnum(["all", "local", "shared"] as const, {
-			description: "Recall scope. Default 'all' (federated).",
-		}),
-	),
-});
-
-const RememberParams = Type.Object({
-	fact: Type.String({ description: "Durable observation, learning, or context to persist." }),
-	collection: Type.Optional(
-		StringEnum(["memories", "directives", "skills", "lessons"] as const, {
-			description: "MPM collection. Default 'memories'. Use 'directives' for prime directives.",
-		}),
-	),
-	tags: Type.Optional(
-		Type.Array(Type.String(), { description: "Tags to apply. Defaults to ['pi-session']." }),
-	),
-	weight: Type.Optional(
-		Type.Integer({ minimum: 0, maximum: 100, description: "Initial retrieval weight 0-100. Default 50." }),
-	),
-});
-
-const SessionHandoffParams = Type.Object({
-	summary: Type.String({ description: "One-paragraph summary of what was done and why." }),
-	commitments: Type.Optional(
-		Type.Array(Type.String(), { description: "Things this session committed to do or follow up on." }),
-	),
-	open_questions: Type.Optional(
-		Type.Array(Type.String(), { description: "Unresolved questions to surface next session." }),
-	),
-	session_id: Type.Optional(
-		Type.String({ description: "Logical session identifier. Defaults to the current Pi session id." }),
-	),
-});
-
-const ExplainParams = Type.Object({
-	query: Type.String({ description: "Query whose retrieval you want explained." }),
-	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Number of hits to explain. Default 5." })),
-});
-
-// --------------------------------------------------------------------------
-// Wake-context payload shape (subset of read_wake_context output we use)
+// Wake-context payload shape (subset of mpm_context/read_wake_context output)
 // --------------------------------------------------------------------------
 
 interface WakeContext {
@@ -274,6 +179,7 @@ interface WakeContext {
 		exceeded?: boolean;
 		ratio?: number;
 		threshold?: number;
+		lesson_count?: number;
 	};
 	active_mode?: string;
 	active_persona?: string;
@@ -299,21 +205,66 @@ function renderWakeBlock(wake: WakeContext): string {
 	if (wake.epistemic_pressure?.exceeded) {
 		const ep = wake.epistemic_pressure;
 		const ratioStr = typeof ep.ratio === "number" ? ep.ratio.toFixed(2) : "?";
-		const lessonCount = (ep as { lesson_count?: number }).lesson_count;
+		const lessonCount = ep.lesson_count;
 		const lessonStr = typeof lessonCount === "number" ? `, lessons=${lessonCount}` : "";
 		lines.push(
-			`\nEpistemic pressure is elevated (ratio=${ratioStr}${lessonStr}). Consider running \`mpm ops stance compact epistemology\` to consolidate.`,
+			`\nEpistemic pressure is elevated (ratio=${ratioStr}${lessonStr}). Consider running \`mpm_system\` with action "gc_run" to consolidate.`,
 		);
 	}
 	lines.push(
-		"\nUse the mpm_recall tool to query prior memories, mpm_remember to persist new ones, and mpm_session_handoff at the end of meaningful work.",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, and mpm_session (action \"end\") to write the handoff at the end of meaningful work. The full mpm_* domain surface is registered (13 domain tools + 3 standalone).",
 	);
 	return lines.join("\n");
 }
 
 // --------------------------------------------------------------------------
-// Extension factory
+// Domain Tool schema + registration helper
+//
+// All 13 Domain Tools use the same "Fat RPC" shape: {action, params}.
+// The action enum and per-action parameters are documented in each tool's
+// description; validation happens in the mpm backend, which returns a
+// descriptive error envelope on a bad action / missing field.
 // --------------------------------------------------------------------------
+
+function domainToolSchema() {
+	return Type.Object({
+		action: Type.String({
+			description: "Which operation to run on this domain. See the tool description for the valid actions.",
+		}),
+		params: Type.Optional(
+			Type.Record(Type.String(), Type.Any(), {
+				description: "Free-form parameters for the chosen action. See the tool description for required/optional fields.",
+			}),
+		),
+	});
+}
+
+interface DomainToolSpec {
+	name: string;
+	label: string;
+	description: string;
+}
+
+/**
+ * Register a Fat RPC Domain Tool. `execute` just forwards `action` and
+ * `params` to the underlying `mpm call <name>` subprocess.
+ */
+function registerDomainTool(pi: ExtensionAPI, spec: DomainToolSpec): void {
+	pi.registerTool({
+		name: spec.name,
+		label: spec.label,
+		description: spec.description,
+		parameters: domainToolSchema(),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const { action, params: body } = params as { action: string; params?: Record<string, unknown> };
+			const r = await callMpm(spec.name, { action, params: body ?? {} });
+			if (!r.success) {
+				return { content: [{ type: "text", text: formatFailure(spec.name, r) }], details: { ok: false } };
+			}
+			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true, action } };
+		},
+	});
+}
 
 export default function piMpmExtension(pi: ExtensionAPI) {
 	// Cached wake context, populated on session_start, consumed on the first
@@ -322,157 +273,229 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	let cachedWake: WakeContext | null = null;
 	let wakeDelivered = false;
 
-	// ---------- Tools --------------------------------------------------------
+	// ---------- 13 Unified Domain Tools (Fat RPC) -------------------------
 
-	pi.registerTool({
-		name: "mpm_recall",
-		label: "MPM Recall",
-		description:
-			"Free-text recall against MPM's long-term memory substrate (FTS5 + reinforcement-weighted ranking). " +
-			"Returns memories with id, content, weight, and provenance. Prefer this over re-reading old files when " +
-			"the information may already be persisted. Use mpm_explain to inspect why a query matched.",
-		parameters: RecallParams,
-		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const r = await callMpm("query_long_term_memory", {
-				query: params.query,
-				limit: params.limit ?? 6,
-				scope: params.scope ?? "all",
-			});
-			if (!r.success) {
-				return {
-					content: [{ type: "text", text: formatFailure("query_long_term_memory", r) }],
-					details: { ok: false },
-				};
-			}
-			const payload = r.payload as {
-				count?: number;
-				scope?: string;
-				memories?: Array<{ id: string; content: string; weight?: number; tags?: string; created_at?: string }>;
-			};
-			const mems = payload.memories ?? [];
-			const lines: string[] = [];
-			lines.push(
-				`Found ${payload.count ?? mems.length} memor${mems.length === 1 ? "y" : "ies"} (scope=${payload.scope ?? "all"}).`,
-			);
-			if (mems.length === 0) {
-				lines.push("(no memories matched the query)");
-			} else {
-				for (const m of mems) {
-					const id = m.id ?? "?";
-					const w = typeof m.weight === "number" ? ` weight=${m.weight}` : "";
-					const tags = m.tags && m.tags !== "" ? ` tags=[${m.tags}]` : "";
-					lines.push(`\n— [${id}]${w}${tags}\n${m.content ?? "(no content)"}\n`);
-				}
-			}
-			return {
-				content: [{ type: "text", text: lines.join("\n") }],
-				details: { ok: true, count: mems.length, scope: payload.scope ?? "all" },
-			};
-		},
+	registerDomainTool(pi, {
+		name: "mpm_memory",
+		label: "MPM Memory",
+		description: `Memory CRUD and lifecycle. Literal actions:
+  save — Required params.fact. Optional: params.collection, params.tags, params.weight, params.ttl.
+  query — Search memories (FTS5 + semantic). Required params.query. Optional: params.limit, params.collection, params.scope ("all"|"local"|"shared").
+  shred — Soft-delete a memory / hard-delete a lesson. Required params.memory_id.
+  reinforce — Bump weight. Required params.memory_id. Optional: params.delta (default 1).
+  weaken — Reduce weight. Required params.memory_id. Optional: params.delta (default 1).
+  snooze — Suppress from retrieval for N days. Required params.memory_id. Optional: params.days (default 1).
+  set_weight — Set explicit weight 0-100. Required params.memory_id, params.weight.
+  patch — JSON-Patch metadata (RFC 6902). Required params.memory_id, params.patch.
+  promote — Mark as long-term. Required params.memory_id.
+  review — List memories due for spaced repetition. Optional: params.days (default 30), params.limit (default 20).
+  synthesize — LLM dedup/merge. Required params.memory_id.
+  challenge — Weaken + create theory from contradiction. Required params.memory_id, params.evidence.
+  commit_milestone — Narrative milestone. Required params.summary (>=50 chars). Optional: params.flavor, params.tags.`,
 	});
 
-	pi.registerTool({
-		name: "mpm_remember",
-		label: "MPM Remember",
-		description:
-			"Persist a durable observation into MPM's memory substrate. Use this when the user tells you to remember " +
-			"something, when you learn a project-specific fact that will recur across sessions, or when you want to " +
-			"preserve a decision rationale for later recall. Returns the assigned memory id.",
-		parameters: RememberParams,
-		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const tags = params.tags ?? ["pi-session"];
-			const weight = params.weight ?? 50;
-			const r = await callMpm("save_to_memory", {
-				fact: params.fact,
-				collection: params.collection ?? "memories",
-				tags,
-				weight,
-			});
-			if (!r.success) {
-				return {
-					content: [{ type: "text", text: formatFailure("save_to_memory", r) }],
-					details: { ok: false },
-				};
-			}
-			const payload = r.payload as { id?: string; success?: boolean; content?: string };
-			const newId = payload.id ?? "(no id returned)";
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Stored memory ${newId} (collection=${params.collection ?? "memories"}, weight=${weight}).`,
-					},
-				],
-				details: { ok: true, id: newId, content: params.fact },
-			};
-		},
+	registerDomainTool(pi, {
+		name: "mpm_theories",
+		label: "MPM Theories",
+		description: `Theory lifecycle. Literal actions:
+  propose — Required params.hypothesis. Optional: params.validation_criteria, params.tags, params.dependencies, params.source_ids.
+  resolve — Resolve a pending theory. Required params.theory_id, params.conclusion ("confirmed"|"disproven"), params.new_status ("proven"|"disproven"). Optional: params.winner_id.`,
 	});
 
-	pi.registerTool({
-		name: "mpm_session_handoff",
-		label: "MPM Session Handoff",
-		description:
-			"End-of-session handoff to MPM: persists a one-paragraph summary plus optional commitments and open " +
-			"questions. The next time any MPM-backed session calls read_wake_context, this handoff surfaces in the " +
-			"wake block. Use near the end of a meaningful unit of work, not on every turn.",
-		parameters: SessionHandoffParams,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const sessionId = params.session_id || ctx.sessionManager.getSessionId();
-			const r = await callMpm("session_end", {
-				summary: params.summary,
-				commitments: params.commitments ?? [],
-				open_questions: params.open_questions ?? [],
-				session_id: sessionId,
-			});
-			if (!r.success) {
-				return {
-					content: [{ type: "text", text: formatFailure("session_end", r) }],
-					details: { ok: false },
-				};
-			}
-			const payload = r.payload as { handoff?: { id?: string }; success?: boolean };
-			const handoffId = payload.handoff?.id ?? "(no id)";
-			return {
-				content: [{ type: "text", text: `Handoff ${handoffId} recorded. Future sessions will see this on wake.` }],
-				details: { ok: true, id: handoffId },
-			};
-		},
+	registerDomainTool(pi, {
+		name: "mpm_decisions",
+		label: "MPM Decisions",
+		description: `Decision recording. Literal actions:
+  record — Record an architectural decision. Required params.context, params.choice, params.rationale. Optional: params.outcome, params.tags, params.source_ids.`,
 	});
 
+	registerDomainTool(pi, {
+		name: "mpm_lessons",
+		label: "MPM Lessons",
+		description: `Lesson lifecycle. Literal actions:
+  save — Required params.fact. Optional: params.type ("warning"|"practice"|"insight"), params.tags, params.source_ids.
+  search — Search lessons by FTS5. Required params.query.
+  list — List lessons. Optional: params.type.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_topics",
+		label: "MPM Topics",
+		description: `Topic clustering. Literal actions:
+  create — Required params.name. Optional: params.description.
+  search — Required params.query. Optional: params.limit (default 20).
+  link — Link a memory to a topic. Required params.memory_id, params.topic_id. Optional: params.relevance (0-1).`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_references",
+		label: "MPM References",
+		description: `Reference document management. Literal actions:
+  add — Ingest a reference file. Required params.filepath. Optional: params.title.
+  search — Search references by content. Required params.query. Optional: params.limit.
+  list — List ingested references. Optional: params.limit (default 50), params.offset (default 0).`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_evidence",
+		label: "MPM Evidence",
+		description: `Evidence management. Literal actions:
+  add — Attach evidence to an artifact. Required params.artifact_id, params.type ("observation"|"test"|"reproduction"|"challenge"|"decision_outcome"|"external_reference"), params.source_group, params.created_by. Optional: params.artifact_type, params.notes, params.strength (-1..1), params.independence_factor.
+  list — List evidence for an artifact. Required params.artifact_id. Optional: params.artifact_type.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_confidence",
+		label: "MPM Confidence",
+		description: `Confidence inspection and audit. Literal actions:
+  show — Current confidence. Required params.artifact_id. Optional: params.artifact_type.
+  recompute — Force recompute from evidence. Required params.artifact_id. Optional: params.artifact_type.
+  explain — Factor breakdown + history trace. Required params.artifact_id. Optional: params.artifact_type.
+  history — Confidence timeline. Required params.artifact_id. Optional: params.artifact_type, params.limit (default 50).
+  changes — Change events (delta + trigger). Optional: params.artifact_id, params.artifact_type, params.since, params.since_seconds_ago, params.limit.
+  trend — Linear fit over window. Required params.artifact_id. Optional: params.artifact_type, params.window_days (default 30).
+  quality — Per-source quality stats. No params.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_context",
+		label: "MPM Context",
+		description: `Agent state and routing. Literal actions:
+  read_wake_context — Session state, active mode, recent memories. No params.
+  read_directives — Active behavioral directives. No params.
+  proactive_recall_hint — Surface conversation-relevant memories. Required params.conversation_text. Optional: params.max_hints (default 3), params.min_score.
+  query_global_rules — Query shared rules. Optional: params.query, params.limit.
+  record_global_rule — Write a shared rule. Required params.fact, params.confirm (true). Optional: params.tags, params.weight, params.provenance.
+  promote_to_global — Copy local memory to shared DB. Required params.memory_id, params.confirm (true).
+  route — Evaluate mode/persona routing. Required params.prompt.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_skills",
+		label: "MPM Skills",
+		description: `Skill management. Literal actions:
+  save — Required params.name, params.version, params.content. Optional: params.author, params.force.
+  read — Fetch skill by name. Required params.name. Optional: params.version.
+  list — List skills. Optional: params.scope ("local"|"shared"|"all").
+  delete — Soft-delete a skill. Required params.skill_id.
+  promote_to_global — Share a skill globally. Required params.skill_id, params.confirm (true).`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_wakes",
+		label: "MPM Wakes",
+		description: `Wake scheduling and inspection. Literal actions:
+  schedule — Required params.reason, params.target_time (epoch/duration/ISO-8601). Optional: params.theory_id, params.recurring_rule, params.metadata.
+  check — Pull due wakes. Optional: params.kinds (array; default notification-only; ["*"] for all).
+  check_pending_event — Pull event wakes for this session. Optional: params.session_id.
+  list — List scheduled wakes. Optional: params.include_fired, params.overdue_only, params.limit.
+  digest — Compact overdue wake summary. Optional: params.top_n (default 5).
+  upsert_task — Create/update a cron task. Required params.id, params.name, params.cron_expr, params.directive_id, params.status.
+  list_tasks — List all scheduled tasks. No params.
+  delete_task — Hard-delete a task. Required params.id.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_session",
+		label: "MPM Session",
+		description: `Session lifecycle and scratchpad. Literal actions:
+  end — Write a handoff for next wake. Required params.session_id, params.summary. Optional: params.state, params.commitments, params.open_questions.
+  handoff — Read latest handoff. Optional: params.unread, params.mark_read.
+  list_handoffs — List handoff history. Optional: params.limit (default 10), params.unread.
+  flush — Overwrite the ephemeral scratchpad. Required params.session_id, params.thesis. Optional: params.supporting.
+  read — Read scratchpad for a session. Required params.session_id.
+  discard — Delete scratchpad without promoting. Required params.session_id.
+  promote_scratchpad — Promote scratchpad to memory, then delete. Required params.session_id.`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_system",
+		label: "MPM System",
+		description: `Maintenance, audit, and diagnostics. Literal actions:
+  gc_run — Lifecycle decay sweep. Optional: params.dry_run (default true), params.aggressive, params.max_age_hours (default 24).
+  compact — Compact raw memories into a lesson. Optional: params.force.
+  health_check — SQLite integrity + domain counts. No params.
+  migrate — Import from markdown/JSON. Required params.from_path. Optional: params.format, params.label, params.dry_run, params.commit, params.commit_batch, params.undo_batch.
+  query_audit_log — Query anomaly ledger. Optional: params.level, params.component, params.days (default 7), params.limit (default 20).
+  list_clusters — List active audit clusters. No params.
+  snooze_cluster — Temporarily hide a cluster. Required params.cluster_key, params.snooze_until. Optional: params.reason.
+  resolve_cluster — Permanently dismiss a cluster. Required params.cluster_key. Optional: params.reason.
+  annotate_cluster — Append forensic annotation. Required params.cluster_key, params.annotation. Optional: params.reason.`,
+	});
+
+	// ---------- 3 Standalone Tools ----------------------------------------
+
 	pi.registerTool({
-		name: "mpm_explain",
+		name: "explain_retrieval",
 		label: "MPM Explain Retrieval",
 		description:
-			"Diagnostic for a recall query: returns MPM's per-node retrieval trace (BM25 base score, reuse count, " +
-			"last retrieved timestamp, success count). Useful when mpm_recall returns something unexpected and the " +
-			"agent (or user) wants to understand why.",
-		parameters: ExplainParams,
+			"Run a standard FTS search and return a per-node diagnostic breakdown: Base FTS Match score, Reuse Count, Last Retrieved timestamp, and Success Count. The retrieval ordering is identical to mpm_memory/query — it layers observability on top without altering ranking. Use when you want to understand WHY a result ranked where it did.",
+		parameters: Type.Object({
+			query: Type.String({ description: "The FTS query string (same contract as mpm_memory query)." }),
+			limit: Type.Optional(Type.Number({ description: "Max results to diagnose (default 10)." })),
+			collection: Type.Optional(Type.String({ description: "Optional collection filter (memories, lessons, decisions, theories, skills)." })),
+			scope: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("local"), Type.Literal("shared")], { default: "all" })),
+			trace: Type.Optional(Type.Boolean({ description: "When true, returns the 3-stage pipeline diagnostic." })),
+		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const r = await callMpm("explain_retrieval", {
-				query: params.query,
-				limit: params.limit ?? 5,
-			});
+			const r = await callMpm("explain_retrieval", (params as Record<string, unknown>) ?? {});
 			if (!r.success) {
-				return {
-					content: [{ type: "text", text: formatFailure("explain_retrieval", r) }],
-					details: { ok: false },
-				};
+				return { content: [{ type: "text", text: formatFailure("explain_retrieval", r) }], details: { ok: false } };
 			}
-			return {
-				content: [{ type: "text", text: jsonToText(r.payload) }],
-				details: { ok: true },
-			};
+			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
+		},
+	});
+
+	pi.registerTool({
+		name: "log_to_changelog",
+		label: "MPM Log to Changelog",
+		description: "Self-report agent work as a changelog entry tied to a git commit SHA.",
+		parameters: Type.Object({
+			fact: Type.String({ description: "The work performed to record." }),
+			commit_hash: Type.String({ description: "Git commit SHA to associate." }),
+			tags: Type.Optional(
+				Type.Union([Type.String(), Type.Array(Type.String())], {
+					description: "Tags as comma-separated string OR a JSON array of strings.",
+				}),
+			),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const r = await callMpm("log_to_changelog", (params as Record<string, unknown>) ?? {});
+			if (!r.success) {
+				return { content: [{ type: "text", text: formatFailure("log_to_changelog", r) }], details: { ok: false } };
+			}
+			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
+		},
+	});
+
+	pi.registerTool({
+		name: "request_review",
+		label: "MPM Request Review",
+		description:
+			"Concurrent multi-component review. Fetch artifact bodies from memory ids in 'artifacts' and send the same prompt + artifact to every component in 'components'. Strategy must be 'parallel' (v0.1). Returns rendered Markdown with one section per component. Independent results: one component's failure does not abort the others.",
+		parameters: Type.Object({
+			components: Type.Array(Type.String(), { description: "Substrate component names to review (e.g. ['memory','critic'])." }),
+			prompt: Type.String({ description: "The instruction sent to every component." }),
+			artifacts: Type.Optional(Type.Array(Type.String(), { description: "Optional memory ids to pass as pre-resolved text." })),
+			strategy: Type.Optional(Type.Union([Type.Literal("parallel")], { default: "parallel" })),
+			timeout_secs: Type.Optional(Type.Number({ description: "Optional total timeout in seconds." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const r = await callMpm("request_review", (params as Record<string, unknown>) ?? {});
+			if (!r.success) {
+				return { content: [{ type: "text", text: formatFailure("request_review", r) }], details: { ok: false } };
+			}
+			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
 		},
 	});
 
 	// ---------- Hooks --------------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Pull the prior handoff + epistemic-pressure signal. Fail-open: any
-		// mpm error logs a warning, session continues without a banner.
 		try {
-			const r = await callMpm("read_wake_context", {
-				session_id: ctx.sessionManager.getSessionId(),
+			const r = await callMpm("mpm_context", {
+				action: "read_wake_context",
+				params: {},
 			});
 			if (r.success && r.payload && typeof r.payload === "object") {
 				cachedWake = r.payload as WakeContext;
@@ -485,8 +508,6 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		// Inject the cached wake context into the system prompt exactly once
-		// per session. Subsequent turns get the unmodified prompt.
 		if (wakeDelivered || !cachedWake) return undefined;
 		wakeDelivered = true;
 		const block = renderWakeBlock(cachedWake);
@@ -500,12 +521,70 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	pi.registerCommand("mpm-status", {
 		description: "Show MPM install identity (version, database, counts). Runs `mpm info`.",
 		handler: async (_args, ctx) => {
-			const r = await callMpm("info", {});
-			if (!r.success || !r.payload) {
-				ctx.ui?.notify?.(`MPM status: unavailable (${formatFailure("info", r)})`, "error");
+			const r = await callMpmCli("info", []);
+			if (!r.success || !r.raw) {
+				ctx.ui?.notify?.(`MPM status: unavailable (${r.spawnError ?? "non-zero exit"})`, "error");
 				return;
 			}
-			ctx.ui?.notify?.(jsonToText(r.payload), "info");
+			ctx.ui?.notify?.(r.raw, "info");
 		},
+	});
+}
+
+/**
+ * Run `mpm <subcommand>` directly (e.g. `mpm info`), NOT through the
+ * `mpm call` tool surface. `info` / `status` / `doctor` are CLI subcommands,
+ * not registry tools, so they can't be reached via callMpm.
+ */
+function callMpmCli(
+	subcommand: string,
+	args: string[],
+	opts: { mpmBin?: string; timeoutMs?: number } = {},
+): Promise<{ success: boolean; raw: string; spawnError: string | null }> {
+	const bin = opts.mpmBin ?? "mpm";
+	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+	return new Promise((resolve) => {
+		let stdout = "";
+		let timedOut = false;
+		let settled = false;
+		const finish = (r: { success: boolean; raw: string; spawnError: string | null }) => {
+			if (settled) return;
+			settled = true;
+			resolve(r);
+		};
+
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(bin, [subcommand, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+		} catch (err) {
+			finish({
+				success: false,
+				raw: "",
+				spawnError: err instanceof Error ? err.message : String(err),
+			});
+			return;
+		}
+
+		child.on("error", (err) => {
+			finish({ success: false, raw: stdout, spawnError: err.message });
+		});
+
+		child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				/* ignore */
+			}
+		}, timeoutMs);
+		timer.unref();
+
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			finish({ success: !timedOut && code === 0, raw: stdout.trim(), spawnError: null });
+		});
 	});
 }

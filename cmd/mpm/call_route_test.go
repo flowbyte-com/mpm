@@ -9,7 +9,10 @@ import (
 
 func TestCallRoute_RequiresPrompt(t *testing.T) {
 	dm := newTestDMForCmd(t)
-	_, err := runHandler(dm, "route", map[string]interface{}{})
+	_, err := runHandler(dm, "mpm_context", map[string]interface{}{
+		"action": "route",
+		"params": map[string]interface{}{},
+	})
 	if err == nil {
 		t.Fatal("callRoute with empty payload should require prompt field")
 	}
@@ -34,8 +37,11 @@ func TestCallRoute_ReturnsReport(t *testing.T) {
 	t.Setenv("MPM_ROUTE_WORKSPACE", workspace)
 	t.Setenv("MPM_WORKSPACE", workspace)
 
-	result, err := runHandler(dm, "route", map[string]interface{}{
-		"prompt": "Design the system architecture for our new API gateway",
+	result, err := runHandler(dm, "mpm_context", map[string]interface{}{
+		"action": "route",
+		"params": map[string]interface{}{
+			"prompt": "Design the system architecture for our new API gateway",
+		},
 	})
 	if err != nil {
 		t.Fatalf("callRoute: %v", err)
