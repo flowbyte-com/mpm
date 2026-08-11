@@ -58,6 +58,7 @@ func NewRouter() *CommandRouter {
 		"stats":        {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
 		"prune":        {Name: "prune", Description: "Prune expired memories", MinArgs: 0},
 		"export":       {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"integration":  {Name: "integration", Description: "Cross-framework config emitters (export-mcp)", MinArgs: 1},
 		"maintain":     {Name: "maintain", Description: "Run self-maintenance sweep", MinArgs: 0},
 
 		// Review
@@ -237,6 +238,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handlePrune(args)
 	case "export":
 		return handleExport(args)
+	case "integration":
+		return handleIntegration(args[1:])
 	case "maintain":
 		return handleMaintain(args)
 	case "review":
@@ -574,6 +577,8 @@ func handleOps(args []string) int {
 		return handlePrune(append([]string{"prune"}, subArgs...))
 	case "export":
 		return handleExport(append([]string{"export"}, subArgs...))
+	case "integration":
+		return handleIntegration(subArgs)
 
 	// — Backup & Restore & Ingest —
 	case "ingest":
