@@ -1,9 +1,20 @@
 # mpm Master Makefile
 # Usage: make <target>
 #
+# Canonical binary location: $HOME/.mpm/bin/ (the same root as data, config,
+# logs, and the runtime database). This is the install target for both the
+# `make build` and `make install` paths — no sudo, no /usr/local copy, no
+# XDG split. Agent integrations invoke $HOME/.mpm/bin/mpm directly; PATH
+# is convenience, not contract.
+#
+# If you cloned to a different location, PREFIX defaults to whatever
+# $(HOME)/.mpm resolves to via the standard mpm data-root convention. To
+# override (rare; for shared-host system mode), pass PREFIX=/usr/local or
+# use scripts/install.sh --system.
+#
 # Targets:
 #   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
-#   make install             - Install all four to $(PREFIX)/bin (system-wide, requires sudo)
+#   make install             - Verify binaries are at $(PREFIX)/bin/ (canonical). No copy step.
 #   make service-scheduler   - [LEGACY/OPT-IN] Install mpm-scheduler systemd USER unit
 #                              (fails on encrypted home dirs — use scripts/install.sh instead)
 #   make service             - Alias for service-scheduler
@@ -13,17 +24,20 @@
 #   make help                - Show this help
 #
 # RECOMMENDED INSTALL PATH:
-#   sudo scripts/install.sh
-# This single command builds, installs binaries + wrapper, creates /var/lib/mpm,
-# installs the SYSTEM-level systemd unit, registers with OpenClaw if present,
-# and validates end-to-end. See INSTALL.md for full details.
+#   ./scripts/install.sh
+# This single command builds, installs binaries + wrapper at $HOME/.mpm/bin/,
+# creates the data root, installs the USER-level systemd unit, registers with
+# OpenClaw if present, and validates end-to-end. No sudo required. See
+# INSTALL.md for full details.
 
 BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
 BUILD_DIR   := bin
-PREFIX      ?= /usr/local
+# Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in scripts/install.sh).
+# Override with `make install PREFIX=/somewhere` for non-standard layouts.
+PREFIX      ?= $(HOME)/.mpm
 SERVICE_NAME := mpm-scheduler
 SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service
 SERVICE_DST := $(HOME)/.config/systemd/user/$(SERVICE_NAME).service
@@ -56,14 +70,25 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
 	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-alpha)"
 
-# Install all four binaries to PREFIX/bin (system-wide, requires sudo).
+# Verify the canonical install location contains all four binaries.
+# `make build` already writes to bin/, which IS $(PREFIX)/bin/ when the repo
+# is cloned at $HOME/.mpm (the standard layout). On a non-standard layout
+# (repo cloned somewhere other than $HOME/.mpm), this target copies the
+# build output into the canonical location. No sudo — the canonical
+# location is always user-writable.
 install: build
-	@echo "🚀 Installing mpm, mpm-mcp, mpm-scheduler, and mpm-critic to $(PREFIX)/bin/..."
-	@sudo install -Dm755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME)
-	@sudo install -Dm755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY)
-	@sudo install -Dm755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY)
-	@sudo install -Dm755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY)
-	@echo "✓ Installation complete!"
+	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
+	@mkdir -p $(PREFIX)/bin
+	@if [ "$(BUILD_DIR)" != "$(PREFIX)/bin" ] && [ ! -L "$(BUILD_DIR)" ] && [ ! -L "$(PREFIX)" ]; then \
+	    install -m755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME) || true; \
+	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) || true; \
+	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) || true; \
+	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) || true; \
+	    echo "    (synced bin/ to $(PREFIX)/bin/)"; \
+	else \
+	    echo "    (bin/ is the canonical location; no copy needed)"; \
+	fi
+	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY)"
 
 # Install the mpm-scheduler systemd user service.
 # The unit is templated for the standard ~/projects/mpm layout; override
@@ -140,9 +165,11 @@ clean:
 help:
 	@echo "mpm Makefile"
 	@echo ""
+	@echo "  Canonical location: \$$HOME/.mpm/bin/ (no sudo, no /usr/local copy)"
+	@echo ""
 	@echo "  Targets:"
-	@echo "    make build               - Build all four binaries"
-	@echo "    make install             - Install all four to \$$(PREFIX)/bin/"
+	@echo "    make build               - Build all four binaries to bin/"
+	@echo "    make install             - Verify/sync bin/ to \$$(PREFIX)/bin/ (default \$$HOME/.mpm)"
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
@@ -153,3 +180,4 @@ help:
 	@echo "    make help                - Show this help"
 	@echo ""
 	@echo "  Version: $(VERSION)"
+	@echo "  Prefix:   $(PREFIX)"

@@ -1241,7 +1241,7 @@ mpm cascade list-dead-letters
 **Operator pattern.** Schedule from `cron` every 5 minutes, or run from `systemd` on a 60s timer:
 
 ```cron
-*/5 * * * * /usr/local/bin/mpm cascade materialize --max-iterations 50
+*/5 * * * * $HOME/.mpm/bin/mpm cascade materialize --max-iterations 50
 ```
 
 The `--max-iterations` bound is a safety valve — the operator's job is to keep the outbox at zero (or near it), not to let a single invocation spend unbounded time churning through a blast-radius cascade.
@@ -1871,7 +1871,7 @@ The cognitive loop closes through the existing wake context: when self-heal esca
 #### Recommended cron
 
 ```cron
-0 4 * * 0 cd /home/v/workspace/projects/mpm && /usr/local/bin/mpm ops self-heal || echo "MPM drift detected: $(date)" | mail -s "MPM Self-Heal Alert" v
+0 4 * * 0 $HOME/.mpm/bin/mpm ops self-heal || echo "MPM drift detected: $(date)" | mail -s "MPM Self-Heal Alert" v
 ```
 
 ### Self-Audit Log

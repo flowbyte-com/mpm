@@ -2442,6 +2442,18 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 // row. The retrieval_metadata is joined in the SQL path (so future
 // rankers can use it) but today DefaultRanker passes ftsScore through
 // unchanged.
+//
+// When trace=true (or trace=true is in the payload), the handler also
+// traces the three stages of the recall pipeline:
+//
+//   Stage 1: raw query → BuildFTS5Query() → final MATCH string
+//   Stage 2: FTS5 row count + BM25 distribution + top 3 IDs
+//   Stage 3: HybridSearch input/output count + discarded-row analysis
+//
+// This is the diagnostic surface for investigating retrieval failures
+// (zero-result queries, short-token drops, hyphen crashes). The
+// permanent addition makes the substrate's recall path debuggable
+// without throwing printfs at it.
 func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query := internal.ParseStringOr(p["query"], "")
 	if query == "" {
@@ -2453,6 +2465,7 @@ func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 	}
 	collection := internal.ParseStringOr(p["collection"], "")
 	scope := internal.ParseStringOr(p["scope"], "all")
+	trace := internal.ParseBoolOr(p["trace"], false)
 
 	items, err := dm.HybridSearchMemories(query, collection, limit, scope)
 	if err != nil {
@@ -2464,57 +2477,351 @@ func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 	sb.WriteString("**Query:** ")
 	sb.WriteString(query)
 	sb.WriteString("\n\n")
+
+	// ── Trace mode (Stage 1/2/3 pipeline diagnostic) ─────────────────────
+	var traceData map[string]interface{}
+	if trace {
+		traceData = runRetrievalTrace(dm, query, collection, scope, limit, items)
+		sb.WriteString(formatTraceSection(traceData))
+		sb.WriteString("\n\n---\n\n")
+	}
+
 	if len(items) == 0 {
 		sb.WriteString("_No results._\n")
-		return map[string]interface{}{
-			"success":    true,
-			"query":      query,
-			"diagnostic": sb.String(),
-			"count":      0,
-		}, nil
-	}
-	sb.WriteString(fmt.Sprintf("**%d result(s).** Retrieval ordering follows FTS `bm25()` rank — identical to `query_long_term_memory`. Retrieval metadata is observability only and does NOT influence ranking today (see `DefaultRanker` in retrieval_ranker.go).\n\n", len(items)))
+	} else {
+		sb.WriteString(fmt.Sprintf("**%d result(s).** Retrieval ordering follows FTS `bm25()` rank — identical to `query_long_term_memory`. Retrieval metadata is observability only and does NOT influence ranking today (see `DefaultRanker` in retrieval_ranker.go).\n\n", len(items)))
 
-	for _, item := range items {
-		id, _ := item["id"].(string)
-		if id == "" {
-			continue
-		}
-		meta, _ := dm.GetRetrievalMetadata(id)
+		for _, item := range items {
+			id, _ := item["id"].(string)
+			if id == "" {
+				continue
+			}
+			meta, _ := dm.GetRetrievalMetadata(id)
 
-		// FTS / combined score — combined_score is the post-hybrid
-		// blend when present; fall back to weight for items without it.
-		var ftsScore interface{} = item["weight"]
-		if cs, ok := item["combined_score"]; ok {
-			ftsScore = cs
-		}
+			// FTS / combined score — combined_score is the post-hybrid
+			// blend when present; fall back to weight for items without it.
+			var ftsScore interface{} = item["weight"]
+			if cs, ok := item["combined_score"]; ok {
+				ftsScore = cs
+			}
 
-		sb.WriteString("## Diagnostic: ")
-		sb.WriteString(id)
-		sb.WriteString("\n")
-		sb.WriteString("- Base FTS Match: ")
-		sb.WriteString(fmt.Sprintf("%v", ftsScore))
-		sb.WriteString("\n")
-		sb.WriteString(fmt.Sprintf("- Reuse Count: %d\n", meta.ReuseCount))
-		var lastRetrieved string
-		if meta.LastRetrievedAt != nil {
-			lastRetrieved = mpminternal.FormatUnixSeconds(*meta.LastRetrievedAt)
-		} else {
-			lastRetrieved = "_never_"
+			sb.WriteString("## Diagnostic: ")
+			sb.WriteString(id)
+			sb.WriteString("\n")
+			sb.WriteString("- Base FTS Match: ")
+			sb.WriteString(fmt.Sprintf("%v", ftsScore))
+			sb.WriteString("\n")
+			sb.WriteString(fmt.Sprintf("- Reuse Count: %d\n", meta.ReuseCount))
+			var lastRetrieved string
+			if meta.LastRetrievedAt != nil {
+				lastRetrieved = mpminternal.FormatUnixSeconds(*meta.LastRetrievedAt)
+			} else {
+				lastRetrieved = "_never_"
+			}
+			sb.WriteString("- Last Retrieved: ")
+			sb.WriteString(lastRetrieved)
+			sb.WriteString("\n")
+			sb.WriteString(fmt.Sprintf("- Success Count: %d\n", meta.SuccessCount))
+			sb.WriteString("\n")
 		}
-		sb.WriteString("- Last Retrieved: ")
-		sb.WriteString(lastRetrieved)
-		sb.WriteString("\n")
-		sb.WriteString(fmt.Sprintf("- Success Count: %d\n", meta.SuccessCount))
-		sb.WriteString("\n")
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"success":    true,
 		"query":      query,
 		"diagnostic": sb.String(),
 		"count":      len(items),
-	}, nil
+	}
+	if traceData != nil {
+		result["trace"] = traceData
+	}
+	return result, nil
+}
+
+// runRetrievalTrace executes the three-stage pipeline diagnostic. It does
+// NOT modify any data; it reads the same queries the live tool would run
+// and reports what each stage saw. Use this to pinpoint whether a recall
+// failure lives in:
+//
+//   - Stage 1 (BuildFTS5Query transformation): does the MATCH string we
+//     build from the user's query match what FTS5 can match against?
+//   - Stage 2 (FTS5 execution): does the index actually have rows for
+//     this MATCH? What BM25 distribution do they show?
+//   - Stage 3 (HybridSearch result handling): how many of those FTS5
+//     rows survive the merge/dedup/threshold/slice path? What were the
+//     BM25 scores of the rows we threw away?
+//
+// Expected contract: if a query returns 0 results but Stage 2 reports
+// N>0 FTS5 rows, the bug is in Stage 3 (discarding). If Stage 2 itself
+// reports 0 rows but direct SQLite with the same MATCH string returns
+// rows, the bug is in Stage 1 or the connection state.
+func runRetrievalTrace(dm mpminternal.CoreDB, query, collection, scope string, limit int, hybridResults []map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"query":      query,
+		"collection": collection,
+		"scope":      scope,
+	}
+
+	// ── Stage 1: BuildFTS5Query transformation ─────────────────────────
+	transformedMATCH := internal.BuildFTS5Query(query)
+	out["stage1"] = map[string]interface{}{
+		"raw_query":      query,
+		"transformed":    transformedMATCH,
+		"transform_note": "BuildFTS5Query tokenizes on whitespace + - _ . and appends * prefix per token (porter unicode61). Empty output means the query was all FTS5 special chars (^ \" ( ) : *).",
+	}
+
+	// Determine FTS table prefix from scope
+	schemaPrefix := ""
+	if scope == "shared" {
+		schemaPrefix = "shared."
+	}
+	ftsTable := schemaPrefix + "memories_fts"
+	memTable := schemaPrefix + "memories"
+	expireClause := " AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))"
+	expireClauseFts := " AND (m.expires_at IS NULL OR m.expires_at > strftime('%s','now'))"
+	if schemaPrefix == "shared." {
+		expireClause = ""
+		expireClauseFts = ""
+	}
+
+	db := dm.SQLDB()
+
+	// ── Stage 2: FTS5 row count + BM25 distribution + top 3 IDs ─────────
+	stage2 := map[string]interface{}{
+		"match_string":     transformedMATCH,
+		"limit_fetched":    limit * 4, // fetch wider than the HybridSearch fetch (limit*2) so we can see what's discarded
+	}
+	if transformedMATCH == "" {
+		stage2["error"] = "BuildFTS5Query returned empty string (would raise sqlite error if sent)"
+		stage2["row_count"] = 0
+		stage2["top_3_ids"] = []string{}
+		stage2["bm25"] = map[string]interface{}{"min": nil, "max": nil, "median": nil, "count": 0}
+	} else {
+		stage2SQL := fmt.Sprintf(`
+			SELECT m.id, bm25(%s) AS score
+			FROM %s
+			JOIN %s m ON %s.rowid = m.rowid
+			WHERE %s MATCH ? AND m.deleted_at IS NULL%s
+			  AND (? = '' OR m.collection = ?)
+			ORDER BY score
+			LIMIT ?`, ftsTable, ftsTable, memTable, ftsTable, ftsTable, expireClauseFts)
+		rows, err := db.Query(stage2SQL, transformedMATCH, collection, collection, limit*4)
+		if err != nil {
+			stage2["error"] = fmt.Sprintf("FTS5 query failed: %v", err)
+			stage2["row_count"] = 0
+			stage2["top_3_ids"] = []string{}
+			stage2["bm25"] = map[string]interface{}{"min": nil, "max": nil, "median": nil, "count": 0}
+		} else {
+			defer rows.Close()
+			scores := []float64{}
+			topIDs := []string{}
+			for rows.Next() {
+				var id string
+				var score float64
+				if err := rows.Scan(&id, &score); err == nil {
+					scores = append(scores, score)
+					if len(topIDs) < 3 {
+						topIDs = append(topIDs, id)
+					}
+				}
+			}
+			stage2["row_count"] = len(scores)
+			stage2["top_3_ids"] = topIDs
+			if len(scores) > 0 {
+				sortedScores := make([]float64, len(scores))
+				copy(sortedScores, scores)
+				// scores already sorted by bm25 ASC (most negative = best)
+				stage2["bm25"] = map[string]interface{}{
+					"min":    sortedScores[0],                                  // most negative = best match
+					"max":    sortedScores[len(sortedScores)-1],               // least negative = worst match
+					"median": sortedScores[len(sortedScores)/2],
+					"count":  len(sortedScores),
+				}
+			} else {
+				stage2["bm25"] = map[string]interface{}{"min": nil, "max": nil, "median": nil, "count": 0}
+			}
+		}
+	}
+	out["stage2"] = stage2
+
+	// ── Stage 3: HybridSearch input/output + discarded-row analysis ────
+	stage3 := map[string]interface{}{
+		"hybrid_output_count": len(hybridResults),
+	}
+
+	// Collect IDs HybridSearch returned
+	hybridIDs := map[string]bool{}
+	for _, item := range hybridResults {
+		if id, ok := item["id"].(string); ok {
+			hybridIDs[id] = true
+		}
+	}
+	stage3["hybrid_returned_ids"] = mapKeysToSlice(hybridIDs)
+
+	// If Stage 2 returned FTS5 rows, figure out which ones HybridSearch
+	// discarded and what their BM25 scores were. This is the key
+	// signal: if discarded rows have very negative BM25 scores (good
+	// matches), something in the merge/threshold/slice path is broken.
+	if transformedMATCH != "" {
+		stage3SQL := fmt.Sprintf(`
+			SELECT m.id, bm25(%s) AS score
+			FROM %s
+			JOIN %s m ON %s.rowid = m.rowid
+			WHERE %s MATCH ? AND m.deleted_at IS NULL%s
+			  AND (? = '' OR m.collection = ?)
+			ORDER BY score
+			LIMIT ?`, ftsTable, ftsTable, memTable, ftsTable, ftsTable, expireClauseFts)
+		rows, err := db.Query(stage3SQL, transformedMATCH, collection, collection, limit*4)
+		if err == nil {
+			allFTSIDs := []string{}
+			discardedScores := []float64{}
+			keptScores := []float64{}
+			for rows.Next() {
+				var id string
+				var score float64
+				if err := rows.Scan(&id, &score); err == nil {
+					allFTSIDs = append(allFTSIDs, id)
+					if hybridIDs[id] {
+						keptScores = append(keptScores, score)
+					} else {
+						discardedScores = append(discardedScores, score)
+					}
+				}
+			}
+			rows.Close()
+			stage3["fts5_total_rows"] = len(allFTSIDs)
+			stage3["fts5_kept_by_hybrid"] = len(keptScores)
+			stage3["fts5_discarded_by_hybrid"] = len(discardedScores)
+			stage3["fts5_kept_ids"] = mapKeysToSlice(hybridIDs)
+			if len(discardedScores) > 0 {
+				stage3["discarded_bm25"] = map[string]interface{}{
+					"min":    discardedScores[0],                            // most-negative discarded score
+					"max":    discardedScores[len(discardedScores)-1],      // least-negative discarded score
+					"count":  len(discardedScores),
+				}
+			} else {
+				stage3["discarded_bm25"] = map[string]interface{}{"count": 0}
+			}
+			if len(keptScores) > 0 {
+				stage3["kept_bm25"] = map[string]interface{}{
+					"min":   keptScores[0],
+					"max":   keptScores[len(keptScores)-1],
+					"count": len(keptScores),
+				}
+			} else {
+				stage3["kept_bm25"] = map[string]interface{}{"count": 0}
+			}
+		}
+		_ = expireClause // suppress unused warning; clause already applied via FTS clause
+	}
+
+	out["stage3"] = stage3
+	return out
+}
+
+// formatTraceSection renders the trace map as readable markdown for the
+// diagnostic surface. Kept separate from runRetrievalTrace so the data
+// shape stays available as JSON for agent consumption.
+func formatTraceSection(t map[string]interface{}) string {
+	var sb strings.Builder
+	sb.WriteString("## Pipeline Trace\n\n")
+
+	// Stage 1
+	if s1, ok := t["stage1"].(map[string]interface{}); ok {
+		sb.WriteString("### Stage 1 — Query Transformation\n\n")
+		sb.WriteString("- Raw query: `")
+		sb.WriteString(fmt.Sprintf("%v", s1["raw_query"]))
+		sb.WriteString("`\n")
+		sb.WriteString("- After `BuildFTS5Query`: `")
+		sb.WriteString(fmt.Sprintf("%v", s1["transformed"]))
+		sb.WriteString("`\n")
+		if note, ok := s1["transform_note"].(string); ok {
+			sb.WriteString("- Note: ")
+			sb.WriteString(note)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Stage 2
+	if s2, ok := t["stage2"].(map[string]interface{}); ok {
+		sb.WriteString("### Stage 2 — FTS5 Execution\n\n")
+		if errStr, ok := s2["error"].(string); ok && errStr != "" {
+			sb.WriteString("- **Error:** ")
+			sb.WriteString(errStr)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("- MATCH string sent to FTS5: `")
+		sb.WriteString(fmt.Sprintf("%v", s2["match_string"]))
+		sb.WriteString("`\n")
+		sb.WriteString(fmt.Sprintf("- FTS5 row count (top %d fetched): %v\n", s2["limit_fetched"], s2["row_count"]))
+		if ids, ok := s2["top_3_ids"].([]string); ok && len(ids) > 0 {
+			sb.WriteString("- Top 3 IDs (best BM25 first):\n")
+			for _, id := range ids {
+				sb.WriteString("  - `")
+				sb.WriteString(id)
+				sb.WriteString("`\n")
+			}
+		}
+		if bm, ok := s2["bm25"].(map[string]interface{}); ok {
+			if count, _ := bm["count"].(int); count > 0 {
+				sb.WriteString(fmt.Sprintf("- BM25 distribution: min=%.3f, max=%.3f, median=%.3f (n=%d)\n",
+					toFloat(bm["min"]), toFloat(bm["max"]), toFloat(bm["median"]), count))
+			} else {
+				sb.WriteString("- BM25 distribution: **no rows**\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Stage 3
+	if s3, ok := t["stage3"].(map[string]interface{}); ok {
+		sb.WriteString("### Stage 3 — HybridSearch Result Handling\n\n")
+		if total, ok := s3["fts5_total_rows"].(int); ok {
+			kept, _ := s3["fts5_kept_by_hybrid"].(int)
+			discarded, _ := s3["fts5_discarded_by_hybrid"].(int)
+			sb.WriteString(fmt.Sprintf("- FTS5 total rows: %d\n", total))
+			sb.WriteString(fmt.Sprintf("- Kept by HybridSearch: %d\n", kept))
+			sb.WriteString(fmt.Sprintf("- **Discarded by HybridSearch: %d**\n", discarded))
+			if discarded > 0 {
+				if bm, ok := s3["discarded_bm25"].(map[string]interface{}); ok {
+					if min, ok := bm["min"].(float64); ok {
+						sb.WriteString(fmt.Sprintf("- Discarded BM25 range: min=%.3f (best discarded), max=%.3f (worst discarded)\n",
+							min, toFloat(bm["max"])))
+					}
+				}
+				sb.WriteString("\n> **Diagnosis:** FTS5 found rows; HybridSearch discarded them.\n>\n")
+				sb.WriteString("> If discarded rows have strongly negative BM25 (e.g., < -1.0), the bug is in the\n")
+				sb.WriteString("> merge/dedup/threshold/slice path, not in FTS5 itself. Compare with direct\n")
+				sb.WriteString("> SQLite `MATCH '<match_string>' LIMIT <n>` to confirm the FTS5 layer is healthy.\n")
+			} else if total > 0 && kept == 0 {
+				sb.WriteString("\n> **Diagnosis:** FTS5 found rows; ALL were discarded.\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func toFloat(v interface{}) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	}
+	return 0
+}
+
+func mapKeysToSlice(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // handleRequestReview implements the request_review MCP tool.

@@ -120,7 +120,7 @@ mpm cascade materialize
 **Cron scheduling example** — run every 5 minutes to drain the queue:
 
 ```cron
-*/5 * * * * /usr/local/bin/mpm cascade materialize --poll-interval 30s
+*/5 * * * * $HOME/.mpm/bin/mpm cascade materialize --poll-interval 30s
 ```
 
 ### `mpm cascade list-dead-letters`

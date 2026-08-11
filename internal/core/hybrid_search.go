@@ -8,7 +8,9 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const challengeWarning     = "[Note: This memory is challenged — treat as unverified]"
@@ -236,11 +238,24 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		})
 	}
 
-	// Sort by combined score descending
+	// Sort: for hybrid results (FTS5+vector), trust CombinedScore descending
+	// (higher = better blend). For FTS5-only results, BM25 is already the
+	// correct relevance signal — more negative = better match — so sort
+	// ascending so the best rows land at the top and survive the Limit
+	// slice. The FTS5-only case is the common path for pure text recall;
+	// the hybrid case is rare and the CombinedScore sort is correct for it.
 	sort.Slice(combined, func(i, j int) bool {
-		return combined[i].CombinedScore > combined[j].CombinedScore
+		if combined[i].Source == "fts5" && combined[j].Source == "fts5" {
+			// Both FTS5-only: ascending BM25 (most negative = best first)
+			return combined[i].FTS5Score < combined[j].FTS5Score
+		}
+		if combined[i].Source == "hybrid" && combined[j].Source == "hybrid" {
+			// Both hybrid: descending combined (higher = better blend)
+			return combined[i].CombinedScore > combined[j].CombinedScore
+		}
+		// Mixed: hybrid > FTS5-only (vector confirmation beats text-only)
+		return combined[i].Source == "hybrid"
 	})
-
 	if len(combined) > cfg.Limit {
 		combined = combined[:cfg.Limit]
 	}
@@ -569,7 +584,11 @@ func searchFTS5(db *sql.DB, query, collection string, limit int, schemaPrefix st
 		return nil, err
 	}
 	defer rows.Close()
-	return scanFTSEntries(rows)
+	result, scanErr := scanFTSEntries(rows)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	return result, nil
 }
 
 // searchLike is the FTS5 fallback using LIKE.
@@ -603,29 +622,77 @@ func scanFTSEntries(rows *sql.Rows) ([]ftsEntry, error) {
 	for rows.Next() {
 		var e ftsEntry
 		var nullableTags, nullableMetadata, nullableRefID sql.NullString
-		var nullableLastAccessed, nullableMetaLastRetrieved sql.NullInt64
+		// Timestamp columns may be stored as INTEGER (unix epoch) or as
+		// TEXT with DATETIME affinity. The mattn driver returns:
+		//   INTEGER columns → driver.Value type int64
+		//   TEXT/DATETIME columns → driver.Value type time.Time
+		// sql.NullTime can't accept int64; sql.NullInt64 can't accept
+		// time.Time. Scan into interface{} and detect the type at runtime
+		// so both storage formats work without schema migrations.
+		var createdAtRaw, lastAccessedRaw, lastRetrievedRaw interface{}
 		if err := rows.Scan(&e.ID, &e.Content, &e.Collection, &nullableTags, &nullableMetadata,
-			&e.CreatedAt, &e.ReinforcementCount, &e.Weight,
-			&nullableLastAccessed, &nullableRefID, &e.Score,
-			&e.ReuseCount, &nullableMetaLastRetrieved, &e.SuccessCount); err != nil {
+			&createdAtRaw, &e.ReinforcementCount, &e.Weight,
+			&lastAccessedRaw, &nullableRefID, &e.Score,
+			&e.ReuseCount, &lastRetrievedRaw, &e.SuccessCount); err != nil {
 			return nil, fmt.Errorf("scanning FTS entry row: %w", err)
+		}
+		if v, ok := timestampToUnix(createdAtRaw); ok {
+			e.CreatedAt = v
 		}
 		e.Tags = nullableTags.String
 		e.Metadata = nullableMetadata.String
-		if nullableLastAccessed.Valid {
-			v := nullableLastAccessed.Int64
+		if v, ok := timestampToUnix(lastAccessedRaw); ok {
 			e.LastAccessedAt = &v
 		}
 		if nullableRefID.Valid {
 			e.ReferenceID = &nullableRefID.String
 		}
-		if nullableMetaLastRetrieved.Valid {
-			v := nullableMetaLastRetrieved.Int64
+		if v, ok := timestampToUnix(lastRetrievedRaw); ok {
 			e.LastRetrievedAt = &v
 		}
 		results = append(results, e)
 	}
 	return results, rows.Err()
+}
+
+// timestampToUnix normalises whatever the mattn/go-sqlite3 driver hands
+// back for a timestamp column. Returns (unixSeconds, true) for any
+// usable value; (0, false) for NULL.
+//
+// Storage variants observed in the wild:
+//   - INTEGER (unix epoch)        → driver.Value type int64
+//   - TEXT in RFC3339 format      → driver.Value type string
+//   - TEXT in 'YYYY-MM-DD HH:MM:SS' (DATETIME affinity) → time.Time
+//
+// All three reduce to a single int64 unix-second representation without
+// the caller needing to know which storage format the database picked.
+func timestampToUnix(v interface{}) (int64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch t := v.(type) {
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case time.Time:
+		return t.Unix(), true
+	case string:
+		// RFC3339 first (more specific), then DATETIME format.
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			return parsed.Unix(), true
+		}
+		if parsed, err := time.Parse("2006-01-02 15:04:05", t); err == nil {
+			return parsed.Unix(), true
+		}
+		// Try parsing as plain integer string (legacy INTEGER-as-string).
+		if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+			return n, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
 }
 
 // VectorMatch searches the memories table for vector similarity.

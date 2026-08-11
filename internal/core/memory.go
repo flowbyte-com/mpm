@@ -1801,13 +1801,21 @@ func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]
 		LIMIT ?`
 	rows, err := s.DB.Query(ftsQuery, query, collection, n)
 	if err == nil {
-		return scanMemoryRows(rows, func(content, q string) float64 {
+		memRows, scanErr := scanMemoryRows(rows, func(content, q string) float64 {
 			// FTS5 rank is implicit order; score by BM25-adjacent frequency
 			return float64(strings.Count(strings.ToLower(content), strings.ToLower(q)))
 		}, query)
+		if scanErr == nil && len(memRows) > 0 {
+			return memRows, nil
+		}
+		// Fall through to LIKE if scan failed OR zero rows. The zero-row case
+		// matters for queries like "pi" where FTS5 has no prefix-match and
+		// returns 0 rows without error — LIKE may still find substring matches.
+		rows.Close()
 	}
 
-	// Strategy 2: LIKE fallback — handles malformed FTS5 queries or no FTS5
+	// Strategy 2: LIKE fallback — handles malformed FTS5 queries, queries
+	// where FTS5 returns 0 rows for short tokens (e.g. "pi", "mcp"), or no FTS5.
 	searchPattern := "%" + query + "%"
 	likeQuery := `
 		SELECT id, collection, content, COALESCE(session_id, '') as session_id, COALESCE(tags, '[]') as tags, COALESCE(metadata, '{}') as metadata, COALESCE(embedding, '[]') as embedding, created_at
@@ -1816,14 +1824,17 @@ func (s *MemoryStore) FullTextSearch(query string, collection string, n int) ([]
 		ORDER BY created_at DESC
 		LIMIT ?`
 	rows2, err := s.DB.Query(likeQuery, collection, searchPattern, searchPattern, n)
-	if err == nil {
-		return scanMemoryRows(rows2, func(content, q string) float64 {
-			return float64(strings.Count(strings.ToLower(content), strings.ToLower(q)))
-		}, query)
+	if err != nil {
+		return nil, fmt.Errorf("LIKE fallback failed: %w", err)
 	}
-
-	// Strategy 3: recent rows as last resort
-	return s.GetRecent(n)
+	defer rows2.Close()
+	memRows, scanErr := scanMemoryRows(rows2, func(content, q string) float64 {
+		return float64(strings.Count(strings.ToLower(content), strings.ToLower(q)))
+	}, query)
+	if scanErr != nil {
+		return nil, fmt.Errorf("LIKE scan failed: %w", scanErr)
+	}
+	return memRows, nil
 }
 
 // MetadataFilter searches by metadata criteria using SQLite pushdown
