@@ -6,9 +6,9 @@
 > captures *instability*, not security — review what the pinned commit
 > exposes before relying on it for sensitive use.
 
-This is a small project run by a small group of people. Most of the rules
-below exist because the architecture is easy to break in ways that "work"
-locally and corrupt invariants globally.
+MPM is an alpha-stage project with a deliberately strict architecture. Most
+of the rules below exist because the architecture is easy to break in ways
+that "work" locally and corrupt invariants globally.
 
 ## Before you change code
 
@@ -71,7 +71,11 @@ is built on. Violations will be rejected in review even when the code
   has already fetched the rewritten SHAs.
 - **One shared connection.** All goroutines use the shared
   `DatabaseManager`. Do not `sql.Open` new connections inside hot
-  paths. A static-analysis test enforces the whitelist.
+  paths. The whitelist is enforced by
+  `TestDatabaseManagerIsOnlyOwnerOfSqlOpen` in
+  `internal/core/sqlopen_owner_test.go` — if you add a new call site,
+  the test will tell you whether it belongs on the whitelist or whether
+  the design needs to route through `DatabaseManager` instead.
 - **Foreign keys are on.** Always. Both the local DB and the shared
   DB. Foreign keys off is a bug.
 

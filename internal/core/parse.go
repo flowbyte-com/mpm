@@ -104,6 +104,31 @@ func ParseFloatOr(v interface{}, def float64) float64 {
 	return parseFloatDefault(v, def)
 }
 
+// ParseBoolOr coerces a JSON-decoded payload value to bool. Accepts
+// native bool, string ("true"/"false"/"1"/"0"/"yes"/"no" case-insensitive),
+// and numeric (non-zero = true). Falls back to def when the value is
+// absent or of an unrecognised type.
+func ParseBoolOr(v interface{}, def bool) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "y", "on":
+			return true
+		case "false", "0", "no", "n", "off", "":
+			return false
+		}
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	}
+	return def
+}
+
 // ── Path utilities — duplicated from the standard library to keep
 // this package's import set tight (no `path/filepath` dep). ──
 

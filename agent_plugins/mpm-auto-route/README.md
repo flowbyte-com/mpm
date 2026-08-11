@@ -25,7 +25,7 @@ openclaw plugins install npm-pack:./openclaw-mpm-auto-route-0.1.0.tgz
 openclaw plugins inspect mpm-auto-route --runtime --json
 ```
 
-Requires MPM installed on PATH (`/usr/local/bin/mpm` or `~/.local/bin/mpm`). The auto-switch is silently a no-op when `mpm` is missing.
+Requires MPM installed at the canonical location `$HOME/.mpm/bin/mpm` (alpha default), or reachable on PATH (set `MPM_BIN=/path/to/mpm` to override). The auto-switch is silently a no-op when `mpm` is missing.
 
 ## Configuration
 

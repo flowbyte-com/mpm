@@ -392,6 +392,17 @@ func applySharedPremium(merged []HybridResult, targetCount int) []HybridResult {
 		out[i] = scored{r: r, final: final}
 	}
 	sort.Slice(out, func(i, j int) bool {
+		// For FTS5-only results (no vector), CombinedScore is negative
+		// (BM25 * (1-VectorWeight)) — more negative = better match.
+		// Sorting final DESC would put the WORST matches first. Use
+		// FTS5Score ASC for FTS5-only (most negative = best first).
+		// For hybrid (FTS5+vector) or vector-only, CombinedScore is
+		// positive (higher = better blend) — sort final DESC.
+		iIsFTS := out[i].r.Source == "fts5"
+		jIsFTS := out[j].r.Source == "fts5"
+		if iIsFTS && jIsFTS {
+			return out[i].r.FTS5Score < out[j].r.FTS5Score
+		}
 		if out[i].final != out[j].final {
 			return out[i].final > out[j].final
 		}

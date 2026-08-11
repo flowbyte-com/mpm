@@ -10,8 +10,8 @@
 #
 # What this script does:
 #   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic)
-#   2. Installs binaries to $HOME/.local/bin/ (XDG user-local)
-#   3. Writes a workspace-setting wrapper at $HOME/.local/bin/mpm
+#   2. Installs binaries to $HOME/.mpm/bin/ (canonical — same root as data)
+#   3. Writes a workspace-setting wrapper at $HOME/.mpm/bin/mpm
 #   4. Creates $HOME/.mpm/ as the runtime data root (0700/0600 enforced
 #      by the binary's startup gate)
 #   5. Installs and enables the USER-level systemd service at
@@ -31,6 +31,9 @@
 #   - Runtime data perms are 0700/0600 (enforced by the binary at startup,
 #     not by this script)
 #   - No global state mutations outside $HOME
+#   - Single canonical install location per user ($HOME/.mpm) — no PATH
+#     ordering, no /usr/local copies, no XDG split, no drift between
+#     shells
 #
 # Usage:
 #   ./scripts/install.sh              # full user-space install (no sudo)
@@ -42,7 +45,7 @@
 #   MPM_SYSTEM=1 ./scripts/install.sh # same as --system (env form)
 #
 # Environment overrides (work in both user and system modes):
-#   PREFIX       Install prefix (default: $HOME/.local/bin or /usr/local)
+#   PREFIX       Install prefix (default: $HOME/.mpm or /usr/local)
 #   DATA_ROOT    Runtime data root (default: $HOME/.mpm or /var/lib/mpm)
 #   USER_NAME    Target user (default: current user)
 #
@@ -115,13 +118,17 @@ resolve_user_home() {
 
 # Resolve PREFIX / DATA_ROOT / SERVICE_DST based on USE_SYSTEM.
 # Called after parse_args so --system flag has been processed.
+#
+# User mode: PREFIX and DATA_ROOT both default to $HOME/.mpm — i.e.
+# PREFIX/bin and DATA_ROOT are siblings under the same root. Single
+# canonical install location. No PATH ordering. No drift.
 resolve_paths() {
     if [ $USE_SYSTEM -eq 1 ]; then
         PREFIX="${PREFIX:-/usr/local}"
         DATA_ROOT="${DATA_ROOT:-/var/lib/mpm}"
         SERVICE_DST="/etc/systemd/system/${SERVICE_NAME}.service"
     else
-        PREFIX="${PREFIX:-$HOME/.local/bin}"
+        PREFIX="${PREFIX:-$HOME/.mpm}"
         DATA_ROOT="${DATA_ROOT:-$HOME/.mpm}"
         SERVICE_DST="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
     fi

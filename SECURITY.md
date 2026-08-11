@@ -7,9 +7,10 @@ tagged with a label, comment, or commit message that hints at a vulnerability
 becomes a public disclosure the moment a fork pulls it.
 
 Report privately to **security@flowbyte.com** (routes to the project lead).
-If you already have a direct channel to v, you can use that instead — but
-email leaves a paper trail, and paper trails help when the timeline of a
-disclosure is questioned later.
+Email leaves a paper trail, and paper trails help when the timeline of a
+disclosure is questioned later. Reporters who already know the maintainer
+directly may use that channel — but the public policy routes through email
+so there is exactly one auditable disclosure path.
 
 ### What to include
 
@@ -29,6 +30,12 @@ The more of the following you can provide, the faster the report moves:
   "attacker can read arbitrary files" need different urgency. You do not
   need a working exploit — a clear description of the vulnerable code
   path is enough.
+
+**When uncertain whether something is security-sensitive, report it
+privately rather than testing it publicly.** False positives are cheap;
+public testing of a real vulnerability can burn the disclosure window
+before a fix ships, and the reporter ends up being the disclosure
+vector.
 
 ### What to expect back
 
@@ -79,7 +86,19 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 - The watch daemon (fsnotify-based file ingestion)
 - Pre-commit hooks and CI workflows (`.github/workflows/`,
   `.superpowers/`)
-- Documentation that contradicts the actual behaviour of the code
+- **Dependencies used directly by MPM.** Vulnerabilities in a Go
+  module that MPM imports, or a binary MPM invokes, are in scope
+  when the vulnerability materially affects MPM users. Report upstream
+  dependency vulnerabilities to the upstream project as appropriate,
+  but also notify MPM when MPM users are exposed — supply-chain
+  vulnerabilities are part of application security.
+- **Security-relevant documentation defects.** Documentation that
+  causes users to expose credentials, disable security controls,
+  misconfigure authentication, or otherwise create a security
+  vulnerability. The general "behaviour change without a corresponding
+  README change is a documentation bug" rule lives in `CONTRIBUTING.md`
+  and is broader than security; only the security-relevant subset
+  belongs here.
 
 ### Out of scope for this repository
 
@@ -92,6 +111,23 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
   poisoned memory). The 19-pattern scanner in `SaveMemoryNode` exists;
   bypasses of that scanner are in scope; behaviour with adversarial
   input that the scanner catches is not.
+
+## A note specifically about memory contents
+
+MPM is a memory system. Users may reasonably store private or sensitive
+information in memories — not just credentials, but session context,
+working notes, draft text, and other material the user did not intend
+to publish. Vulnerabilities that allow unintended cross-user,
+cross-workspace, cross-session, or unauthorized memory disclosure are
+security issues regardless of whether the disclosed content is itself
+a "secret" in the conventional sense. This is broader than the
+"credentials in code" rule below; memory contents are the substrate's
+primary data, and protections against unauthorized disclosure of that
+data are part of application security, not just hygiene.
+
+Report anything that looks like a memory-disclosure path through the
+same channel as any other vulnerability. If uncertain whether observed
+behaviour counts, report it — false positives are cheap.
 
 ## A note specifically about credentials and runtime state
 
@@ -127,34 +163,59 @@ gap from the next person.
 ### If a secret has already entered git history
 
 **Removing a secret from the working tree does not make it safe if it
-has previously entered git history.** Once a secret is in a commit, it
-is in every clone, every fork, every mirror, every CI cache, every
-`git log -p` that anyone runs against the repo. Deleting the file in
-a later commit removes it from the *current* working tree only.
+has previously entered git history.** Once a secret is in a reachable
+commit, assume it may have been copied into clones, forks, mirrors,
+CI caches, backups, and other retained Git objects — anywhere that
+commit has been fetched, it persists until actively removed. Deleting
+the file in a later commit removes it from the *current* working tree
+only.
 
 This is not a hypothetical. It has happened in this project's own
 development history: at various points, runtime state and developer
 build artifacts (including a debug binary and several personal
 workspace files) were tracked in commits, then untracked later. The
 untracking is real and complete for the current working tree. The
-historical commits remain in the git object database. If you find
-something you believe is a real credential — yours or anyone else's —
-in any branch, tag, or commit reachable from `origin`, treat it as a
-security incident, not as cleanup:
+historical commits remain in the git object database and, where they
+were pushed, in retained remote objects as well. If you find something
+you believe is a real credential — yours or anyone else's — in any
+branch, tag, or commit reachable from `origin`, treat it as a security
+incident, not as cleanup:
 
-1. Report to **security@flowbyte.com** immediately. Do not email the
-   list and wait; the secret is exposed until rotation happens.
-2. The maintainer rotates the credential at the provider.
-3. The maintainer rewrites history (`git filter-repo` or equivalent)
-   and force-pushes.
-4. All collaborators and CI re-clone.
-5. A post-mortem entry is added to `changelog.md` so the failure
-   mode is visible to the next contributor.
+1. **Report to `security@flowbyte.com` immediately.** Do not email
+   the list and wait; the secret is exposed until rotation happens.
+2. **The maintainer rotates or revokes the credential at the
+   provider.** Rotation is the actual remediation; everything below
+   is damage control for what was already fetched.
+3. **The maintainer rewrites local history** (`git filter-repo` or
+   equivalent) and force-pushes the cleaned history. The force-push
+   replaces the rewritten refs on `origin`; it does **not** by itself
+   remove objects already retained by the remote host's object store,
+   fork network, or any mirror that has fetched the affected SHAs.
+4. **If the secret was pushed to GitHub, the maintainer requests
+   GitHub's sensitive-data / history removal workflow where
+   necessary.** A force-push alone is not assumed to remove retained
+   GitHub objects. The "remove sensitive data from a repository"
+   contact path is the appropriate escalation for objects that have
+   already reached the host — required for things that a
+   `filter-repo` + force-push cannot reach (cached views, fork
+   graph traversal surfaces, internal snapshots).
+5. **All collaborators and CI re-clone from the cleaned history.**
+   Existing clones, forks, and CI caches must be replaced; reflogs,
+   ref bundles, and unreachable objects in those clones are not
+   cleared by a force-push.
+6. **The incident is recorded internally.** A public disclosure in
+   `changelog.md` is included only when appropriate — security
+   incidents can themselves contain information we don't want
+   publicly documented, and we do not want to turn every credential
+   mistake into a permanent public artifact. The goal is that the
+   next contributor learns the failure mode; whether that lesson is
+   public is a per-incident call.
 
 If the "secret" is a local-only artifact with no provider-side value
 (an internal debug binary, a captured agent transcript with no
 real-world data), rotation is not required, but history rewriting
-still is.
+still is — and the same remote-retained-objects caveat applies if
+the artifact was ever pushed.
 
 ## Disclosures without prior public notice
 
@@ -173,8 +234,9 @@ a disclosure timeline has been agreed.
 ## Acknowledgements
 
 Reports that lead to a fix are credited in `changelog.md` under the
-relevant release, unless the reporter opts out.
+relevant release, unless the reporter opts out. Internal incident
+records are kept regardless.
 
 ---
 
-_Last updated: 2026-08-09, for the `mpm-alpha` release._
+_Last updated: 2026-08-10, for the `mpm-alpha` release._

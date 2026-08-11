@@ -85,16 +85,16 @@ Or manually:
 
 ```bash
 systemctl --user status mpm-scheduler                    # expect: active
-~/.local/bin/mpm call health_check --payload '{}'        # expect: "ok":true
+~/.mpm/bin/mpm call health_check --payload '{}'        # expect: "ok":true
 journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler running"
 ```
 
 ### 1c. Bootstrap cognitive state
 
 ```bash
-~/.local/bin/mpm ops init directives          # seed prime directives (idempotent)
-~/.local/bin/mpm status                      # verify DB reachable
-~/.local/bin/mpm call read_wake_context        # first agent tool call
+~/.mpm/bin/mpm ops init directives          # seed prime directives (idempotent)
+~/.mpm/bin/mpm status                      # verify DB reachable
+~/.mpm/bin/mpm call read_wake_context        # first agent tool call
 ```
 
 `ops init directives` is the *only* command that touches cognitive state during
@@ -149,7 +149,7 @@ sudo ./scripts/install.sh --system
 ```
 
 This is identical to the default install but:
-- Writes binaries to `/usr/local/bin/` (instead of `$HOME/.local/bin/`)
+- Writes binaries to `/usr/local/bin/` (the ONLY mode that does this)
 - Creates `/var/lib/mpm/{src/db,backups/critic-pre}` (instead of `$HOME/.mpm/`)
 - Installs the system unit to `/etc/systemd/system/mpm-scheduler.service`
 - Uses plain `systemctl` (no `--user`)

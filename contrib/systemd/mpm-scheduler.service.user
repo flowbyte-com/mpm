@@ -1,13 +1,17 @@
 [Unit]
 Description=MPM universal wake executor (USER-level, alpha default)
 # MPM is a headless cognitive substrate. See the project README:
-#   https://github.com/yourorg/mpm#52-run-it-as-a-daemon
+#   https://github.com/flowbyte-com/mpm
 #
 # This is the USER-level unit and the DEFAULT install target as of
 # the alpha release. scripts/install.sh installs it to
 # $HOME/.config/systemd/user/mpm-scheduler.service and the install
 # flow does NOT require root. The system-level alternative
 # (mpm-scheduler.service.system) is reachable via `sudo ./install.sh --system`.
+#
+# Canonical install layout: $HOME/.mpm/bin/ for binaries, $HOME/.mpm/ for
+# data + lock + backups. This service points at the canonical location;
+# no /usr/local copy, no /usr/bin copy, no PATH-ordering concern.
 #
 # On hosts with encrypted home, this unit may silently fail at boot
 # because user@UID.service starts via linger but cannot read binaries
@@ -18,12 +22,18 @@ After=default.target
 
 [Service]
 Type=simple
-# Default layout assumes the project lives at ~/projects/mpm. Override via:
-#   1. Drop-in:    systemctl --user edit mpm-scheduler
-#                  (writes to ~/.config/systemd/user/mpm-scheduler.service.d/override.conf)
-#   2. Env file:   write ~/.config/mpm/mpm.env (sourced as EnvironmentFile below)
-WorkingDirectory=%h/projects/mpm
-ExecStart=%h/projects/mpm/bin/mpm-scheduler --interval 60s --log-level info
+# Canonical install: binaries at %h/.mpm/bin/, data at %h/.mpm/.
+# The lock file lives inside the encrypted %h/.mpm/ so it is unreadable
+# pre-decrypt (the Lazy-Start Architecture's safety property).
+WorkingDirectory=%h/.mpm
+ExecStart=%h/.mpm/bin/mpm-scheduler --interval 60s --log-level info --lock %h/.mpm/scheduler.lock
+
+# Runtime paths
+Environment=MPM_WORKSPACE=%h/.mpm
+Environment=MPM_DB_PATH=%h/.mpm/src/db/mpm.db
+Environment=MPM_BACKUP_DIR=%h/.mpm/backups/critic-pre
+Environment=MPM_CRITIC_BIN=%h/.mpm/bin/mpm-critic
+
 EnvironmentFile=-%h/.config/mpm/mpm.env
 
 # Hardening (light — tighten further as your security model demands)
@@ -31,8 +41,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Allow writes only to the project directory and the runtime state dir
-ReadWritePaths=%h/projects/mpm %h/.mpm
+# Only %h/.mpm is writable (data + lock + backups). Binaries are
+# read-only under the canonical install.
+ReadWritePaths=%h/.mpm
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal

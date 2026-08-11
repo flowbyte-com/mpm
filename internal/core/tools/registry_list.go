@@ -252,7 +252,8 @@ var Registry = []Tool{
 				"query":      {"type": "string", "description": "The FTS query string (same contract as query_long_term_memory)."},
 				"limit":      {"type": "number", "description": "Max results to diagnose (default 10)."},
 				"collection": {"type": "string", "description": "Optional collection filter (memories, lessons, decisions, theories, skills)."},
-				"scope":      {"type": "string", "enum": ["all", "local", "shared"], "default": "all"}
+				"scope":      {"type": "string", "enum": ["all", "local", "shared"], "default": "all"},
+				"trace":      {"type": "boolean", "default": false, "description": "When true, returns a 3-stage pipeline diagnostic (raw query → BuildFTS5Query → FTS5 row count + BM25 distribution → HybridSearch input/output + discarded-row analysis). Permanent observability surface for investigating retrieval failures — zero-result queries, short-token drops, hyphen crashes. Cost: one extra FTS5 round-trip per call."}
 			},
 			"required": ["query"]
 		}`),
