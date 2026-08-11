@@ -1647,6 +1647,7 @@ func printHelp() {
 		{"wake | directives | switch | status", "", false},
 		{"doctor | maintain | gc | prune", "", false},
 		{"stats | export | synthesize", "", false},
+		{"integration export-mcp", "Emit canonical MCP config for Claude Code / Hermes / OpenClaw", false},
 		{"backup | restore-db | ingest", "", false},
 		{"backfill-embeddings", "", false},
 		{"gateway", "", false},
