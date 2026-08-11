@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -561,47 +562,37 @@ func handleShredMem(args []string) int {
 		return 1
 	}
 
-	// Fetch memory to extract challenged_theory_id before deletion
-	mem, err := dm.GetMemory(id)
-	var theoryID string
-	if err == nil && mem != nil {
-		metaStr, _ := mem["metadata"].(string)
-		var meta map[string]interface{}
-		if metaStr != "" {
-			json.Unmarshal([]byte(metaStr), &meta)
-		}
-		theoryID, _ = meta["challenged_theory_id"].(string)
-	}
-
-	// Transaction: DELETE topic_memberships → DELETE theory (if exists) → DELETE memory
-	tx, err := dm.SQLDB().Begin()
+	// Route through the substrate's ShredMemoryWithCascade so the CLI
+	// and the MCP path share the same broad-sweep + cascade behaviour
+	// (id removed from session_handoffs, lessons, topics,
+	// capabilities, evidence, retrieval_metadata, confidence_history,
+	// artifact_provenance, synth_runs, memory_revisions, plus
+	// topic_memberships and the challenged theory cascade).
+	result, err := dm.ShredMemoryWithCascade(id)
 	if err != nil {
-		usererror.Error("%v", err)
-	}
-	defer tx.Rollback()
-
-	if _, err = tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, id); err != nil {
-		usererror.Error("%v", err)
+		usererror.Error("shred %s: %v", id, err)
+		return 1
 	}
 
-	if theoryID != "" {
-		if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
-			usererror.Error("%v", err)
-		}
-	}
-
-	if _, err = tx.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
-		usererror.Error("%v", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		usererror.Error("%v", err)
-	}
-
+	theoryID, _ := result["theory_purged"].(string)
+	sweep, _ := result["sweep"].(map[string]int64)
 	if theoryID != "" {
 		fmt.Printf("⚡ Memory %s shredded. Theory %s purged.\n", id, theoryID)
 	} else {
 		fmt.Printf("⚡ Memory %s shredded.\n", id)
+	}
+	if len(sweep) > 0 {
+		fmt.Printf("  sweep:\n")
+		// Stable ordering so the output is reproducible across runs.
+		tables := make([]string, 0, len(sweep))
+		for t := range sweep {
+			tables = append(tables, t)
+		}
+		sort.Strings(tables)
+		for _, t := range tables {
+			n := sweep[t]
+			fmt.Printf("    - %s: %v rows\n", t, n)
+		}
 	}
 	return 0
 }

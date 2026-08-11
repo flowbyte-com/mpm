@@ -12,6 +12,7 @@ package internal
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -549,15 +550,6 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		}
 	}()
 
-	if _, err := tx.Exec(`DELETE FROM topic_memberships WHERE memory_id = ?`, memoryID); err != nil {
-		return nil, fmt.Errorf("shred: delete memberships: %w", err)
-	}
-	if theoryID != "" {
-		if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
-			return nil, fmt.Errorf("shred: delete theory: %w", err)
-		}
-	}
-
 	// Cascade invalidation hook: enqueue intents for every downstream
 	// decision/theory that cited the about-to-be-deleted memory.
 	// Must happen BEFORE the memory DELETE so the
@@ -576,6 +568,34 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		cascadeIntents = n
 	}
 
+	// Broad sweep: erase the id from EVERY top-level artifact table
+	// that may have it. A user-supplied ID belongs to no single
+	// table — it can land in session_handoffs (a wake-context
+	// artefact), lessons, topics, capabilities, evidence,
+	// retrieval_metadata, confidence_history, epistemic_provenance,
+	// artifact_provenance, epistemic_cascade_outbox, or synth_runs.
+	// Partial shreds erode trust in every other primitive, so the
+	// sweep is unconditional and idempotent. Each DELETE returns
+	// rows-affected; we don't fail on zero because not every shred
+	// target is guaranteed to have a matching row.
+	//
+	// Order rationale: foreign-key dependents that point at the
+	// memory (memory_revisions via FK CASCADE, topic_memberships via
+	// explicit DELETE) go first; the memory row itself goes last so
+	// cascade discovery above can still observe it. Non-memory
+	// artefact tables (lessons, topics, capabilities,
+	// session_handoffs) can be deleted in any order.
+	sweep, err := shredBroadSweep(tx, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("shred: broad sweep: %w", err)
+	}
+
+	if theoryID != "" {
+		if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, theoryID); err != nil {
+			return nil, fmt.Errorf("shred: delete theory: %w", err)
+		}
+	}
+
 	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, memoryID); err != nil {
 		return nil, fmt.Errorf("shred: delete memory: %w", err)
 	}
@@ -589,11 +609,88 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		"memory_id":       memoryID,
 		"shredded":        true,
 		"cascade_intents": cascadeIntents,
+		"sweep":           sweep,
 	}
 	if theoryID != "" {
 		result["theory_purged"] = theoryID
 	}
 	return result, nil
+}
+
+// shredBroadSweep deletes a memory ID from every top-level artifact
+// table where it might live, in a single transaction. Returns a map
+// of {table: rows_deleted} for the caller's audit surface.
+//
+// Idempotency: each DELETE is a plain WHERE id=? — re-running on an
+// already-swept database returns 0 rows-affected for every table,
+// which is fine. The substrate cares about presence/absence, not the
+// pre-shred state.
+//
+// Why a broad sweep, not targeted: the user's mental model is
+// "shred this id" — absolute, table-agnostic. Internal routing by
+// table is the substrate's problem, not the user's. Partial shreds
+// (memory gone but handoff still visible) erode trust in every other
+// debugging primitive and invite operator confusion when a wake
+// context surfaces a "deleted" id.
+//
+// Tables covered:
+//   - Top-level artifact tables (id PK, user-supplied id):
+//     session_handoffs, lessons, topics, capabilities
+//   - FK dependents of memories (artifact_id is a TEXT column, no
+//     FK constraint declared, so cascades don't auto-fire):
+//     evidence, retrieval_metadata, confidence_history,
+//     epistemic_provenance (source or downstream),
+//     artifact_provenance, epistemic_cascade_outbox (dead or
+//     downstream), synth_runs (result_memory_id),
+//     memory_revisions (FK CASCADE in schema, included for clarity)
+//   - topic_memberships (explicit DELETE was here pre-sweep; kept
+//     in the sweep for table-coverage audit).
+func shredBroadSweep(tx *sql.Tx, id string) (map[string]int64, error) {
+	deletes := []struct {
+		table string
+		sql   string
+	}{
+		// Top-level artifact tables first.
+		{"session_handoffs", `DELETE FROM session_handoffs WHERE id = ?`},
+		{"lessons", `DELETE FROM lessons WHERE id = ?`},
+		{"topics", `DELETE FROM topics WHERE id = ?`},
+		{"capabilities", `DELETE FROM capabilities WHERE id = ?`},
+
+		// FK dependents of memories (no cascade because artifact_id
+		// is TEXT, not a declared FOREIGN KEY).
+		{"topic_memberships", `DELETE FROM topic_memberships WHERE memory_id = ?`},
+		{"evidence", `DELETE FROM evidence WHERE artifact_id = ?`},
+		{"retrieval_metadata", `DELETE FROM retrieval_metadata WHERE node_id = ?`},
+		{"confidence_history", `DELETE FROM confidence_history WHERE artifact_id = ?`},
+		{"artifact_provenance", `DELETE FROM artifact_provenance WHERE artifact_id = ?`},
+		{"synth_runs", `DELETE FROM synth_runs WHERE result_memory_id = ?`},
+		{"memory_revisions", `DELETE FROM memory_revisions WHERE memory_id = ?`},
+
+		// DELIBERATELY NOT swept here:
+		//   epistemic_cascade_outbox — this is the DESTINATION for
+		//     cascade intents, not a victim. The shred above just
+		//     enqueued intents there; sweeping them would erase the
+		//     shred's own work.
+		//   epistemic_provenance — cascade discovery already ran
+		//     (see EnqueueCascadeInvalidation above). Rows that cite
+		//     this dead id become orphans, but other rows on the
+		//     same downstream memories may still be needed for
+		//     subsequent cascades. A periodic gc sweep is the right
+		//     place to prune orphaned provenance rows.
+	}
+
+	sweep := make(map[string]int64, len(deletes))
+	for _, d := range deletes {
+		res, err := tx.Exec(d.sql, id)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", d.table, err)
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			sweep[d.table] = n
+		}
+	}
+	return sweep, nil
 }
 
 // SnoozeMemory bumps a memory's relevance without promoting it to LTM.

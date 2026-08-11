@@ -612,3 +612,102 @@ func TestCallHelpers_RunGC_AppliesUpdatesWhenNotDryRun(t *testing.T) {
 	require.NoError(t, dm.QueryRowTracked(`SELECT weight FROM memories WHERE id = ?`, "mem-mid").Scan(&newWeight))
 	assert.Less(t, newWeight, 7, "weight must decrease after decay")
 }
+
+// TestShredMemory_BroadSweepCoversPiGap is the regression test for the
+// 2026-08-11 finding: shredding a memory left orphan rows in
+// session_handoffs (and a handful of other top-level artifact tables).
+// A user-facing shred must be table-agnostic — if a row exists with
+// the shredded id in any user-visible table, it must vanish.
+func TestShredMemory_BroadSweepCoversPiGap(t *testing.T) {
+	dm := newTestDM(t)
+	id := "broad-sweep-victim"
+
+	// Plant the target memory + a matching row in every top-level
+	// artifact table that shares the ID space. If a future table is
+	// added to the ID space and someone forgets to extend the sweep,
+	// this test is the alarm.
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, weight) VALUES (?, 'memories', 'doomed', '[]', 5)`, 0, id)
+	require.NoError(t, err)
+
+	// Pi's specific bug: session_handoffs. handoff id == memory id.
+	now := time.Now().Unix()
+	_, err = dm.ExecTracked(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary, commitments, open_questions) VALUES (?, ?, ?, 'clean', '?', '[]', '[]')`, 0, id, "sess-"+id, now, "smoke test pollution")
+	require.NoError(t, err)
+
+	// Other top-level artifact tables that should also be swept.
+	_, err = dm.ExecTracked(`INSERT INTO topics (id, name) VALUES (?, ?)`, 0, id, "topic-"+id)
+	require.NoError(t, err)
+
+	// FK dependents (artifact_id / node_id / memory_id columns that
+	// don't have FK constraints declared — no auto-cascade).
+	_, err = dm.ExecTracked(`INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group, strength, independence_factor, created_by, created_at) VALUES (?, ?, 'memory', 'reproduction', 'src', 0.85, 1.0, 'test', ?)`, 0, "ev-"+id, id, now)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO retrieval_metadata (node_id, node_type) VALUES (?, 'memory')`, 0, id)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger) VALUES (?, ?, 'memory', 0.5, ?, 1, 'manual_recompute')`, 0, "ch-"+id, id, now)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO artifact_provenance (id, artifact_id, artifact_type, created_at, actor_kind) VALUES (?, ?, 'memory', ?, 'human')`, 0, "ap-"+id, id, now)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO synth_runs (content_hash, first_run_at, last_run_at, result_memory_id) VALUES (?, ?, ?, ?)`, 0, "hash-"+id, now, now, id)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO memory_revisions (memory_id, version, content, weight, collection) VALUES (?, 2, 'second', 5, 'memories')`, 0, id)
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO topic_memberships (memory_id, topic_id) VALUES (?, 'some-topic')`, 0, id)
+	require.NoError(t, err)
+
+	// Shred.
+	out, err := dm.ShredMemoryWithCascade(id)
+	require.NoError(t, err)
+	require.Equal(t, true, out["success"])
+
+	// Sweep result must report at least the Pi-gap table + the FK
+	// dependents we planted. If any of these tables is missing from
+	// the sweep, this assertion fires.
+	// Note: sweep is map[string]int64 in the substrate (not
+	// map[string]interface{}) — type assertion must match.
+	sweep, _ := out["sweep"].(map[string]int64)
+	assert.NotEmpty(t, sweep, "sweep should report at least one row deleted")
+
+	expectedTables := []string{
+		"session_handoffs", // the regression target
+		"topics",
+		"evidence",
+		"retrieval_metadata",
+		"confidence_history",
+		"artifact_provenance",
+		"synth_runs",
+		"memory_revisions",
+		"topic_memberships",
+	}
+	for _, table := range expectedTables {
+		assert.Contains(t, sweep, table, "sweep must cover %s (regression: shred left orphans here before)", table)
+	}
+
+	// Verify the rows are actually gone.
+	var n int
+	for _, q := range []struct {
+		table string
+		sql   string
+	}{
+		{"memories", `SELECT COUNT(*) FROM memories WHERE id = ?`},
+		{"session_handoffs", `SELECT COUNT(*) FROM session_handoffs WHERE id = ?`},
+		{"topics", `SELECT COUNT(*) FROM topics WHERE id = ?`},
+		{"evidence", `SELECT COUNT(*) FROM evidence WHERE artifact_id = ?`},
+		{"retrieval_metadata", `SELECT COUNT(*) FROM retrieval_metadata WHERE node_id = ?`},
+		{"confidence_history", `SELECT COUNT(*) FROM confidence_history WHERE artifact_id = ?`},
+		{"artifact_provenance", `SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id = ?`},
+		{"synth_runs", `SELECT COUNT(*) FROM synth_runs WHERE result_memory_id = ?`},
+		{"memory_revisions", `SELECT COUNT(*) FROM memory_revisions WHERE memory_id = ?`},
+		{"topic_memberships", `SELECT COUNT(*) FROM topic_memberships WHERE memory_id = ?`},
+	} {
+		require.NoError(t, dm.QueryRowTracked(q.sql, id).Scan(&n), q.table)
+		assert.Equal(t, 0, n, "%s must have no rows for shredded id", q.table)
+	}
+
+	// DELIBERATELY NOT swept: epistemic_cascade_outbox. The shred
+	// just enqueued intents there for downstream invalidation;
+	// sweeping them would erase the shred's own work.
+	var intents int
+	require.NoError(t, dm.QueryRowTracked(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE dead_artifact_id = ?`, id).Scan(&intents))
+	assert.GreaterOrEqual(t, intents, 0, "cascade outbox is the destination, not a sweep target")
+}
