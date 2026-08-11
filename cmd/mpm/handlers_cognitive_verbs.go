@@ -8,9 +8,13 @@
 //     mpm decide       record a decision
 //     mpm theorize     propose a theory
 //
-//   AGENTS use stable verb-noun MCP contracts:
-//     mpm call save_to_memory / save_lesson / record_decision / propose_theory
-//     (the substrate tool names never change)
+//   AGENTS use the consolidated mpm_* aggregator tool contracts:
+//     mpm call mpm_memory '{"action":"save",...}'
+//     mpm call mpm_lessons '{"action":"save",...}'
+//     mpm call mpm_decisions '{"action":"save","params":{"context":...}}'
+//     mpm call mpm_theories '{"action":"propose","params":{"hypothesis":...}}'
+//     (the substrate aggregator names are stable; the actions inside
+//      each aggregator are the dispatch surface, kept narrow on purpose)
 //
 // Wave 3 ships the human-facing cognitive verbs as THIN ALIASES —
 // every cognitive verb routes to an existing handler. No behaviour
@@ -179,7 +183,7 @@ Subcommands:
 Examples:
   mpm decision add context="..." choice="..." rationale="..."
   mpm decide context="..." choice="..." rationale="..."
-  mpm call record_decision --payload '{"context":"...","choice":"...","rationale":"..."}'`)
+  mpm call mpm_decisions --payload '{"action":"save","params":{"context":"...","choice":"...","rationale":"..."}}'`)
 }
 
 // printTheoryHelp prints the mpm theory help block.

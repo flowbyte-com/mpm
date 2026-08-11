@@ -342,8 +342,9 @@ func directiveInjectionLimit() int {
 
 // directiveCacheTTL bounds the staleness window for cached prime-directive
 // injection. 5 seconds is short enough that operator-driven changes (e.g.,
-// `mpm call challenge_memory`) surface within a few prompts of an active
-// conversation, and long enough to absorb a typical Claude Code hook burst
+// `mpm call mpm_memory '{"action":"challenge",...}'`) surface within a few
+// prompts of an active conversation, and long enough to absorb a typical
+// Claude Code hook burst
 // (the route command is invoked on every user message in the hook chain).
 // Operators who need stricter freshness can call InvalidateDirectiveCache()
 // after mutating directives.
