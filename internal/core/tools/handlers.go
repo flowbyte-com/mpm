@@ -2928,3 +2928,317 @@ func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	// prints it to stdout. Same surface both ways.
 	return renderers.FormatReviewsMarkdown(results), nil
 }
+
+// handleMpmMemory is the unified dispatcher for the mpm_memory domain tool.
+// It routes the "action" string to the existing per-operation handler,
+// passing "params" through as the payload map.
+func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+
+	switch action {
+	case "save":
+		return handleSaveToMemory(dm, ac, params)
+	case "query":
+		return handleQueryLongTermMemory(dm, ac, params)
+	case "shred":
+		return handleShredMemory(dm, ac, params)
+	case "reinforce":
+		return handleReinforceMemory(dm, ac, params)
+	case "weaken":
+		return handleWeakenMemory(dm, ac, params)
+	case "snooze":
+		return handleSnoozeMemory(dm, ac, params)
+	case "set_weight":
+		return handleSetMemoryWeight(dm, ac, params)
+	case "patch":
+		return handlePatchMemory(dm, ac, params)
+	case "promote":
+		return handlePromoteMemory(dm, ac, params)
+	case "review":
+		return handleReviewMemories(dm, ac, params)
+	case "synthesize":
+		return handleSynthesizeMemory(dm, ac, params)
+	case "challenge":
+		// Normalize snake_case to camelCase for the underlying handler.
+		if id, ok := params["memory_id"]; ok {
+			params["memoryId"] = id
+		}
+		return handleChallengeMemory(dm, ac, params)
+	case "commit_milestone":
+		return handleCommitMilestone(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone", action)
+	}
+}
+
+func handleMpmSession(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "end":
+		return handleSessionEnd(dm, ac, params)
+	case "handoff":
+		return handleSessionHandoff(dm, ac, params)
+	case "list_handoffs":
+		return handleListHandoffs(dm, ac, params)
+	case "flush":
+		return handleFlushScratchpad(dm, ac, params)
+	case "read":
+		return handleReadScratchpad(dm, ac, params)
+	case "discard":
+		return handleDiscardScratchpad(dm, ac, params)
+	case "promote_scratchpad":
+		return handlePromoteScratchpad(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_session. Valid actions include end, handoff, list_handoffs, flush, read, discard, promote_scratchpad", action)
+	}
+}
+
+func handleMpmWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "schedule":
+		return handleScheduleWake(dm, ac, params)
+	case "check":
+		return handleCheckWakes(dm, ac, params)
+	case "check_pending_event":
+		return handleCheckPendingEventWakes(dm, ac, params)
+	case "list":
+		return handleListWakes(dm, ac, params)
+	case "digest":
+		return handleDigestWakes(dm, ac, params)
+	case "upsert_task":
+		return handleUpsertScheduledTask(dm, ac, params)
+	case "list_tasks":
+		return handleListScheduledTasks(dm, ac, params)
+	case "delete_task":
+		return handleDeleteScheduledTask(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_wakes. Valid actions include schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task", action)
+	}
+}
+
+func handleMpmTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "propose":
+		return handleProposeTheory(dm, ac, params)
+	case "resolve":
+		// Normalize snake_case to camelCase for the underlying handler.
+		if id, ok := params["theory_id"]; ok {
+			params["theoryId"] = id
+		}
+		if s, ok := params["new_status"]; ok {
+			params["newStatus"] = s
+		}
+		if id, ok := params["winner_id"]; ok {
+			params["winnerId"] = id
+		}
+		return handleResolveTheory(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_theories. Valid actions include propose, resolve", action)
+	}
+}
+
+func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "save":
+		return handleSaveLesson(dm, ac, params)
+	case "search":
+		return handleSearchLessons(dm, ac, params)
+	case "list":
+		return handleListLessons(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list", action)
+	}
+}
+
+func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "record":
+		return handleRecordDecision(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_decisions. Valid actions include record", action)
+	}
+}
+
+func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "create":
+		return handleCreateTopic(dm, ac, params)
+	case "search":
+		return handleSearchTopics(dm, ac, params)
+	case "link":
+		return handleLinkTopic(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link", action)
+	}
+}
+
+func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "add":
+		return handleAddReference(dm, ac, params)
+	case "search":
+		return handleSearchReferences(dm, ac, params)
+	case "list":
+		return handleListReferences(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_references. Valid actions include add, search, list", action)
+	}
+}
+
+func handleMpmEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "add":
+		return handleAddEvidence(dm, ac, params)
+	case "list":
+		return handleListEvidence(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_evidence. Valid actions include add, list", action)
+	}
+}
+
+func handleMpmConfidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "show":
+		return handleShowConfidence(dm, ac, params)
+	case "recompute":
+		return handleRecomputeConfidence(dm, ac, params)
+	case "explain":
+		return handleExplainConfidence(dm, ac, params)
+	case "history":
+		return handleQueryConfidenceHistory(dm, ac, params)
+	case "changes":
+		return handleQueryConfidenceChanges(dm, ac, params)
+	case "trend":
+		return handleQueryConfidenceTrend(dm, ac, params)
+	case "quality":
+		return handleQueryMemoryQuality(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_confidence. Valid actions include show, recompute, explain, history, changes, trend, quality", action)
+	}
+}
+
+func handleMpmSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "save":
+		return handleSaveSkill(dm, ac, params)
+	case "read":
+		return handleReadSkill(dm, ac, params)
+	case "list":
+		return handleListSkills(dm, ac, params)
+	case "delete":
+		return handleDeleteSkill(dm, ac, params)
+	case "promote_to_global":
+		return handlePromoteSkillToGlobal(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_skills. Valid actions include save, read, list, delete, promote_to_global", action)
+	}
+}
+
+func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "read_wake_context":
+		return handleReadWakeContext(dm, ac, params)
+	case "read_directives":
+		return handleReadDirectives(dm, ac, params)
+	case "proactive_recall_hint":
+		return handleProactiveRecallHint(dm, ac, params)
+	case "query_global_rules":
+		return handleQueryGlobalRules(dm, ac, params)
+	case "record_global_rule":
+		return handleRecordGlobalRule(dm, ac, params)
+	case "promote_to_global":
+		return handlePromoteToGlobal(dm, ac, params)
+	case "route":
+		return handleRoute(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, promote_to_global, route", action)
+	}
+}
+
+func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	switch action {
+	case "gc_run":
+		return handleGCRun(dm, ac, params)
+	case "compact":
+		return handleCompactEpistemology(dm, ac, params)
+	case "health_check":
+		return handleHealthCheck(dm, ac, params)
+	case "migrate":
+		return handleMigrate(dm, ac, params)
+	case "query_audit_log":
+		return handleQueryAuditLog(dm, ac, params)
+	case "list_clusters":
+		return handleListActiveClusters(dm, ac, params)
+	case "snooze_cluster":
+		return handleSnoozeCluster(dm, ac, params)
+	case "resolve_cluster":
+		return handleResolveCluster(dm, ac, params)
+	case "annotate_cluster":
+		return handleAnnotateCluster(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster", action)
+	}
+}

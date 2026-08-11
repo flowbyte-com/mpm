@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // integrationEmitter is the per-framework shape emitter. Each emit
@@ -216,7 +217,7 @@ func handleIntegrationExportMcp(args []string) int {
 		}
 	}
 	if emitter.name == "" {
-		fmt.Fprintf(os.Stderr, "unknown framework: %q\navailable: %s\n",
+		usererror.Error("unknown framework: %q\navailable: %s",
 			target, strings.Join(frameworkNames(), ", "))
 		return 1
 	}
@@ -231,7 +232,7 @@ func handleIntegrationExportMcp(args []string) int {
 
 	snippet, err := emitter.emit(mpmBin, workspace, env)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to render snippet: %v\n", err)
+		usererror.Error("failed to render snippet: %v", err)
 		return 1
 	}
 
@@ -305,9 +306,7 @@ func handleIntegration(args []string) int {
 	case "help", "-h", "--help":
 		return printIntegrationHelp()
 	default:
-		fmt.Fprintf(os.Stderr,
-			"unknown integration subcommand: %q\nrun `mpm integration help`\n",
-			args[0])
+		usererror.Error("unknown integration subcommand: %q — run `mpm integration help`", args[0])
 		return 1
 	}
 }

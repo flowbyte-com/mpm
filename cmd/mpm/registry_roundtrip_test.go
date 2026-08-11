@@ -23,27 +23,38 @@ import (
 // in tools.go) that could — and did — drift apart.
 //
 // We test tools that don't require complex preconditions (DB, schema
-// migrations, etc.) by using `read_wake_context` and `read_directives`
-// — both are read-only and produce deterministic output given an
-// empty DB. For wider coverage we add a "happy path" test below that
-// runs every tool with a minimal payload and asserts no panics.
+// migrations, etc.) by using `mpm_context` with `read_wake_context` and
+// `read_directives` actions — both are read-only and produce deterministic
+// output given an empty DB. For wider coverage we add a "happy path" test
+// below that runs every tool with a minimal payload and asserts no panics.
 func TestRegistry_RoundTripCLIAndMCP_ReadOnlyTools(t *testing.T) {
 	dm := newTestDMForCmd(t)
 
-	readOnlyTools := []string{
-		"read_wake_context",
-		"read_directives",
+	// Use domain tools with read-only actions for the roundtrip test.
+	type readOnlyCase struct {
+		tool   string
+		action string
+		params map[string]interface{}
+	}
+	readOnlyTools := []readOnlyCase{
+		{"mpm_context", "read_wake_context", map[string]interface{}{}},
+		{"mpm_context", "read_directives", map[string]interface{}{}},
 	}
 
-	for _, name := range readOnlyTools {
-		t.Run(name, func(t *testing.T) {
-			tool, ok := tools.ByName(name)
+	for _, tc := range readOnlyTools {
+		t.Run(tc.tool+"_"+tc.action, func(t *testing.T) {
+			tool, ok := tools.ByName(tc.tool)
 			if !ok {
-				t.Fatalf("tool %q not in registry", name)
+				t.Fatalf("tool %q not in registry", tc.tool)
 			}
 
-			// CLI path: invoke handler directly with empty payload.
-			cliResult, err := tool.Handler(dm, internal.ActiveContext{}, map[string]interface{}{})
+			payload := map[string]interface{}{
+				"action": tc.action,
+				"params": tc.params,
+			}
+
+			// CLI path: invoke handler directly with payload.
+			cliResult, err := tool.Handler(dm, internal.ActiveContext{}, payload)
 			if err != nil {
 				t.Fatalf("CLI path failed: %v", err)
 			}
@@ -52,7 +63,7 @@ func TestRegistry_RoundTripCLIAndMCP_ReadOnlyTools(t *testing.T) {
 			adapter := mcpAdapterForTest(dm, tool.Handler)
 			req := mcp.CallToolRequest{}
 			req.Params.Name = tool.Name
-			req.Params.Arguments = map[string]interface{}{}
+			req.Params.Arguments = payload
 			mcpResult, err := adapter(context.Background(), req)
 			if err != nil {
 				t.Fatalf("MCP path failed: %v", err)
@@ -79,8 +90,8 @@ func TestRegistry_RoundTripCLIAndMCP_ReadOnlyTools(t *testing.T) {
 			cliJSON = stripVolatile(cliJSON)
 			mcpJSON = stripVolatile(mcpJSON)
 			if string(mcpJSON) != string(cliJSON) {
-				t.Errorf("CLI/MCP output mismatch for %s:\n  CLI: %s\n  MCP: %s",
-					name, cliJSON, mcpJSON)
+				t.Errorf("CLI/MCP output mismatch for %s_%s:\n  CLI: %s\n  MCP: %s",
+					tc.tool, tc.action, cliJSON, mcpJSON)
 			}
 		})
 	}

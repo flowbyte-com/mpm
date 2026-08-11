@@ -475,53 +475,56 @@ func TestHandleListActiveClusters_FutureSnoozeExcluded(t *testing.T) {
 	}
 }
 
-// TestHandleListActiveClusters_RegistryEntryWired pins that the tool
-// is registered. If a future refactor removes it from the Registry
-// slice, this test fails before the agent loses access.
+// TestHandleListActiveClusters_RegistryEntryWired pins that the
+// aggregator that hosts this action is registered. After the
+// 2026-08-11 aggregator redesign, list_active_clusters is now
+// reached via mpm_system action=`list_clusters`. The test asserts
+// the aggregator exists; the action enum is documented in the
+// tool's Description.
 func TestHandleListActiveClusters_RegistryEntryWired(t *testing.T) {
 	var found bool
 	for _, tool := range Registry {
-		if tool.Name == "list_active_clusters" {
+		if tool.Name == "mpm_system" {
 			found = true
 			if tool.Handler == nil {
-				t.Error("list_active_clusters registry entry has nil Handler")
+				t.Error("mpm_system registry entry has nil Handler")
 			}
 			if tool.Description == "" {
-				t.Error("list_active_clusters registry entry has empty Description")
+				t.Error("mpm_system registry entry has empty Description")
+			}
+			if !strings.Contains(tool.Description, "list_clusters") {
+				t.Errorf("mpm_system description must mention `list_clusters` action (got: %q)", tool.Description)
 			}
 			if len(tool.Schema) == 0 {
-				t.Error("list_active_clusters registry entry has empty Schema")
+				t.Error("mpm_system registry entry has empty Schema")
 			}
 			break
 		}
 	}
 	if !found {
-		t.Error("list_active_clusters not in Registry — agent will not see this tool")
+		t.Error("mpm_system not in Registry — list_active_clusters dispatch path is broken")
 	}
 }
 
-// TestHandleCommitMilestone_RegistryEntryWired pins the tool's wiring —
-// the schema guard test additionally checks the over/under-declaration
-// invariant. If the registry entry drifts, this test fails first.
+// TestHandleCommitMilestone_RegistryEntryWired pins the aggregator
+// that hosts this action. After the 2026-08-11 aggregator redesign,
+// commit_milestone is now reached via mpm_memory action=`commit_milestone`.
 func TestHandleCommitMilestone_RegistryEntryWired(t *testing.T) {
 	var entry *Tool
 	for i, tool := range Registry {
-		if tool.Name == "commit_milestone" {
+		if tool.Name == "mpm_memory" {
 			entry = &Registry[i]
 			break
 		}
 	}
 	if entry == nil {
-		t.Fatal("commit_milestone not in Registry — agent will not see this tool")
+		t.Fatal("mpm_memory not in Registry — commit_milestone dispatch path is broken")
 	}
 	if entry.Handler == nil {
-		t.Error("commit_milestone registry entry has nil Handler")
+		t.Error("mpm_memory registry entry has nil Handler")
 	}
-	if entry.Description == "" {
-		t.Error("commit_milestone registry entry has empty Description")
-	}
-	if len(entry.Schema) == 0 {
-		t.Error("commit_milestone registry entry has empty Schema")
+	if !strings.Contains(entry.Description, "commit_milestone") {
+		t.Errorf("mpm_memory description must mention `commit_milestone` action (got: %q)", entry.Description)
 	}
 }
 
@@ -891,3 +894,391 @@ func TestHandleHealthCheck_ReflectsState(t *testing.T) {
 }
 
 // ── annotate_cluster ──────────────────────────────────────────────────
+
+// ── mpm_memory domain dispatcher ─────────────────────────────────────
+
+// TestMpmMemoryDispatch routes each action through the unified dispatcher
+// and verifies it reaches the underlying handler (no "unknown action" error).
+// Actions that require specific DB state or params are tested with the
+// minimum viable payload.
+func TestMpmMemoryDispatch(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	// Seed a memory for actions that need an existing row.
+	seedID := fmt.Sprintf("mem-dispatch-%d", time.Now().UnixNano())
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)
+		VALUES (?, 'memories', 'dispatch test fact', 5, NULL, '2026-08-11', '2026-08-11')
+	`, seedID)
+	if err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		action  string
+		params  map[string]interface{}
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:   "save routes to handleSaveToMemory",
+			action: "save",
+			params: map[string]interface{}{
+				"fact": "dispatch save test",
+			},
+		},
+		{
+			name:   "query routes to handleQueryLongTermMemory",
+			action: "query",
+			params: map[string]interface{}{
+				"query": "dispatch",
+			},
+		},
+		{
+			name:   "shred routes to handleShredMemory",
+			action: "shred",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+			},
+		},
+		{
+			name:   "reinforce routes to handleReinforceMemory",
+			action: "reinforce",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+				"delta":     1,
+			},
+		},
+		{
+			name:   "weaken routes to handleWeakenMemory",
+			action: "weaken",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+				"delta":     1,
+			},
+		},
+		{
+			name:   "snooze routes to handleSnoozeMemory",
+			action: "snooze",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+				"days":      1,
+			},
+		},
+		{
+			name:   "set_weight routes to handleSetMemoryWeight",
+			action: "set_weight",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+				"weight":    10,
+			},
+		},
+		{
+			name:   "promote routes to handlePromoteMemory",
+			action: "promote",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+			},
+		},
+		{
+			name:   "review routes to handleReviewMemories",
+			action: "review",
+			params: map[string]interface{}{},
+		},
+		{
+			name:   "challenge routes to handleChallengeMemory with normalization",
+			action: "challenge",
+			params: map[string]interface{}{
+				"memory_id": seedID,
+				"evidence":  "contradictory finding",
+			},
+		},
+		{
+			name:   "commit_milestone routes to handleCommitMilestone",
+			action: "commit_milestone",
+			params: map[string]interface{}{
+				"summary": "Shipped the unified domain dispatcher for mpm_memory with normalized casing across all actions",
+				"flavor":  "shipped",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := map[string]interface{}{
+				"action": tt.action,
+				"params": tt.params,
+			}
+			_, err := handleMpmMemory(dm, internal.ActiveContext{}, payload)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errMsg)
+				} else if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("expected error containing %q, got: %v", tt.errMsg, err)
+				}
+				return
+			}
+			if err != nil {
+				// "unknown action" errors are dispatch failures; other errors
+				// mean the dispatcher routed correctly but the handler rejected
+				// bad input — that's fine for this test.
+				if strings.Contains(err.Error(), "unknown action") {
+					t.Errorf("dispatch failed (unknown action): %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestMpmMemoryUnknownAction verifies the dispatcher returns a descriptive
+// error with the valid action list when given an unrecognized action.
+func TestMpmMemoryUnknownAction(t *testing.T) {
+	dm := newTestSharedDM(t)
+	payload := map[string]interface{}{
+		"action": "nonexistent_action",
+		"params": map[string]interface{}{},
+	}
+	_, err := handleMpmMemory(dm, internal.ActiveContext{}, payload)
+	if err == nil {
+		t.Fatal("expected error for unknown action, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown action") {
+		t.Errorf("error should mention 'unknown action', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent_action") {
+		t.Errorf("error should mention the bad action name, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Valid actions include") {
+		t.Errorf("error should list valid actions, got: %v", err)
+	}
+}
+
+// TestMpmMemoryChallengeNormalization verifies that the challenge action
+// normalizes memory_id (snake_case) to memoryId (camelCase) for the
+// underlying handler.
+func TestMpmMemoryChallengeNormalization(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	// Seed a memory to challenge.
+	normID := fmt.Sprintf("mem-challenge-norm-%d", time.Now().UnixNano())
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)
+		VALUES (?, 'memories', 'challengeable fact', 5, NULL, '2026-08-11', '2026-08-11')
+	`, normID)
+	if err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+
+	// Send memory_id (snake_case) — the dispatcher must normalize to memoryId.
+	payload := map[string]interface{}{
+		"action": "challenge",
+		"params": map[string]interface{}{
+			"memory_id": normID,
+			"evidence":  "new contradictory evidence",
+		},
+	}
+	_, err = handleMpmMemory(dm, internal.ActiveContext{}, payload)
+	if err != nil {
+		// The handler may fail for other reasons (e.g., no theory table),
+		// but it must NOT fail with "memoryId is required" — that would
+		// mean normalization didn't happen.
+		if strings.Contains(err.Error(), "memoryId is required") {
+			t.Errorf("normalization failed: memoryId not passed through: %v", err)
+		}
+	}
+}
+
+// TestMpmMemoryNilParams verifies the dispatcher handles nil/missing params
+// gracefully (treats as empty map, doesn't panic).
+func TestMpmMemoryNilParams(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	// Dispatch with nil params — should not panic.
+	_, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "review",
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "unknown action") {
+			t.Errorf("dispatch failed: %v", err)
+		}
+		// Other errors are fine — the handler got called.
+	}
+
+	// Dispatch with params=nil explicitly.
+	_, err = handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": nil,
+	})
+	if err == nil {
+		t.Error("expected error for save with no fact, got nil")
+	}
+	if err != nil && strings.Contains(err.Error(), "unknown action") {
+		t.Errorf("dispatch failed: %v", err)
+	}
+}
+
+// ── All-domain dispatch tests ───────────────────────────────────────
+
+// TestAllDomainDispatchers routes one safe action per domain through each
+// unified dispatcher, verifying: (1) the dispatcher doesn't panic,
+// (2) unknown actions return descriptive errors, and (3) nil params
+// are handled gracefully.
+func TestAllDomainDispatchers(t *testing.T) {
+	dm := newTestSharedDM(t)
+	ac := internal.ActiveContext{}
+
+	type domainTest struct {
+		name    string
+		handler func(internal.CoreDB, internal.ActiveContext, map[string]interface{}) (interface{}, error)
+		action  string
+		params  map[string]interface{}
+	}
+
+	tests := []domainTest{
+		// mpm_session
+		{"session/list_handoffs", handleMpmSession, "list_handoffs", map[string]interface{}{}},
+		{"session/handoff", handleMpmSession, "handoff", map[string]interface{}{}},
+		// mpm_wakes
+		{"wakes/list", handleMpmWakes, "list", map[string]interface{}{}},
+		{"wakes/list_tasks", handleMpmWakes, "list_tasks", map[string]interface{}{}},
+		{"wakes/digest", handleMpmWakes, "digest", map[string]interface{}{}},
+		// mpm_theories
+		{"theories/propose", handleMpmTheories, "propose", map[string]interface{}{"hypothesis": "test hypothesis for dispatch"}},
+		// mpm_lessons
+		{"lessons/list", handleMpmLessons, "list", map[string]interface{}{}},
+		{"lessons/search", handleMpmLessons, "search", map[string]interface{}{"query": "test"}},
+		// mpm_decisions
+		{"decisions/record", handleMpmDecisions, "record", map[string]interface{}{"context": "test context", "choice": "test choice", "rationale": "test rationale"}},
+		// mpm_topics
+		{"topics/search", handleMpmTopics, "search", map[string]interface{}{"query": "test"}},
+		// mpm_references
+		{"references/list", handleMpmReferences, "list", map[string]interface{}{}},
+		// mpm_evidence
+		{"evidence/list", handleMpmEvidence, "list", map[string]interface{}{"artifact_id": "nonexistent"}},
+		// mpm_confidence
+		{"confidence/quality", handleMpmConfidence, "quality", map[string]interface{}{}},
+		{"confidence/show", handleMpmConfidence, "show", map[string]interface{}{"artifact_id": "nonexistent"}},
+		// mpm_skills
+		{"skills/list", handleMpmSkills, "list", map[string]interface{}{}},
+		// mpm_context
+		{"context/read_wake_context", handleMpmContext, "read_wake_context", map[string]interface{}{}},
+		{"context/read_directives", handleMpmContext, "read_directives", map[string]interface{}{}},
+		{"context/query_global_rules", handleMpmContext, "query_global_rules", map[string]interface{}{}},
+		// mpm_system
+		{"system/health_check", handleMpmSystem, "health_check", map[string]interface{}{}},
+		{"system/list_clusters", handleMpmSystem, "list_clusters", map[string]interface{}{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := map[string]interface{}{
+				"action": tt.action,
+				"params": tt.params,
+			}
+			_, err := tt.handler(dm, ac, payload)
+			if err != nil && strings.Contains(err.Error(), "unknown action") {
+				t.Errorf("dispatch failed (unknown action): %v", err)
+			}
+		})
+	}
+}
+
+// TestAllDomainUnknownActions verifies each dispatcher returns a
+// descriptive error for unrecognized actions.
+func TestAllDomainUnknownActions(t *testing.T) {
+	dm := newTestSharedDM(t)
+	ac := internal.ActiveContext{}
+
+	type dispatcherInfo struct {
+		name    string
+		handler func(internal.CoreDB, internal.ActiveContext, map[string]interface{}) (interface{}, error)
+	}
+
+	dispatchers := []dispatcherInfo{
+		{"mpm_session", handleMpmSession},
+		{"mpm_wakes", handleMpmWakes},
+		{"mpm_theories", handleMpmTheories},
+		{"mpm_lessons", handleMpmLessons},
+		{"mpm_decisions", handleMpmDecisions},
+		{"mpm_topics", handleMpmTopics},
+		{"mpm_references", handleMpmReferences},
+		{"mpm_evidence", handleMpmEvidence},
+		{"mpm_confidence", handleMpmConfidence},
+		{"mpm_skills", handleMpmSkills},
+		{"mpm_context", handleMpmContext},
+		{"mpm_system", handleMpmSystem},
+	}
+
+	for _, d := range dispatchers {
+		t.Run(d.name, func(t *testing.T) {
+			payload := map[string]interface{}{
+				"action": "bogus_action",
+				"params": map[string]interface{}{},
+			}
+			_, err := d.handler(dm, ac, payload)
+			if err == nil {
+				t.Errorf("%s: expected error for bogus action, got nil", d.name)
+				return
+			}
+			if !strings.Contains(err.Error(), "unknown action") {
+				t.Errorf("%s: error should mention 'unknown action', got: %v", d.name, err)
+			}
+			if !strings.Contains(err.Error(), "bogus_action") {
+				t.Errorf("%s: error should mention the bad action name, got: %v", d.name, err)
+			}
+			if !strings.Contains(err.Error(), "Valid actions include") {
+				t.Errorf("%s: error should list valid actions, got: %v", d.name, err)
+			}
+		})
+	}
+}
+
+// TestAllDomainNilParams verifies each dispatcher handles nil/missing
+// params gracefully (treats as empty map, doesn't panic).
+func TestAllDomainNilParams(t *testing.T) {
+	dm := newTestSharedDM(t)
+	ac := internal.ActiveContext{}
+
+	type dispatcherInfo struct {
+		name    string
+		handler func(internal.CoreDB, internal.ActiveContext, map[string]interface{}) (interface{}, error)
+		action  string
+	}
+
+	dispatchers := []dispatcherInfo{
+		{"mpm_session", handleMpmSession, "list_handoffs"},
+		{"mpm_wakes", handleMpmWakes, "list"},
+		{"mpm_theories", handleMpmTheories, "propose"},
+		{"mpm_lessons", handleMpmLessons, "list"},
+		{"mpm_decisions", handleMpmDecisions, "record"},
+		{"mpm_topics", handleMpmTopics, "search"},
+		{"mpm_references", handleMpmReferences, "list"},
+		{"mpm_evidence", handleMpmEvidence, "list"},
+		{"mpm_confidence", handleMpmConfidence, "quality"},
+		{"mpm_skills", handleMpmSkills, "list"},
+		{"mpm_context", handleMpmContext, "read_wake_context"},
+		{"mpm_system", handleMpmSystem, "health_check"},
+	}
+
+	for _, d := range dispatchers {
+		t.Run(d.name+"_nil_params", func(t *testing.T) {
+			// Dispatch with no params key — should not panic.
+			_, err := d.handler(dm, ac, map[string]interface{}{
+				"action": d.action,
+			})
+			if err != nil && strings.Contains(err.Error(), "unknown action") {
+				t.Errorf("dispatch failed: %v", err)
+			}
+
+			// Dispatch with params=nil explicitly.
+			_, err = d.handler(dm, ac, map[string]interface{}{
+				"action": d.action,
+				"params": nil,
+			})
+			if err != nil && strings.Contains(err.Error(), "unknown action") {
+				t.Errorf("dispatch failed with nil params: %v", err)
+			}
+		})
+	}
+}

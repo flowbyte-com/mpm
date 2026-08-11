@@ -1,43 +1,86 @@
 # pi-mpm
 
-Pi extension that wires [MPM](https://flowbyte.com/mpm) into the Pi coding agent.
+Pi extension that wires the full [MPM](https://flowbyte.com/mpm) cognitive
+substrate into the Pi coding agent. Every `mpm call <tool>` reachable from
+the CLI is reachable from Pi as a typed tool.
 
-MPM is a long-term memory / cognitive substrate. Pi is a coding agent harness
-with no built-in MCP support. This extension is the smallest correct bridge
-between them: it registers Pi tools that shell out to mpm's agent-facing
-JSON-RPC interface (`mpm call <tool> --payload '<json>'`).
+## Coverage
 
-## What it provides
+**16 Pi tools registered**, in two layers:
 
-| Surface        | Name                  | Wraps                              | Purpose                                           |
-| -------------- | --------------------- | ---------------------------------- | ------------------------------------------------- |
-| Tool (LLM)     | `mpm_recall`          | `query_long_term_memory`           | Free-text recall of durable memories              |
-| Tool (LLM)     | `mpm_remember`        | `save_to_memory`                   | Persist a durable observation / decision / fact   |
-| Tool (LLM)     | `mpm_session_handoff` | `session_end`                      | Cross-session handoff at end of meaningful work   |
-| Tool (LLM)     | `mpm_explain`         | `explain_retrieval`                | Diagnostic: why did recall return this?           |
-| Hook           | `session_start`       | `read_wake_context`                | Inject prior handoff + epistemic pressure banner  |
-| Command        | `/mpm-status`         | `info`                             | Show install identity (version, DB, counts)       |
+| Layer | Count | Source |
+|---|---|---|
+| Unified Domain Tools ("Fat RPC") | 13 | `index.ts` (hand-written) |
+| Standalone tools | 3 | `index.ts` (hand-written) |
 
-Every tool maps 1:1 onto an entry in mpm's `internal/core/tools` registry —
-no mpm core changes required.
+The 13 Domain Tools cover the full cognitive surface from mpm's registry,
+each dispatching on an `action` enum with free-form `params`:
+
+| Domain | Actions |
+|---|---|
+| `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
+| `mpm_session` | end, handoff, list_handoffs, flush, read, discard, promote_scratchpad |
+| `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |
+| `mpm_theories` | propose, resolve |
+| `mpm_lessons` | save, search, list |
+| `mpm_decisions` | record |
+| `mpm_topics` | create, search, link |
+| `mpm_references` | add, search, list |
+| `mpm_evidence` | add, list |
+| `mpm_confidence` | show, recompute, explain, history, changes, trend, quality |
+| `mpm_skills` | save, read, list, delete, promote_to_global |
+| `mpm_context` | read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, promote_to_global, route |
+| `mpm_system` | gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster |
+
+Plus 3 standalone tools with their own parameter schemas:
+
+- `explain_retrieval` — per-node retrieval diagnostic (same ordering as query)
+- `log_to_changelog` — self-report work against a git commit SHA
+- `request_review` — concurrent multi-component review
+
+Plus the same hooks and command as before:
+
+- `session_start` → calls `mpm_context` (action `read_wake_context`), caches the prior handoff
+- `before_agent_start` → injects the cached wake context into the system prompt once
+- `/mpm-status` slash command → runs `mpm info`
 
 ## Why this exists
 
 From mpm's README:
 
 > "Three surfaces, one substrate. The CLI is the human-facing cognitive
-> interface (`mpm remember`, `mpm learn`, ...); `mpm call` and MCP are the
-> agent-facing tool surfaces. All map to the same `internal/core/tools`
-> registry."
+> interface; `mpm call` and MCP are the agent-facing tool surfaces. All
+> map to the same `internal/core/tools` registry."
 
 Pi explicitly does not support MCP (`docs/usage.md` §303), so `mpm-mcp` is
 not an option. The next-best is `mpm call`, which is a plain
-`--payload '<json>'` subprocess — exactly what this extension wraps.
+`--payload '<json>'` subprocess. This extension is the smallest correct
+bridge: 13 Fat-RPC domain adapters (one per domain) plus 3 standalone
+adapters.
+
+## Why 16 tools (and not 77)
+
+Until the Phase 1/2 registry refactor of mpm, `mpm-mcp` exposed 77
+granular tools (one per registry entry). The agent-facing tool definition
+prompt — every tool's name, description, and parameter schema — grew to
+~15KB of context on every turn. mpm now exposes **16** tools: the 13
+Domain Tools are "Fat RPC" — each takes `{action: string, params: object}`
+and the mpm backend validates and dispatches. That collapses ~77 distinct
+tool definitions into 13 near-identical ones.
+
+Because every domain tool shares the same trivial parameter schema
+(`action` + free-form `params`), the tool-definition prompt is now compact
+instead of bloated. Per-action validation still happens in the mpm backend,
+which returns a descriptive error envelope (`"Valid actions include …"`)
+that the agent can self-correct from.
+
+This file is **hand-written and static** by design: the registry is stable
+enough that code generation would be an anti-pattern.
 
 ## Install
 
 The canonical source lives at `~/.mpm/agent_plugins/pi-mpm/index.ts`.
-To make Pi auto-discover it, add the path to `~/.pi/agent/settings.json`:
+Auto-loading is enabled by adding the path to `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -45,11 +88,25 @@ To make Pi auto-discover it, add the path to `~/.pi/agent/settings.json`:
 }
 ```
 
-Or copy the file to `~/.pi/agent/extensions/pi-mpm.ts` (or symlink it).
-See [Pi's extension docs](https://github.com/earendil-works/pi-coding-agent/blob/main/docs/extensions.md)
+Or copy/symlink `index.ts` to `~/.pi/agent/extensions/`. See
+[Pi's extension docs](https://github.com/earendil-works/pi-coding-agent/blob/main/docs/extensions.md)
 for details.
 
-MPM itself must be on `PATH` (verify with `mpm --version`).
+MPM itself must be on `PATH` (`mpm --version` to verify).
+
+## Trade-offs
+
+**Parameter schema permissiveness.** Each domain tool's parameter schema is
+`{action: string, params: object}` — i.e., free-form. This is a deliberate
+consequence of the Fat RPC pattern: the per-action fields are documented in
+each tool's description, and validation is delegated to mpm itself.
+
+The mpm backend returns a structured error envelope when required fields
+are missing or an action is unknown (`{"error":"... Valid actions include
+...","success":false}`), and the wrapper surfaces that as a soft error to
+the LLM, which can self-correct. The trade-off is that the Pi tool picker
+doesn't get per-action typed-schema hints — the LLM relies on the tool
+description instead.
 
 ## Failure modes (all fail-open)
 
@@ -57,65 +114,31 @@ MPM itself must be on `PATH` (verify with `mpm --version`).
 | ------------------------ | --------------------------------------------------------------- |
 | `mpm` not on PATH        | Tool returns soft error to LLM; session continues               |
 | `mpm` exits non-zero     | `mpm call <tool>` envelope's `error` field rendered to the LLM  |
-| Subprocess timeout       | 15s default; child killed; partial stdout discarded             |
+| Subprocess timeout       | 30s default; child killed; partial stdout discarded             |
 | `read_wake_context` fails| `session_start` banner skipped; warning notify only            |
 
 No error throws into the agent turn — every failure path returns a result envelope.
 
-## Assumptions
-
-- mpm is installed at `~/.mpm` and `mpm` is on `PATH`.
-- The mpm call subprocess emits one zap-style log line to stderr and a
-  single JSON object to stdout on success. The parser scans the last
-  JSON-looking line — matches the existing `openclaw-mpm-memory` adapter.
-- The Pi runtime is `>=0.84.x` (uses `pi.getSessionEntries` shape — soft, the
-  call is gated; uses `pi.on("session_start", ...)` returning `{ message }`
-  per docs/extensions.md).
-
-## Verification
-
-```bash
-# 1. The extension loads
-pi -e ~/.mpm/agent_plugins/pi-mpm --help   # no parse errors expected
-
-# 2. Round-trip a memory
-pi --mode json -e ~/.mpm/agent_plugins/pi-mpm \
-   -p "Use mpm_remember to store 'pi-mpm smoke test' with tags ['pi-smoke'], then use mpm_recall to find it."
-
-# 3. Wake context surfaces on session_start
-pi --mode json -e ~/.mpm/agent_plugins/pi-mpm \
-   -p "Read the MPM wake context banner at session start."
-```
-
-Manual sanity:
-
-```bash
-# Tool envelope shape (raw, for debugging)
-mpm call query_long_term_memory --payload '{"query":"foo","limit":3}'
-mpm call read_wake_context --payload '{}'
-mpm call info --payload '{}'
-```
-
 ## Repair guide
 
-If `mpm` changes its CLI surface (e.g. renames `query_long_term_memory` →
-`recall`):
+If mpm changes its CLI surface:
 
-1. Update the `callMpm(tool, payload, …)` call sites in `index.ts`.
-2. The parser (`parseLastJsonLine`) is robust to additional stderr logs
-   but assumes stdout is still a single JSON object — if mpm moves to
-   NDJSON, replace the "last `{…}` line" heuristic with a JSONL consumer.
-3. The `session_start` banner assumes `read_wake_context` returns
-   `last_handoff` and `epistemic_pressure`; if either field is renamed,
-   update the banner builder.
+1. **Tool renamed or domain reshuffled**: mpm's registry is the source of
+   truth — update the corresponding tool name, description, and action list
+   in `index.ts`. The change is confined to a few lines per domain.
+2. **Domain action added/removed**: update that domain tool's description.
+   The parameter schema never needs to change (it's free-form).
+3. **Stdout format change** (e.g., NDJSON instead of single-object):
+   update `parseLastJsonLine` in `index.ts` to consume NDJSON rather than
+   scan for the last `{…}` line.
 
 ## Related mpm integrations in this repo
 
-- `agent_plugins/openclaw-mpm-memory/` — the OpenClaw equivalent (memory slot plugin).
-- `agent_plugins/mpm-auto-route/`     — per-turn persona auto-routing for OpenClaw.
+- `agent_plugins/openclaw-mpm-memory/` — OpenClaw memory slot plugin (2 tools).
+- `agent_plugins/mpm-auto-route/`     — OpenClaw per-turn persona auto-routing.
 
-Both follow the same `mpm call` subprocess pattern; this file is the Pi-shaped
-adaptation of the same boundary.
+Both follow the same `mpm call` subprocess pattern; pi-mpm is the Pi-shaped
+adaptation with **full coverage** instead of the narrow OpenClaw slot.
 
 ## License
 
