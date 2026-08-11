@@ -136,7 +136,7 @@ func handleOpsMilestones(args []string) int {
 			fmt.Printf("  filter: flavor=%s\n", flavorFilter)
 		}
 		fmt.Println()
-		fmt.Println("Milestones are written via `commit_milestone` (MCP) or `mpm call commit_milestone` (CLI).")
+		fmt.Println("Milestones are written via the mpm_memory action `commit_milestone` or `mpm call mpm_memory --payload '{\"action\":\"commit_milestone\",\"params\":{...}}'`.")
 		fmt.Println("Each one carries a type:milestone-* tag; this view queries that anchor.")
 		return 0
 	}
@@ -161,7 +161,7 @@ func handleOpsMilestones(args []string) int {
 		fmt.Printf("          id=%s\n", e.id)
 	}
 	fmt.Println()
-	fmt.Println("Tactical:  delete via `mpm call shred_memory --payload '{\"memory_id\": \"<id>\"}'`.")
+	fmt.Println("Tactical:  delete via `mpm call mpm_memory --payload '{\"action\":\"shred\",\"params\":{\"memory_id\":\"<id>\"}}'`.")
 	fmt.Println("Strategic: same primitive — a milestone is a memory with a tag.")
 
 	return 0
@@ -180,7 +180,7 @@ func printMilestonesHelp() {
 	fmt.Println("  --limit   <N>               max rows to return (default 5, capped at 50)")
 	fmt.Println("  -h, --help                  show this help")
 	fmt.Println()
-	fmt.Println("Write counterpart: `mpm call commit_milestone --payload '{\"summary\":\"...\",\"flavor\":\"shipped\"}'`")
+	fmt.Println("Write counterpart: `mpm call mpm_memory --payload '{\"action\":\"commit_milestone\",\"params\":{\"summary\":\"...\",\"flavor\":\"shipped\"}}'`")
 	fmt.Println("Summary must be ≥50 chars; flavor defaults to 'shipped' if omitted.")
 }
 

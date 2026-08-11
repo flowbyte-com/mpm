@@ -237,10 +237,13 @@ at upsert time, not at 3 AM as a silent wake drop.
 
 ```bash
 # Create the directive first (one-time)
-mpm call save_to_memory --payload '{
-  "fact": "Compact last week's memories tagged \"scratchpad\" into a durable lesson. Shred the originals.",
-  "collection": "directives",
-  "tags": ["prime_directive", "epistemic-compaction", "2026-07-23"]
+mpm call mpm_memory --payload '{
+  "action": "save",
+  "params": {
+    "fact": "Compact last week'"'"'s memories tagged \"scratchpad\" into a durable lesson. Shred the originals.",
+    "collection": "directives",
+    "tags": ["prime_directive", "epistemic-compaction", "2026-07-23"]
+  }
 }'    # note the returned id, e.g. abc123...
 
 # Then schedule the task

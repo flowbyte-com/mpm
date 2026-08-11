@@ -1,7 +1,7 @@
 {
   "id": "openclaw-mpm-memory",
   "name": "MPM Memory",
-  "description": "Memory slot backed by MPM (Memory Persistence Module). Routes memory_search/memory_get through `mpm call query_long_term_memory`. FTS5-only recall (no semantic vector). Replaces the default memory-core. Requires MPM installed on PATH and the agent configured with `plugins.slots.memory = \"openclaw-mpm-memory\"` to clear the `core/doctor/memory-search` 'No active memory plugin' warning.",
+  "description": "Memory slot backed by MPM (Memory Persistence Module). Routes memory_search/memory_get through `mpm call mpm_memory --payload '{\"action\":\"query\",...}'` (the 2026-08-11 aggregator tool). FTS5-only recall (no semantic vector). Replaces the default memory-core. Requires MPM installed on PATH and the agent configured with `plugins.slots.memory = \"openclaw-mpm-memory\"` to clear the `core/doctor/memory-search` 'No active memory plugin' warning.",
   "activation": {
     "onStartup": false
   },

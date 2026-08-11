@@ -285,7 +285,7 @@ func sectionHelpContent(section string) (string, bool) {
     mpm doctor            Trust signals across substrate subsystems
 
   Today's ` + "`mpm why`" + ` is available via the MCP boundary as
-  ` + "`mpm call explain_retrieval`" + ` and ` + "`mpm call list_evidence`" + `. The CLI wrapper ships in Wave 2.`, true
+  ` + "`mpm call explain_retrieval`" + ` and ` + "`mpm call mpm_evidence --payload '{\"action\":\"list\",...}'`" + `. The CLI wrapper ships in Wave 2.`, true
 
 	default:
 		return "", false

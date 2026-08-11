@@ -165,7 +165,7 @@ func (r *WhyRenderer) renderEvidence(rows []EvidenceRow) {
 		}
 	}
 	if len(rows) > maxRows {
-		fmt.Fprintf(r.out, "  ... and %d more (use 'mpm call list_evidence' for full list)\n",
+		fmt.Fprintf(r.out, "  ... and %d more (use 'mpm call mpm_evidence --payload '{\"action\":\"list\",...}' for full list)\n",
 			len(rows)-maxRows)
 	}
 }

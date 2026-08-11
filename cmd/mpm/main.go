@@ -1489,7 +1489,7 @@ func PrintQuicklinks() {
 // Theory content is shaped by the propose_theory MCP tool:
 // "hypothesis_id=<id> validation=<criteria>". The two-audience
 // principle (RFC §'two-personalities') applies to data shape too:
-// this raw key=value form is fine for `mpm call propose_theory`
+// this raw key=value form is fine for `mpm call mpm_theories`
 // scripts but reads as machine noise on the cognitive-verb
 // dashboard. We parse it into a clean "<id>: <criteria>" form
 // here so the Quicklinks surface reads as information, not raw

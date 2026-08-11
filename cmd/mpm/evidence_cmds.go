@@ -68,7 +68,7 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 }
 
 // handleEvidenceAdd dispatches `mpm evidence add ...`. Calls internal.AddEvidence
-// directly. Task 10 will add a parallel `mpm call add_evidence` tool that goes
+// directly. Task 10 will add a parallel `mpm call mpm_evidence` tool that goes
 // through the call layer.
 func handleEvidenceAdd(args []string) int {
 	payload, err := parseEvidenceAddArgs(args)

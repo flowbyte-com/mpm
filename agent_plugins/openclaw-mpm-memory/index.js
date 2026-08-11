@@ -1,18 +1,28 @@
 // @openclaw/mpm-memory — Memory slot backed by MPM.
 //
 // Thin transport adapter: the agent's memory_search/memory_get tool calls
-// shell out to `mpm call query_long_term_memory`. Result shape is mapped
-// onto OpenClaw's expected MemorySearchResult contract (path, startLine,
+// shell out to `mpm call mpm_memory` (the aggregator MCP tool) with an
+// action-dispatch payload. The 33-tool → 13-aggregator schema collapse
+// (2026-08-11) lets us keep this adapter as ONE call-shape instead of
+// a fan-out across granular tool names. Result shape is mapped onto
+// OpenClaw's expected MemorySearchResult contract (path, startLine,
 // endLine, score, snippet). Hit paths are virtual (mpm://memory/<id>) —
 // the full recalled content lives in the snippet so memory_get only matters
 // when an agent needs the body of a specific id, in which case we
 // re-query with the id.
 //
-// Fail-open: every failure path returns jsonResult({disabled:true}) rather
-// than throwing, so a missing mpm binary doesn't kill the agent turn.
+// Boot-time health check: register() pings `mpm call mpm_system` with
+// action:health_check so a missing/broken mpm fails loudly at OpenClaw
+// boot (where the operator can see and fix it) rather than silently
+// returning disabled:true during reasoning turns.
 //
-// Cost: one subprocess per memory_search (~50ms cold). mpm-mcp fast-path
-// is on the roadmap — see README.
+// Fail-open: per-call failures still return jsonResult({disabled:true})
+// rather than throwing, so a transient backend blip doesn't kill the
+// turn. The boot-time check is the only hard-fail path.
+//
+// Cost: one subprocess per memory_search (~50ms cold). The MCP
+// aggregator path (mcp.servers.mpm) is the long-term fast-path — see
+// README.
 
 import { spawn, spawnSync } from "node:child_process";
 import { definePluginEntry } from "@openclaw/plugin-sdk/plugin-entry";
@@ -198,7 +208,7 @@ export default definePluginEntry({
   id: "openclaw-mpm-memory",
   name: "MPM Memory",
   description:
-    "Memory slot backed by MPM. Routes memory_search/memory_get through `mpm call query_long_term_memory`. FTS5 lexical + reinforcement-weighted recall. Replaces the default memory-core plugin (semantic vector recall is not provided by MPM in this adapter).",
+    "Memory slot backed by MPM. Routes memory_search/memory_get through `mpm call mpm_memory` (aggregator tool, action:query). FTS5 lexical + reinforcement-weighted recall. Replaces the default memory-core plugin (semantic vector recall is not provided by MPM in this adapter).",
   kind: "memory",
   enabledByDefault: false,
 
@@ -220,6 +230,54 @@ export default definePluginEntry({
     if (typeof log.info === "function") {
       log.info(`openclaw-mpm-memory: registered (mpmBin=${mpmBin}, scope=${scope}, timeout=${timeoutMs}ms, limit=${limitDefault})`);
     }
+
+    // Boot-time health check — fail loud at OpenClaw startup rather than
+    // silently returning disabled:true during reasoning turns. We don't
+    // *throw* here (that would crash the gateway boot for a transient
+    // mpm blip); we log loudly with action items, then continue. Operator
+    // sees this on every OpenClaw restart and can act on it.
+    //
+    // Wrapped in an async IIFE so we don't make register() async (the
+    // plugin SDK contract is sync). The check runs to completion in the
+    // background; on a healthy box it finishes in ~50ms, well before the
+    // agent's first memory_search turn.
+    //
+    // Action: ping `mpm call mpm_system` with action:health_check, which
+    // returns SQLite integrity + domain counts. ok:true means the mpm
+    // binary exists, the mcp server is reachable, and the DB is healthy.
+    (async () => {
+      try {
+        const hc = await callMpmTool("mpm_system", { action: "health_check" }, {
+          mpmBin,
+          // Health check should be cheap; cap tightly so a stuck mpm
+          // doesn't block boot for 5s.
+          timeoutMs: 2000,
+        });
+        if (hc && hc.ok === true) {
+          if (typeof log.info === "function") {
+            log.info(
+              `openclaw-mpm-memory: health_check ok ` +
+              `(memories=${hc.memories_active ?? "?"} pending_theories=${hc.theories_pending ?? "?"} ` +
+              `wakes_overdue=${hc.wakes_overdue ?? "?"})`,
+            );
+          }
+        } else {
+          const err = (hc && hc.error) || "no ok:true in response";
+          if (typeof log.warn === "function") {
+            log.warn(
+              `openclaw-mpm-memory: health_check failed — ${err}. ` +
+              `Recall will return disabled:true until mpm is reachable. ` +
+              `Check that /home/v/.mpm/bin/mpm exists and mcp.servers.mpm ` +
+              `is registered.`,
+            );
+          }
+        }
+      } catch (e) {
+        if (typeof log.warn === "function") {
+          log.warn(`openclaw-mpm-memory: health_check threw — ${e.message || e}`);
+        }
+      }
+    })();
 
     // Cached manager per agent id. The manager is what the gateway uses to
     // probe embedding readiness for `doctor.memory.status`. Recall itself
@@ -314,10 +372,11 @@ export default definePluginEntry({
         parameters: MemorySearchSchema,
         async execute(_callId, params) {
           const limit = params.maxResults ?? limitDefault;
-          const payload = { query: params.query, limit, scope };
-          if (typeof params.minScore === "number") payload.min_score = params.minScore;
+          const params_ = { query: params.query, limit, scope };
+          if (typeof params.minScore === "number") params_.min_score = params.minScore;
+          const payload = { action: "query", params: params_ };
           try {
-            const result = await callMpm("query_long_term_memory", payload);
+            const result = await callMpm("mpm_memory", payload);
             if (!result || result.success === false) {
               const err =
                 (result && result.error) ||
@@ -378,10 +437,13 @@ export default definePluginEntry({
             // MPM has no direct id-get; re-query with the id as the search term
             // and take the top hit. The FTS5 match on id (if present in content)
             // plus the lexical match on the id string are usually sufficient.
-            const result = await callMpm("query_long_term_memory", {
-              query: id,
-              limit: 1,
-              scope,
+            const result = await callMpm("mpm_memory", {
+              action: "query",
+              params: {
+                query: id,
+                limit: 1,
+                scope,
+              },
             });
             if (!result || result.success === false) {
               return jsonResult({

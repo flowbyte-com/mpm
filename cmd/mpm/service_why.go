@@ -5,8 +5,8 @@
 // artifact:
 //
 //   - Artifact identity (memory/decision/theory/skill metadata)
-//   - Evidence chain (mpm call list_evidence)
-//   - Confidence history (mpm call query_confidence_history)
+//   - Evidence chain (mpm call mpm_evidence '{"action":"list",...}')
+//   - Confidence history (mpm call mpm_confidence '{"action":"query_confidence_history",...}')
 //   - Retrieval metadata (GetRetrievalMetadata)
 //
 // If this service disappeared, every operator who wanted to ask

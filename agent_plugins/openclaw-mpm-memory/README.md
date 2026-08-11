@@ -27,8 +27,8 @@ plugin is that pick, and it makes MPM the agent's memory surface.
 
 - **Default slot occupant:** `memory-core` (sqlite-vec + BM25 + embeddings +
   dreaming subagent). Heavy.
-- **This plugin:** `openclaw-mpm-memory` (subprocess → `mpm call
-  query_long_term_memory`). Light.
+- **This plugin:** `openclaw-mpm-memory` (subprocess → `mpm call mpm_memory`
+  with action:query). Light.
 
 The trade is honest: MPM is FTS5-only in this adapter — no semantic vector
 recall. If you need embeddings, run `memory-core` for `memory_search` and
@@ -125,7 +125,7 @@ If MPM is unreachable the tool returns the standard OpenClaw unavailable shape:
 | ---------------------------------- | ------------------------------------------------------------------------------- |
 | `mpm` not on PATH                  | `memory_search` returns `{disabled:true, error:"...not on PATH..."}`            |
 | `mpm` exits non-zero               | Tool result includes the last 500 chars of stderr/stdout as `error`              |
-| Subprocess timeout                 | `error: "mpm query_long_term_memory timed out after 5000ms"`                     |
+| Subprocess timeout                 | `error: "mpm mpm_memory timed out after 5000ms"`                                |
 | MPM returns zero hits              | `results: []`, `total: 0` — normal                                              |
 | `memory_get` on non-virtual path   | `{notFound:true, supportedPrefix:"mpm://memory/"}`                              |
 | `memory_get` for unknown id        | `{notFound:true}`                                                               |
