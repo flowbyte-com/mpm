@@ -197,7 +197,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 #### Skill
 
-Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, proactive_recall_hint). See §9 for the full authoring and discovery surface.
+Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). See §9 for the full authoring and discovery surface.
 
 #### Evidence
 
@@ -403,7 +403,7 @@ challenge ───────────────────────�
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
-**Auto-resolution on memory save (the implicit path).** Theories can also be closed out without an explicit `mpm resolve_theory` call. When `save_to_memory` writes a memory carrying the tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), the theory is atomically resolved in the same transaction as the memory insert. The result envelope returns `theory_resolutions_applied: ["<id>"]` when this fires; the resolved theory row carries `resolved_by=save_to_memory:theory_resolve_hook` as the forensic marker. This is the preferred path for closing out a theory you've just verified — the evidence and the conclusion land in the same row, and the audit trail is the row itself rather than a separate `mpm resolve_theory` invocation.
+**Auto-resolution on memory save (the implicit path).** Theories can also be closed out without an explicit `mpm resolve_theory` call. When `mpm_memory action=save` writes a memory carrying the tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), the theory is atomically resolved in the same transaction as the memory insert. The result envelope returns `theory_resolutions_applied: ["<id>"]` when this fires; the resolved theory row carries `resolved_by=mpm_memory action=save:theory_resolve_hook` as the forensic marker. This is the preferred path for closing out a theory you've just verified — the evidence and the conclusion land in the same row, and the audit trail is the row itself rather than a separate `mpm resolve_theory` invocation.
 
 ### 4.6 Proactive Recall
 
@@ -415,7 +415,7 @@ mpm kb hint "discussing the CSS injection approach for the widget system"
 #    RATIONALE: WordPress strips <style> blocks from post content...
 ```
 
-FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `proactive_recall_hint` tool is wired into the OpenClaw agent loop and surfaces the most relevant epistemology memory automatically after context shifts.
+FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `mpm_context action=proactive_recall_hint` tool is wired into the OpenClaw agent loop and surfaces the most relevant epistemology memory automatically after context shifts.
 
 ### 4.7 What happens when MPM is wrong?
 
@@ -427,7 +427,7 @@ Six canonical failure modes and the mechanism that handles each:
 
 **Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
 
-**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* every shared write produces a near-miss scan against existing rules via `shared.contradiction_log`. Detection runs opportunistically inside `query_long_term_memory` — no separate ticker. Near-misses carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
+**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* every shared write produces a near-miss scan against existing rules via `shared.contradiction_log`. Detection runs opportunistically inside `mpm_memory action=query` — no separate ticker. Near-misses carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
 
 **Confidence decay drift.** A memory's weight decayed to a wrong value because the lifecycle sweep ran in an unexpected state, or because the underlying evidence ledger had a bug. *Recovery:* §10.1 Self-Healing Integrity Loop. Concept-drift detection quarantines affected memories (`concept_drift: true`), proposes pending theories, and survives restarts via SQLite-native dedup. The system errs on the side of *escalating to a theory* rather than silently fixing — wrong weight corrections are far more dangerous than visible ones.
 
@@ -662,7 +662,7 @@ difference between a chatbot and an assistant that feels like a colleague.
 - **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in
   the `directives` table, seeded by `mpm ops init directives`)
 - **MPM memories** — what the agent _believes_ (DB-side,
-  `save_to_memory` / `query_long_term_memory`, scales to thousands of rows)
+  `mpm_memory action=save` / `mpm_memory action=query`, scales to thousands of rows)
 
 Use `MEMORY.md` for "who am I and what do I know about my user". Use MPM
 directives for "how does MPM's machinery actually fire". Use MPM memories
@@ -762,7 +762,7 @@ Initial confidence is also fixed by artifact type:
 
 #### Source of truth + cache
 
-The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `query_confidence_history` derives its view from evidence, not the cached column.
+The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
 
 This is one of the four enforcement patterns that make MPM's guarantees stick. See **Appendix C** for the rest (property tests, AST guard rails, self-heal whitelist + escalation).
 
@@ -785,7 +785,7 @@ score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
 
 BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals live on a comparable scale before combining. Use `--semantic` to drop BM25 and search by embedding similarity alone.
 
-> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `search_lessons` / `query_long_term_memory` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
+> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=query` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
 
@@ -799,7 +799,7 @@ BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals
 
 #### Concept Drift Detection
 
-Concept drift detection — autonomously identifying paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence — is implemented as a **synchronous** operation that runs inline with `query_long_term_memory` (no background ticker). The detection signature:
+Concept drift detection — autonomously identifying paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence — is implemented as a **synchronous** operation that runs inline with `mpm_memory action=query` (no background ticker). The detection signature:
 
 | Signal | Threshold |
 |---|---|
@@ -878,7 +878,7 @@ Each workspace has its own `mpm.db` (per-project tactical memory). An optional s
 
 The shared DB uses the **same table schema** as the local DB. Migrations apply to both DBs at startup. FTS5 sync triggers keep the shared FTS5 mirror in lockstep with the shared tables. `getDB()` is a per-process singleton, so one ATTACH, one connection, no leak surface.
 
-`query_long_term_memory` federates across both DBs with a multiplicative Shared Premium: `score = base × 1.20` for shared results, `score = base × 1.35` when the shared row also matches a rule. The boost only applies to rows that already pass the base relevance threshold — house rules outrank noisy local memories without being able to invent matches.
+`mpm_memory action=query` federates across both DBs with a multiplicative Shared Premium: `score = base × 1.20` for shared results, `score = base × 1.35` when the shared row also matches a rule. The boost only applies to rows that already pass the base relevance threshold — house rules outrank noisy local memories without being able to invent matches.
 
 Writing to shared (`record_global_rule`, `promote_to_global`) requires `confirm=true` in the tool payload. The agent cannot autonomously extend the shared rule set — only the operator can.
 
@@ -888,7 +888,7 @@ Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs 
 
 #### Layer 2 — Conflict Detection
 
-When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `query_long_term_memory`'s result set** — opportunistic, not polled. There is no background ticker, no separate timer.
+When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `mpm_memory action=query`'s result set** — opportunistic, not polled. There is no background ticker, no separate timer.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
 
@@ -925,7 +925,7 @@ The dispatcher pulls pending event wakes after every handler returns, so the age
 - Cross-DB transactions are NOT supported. Every shared write is its own atomic transaction on the shared DB.
 - WAL mode on both DBs allows concurrent local writers without blocking.
 - A drift missed last query is just as catchable next query. Detection and fan-out are both opportunistic.
-- Cold-start does NOT replay old wakes. `query_long_term_memory` handles history; event wakes are real-time push only.
+- Cold-start does NOT replay old wakes. `mpm_memory action=query` handles history; event wakes are real-time push only.
 
 For the DDL, fan-out algorithm, auto-broadcast hooks, tests, and smoke behind this stack, see **Appendix A** (Layers 0-3) and **Appendix B** (Layer 4).
 
@@ -1224,7 +1224,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`config`** — Configure AI provider (interactive wizard or scripted set|get|show|edit)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
 - **`debug`** — Low-level debugging tools
-- **`decide`** — Record decision (cognitive verb for 'record_decision')
+- **`decide`** — Record decision (cognitive verb for 'mpm_decisions action=save')
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
@@ -1250,11 +1250,11 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`patch-memory`** — Patch memory metadata
 - **`persona`** — Manage personas
 - **`promote`** — Mark as durable (exempt from decay)
-- **`propose_theory`** — Propose hypothesis
+- **`mpm_theories action=propose`** — Propose hypothesis
 - **`prune`** — Prune expired memories
 - **`read-skill`** — Read skill by name (or id) and optional version
 - **`recall`** _(aliases: s)_ — Recall relevant context
-- **`record_decision`** — Record decision (full substrate form: context, choice, rationale)
+- **`mpm_decisions action=save`** — Record decision (full substrate form: context, choice, rationale)
 - **`reference`** — Manage reference documents
 - **`reinforce`** — Raise retrieval priority
 - **`remember`** — Persist knowledge (cognitive verb for 'mpm add')
@@ -1277,7 +1277,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`synthesize`** — Merge near-duplicate memories
 - **`tasks`** — Manage scheduled tasks (upsert|list|delete)
 - **`theories`** — List theories [pending|resolved|all]
-- **`theorize`** — Propose theory (cognitive verb for 'propose_theory')
+- **`theorize`** — Propose theory (cognitive verb for 'mpm_theories action=propose')
 - **`theory`** — Theory CRUD
 - **`topic`** — Manage topics
 - **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
@@ -1376,7 +1376,7 @@ BEGIN;
 COMMIT;
 ```
 
-The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={source:'cron', task_id, directive_id}`. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
+The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={source:'cron', task_id, directive_id}`. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `mpm_context action=read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
 
 **Companion schema** (for the database-design curious):
 
@@ -1489,13 +1489,13 @@ Relevant Context: [IDs of memories/skills in use]
 Exit Criteria: [What constitutes completion? When do we wipe this?]
 ```
 
-The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `save_lesson` before wiping.
+The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `mpm_lessons action=save` before wiping.
 
 **The atomic rollback is the entire point.** `promote_scratchpad` runs the security scanner against the synthesized memory *inside* the same transaction as the memory INSERT and the scratchpad DELETE. If the scanner rejects (poison-phrase match, sensitive content, etc.), the entire transaction aborts: the scratchpad row survives for the agent to amend, and no memory row is created. A thought that fails the scanner is **not lost** — it is preserved for revision.
 
-**Wake-context orphan surfacing.** A scratchpad from a session that never promoted becomes an *orphan* on the next wake. `read_wake_context` includes an aggregate header (Fresh / Dormant / Expired counts) and a truncated thesis preview for each orphan. The agent's options: `promote_scratchpad` (commit), `flush_scratchpad` (amend), or `discard_scratchpad` (abandon). This closes the "agent crashed mid-thought" gap — even a process kill between flush and promote doesn't lose the work.
+**Wake-context orphan surfacing.** A scratchpad from a session that never promoted becomes an *orphan* on the next wake. `mpm_context action=read_wake_context` includes an aggregate header (Fresh / Dormant / Expired counts) and a truncated thesis preview for each orphan. The agent's options: `promote_scratchpad` (commit), `flush_scratchpad` (amend), or `discard_scratchpad` (abandon). This closes the "agent crashed mid-thought" gap — even a process kill between flush and promote doesn't lose the work.
 
-**Decision boundary vs `save_to_memory`:** the scratchpad is for *tentative* thoughts — working hypotheses, half-formed theories, intermediate conclusions that may need revision. `save_to_memory` is for *committed* facts. The promote path is the gate: if you're not ready to defend a thought against the security scanner and future challenges, it belongs on the scratchpad first.
+**Decision boundary vs `mpm_memory action=save`:** the scratchpad is for *tentative* thoughts — working hypotheses, half-formed theories, intermediate conclusions that may need revision. `mpm_memory action=save` is for *committed* facts. The promote path is the gate: if you're not ready to defend a thought against the security scanner and future challenges, it belongs on the scratchpad first.
 
 **Trade-off vs. auto-promote-on-flush:** `flush` never auto-creates a memory. The agent must explicitly `promote_scratchpad` and pass the scanner. This is the right friction: tentative thoughts should be deliberate before they become permanent knowledge. A flush that auto-promoted would silently double the agent's memory-write surface, bypassing the scanner's intent.
 #### Retrieval Observability Layer & Provenance Proxy
@@ -1504,9 +1504,9 @@ The `Exit Criteria` line is the discipline that prevents context crunch: without
 
 The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory, Lesson, Decision, Theory, Skill). It tracks two signals: how often a node was surfaced into agent working memory (`reuse_count`, `last_retrieved_at`), and how often it actively helped produce durable knowledge (`success_count`). The schema is observability only — search ranking, FTS sorting, and cognitive-object schemas are unchanged. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today `DefaultRanker` returns the FTS score unchanged.
 
-**Automatic instrumentation.** The agent never manages these stats explicitly. Every `read_wake_context` boot, every `query_long_term_memory` result, every `search_lessons` result, and every `read_skill` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
+**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=query` result, and every `read_skill` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
-**Provenance Proxy via `save_lesson`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+**Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
 
 ```json
 {
@@ -1519,7 +1519,7 @@ The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory,
 
 The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`, `memory:`, `dec-`, `theory:` / `the-`) and falls back to `memory` for unknown formats. The response includes a `credited_sources` count so the agent can verify the provenance was wired.
 
-**Diagnose with `explain_retrieval`.** The MCP tool `mpm call explain_retrieval --payload '{"query":"..."}'` runs a standard FTS search and returns a per-node diagnostic markdown block: Base FTS Match score, Reuse Count, Last Retrieved timestamp, Success Count. The retrieval ordering is identical to `query_long_term_memory` — the `bm25()` rank is preserved. `explain_retrieval` layers observability on top; it does not alter ranking.
+**Diagnose with `explain_retrieval`.** The MCP tool `mpm call explain_retrieval --payload '{"query":"..."}'` runs a standard FTS search and returns a per-node diagnostic markdown block: Base FTS Match score, Reuse Count, Last Retrieved timestamp, Success Count. The retrieval ordering is identical to `mpm_memory action=query` — the `bm25()` rank is preserved. `explain_retrieval` layers observability on top; it does not alter ranking.
 
 **Why observability first, ranking later.** The system records retrieval patterns for a month before any ranker consults them. Today, `reuse_count` and `success_count` are facts the operator can read; tomorrow, a future ranker can use the same data to promote frequently-cited memories and demote never-reused ones. The schema, the instrumentation, and the UPSERT path are the durable substrate; the ranker is the consumer that hasn't shipped yet.
 #### XITL Stance Hot-Swap
@@ -1541,14 +1541,14 @@ Directives are the agent's **prime directives** — non-negotiable behavioral pr
 
 | Tier | Lives in | Loaded | Examples |
 |---|---|---|---|
-| Prime Directives | SQLite `collection='directives'` | Always, via `read_directives` | "Always log contradictions as challenge evidence, never overwrite" |
+| Prime Directives | SQLite `collection='directives'` | Always, via `mpm_context action=read_directives` | "Always log contradictions as challenge evidence, never overwrite" |
 | Mode Directives | `mode/*.md` files | Only when the agent is in that mode | "Query confidence history on suspicious memories before debugging" |
 
 Storage: `collection='directives'` (MCP path) or legacy `is_prime_directive = 1`. Both read paths query `WHERE (collection = 'directives' OR is_prime_directive = 1) AND deleted_at IS NULL`, so a directive is visible from every consumer regardless of which identifier was set.
 
 Elevation: `mpm call mpm_memory --payload '{"action":"save","params":{"fact":"Always verify before acting","collection":"directives","tags":["prime_directive"]}}'`.
 
-The `proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
+The `mpm_context action=proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
 #### Baseline Cognitive Bootstrap
 
 For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
@@ -1605,7 +1605,7 @@ Three tiers, in increasing specificity:
 
 1. **Inventory** — `mpm call list_skills` (CLI: `mpm list-skills`). Returns one row per name with the highest-version row's id, name, version, when_to_use, is_global, weight. Used by wake context to render an `<available_skills>` block bounded to the top 20 by weight.
 2. **Read** — `mpm call read_skill --payload '{"name":"agentshell"}'` (or `"skill_id":"skill:agentshell-v2.0.0"`). Returns the full Skill struct with parsed frontmatter and body.
-3. **Proactive** — `proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + reinforcement + recency + Shared Premium for `is_global=1` rows.
+3. **Proactive** — `mpm_context action=proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + reinforcement + recency + Shared Premium for `is_global=1` rows.
 
 ##### Versioning
 
@@ -1832,7 +1832,7 @@ mpm doctor --deep-scan --fix   # clean soft-delete ghosts in place
 
 The asymmetry is deliberate. Soft-delete ghosts are the only drift class where we have a precise model of the correct state AND a proven-safe mechanism that should have produced that state. For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug or the source-table row is the bug. Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate.
 
-The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
+The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context action=read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
 
 #### Recommended cron
 
@@ -1886,7 +1886,7 @@ Raw audit events are the *nervous system* of the substrate, but a single error d
 | Layer | What | Where |
 |---|---|---|
 | Write | Atomic UPSERT into `audit_cluster_proposals` on every `LogAudit` call. Rolling 7d window. Default threshold: 3 events. | `internal/core/audit.go::upsertClusterCounter` |
-| Read | Deduped view partitioned into `known` (cluster_key in any pending theory / recent decision / resolved theory) vs `unknown`. Surfaced as a tiered string in `read_wake_context`. | `internal/core/cluster_proposals.go::ActiveClusters` + `internal/core/wake_context.go::auditSummaryRich` |
+| Read | Deduped view partitioned into `known` (cluster_key in any pending theory / recent decision / resolved theory) vs `unknown`. Surfaced as a tiered string in `mpm_context action=read_wake_context`. | `internal/core/cluster_proposals.go::ActiveClusters` + `internal/core/wake_context.go::auditSummaryRich` |
 | Act | `mpm call list_active_clusters` returns structured JSON (cluster_key strings) so the agent can triage at session end. Three management verbs (snooze / resolve / annotate) close the loop on each proposal. | `internal/core/tools/handlers.go::handleListActiveClusters` |
 
 Tunables centralized in `internal/core/cluster_proposals.go`: `ClusterThreshold`, `ClusterWindowDays`, and the status constants (`active` / `snoozed` / `resolved`).
@@ -2113,7 +2113,7 @@ The `VectorMatch` circuit breaker refuses to start a vector scan that would touc
 - The protobuf-shape score for each side
 - The resolution status (`pending` / `resolved` / `arbitration_needed`)
 
-The detection runs **inside `query_long_term_memory`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no panic-recovery surface.
+The detection runs **inside `mpm_memory action=query`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no panic-recovery surface.
 
 ### Protobuf-shape scoring
 
@@ -2367,7 +2367,7 @@ Documented in the Arc 2 implementation lesson:
 - **Cross-DB transactions are NOT supported.** Each `INSERT OR IGNORE` is its own transaction on the shared DB.
 - **WAL mode on both DBs** allows concurrent local writers without blocking.
 - **Heartbeat is passive.** Every MPM call writes a heartbeat via `cmd/mpm/call.go`'s pre-handler. Optional `mpm ops heartbeat` exists for tooling that doesn't run agents.
-- **Cold-start does NOT replay old wakes.** `query_long_term_memory` handles history; event wakes are real-time push only.
+- **Cold-start does NOT replay old wakes.** `mpm_memory action=query` handles history; event wakes are real-time push only.
 - **Self-skip is by session_id, not agent_id.** An agent running in multiple sessions gets the wake in each one (except the broadcasting one).
 
 ---
@@ -2388,9 +2388,9 @@ The `confidence` column on `memories` is a performance cache. The evidence ledge
 
 How this is enforced:
 
-- `add_evidence` recomputes confidence in the same transaction as the evidence INSERT. If recompute fails (e.g., CHECK constraint on `confidence_history.trigger`), the entire transaction rolls back — no orphan evidence rows, no stale confidence.
-- `recompute_confidence` triggers a manual recompute from the evidence ledger.
-- `query_confidence_history` derives its view from evidence, not the cached column.
+- `mpm_evidence action=add` recomputes confidence in the same transaction as the evidence INSERT. If recompute fails (e.g., CHECK constraint on `confidence_history.trigger`), the entire transaction rolls back — no orphan evidence rows, no stale confidence.
+- `mpm_confidence action=recompute` triggers a manual recompute from the evidence ledger.
+- `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
 
 **The invariant:** `confidence = f(evidence, decay) at most-recent recompute`.
 
@@ -2406,7 +2406,7 @@ How this is enforced:
 - Decay never increases confidence.
 - Cached confidence always matches `f(evidence, decay)` at most-recent recompute.
 - `mpm ops gc` never shreds a memory with `weight >= 0` (regardless of the threshold).
-- The decision ledger is append-only (no UPDATE on `record_decision` rows after insert).
+- The decision ledger is append-only (no UPDATE on `mpm_decisions action=save` rows after insert).
 
 The confidence properties are pinned in `internal/core/confidence_test.go`. When the formula changes, the tests stay green and the meaning survives.
 
@@ -2448,7 +2448,7 @@ How this is enforced:
 
 **Why the asymmetry.** Soft-delete ghosts are the only drift class where we have a precise model of the correct state AND a proven-safe mechanism that should have produced that state. For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug or the source-table row is the bug. Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate.
 
-The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
+The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context action=read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
 
 ## C.5 When to use which pattern
 
