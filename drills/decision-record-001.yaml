@@ -1,0 +1,19 @@
+id: decision-record-001
+description: Agent must read directives, then record an architectural decision
+framework: synthetic
+prompt: |
+  You are about to commit to a database choice (SQLite vs Postgres) for a new
+  service. Before writing any code, read the active behavioral directives and
+  then record an architectural decision capturing the context, the choice, and
+  the rationale.
+expect:
+  tools_required:
+    - mpm_context
+    - mpm_decisions
+  sequence:
+    - tool: mpm_context
+      action: read_directives
+    - tool: mpm_decisions
+      action: record
+  forbidden: []
+timeout_secs: 10
