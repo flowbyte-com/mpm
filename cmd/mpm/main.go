@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -89,6 +90,78 @@ func formatUptime(d time.Duration) string {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+// schedulerHealthStaleAfterSecs mirrors the verdict threshold used by
+// internal/core/probeSchedulerState so the CLI nudge is consistent with
+// the canonical health probe. 5 min = 5x the default 60s tick interval,
+// giving slow ticks / brief blips slack while still surfacing a true
+// stall well before the next human eye-check.
+const schedulerHealthStaleAfterSecs = 300
+
+// emitSchedulerHealthWarning reads ~/.mpm/run/scheduler.state (the
+// cross-process health bridge the scheduler writes every tick) and
+// emits a single discrete warning to w if the daemon is degraded.
+// Silent on the healthy path. The verdict precedence is:
+//
+//	not_running > error > stalled > ok
+//
+// "unknown" (file corrupt, home dir unreachable) is treated as
+// not_running for the nudge — same operator action either way
+// (`systemctl --user status mpm-scheduler`).
+//
+// Errors reading the file are swallowed: a passive nudge must NEVER
+// turn a successful CLI invocation into a failure or noise-storm.
+func emitSchedulerHealthWarning(w io.Writer) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	body, err := os.ReadFile(filepath.Join(home, ".mpm", "run", "scheduler.state"))
+	if err != nil {
+		// File missing or unreadable. Surface as not_running only if
+		// it actually doesn't exist; a stat error stays silent (the
+		// permcheck gate has already warned about perms if relevant).
+		if os.IsNotExist(err) {
+			fmt.Fprintln(w, "[mpm] scheduler: not running — start with `systemctl --user start mpm-scheduler`")
+		}
+		return
+	}
+
+	var snap struct {
+		LastTickUnix       int64  `json:"last_tick_unix"`
+		LastStatus         string `json:"last_status"`
+		LastError          string `json:"last_error"`
+		ProcessStartedUnix int64  `json:"process_started_unix"`
+	}
+	if err := json.Unmarshal(body, &snap); err != nil {
+		// Corrupt state file — degraded but not actionable from the
+		// CLI nudge. Stay silent; `mpm status` will surface it.
+		return
+	}
+
+	now := time.Now().Unix()
+	verdict := "ok"
+	var hint string
+	switch {
+	case snap.LastStatus == "error":
+		verdict = "error"
+		errMsg := snap.LastError
+		if errMsg == "" {
+			errMsg = "no detail"
+		}
+		hint = fmt.Sprintf("last_error=%s", errMsg)
+	case snap.LastTickUnix > 0 && (now-snap.LastTickUnix) > schedulerHealthStaleAfterSecs:
+		verdict = "stalled"
+		ageMin := (now - snap.LastTickUnix) / 60
+		hint = fmt.Sprintf("last tick %dm ago (threshold %dm) — daemon may be hung",
+			ageMin, schedulerHealthStaleAfterSecs/60)
+	}
+	if verdict == "ok" {
+		return
+	}
+
+	fmt.Fprintf(w, "[mpm] scheduler: %s — %s (run `mpm status` for details)\n", verdict, hint)
 }
 
 // truncate truncates a string to maxLen, adding ellipsis if needed
@@ -191,6 +264,14 @@ func main() {
 		// the dir-perms gate already passed.
 		fmt.Fprintln(os.Stderr, "warn: file perms sweep failed to start:", err)
 	}
+
+	// Passive scheduler health nudge. Reads ~/.mpm/run/scheduler.state
+	// (the cross-process health bridge the scheduler writes every tick)
+	// and emits a single discrete warning to stderr if the daemon is
+	// degraded. Silent on the healthy path — this is observability, not
+	// noise. Runs before any command dispatch so it surfaces during
+	// every CLI invocation, including the stdin-save path below.
+	emitSchedulerHealthWarning(os.Stderr)
 
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
