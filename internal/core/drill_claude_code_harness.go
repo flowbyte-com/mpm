@@ -95,6 +95,11 @@ func NewClaudeCodeHarness(workspace, claudePath, mpmMcpPath string) *ClaudeCodeH
 	}
 }
 
+// SessionID returns the session_id minted at Launch. Callers use this
+// to associate the audit rows the harness will write with the
+// drill_runs row that initiated the run. Returns "" before Launch.
+func (h *ClaudeCodeHarness) SessionID() string { return h.sessionID }
+
 // isAvailable reports whether the harness can run in the current
 // environment. Returns false when `claude` is missing or mpm-mcp isn't
 // built — both are required for the real-framework pipeline.
@@ -225,10 +230,17 @@ func (h *ClaudeCodeHarness) Finish(ctx context.Context, db *sql.DB) ([]ToolCall,
 // writeMcpConfig materialises a one-shot MCP config file pointing at
 // the local mpm-mcp binary. Re-creating the config per drill keeps
 // concurrent drills from racing over a shared ~/.claude/mcp.json.
+//
+// The "type": "stdio" field is required by Claude Code's MCP loader
+// (verified empirically — without it, the server is loaded but
+// silently skipped, and Claude reports "no MCP tools available").
+// Older code paths that omitted the field would have masked this
+// failure mode by emitting a passing-but-fake NOT_TESTED result.
 func (h *ClaudeCodeHarness) writeMcpConfig(drill DrillSpec) (string, error) {
 	cfg := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"mpm": map[string]interface{}{
+				"type":    "stdio",
 				"command": h.mpmMcpPath,
 				"args":    []string{},
 				"env": map[string]string{
