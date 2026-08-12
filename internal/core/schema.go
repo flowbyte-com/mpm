@@ -957,6 +957,38 @@ var CommonIndexes = []string{
 		ON vector_assignments(cluster_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_vector_assignments_updated
 		ON vector_assignments(updated_at);`,
+
+	// ── Behavioral Drill Audit (2026-08-12) ──────────────────────────────
+	//
+	// tool_invocations backs the mpm drills orchestrator. Every CLI and MCP
+	// tool dispatch writes a row here (audit hooks in cmd/mpm/call.go and
+	// cmd/mpm-mcp/) so that drill_handler.go can derive a per-session
+	// tool-call sequence and score compliance against drill_runs.expect.
+	//
+	// The composite (session_id, started_at) index is the only hot path —
+	// drill scorers read "give me all calls in session X in time order" —
+	// so it lives in BaseTables rather than CommonIndexes.
+	`CREATE TABLE IF NOT EXISTS tool_invocations (
+		id              TEXT PRIMARY KEY,
+		session_id      TEXT NOT NULL,
+		tool_name       TEXT NOT NULL,
+		action          TEXT NOT NULL,
+		invocation_id   TEXT NOT NULL,
+		actor_kind      TEXT NOT NULL,
+		framework_name  TEXT,
+		payload_hash    TEXT NOT NULL,
+		result_status   TEXT NOT NULL CHECK (result_status IN ('success','error')),
+		started_at      INTEGER NOT NULL,
+		completed_at    INTEGER,
+		duration_ms     INTEGER,
+		error_message   TEXT
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_session
+		ON tool_invocations(session_id, started_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_invocation
+		ON tool_invocations(invocation_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_tool_time
+		ON tool_invocations(tool_name, started_at DESC);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
