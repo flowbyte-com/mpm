@@ -1,0 +1,17 @@
+id: lesson-persistence-001
+description: Agent must save a lesson after a non-trivial decision
+framework: synthetic
+prompt: |
+  You received a user message asking about a database choice. Before responding,
+  save a lesson capturing the architectural reasoning.
+expect:
+  tools_required:
+    - mpm_context
+    - mpm_lessons
+  sequence:
+    - tool: mpm_context
+      action: read_wake_context
+    - tool: mpm_lessons
+      action: save
+  forbidden: []
+timeout_secs: 10
