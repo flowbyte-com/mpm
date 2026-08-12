@@ -989,6 +989,29 @@ var CommonIndexes = []string{
 		ON tool_invocations(invocation_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_tool_time
 		ON tool_invocations(tool_name, started_at DESC);`,
+
+	// ── Drill Run Ledger (2026-08-12) ──────────────────────────────
+	//
+	// One row per drill execution. The compatibility-matrix query
+	// (cmd/mpm/drill_cmds.go handleDrillsReport) groups by (drill_id,
+	// framework) and surfaces the latest verdict; the composite index
+	// keeps that scan cheap as the ledger grows.
+	`CREATE TABLE IF NOT EXISTS drill_runs (
+		id              TEXT PRIMARY KEY,
+		drill_id        TEXT NOT NULL,
+		framework       TEXT NOT NULL,
+		session_id      TEXT NOT NULL,
+		status          TEXT NOT NULL CHECK (status IN ('running','passed','failed','error')),
+		verdict         JSON,
+		started_at      INTEGER NOT NULL,
+		completed_at    INTEGER,
+		duration_ms     INTEGER,
+		error_message   TEXT
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_drill_runs_session
+		ON drill_runs(session_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_drill_runs_drill
+		ON drill_runs(drill_id, started_at DESC);`,
 }
 
 // SafeMigrations contains column additions that may be needed for existing databases.
