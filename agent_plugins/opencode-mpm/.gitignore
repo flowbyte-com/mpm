@@ -1,0 +1,11 @@
+# Build artifacts (compile via `npm install && npm run build`)
+dist/
+node_modules/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
