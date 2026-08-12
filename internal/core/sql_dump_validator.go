@@ -148,6 +148,7 @@ var CanonicalMPMSchema = []string{
 	"system_config",
 	"topic_memberships",
 	"topics",
+	"tool_invocations",
 	"vector_assignments",
 	"vector_clusters",
 }

@@ -215,6 +215,11 @@ type ActiveContext struct {
 	// Hostname is reported in the shared.sessions heartbeat for
 	// debugging ("who is awake?"). Empty is fine.
 	Hostname string
+	// FrameworkName identifies the calling framework (e.g. "mpm-cli",
+	// "mcp", "hermes", "opencode"). The drill orchestrator uses this to
+	// populate tool_invocations.framework_name and to group the
+	// compatibility matrix. Empty is fine — defaults to "mpm-cli".
+	FrameworkName string
 }
 
 // provenanceMeta is deprecated. The full provenance block is now

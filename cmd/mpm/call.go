@@ -86,11 +86,18 @@ func handleCall(args []string) int {
 	// turn. Discovery window is 24h so transient skips are fine.
 	_ = dm.Heartbeat(ac.SessionID, ac.Agent, ac.Hostname, nil)
 
+	startedAt := time.Now()
 	result, err := tool.Handler(dm, ac, payload)
+	completedAt := time.Now()
+	// Audit insert is best-effort and panic-isolated; failure here does
+	// NOT affect the call's exit code or downstream error handling. See
+	// audit_hook.go for the isolation guarantees.
+	recordToolInvocation(dm.SQLDB(), ac, tool.Name, payload,
+		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
 	if err != nil {
 		// Errors are JSON to stderr so the agent can parse them
 		// Direct fmt.Fprintf to stderr: JSON error envelope for `mpm call` — must be raw JSON, not user-formatted.
-	fmt.Fprintf(os.Stderr, "%s\n", must(json.Marshal(map[string]interface{}{
+		fmt.Fprintf(os.Stderr, "%s\n", must(json.Marshal(map[string]interface{}{
 			"success": false,
 			"error":   err.Error(),
 		})))
@@ -219,5 +226,20 @@ func runHandler(dm *mpminternal.DatabaseManager, name string, payload map[string
 	if !ok {
 		return nil, fmt.Errorf("test: unknown tool %q", name)
 	}
-	return tool.Handler(dm, mpminternal.ActiveContext{}, payload)
+	ac := mpminternal.ActiveContext{SessionID: "test-run-handler"}
+	startedAt := time.Now()
+	result, err := tool.Handler(dm, ac, payload)
+	completedAt := time.Now()
+	recordToolInvocation(dm.SQLDB(), ac, name, payload,
+		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
+	return result, err
+}
+
+// auditStatus maps a non-nil error to "error" and a nil error to "success",
+// matching the CHECK constraint on tool_invocations.result_status.
+func auditStatus(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
 }
