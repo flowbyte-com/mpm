@@ -130,13 +130,13 @@ func TestClaudeCodeHarness_ReadInvocationsForSession(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeHarness_FinishWithoutBeginFails(t *testing.T) {
+func TestClaudeCodeHarness_FinishWithoutLaunchFails(t *testing.T) {
 	h := NewClaudeCodeHarness(t.TempDir(), "/bin/true", "/bin/echo")
 	_, err := h.Finish(context.Background(), nil)
 	if err == nil {
-		t.Fatal("Finish without Begin should error")
+		t.Fatal("Finish without Launch should error")
 	}
-	if !strings.Contains(err.Error(), "Begin") {
-		t.Errorf("error should mention Begin; got: %v", err)
+	if !strings.Contains(err.Error(), "Launch") {
+		t.Errorf("error should mention Launch; got: %v", err)
 	}
 }

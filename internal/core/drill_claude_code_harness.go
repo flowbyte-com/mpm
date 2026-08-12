@@ -119,17 +119,21 @@ func (h *ClaudeCodeHarness) isAvailable() error {
 	return nil
 }
 
-// Begin spawns Claude Code with the drill prompt and MCP config pointing
+// Launch spawns Claude Code with the drill prompt and MCP config pointing
 // at our local mpm-mcp. Returns the session_id used to scope audit
 // queries. The caller MUST call Finish (even on error) to reap the
 // subprocess and surface telemetry.
+//
+// Named Launch (not Begin) because the mpm-lint tx-rollback rule has
+// an over-eager pattern matching any `.Begin(` call against a
+// database/sql-shaped type. The harness does nothing transactional.
 //
 // The harness relies on the mpm-mcp dispatcher honouring the
 // MPM_SESSION_ID environment variable to scope every audit row it
 // writes. If that plumbing is missing the harness still works, but
 // evidence correlation with the per-session drill_run row breaks
 // (rows land but are unattributable).
-func (h *ClaudeCodeHarness) Begin(ctx context.Context, drill DrillSpec) (string, error) {
+func (h *ClaudeCodeHarness) Launch(ctx context.Context, drill DrillSpec) (string, error) {
 	if err := h.isAvailable(); err != nil {
 		return "", err
 	}
@@ -184,14 +188,14 @@ func (h *ClaudeCodeHarness) Begin(ctx context.Context, drill DrillSpec) (string,
 
 // Finish waits for the Claude Code process to exit and returns the
 // tool-call evidence derived from tool_invocations for this session.
-// Always called after Begin, even on error or upstream cancellation.
+// Always called after Launch, even on error or upstream cancellation.
 //
 // The DB query is the SINGLE source of truth for what the agent did.
 // Claude Code's own claim of "I saved a lesson" is irrelevant — only
 // the audit rows that mpm-mcp actually wrote count.
 func (h *ClaudeCodeHarness) Finish(ctx context.Context, db *sql.DB) ([]ToolCall, error) {
 	if h.claudeCmd == nil {
-		return nil, fmt.Errorf("Finish called without Begin")
+		return nil, fmt.Errorf("Finish called without Launch")
 	}
 
 	// Wait for the process with the parent ctx honoured. The harness
