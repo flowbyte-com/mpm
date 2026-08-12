@@ -239,52 +239,6 @@ teardown_legacy_unit() {
 }
 
 # ---------- state inspection ----------
-
-# detect_canonical_dir_symlink refuses to install when PREFIX or
-# DATA_ROOT is a symlink. The 2026-08-12 split-brain incident
-# (commit 35f72a3) showed that a symlinked $HOME/.mpm (pointing at
-# the dev workspace) silently co-locates production runtime with
-# source code: any `git pull`, `make clean`, or test sweep clobbers
-# the live DB. The install MUST land on a real directory.
-#
-# Returns:
-#   0  if both PREFIX and DATA_ROOT resolve to real directories
-#   1  if either is a symlink (caller should warn + abort)
-detect_canonical_dir_symlink() {
-    local symlink_path=""
-    if [ -L "$PREFIX" ]; then
-        symlink_path="$PREFIX"
-    elif [ -L "$DATA_ROOT" ]; then
-        symlink_path="$DATA_ROOT"
-    fi
-    if [ -n "$symlink_path" ]; then
-        local target
-        target=$(readlink -f "$symlink_path" 2>/dev/null || echo "<unresolved>")
-        warn "════════════════════════════════════════════════════════════════"
-        warn "CANONICAL-DIR SYMLINK DETECTED"
-        warn "  $symlink_path -> $target"
-        warn "  The canonical install MUST be a real directory, not a"
-        warn "  symlink. A symlinked \$HOME/.mpm co-locates production"
-        warn "  runtime with source code, so any `git pull`, `make clean`,"
-        warn "  or test sweep clobbers the live database."
-        warn ""
-        warn "  This is the 2026-08-12 split-brain bug class. See"
-        warn "  commit 35f72a3 and the install.sh §CANONICAL-DIR check."
-        warn ""
-        warn "  Fix BEFORE installing:"
-        warn "    systemctl --user stop mpm-scheduler       # release DB"
-        warn "    kill <mpm-mcp pid>                        # if running"
-        warn "    rm \"$symlink_path\"                          # remove the symlink"
-        warn "    mkdir -p \"${symlink_path}/{bin,src/db,run,backups/critic-pre}\""
-        warn "    cp -a <src>/bin/* \"${symlink_path}/bin/\"       # binaries"
-        warn "    cp -a <src>/src/db/mpm.db* \"${symlink_path}/src/db/\"  # data"
-        warn "    systemctl --user start mpm-scheduler      # reattach"
-        warn "════════════════════════════════════════════════════════════════"
-        return 1
-    fi
-    return 0
-}
-
 inspect_existing_state() {
     local has_data=0 has_service=0 has_binaries=0 has_wrapper=0 has_user_unit=0
     [ -f "$DATA_ROOT/src/db/mpm.db" ] && has_data=1
@@ -302,21 +256,6 @@ inspect_existing_state() {
     log "  mpm wrapper:   $([ $has_wrapper -eq 1 ] && echo present || echo absent)"
     if [ $USE_SYSTEM -eq 0 ]; then
         log "  user unit:     $([ $has_user_unit -eq 1 ] && echo present || echo absent)"
-    fi
-
-    # Symlink check — see detect_canonical_dir_symlink doc.
-    if ! detect_canonical_dir_symlink; then
-        if [ $ASSUME_YES -eq 0 ]; then
-            local ans
-            printf '%s Continue anyway? [y/N] ' "$LOG_PREFIX"
-            read -r ans
-            case "$ans" in
-                y|Y|yes|YES) warn "  proceeding despite symlink (NOT recommended)" ;;
-                *)            die "refusing to install over a canonical-dir symlink — see fix steps above" 1 ;;
-            esac
-        else
-            warn "  --yes: proceeding despite symlink (NOT recommended)"
-        fi
     fi
 }
 
