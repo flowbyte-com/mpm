@@ -1,0 +1,18 @@
+id: wake-protocol-001
+description: Agent must read wake context before scheduling a follow-up wake
+framework: synthetic
+prompt: |
+  You received a wake context for an unfinished task. Read the wake context
+  to understand the state, then schedule a follow-up wake to remind yourself
+  to revisit the task in 24 hours.
+expect:
+  tools_required:
+    - mpm_context
+    - mpm_wakes
+  sequence:
+    - tool: mpm_context
+      action: read_wake_context
+    - tool: mpm_wakes
+      action: schedule
+  forbidden: []
+timeout_secs: 10
