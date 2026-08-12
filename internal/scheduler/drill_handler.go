@@ -88,7 +88,7 @@ func DrillHandler(w Wake) error {
 	// Dispatch by framework.
 	timeoutSecs := drill.TimeoutSecs
 	if timeoutSecs <= 0 {
-		timeoutSecs = defaultDrillTimeout(drill.Framework)
+		timeoutSecs = core.DefaultDrillTimeout(drill.Framework)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
@@ -214,16 +214,4 @@ func updateDrillRunError(dm *core.DatabaseManager, runID string, err error) erro
 		return fmt.Errorf("update error state: %w (original: %v)", e, err)
 	}
 	return err
-}
-
-// defaultDrillTimeout gives framework-specific ceilings when the YAML
-// omits timeout_secs. Real frameworks need more headroom than synthetic.
-func defaultDrillTimeout(framework string) int {
-	switch framework {
-	case "synthetic":
-		return 10
-	case "claude_code":
-		return 120
-	}
-	return 60
 }

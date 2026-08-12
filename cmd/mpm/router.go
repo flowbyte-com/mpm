@@ -146,6 +146,9 @@ func NewRouter() *CommandRouter {
 
 		// Provenance — artifact creation metadata
 		"provenance": {Name: "provenance", Description: "Show artifact provenance (mpm provenance help for subcommands)", MinArgs: 0},
+
+		// Drills — behavioural drill execution + compatibility matrix
+		"drills": {Name: "drills", Description: "Behavioural drill execution + compatibility matrix (list|show|run|report)", MinArgs: 0},
 	}
 
 	return r
@@ -365,6 +368,8 @@ func (r *CommandRouter) Execute(args []string) int {
 			// Bare artifact ID.
 			return handleProvenance(args[1:])
 		}
+	case "drills":
+		return handleDrills(args)
 	case "call":
 		return handleCall(args[1:])
 	case "evidence":
