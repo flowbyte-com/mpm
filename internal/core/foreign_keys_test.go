@@ -33,6 +33,13 @@ import (
 // actually applies (NewTestDM skips the DSN; initUnifiedSchema leaves FK
 // off for connections whose DSN did not opt in, per the test-path contract
 // in initUnifiedSchema).
+//
+// Refactor 2026-08-12: delegate to NewTestLocalOnlyDM (which sets
+// MPM_WORKSPACE under t.TempDir() so the file DB never touches the live
+// workspace) but still constructs the DatabaseManager via
+// NewDatabaseManager("") to preserve the real DSN with _foreign_keys=1.
+// NewTestDM would skip that DSN and silently let FK enforcement drop —
+// exactly the regression this test guards against.
 func foreignKeyTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
 	tmp := t.TempDir()

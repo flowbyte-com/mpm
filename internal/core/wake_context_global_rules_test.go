@@ -1,28 +1,28 @@
 package internal
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// Refactor 2026-08-12: replaced direct NewDatabaseManager("") calls with
+// NewTestSharedDM / NewTestLocalOnlyDM. The previous pattern set
+// MPM_SHARED_DB to a per-test tmpfile but left the local DB pointed at
+// config.GetMPMDir() — which under a normal `go test ./...` invocation
+// defaults to ~/.mpm/src/db/mpm.db and pollutes the live production
+// database with per-test fixtures. NewTestSharedDM / NewTestLocalOnlyDM
+// set both MPM_WORKSPACE and MPM_SHARED_DB to t.TempDir()-rooted paths,
+// severing the link to production state.
 
 // TestWakeContext_IncludesGlobalRules verifies that when MPM_SHARED_DB
 // is attached and the shared DB has is_global rows, those rows appear
 // in the wake context payload. This is the Phase 2c feature — every
 // agent on the workstation should see shared house rules on wake.
 func TestWakeContext_IncludesGlobalRules(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	// Insert a shared rule.
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)
@@ -53,15 +53,7 @@ func TestWakeContext_IncludesGlobalRules(t *testing.T) {
 // MPM_SHARED_DB attached but no is_global rows, the wake context
 // payload has empty GlobalRules (not nil-with-panic).
 func TestWakeContext_NoGlobalRulesWhenSharedDBEmpty(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	ctx, err := dm.GatherWakeContext()
 	if err != nil {
@@ -77,12 +69,7 @@ func TestWakeContext_NoGlobalRulesWhenSharedDBEmpty(t *testing.T) {
 // field's JSON tag is omitempty so it's omitted from the wire format
 // entirely — agents don't see the field at all in local-only mode.
 func TestWakeContext_LocalOnlyOmitsGlobalRules(t *testing.T) {
-	t.Setenv("MPM_SHARED_DB", "")
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestLocalOnlyDM(t)
 
 	ctx, err := dm.GatherWakeContext()
 	if err != nil {
@@ -98,17 +85,9 @@ func TestWakeContext_LocalOnlyOmitsGlobalRules(t *testing.T) {
 // when shared rules exist. The agent reads this on wake and applies
 // the rules to subsequent behavior.
 func TestReadWakeContext_IncludesGlobalRulesSection(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)
