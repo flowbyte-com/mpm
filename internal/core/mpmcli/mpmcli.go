@@ -27,9 +27,16 @@ func ResolveWorkspace() string {
 // Both the CLI and the MCP server stamp these onto every memory/decision
 // they create so the row carries provenance about which mode/persona
 // produced it.
+//
+// MPM_SESSION_ID, when set, scopes every tool_invocations row the MCP
+// server writes to that session. The drill orchestrator sets it before
+// spawning a real framework harness (e.g. Claude Code) so the audit
+// rows attributable to that drill can be queried together.
 func ActiveContextFromEnv() internal.ActiveContext {
 	return internal.ActiveContext{
-		Mode:    os.Getenv("MPM_ACTIVE_MODE"),
-		Persona: os.Getenv("MPM_ACTIVE_PERSONA"),
+		Mode:         os.Getenv("MPM_ACTIVE_MODE"),
+		Persona:      os.Getenv("MPM_ACTIVE_PERSONA"),
+		SessionID:    os.Getenv("MPM_SESSION_ID"),
+		FrameworkName: "mcp",
 	}
 }
