@@ -88,7 +88,19 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		if payload == nil {
 			payload = map[string]interface{}{}
 		}
+		startedAt := time.Now()
 		result, err := handler(dm, ac, payload)
+		completedAt := time.Now()
+		// Audit insert is best-effort; audit failures must not propagate
+		// to the MCP client (see audit_hook.go for isolation contract).
+		auditAC := ac
+		auditAC.FrameworkName = "mcp"
+		auditStatus := "success"
+		if err != nil {
+			auditStatus = "error"
+		}
+		recordToolInvocation(dm.SQLDB(), auditAC, req.Params.Name, payload,
+			startedAt, completedAt, extractAction(payload), auditStatus, err)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
 		}
