@@ -46,3 +46,19 @@ type DrillArtifact struct {
 	Tags            []string `yaml:"tags"`
 	ContentContains string   `yaml:"content_contains"`
 }
+
+// DefaultDrillTimeout returns the framework-specific ceiling when the
+// YAML omits timeout_secs. Real frameworks need more headroom than
+// synthetic — Claude Code can take 60–120s for a tool-discovery
+// cycle, while a synthetic harness is a deterministic shell loop and
+// should never exceed 10s. Used by both the scheduler wake handler
+// and the `mpm drills run` CLI to keep their policies in lockstep.
+func DefaultDrillTimeout(framework string) int {
+	switch framework {
+	case "synthetic":
+		return 10
+	case "claude_code":
+		return 120
+	}
+	return 60
+}
