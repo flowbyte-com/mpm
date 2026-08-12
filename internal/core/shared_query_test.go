@@ -1,17 +1,19 @@
 package internal
 
 import (
-	"path/filepath"
 	"testing"
 )
 
+// Refactor 2026-08-12: replaced direct NewDatabaseManager("") calls with
+// NewTestSharedDM. The previous pattern set MPM_SHARED_DB to a per-test
+// tmpfile but left the local DB pointed at config.GetMPMDir() — which
+// under a normal `go test ./...` invocation defaults to
+// ~/.mpm/src/db/mpm.db and pollutes the live production database.
+// NewTestSharedDM sets both MPM_WORKSPACE and MPM_SHARED_DB to
+// t.TempDir()-rooted paths, severing the link to production state.
+
 func TestQueryGlobalRules_LocalOnlyReturnsEmpty(t *testing.T) {
-	t.Setenv("MPM_SHARED_DB", "")
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestLocalOnlyDM(t)
 
 	got, err := dm.QueryGlobalRules("", 10)
 	if err != nil {
@@ -23,16 +25,7 @@ func TestQueryGlobalRules_LocalOnlyReturnsEmpty(t *testing.T) {
 }
 
 func TestQueryGlobalRules_AttachesAndReadsRules(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
-	t.Setenv("MPM_SHARED_READONLY", "")
-
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	dm := NewTestSharedDM(t)
 
 	if dm.SharedAttached() == "" {
 		t.Fatal("shared DB did not attach")
@@ -40,7 +33,7 @@ func TestQueryGlobalRules_AttachesAndReadsRules(t *testing.T) {
 
 	// Insert a rule. We include every column the QueryGlobalRules
 	// SELECT references so NULL coercion can't trip the scan.
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)
@@ -72,17 +65,9 @@ func TestQueryGlobalRules_AttachesAndReadsRules(t *testing.T) {
 }
 
 func TestQueryGlobalRules_FiltersByIsGlobal(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)
@@ -109,17 +94,9 @@ func TestQueryGlobalRules_FiltersByIsGlobal(t *testing.T) {
 }
 
 func TestQueryGlobalRules_FTSSearch(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)
@@ -146,17 +123,9 @@ func TestQueryGlobalRules_FTSSearch(t *testing.T) {
 }
 
 func TestQueryGlobalRules_LimitCap(t *testing.T) {
-	tmp := t.TempDir()
-	sharedPath := filepath.Join(tmp, "shared.db")
-	t.Setenv("MPM_SHARED_DB", sharedPath)
+	dm := NewTestSharedDM(t)
 
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-
-	_, err = dm.SQLDB().Exec(`
+	_, err := dm.SQLDB().Exec(`
 		INSERT INTO shared.memories
 		    (id, collection, content, weight, reinforcement_count,
 		     created_at, updated_at, deleted_at, is_global)

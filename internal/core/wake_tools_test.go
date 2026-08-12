@@ -17,7 +17,6 @@ package internal
 import (
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -293,33 +292,18 @@ func TestResolveTargetTime_ISO8601(t *testing.T) {
 // ── Handler-layer tests (mirror the tools/handlers_test.go shape) ──────
 
 // helper: build a wake DM with a temp shared DB, then wipe the LOCAL
-// scheduled_wakes table so prior tests do not leak rows. The shared DB
-// newTestWakeDM returns a hermetic DatabaseManager rooted at a per-test
-// tmpdir, so neither scheduled_wakes nor scheduled_tasks touch the
-// production DB at $HOME/.mpm/src/db/mpm.db. The previous version only
-// redirected the shared DB via MPM_SHARED_DB, leaving the local DB on
-// the production path — after the 2026-07-30 timestamps_unified_v1
-// migration, that meant tests read TEXT-affinity columns (production DB
-// has the legacy schema) while the code path expected INTEGER, surfacing
-// as TestListScheduledTasks_OrdersByNextRun + TestProcessDueTasks_*
-// failures against src/db/mpm.db.
+// scheduled_wakes table so prior tests do not leak rows.
 //
-// Now: MPM_WORKSPACE redirects the local DB to t.TempDir(); MPM_SHARED_DB
-// redirects the shared DB to a sibling file. Both are auto-cleaned by
-// t.Cleanup. The per-test DELETE on scheduled_wakes remains as a
-// belt-and-braces guard against any future leak.
+// Refactor 2026-08-12: delegate to NewTestSharedDM which centralises
+// the MPM_WORKSPACE + MPM_SHARED_DB redirect under t.TempDir(). The
+// previous inlined version did the same dance by hand; NewTestSharedDM
+// keeps the env-redirect invariants in one place so a future test file
+// can't accidentally skip MPM_WORKSPACE and pollute the production DB.
 func newTestWakeDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	tmp := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", tmp)
-	t.Setenv("MPM_SHARED_DB", filepath.Join(tmp, "shared.db"))
-	dm, err := NewDatabaseManager("")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
+	dm := NewTestSharedDM(t)
 	t.Cleanup(func() {
 		_, _ = dm.db.Exec(`DELETE FROM scheduled_wakes`)
-		dm.Close()
 	})
 	_, _ = dm.db.Exec(`DELETE FROM scheduled_wakes`)
 	return dm
