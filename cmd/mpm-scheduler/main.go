@@ -121,12 +121,18 @@ func main() {
 	// broadcast        → active dissemination fan-out to receiving agents
 	// cascade_drain    → per-tick cascade outbox drain (30s budget)
 	// cascade_summary  → forensic log line for each non-steady-state drain tick
+	// drill            → behavioural drill execution (synthetic engine
+	//                    self-test or real-framework harness like Claude
+	//                    Code). Dispatches by spec.Framework field;
+	//                    unknown frameworks surface as status='error'
+	//                    rows in drill_runs, never as silent failures.
 	// (anything else)  → notification kind, passes through to opportunistic fold
 	s.Register("snapshot", scheduler.SnapshotHandler)
 	s.Register("critic_audit", scheduler.CriticAuditHandler)
 	s.Register("gc", scheduler.GCHandler)
 	s.Register("broadcast", scheduler.BroadcastHandler)
 	s.Register("cascade_summary", scheduler.NewCascadeSummaryHandler(logger))
+	s.Register("drill", scheduler.DrillHandler)
 	s.RegisterTickHandler("cascade_drain", scheduler.NewCascadeDrainHandler(
 		dm,
 		logger,
