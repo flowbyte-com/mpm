@@ -154,3 +154,22 @@ docs/audit-*.md
 .opencode/
 reference/
 CLAUDE.md
+
+# Rollback artifacts from 2026-08-12 symlink restore (don't commit these)
+# The pre-symlink-fix snapshot lives at /home/v/.mpm-pre-symlink-fix.* and
+# is OUTSIDE the workspace, but defensive rules prevent re-introduction
+# if the snapshot is ever moved into the repo.
+.mpm-pre-symlink-fix.*
+.dev-archive/
+
+# DB and watchdog pre-* snapshots (from various test sweeps + scheduler
+# fix milestones). The backup-* pattern was already covered; pre-* was
+# missed until the 2026-08-12 symlink restore.
+src/db/mpm.db.pre-*
+src/db/watchdog.jsonl.pre-*
+
+# Runtime state created by the symlink restore. /run/ holds the
+# scheduler.state file. /mpm.db is a stray top-level symlink/file from
+# an old test sweep.
+/mpm.db
+/run/
