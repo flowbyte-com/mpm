@@ -99,7 +99,7 @@ fi
 
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
-# as a standalone Go module — see docs/ARCHITECTURE_SPLIT.md. The pre-commit
+# as a standalone Go module. The pre-commit
 # gate now runs from inside the Core module because main/ and core/ are
 # separate Go modules (cross-module `./internal/core/...` from main/ fails).
 if ! (cd internal/core && "$GO" test -short -count=1 ./... \
