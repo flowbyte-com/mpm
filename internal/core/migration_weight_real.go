@@ -18,24 +18,41 @@ import (
 // `converting driver.Value type float64 ("82.5") to a int: invalid syntax`
 // when reading those rows into an `int` target. ConsolidateMemories has
 // been silently skipping affected rows via the silent-continue pattern —
-// load-bearing memory consolidation has been silently broken since the
-// weight scale shifted to fractional values.
+// load-bearing memory consolidation has been silently broken.
 //
-// Why the rename-recreate dance: SQLite does NOT support
-// `ALTER TABLE ... ALTER COLUMN ... TYPE` natively. The supported ALTER
-// TABLE subset is limited to ADD COLUMN, DROP COLUMN, RENAME COLUMN,
-// and RENAME TO. To change a column type, we read the table's CREATE
-// statement from sqlite_master, substitute "weight INTEGER" → "weight
-// REAL", rename the original table aside, create the new one, copy
-// data, recreate indexes, and drop the renamed copy. Universal across
-// SQLite versions; the data migration is lossless because the actual
-// stored values are already REAL (just under an INTEGER declaration).
+// Strategy: ADD/UPDATE/DROP/RENAME column dance. Why not the rename-recreate
+// table dance:
+//
+//   - Renaming the original table rewrites dependent views and triggers in
+//     sqlite_master to reference the renamed copy. After DROP TABLE on that
+//     renamed copy, views and triggers reference a non-existent table —
+//     leaving them stale. The next migration attempt fails with
+//     "error in view <name>: no such table" (2026-08-13 production hit).
+//
+//   - The column dance is in-place (ALTER TABLE ADD/DROP/RENAME COLUMN do
+//     not require data copies), keeps views and triggers attached to the
+//     same table, and only requires dropping+recreating the indexes,
+//     triggers, and views that directly reference the `weight` column.
+//
+// DROP COLUMN refuses to operate while the column is referenced by:
+//
+//   - indexes ("error in index <name> after drop column") — production
+//     hit on 2026-08-13 15:23 (idx_memories_session collision, addressed
+//     by the first fix attempt)
+//   - triggers ("error in trigger <name> after drop column: no such
+//     column: NEW.weight") — production hit on 2026-08-13 18:37
+//   - views ("error in view <name> after drop column: no such column:
+//     m.weight") — production hit on 2026-08-13 18:40
+//
+// All three must be dropped first, then recreated after the RENAME COLUMN.
+//
+// Requires SQLite 3.35.0+ for DROP COLUMN; the bundled SQLite in
+// mattn/go-sqlite3 v1.14.37 is 3.51.3.
 //
 // Idempotent via the schema_migrations sentinel `weight_real_v1`.
 //
-// Must run AFTER BaseTables and SafeMigrations have executed (memories
-// and memory_revisions tables must exist with a weight column). Caller
-// (DatabaseManager.init) wraps in a transaction:
+// Must run AFTER BaseTables has executed (memories and memory_revisions
+// must exist). Caller (DatabaseManager.init) wraps in a transaction:
 //
 //	tx.Begin()
 //	MigrateWeightToReal(tx)
@@ -54,7 +71,7 @@ func MigrateWeightToReal(tx *sql.Tx) error {
 		return nil
 	}
 
-	// 2. Migrate each table where weight is declared != REAL.
+	// 2. Convert each table where weight is declared != REAL.
 	for _, table := range []string{"memories", "memory_revisions"} {
 		if err := migrateTableWeight(tx, table); err != nil {
 			return fmt.Errorf("%s.weight: %w", table, err)
@@ -72,12 +89,38 @@ func MigrateWeightToReal(tx *sql.Tx) error {
 	return nil
 }
 
-// migrateTableWeight probes <table>.weight via pragma_table_info. If
-// declared as REAL (or the column doesn't exist), returns nil without
-// touching the schema. Otherwise reads the original CREATE TABLE
-// statement from sqlite_master, substitutes "weight INTEGER" →
-// "weight REAL", and applies the rename-recreate dance. Indexes that
-// referenced the renamed table are recreated against the new table.
+// sqlObject is one captured sqlite_master entry (index, trigger, or view)
+// whose SQL references the `weight` column. Saved before DROP COLUMN so
+// we can recreate the object after the column is back (as REAL).
+type sqlObject struct {
+	name string
+	sql  string
+}
+
+// migrateTableWeight converts <table>.weight from INTEGER-declared to REAL
+// using the ADD/UPDATE/DROP/RENAME column dance. Steps:
+//
+//  1. Capture indexes, triggers, and views whose SQL text references
+//     "weight" — DROP COLUMN refuses otherwise. Production hit all
+//     three failure modes over the course of 2026-08-13.
+//  2. Drop the captured indexes.
+//  3. Drop the captured triggers.
+//  4. Drop the captured views.
+//  5. ADD COLUMN weight_new REAL.
+//  6. UPDATE weight_new = weight (the value already lives in REAL
+//     storage per SQLite dynamic typing; this cast documents intent).
+//  7. DROP COLUMN weight.
+//  8. RENAME COLUMN weight_new TO weight.
+//  9. Recreate the captured indexes (replay original SQL verbatim).
+// 10. Recreate the captured triggers.
+// 11. Recreate the captured views.
+//
+// Steps 1-4 and 9-11 keep the migration hermetic: nothing else about
+// the table changes. Views stay attached and reference the same column
+// name, so they don't need to be touched.
+//
+// Skips silently if the column doesn't exist (covers fresh DBs where
+// BaseTables already declared REAL after the SafeMigrations update).
 func migrateTableWeight(tx *sql.Tx, table string) error {
 	// Probe declared type.
 	var declType string
@@ -90,97 +133,140 @@ func migrateTableWeight(tx *sql.Tx, table string) error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("probe type: %w", err)
+		return fmt.Errorf("probe %s.weight type: %w", table, err)
 	}
 	if strings.EqualFold(declType, "REAL") {
 		return nil
 	}
 
-	// Read the original CREATE TABLE statement.
-	var createSQL string
-	err = tx.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`,
-		table,
-	).Scan(&createSQL)
+	// 1. Capture indexes, triggers, and views that reference `weight`.
+	// The LIKE matches against the stored SQL text; false positives
+	// (e.g., a view named `legacy_weight` whose body doesn't actually
+	// reference the column) are harmless — drop+recreate is a no-op
+	// semantically, just a few ms of work. Index matches also exclude
+	// sqlite_* autoindexes (those are managed by SQLite itself).
+	indexes, err := captureObjects(tx, "index",
+		`type = 'index' AND tbl_name = ? AND sql IS NOT NULL
+		 AND sql LIKE '%weight%' AND name NOT LIKE 'sqlite_%'`,
+		table)
 	if err != nil {
-		return fmt.Errorf("read %s schema: %w", table, err)
+		return fmt.Errorf("list indexes on %s referencing weight: %w", table, err)
 	}
-	if createSQL == "" {
-		return fmt.Errorf("%s table not found in sqlite_master", table)
-	}
-
-	// Substitute "weight INTEGER" → "weight REAL" in the CREATE statement.
-	// Replace N=1 so we only touch the first occurrence (defensive: the
-	// schema has one weight column declaration per table).
-	newCreate := strings.Replace(createSQL, "weight INTEGER", "weight REAL", 1)
-	if newCreate == createSQL {
-		return fmt.Errorf("%s CREATE statement does not contain 'weight INTEGER'; cannot auto-substitute — manual review required", table)
-	}
-
-	// Rename-recreate dance. We use a temporary table name; on rollback
-	// we restore the original table name. Any error mid-dance leaves the
-	// schema in an inconsistent state — the caller wraps in a transaction
-	// that rolls back on error, so the partial state never escapes.
-	oldName := table + "_weight_real_old"
-
-	renameSQL := fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`, table, oldName)
-	if _, err := tx.Exec(renameSQL); err != nil {
-		return fmt.Errorf("rename %s → %s: %w", table, oldName, err)
-	}
-
-	if _, err := tx.Exec(newCreate); err != nil {
-		return fmt.Errorf("recreate %s with weight REAL: %w", table, err)
-	}
-
-	// Copy data. SELECT * preserves all columns including weight; the
-	// actual stored values are already REAL (SQLite dynamic typing stored
-	// fractional values as REAL despite the INTEGER declaration), so
-	// casting is unnecessary — the new REAL column accepts the values as-is.
-	copySQL := fmt.Sprintf(`INSERT INTO %s SELECT * FROM %s`, table, oldName)
-	if _, err := tx.Exec(copySQL); err != nil {
-		return fmt.Errorf("copy data %s → %s: %w", oldName, table, err)
-	}
-
-	// Recreate indexes that referenced the renamed old table. SQLite
-	// automatically renamed indexes alongside the table; they sit on the
-	// old table now and would be lost when we drop it. Walk sqlite_master
-	// and replay each CREATE INDEX statement with the old name swapped for
-	// the new.
-	idxRows, err := tx.Query(`
-		SELECT sql FROM sqlite_master
-		WHERE type = 'index' AND tbl_name = ?
-		  AND sql IS NOT NULL
-		  AND name NOT LIKE 'sqlite_%'
-	`, oldName)
+	triggers, err := captureObjects(tx, "trigger",
+		`type = 'trigger' AND tbl_name = ? AND sql IS NOT NULL
+		 AND sql LIKE '%weight%'`,
+		table)
 	if err != nil {
-		return fmt.Errorf("list indexes on %s: %w", oldName, err)
+		return fmt.Errorf("list triggers on %s referencing weight: %w", table, err)
 	}
-	defer idxRows.Close()
-	var indexSQLs []string
-	for idxRows.Next() {
-		var idxSQL string
-		if err := idxRows.Scan(&idxSQL); err != nil {
-			return fmt.Errorf("scan index sql: %w", err)
+	views, err := captureObjects(tx, "view",
+		`type = 'view' AND sql IS NOT NULL
+		 AND sql LIKE '%weight%'
+		 AND (sql LIKE '%FROM ' || ? || '%' OR sql LIKE '%JOIN ' || ? || '%' OR sql LIKE '%from ' || ? || '%' OR sql LIKE '%join ' || ? || '%')`,
+		table, table, table, table)
+	if err != nil {
+		return fmt.Errorf("list views referencing %s.weight: %w", table, err)
+	}
+
+	// 2-4. Drop the captured objects.
+	for _, ie := range indexes {
+		dropIdx := fmt.Sprintf(`DROP INDEX IF EXISTS %q`, ie.name)
+		if _, err := tx.Exec(dropIdx); err != nil {
+			return fmt.Errorf("drop index %s on %s: %w", ie.name, table, err)
 		}
-		indexSQLs = append(indexSQLs, idxSQL)
 	}
-	if err := idxRows.Err(); err != nil {
-		return fmt.Errorf("iterate indexes on %s: %w", oldName, err)
+	for _, tr := range triggers {
+		dropTr := fmt.Sprintf(`DROP TRIGGER IF EXISTS %q`, tr.name)
+		if _, err := tx.Exec(dropTr); err != nil {
+			return fmt.Errorf("drop trigger %s on %s: %w", tr.name, table, err)
+		}
 	}
-	idxRows.Close()
-
-	for _, idxSQL := range indexSQLs {
-		newIdxSQL := strings.Replace(idxSQL, oldName, table, -1)
-		if _, err := tx.Exec(newIdxSQL); err != nil {
-			return fmt.Errorf("recreate index on %s: %w (sql: %s)", table, err, newIdxSQL)
+	for _, vw := range views {
+		dropV := fmt.Sprintf(`DROP VIEW IF EXISTS %q`, vw.name)
+		if _, err := tx.Exec(dropV); err != nil {
+			return fmt.Errorf("drop view %s (references %s.weight): %w", vw.name, table, err)
 		}
 	}
 
-	// Drop the renamed original.
-	dropSQL := fmt.Sprintf(`DROP TABLE %s`, oldName)
-	if _, err := tx.Exec(dropSQL); err != nil {
-		return fmt.Errorf("drop %s: %w", oldName, err)
+	// 5. ADD COLUMN weight_new REAL.
+	if _, err := tx.Exec(fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN weight_new REAL`, table,
+	)); err != nil {
+		return fmt.Errorf("add weight_new REAL to %s: %w", table, err)
+	}
+
+	// 6. UPDATE weight_new = weight.
+	if _, err := tx.Exec(fmt.Sprintf(
+		`UPDATE %s SET weight_new = weight`, table,
+	)); err != nil {
+		return fmt.Errorf("copy weight → weight_new on %s: %w", table, err)
+	}
+
+	// 7. DROP COLUMN weight.
+	if _, err := tx.Exec(fmt.Sprintf(
+		`ALTER TABLE %s DROP COLUMN weight`, table,
+	)); err != nil {
+		return fmt.Errorf("drop weight from %s: %w", table, err)
+	}
+
+	// 8. RENAME COLUMN weight_new TO weight.
+	if _, err := tx.Exec(fmt.Sprintf(
+		`ALTER TABLE %s RENAME COLUMN weight_new TO weight`, table,
+	)); err != nil {
+		return fmt.Errorf("rename weight_new → weight on %s: %w", table, err)
+	}
+
+	// 9-11. Recreate the dropped objects.
+	for _, ie := range indexes {
+		if _, err := tx.Exec(ie.sql); err != nil {
+			return fmt.Errorf("recreate index %s on %s: %w (sql: %s)", ie.name, table, err, ie.sql)
+		}
+	}
+	for _, tr := range triggers {
+		if _, err := tx.Exec(tr.sql); err != nil {
+			return fmt.Errorf("recreate trigger %s on %s: %w (sql: %s)", tr.name, table, err, tr.sql)
+		}
+	}
+	for _, vw := range views {
+		if _, err := tx.Exec(vw.sql); err != nil {
+			return fmt.Errorf("recreate view %s (references %s.weight): %w (sql: %s)", vw.name, table, err, vw.sql)
+		}
 	}
 
 	return nil
+}
+
+// captureObjects reads sqlite_master and returns the entries (with their
+// stored SQL) that match the given objectType ("index", "trigger", or
+// "view") and the WHERE clause (parameterised by the trailing args).
+// Caller is responsible for any further filtering (e.g., excluding
+// sqlite_* autoindexes).
+//
+// The LIKE pattern '%weight%' used by callers is a substring match
+// against the stored SQL — sufficient for column-name disambiguation
+// when applied to a single table at a time. False positives are
+// harmless: dropping and recreating an unaffected index costs
+// milliseconds.
+func captureObjects(tx *sql.Tx, objectType, where string, args ...any) ([]sqlObject, error) {
+	query := fmt.Sprintf(`
+		SELECT name, sql FROM sqlite_master
+		WHERE %s
+	`, where)
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", objectType, err)
+	}
+	defer rows.Close()
+	var out []sqlObject
+	for rows.Next() {
+		var o sqlObject
+		if err := rows.Scan(&o.name, &o.sql); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", objectType, err)
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", objectType, err)
+	}
+	return out, nil
 }
