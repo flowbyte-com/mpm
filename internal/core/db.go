@@ -240,7 +240,8 @@ func UnmarshalJSON(data string, v interface{}) error {
 // DatabaseManager manages the single unified database
 type DatabaseManager struct {
 	db          *sql.DB
-	dbPath      string       // stored for shareable store init
+	dbPath      string // absolute, realpath-resolved path to the SQLite file
+	dbPathRaw   string // raw path passed to NewDatabaseManager (symlinks un-resolved)
 	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
 
 	watchdogPath string     // path to watchdog.jsonl for query observability
@@ -385,6 +386,28 @@ func (dm *DatabaseManager) BusyRetryCount() uint64 {
 func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	out := map[string]interface{}{
 		"busy_retries": dm.BusyRetryCount(),
+		// db_path — the absolute, realpath-resolved SQLite file this
+		// DatabaseManager is attached to. Surface it as part of every
+		// health check so integration plugins can compare the live
+		// attachment against their host-pinned expected path and
+		// refuse to boot if they disagree (the silent-orphan-db
+		// failure mode that motivated the 2026-08-13 hardening).
+		//
+		// db_path_raw — the raw string passed to NewDatabaseManager,
+		// before symlink resolution. Diagnostic only; agents should
+		// compare on db_path, not db_path_raw, since the contract is
+		// inode-equivalent (the directive id 22736bb9122e0e32 pins
+		// `/home/v/.mpm/src/db/mpm.db` as canonical, but the
+		// project-source, openclaw-mirror, and canonical symlinks
+		// all resolve to the same inode).
+		//
+		// shared_path — the path of any attached shared DB, or ""
+		// when federation is off. Same comparison contract applies
+		// if a host pins an expected shared attachment.
+		"db_path":        dm.dbPath,
+		"db_path_raw":    dm.dbPathRaw,
+		"shared_attached": dm.sharedAttached,
+		"shared_path":    dm.sharedPath,
 	}
 
 	// Integrity check (PRAGMA quick_check is cheap, runs in <100ms).
@@ -893,6 +916,18 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
 	}
 
+	// Resolve symlinks for health_check / integration gating. The raw
+	// dbPath is preserved as dbPathRaw so operators can distinguish
+	// "operator passed this path" from "the inode we actually opened".
+	// evalSymlinksOnDB returns "" if the file doesn't exist yet (cold
+	// boot) — that's fine, the HealthCheck response will simply show
+	// raw == resolved.
+	resolved, rerr := evalSymlinksOnDB(dbPath)
+	if rerr == nil && resolved != "" {
+		manager.dbPathRaw = manager.dbPath
+		manager.dbPath = resolved
+	}
+
 	if err := manager.initUnifiedSchema(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
@@ -948,6 +983,7 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 	session := &DatabaseManager{
 		db:           db,
 		dbPath:       dm.dbPath,
+		dbPathRaw:    dm.dbPathRaw,
 		watchdogPath: filepath.Join(filepath.Dir(dm.dbPath), "watchdog.jsonl"),
 	}
 
@@ -1533,6 +1569,23 @@ func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
 		wdPath = filepath.Join(mpmDir, "src", "db", "watchdog.jsonl")
 	}
 	return &DatabaseManager{db: db, watchdogPath: wdPath}
+}
+
+// evalSymlinksOnDB resolves the symlink chain of a database file path.
+// Used by HealthCheck so the integration layer can compare the live
+// attachment against a host-pinned expected path (symlink-equal).
+//
+// Returns ("", nil) when the file does not exist (cold-boot / first-run)
+// — the underlying NewDatabaseManager will create it on next open.
+func evalSymlinksOnDB(p string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return resolved, nil
 }
 
 // InitSchema initializes the shared MPM schema (tables, indexes, migrations, FTS).
