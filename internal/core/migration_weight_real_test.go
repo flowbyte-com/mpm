@@ -31,6 +31,30 @@ func setupMigrationWeightTestDB(t *testing.T) *sql.DB {
 		weight INTEGER NOT NULL DEFAULT 1,
 		deleted_at INTEGER
 	);
+	-- Indexes that mirror production (a subset of the 14 indexes on the
+	-- real memories table). The migration drops indexes that reference
+	-- the weight column before DROP COLUMN — production has several.
+	-- We include a composite one to exercise column-list matching.
+	CREATE INDEX IF NOT EXISTS idx_memories_test_collection ON memories(collection);
+	CREATE INDEX IF NOT EXISTS idx_memories_test_deleted    ON memories(deleted_at);
+	CREATE INDEX IF NOT EXISTS idx_memories_test_session    ON memories(id);
+	CREATE INDEX IF NOT EXISTS idx_memories_test_weight     ON memories(weight);
+	CREATE INDEX IF NOT EXISTS idx_memories_test_composite  ON memories(collection, weight);
+	-- Trigger that references NEW.weight — the production schema has
+	-- triggers like memories_rev_ai/memories_rev_au that read NEW.weight
+	-- into memory_revisions.weight. DROP COLUMN fails on these; the
+	-- migration must drop the trigger first, then recreate it.
+	CREATE TRIGGER IF NOT EXISTS memories_test_rev_ai AFTER INSERT ON memories
+		BEGIN
+			INSERT INTO memory_revisions (memory_id, version, content, weight, collection)
+			VALUES (NEW.id, 1, NEW.content, COALESCE(NEW.weight, 0), NEW.collection);
+		END;
+	-- View that references memories.weight — production has views like
+	-- v_model_memory_yield that read m.weight from the memories alias.
+	-- DROP COLUMN fails on these too; the migration must drop the view
+	-- first, then recreate it. Production hit on 2026-08-13 18:40.
+	CREATE VIEW IF NOT EXISTS memories_test_weight_view AS
+		SELECT id, weight FROM memories WHERE weight >= 1;
 	CREATE TABLE IF NOT EXISTS memory_revisions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		memory_id TEXT NOT NULL,
@@ -60,6 +84,11 @@ func setupMigrationWeightTestDB(t *testing.T) *sql.DB {
 //   - records the schema_migrations sentinel exactly once
 //   - is idempotent (second run short-circuits on sentinel)
 //   - does not touch unrelated columns (deleted_at stays INTEGER)
+//   - reproduces the production index-namespace collision: indexes that
+//     exist on the source table must be cleanly recreated on the new
+//     table without triggering "index <name> already exists". The
+//     pre-fix ordering (recreate-then-drop) tripped on this in
+//     production on 2026-08-13 — this test would have caught it.
 func TestMigrateWeightToReal(t *testing.T) {
 	db := setupMigrationWeightTestDB(t)
 	defer db.Close()
@@ -83,9 +112,14 @@ func TestMigrateWeightToReal(t *testing.T) {
 			t.Fatalf("seed memories %s: %v", s.id, err)
 		}
 	}
+	// Seed memory_revisions with rows that DON'T collide with the
+	// trigger (memories_test_rev_ai fires on every memories INSERT and
+	// creates a memory_revisions row for the same memory_id with the
+	// NEW.weight value). Using distinct ids ("rev-..." prefix) keeps
+	// the seed assertions unambiguous.
 	revisionSeeds := []seed{
-		{"mem-int", 50},
-		{"mem-real", 90.5},
+		{"rev-int", 50},
+		{"rev-real", 90.5},
 	}
 	for _, s := range revisionSeeds {
 		if _, err := db.Exec(
@@ -135,6 +169,99 @@ func TestMigrateWeightToReal(t *testing.T) {
 		}
 	}
 
+	// Index namespace: every index that existed on the source memories
+	// table must be recreated on the new weight column after the
+	// column dance. The old index dropped+recreate path was the
+	// index-collision bug from 2026-08-13.
+	indexRows, err := db.Query(`
+		SELECT name FROM sqlite_master
+		WHERE type = 'index' AND tbl_name = 'memories'
+		  AND name NOT LIKE 'sqlite_%'
+		ORDER BY name
+	`)
+	if err != nil {
+		t.Fatalf("list recreated indexes: %v", err)
+	}
+	defer indexRows.Close()
+	var gotIdx []string
+	for indexRows.Next() {
+		var name string
+		if err := indexRows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		gotIdx = append(gotIdx, name)
+	}
+	wantIdx := []string{
+		"idx_memories_test_collection",
+		"idx_memories_test_composite",
+		"idx_memories_test_deleted",
+		"idx_memories_test_session",
+		"idx_memories_test_weight",
+	}
+	if len(gotIdx) != len(wantIdx) {
+		t.Errorf("recreated index count: want %d (%v), got %d (%v)",
+			len(wantIdx), wantIdx, len(gotIdx), gotIdx)
+	} else {
+		for i := range wantIdx {
+			if gotIdx[i] != wantIdx[i] {
+				t.Errorf("recreated index[%d]: want %q, got %q", i, wantIdx[i], gotIdx[i])
+			}
+		}
+	}
+
+	// Trigger: the trigger that referenced NEW.weight must have been
+	// dropped before DROP COLUMN and recreated after RENAME. Use a
+	// fresh memory_id ("mem-trig-test") so we don't collide with the
+	// seed inserts that ran earlier in the test — the trigger fires on
+	// every memories INSERT and would otherwise create duplicate
+	// memory_revisions rows for the seed ids.
+	if _, err := db.Exec(`INSERT INTO memories (id, collection, content, weight) VALUES ('mem-trig-test', 'memories', 'trig body', 77.5)`); err != nil {
+		t.Fatalf("trigger test insert: %v", err)
+	}
+	var trigWeight float64
+	if err := db.QueryRow(
+		`SELECT weight FROM memory_revisions WHERE memory_id = 'mem-trig-test'`,
+	).Scan(&trigWeight); err != nil {
+		t.Fatalf("trigger test select: %v", err)
+	}
+	if trigWeight != 77.5 {
+		t.Errorf("trigger weight: want 77.5, got %v", trigWeight)
+	}
+
+	// View: the view that referenced memories.weight must have been
+	// dropped before DROP COLUMN and recreated after RENAME. Verify by
+	// querying the view — if it returns the expected row, the view is
+	// functional; if the migration failed to recreate it, the view
+	// would be absent from sqlite_master.
+	viewRows, err := db.Query(`
+		SELECT name FROM sqlite_master
+		WHERE type = 'view' AND name = 'memories_test_weight_view'
+	`)
+	if err != nil {
+		t.Fatalf("view check query: %v", err)
+	}
+	defer viewRows.Close()
+	if !viewRows.Next() {
+		t.Fatalf("memories_test_weight_view not in sqlite_master after migration")
+	}
+	viewRows.Close()
+	var viewCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM memories_test_weight_view`,
+	).Scan(&viewCount); err != nil {
+		t.Fatalf("view query: %v", err)
+	}
+	// The view filters WHERE weight >= 1, so mem-int (50.0) qualifies
+	// but mem-real (82.5) also qualifies; the trigger row
+	// (mem-trig-test, 77.5) qualifies. mem-null was removed earlier.
+	// mem-real from the seed was 82.5, which becomes 82.5 after
+	// migration — it qualifies. mem-int (50) qualifies. mem-trig-test
+	// (77.5) qualifies. rev-* rows are in memory_revisions, not
+	// memories, so don't appear.
+	if viewCount != 3 {
+		t.Errorf("view count: want 3 (mem-int, mem-real, mem-trig-test), got %d", viewCount)
+	}
+
 	// Data preservation: read all seeded memories, verify values.
 	rows, err := db.Query(`SELECT id, weight FROM memories WHERE id IN ('mem-int', 'mem-real')`)
 	if err != nil {
@@ -160,7 +287,7 @@ func TestMigrateWeightToReal(t *testing.T) {
 	// Data preservation: memory_revisions fractional value intact.
 	var revWeight sql.NullFloat64
 	if err := db.QueryRow(
-		`SELECT weight FROM memory_revisions WHERE memory_id = 'mem-real'`,
+		`SELECT weight FROM memory_revisions WHERE memory_id = 'rev-real'`,
 	).Scan(&revWeight); err != nil {
 		t.Fatalf("select memory_revisions: %v", err)
 	}
