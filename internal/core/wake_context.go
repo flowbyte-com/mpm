@@ -7,80 +7,108 @@ package internal
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 )
 
-// WakeContextData is the structured payload produced by GatherWakeContext.
-// Callers format it for their own wire protocol (CLI returns a map for
-// backward compatibility with the Python plugin; the MCP server returns a
-// pre-formatted string).
+// WakeContextData is the bounded orientation surface for an agent.
+// It answers four questions: Who am I? What just happened? What is waiting
+// for me? What constraints apply? Wake context is orientation — not
+// investigation; not retrieval; not durable state. Deliberate retrieval
+// happens via mpm_memory query / mpm_lessons / mpm_skills get, scheduler
+// activation happens via the wakes surface, durable state lives in
+// memories/lessons/decisions/theories tables. Wake context bootstraps.
+// That's it.
+//
+// INVARIANTS (every field added to this struct must respect these):
+//   1. Humans get prose. Agents get typed signals. The same data can be
+//      rendered both ways (see formatWakeContext for prose, the struct
+//      itself for JSON), but the JSON wire form must always be typed.
+//   2. If a subsystem can create work an agent is expected to perform,
+//      wake_context MUST expose the resulting pending state. This is the
+//      invariant that the 2026-08-13 overdue_wakes patch closed.
+//   3. Lists MUST NOT omit empty values (no omitempty on slice fields).
+//      Absence in the JSON means "schema does not support this signal";
+//      empty array means "checked, none found". The two are different
+//      states and the agent must be able to distinguish them.
+//   4. Payload size is strictly bounded (MaxWakeContextBytes = 32 KB).
+//      If budget is exceeded, fields are truncated in a documented
+//      priority order and *flagged via Truncated booleans*. Wake context
+//      must never silently grow past budget.
+//
+// Wire format version: bump ContextVersion on any non-additive change.
+// Pure additions (new fields, new truncation flags) are safe under the
+// same version. Rename, semantic change, or removal of an existing
+// field is a major-version bump.
 type WakeContextData struct {
-	SessionID        string              `json:"session_id"`
-	ActiveMode       string              `json:"active_mode"`
-	ActivePersona    string              `json:"active_persona"`
-	RecentTopics     []string            `json:"recent_topics"`
-	RecentMemories   []WakeContextMemory `json:"recent_memories"`
-	RecentMilestones []WakeContextMemory `json:"recent_milestones"`
-	// AuditSummary is a one-line summary of system_audit_log activity in
-	// the last 24h, or empty if no error/fatal events were logged. The
-	// agent uses this as a signpost — if present, it should call
-	// query_audit_log to investigate.
-	AuditSummary string `json:"audit_summary,omitempty"`
-	// LastHandoff is the most recent unread handoff from the previous
-	// session, or nil if there is none. The handoff is marked as read
-	// when surfaced here, so the same handoff is never shown twice in a
-	// row. The agent uses this to continue work across restarts — the
-	// summary, commitments, and open_questions fields tell it where it
-	// left off, what it promised to do next, and what's still unresolved.
+	// Metadata — emitted on every read so consumers can detect stale
+	// payloads and (in v5+) reason about which schema they got.
+	ContextVersion string `json:"context_version"` // e.g., "wake-context-v4-session-identity"
+	GeneratedAt    int64  `json:"generated_at"`     // unix seconds, when the struct was assembled
+	AsOf           int64  `json:"as_of"`            // unix seconds, the substrate-state timestamp
+
+	// Identity — strict superset over v3's session_id field. v3 callers
+	// keep working because SessionID is preserved. v4 callers can use
+	// the split fields.
+	//
+	// SessionCurrentID — the session that is currently waking.
+	// SessionPreviousID — the session that last wrote state (often the
+	//   one whose handoff we just marked read). Empty when no prior
+	//   session exists or when GetPreviousSession hasn't been wired yet
+	//   (filled in by a follow-up; today the field stays "").
+	// SessionStartedAt — when SessionCurrentID began (unix epoch).
+	// SessionPreviousEndedAt — when SessionPreviousID ended (unix epoch,
+	//   0 when no previous).
+	SessionID               string `json:"session_id"`
+	SessionCurrentID        string `json:"session_current_id"`
+	SessionPreviousID       string `json:"session_previous_id"`
+	SessionStartedAt        int64  `json:"session_started_at"`
+	SessionPreviousEndedAt int64  `json:"session_previous_ended_at"`
+
+	// Orientation — the "what just happened" half.
+	ActiveMode            string `json:"active_mode"`
+	ActivePersona         string `json:"active_persona"`
+	RecentTopics          []string `json:"recent_topics"`
+	// RecentTopicsTruncated is set by enforceSizeLimit when the topics
+	// array had to be shed to stay under MaxWakeContextBytes. The
+	// agent sees the flag and knows recent_topics is empty *because of
+	// the cap*, not because there were no recent topics.
+	RecentTopicsTruncated bool                `json:"recent_topics_truncated,omitempty"`
+	RecentMemories       []WakeContextMemory `json:"recent_memories"`
+	RecentMilestones     []WakeContextMemory `json:"recent_milestones"`
+
+	// Attention & Pending Work — the "what is waiting for me" half.
+	// LastHandoff is the most recent unread handoff from a previous
+	// session, or nil if there is none. Marked-as-read on surfacing;
+	// the same handoff is never shown twice in a row.
 	LastHandoff *Handoff `json:"last_handoff,omitempty"`
-	// GlobalRules is the list of shared (cross-agent) house rules that
-	// apply to every agent on this workstation. Populated by
-	// GatherWakeContext when MPM_SHARED_DB is attached and the shared
-	// DB has any is_global rows. Empty in local-only mode (the default).
-	// The agent reads these on wake to know the conventions, voice
-	// rules, and operator overrides before it starts working.
-	GlobalRules []WakeContextRule `json:"global_rules,omitempty"`
-	// ScratchpadOrphans is the agent-facing summary of unpromoted
-	// scratchpad rows from previous sessions. Empty when no orphans
-	// exist (the common case). Populated by GatherWakeContext via
-	// ScratchpadOrphansSummary(). Each orphan carries [Fresh] /
-	// [Dormant] / [Expired] age-tag, the session_id, and a 200-char
-	// truncated thesis preview. The agent's options are: promote
-	// (promote_scratchpad), amend (flush_scratchpad with same
-	// session_id), or discard (discard_scratchpad).
-	ScratchpadOrphans string `json:"scratchpad_orphans,omitempty"`
-	// OverdueWakes surfaces scheduled_wakes whose target_time has
-	// passed but have not yet been fired. Capped at 5 most-overdue
-	// so the wake-context payload stays bounded even when the
-	// scheduled queue is large. The bootstrap patch (2026-08-13)
-	// added this because the wake-context primer was structurally
-	// blind to scheduled items — silent omission at bootstrap is
-	// worse than explicit error, since nothing in the audit log
-	// flags the gap. Symmetric with the other proprioception
-	// signals (epistemic pressure, scratchpad orphans, audit
-	// summary) — and intentionally NOT tagged omitempty so the
-	// field is always present (even as []) in the JSON surface.
-	// An absent field is ambiguous between "no overdue work" and
-	// "this signal isn't wired" — the latter is exactly the gap
-	// this patch closes, so the field must be unconditional.
+	// OverdueWakes: see struct field comment above. Added 2026-08-13.
+	// Always-on (no omitempty) per invariant 3.
 	OverdueWakes []OverdueWake `json:"overdue_wakes"`
-	// EpistemicPressure summarises the substrate's cognitive load:
-	// raw memories pending compaction vs durable lessons present.
-	// Surfaced on every wake so the agent feels its own cognitive
-	// pressure without polling (proprioception). Threshold lives in
-	// system_config under key "compaction.raw_threshold" (default 100).
-	// Exceeded=true is the agent's signal that a compact_epistemology
-	// call is warranted; Ratio is a secondary signal (raw:lesson
-	// density) clamped to 0 when LessonCount == 0 to avoid
-	// divide-by-zero NaN/Inf in the JSON response.
+	// ScratchpadOrphans: human-readable summary of unpromoted
+	// scratchpad rows. v5+ may carry structured entries; v4 keeps the
+	// prose form for compatibility with existing call sites.
+	ScratchpadOrphans string `json:"scratchpad_orphans"`
+
+	// Constraints & Capabilities — the "what rules apply, what tools".
+	// GlobalRules only populated when MPM_SHARED_DB is attached.
+	GlobalRules []WakeContextRule `json:"global_rules"`
+	// EpistemicPressure is kept as EpistemicPressureData (existing
+	// type alias kept intentionally to avoid an unnecessary rename).
 	EpistemicPressure EpistemicPressureData `json:"epistemic_pressure"`
-	// AvailableSkills is the lightweight catalogue of skills the agent
-	// has access to. At most TopSkillsInWake entries are surfaced in
-	// weight order. Populated by GatherWakeContext when the skill feature
-	// is enabled; empty otherwise.
-	AvailableSkills []SkillSummary `json:"available_skills,omitempty"`
+	// AvailableSkills: at most TopSkillsInWake entries, weight-sorted.
+	AvailableSkills []SkillSummary `json:"available_skills"`
+	// AvailableSkillsTruncated: see RecentTopicsTruncated above.
+	AvailableSkillsTruncated bool `json:"available_skills_truncated,omitempty"`
+
+	// System Health.
+	// AuditSummary: prose form (humans get prose). Future v5 may add
+	// a structured audit_block alongside this; for v4 prose stays.
+	AuditSummary string `json:"audit_summary"`
 }
 
 // EpistemicPressureData is the structured payload of the substrate's
@@ -144,6 +172,72 @@ type OverdueWake struct {
 	OverdueSecs int64  `json:"overdue_secs"`
 }
 
+// EnforceSizeLimit marshals the wake-context data, checks it against
+// the MaxWakeContextBytes cap, and sheds the heaviest arrays first if
+// the limit is breached. The shed order is documented in
+// wakeContextTruncatedFieldNames (declared above) — heaviest first so
+// the agent loses the lowest-priority information first.
+//
+// This function is a guardrail, not a normal path: under steady-state
+// operation, the wake-context payload is bounded by the gather-layer
+// limits (5 memories, 5 milestones, 5 overdue wakes, 5 skills, 10
+// rules, 200-char scratchpad previews). A size-cap hit indicates either
+// a subsystem growing past its allocation or a regression in the
+// gather-layer limits — both warrant operator attention.
+//
+// The shed-and-flush loop returns the marshalled bytes so callers
+// that produce wire form from WakeContextData (e.g. ReadWakeContext
+// which returns prose alongside JSON) can ship the post-cap bytes
+// without re-marshalling. The function also mutates *data to set
+// Truncated flags.
+func EnforceSizeLimit(data *WakeContextData) ([]byte, error) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) <= MaxWakeContextBytes {
+		return b, nil
+	}
+
+	// Shed tiers. Each tier is gated on the field being non-empty
+	// (the slot might already have been dropped by an earlier tier)
+	// and sets the Truncated flag so the agent can tell that the
+	// absence was a cap-induced drop and not "checked, none found".
+	for _, tier := range wakeContextTruncatedFieldNames { //nolint:gocritic // range is fine, switch is the actual control flow
+		switch tier {
+		case "available_skills":
+			if len(data.AvailableSkills) > 0 {
+				data.AvailableSkills = make([]SkillSummary, 0)
+				data.AvailableSkillsTruncated = true
+				b, _ = json.Marshal(data)
+				if len(b) <= MaxWakeContextBytes {
+					return b, nil
+				}
+			}
+		case "recent_topics":
+			if len(data.RecentTopics) > 0 {
+				data.RecentTopics = make([]string, 0)
+				data.RecentTopicsTruncated = true
+				b, _ = json.Marshal(data)
+				if len(b) <= MaxWakeContextBytes {
+					return b, nil
+				}
+			}
+		}
+	}
+
+	// Pathological case: even after shedding both tiers, the payload
+	// still exceeds budget. Likely a regression in the render layer
+	// (e.g. a debug field that's a megabyte). Don't silently lie; warn
+	// so operators can find it. Wake context must still return — the
+	// agent's bootstrap is non-optional.
+	slog.Warn("wake_context: size cap exceeded even after shedding all tiers",
+		"size_bytes", len(b),
+		"budget_bytes", MaxWakeContextBytes,
+		"context_version", data.ContextVersion)
+	return b, nil
+}
+
 // readActiveState reads {MPM_DIR}/active.json via the shared loader in
 // xitl.go. Missing/unreadable file returns empty strings with no error —
 // the wake context is still useful without mode/persona metadata.
@@ -171,8 +265,40 @@ func readActiveState(dm *DatabaseManager) (mode, persona string) {
 // there is no prior session row. Callers can detect a missing session via
 // SessionID == "". The latest unread handoff (if any) is also surfaced
 // and marked as read.
+// wakeContextCurrentVersion is set on every GatherWakeContext so consumers
+// can detect schema drift. Bumped only on non-additive changes to
+// WakeContextData (rename, semantic change, removal). Pure additions —
+// new fields, new truncation flags — stay at the same version because
+// the JSON wire form remains a strict superset of older versions.
+const wakeContextCurrentVersion = "wake-context-v4-session-identity"
+
+// MaxWakeContextBytes is the hard cap on the JSON wire form of the
+// wake-context payload. 32 KB is enough for the bounded orientation
+// surface (5 tactical memories + 5 milestones + ≤5 overdue wakes +
+// ≤5 skills + ≤10 rules + small prose summaries). If a future
+// subsystem crosses this budget, enforceSizeLimit sheds the heaviest
+// arrays first and sets the corresponding Truncated flag.
+const MaxWakeContextBytes = 32 * 1024
+
+// wakeContextTruncatedFieldNames lists the JSON field names whose
+// truncation we surface. Used by tests and by future operator
+// surfaces. Order = shedding priority (first listed = shed first).
+var wakeContextTruncatedFieldNames = []string{
+	"available_skills",
+	"recent_topics",
+}
+
 func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	var data WakeContextData
+
+	// Metadata — emitted on every read. GeneratedAt and AsOf are the
+	// same instant for now (event-time = processing-time); the
+	// separation exists so future event-time backfills can be
+	// distinguished cleanly.
+	nowUnix := time.Now().Unix()
+	data.ContextVersion = wakeContextCurrentVersion
+	data.GeneratedAt = nowUnix
+	data.AsOf = nowUnix
 
 	session, err := dm.GetLastSession()
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -180,7 +306,31 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	}
 	if err == nil && session != nil {
 		data.SessionID, _ = session["session_id"].(string)
+		data.SessionCurrentID = data.SessionID
+		// SessionStartedAt is a unix epoch (int64) on the sessions table.
+		if startedAt, ok := session["started_at"].(int64); ok {
+			data.SessionStartedAt = startedAt
+		}
+		// SessionPreviousID + SessionPreviousEndedAt remain zero values
+		// until a future iteration wires GetPreviousSession(); until
+		// then the agent sees "" / 0 and the absence is captured in
+		// the v4 wire format. Future work, not future regression.
 	}
+
+	// Ensures every list field on data is a non-nil empty slice —
+	// see invariant 3 on WakeContextData. Variables like
+	// `var x []string` would serialize as null; `make([]string, 0)`
+	// serializes as []. The GatherWakeContext body below populates
+	// most of these from query helpers (each `GetX()` in this file
+	// already uses `make([]T, 0)` internally), but this explicit
+	// init here guarantees the contract for the fresh-database case
+	// before the queries run.
+	data.RecentTopics = make([]string, 0)
+	data.RecentMemories = make([]WakeContextMemory, 0)
+	data.RecentMilestones = make([]WakeContextMemory, 0)
+	data.OverdueWakes = make([]OverdueWake, 0)
+	data.GlobalRules = make([]WakeContextRule, 0)
+	data.AvailableSkills = make([]SkillSummary, 0)
 
 	// Pull the latest unread handoff. The mark-read happens here so
 	// re-reading wake context (e.g. in the same session) doesn't re-show
