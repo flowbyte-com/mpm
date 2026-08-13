@@ -1201,32 +1201,36 @@ func TestMpmMemoryChallengeNormalization(t *testing.T) {
 	}
 }
 
-// TestMpmMemoryNilParams verifies the dispatcher handles nil/missing params
-// gracefully (treats as empty map, doesn't panic).
-func TestMpmMemoryNilParams(t *testing.T) {
+// TestMpmMemoryMissingParamsContract verifies that after the 2026-08-13
+// hard-fail dispatch-contract change, the dispatcher REJECTS payloads with
+// a missing or nil params envelope with a loud, descriptive error — it no
+// longer silently coerces to an empty map. The old test in this slot
+// codified the silent-drop; this rewrite codifies the loud-fail.
+func TestMpmMemoryMissingParamsContract(t *testing.T) {
 	dm := newTestSharedDM(t)
 
-	// Dispatch with nil params — should not panic.
+	// Missing params key → loud failure naming the tool and the missing field.
 	_, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
 		"action": "review",
 	})
-	if err != nil {
-		if strings.Contains(err.Error(), "unknown action") {
-			t.Errorf("dispatch failed: %v", err)
-		}
-		// Other errors are fine — the handler got called.
+	if err == nil {
+		t.Fatal("expected loud failure for missing params, got nil — silent-drop regression")
+	}
+	if !strings.Contains(err.Error(), "mpm_memory") ||
+		!strings.Contains(err.Error(), "missing required field `params`") {
+		t.Fatalf("expected schema-error naming mpm_memory + missing params, got: %v", err)
 	}
 
-	// Dispatch with params=nil explicitly.
+	// params=nil (present but nil-valued) → loud failure naming the type mismatch.
 	_, err = handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
 		"action": "save",
 		"params": nil,
 	})
 	if err == nil {
-		t.Error("expected error for save with no fact, got nil")
+		t.Fatal("expected loud failure for params: nil, got nil — silent-drop regression")
 	}
-	if err != nil && strings.Contains(err.Error(), "unknown action") {
-		t.Errorf("dispatch failed: %v", err)
+	if !strings.Contains(err.Error(), "must be an object") {
+		t.Fatalf("expected type-mismatch message, got: %v", err)
 	}
 }
 
@@ -1374,23 +1378,136 @@ func TestAllDomainNilParams(t *testing.T) {
 	}
 
 	for _, d := range dispatchers {
-		t.Run(d.name+"_nil_params", func(t *testing.T) {
-			// Dispatch with no params key — should not panic.
+		t.Run(d.name+"_missing_params", func(t *testing.T) {
+			// Post-2026-08-13 hardening contract: missing params is a
+			// LOUD schema error, not a silent coercion. Verify the
+			// dispatcher surfaces "missing required field `params`"
+			// for every domain tool.
 			_, err := d.handler(dm, ac, map[string]interface{}{
 				"action": d.action,
 			})
-			if err != nil && strings.Contains(err.Error(), "unknown action") {
-				t.Errorf("dispatch failed: %v", err)
+			if err == nil {
+				t.Fatalf("%s: expected loud failure for missing params, got nil — silent-drop regression", d.name)
+			}
+			if !strings.Contains(err.Error(), d.name) ||
+				!strings.Contains(err.Error(), "missing required field `params`") {
+				t.Fatalf("%s: expected schema-error naming %s + missing params, got: %v", d.name, d.name, err)
 			}
 
-			// Dispatch with params=nil explicitly.
+			// params=nil (present but nil-valued) → loud failure for type mismatch.
 			_, err = d.handler(dm, ac, map[string]interface{}{
 				"action": d.action,
 				"params": nil,
 			})
-			if err != nil && strings.Contains(err.Error(), "unknown action") {
-				t.Errorf("dispatch failed with nil params: %v", err)
+			if err == nil {
+				t.Fatalf("%s: expected loud failure for params: nil, got nil — silent-drop regression", d.name)
+			}
+			if !strings.Contains(err.Error(), "must be an object") {
+				t.Fatalf("%s: expected type-mismatch message, got: %v", d.name, err)
 			}
 		})
+	}
+}
+
+// ── 2026-08-13 hardening regression tests ────────────────────────────
+//
+// Two specific failure modes from the silent-promotion-by-edge-case
+// archaeology. Both were catching the day through the SQLite cross-check
+// rule, but never reaching the Go test suite — so a future agent could
+// have re-introduced either shape without any test failing. These tests
+// pin the loud-fail contract and the db_path surface to disk.
+
+func TestExtractParamsOrFail_LoudFailureTopLevelFact(t *testing.T) {
+	dm, ac := newTestSharedDM(t), internal.ActiveContext{Agent: "test", SessionID: "test"}
+
+	// Pre-fix shape: {"action":"save","fact":"..."} — top-level `fact`
+	// outside the params envelope. Pre-fix this silently dropped the
+	// fact, called handleSaveToMemory with empty params, and returned
+	// "fact is required" — far away from the source of the bug.
+	// Post-fix extractParamsOrFail catches the top-level `fact` and
+	// returns a descriptive schema error naming the offending field.
+	_, err := handleMpmMemory(dm, ac, map[string]interface{}{
+		"action": "save",
+		"fact":   "I should be inside params.fact, not at the top level",
+	})
+	if err == nil {
+		t.Fatal("expected loud failure for top-level `fact`, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside the params envelope") ||
+		!strings.Contains(err.Error(), "fact") ||
+		!strings.Contains(err.Error(), "mpm_memory") {
+		t.Fatalf("expected schema-error message naming mpm_memory + `fact`, got: %v", err)
+	}
+}
+
+func TestExtractParamsOrFail_LoudFailureTopLevelLeakAcrossAllDomainTools(t *testing.T) {
+	dm, ac := newTestSharedDM(t), internal.ActiveContext{Agent: "test", SessionID: "test"}
+
+	// Same regression as the all-loop above, but this one specifically
+	// tests top-level field leakage (the original failing pattern
+	// discovered at scope=all) across every dispatcher with the new
+	// "outside the params envelope" message.
+	tools := []struct {
+		name    string
+		handler func(internal.CoreDB, internal.ActiveContext, map[string]interface{}) (interface{}, error)
+	}{
+		{"mpm_memory", handleMpmMemory},
+		{"mpm_session", handleMpmSession},
+		{"mpm_wakes", handleMpmWakes},
+		{"mpm_theories", handleMpmTheories},
+		{"mpm_lessons", handleMpmLessons},
+		{"mpm_decisions", handleMpmDecisions},
+		{"mpm_topics", handleMpmTopics},
+		{"mpm_references", handleMpmReferences},
+		{"mpm_evidence", handleMpmEvidence},
+		{"mpm_confidence", handleMpmConfidence},
+		{"mpm_skills", handleMpmSkills},
+		{"mpm_context", handleMpmContext},
+		{"mpm_system", handleMpmSystem},
+	}
+	for _, tcase := range tools {
+		t.Run(tcase.name, func(t *testing.T) {
+			_, err := tcase.handler(dm, ac, map[string]interface{}{
+				"action":            "anything",
+				"top_level_leak":    "should fail with schema error",
+			})
+			if err == nil {
+				t.Fatalf("%s: expected loud failure for top-level leak, got nil", tcase.name)
+			}
+			if !strings.Contains(err.Error(), tcase.name) {
+				t.Fatalf("%s: error message should name the tool, got: %v", tcase.name, err)
+			}
+			if !strings.Contains(err.Error(), "outside the params envelope") {
+				t.Fatalf("%s: expected 'outside the params envelope' message, got: %v", tcase.name, err)
+			}
+		})
+	}
+}
+
+func TestHealthCheck_DbPathSurface(t *testing.T) {
+	dm, ac := newTestSharedDM(t), internal.ActiveContext{Agent: "test", SessionID: "test"}
+
+	// The 2026-08-13 hardening exposed db_path / db_path_raw /
+	// shared_attached / shared_path in health_check so integration
+	// plugins can assert host-pinned path invariants at boot. Verify
+	// they are present (non-empty strings for db_path on an opened db).
+	res, err := handleMpmSystem(dm, ac, map[string]interface{}{
+		"action": "health_check",
+		"params": map[string]interface{}{},
+	})
+	if err != nil {
+		t.Fatalf("health_check failed: %v", err)
+	}
+	m, ok := res.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map response, got %T", res)
+	}
+	for _, key := range []string{"db_path", "db_path_raw", "shared_attached", "shared_path"} {
+		if _, present := m[key]; !present {
+			t.Errorf("health_check response missing key %q", key)
+		}
+	}
+	if dbp, _ := m["db_path"].(string); dbp == "" {
+		t.Errorf("expected non-empty db_path, got: %v", m["db_path"])
 	}
 }
