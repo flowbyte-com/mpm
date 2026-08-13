@@ -52,7 +52,7 @@ import (
 //                              so EX-7 fracture detection counts
 //                              it as a failure, not an infra error.
 //
-// Spec: docs/capability-lifecycle-spec.md §4.1 (sandbox args),
+// Spec: docs/architecture/capability-lifecycle.md §4.1 (sandbox args),
 //      §4.3 (timeout via ctx).
 // =============================================================================
 
