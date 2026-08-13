@@ -210,14 +210,20 @@ func mustMarshal(v interface{}) []byte {
 }
 
 // minimalPayload constructs a minimal valid payload for a tool based
-// on its JSON schema. Required fields get placeholder values; optional
-// fields are omitted. The goal is to exercise every handler with
-// enough args to reach the DB call (or first validation error).
+// on its JSON schema. After the 2026-08-13 dispatcher hardening, the
+// domain-tool contract is {action: <op>, params: {<op-specific>}}. The
+// schema declares `action` as required (an enum of valid op strings)
+// and `params` as a free-form object — so the minimal shape we build
+// here is {action: <first enum value>, params: {}}. Inner handlers that
+// need specific fields in params.<key> will return "X is required" and
+// the test tolerates that as long as it doesn't panic, identical to
+// the pre-fix shape.
 //
-// This is intentionally a dumb stub. It doesn't know about field types
-// or constraints — handlers that need richer payloads should add a
-// tool-specific case below the loop. Today every schema has
-// string-or-number required fields, so empty strings and 0 cover it.
+// Tools that have NO schema (a few standalone tools like
+// `explain_retrieval`) get an empty top-level payload. Their handlers
+// are written defensively and tolerate missing-field errors at every
+// level; that continues to work post-hardening because those handlers
+// don't route through extractParamsOrFail.
 func minimalPayload(schemaRaw json.RawMessage) map[string]interface{} {
 	var schema struct {
 		Properties map[string]map[string]interface{} `json:"properties"`
@@ -226,29 +232,57 @@ func minimalPayload(schemaRaw json.RawMessage) map[string]interface{} {
 	if err := json.Unmarshal(schemaRaw, &schema); err != nil {
 		return map[string]interface{}{}
 	}
-	out := map[string]interface{}{}
-	for _, key := range schema.Required {
-		prop, ok := schema.Properties[key]
-		if !ok {
-			continue
-		}
-		typ, _ := prop["type"].(string)
-		switch typ {
-		case "string":
-			out[key] = ""
-		case "number", "integer":
-			out[key] = 0
-		case "boolean":
-			out[key] = false
-		case "array":
-			out[key] = []interface{}{}
-		case "object":
-			out[key] = map[string]interface{}{}
-		default:
-			out[key] = nil
+
+	// Resolve the action enum (if present) so the wrapping is valid
+	// for domain tools. Default to "x" for tools without an enum.
+	actionValue := "x"
+	if actionProp, ok := schema.Properties["action"]; ok {
+		if enum, ok := actionProp["enum"].([]interface{}); ok && len(enum) > 0 {
+			if s, ok := enum[0].(string); ok {
+				actionValue = s
+			}
 		}
 	}
-	return out
+
+	// Only wrap if `action` is required — tools without `action` in
+	// their required list (e.g. explain_retrieval) keep their flat shape.
+	requiresAction := false
+	for _, k := range schema.Required {
+		if k == "action" {
+			requiresAction = true
+			break
+		}
+	}
+	if !requiresAction {
+		out := map[string]interface{}{}
+		for _, key := range schema.Required {
+			prop, ok := schema.Properties[key]
+			if !ok {
+				continue
+			}
+			typ, _ := prop["type"].(string)
+			switch typ {
+			case "string":
+				out[key] = ""
+			case "number", "integer":
+				out[key] = 0
+			case "boolean":
+				out[key] = false
+			case "array":
+				out[key] = []interface{}{}
+			case "object":
+				out[key] = map[string]interface{}{}
+			default:
+				out[key] = nil
+			}
+		}
+		return out
+	}
+
+	return map[string]interface{}{
+		"action": actionValue,
+		"params": map[string]interface{}{},
+	}
 }
 
 // guard against unused import in case strings is dropped later

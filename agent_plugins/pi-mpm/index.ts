@@ -273,6 +273,48 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	let cachedWake: WakeContext | null = null;
 	let wakeDelivered = false;
 
+	// ----- 2026-08-13 hardening: DB path invariant -----
+	// Catch the silent-orphan-db failure mode by refusing to boot
+	// against an unexpected db_path. Set MPM_REQUIRED_DB_PATH to a
+	// canonical absolute path to activate the gate; when unset the
+	// check is skipped so ad-hoc dev environments still work.
+	const requiredDbPath = process.env.MPM_REQUIRED_DB_PATH;
+	if (requiredDbPath && requiredDbPath.length > 0) {
+		const hcPromise = callMpm("mpm_system", {
+			action: "health_check",
+			params: {},
+		});
+		hcPromise.then((r) => {
+			const live = (r.success && r.payload && typeof r.payload === "object" && typeof (r.payload as Record<string, unknown>).db_path === "string")
+				? (r.payload as Record<string, unknown>).db_path as string
+				: null;
+			if (!live) {
+				throw new Error("pi-mpm: db_path invariant — health_check missing db_path (mpm server too old to be gated)");
+			}
+			if (live !== requiredDbPath) {
+				throw new Error(
+					`pi-mpm: refusing to boot — DB path invariant violated.\n` +
+					`  expected: ${requiredDbPath}\n` +
+					`  actual:   ${live}\n` +
+					`This usually means two mpm installs on the same host, or a stale scratch db.\n` +
+					`Run \`mpm status\` to see which workspace is current.`,
+				);
+			}
+			pi.on("session_start", async () => {
+				ctxSafeNotify(pi, `MPM: db_path invariant satisfied (${live})`);
+			});
+		}).catch((e: Error) => {
+			throw e;
+		});
+	}
+
+	function ctxSafeNotify(_pi: ExtensionAPI, msg: string): void {
+		// pi does not have a top-level notifier at register-time; the
+		// registered session_start hook above is the safe hook.
+		// (no-op here; kept for future extension)
+		void msg;
+	}
+
 	// ---------- 13 Unified Domain Tools (Fat RPC) -------------------------
 
 	registerDomainTool(pi, {
