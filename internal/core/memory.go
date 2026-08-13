@@ -406,8 +406,15 @@ func normalizeWeightToColumn(weight float64) int {
 	if weight <= 0 {
 		return 5 // historical default (0.5 * 10)
 	}
-	if weight > 1.0 {
-		// 0-100 scale: use directly
+	if weight >= 1.0 {
+		// 0-100 scale: use directly. The boundary at weight=1.0 is
+		// inclusive — callers passing --weight 1 (or `AddMemory` callers
+		// passing the legacy weight=1) get weight=1 in the column, not
+		// weight=10. Pre-fix this was `weight > 1.0`, which silently
+		// misrouted every caller of the new --weight CLI flag that
+		// passed an integer value (e.g. --weight 1 → column=10) — the
+		// CLI silently promoted every save to long-term memory because
+		// the legacy *10 conversion tripped.
 		i := int(weight)
 		if i < 1 {
 			return 1
@@ -417,7 +424,7 @@ func normalizeWeightToColumn(weight float64) int {
 		}
 		return i
 	}
-	// 0-1 float scale: apply legacy *10 conversion
+	// 0-1 float scale: apply legacy *10 conversion (sub-1 fractional values).
 	i := int(weight * 10)
 	if i < 1 {
 		return 1
