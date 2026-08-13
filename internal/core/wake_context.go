@@ -51,6 +51,21 @@ type WakeContextData struct {
 	// (promote_scratchpad), amend (flush_scratchpad with same
 	// session_id), or discard (discard_scratchpad).
 	ScratchpadOrphans string `json:"scratchpad_orphans,omitempty"`
+	// OverdueWakes surfaces scheduled_wakes whose target_time has
+	// passed but have not yet been fired. Capped at 5 most-overdue
+	// so the wake-context payload stays bounded even when the
+	// scheduled queue is large. The bootstrap patch (2026-08-13)
+	// added this because the wake-context primer was structurally
+	// blind to scheduled items — silent omission at bootstrap is
+	// worse than explicit error, since nothing in the audit log
+	// flags the gap. Symmetric with the other proprioception
+	// signals (epistemic pressure, scratchpad orphans, audit
+	// summary) — and intentionally NOT tagged omitempty so the
+	// field is always present (even as []) in the JSON surface.
+	// An absent field is ambiguous between "no overdue work" and
+	// "this signal isn't wired" — the latter is exactly the gap
+	// this patch closes, so the field must be unconditional.
+	OverdueWakes []OverdueWake `json:"overdue_wakes"`
 	// EpistemicPressure summarises the substrate's cognitive load:
 	// raw memories pending compaction vs durable lessons present.
 	// Surfaced on every wake so the agent feels its own cognitive
@@ -111,6 +126,22 @@ type WakeContextMemory struct {
 type WakeContextRule struct {
 	Content string `json:"content"`
 	Weight  int    `json:"weight"`
+}
+
+// OverdueWake is a single row in the wake-context overdue-wakes
+// surface. Derived from scheduled_wakes where fired=0 AND
+// target_time <= now. Slim payload: id, when it was due, what kind
+// it is, the reason (truncated to 100 chars at the render layer),
+// and the overdue duration in seconds (always >= 0 because the
+// gather query filters out future-dated rows; the negative
+// clamp at scan time is defensive against timezone skew between
+// the SQLite-side strftime and the renderer).
+type OverdueWake struct {
+	ID          string `json:"id"`
+	TargetTime  int64  `json:"target_time"`
+	Reason      string `json:"reason"`
+	Kind        string `json:"kind,omitempty"`
+	OverdueSecs int64  `json:"overdue_secs"`
 }
 
 // readActiveState reads {MPM_DIR}/active.json via the shared loader in
@@ -225,6 +256,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 		return data, fmt.Errorf("gather scratchpad orphans: %w", err)
 	}
 	data.ScratchpadOrphans = orphans
+	data.OverdueWakes = dm.gatherOverdueWakes()
 	data.AvailableSkills = populateAvailableSkills(dm, "all")
 
 	return data, nil
@@ -297,6 +329,66 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 		Exceeded:        rawCount > threshold,
 		LastCompactedAt: lastCompacted,
 	}
+}
+
+// gatherOverdueWakes returns the most-overdue un-fired scheduled
+// wakes, capped at 5 rows by overdue severity (most-overdue first).
+// Returns nil (no error) when no overdue wakes exist.
+//
+// Symmetric to gatherEpistemicPressure: a single query against
+// scheduled_wakes, sub-millisecond at realistic queue sizes thanks
+// to the idx_scheduled_wakes_due(fired, target_time) index. The
+// kind column is parsed out of metadata so the agent can branch on
+// it (task / reminder / drill / etc) without parsing the reason
+// string. OverdueSecs is computed in SQL so the renderer never
+// needs to call time.Now() — keeping this surface pure data.
+//
+// NULL handling: rows with NULL or empty reason are skipped
+// (defensive — would never be created via the canonical paths but
+// a future ingest path could insert manually).
+//
+// Error handling: non-fatal, log to audit and return nil. The agent
+// still has mpm_call mpm_wakes list overdue_only=true as the
+// canonical surface if the wake-context summary is incomplete.
+//
+// Bootstrap context (2026-08-13): this method was added to
+// eliminate the silent-failure gap where read_wake_context never
+// surfaced scheduled_wakes at all — agents relying on wake-context
+// for "what should I do today" were structurally blind to reminders,
+// deferred check-ins, and drill launches.
+func (dm *DatabaseManager) gatherOverdueWakes() []OverdueWake {
+	if dm == nil || dm.db == nil {
+		return nil
+	}
+	rows, err := dm.db.Query(`
+		SELECT id, target_time, reason,
+		       COALESCE(json_extract(metadata, '$.kind'), '') AS kind,
+		       CAST(strftime('%s','now') AS INTEGER) - target_time AS overdue_secs
+		FROM scheduled_wakes
+		WHERE fired = 0
+		  AND target_time <= CAST(strftime('%s','now') AS INTEGER)
+		  AND reason != ''
+		ORDER BY target_time ASC
+		LIMIT 5`)
+	if err != nil {
+		dm.LogAudit(AuditWarn, "wake_context", "overdue_wakes read failed: "+err.Error(), "", AuditContext{})
+		return nil
+	}
+	defer rows.Close()
+
+	out := make([]OverdueWake, 0, 5)
+	for rows.Next() {
+		var w OverdueWake
+		if err := rows.Scan(&w.ID, &w.TargetTime, &w.Reason, &w.Kind, &w.OverdueSecs); err != nil {
+			dm.LogAudit(AuditWarn, "wake_context", "scan overdue wake row: "+err.Error(), "", AuditContext{})
+			continue
+		}
+		if w.OverdueSecs < 0 {
+			w.OverdueSecs = 0
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // recentMemories returns up to `limit` non-deleted memories ordered newest first.
@@ -482,6 +574,21 @@ func formatWakeContext(d WakeContextData) string {
 	}
 	if d.ScratchpadOrphans != "" {
 		lines = append(lines, d.ScratchpadOrphans)
+	}
+	if len(d.OverdueWakes) > 0 {
+		lines = append(lines, fmt.Sprintf("**Overdue Wakes (%d, capped at 5):**", len(d.OverdueWakes)))
+		for _, w := range d.OverdueWakes {
+			reason := w.Reason
+			if len(reason) > 100 {
+				reason = reason[:100] + "…"
+			}
+			kindLabel := ""
+			if w.Kind != "" {
+				kindLabel = " [" + w.Kind + "]"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s%s overdue by %s — %s",
+				w.ID, kindLabel, humanizeOverdueSecs(w.OverdueSecs), reason))
+		}
 	}
 	if len(d.AvailableSkills) > 0 {
 		lines = append(lines, fmt.Sprintf("**Available Skills (count=%d):**", len(d.AvailableSkills)))
@@ -722,6 +829,29 @@ func ternaryPlural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// humanizeOverdueSecs renders an overdue duration in seconds as the
+// coarsest meaningful unit (s < 60 → "Ns"; m < 60 → "Nm"; h < 24 →
+// "Nh"; else "Nd"). Coarse-grained on purpose — wake-context is a
+// glance surface, not a clock. Used by the OverdueWakes renderer.
+// Negative input is clamped to zero (defensive — gatherOverdueWakes
+// filters future-dated rows but a renderer-only defense costs
+// nothing).
+func humanizeOverdueSecs(s int64) string {
+	if s <= 0 {
+		return "0s"
+	}
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm", s/60)
+	}
+	if s < 86400 {
+		return fmt.Sprintf("%dh", s/3600)
+	}
+	return fmt.Sprintf("%dd", s/86400)
 }
 
 // clusterKeyKnownByEpistemology returns true if cluster_key appears in

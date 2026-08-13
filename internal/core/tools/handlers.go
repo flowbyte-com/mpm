@@ -928,6 +928,24 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		_ = dm.RecordRetrieval(m.ID, "memory")
 	}
 
+	// Overdue-wakes surface (added 2026-08-13). Pure read — does NOT
+	// mutate scheduled_wakes. Complements wakes_pending (which is the
+	// scheduler's fire-and-return surface) and the existing pre-dispatch
+	// CheckPendingWakes call below. Specifically catches wake kinds that
+	// the default CheckPendingWakes kind-filter skips (reminder, drill,
+	// task, etc) — those woke up overdue in the silent-failure case that
+	// prompted this patch.
+	overdueRefs := make([]map[string]interface{}, 0, len(data.OverdueWakes))
+	for _, w := range data.OverdueWakes {
+		overdueRefs = append(overdueRefs, map[string]interface{}{
+			"id":           w.ID,
+			"target_time":  float64(w.TargetTime),
+			"reason":       w.Reason,
+			"kind":         w.Kind,
+			"overdue_secs": float64(w.OverdueSecs),
+		})
+	}
+
 	// Cold-start sweep: check for wakes that came due while the system
 	// was offline. The agent sees these immediately on boot — no need to
 	// wait for the next tool call to trigger the opportunistic fold.
@@ -937,20 +955,36 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		"success":             true,
 		"session_id":          data.SessionID,
 		"active_mode":         data.ActiveMode,
-		"active_persona":      data.ActivePersona,
+		"active_persona":       data.ActivePersona,
 		"recent_topics":       data.RecentTopics,
 		"recent_memories":     memRefs,
 		"recent_milestones":   milestoneRefs,
+		"overdue_wakes":       overdueRefs,
 		"audit_summary":       data.AuditSummary,
 		"last_handoff":        data.LastHandoff,
 		"scratchpad_orphans":  data.ScratchpadOrphans,
 		"epistemic_pressure":  data.EpistemicPressure,
 	}
-	if wErr == nil && len(wakes) > 0 {
+	// Always surface wakes_pending — even when empty — so the agent can
+	// branch on field presence rather than parsing absence. The Map shape
+	// is consistent with overdue_wakes; the semantic is different
+	// (just-fired by the opportunistic dispatch vs. still-pending in the
+	// substrate's queue). wakes_pending_count is redundant with len() on
+	// the agent side but kept for symmetry with existing tooling.
+	if wErr == nil {
+		if wakes == nil {
+			wakes = []map[string]interface{}{}
+		}
 		result["wakes_pending"] = wakes
-		result["wakes_pending_count"] = len(wakes)
+		result["wakes_pending_count"] = float64(len(wakes))
+	} else {
+		// Surface the failure shape explicitly so the agent can see that
+		// the dispatch path was attempted but failed (vs. the field being
+		// absent due to silent omission).
+		result["wakes_pending"] = []map[string]interface{}{}
+		result["wakes_pending_count"] = float64(0)
+		result["wakes_pending_error"] = wErr.Error()
 	}
-	_ = wErr // CheckPendingWakes errors are non-fatal here
 
 	// Epistemic pressure — same shape contract as the other fields:
 	// struct → map[string]interface{} for the JSON wire. The struct

@@ -797,6 +797,118 @@ func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
 	}
 }
 
+// TestHandleReadWakeContext_IncludesOverdueWakes pins the wire
+// contract: a scheduled_wake with fired=0 and a past target_time must
+// surface in the read_wake_context response under the overdue_wakes
+// key.
+//
+// Companion to the wake_context_overdue_wakes_test.go tests in
+// internal/core — those pin the SQL/logic at the gather layer, this
+// test pins the handler copy. The pattern is identical to
+// TestHandleReadWakeContext_IncludesRecentMilestones: same drift
+// pattern (struct gains a field, handler drops it on the wire), same
+// hermetic in-memory DB, same field-presence check.
+//
+// 2026-08-13 bootstrap: the patch that adds overdue_wakes to the
+// wake-context primer was prompted by the silent failure where an
+// overdue reminder wake sat 4d13h past its target without any
+// surface surfacing it. handleReadWakeContext builds the response
+// map by hand — any new WakeContextData field has to be explicitly
+// projected, otherwise the wire contract drifts silently.
+func TestHandleReadWakeContext_IncludesOverdueWakes(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	// Seed a single overdue wake (fired=0, target_time in the past) and a
+	// future-dated wake that must NOT surface.
+	now := time.Now().Unix()
+	past := now - 7200   // 2 hours overdue
+	future := now + 3600 // 1 hour in the future
+
+	seedOverdueWake := func(id string, target int64, fired int, kind, reason string) {
+		var meta any
+		if kind == "" {
+			meta = nil
+		} else {
+			meta = fmt.Sprintf(`{"kind":%q}`, kind)
+		}
+		_, err := db.Exec(`
+			INSERT INTO scheduled_wakes (id, target_time, reason, fired, fired_at, created_by, metadata)
+			VALUES (?, ?, ?, ?, NULL, 'test', ?)`,
+			id, target, reason, fired, meta)
+		if err != nil {
+			t.Fatalf("seed wake %s: %v", id, err)
+		}
+	}
+	seedOverdueWake("wk-overdue", past, 0, "reminder", "Should surface in overdue_wakes")
+	seedOverdueWake("wk-fired", past, 1, "reminder", "Already fired — must not surface")
+	seedOverdueWake("wk-future", future, 0, "reminder", "Future-dated — must not surface")
+
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+
+	rawOverdue, exists := m["overdue_wakes"]
+	if !exists {
+		t.Fatal("overdue_wakes key missing from read_wake_context response — handler copy drifted from WakeContextData struct")
+	}
+	refs, ok := rawOverdue.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected overdue_wakes to be []map[string]interface{}, got %T", rawOverdue)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("expected exactly 1 row in overdue_wakes (one past+fired=0 row), got %d: %+v", len(refs), refs)
+	}
+	got := refs[0]
+	if got["id"] != "wk-overdue" {
+		t.Errorf("overdue_wakes id drift: got %v, want wk-overdue", got["id"])
+	}
+	if got["kind"] != "reminder" {
+		t.Errorf("overdue_wakes kind drift: got %v, want reminder", got["kind"])
+	}
+	// overdue_secs should be positive (target_time was 2h ago).
+	if secs, ok := got["overdue_secs"].(float64); !ok || secs <= 0 {
+		t.Errorf("overdue_secs drift: got %v (%T), want positive float64", got["overdue_secs"], got["overdue_secs"])
+	}
+	if reason, _ := got["reason"].(string); reason != "Should surface in overdue_wakes" {
+		t.Errorf("overdue_wakes reason drift: got %q, want %q", reason, "Should surface in overdue_wakes")
+	}
+
+	// Also assert the field is ALWAYS present even when there's nothing
+	// overdue. This catches the omitempty-style silent omission at the
+	// handler layer specifically (cf. the underlying struct field which
+	// we already pinned in wake_context_overdue_wakes_test.go).
+	cleanDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open clean db: %v", err)
+	}
+	t.Cleanup(func() { cleanDB.Close() })
+	cleanDM := internal.NewDatabaseManagerForDB(cleanDB)
+	if err := cleanDM.InitSchema(); err != nil {
+		t.Fatalf("init clean schema: %v", err)
+	}
+	out2, err := handleReadWakeContext(cleanDM, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context (clean): %v", err)
+	}
+	m2 := out2.(map[string]interface{})
+	if _, present := m2["overdue_wakes"]; !present {
+		t.Fatal("overdue_wakes key absent on clean DB — handler must always surface the field, even as []")
+	}
+}
+
 // TestHandleReadWakeContext_IncludesEpistemicPressure pins the
 // proprioception contract at the handler boundary: every
 // read_wake_context response must surface an `epistemic_pressure`
