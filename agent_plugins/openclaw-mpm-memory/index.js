@@ -338,9 +338,45 @@ export default definePluginEntry({
     }
 
     // Register the memory capability.
+    //
+    // flushPlanResolver returns OpenClaw's compaction-shape instructions
+    // for the memory plugin. The dist contract (verified against
+    // agent-runner.runtime runMemoryFlushIfNeeded, 2026-08-13) consumes:
+    //   - reserveTokensFloor, softThresholdTokens, forceFlushTranscriptBytes
+    //     → token-budget gating
+    //   - relativePath  → workspaceDir-relative target the flush writes to
+    //   - systemPrompt  → joined into the flush-run's system prompt
+    //   - model         → optional override for the flush follow-up run
+    //
+    // The previous noop returned { kind: "noop" } so OpenClaw never
+    // ran a memory flush. Replacing it with a real plan wires the
+    // bridge from OpenClaw's compaction-event into mpm-scheduler's
+    // ingest pathway — see internal/scheduler/ingest.go (the file
+    // watcher that picks up /home/v/.mpm/run/ingest.md after a flush).
+    //
+    // relativePath is RELATIVE to workspaceDir (OpenClaw passes
+    // params.followupRun.run.workspaceDir at flush time — typically the
+    // agent's session root, which for the main session is /home/v/).
+    // Writing to .mpm/run/ingest.md lands at /home/v/.mpm/run/ingest.md
+    // in absolute form, which is the canonical ingest target.
     api.registerMemoryCapability({
       promptBuilder: () => "",
-      flushPlanResolver: () => ({ kind: "noop" }),
+      flushPlanResolver: () => {
+        return {
+          kind: "compaction_flush",
+          relativePath: ".mpm/run/ingest.md",
+          systemPrompt:
+            "You are performing epistemic compaction. Distill the recent " +
+            "conversation into durable architectural lessons, decisions, " +
+            "and factual context. Output clean markdown. " +
+            "Do not include anything that isn't factually present in " +
+            "the input conversation.",
+          model: "",
+          reserveTokensFloor: 20000,
+          softThresholdTokens: 4000,
+          forceFlushTranscriptBytes: 0,
+        };
+      },
       runtime: {
         async getMemorySearchManager(params) {
           const agentId = params?.agentId || "default";
