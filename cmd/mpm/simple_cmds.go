@@ -1554,7 +1554,7 @@ Supported formats: .txt, .md, .html, .epub, .pdf`)
 //
 // active.json read/write was duplicated here in main package AND in
 // internal/xitl.go for years, with subtly different shapes (this one
-// defaulted to Persona="default" / Modes=["standard"] when missing; the
+// defaulted to Persona="default" / Modes=["default"] when missing; the
 // internal one defaulted to zero values). 2026-06-26 consolidation
 // moved the canonical owner to internal/active_state.go (internal
 // package) so both surfaces route through one path. The main-package
