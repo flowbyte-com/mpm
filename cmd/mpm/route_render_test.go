@@ -818,7 +818,7 @@ func TestApplyRouteToActive(t *testing.T) {
 // The seed active.json sets Persona="auto" because handleRoute's three-state
 // gate only enters the router-and-apply branch when at least one of
 // (persona, modes) is the literal "auto" sentinel. Seeding with concrete
-// values like "default" / "standard" lands in the "manual" branch, which
+// values like "default" / "default" lands in the "manual" branch, which
 // skips the router and ignores --apply — which is correct production
 // behavior but breaks this test's intent.
 func TestHandleRoute_ApplyFlag(t *testing.T) {
