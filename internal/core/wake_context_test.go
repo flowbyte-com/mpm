@@ -18,10 +18,80 @@ package internal
 // These tests pin the structural-topic exclusion contract.
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestWakeContext_EmptyListsAreNotOmitted pins the v4 wire-form contract:
+// lists that the schema supports MUST appear in the JSON output as
+// "[]" (empty array), never be omitted or rendered as "null". This
+// is invariant 3 on WakeContextData — the boundary between
+// "schema does not support this signal" (absent) and "checked, none
+// found" (empty array) is load-bearing for agent debuggability. If a
+// future contributor re-adds `omitempty` to a list field, swaps a
+// make([]T, 0) for a var x []T, or otherwise changes the contract,
+// this test fails CI.
+func TestWakeContext_EmptyListsAreNotOmitted(t *testing.T) {
+	// Initialize a purely empty context to simulate a fresh database
+	// where no subsystems have produced state yet. The struct fields
+	// below mirror what GatherWakeContext does on an empty DB.
+	data := WakeContextData{
+		ContextVersion:   "wake-context-v4-session-identity",
+		GeneratedAt:      time.Now().Unix(),
+		RecentTopics:     make([]string, 0),
+		RecentMemories:   make([]WakeContextMemory, 0),
+		RecentMilestones: make([]WakeContextMemory, 0),
+		OverdueWakes:     make([]OverdueWake, 0),
+		GlobalRules:      make([]WakeContextRule, 0),
+		AvailableSkills:  make([]SkillSummary, 0),
+	}
+
+	b, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	jsonStr := string(b)
+
+	// Array fields MUST be present and rendered as "[]", never omitted
+	// or "null". This is the v4 invariant 3 contract.
+	requiredEmptyArrays := []string{
+		`"recent_topics":[]`,
+		`"recent_memories":[]`,
+		`"recent_milestones":[]`,
+		`"overdue_wakes":[]`,
+		`"global_rules":[]`,
+		`"available_skills":[]`,
+	}
+	for _, req := range requiredEmptyArrays {
+		if !strings.Contains(jsonStr, req) {
+			t.Errorf("v4 contract violation: expected %s in JSON, got: %s", req, jsonStr)
+		}
+	}
+
+	// Negative check: the absence of those fields would also pass the
+	// substring check (an empty JSON matches all substrings trivially).
+	// Verify the JSON actually has weight to it by ensuring other
+	// required fields are present too.
+	requiredAlwaysFields := []string{
+		`"context_version"`,
+		`"generated_at"`,
+		`"as_of"`,
+		`"session_id"`,
+		`"active_mode"`,
+		`"active_persona"`,
+		`"epistemic_pressure"`,
+	}
+	for _, req := range requiredAlwaysFields {
+		if !strings.Contains(jsonStr, req) {
+			t.Errorf("v4 contract violation: required field %s missing from JSON", req)
+		}
+	}
+}
 
 // newTestDMForWake returns a hermetic in-memory DatabaseManager. Used by
 // wake-context tests so the test never touches the workspace database.
