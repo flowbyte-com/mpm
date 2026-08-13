@@ -12,7 +12,7 @@
 //	core-no-main   — internal/core is the standalone mpm-core module. It
 //	                 must never import github.com/flowbyte-com/mpm/... (the
 //	                 main module path); if it does, the standalone split is
-//	                 silently re-coupled and the ARCHITECTURE_SPLIT invariant
+//	                 silently re-coupled and the standalone-Core invariant
 //	                 is broken.
 //	audit-no-core   — internal/audit must stay a pure static-analysis
 //	                 library. Importing internal/core (or mpm-core) would
