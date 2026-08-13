@@ -1439,10 +1439,27 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		var tags string
 		var embeddingJSON []byte
 		if err := rows.Scan(&m.id, &m.collection, &m.content, &tags, &embeddingJSON, &m.createdAt, &m.weight, &m.reinforce); err != nil {
+			// Scan failure on a memory row is a data-integrity issue, not
+			// a routine event. Fail loud and fast: AuditError so cluster
+			// detection surfaces the systemic problem to the operator,
+			// and return the wrapped error so the caller (RunSelfMaintenance)
+			// halts this maintenance tick instead of silently processing a
+			// partial set. Subsequent ticks will retry automatically; if the
+			// underlying schema/data issue persists the operator will see
+			// the same AuditError until they fix the root cause.
+			//
+			// Destination variables are in an undefined state after a failed
+			// Scan (per database/sql docs), so we deliberately do NOT
+			// include m.id in the audit context — reading from an undefined
+			// destination could log a corrupt value.
 			if s.DM != nil {
-				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("ConsolidateMemories: scan failed, skipping: %v", err), "", AuditContext{})
+				s.DM.LogAudit(AuditError, "memory",
+					fmt.Sprintf("ConsolidateMemories: scan failed, aborting consolidation: %v", err),
+					"",
+					AuditContext{},
+				)
 			}
-			continue
+			return 0, fmt.Errorf("consolidate: scan memory row: %w", err)
 		}
 		if len(embeddingJSON) > 0 {
 			json.Unmarshal(embeddingJSON, &m.embedding)
