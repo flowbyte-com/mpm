@@ -23,7 +23,9 @@ import (
 	"errors"
 	"log"
 	"log/slog"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -67,6 +69,43 @@ func main() {
 		log.Fatalf("mpm-mcp: open database: %v", err)
 	}
 	defer dm.Close()
+
+	// Integration invariant: every mpm-mcp boot must check the live
+	// db_path against a host-pinned expected path before serving any
+	// tool call. This catches the "orphaned database" failure mode where
+	// an agent quietly talks to a forgotten scratch db (left over from a
+	// prior host migration, a stale CI runner, or a permissive
+	// `mpm init --allow-empty`).
+	//
+	// Set MPM_REQUIRED_DB_PATH to a canonical absolute path to activate.
+	// When unset the check is skipped (so ad-hoc `mpm-mcp` calls from
+	// the test harness still work); setting it to ""+non-empty-string
+	// disables the gate explicitly. Compare on EvalSymlinks-resolved
+	// paths so symlink-aliasing (e.g. canonical → project-source)
+	// doesn't false-positive.
+	if required := os.Getenv("MPM_REQUIRED_DB_PATH"); required != "" {
+		got, herr := filepath.EvalSymlinks(dm.DBPath())
+		if herr != nil {
+			log.Fatalf("mpm-mcp: resolve live db_path: %v", herr)
+		}
+		want, herr := filepath.EvalSymlinks(required)
+		if herr != nil {
+			log.Fatalf("mpm-mcp: resolve MPM_REQUIRED_DB_PATH: %v", herr)
+		}
+		if got != want {
+			log.Fatalf(
+				"mpm-mcp: DB path invariant violated — refusing to boot.\n"+
+					"  expected: %s\n"+
+					"  actual:   %s\n"+
+					"This usually means two mpm installs on the same host, or a\n"+
+					"  stale scratch db that pre-dates the canonical mpm install.\n"+
+					"Either set MPM_REQUIRED_DB_PATH correctly, unset it for ad-hoc\n"+
+					"  boots, or run `mpm status` to see which workspace is current.",
+				want, got,
+			)
+		}
+		slog.Info("mpm-mcp: DB path invariant satisfied", "db_path", got)
+	}
 
 	ac := mpmcli.ActiveContextFromEnv()
 
