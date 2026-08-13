@@ -481,12 +481,22 @@ func fetchTopDirectives(workspace string, limit int) string {
 
 // resolveMPMDatabase locates the MPM SQLite database relative to the workspace.
 // Returns "" if no plausible DB file is found. Common MPM layouts:
-//   - <workspace>/mpm.db
-//   - <workspace>/mpm.sqlite
-//   - <workspace>/src/db/mpm.db
+//   - <workspace>/src/db/mpm.db    canonical — DatabaseManager writes here
+//   - <workspace>/mpm.db           legacy top-level fallback
+//   - <workspace>/mpm.sqlite       legacy alternate
 //
-// The function is read-only and tolerant: missing files return "" rather than
-// erroring. We use the first match in priority order.
+// The canonical path MUST win when both canonical and legacy exist;
+// otherwise route_render silently falls back to a stray workspace-root
+// mpm.db (e.g. an empty file created by a prior workspace-probe
+// invocation) instead of the actively-managed DatabaseManager. The
+// 2026-08-13 patch flipped the candidate order to enforce this —
+// previously the order was mpm.db → mpm.sqlite → src/db/mpm.db, which
+// made a stray root-level mpm.db a silent foot-gun (sqlite "not a
+// database" error returned, route_render degraded to no-injection
+// without surfacing the failure).
+//
+// The function is read-only and tolerant: missing files return "" rather
+// than erroring. We use the first match in priority order.
 //
 // Empty workspace: returns "" immediately. Without this guard, the
 // candidates resolve to relative paths (e.g. `src/db/mpm.db`) and the
@@ -502,9 +512,9 @@ func resolveMPMDatabase(workspace string) string {
 		return ""
 	}
 	candidates := []string{
+		filepath.Join(workspace, "src", "db", "mpm.db"),
 		filepath.Join(workspace, "mpm.db"),
 		filepath.Join(workspace, "mpm.sqlite"),
-		filepath.Join(workspace, "src", "db", "mpm.db"),
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
