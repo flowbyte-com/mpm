@@ -433,46 +433,60 @@ func TestDirectiveInjectionLimit(t *testing.T) {
 	}
 }
 
+// TestResolveMPMDatabase pins the workspace-DB candidate priority after the
+// 2026-08-13 patch. The 2026-07-21 ghost-DB failure mode (a stray
+// workspace-root mpm.db shadowing the canonical src/db/mpm.db) was the
+// foot-gun the patch closed — these cases keep the new ordering
+// honest.
 func TestResolveMPMDatabase(t *testing.T) {
 	tests := []struct {
-		name     string
-		setup    func(t *testing.T, dir string) // creates candidate files
-		wantFile string                         // basename of expected return, "" for none
+		name        string
+		setup       func(t *testing.T, dir string) // creates candidate files
+		wantPathSub string                         // substring expected in returned path, "" for no path
 	}{
 		{
-			name:     "no candidates returns empty",
-			setup:    func(t *testing.T, dir string) {},
-			wantFile: "",
+			name:        "no candidates returns empty",
+			setup:       func(t *testing.T, dir string) {},
+			wantPathSub: "",
 		},
 		{
-			name: "mpm.db at root is preferred",
+			name: "src/db/mpm.db is preferred when both canonical and root exist",
+			setup: func(t *testing.T, dir string) {
+				mustMkdir(t, filepath.Join(dir, "src", "db"))
+				mustWriteFile(t, filepath.Join(dir, "mpm.db"), "")
+				mustWriteFile(t, filepath.Join(dir, "src", "db", "mpm.db"), "")
+			},
+			wantPathSub: "src/db/mpm.db",
+		},
+		{
+			name: "mpm.db at root when canonical absent",
 			setup: func(t *testing.T, dir string) {
 				mustWriteFile(t, filepath.Join(dir, "mpm.db"), "")
 				mustWriteFile(t, filepath.Join(dir, "mpm.sqlite"), "")
 			},
-			wantFile: "mpm.db",
+			wantPathSub: "mpm.db",
 		},
 		{
-			name: "mpm.sqlite when no mpm.db",
+			name: "mpm.sqlite when neither canonical nor mpm.db exists",
 			setup: func(t *testing.T, dir string) {
 				mustWriteFile(t, filepath.Join(dir, "mpm.sqlite"), "")
 			},
-			wantFile: "mpm.sqlite",
+			wantPathSub: "mpm.sqlite",
 		},
 		{
-			name: "src/db/mpm.db is fallback",
+			name: "src/db/mpm.db alone is selected",
 			setup: func(t *testing.T, dir string) {
 				mustMkdir(t, filepath.Join(dir, "src", "db"))
 				mustWriteFile(t, filepath.Join(dir, "src", "db", "mpm.db"), "")
 			},
-			wantFile: "mpm.db",
+			wantPathSub: "src/db/mpm.db",
 		},
 		{
 			name: "empty workspace returns empty",
 			setup: func(t *testing.T, dir string) {
 				mustWriteFile(t, filepath.Join(dir, "mpm.db"), "")
 			},
-			wantFile: "",
+			wantPathSub: "",
 		},
 	}
 	for _, tt := range tests {
@@ -487,14 +501,14 @@ func TestResolveMPMDatabase(t *testing.T) {
 			}
 
 			got := resolveMPMDatabase(ws)
-			if tt.wantFile == "" {
+			if tt.wantPathSub == "" {
 				if got != "" {
 					t.Errorf("resolveMPMDatabase() = %q, want empty", got)
 				}
 				return
 			}
-			if filepath.Base(got) != tt.wantFile {
-				t.Errorf("resolveMPMDatabase() = %q, want file %q", got, tt.wantFile)
+			if !strings.Contains(got, tt.wantPathSub) {
+				t.Errorf("resolveMPMDatabase() = %q, want path containing %q", got, tt.wantPathSub)
 			}
 		})
 	}
