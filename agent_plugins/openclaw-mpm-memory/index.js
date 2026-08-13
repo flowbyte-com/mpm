@@ -254,6 +254,37 @@ export default definePluginEntry({
           timeoutMs: 2000,
         });
         if (hc && hc.ok === true) {
+          // ----- 2026-08-13 hardening: DB path invariant -----
+          // Catch the silent-orphan-db failure mode by refusing to
+          // boot against an unexpected db_path. Set
+          // MPM_REQUIRED_DB_PATH to a canonical absolute path to
+          // activate the gate; when unset the check is skipped so
+          // ad-hoc dev environments still work.
+          const required = process.env.MPM_REQUIRED_DB_PATH;
+          if (required && typeof required === "string" && required.length > 0) {
+            const live = (hc && typeof hc.db_path === "string") ? hc.db_path : null;
+            if (!live) {
+              if (typeof log.error === "function") {
+                log.error("openclaw-mpm-memory: refusing to boot — MPM_REQUIRED_DB_PATH is set but health_check did not surface db_path. The mpm server is too old to be gated.");
+              }
+              throw new Error("openclaw-mpm-memory: mpm db_path invariant — health_check missing db_path");
+            }
+            if (live !== required) {
+              if (typeof log.error === "function") {
+                log.error(
+                  "openclaw-mpm-memory: refusing to boot — DB path invariant violated.\n" +
+                  "  expected: " + required + "\n" +
+                  "  actual:   " + live + "\n" +
+                  "This usually means two mpm installs on the same host, or a stale scratch db.\n" +
+                  "Run `mpm status` to see which workspace is current."
+                );
+              }
+              throw new Error("openclaw-mpm-memory: db_path invariant violated");
+            }
+            if (typeof log.info === "function") {
+              log.info(`openclaw-mpm-memory: db_path invariant satisfied (${live})`);
+            }
+          }
           if (typeof log.info === "function") {
             log.info(
               `openclaw-mpm-memory: health_check ok ` +

@@ -307,6 +307,36 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		emitBootWarning(bin, health.reason);
 	}
 
+	// ----- 2026-08-13 hardening: DB path invariant -----
+	// Catch the silent-orphan-db failure mode by refusing to boot
+	// against an unexpected db_path. Set MPM_REQUIRED_DB_PATH to a
+	// canonical absolute path to activate the gate; when unset the
+	// check is skipped so ad-hoc dev environments still work.
+	const requiredDbPath = process.env.MPM_REQUIRED_DB_PATH;
+	if (requiredDbPath && requiredDbPath.length > 0) {
+		const r = await callMpm(bin, "mpm_system", { action: "health_check", params: {} }, {
+			timeoutMs: HEALTH_CHECK_TIMEOUT_MS,
+		});
+		const payload = (r.payload ?? {}) as { db_path?: string; ok?: boolean };
+		const live = payload.db_path;
+		if (!live) {
+			emitBootWarning(bin, "MPM_REQUIRED_DB_PATH is set but health_check did not surface db_path. The mpm server is too old to be gated.");
+			throw new Error("opencode-mpm: db_path invariant — health_check missing db_path");
+		}
+		if (live !== requiredDbPath) {
+			emitBootWarning(
+				bin,
+				`refusing to boot — DB path invariant violated.\n` +
+				`  expected: ${requiredDbPath}\n` +
+				`  actual:   ${live}\n` +
+				`This usually means two mpm installs on the same host, or a stale scratch db.\n` +
+				`Run \`mpm status\` to see which workspace is current.`,
+			);
+			throw new Error("opencode-mpm: db_path invariant violated");
+		}
+		console.warn(`opencode-mpm: db_path invariant satisfied (${live})`);
+	}
+
 	const tools: Record<string, ReturnType<typeof tool>> = {};
 
 	// ---------- 13 Unified Domain Tools (Fat RPC) -------------------------

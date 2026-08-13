@@ -21,6 +21,7 @@ func TestRunHandler_WritesAuditRow(t *testing.T) {
 
 	if _, err := runHandler(dm, "mpm_system", map[string]interface{}{
 		"action": "health_check",
+		"params": map[string]interface{}{},
 	}); err != nil {
 		t.Fatalf("runHandler mpm_system/health_check: %v", err)
 	}
