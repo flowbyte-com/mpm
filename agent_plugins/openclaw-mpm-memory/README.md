@@ -63,6 +63,11 @@ openclaw doctor --lint --only core/doctor/memory-search --json
 After step 1 you can also just run `openclaw doctor --fix` — it will
 detect and surface the slot/entry configuration if anything is missing.
 
+This plugin does not touch `agents.defaults.compaction.memoryFlush.enabled`.
+OpenClaw's dist default applies; the neutered flush path is safe under both
+`true` and `false`. See "Compaction flush (neutered at the sink)" below for
+the architectural rationale.
+
 ## Configuration
 
 ```json5
@@ -82,59 +87,33 @@ plugins: {
 }
 ```
 
-## Memory-flush path (compaction)
+## Compaction flush (neutered at the sink)
 
-This plugin writes memory-flush output to disk so the MPM substrate can pick
-it up. Concretely, the plugin's `flushPlanResolver` returns a real plan (not
-`{ kind: "noop" }`) that asks OpenClaw to write flushed content to:
+This plugin does **not** ingest OpenClaw's compaction flush output. The
+plugin's `flushPlanResolver` returns a plan whose `relativePath` points at
+a throwaway file (`local_flush_trash.md`) under the calling session's
+`workspaceDir`. OpenClaw writes the file as part of its flush lifecycle —
+satisfying its internal contract — but the file's content is discarded
+unread. No scheduler handler is wired to it; no watcher picks it up.
 
-```
-.mpm/run/ingest.md
-```
+**Why neuter the integration.** MPM already has two higher-fidelity
+epistemic sources than OpenClaw's auto-generated transcript summary:
 
-Relative to the calling session's `workspaceDir` — for the main session
-(`/home/v/`), this resolves to the canonical target:
+- **Scratchpad** — agent-curated Working Context, deliberate, ephemeral.
+- **Memories** (`mpm_memory`) — explicit facts with tags, weight, and
+  reinforcement, retrievable via FTS5 + hybrid scoring.
 
-```
-/home/v/.mpm/run/ingest.md
-```
+Capturing OpenClaw's lossy auto-summary would add a third memory surface
+with lower fidelity than the two we already have. The integration
+boundary is deleted at the sink, not the source. See decision
+`40544f5a04a2aac7` (2026-08-13) for full rationale; this implements the
+AGENTS.md doctrine *"Truth once. Views everywhere."*
 
-The `mpm-scheduler` daemon's `openclaw_ingest` tick handler reads that file
-on its next 60-second tick and inserts a `scheduled_wakes` row of `kind:
-"ephemeral_compaction_ready"` with `metadata.source = "openclaw_ingest"`.
-The wake surfaces on the agent's next `read_wake_context` call (via the
-`overdue_wakes` field) for the agent to consume.
-
-To enable the bridge end-to-end, you need:
-
-1. **OpenClaw side** — flush plan enabled in user config:
-   ```bash
-   openclaw config set agents.defaults.compaction.memoryFlush.enabled true
-   ```
-2. **MPM side** — the scheduler daemon running with the `openclaw_ingest`
-   tick handler registered (it is, by default, in current `mpm-scheduler`
-   builds):
-   ```bash
-   systemctl --user status mpm-scheduler
-   journalctl --user -u mpm-scheduler -n 20 --no-pager | grep -i ingest
-   ```
-
-**Failure mode if `mpm-scheduler` is NOT running:** the plugin will write
-to `/home/v/.mpm/run/ingest.md` on every OpenClaw flush event, and the
-file will silently pile up in `/home/v/.mpm/run/` with no automatic
-cleanup. There is no daemon-side fallback; the scheduler is the only
-drain mechanism. If you see multiple `ingest.md` / `ingest.md.processing`
-/ `ingest.md.rejected` files accumulating, scheduler is the suspect.
-
-**Size cap:** the ingest watcher caps each file at 64 KB. Larger content
-is quarantined as `ingest.md.rejected` (rename, not delete) instead of
-ingesting — either OpenClaw is producing too-large flushes or the
-flush contained content that exceeded the size budget. Inspect the
-quarantine file, then delete it manually.
-
-**Symlink refusal:** the watcher uses `Lstat` and refuses to follow
-symlinks. If `/home/v/.mpm/run/ingest.md` is a symlink, the watcher
-will log a warning and skip — the wake will not be inserted.
+**Do not "fix" the path back to `.mpm/run/ingest.md`.** That was the
+original integration, and it is the bug this neuter removes — see the
+`Error: Invalid memory flush target path` incident of 2026-08-13 where a
+config flip wedged the gateway and required a sessions-clear + bounce
+recovery.
 
 ## Result shape
 

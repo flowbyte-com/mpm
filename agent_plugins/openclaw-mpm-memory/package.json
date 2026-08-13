@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/mpm-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MPM-backed memory_search/memory_get for OpenClaw. Fills plugins.slots.memory with MPM as the long-term memory substrate. Replaces the default memory-core plugin.",
   "type": "module",
   "main": "index.js",
