@@ -39,7 +39,7 @@ package capability
 // the ceilings here (one-line change) if a legitimate use
 // case emerges.
 //
-// Spec: docs/capability-lifecycle-spec.md §4.3
+// Spec: docs/architecture/capability-lifecycle.md §4.3
 // =============================================================================
 
 // LimitsCeiling is the upper bound applied to each
