@@ -164,9 +164,13 @@ func resolveActiveComponent(dm *DatabaseManager, kind, requested, defaultName st
 		if _, err := os.Stat(path); err == nil {
 			return requested
 		}
-		// Requested is missing — fall through to default.
+		// Requested is missing — fall through to default. Successful fallback
+		// is a deliberate, non-anomalous event (the system is designed to do
+		// this), so it logs at AuditInfo — forensic trail only, not cluster
+		// detection. The AuditError branch below covers the real anomaly:
+		// the safe default itself is missing.
 		if dm != nil {
-			dm.LogAudit(AuditWarn, "router",
+			dm.LogAudit(AuditInfo, "router",
 				fmt.Sprintf("%s %q not found on disk; falling back to %q", kind, requested, defaultName),
 				"",
 				AuditContext{
