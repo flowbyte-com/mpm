@@ -331,3 +331,165 @@ func TestAddEvidence_ScrubsAllUserFields(t *testing.T) {
 		})
 	}
 }
+
+// ── 2026-08-13 silent-promotion hardening regression tests ─────────
+//
+// Three failure modes from the silent-promotion-by-edge-case archaeology:
+//   1. AddLesson insert returns success+id but row doesn't land (no
+//      RowsAffected check, no read-back).
+//   2. Lesson.SourceSessionID scanned NULL into string → panic.
+//   3. Decision / memory insert returns success+id but row doesn't land.
+//
+// All three fix points live in internal/core/db.go. The tests below pin
+// the loud-fail contract so a future refactor cannot regress to the
+// silent-success state without CI catching it.
+
+func TestAddLesson_RoundTripsLessonWithNullSourceSessionID(t *testing.T) {
+	// Fix #2: Lesson.SourceSessionID is now sql.NullString. Inserting
+	// a row with no source_session_id must round-trip via GetLesson
+	// without the scan panic that previously broke list_lessons.
+	dm := newTestDM(t)
+	lesson, err := dm.AddLesson("silent-promotion arch lesson 2026-08-13", "practice", []string{"silent-promotion"}, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, lesson.ID)
+
+	// Read back via GetLesson (the same scan path that previously crashed).
+	got, err := dm.GetLesson(lesson.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	// SourceSessionID should report NULL → .Valid false, .String empty.
+	assert.False(t, got.SourceSessionID.Valid,
+		"AddLesson with empty sourceSessionID should produce a NULL row, got %v", got.SourceSessionID)
+	assert.Equal(t, "", got.SourceSessionID.String)
+
+	// ListLessons must also not panic on a NULL source_session_id.
+	items, err := dm.ListLessons("")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(items), 1, "list_lessons should include the row we just wrote")
+}
+
+func TestAddLesson_SetsSourceSessionIDWhenSupplied(t *testing.T) {
+	// Companion to the NULL case: a non-empty sourceSessionID must
+	// surface as Valid=true with the value preserved across the
+	// scan boundary. Round-tripping an empty string is meaningless
+	// here; the round-trip value preservation is what matters.
+	dm := newTestDM(t)
+	lesson, err := dm.AddLesson("non-null source_session_id round-trip", "practice", []string{"silent-promotion"}, "sess-X")
+	require.NoError(t, err)
+
+	got, err := dm.GetLesson(lesson.ID)
+	require.NoError(t, err)
+	require.True(t, got.SourceSessionID.Valid)
+	assert.Equal(t, "sess-X", got.SourceSessionID.String)
+}
+
+func TestAddLesson_RowActuallyPersisted(t *testing.T) {
+	// Fix #1: AddLesson must verify the row lands. Assert by
+	// reading back via GetLesson, identical to the (live) probe the
+	// silent-promotion archaeology used to surface the bug. If the
+	// row didn't land, this test fails — which is the loud-fail
+	// we want.
+	dm := newTestDM(t)
+	fact := "silent-promotion-by-edge-case row-persistence assertion 2026-08-13"
+	lesson, err := dm.AddLesson(fact, "insight", []string{"silent-promotion"}, "sess-probe")
+	require.NoError(t, err)
+	require.NotEmpty(t, lesson.ID)
+
+	// Direct sqlite read — independent of any Go-side cache. The
+	// fallback shape if AddLesson silently dropped the row would be
+	// a 0-row read here.
+	var content string
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT content FROM lessons WHERE id = ?`, lesson.ID,
+	).Scan(&content))
+	assert.Equal(t, fact, content,
+		"AddLesson returned success but the row is not visible in sqlite — silent-promotion regression")
+}
+
+func TestRecordDecision_RowActuallyPersisted(t *testing.T) {
+	// Fix #3: RecordDecision must verify the decision row lands in
+	// the memories table with collection=decisions. Same cross-check
+	// shape as the lesson test, but exercising the WithTx path used
+	// by handleRecordDecision.
+	dm := newTestDM(t)
+	res, err := dm.RecordDecision(
+		"2026-08-13 silent-promotion archaeology",
+		"loud-fail at the dispatcher + read-back at the writer",
+		"silent-coercion-of-bad-shape is the failure mode family",
+		"open follow-ups in lessons/decisions write paths",
+		[]string{"silent-promotion", "decision-loud-fail"},
+		[]string{},
+		ActiveContext{},
+	)
+	require.NoError(t, err)
+	id, _ := res["id"].(string)
+	require.NotEmpty(t, id)
+
+	var content, collection string
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT content, collection FROM memories WHERE id = ?`, id,
+	).Scan(&content, &collection))
+	assert.Equal(t, "decisions", collection)
+	assert.Contains(t, content, "loud-fail", "decision content should carry the choice string")
+}
+
+func TestSaveMemoryNode_RowActuallyPersisted(t *testing.T) {
+	// Same regression shape as the two above, applied to the
+	// foundational saveMemoryRow primitive that every memories-table
+	// write funnels through (handleSaveMemory, handleCommitMilestone,
+	// handleReview's accept-all, idle_dream, etc). If this test
+	// fails, the substrate's primary write path has regressed to
+	// the silent-success shape.
+	dm := newTestDM(t)
+	res, _, err := dm.SaveMemoryWithContext(
+		"saved-content",
+		"memories",
+		[]string{"silent-promotion-by-edge-case", "2026-08-13"},
+		1.0,
+		"",
+		ActiveContext{},
+	)
+	require.NoError(t, err)
+	id, _ := res["id"].(string)
+	require.NotEmpty(t, id)
+
+	var content string
+	require.NoError(t, dm.QueryRowTracked(
+		`SELECT content FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL`,
+		id, "memories",
+	).Scan(&content))
+	assert.Equal(t, "saved-content", content)
+}
+
+func TestSearchLessons_DoesNotPanicOnNullSourceSessionID(t *testing.T) {
+	// Fix #2 follow-up: every scan path that touches lessons must
+	// tolerate NULL source_session_id without a sql.Scan error.
+	// Insert a row with NULL source_session_id (the default for
+	// AddLesson with empty string), then exercise the four scan
+	// shapes from the silent-promotion archaeology.
+	dm := newTestDM(t)
+	_, err := dm.AddLesson("scan-path smoke", "insight", nil, "")
+	require.NoError(t, err)
+
+	for _, name := range []string{"GetLesson", "ListLessons", "SearchLessons", "ListLessonsFiltered"} {
+		switch name {
+		case "GetLesson":
+			// GetLesson needs an id — use the one we just inserted.
+			var id string
+			require.NoError(t, dm.QueryRowTracked(
+				`SELECT id FROM lessons WHERE content = ?`, "scan-path smoke",
+			).Scan(&id))
+			_, err := dm.GetLesson(id)
+			require.NoError(t, err, "GetLesson must not panic on NULL source_session_id")
+		case "ListLessons":
+			_, err := dm.ListLessons("")
+			require.NoError(t, err, "ListLessons must not panic on NULL source_session_id")
+		case "ListLessonsFiltered":
+			_, err := dm.ListLessonsFiltered("insight")
+			require.NoError(t, err, "ListLessonsFiltered must not panic on NULL source_session_id")
+		case "SearchLessons":
+			_, err := dm.SearchLessons("scan-path", 10)
+			require.NoError(t, err, "SearchLessons must not panic on NULL source_session_id")
+		}
+	}
+}

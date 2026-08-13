@@ -2388,10 +2388,29 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	contentHashBytes := sha256.Sum256([]byte(content))
 	contentHash := hex.EncodeToString(contentHashBytes[:])
 
-	_, err = node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash)
 	if err != nil {
 		return id, err
+	}
+
+	// 2026-08-13 hardening: same silent-promotion class as AddLesson.
+	// Exec returned no error, but a sqlite trigger swallowing the INSERT
+	// (or a unique-constraint race in WAL) can produce RowsAffected=0
+	// while the call returns success. Without these checks, the caller
+	// sees a phantom success and the row never lands. A non-tx caller
+	// (node == dm) gets a read-back via the canonical GetMemory path;
+	// a tx caller defers the read-back to its WithTx Commit (it would
+	// race against the uncommitted state otherwise).
+	if affected, err := res.RowsAffected(); err != nil {
+		return id, fmt.Errorf("save_memory row insert rows-affected: %w", err)
+	} else if affected != 1 {
+		return id, fmt.Errorf("save_memory row insert affected %d rows, expected 1", affected)
+	}
+	if nodeUnwrapTx(node) == nil {
+		if _, err := dm.GetMemory(id); err != nil {
+			return id, fmt.Errorf("save_memory row insert read-back failed (commit did not persist): %w", err)
+		}
 	}
 
 	// Artifact provenance (best-effort telemetry). RecordArtifactProvenance
@@ -3207,15 +3226,58 @@ func ValidateLessonType(lt string) error {
 // Lesson represents a learned lesson
 type Lesson struct {
 	ID                 string     `json:"id"`
-	Type               LessonType `json:"type"`
-	Content            string     `json:"content"`
-	Tags               []string   `json:"tags"`
-	ReinforcementCount int        `json:"reinforcement_count"`
-	SourceSessionID    string     `json:"source_session_id,omitempty"`
-	Created            string     `json:"created"`
+	Type               LessonType     `json:"type"`
+	Content            string         `json:"content"`
+	Tags               []string       `json:"tags"`
+	ReinforcementCount int            `json:"reinforcement_count"`
+	SourceSessionID    sql.NullString `json:"source_session_id"`
+	// ^ 2026-08-13 hardening: was `string` until the silent-promotion archaeology
+	// surfaced `Scan error on column index 5, name "source_session_id": converting
+	// NULL to string is unsupported` on every list/search/scan path that hit a
+	// row with no source_session_id. sql.NullString is the idiomatic Go wrapper
+	// for nullable text columns; `.Valid` distinguishes NULL from empty-string.
+	// JSON tag drops the `omitempty` so the consumer sees `"source_session_id": null`
+	// rather than a missing field — debugging the underlying NULL is easier when
+	// the field is visible.
+	Created           string  `json:"created"`
 	RetrievalPriority  float64    `json:"retrieval_priority,omitempty"`
 	Importance         float64    `json:"importance,omitempty"`
 	Confidence         float64    `json:"confidence,omitempty"`
+}
+
+// lessonsIsView reports whether the lessons object is a view (with
+// INSTEAD OF triggers routed to lessons_base) or a plain table. Used
+// by AddLesson's silent-promotion hardening to decide whether
+// RowsAffected is a reliable indicator — on a routed view it
+// legitimately reports 0 even when the trigger's INSERT succeeded.
+//
+// 2026-08-13 hardening: this exists so the read-back check can
+// substitute for RowsAffected on the view path without losing the
+// loud-fail guarantee on the direct-table path.
+func (dm *DatabaseManager) lessonsIsView() bool {
+	var kind string
+	err := dm.db.QueryRow(
+		`SELECT type FROM sqlite_master WHERE name = 'lessons'`,
+	).Scan(&kind)
+	if err != nil {
+		return false // safe default — surface the louder error in the rare ErrNoRows case
+	}
+	return kind == "view"
+}
+
+// sourceSessionIDOrNil converts the empty string to a typed nil so the
+// INSERT writes NULL rather than '' to source_session_id. Without this,
+// the column holds an empty string and downstream scans treat it as
+// Valid=true (empty-string, not NULL) — a subtle silent-promotion class
+// where the NULL/empty distinction gets lost at the SQL boundary.
+//
+// 2026-08-13 hardening: introduced alongside the sql.NullString struct
+// change to make sure callers that pass "" actually write NULL.
+func sourceSessionIDOrNil(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // AddLesson adds a new lesson, checking for duplicates by content hash
@@ -3257,12 +3319,34 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	tagsJSON, _ := MarshalJSON(tags)
 	now := time.Now().Format(time.RFC3339)
 
-	_, err = dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		INSERT INTO lessons (id, type, content, tags, reinforcement_count, source_session_id, created, content_hash, retrieval_priority, importance, confidence)
 		VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0.5, 0.5, ?)
-	`, id, lessonType, content, tagsJSON, sourceSessionID, now, contentHash, InitialConfidence("lesson"))
+	`, id, lessonType, content, tagsJSON, sourceSessionIDOrNil(sourceSessionID), now, contentHash, InitialConfidence("lesson"))
 	if err != nil {
 		return nil, err
+	}
+
+	// 2026-08-13 hardening: never let a silent-promotion slip past the
+	// write. RowsAffected on a view routed through an INSTEAD OF trigger
+	// can legitimately report 0 even when the underlying base-table
+	// INSERT succeeded — sqlite counts the row through the trigger's
+	// own INSERT, not the outer statement. Trust the read-back instead:
+	// if GetLesson returns the row we just wrote, the commit landed;
+	// if it returns ErrNoRows, the trigger swallowed it (or some other
+	// constraint silently dropped the row) and the caller needs to
+	// know. We still surface RowsAffected errors as a loud failure
+	// for non-view INSERTs that happen to go through this path in
+	// the future.
+	if _, err := res.RowsAffected(); err != nil {
+		// Only surface this for direct table INSERTs; in the trigger path
+		// it's noisy-but-correct to ignore the count.
+		if !dm.lessonsIsView() {
+			return nil, fmt.Errorf("lesson insert rows-affected: %w", err)
+		}
+	}
+	if _, err := dm.GetLesson(id); err != nil {
+		return nil, fmt.Errorf("lesson insert read-back failed (commit did not persist): %w", err)
 	}
 
 	// Artifact provenance (best-effort telemetry). RecordArtifactProvenance
@@ -3313,7 +3397,13 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		Content:            content,
 		Tags:               tags,
 		ReinforcementCount: 1,
-		SourceSessionID:    sourceSessionID,
+		// 2026-08-13 hardening: wrap the input string in sql.NullString
+		// so the field assignment matches the new struct definition.
+		// AddLesson callers pass an empty string when they don't have a
+		// session id; we surface this as NULL (not empty-string) so the
+		// schema reflects the truth and downstream readers can rely on
+		// .Valid distinguishing "absent" from "explicitly empty".
+		SourceSessionID:    sql.NullString{String: sourceSessionID, Valid: sourceSessionID != ""},
 		Created:            now,
 		RetrievalPriority:  0.5,
 		Importance:         0.5,
