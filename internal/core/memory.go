@@ -1429,7 +1429,7 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		tags       string
 		embedding  []float32
 		createdAt  string
-		weight     int
+		weight     float64
 		reinforce  int
 	}
 
@@ -1490,9 +1490,9 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		if len(cluster) > maxPerTopic && maxPerTopic > 0 {
 			// Keep the newest (highest weight/reinforce), soft-delete the rest
 			bestIdx := 0
-			bestScore := clusterMem[0].weight*10 + clusterMem[0].reinforce
+			bestScore := clusterMem[0].weight*10 + float64(clusterMem[0].reinforce)
 			for k := 1; k < len(clusterMem); k++ {
-				score := clusterMem[k].weight*10 + clusterMem[k].reinforce
+				score := clusterMem[k].weight*10 + float64(clusterMem[k].reinforce)
 				if score > bestScore {
 					bestScore = score
 					bestIdx = k

@@ -1651,6 +1651,10 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("timestamps unification migration failed: %w", err)
 	}
+	if err := MigrateWeightToReal(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("weight column real conversion failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}
