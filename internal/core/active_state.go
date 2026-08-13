@@ -91,7 +91,7 @@ type AutoStatus struct {
 
 // CheckAutoActive reads active.json and returns whether auto is engaged.
 // When auto is not active, Reason describes the exact state (e.g.
-// "mode=\"standard\", persona=\"default\"") so the caller can relay
+// "mode=\"default\", persona=\"default\"") so the caller can relay
 // diagnostics to the user.
 func CheckAutoActive() AutoStatus {
 	s, err := LoadActiveJSON()
@@ -121,13 +121,13 @@ func IsAutoActive() bool {
 // still references the old name. If we passed the dangling name
 // through to the LLM, the agent would boot with a blank context
 // window. The fallback layer below catches os.ErrNotExist at every
-// load point and substitutes the safe default (system / standard),
+// load point and substitutes the safe default ("default" for both),
 // logging to the audit table so operators see the substitution.
 //
-// "Safe default" = the alpha-baseline professional identities:
-//   - persona → "system"   (utilitarian, no-fluff execution)
-//   - mode    → "standard"  (balanced retrieval for routine work)
-// These names MUST exist on disk; the resolver falls back to empty
+// "Safe default" = the alpha-baseline professional identity:
+//   - persona → "default"  (utilitarian, no-fluff execution)
+//   - mode    → "default"  (balanced retrieval for routine work)
+// Both names MUST exist on disk; the resolver falls back to empty
 // string if neither the requested nor the default file is present,
 // in which case the caller treats empty as "no override" rather than
 // crashing.
@@ -135,24 +135,24 @@ func IsAutoActive() bool {
 // ResolveActivePersona returns the persona name to use given a
 // caller-supplied requested name. Validates that the persona file
 // exists on disk; if not, logs a warning to the audit table (if dm
-// is non-nil) and falls back to "system". Empty input also falls
-// back to "system".
+// is non-nil) and falls back to "default". Empty input also falls
+// back to "default".
 //
 // The check is a single os.Stat — cheap; safe to call from every
 // wake-context load and every MCP call resolution.
 func ResolveActivePersona(dm *DatabaseManager, requested string) string {
-	return resolveActiveComponent(dm, "persona", requested, "system")
+	return resolveActiveComponent(dm, "persona", requested, "default")
 }
 
 // ResolveActiveMode is the mode-equivalent of ResolveActivePersona.
-// Falls back to "standard" when the requested mode file is missing.
+// Falls back to "default" when the requested mode file is missing.
 func ResolveActiveMode(dm *DatabaseManager, requested string) string {
-	return resolveActiveComponent(dm, "mode", requested, "standard")
+	return resolveActiveComponent(dm, "mode", requested, "default")
 }
 
 // resolveActiveComponent is the shared fallback for both kinds.
 // kind is "persona" or "mode"; defaultName is the safe-substitute
-// ("system" or "standard"). Returns the resolved name — never an
+// (always "default" in alpha). Returns the resolved name — never an
 // error. If BOTH the requested and default files are missing,
 // returns empty string (caller treats empty as "no override").
 func resolveActiveComponent(dm *DatabaseManager, kind, requested, defaultName string) string {

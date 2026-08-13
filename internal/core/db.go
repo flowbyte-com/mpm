@@ -3601,7 +3601,9 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 }
 
 // extractProvenanceCompute reads the provenance.compute field from metadata JSON.
-// Returns empty string if not found, allowing graceful default to "standard".
+// Returns empty string if not found, allowing graceful default to the "standard"
+// provenance tier (absolute > high > standard > ephemeral). Not to be confused
+// with the mode fallback name "default" — this is a separate taxonomy.
 func extractProvenanceCompute(metadataJSON string) string {
 	if metadataJSON == "" || metadataJSON == "{}" || metadataJSON == "null" {
 		return ""
