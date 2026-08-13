@@ -126,6 +126,14 @@ func main() {
 	//                    Code). Dispatches by spec.Framework field;
 	//                    unknown frameworks surface as status='error'
 	//                    rows in drill_runs, never as silent failures.
+	// openclaw_ingest  → per-tick file watcher at /home/v/.mpm/run/ingest.md.
+	//                    Drains the openclaw-mpm-memory plugin's
+	//                    memory-flush output into scheduled_wakes (kind
+	//                    ephemeral_compaction_ready). Lives behind
+	//                    safety rails (path allowlist, symlink refuse,
+	//                    64KB cap, *.rejected quarantine, atomic
+	//                    rename, source attribution, world-readable
+	//                    refuse) — see internal/scheduler/ingest.go.
 	// (anything else)  → notification kind, passes through to opportunistic fold
 	s.Register("snapshot", scheduler.SnapshotHandler)
 	s.Register("critic_audit", scheduler.CriticAuditHandler)
@@ -141,6 +149,7 @@ func main() {
 			BatchSize: 10,
 		},
 	).TickHandler())
+	s.RegisterTickHandler("openclaw_ingest", scheduler.NewIngestHandler(dm, logger).TickHandler())
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
