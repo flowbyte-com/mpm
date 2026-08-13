@@ -442,7 +442,7 @@ var BaseTables = []string{
 	// ── Capability Lifecycle (2026-08-05) ─────────────────────────────
 	//
 	// Four-table substrate for the capability lifecycle subsystem.
-	// Spec: docs/capability-lifecycle-spec.md
+	// Spec: docs/architecture/capability-lifecycle.md
 	//
 	//   capabilities:           stateful artifact ledger. State machine
 	//                           CHECK enforced at storage boundary;

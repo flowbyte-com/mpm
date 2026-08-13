@@ -39,7 +39,7 @@ import (
 // the full Capability row (which would be a layering violation
 // — Drivers are policy-free primitives).
 //
-// Spec: docs/capability-lifecycle-spec.md §4.1 (sandbox vs
+// Spec: docs/architecture/capability-lifecycle.md §4.1 (sandbox vs
 //      restricted arg shape).
 // =============================================================================
 

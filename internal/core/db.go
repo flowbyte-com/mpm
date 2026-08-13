@@ -255,7 +255,7 @@ type DatabaseManager struct {
 
 	// sharedPath is the path of the attached shared DB, or "" if not attached.
 	// Set by attachShared() when MPM_SHARED_DB is configured and ATTACH succeeds.
-	// See WISHLIST.md "Multi-Agent Shared Epistemology" for the design.
+	// See docs/architecture/shared-epistemology.md "Multi-Agent Shared Epistemology" for the design.
 	sharedPath     string
 	sharedAttached bool
 
@@ -910,7 +910,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		slog.Warn("mirror log rotation at startup", "error", err.Error())
 	}
 
-	// Phase 1 of the multi-agent shared-epistemology arc (WISHLIST.md):
+	// Phase 1 of the multi-agent shared-epistemology arc (docs/architecture/shared-epistemology.md):
 	// if MPM_SHARED_DB is set, ATTACH the shared SQLite database. Failure
 	// to attach is non-fatal — mpm continues in local-only mode. This
 	// keeps single-instance use cases unaffected while making the
@@ -969,7 +969,7 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 
 // attachShared ATTACHes sharedPath as the `shared` schema in the current
 // connection and runs SafeMigrations + index creation against it. The
-// shared DB uses the same schema as the local DB (see WISHLIST.md
+// shared DB uses the same schema as the local DB (see docs/architecture/shared-epistemology.md
 // Schema overlap section) so SQL is identical, just prefixed `shared.`.
 //
 // Idempotent: SafeMigrations uses ALTER TABLE ADD COLUMN, which is a
@@ -1390,7 +1390,7 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 	// schema would mean cross-schema INSERT triggers, which SQLite
 	// supports but requires careful handling. Backfilling on the
 	// first read is simpler and bounded — the shared DB is
-	// append-mostly per the WISHLIST.md concurrency model.
+	// append-mostly per the docs/architecture/shared-epistemology.md concurrency model.
 	if err := dm.backfillSharedFTSIfEmpty(); err != nil {
 		// Non-fatal — fall back to LIKE if backfill or FTS query fails.
 		slog.Warn("shared FTS backfill failed; falling back to LIKE", "error", err.Error())
@@ -1492,7 +1492,7 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 // backfill on the first query.
 //
 // This is O(N) on the number of is_global rows. The shared DB is
-// append-mostly per WISHLIST.md so the cost amortizes to zero on
+// append-mostly per docs/architecture/shared-epistemology.md so the cost amortizes to zero on
 // subsequent queries.
 func (dm *DatabaseManager) backfillSharedFTSIfEmpty() error {
 	if !dm.sharedAttached {
@@ -3802,9 +3802,9 @@ func ProvenancePreamble(metadataJSON string) string {
 //
 // The row is written with collection="rules" by default — the shared
 // DB's home for cross-agent conventions. Other collections are
-// allowed but `rules` is the canonical home per WISHLIST.md.
+// allowed but `rules` is the canonical home per docs/architecture/shared-epistemology.md.
 //
-// Phase 3 of WISHLIST.md: operator-only. No agent should be writing
+// Phase 3 of docs/architecture/shared-epistemology.md: operator-only. No agent should be writing
 // house rules autonomously. CLI and MCP both gate on confirm=true.
 func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weight int, provenance string) (string, error) {
 	if !dm.sharedAttached {
@@ -3841,12 +3841,12 @@ func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weigh
 }
 
 // PromoteToGlobal copies a local memory to the shared DB. The
-// original local row stays in the local DB (per WISHLIST.md: "Source
+// original local row stays in the local DB (per docs/architecture/shared-epistemology.md: "Source
 // row stays in local DB"). The shared copy is marked is_global=1
 // with collection="rules" and a metadata.derived_from_local_id
 // field linking back to the original.
 //
-// Phase 3 of WISHLIST.md: operator-only. Requires confirm: true at
+// Phase 3 of docs/architecture/shared-epistemology.md: operator-only. Requires confirm: true at
 // the tool boundary.
 func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 	if !dm.sharedAttached {

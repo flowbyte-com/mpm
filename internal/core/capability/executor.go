@@ -53,7 +53,7 @@ import (
 // can mock at either layer — most EX-1 tests use a FakeDriver; the
 // Executor itself gets separately verified with a stub Invoker.
 //
-// Spec: docs/capability-lifecycle-spec.md §4
+// Spec: docs/architecture/capability-lifecycle.md §4
 // =============================================================================
 
 // SourceLanguage is the typed source-language identifier. The Forge
