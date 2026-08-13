@@ -65,9 +65,11 @@ func TestWakeContext_NoGlobalRulesWhenSharedDBEmpty(t *testing.T) {
 }
 
 // TestWakeContext_LocalOnlyOmitsGlobalRules verifies that without
-// MPM_SHARED_DB, GlobalRules is empty (not populated, no error). The
-// field's JSON tag is omitempty so it's omitted from the wire format
-// entirely — agents don't see the field at all in local-only mode.
+// MPM_SHARED_DB, GlobalRules is empty (not populated, no error). Under
+// the v4 schema (invariant 3 on WakeContextData: "Lists MUST NOT omit
+// empty values") the field is a non-nil empty slice — never nil. This is
+// the same intent as the v3 test, but the assertion now matches the
+// v4 wire-form contract: empty array "[]" in the JSON, not nil / omitted.
 func TestWakeContext_LocalOnlyOmitsGlobalRules(t *testing.T) {
 	dm := NewTestLocalOnlyDM(t)
 
@@ -75,9 +77,15 @@ func TestWakeContext_LocalOnlyOmitsGlobalRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GatherWakeContext: %v", err)
 	}
-	if ctx.GlobalRules != nil {
-		t.Errorf("expected nil GlobalRules in local-only mode, got %v", ctx.GlobalRules)
+	// v4 contract: list is non-nil empty, not nil.
+	if ctx.GlobalRules == nil {
+		t.Errorf("v4 invariant: GlobalRules MUST be non-nil even when empty (got nil)")
 	}
+	if len(ctx.GlobalRules) != 0 {
+		t.Errorf("expected empty GlobalRules in local-only mode, got %d rules", len(ctx.GlobalRules))
+	}
+	// And the JSON wire form must surface it as "[]", not omit the field.
+	// Locked down by TestWakeContext_EmptyListsAreNotOmitted.
 }
 
 // TestReadWakeContext_IncludesGlobalRulesSection verifies that the

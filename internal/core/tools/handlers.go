@@ -905,6 +905,17 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		return nil, fmt.Errorf("gather wake context: %w", err)
 	}
 
+	// Wire-format size cap (sibling to the prose-format cap applied inside
+	// mpminternal.ReadWakeContext). Mutates `data` to shed Tier 1 +
+	// Tier 2 if the JSON would exceed MaxWakeContextBytes; sets the
+	// corresponding Truncated flags so the agent can distinguish
+	// cap-induced emptiness from "checked, none found". The 32 KB
+	// guardrail is invariant 4 on WakeContextData — see the type
+	// documentation for the shedding order.
+	if _, err := mpminternal.EnforceSizeLimit(&data); err != nil {
+		return nil, fmt.Errorf("wake_context size cap: %w", err)
+	}
+
 	memRefs := make([]map[string]interface{}, 0, len(data.RecentMemories))
 	for _, m := range data.RecentMemories {
 		memRefs = append(memRefs, map[string]interface{}{
@@ -951,18 +962,63 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// wait for the next tool call to trigger the opportunistic fold.
 	// Pass nil kinds for backward-compatible default (notification-only).
 	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
+
+	// v4 wire format: project the v4 fields (GlobalRules, AvailableSkills)
+	// which were previously populated on the struct but never surfaced
+	// through the manual map projection. Empty (non-nil) per invariant 3.
+	globalRuleRefs := make([]map[string]interface{}, 0, len(data.GlobalRules))
+	for _, r := range data.GlobalRules {
+		globalRuleRefs = append(globalRuleRefs, map[string]interface{}{
+			"content": r.Content,
+			"weight":  float64(r.Weight),
+		})
+	}
+	skillRefs := make([]map[string]interface{}, 0, len(data.AvailableSkills))
+	for _, s := range data.AvailableSkills {
+		skillRefs = append(skillRefs, map[string]interface{}{
+			"id":          s.ID,
+			"name":        s.Name,
+			"version":     s.Version,
+			"when_to_use": s.WhenToUse,
+			"is_global":   s.IsGlobal,
+			"weight":      float64(s.Weight),
+		})
+	}
+
 	result := map[string]interface{}{
 		"success":             true,
-		"session_id":          data.SessionID,
+		// Wire-format metadata (added with the v4 schema bump). Both
+		// unix-seconds; GeneratedAt = "when the struct was assembled",
+		// AsOf = "what 'now' represented substrate state at". v3 callers
+		// ignore these safely (extra fields are non-additive for them).
+		"context_version":     data.ContextVersion,
+		"generated_at":        data.GeneratedAt,
+		"as_of":               data.AsOf,
+		// Identity — session_id retained as the v3 alias for
+		// SessionCurrentID. New v4 callers should prefer the split
+		// fields below; older callers can keep using session_id.
+		"session_id":                 data.SessionID,
+		"session_current_id":         data.SessionCurrentID,
+		"session_previous_id":       data.SessionPreviousID,
+		"session_started_at":        data.SessionStartedAt,
+		"session_previous_ended_at": data.SessionPreviousEndedAt,
 		"active_mode":         data.ActiveMode,
 		"active_persona":       data.ActivePersona,
+		// Orientation block.
 		"recent_topics":       data.RecentTopics,
+		"recent_topics_truncated": data.RecentTopicsTruncated,
 		"recent_memories":     memRefs,
 		"recent_milestones":   milestoneRefs,
+		// Attention & pending work.
 		"overdue_wakes":       overdueRefs,
-		"audit_summary":       data.AuditSummary,
-		"last_handoff":        data.LastHandoff,
 		"scratchpad_orphans":  data.ScratchpadOrphans,
+		"last_handoff":        data.LastHandoff,
+		// Constraints & capabilities.
+		"global_rules":        globalRuleRefs,
+		"available_skills":    skillRefs,
+		"available_skills_truncated": data.AvailableSkillsTruncated,
+		// System health.
+		"audit_summary":       data.AuditSummary,
 		"epistemic_pressure":  data.EpistemicPressure,
 	}
 	// Always surface wakes_pending — even when empty — so the agent can
