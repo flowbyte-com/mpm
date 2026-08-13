@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,13 +120,25 @@ func handlePrimeDirectives() int {
 
 func handleMemoryAdd(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm memory add [--expires-in <duration>] <content>", 1)
+		return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>", 1)
 	}
 
-	// Pre-scan --json, -i/--interactive, and --expires-in flags
+	// Pre-scan --json, -i/--interactive, --fact, --tags, --weight, --expires-in flags.
+	// Unrecognized flags fall through to contentArgs (positional content),
+	// but --fact/--tags/--weight are EXPLICITLY recognized so a typo in flag
+	// shape doesn't silently land as content. Production hit 2026-08-13:
+	// an agent invoked `mpm memory add --fact X --weight 85 --tags a,b,c`
+	// expecting flags to work; the handler passed them through as content
+	// args, the row landed with content "--fact X --weight 85 --tags a,b,c"
+	// and tags=null, weight=1. Silent failure with success return — exactly
+	// the shape the always-cross-check-with-sqlite3 rule exists to catch.
 	jsonOutput := false
 	expiresIn := ""
 	interactive := false
+	factArg := ""    // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
+	tagsArg := ""    // --tags <csv>: comma-separated tags
+	weightArg := 1.0 // --weight <0-100>: weight; default 1 (matches the hardcoded value AddMemoryWithWeight substitutes)
+	weightSet := false // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
 	contentArgs := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -133,6 +146,29 @@ func handleMemoryAdd(args []string) int {
 			jsonOutput = true
 		case "-i", "--interactive":
 			interactive = true
+		case "--fact":
+			if i+1 >= len(args) {
+				return respond("", "--fact requires a value\n", 1)
+			}
+			i++
+			factArg = args[i]
+		case "--tags":
+			if i+1 >= len(args) {
+				return respond("", "--tags requires a value\n", 1)
+			}
+			i++
+			tagsArg = args[i]
+		case "--weight":
+			if i+1 >= len(args) {
+				return respond("", "--weight requires a value\n", 1)
+			}
+			i++
+			w, parseErr := strconv.ParseFloat(args[i], 64)
+			if parseErr != nil {
+				return respond("", fmt.Sprintf("--weight: invalid float %q\n", args[i]), 1)
+			}
+			weightArg = w
+			weightSet = true
 		case "--expires-in":
 			if i+1 < len(args) {
 				i++
@@ -154,10 +190,33 @@ func handleMemoryAdd(args []string) int {
 		}
 		content = drafted
 	} else {
-		if len(contentArgs) == 0 {
-			return respond("", "Usage: mpm memory add [--expires-in <duration>] <content>", 1)
+		// Content precedence: --fact > positional args. This mirrors the
+		// mpm_memory action=save contract (`params.fact`) so the CLI and
+		// the tool path agree on what "the fact" means. If both are given,
+		// --fact wins and the positional args are silently dropped — log
+		// this via warn so the operator notices, since the alternative is
+		// the same silent-failure shape this fix exists to prevent.
+		switch {
+		case factArg != "":
+			content = factArg
+			if len(contentArgs) > 0 {
+				usererror.Warn("--fact provided alongside %d positional arg(s); positional dropped (use one or the other)", len(contentArgs))
+			}
+		case len(contentArgs) == 0:
+			return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>\n", 1)
+		default:
+			content = strings.Join(contentArgs, " ")
 		}
-		content = strings.Join(contentArgs, " ")
+	}
+
+	// Parse tags: comma-separated, trim spaces, drop empties.
+	var tagsList []string
+	if tagsArg != "" {
+		for _, t := range strings.Split(tagsArg, ",") {
+			if trimmed := strings.TrimSpace(t); trimmed != "" {
+				tagsList = append(tagsList, trimmed)
+			}
+		}
 	}
 
 	// Inject active mode/persona from config files
@@ -180,9 +239,21 @@ func handleMemoryAdd(args []string) int {
 	if activePersona != "" {
 		memMetadata["active_persona"] = activePersona
 	}
+	// Echo the parsed flags back into metadata for forensic clarity (and so
+	// a subsequent `mpm memory show <id>` shows the user what was applied
+	// vs. what was silently defaulted). Production incident: a row saved
+	// with weight=1 and tags=null looked indistinguishable from a row that
+	// was saved with explicit weight=1 tags=null until the operator queried
+	// sqlite3 directly.
+	if weightSet {
+		memMetadata["cli_weight"] = weightArg
+	}
+	if len(tagsList) > 0 {
+		memMetadata["cli_tags"] = tagsList
+	}
 
 	store := getMemoryStore()
-	mem, err := store.AddMemory(content, "memories", nil, memMetadata, "", "cli")
+	mem, err := store.AddMemoryWithWeight(content, "memories", tagsList, memMetadata, "", "cli", weightArg)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
@@ -221,12 +292,21 @@ func handleMemoryAdd(args []string) int {
 			Success         bool                     `json:"success"`
 			ID              string                   `json:"id"`
 			Content         string                   `json:"content"`
+			// Echo tags/weight so the operator can verify at the CLI that
+			// the flags were applied — not just that the call returned
+			// success. Production incident: silent-failure shape hid the
+			// fact that --tags/--weight weren't recognized; the user
+			// only saw the bug when they queried sqlite3 directly.
+			Tags            []string                 `json:"tags,omitempty"`
+			Weight          float64                  `json:"weight,omitempty"`
 			SuggestedTopics []map[string]interface{} `json:"suggested_topics,omitempty"`
 		}
 		result := jsonResult{
 			Success: true,
 			ID:      mem.ID,
 			Content: mem.Content,
+			Tags:    tagsList,
+			Weight:  weightArg,
 		}
 		if len(suggestions) > 0 {
 			result.SuggestedTopics = suggestions

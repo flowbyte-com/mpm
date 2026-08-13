@@ -120,7 +120,10 @@ func handleMemoryHelp() int {
 	output := `mpm memory - Memory operations
 
 Usage:
-  mpm memory add <content>      Add a new memory (returns ID)
+  mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>]
+                  [--expires-in <duration>] [-i|--interactive] [--json]
+                  <content>
+                  Add a new memory (returns ID)
   mpm memory search <query>      Search memories
   mpm memory search-term <term>  List memories matching term (500 char snippets)
   mpm memory show <id>           Show memory by ID
@@ -128,8 +131,20 @@ Usage:
   mpm memory list                List recent memories
   mpm memory wipe                Wipe all memories (requires -f)
 
+Flags for "mpm memory add":
+  --fact <text>         Memory content (alternative to positional arg;
+                        matches the mpm_memory action=save contract)
+  --tags <csv>          Comma-separated tags, e.g. --tags alpha,beta
+  --weight <0-100>      Weight (default 1)
+  --expires-in <dur>    Time-to-live (e.g. 7d, 24h)
+  -i, --interactive     Compose content via draft prompt
+  --json, -j            Emit JSON output including tags + weight for
+                        verification
+
 Examples:
   mpm memory add "Remember to call mom"
+  mpm memory add --fact "Project: alpha is shipped" --tags alpha,shipped --weight 50
+  mpm memory add --fact "Expires in 7 days" --expires-in 7d
   mpm memory search "mom"
   mpm memory search-term "project"
   mpm memory show abc123
