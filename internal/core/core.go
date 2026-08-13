@@ -3,7 +3,7 @@
 // All Runtime code (cmd/mpm, internal/core/tools) depends on this interface
 // rather than *DatabaseManager. DatabaseManager satisfies the interface.
 //
-// Phase 2 of the Architecture Split proposal (docs/ARCHITECTURE_SPLIT.md):
+// Phase 2 of the Architecture Split (2026-07-07):
 // extract the interface, switch consumers, keep the concrete type internal.
 
 package internal
