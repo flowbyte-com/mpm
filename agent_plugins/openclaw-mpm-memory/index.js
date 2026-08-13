@@ -348,23 +348,29 @@ export default definePluginEntry({
     //   - systemPrompt  → joined into the flush-run's system prompt
     //   - model         → optional override for the flush follow-up run
     //
-    // The previous noop returned { kind: "noop" } so OpenClaw never
-    // ran a memory flush. Replacing it with a real plan wires the
-    // bridge from OpenClaw's compaction-event into mpm-scheduler's
-    // ingest pathway — see internal/scheduler/ingest.go (the file
-    // watcher that picks up /home/v/.mpm/run/ingest.md after a flush).
+    // Architectural decision (2026-08-13): NEUTER THE EMITTER. We don't
+    // ingest the flush output. MPM has its own native epistemic source —
+    // the agent-curated scratchpad (Working Context) and explicitly-written
+    // memories in SQLite. Capturing OpenClaw's auto-generated transcript
+    // summary would be redundant low-signal noise: lower-fidelity copies
+    // of data we already hold at higher fidelity. The integration boundary
+    // is deleted at the sink, not the source. See decision log for full
+    // rationale; see AGENTS.md "Truth once. Views everywhere." for the
+    // doctrine this implements.
     //
-    // relativePath is RELATIVE to workspaceDir (OpenClaw passes
-    // params.followupRun.run.workspaceDir at flush time — typically the
-    // agent's session root, which for the main session is /home/v/).
-    // Writing to .mpm/run/ingest.md lands at /home/v/.mpm/run/ingest.md
-    // in absolute form, which is the canonical ingest target.
+    // relativePath is RELATIVE to workspaceDir (OpenClaw passes the
+    // calling agent's workspaceDir at flush time — typically the agent's
+    // session root, which for the main session is /home/v/). The path
+    // is a throwaway — OpenClaw writes a file, we ignore it.
+    // local_flush_trash.md lands under workspaceDir as the discard bin.
+    // mpm-scheduler's openclaw_ingest handler (internal/scheduler/ingest.go)
+    // stays DORMANT — safe and idempotent, never wired to this path.
     api.registerMemoryCapability({
       promptBuilder: () => "",
       flushPlanResolver: () => {
         return {
           kind: "compaction_flush",
-          relativePath: ".mpm/run/ingest.md",
+          relativePath: "local_flush_trash.md",
           systemPrompt:
             "You are performing epistemic compaction. Distill the recent " +
             "conversation into durable architectural lessons, decisions, " +
