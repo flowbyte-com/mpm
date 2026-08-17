@@ -154,6 +154,15 @@ docs/audit-*.md
 .opencode/
 reference/
 CLAUDE.md
+# Re-include the project's own CLAUDE.md (canonical docs per CONTRIBUTING.md line 1).
+# The bare CLAUDE.md pattern above was over-broad: it matched the project's
+# canonical doc as well as any agent-runtime CLAUDE.md that landed in the tree.
+# Pin the bare pattern to the workspace-symlink locations that actually carry
+# the agent's working memory (root + workspace/), then re-include the project
+# root via the explicit path below.
+!/CLAUDE.md
+!/workspace/CLAUDE.md
+/CLAUDE.md.bak
 
 # Rollback artifacts from 2026-08-12 symlink restore (don't commit these)
 # The pre-symlink-fix snapshot lives at /home/v/.mpm-pre-symlink-fix.* and
