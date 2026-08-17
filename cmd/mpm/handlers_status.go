@@ -273,7 +273,7 @@ func getSynthesisStats(dm *mpminternal.DatabaseManager) (int, string) {
 	var count int
 	var lastTime string
 	if err := dm.SQLDB().QueryRow(`
-		SELECT COUNT(*), MAX(json_extract(metadata, '$.synthesized_at'))
+		SELECT COUNT(*), COALESCE(MAX(json_extract(metadata, '$.synthesized_at')), '')
 		FROM memories
 		WHERE deleted_at IS NULL
 		AND json_extract(metadata, '$.synthesized') = 'true'

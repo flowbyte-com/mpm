@@ -88,6 +88,14 @@ type Scheduler struct {
 	tickCount      uint64
 	heartbeatEvery uint64
 
+	// processStartedUnix is captured at New() and persisted to
+	// scheduler.state every tick. The CLI's emitSchedulerHealthWarning
+	// surfaces 'not running' when process_started_unix is stale — a
+	// way to detect a daemon that exited and was replaced without a
+	// state-file update (which the atomic-write pattern in state.go
+	// makes safe).
+	processStartedUnix int64
+
 	// captureBuf/captureMu are test-only fields for capturing slog output.
 	// Production code never reads them; tests set them via
 	// newTestSchedulerWithCaptureLogger and retrieve via s.captureLogs().
@@ -116,12 +124,13 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	return &Scheduler{
-		db:             db,
-		dbPath:         "<managed-by-DatabaseManager>",
-		log:            log,
-		handlers:       make(map[string]HandlerFunc),
-		tickHandlers:   make(map[string]func(ctx context.Context) error),
-		heartbeatEvery: 100, // ~100 min at 60s interval; override with SetHeartbeat
+		db:                 db,
+		dbPath:             "<managed-by-DatabaseManager>",
+		log:                log,
+		handlers:           make(map[string]HandlerFunc),
+		tickHandlers:       make(map[string]func(ctx context.Context) error),
+		heartbeatEvery:     100, // ~100 min at 60s interval; override with SetHeartbeat
+		processStartedUnix: time.Now().Unix(),
 	}, nil
 }
 
@@ -394,6 +403,10 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 	} else if n > 0 {
 		s.log.Info("initial tick executed wakes", "count", n)
 	}
+	// Persist initial state so a CLI that runs within the first tick
+	// interval sees a non-stale last_tick_unix and doesn't surface
+	// 'stalled' on a healthy daemon.
+	s.persistState()
 
 	for {
 		select {
@@ -416,6 +429,9 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 			} else if n > 0 {
 				s.log.Info("tick executed wakes", "count", n)
 			}
+			// Persist state every tick (≈130 bytes, write amp negligible).
+			// Atomic tmp+rename — see internal/scheduler/state.go.
+			s.persistState()
 		}
 	}
 }

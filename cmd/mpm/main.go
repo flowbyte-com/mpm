@@ -133,6 +133,8 @@ func emitSchedulerHealthWarning(w io.Writer) {
 		LastStatus         string `json:"last_status"`
 		LastError          string `json:"last_error"`
 		ProcessStartedUnix int64  `json:"process_started_unix"`
+		TickCount          uint64 `json:"tick_count"`
+		PID                int    `json:"pid"`
 	}
 	if err := json.Unmarshal(body, &snap); err != nil {
 		// Corrupt state file — degraded but not actionable from the
