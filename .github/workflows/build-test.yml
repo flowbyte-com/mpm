@@ -36,7 +36,13 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.1'
+          # Bumped from 1.26.1 to 1.26.6 on 2026-08-17 (commit cf66916
+          # raised the go.mod minimum to match the Dependabot audit
+          # close-out). Keep this pin in lock-step with the `go` directive
+          # in go.mod — `GOTOOLCHAIN=local` below refuses to auto-fetch,
+          # so a stale pin here fails the build with "go.mod requires
+          # go >= X (running go Y; GOTOOLCHAIN=local)".
+          go-version: '1.26.6'
           cache: true
 
       # Some downstream steps (full-suite job, changelog scripts, future
@@ -120,7 +126,8 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.1'
+          # See the gate job above for the bump rationale (2026-08-17).
+          go-version: '1.26.6'
           cache: true
 
       - name: Full test sweep
