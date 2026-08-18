@@ -123,7 +123,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		db:                 db,
 		dbPath:             "<managed-by-DatabaseManager>",
 		log:                log,
@@ -131,7 +131,15 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		tickHandlers:       make(map[string]func(ctx context.Context) error),
 		heartbeatEvery:     100, // ~100 min at 60s interval; override with SetHeartbeat
 		processStartedUnix: time.Now().Unix(),
-	}, nil
+	}
+	// Register the notification-expiration sweep as a tick handler so
+	// every scheduler tick retires notification-kind wakes whose
+	// target_time is more than 7 days in the past. The sweep is
+	// bounded (LIMIT 100) and runs in its own transaction so a
+	// backlog drains over multiple ticks without ever blocking a
+	// single tick. See wake_expiration.go for the full contract.
+	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db))
+	return s, nil
 }
 
 // SetHeartbeat overrides the default heartbeat cadence. Pass 0 to disable.
