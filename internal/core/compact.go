@@ -339,7 +339,7 @@ func (dm *DatabaseManager) recordCompactionEvent(ctx context.Context, lessonID s
 		VALUES ('compaction.last_run', ?, '')
 		ON CONFLICT(key) DO UPDATE SET
 		  raw_json = excluded.raw_json,
-		  updated_at = CURRENT_TIMESTAMP
+		  updated_at = CAST(strftime('%s','now') AS INTEGER)
 	`, string(payload))
 	return err
 }

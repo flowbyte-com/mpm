@@ -252,7 +252,7 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 			UPDATE memories
 			SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
 			    weight = MIN(weight + 1, 100),
-			    last_accessed_at = CURRENT_TIMESTAMP
+			    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
 			  AND json_extract(metadata, '$.status') = 'pending'
 		`, 0, string(patchJSON), theoryID)

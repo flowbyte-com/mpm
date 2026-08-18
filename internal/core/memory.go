@@ -2816,7 +2816,7 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	_, err := s.DB.Exec(`
 		UPDATE memories
 		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-		    updated_at = CURRENT_TIMESTAMP
+		    updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
 	if err != nil {

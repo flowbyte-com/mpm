@@ -426,7 +426,7 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	_, err := dm.db.Exec(`
 		UPDATE memories
 		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-		    updated_at = CURRENT_TIMESTAMP
+		    updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
 	return err
@@ -444,7 +444,7 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	_, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
-		    last_accessed_at = CURRENT_TIMESTAMP
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightGain, id)
 	return err
@@ -456,7 +456,7 @@ func (dm *DatabaseManager) AdjustMemoryWeight(id string, delta int) error {
 	_, err := dm.db.Exec(`
 		UPDATE memories
 		SET weight = MAX(weight + ?, 1),
-		    last_accessed_at = CURRENT_TIMESTAMP
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, id)
 	return err
@@ -521,7 +521,7 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?,
 		    weight = MIN(weight + ?, 100),
-		    last_accessed_at = CURRENT_TIMESTAMP
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightGain, id)
 	if err != nil {
@@ -541,7 +541,7 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 0),
-		    last_accessed_at = CURRENT_TIMESTAMP
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightLoss, id)
 	return err
