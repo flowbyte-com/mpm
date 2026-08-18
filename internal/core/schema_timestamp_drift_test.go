@@ -341,3 +341,133 @@ func TestNoCurrentTimestampWritesToIntegerColumns(t *testing.T) {
 		)
 	}
 }
+
+// createTableDatetimeRe matches any inline column declaration that
+// types a (presumed integer-timestamp) column as DATETIME or DATE.
+// Catches both the multi-line form (column at start of line, in a
+// CREATE TABLE body) and the inline form (column mid-line in a
+// longer DDL string).
+//
+// Match shape: <word_boundary> <col_name> <whitespace> <DATETIME|DATE>
+// The word boundary prevents the regex from matching inside
+// identifiers (e.g. "old_created_at DATETIME" is not a violation;
+// "created_at DATETIME" is).
+var createTableDatetimeRe = regexp.MustCompile(
+	`(?i)\b([a-zA-Z_][a-zA-Z0-9_]*)\s+(DATETIME|DATE)\b`,
+)
+
+// TestNoCreateTableDatetimeForIntegerColumns is the static-scan
+// CREATE-side companion to TestNoCurrentTimestampWritesToIntegerColumns.
+// Together they form the full guard for the schema-timestamp-class
+// problem:
+//
+//   - TestNoCurrentTimestampWritesToIntegerColumns prevents new
+//     drift by failing the build if any write path assigns
+//     CURRENT_TIMESTAMP to an INTEGER timestamp column.
+//
+//   - TestNoCreateTableDatetimeForIntegerColumns (this test) prevents
+//     legacy-shape reintroduction by failing the build if any
+//     CREATE TABLE declaration types an integer-timestamp column as
+//     DATETIME or DATE.
+//
+// The shipped migration (migration_memories_affinity_rebuild.go)
+// is the cleanup for legacy on-disk databases that already have
+// such columns. This test ensures future contributors don't re-
+// introduce the drift class at the DDL layer.
+//
+// Out of scope (intentionally not scanned):
+//   - Files under internal/core/ that legitimately declare DATETIME
+//     columns (broadcast_schema_patch.go — shared.bcast_* uses
+//     DATETIME by design; legacy_weight view — historical)
+//   - Test files (_test.go) — allowed to seed TEXT/DATETIME data
+//     intentionally to exercise the migration.
+func TestNoCreateTableDatetimeForIntegerColumns(t *testing.T) {
+	// Files where DATETIME-shape declarations are legitimate.
+	legitimateTextFiles := map[string]bool{
+		"broadcast.go":                  true,
+		"broadcast_schema_patch.go":     true,
+		"contradiction_schema_patch.go": true,
+		"migration_memories_affinity_rebuild.go": true, // references DATETIME in comments / legacy-shape fixtures
+	}
+
+	packageDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	integerCols := make(map[string]bool, len(integerTimestampColumns))
+	for _, c := range integerTimestampColumns {
+		integerCols[c] = true
+	}
+	// Also include deleted_at — part of the rebuild target list,
+	// should be INTEGER in the canonical schema.
+	integerCols["deleted_at"] = true
+
+	entries, err := os.ReadDir(packageDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", packageDir, err)
+	}
+
+	var offenders []string
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if legitimateTextFiles[name] {
+			continue
+		}
+
+		path := filepath.Join(packageDir, name)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 1<<16), 1<<20)
+
+		// We only fire when the line appears inside a CREATE TABLE
+		// block. Track that with a depth counter that opens on
+		// `CREATE TABLE` and closes on the matching `)`. Simpler
+		// approach: just look for lines that mention both
+		// `CREATE TABLE` and one of the integer columns in the
+		// preceding 20 lines. Even simpler: trigger on the column
+		// declaration itself regardless of context, and let the
+		// file-exclusion list carry the precision.
+		//
+		// The looser approach (column declaration only) is what's
+		// used here. False positives are caught by the file list.
+		for scanner.Scan() {
+			line := scanner.Text()
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+				continue
+			}
+			m := createTableDatetimeRe.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			col := strings.TrimSpace(m[1])
+			if !integerCols[col] {
+				continue
+			}
+			offenders = append(offenders, fmt.Sprintf("%s: %s", name, strings.TrimSpace(line)))
+		}
+		f.Close()
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("scan %s: %v", path, err)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf(
+			"production code declares an integer-timestamp column as DATETIME/DATE "+
+				"in %d place(s). Use INTEGER instead:\n  %s",
+			len(offenders), strings.Join(offenders, "\n  "),
+		)
+	}
+}
