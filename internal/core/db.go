@@ -1809,6 +1809,28 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Safe to call on every startup — idempotent if lessons_base already exists.
 	dm.migrateLessonsToView()
 
+	// Column-affinity rebuild: flip legacy DATETIME/TEXT timestamp
+	// columns on `memories` (and `shared.memories`) to INTEGER so
+	// mattn/go-sqlite3 returns integer-shaped values that scan
+	// cleanly into *int64. Without this, `mpm doctor`'s Review
+	// backlog check fails with "converting driver.Value type
+	// time.Time to a int64: invalid syntax".
+	//
+	// Runs AFTER the outer migration transaction commits because
+	// the rebuild manages its own PRAGMA foreign_keys envelope
+	// (PRAGMA foreign_keys is a no-op inside a transaction, per
+	// SQLite's transaction-restrictions doc). Idempotent via the
+	// `memories_column_affinity_v1` and `shared_memories_column_affinity_v1`
+	// sentinels — no-op on databases that have already been migrated.
+	//
+	// Codifies the fifth member of the Substrate Defense Triad:
+	// column-affinity-rebuild. Together with commit 627d0d8's
+	// column-write-shape guard, this closes the schema-timestamp-class
+	// problem (prevent new drift + clean legacy drift).
+	if err := RebuildMemoriesColumnAffinity(dm.db); err != nil {
+		return fmt.Errorf("memories column affinity rebuild: %w", err)
+	}
+
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
 	if err := dm.initFTSTables(); err != nil {
 		slog.Warn("FTS5 initialization failed; search will use LIKE fallback", "error", err.Error())
