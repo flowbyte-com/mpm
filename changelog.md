@@ -1,5 +1,179 @@
 # Changelog
 
+## 2026-08-13 → 2026-08-18 — Pre-Alpha Hardening Cycle
+
+Five-day hardening arc (Days 1–5 of the pre-alpha cycle) that closed
+the same class of bug — silent promotion of partially-validated writes
+into durable state — from five different angles. Each member codifies
+a pattern that mock-schema unit tests passed against but live agent
+operations broke. Together they form the **Substrate Defense Triad**,
+now formally codified as five named members and load-bearing in
+production. Adding new write paths or cross-process bridges without
+honoring them is a pre-commit-defeating offense.
+
+### The Substrate Defense Triad (Codified)
+
+The Triad is the project's defense-in-depth contract for substrate
+writes. Each member addresses a distinct failure shape; a write path
+must satisfy all five to be considered substrate-safe.
+
+#### 1. Silent-Swallow (codified 2026-08-13, commit `755d671`)
+
+SQLite migrations that *continue past errors* (`log; carry on`) instead
+of returning them. The downstream symptom is a partially-applied
+migration with the sentinel row written, so future boots think the
+migration succeeded. The fix is to surface the error path:
+`if err := tx.Exec(...); err != nil { return fmt.Errorf(...) }`.
+
+#### 2. Edge-Case Promote (codified 2026-08-13, commit `8f31624`)
+
+Migrations that handle the *easy case* but silently drop edge rows
+(NULLs, junk-text in INTEGER-shaped columns, etc.). The 2026-08-13
+column-dance migration adds `WHERE ... IS NOT NULL AND strftime() IS
+NOT NULL` so unparseable junk is logged rather than NULL-ed into a
+NOT-NULL column. Defence pattern: every migration UPDATE must include
+a typeof() or IS-NOT-NULL guard, and the verifier must check that no
+residue remains.
+
+#### 3. Auth-Canonical Resolver (codified 2026-08-13, commit `e2fecbb`)
+
+Auth/credential paths that silently fall back when the canonical
+resolver returns empty. The 2026-08-13 compaction auth patch replaces
+silent fallbacks with `cfg.ProfileFor(synth).APIKey` + a `slog.Error`
+when both canonical and env-var fallbacks are exhausted. Defence
+pattern: auth paths must surface the failure, not swallow it.
+
+#### 4. Column-Write-Shape (codified 2026-08-18, commit `627d0d8`)
+
+SQL writes that interpolate `CURRENT_TIMESTAMP` (SQLite TEXT) into a
+column declared INTEGER. Eight production UPDATE statements did this;
+the static-scan guard `TestNoCurrentTimestampWritesToIntegerColumns`
+fails the build if any new write path re-introduces the pattern.
+Defence pattern: every timestamp write must use
+`CAST(strftime('%s','now') AS INTEGER)`, never `CURRENT_TIMESTAMP`.
+
+#### 5. Column-Affinity-Rebuild (codified 2026-08-18, commit `d4cfbfa`)
+
+Legacy on-disk databases whose columns are declared with the wrong
+affinity (DATETIME / TEXT where INTEGER is required). The
+`migration_memories_affinity_rebuild.go` rebuild flips the column
+affinity via the standard 12-step dance (CREATE new_X / bulk INSERT
+with CAST / DROP / RENAME / recreate indexes+triggers+views+FTS5
+shadow), gated by `memories_column_affinity_v1` sentinel, with FK
+envelope around the tx and composite 4-tuple checksum pre/post.
+The companion AST scan `TestNoCreateTableDatetimeForIntegerColumns`
+fails the build if any new CREATE TABLE declares a timestamp column
+as DATETIME or DATE. Defence pattern: schema-affinity rebuild is a
+one-shot migration, schema-shape probe prevents new drift.
+
+### Triad Coverage Map
+
+| Triad Member    | Detection                              | Fix / Guard                          |
+|-----------------|----------------------------------------|--------------------------------------|
+| Silent-Swallow  | audit/sql `silent-continue = 0`         | explicit error returns               |
+| Edge-Case       | audit/sql `logged-swallow` budget      | typeof() / IS-NOT-NULL guards        |
+| Auth-Canonical  | code review on auth paths             | ProfileFor + slog.Error              |
+| Column-Write    | `TestNoCurrentTimestampWrites…`        | CAST(strftime) only                   |
+| Column-Affinity | `TestNoCreateTableDatetime…` + probe   | one-shot rebuild + sentinel          |
+
+### Daily Summary (Day 1–5)
+
+#### Day 1–2 (2026-08-13 → 2026-08-14) — Schema migration correctness
+
+- **`fix(pre-alpha): loud-fail dispatcher contract via extractParamsOrFail`** (`5cc2903`)
+  Removed silent fallbacks in the openclaw plugin dispatch path;
+  parameters that fail to extract now loudly refuse rather than
+  silently emit an empty argument.
+
+- **`fix(pre-alpha): surface db_path + db_path_raw in HealthCheck`** (`46338c8`)
+  Doctor no longer reports `ok` when the on-disk DB path doesn't
+  match the host-pinned expected path.
+
+- **`fix(pre-alpha): mpm-mcp boots refuse db_path mismatch`** (`6cc08eb`)
+  Bridge hosts bail loudly at startup if their on-disk DB diverges
+  from the host pin. Prevents silent data divergence across multi-
+  agent installs.
+
+- **`fix(pre-alpha): gate plugin boot on host-pinned db_path`** (`63d0690`)
+  Symmetric gate on the plugin side.
+
+#### Day 3 (2026-08-15) — NULL scan safety
+
+- **`fix(pre-alpha): read-back assertions + sql.NullString on lesson writes`** (`e748400`)
+  Lesson writers that previously assumed NOT-NULL on read-back paths
+  now use `sql.NullString` and assert the round-trip. Eliminates the
+  `converting driver.Value type <nil>` scan failure class.
+
+#### Day 4 (2026-08-15) — Atomic state writers
+
+- **`fix(pre-alpha): atomic scheduler.state writer + getSynthesisStats NULL Scan`** (`bb77852`)
+  Scheduler state file now writes atomically (write-temp + rename)
+  rather than truncating in place. A crashed writer no longer leaves
+  the state file empty.
+
+#### Day 5 (2026-08-17) — Multi-agent write contention
+
+- **`fix(pre-alpha): bump go directive 1.26.1 → 1.26.6 — closes 13 reachable Dependabot CVEs`** (`cf66916`)
+  Toolchain bump that closes the reachable CVE set in transitive
+  deps. Pairs with the day-5 contention harness.
+
+- **`fix(test): WaitGroup barrier replaces busy-poll race in TestConcurrentMcpInstances`** (`61a7596`)
+  The multi-agent contention test now uses a WaitGroup barrier
+  instead of a busy-poll, eliminating a 5s × N-flake in CI.
+
+- **`test(day-5): add multi-agent write contention harness`** (`069d710`)
+  16 concurrent workers across 3 invocation paths verify SQLite WAL
+  + 5s busy_timeout holds without SQLITE_BUSY or reader spikes.
+  This is the load-bearing test for the Substrate Defense Triad's
+  cross-process contract.
+
+- **`docs(claude): codify the Substrate Defense Triad`** (`78059d8`)
+  Adds the Substrate Defense Triad section to `CLAUDE.md` with
+  canonical-implementation pointers and the load-bearing contract
+  that adding new write paths or cross-process bridges without
+  honoring them is a pre-commit-defeating offense.
+
+#### Day 6 (2026-08-17) — CI lockstep + notification housekeeping
+
+- **`ci: bump setup-go from 1.26.1 → 1.26.6 — keep lockstep with go.mod`** (`a31748a`)
+  CI lockstep bump.
+
+#### Day 7 (2026-08-18) — Schema drift closures + release-gate prep
+
+Two paired commits that close the schema-timestamp-class problem
+from opposite sides — drift prevention (today's column-write-shape
+member #4) and legacy cleanup (column-affinity-rebuild member #5):
+
+- **`fix(core): normalize last_accessed_at timestamp writes and add schema migration`** (`627d0d8`)
+  Codified the 4th member. 8 SQL write sites converted from
+  `CURRENT_TIMESTAMP` to `CAST(strftime('%s','now') AS INTEGER)`,
+  with a focused migration (`last_accessed_at_drift_v1` sentinel)
+  that normalizes any TEXT residue and the static-scan guard
+  `TestNoCurrentTimestampWritesToIntegerColumns` that fails the
+  build if any new write path re-introduces the pattern.
+
+- **`feat(scheduler): add 7-day retention expiration for overdue notification wakes`** (`ac3f732`)
+  Notification-kind scheduled_wakes (which by design never reach a
+  handler that would mark them fired) accumulated indefinitely; this
+  adds a 7-day retention sweep that retires them with audit metadata.
+  8 tests pin every guarantee.
+
+- **`docs(changelog): 2026-08-18 column-type drift + notification wake retention`** (`81fa61e`)
+  Changelog entry for the Day 7 work above.
+
+### Release Notes
+
+This is the pre-alpha cut that locks the substrate. All five Triad
+members are codified and guarded. Doctor passes 4/5 checks (the
+fifth, `Working Context`, has a pre-existing scratchpad-cleanup
+issue filed separately as P3 — not a substrate defect). Tests are
+green across both modules; CI is on go-1.26.6; multi-agent
+contention harness is in CI; Substrate Defense Triad is in
+`CLAUDE.md` as a load-bearing contract.
+
+---
+
+
 ## 2026-08-18 — Column-Type Drift + Notification Wake Retention
 
 Two pre-alpha hardening passes that close the same class of bug from
@@ -390,3 +564,76 @@ The 5 original commits were rewritten with new SHAs by `git-filter-repo`; only t
 - `Makefile` — test target split across both modules
 - `docs/ARCHITECTURE_SPLIT.md` — 4-phase migration plan (new)
 - `audit.md` — comprehensive audit report (new)
+
+## 2026-08-18 — Memories Column-Affinity Rebuild
+
+Codified the 5th member of the Substrate Defense Triad. Closes the
+doctor `Review backlog` WARN that surfaced as
+`scanning spaced reinforcement memory row: sql: Scan error on column
+index 7, name created_at: converting driver.Value type time.Time to a
+int64: invalid syntax`. The on-disk mpm.db had `created_at`,
+`updated_at`, `last_accessed_at`, `expires_at` declared DATETIME
+(NUMERIC affinity) and `deleted_at` declared TEXT, because earlier
+migrations (`timestamps_unified_v1`, `last_accessed_at_drift_v1`)
+only converted the column *values*, never the column *affinity*.
+
+- **`fix(core): rebuild memories column affinity to INTEGER for legacy DATETIME/TEXT timestamp columns`** (`d4cfbfa`)
+  - 5 timestamp columns flipped to INTEGER across `memories` (and
+    `shared.memories`) via the standard 12-step dance: CREATE TABLE
+    `new_X` with INTEGER-affinity columns, INSERT INTO `new_X`
+    SELECT … CAST(...) FROM `X`, DROP TABLE `X` (with FK envelope
+    around the tx), ALTER TABLE `new_X` RENAME TO `X`, then recreate
+    indexes, triggers, views, and the standalone FTS5 shadow table.
+  - **Three SQLite landmines** addressed inline:
+    1. PRAGMA foreign_keys is a no-op inside a transaction. The
+       rebuild pins a single connection via `db.Conn(ctx)`, sets
+       `foreign_keys=OFF` BEFORE BEGIN, runs a *targeted*
+       `memories→sessions` FK check inside the tx (the broader
+       `PRAGMA foreign_key_check` would false-positive on pre-
+       existing violations in unrelated tables like
+       `memory_revisions`), and restores `foreign_keys=ON` after
+       COMMIT.
+    2. `memories_fts` is a STANDALONE FTS5 virtual table (no
+       `content=` clause), so the rebuild uses `DELETE FROM
+       memories_fts` followed by `INSERT INTO memories_fts SELECT …`,
+       not the `INSERT INTO fts(fts) VALUES('rebuild')` maintenance
+       command — which would silently desync shadow rowids on
+       standalone tables.
+    3. Composite 4-tuple checksum (COUNT, COUNT DISTINCT id,
+       SUM(created_at), SUM(last_accessed_at)) compared pre/post
+       rebuild via CASE+typeof(): handles databases where
+       `timestamps_unified_v1` already converted some rows to
+       INTEGER while others remain TEXT.
+  - **Schema-shape preservation:** runtime column discovery via
+    `pragma_table_info` keeps the rebuild in lockstep with any
+    ALTER TABLE ADD COLUMN that accumulated since the canonical
+    `schema.go` DDL was written. Hardcoding the column list would
+    drift out of sync with `SafeMigrations`.
+  - **View preservation:** views that reference the renamed table
+    (`artifacts`, `epistemic_pressure_v`) are captured via
+    `sqlite_master` LIKE scan + DROP+recreate around the table
+    swap, so the RENAME doesn't fail with `error in view X: no
+    such table: main.Y`.
+  - **Idempotent:** sentinel-gated
+    (`memories_column_affinity_v1` for local,
+    `shared_memories_column_affinity_v1` for shared). Schema-shape
+    probe (any DATETIME/DATE/TEXT timestamp column → rebuild) is
+    the fast-skip path on already-INTEGER databases.
+  - **Companion guard:** `TestNoCreateTableDatetimeForIntegerColumns`
+    in `schema_timestamp_drift_test.go` statically scans every
+    production .go file and fails the build if any CREATE TABLE
+    declaration types an integer-timestamp column as DATETIME or
+    DATE. Together with commit 627d0d8's
+    `TestNoCurrentTimestampWritesToIntegerColumns`, this closes the
+    schema-timestamp-class problem end-to-end: prevent new drift +
+    clean legacy drift.
+
+### Pre-alpha verification on production mpm.db
+
+- 419 rows preserved with checksum integrity (4-tuple sum match
+  pre/post).
+- 14 indexes + 7 triggers recreated verbatim.
+- Doctor `Review backlog` check: WARN → PASS.
+- All 11 internal/core packages and 6 main-module packages green
+  with `-race`.
+
