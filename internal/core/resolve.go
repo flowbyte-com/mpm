@@ -273,7 +273,7 @@ func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision
 			SET metadata = ?,
 			    weight = MAX(1, weight - ?),
 			    retrieval_priority = MAX(0.01, retrieval_priority - ?),
-			    updated_at = CURRENT_TIMESTAMP
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND deleted_at IS NULL
 		`, string(mergedJSON), dec.SlashAmount, float64(dec.SlashAmount)/100.0, dec.LoserID)
 		if err != nil {

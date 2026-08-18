@@ -279,7 +279,7 @@ func (dm *DatabaseManager) applyArbitrationResolution(theoryID string, queueID i
 			SET metadata = ?,
 			    weight = MAX(1, weight - ?),
 			    retrieval_priority = MAX(0.01, retrieval_priority - ?),
-			    updated_at = CURRENT_TIMESTAMP
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND deleted_at IS NULL
 		`, string(mergedJSON), slashAmount, float64(slashAmount)/100.0, loserID)
 		if err != nil {
@@ -428,7 +428,7 @@ func (dm *DatabaseManager) UpdateSharedMemoryMetadata(id string, patchJSON strin
 	_, err = tx.Exec(`
 		UPDATE shared.memories
 		SET metadata = ?,
-		    updated_at = CURRENT_TIMESTAMP
+		    updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, string(mergedJSON), id)
 	if err != nil {
@@ -457,7 +457,7 @@ func (dm *DatabaseManager) ReinforceSharedMemory(id string, delta int) error {
 		UPDATE shared.memories
 		SET reinforcement_count = COALESCE(reinforcement_count, 0) + ?,
 		    weight = COALESCE(weight, 1) + ?,
-		    last_accessed_at = CURRENT_TIMESTAMP
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightGain, id)
 	if err != nil {
