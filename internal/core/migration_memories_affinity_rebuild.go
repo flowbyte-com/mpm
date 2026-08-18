@@ -443,6 +443,7 @@ func rebuildOneMemoriesTable(ctx context.Context, tx *sql.Tx, table, newTable, f
 	}
 	copied, _ := res.RowsAffected()
 
+
 	// Step 8: composite post-migration checksum on the NEW table
 	// (now INTEGER-affinity — sum directly, no strftime).
 	post, err := checksumMemoriesTable(ctx, tx, newTable, false /* useStrftime */)
@@ -474,8 +475,8 @@ func rebuildOneMemoriesTable(ctx context.Context, tx *sql.Tx, table, newTable, f
 	// correct maintenance. (External-content tables would need
 	// `INSERT INTO fts(fts) VALUES('rebuild')` instead — that
 	// would silently desync shadow rowids on standalone.)
-	if err := clearStandaloneFTS(ctx, tx, resolveTable(table)+"_fts"); err != nil {
-		return fmt.Errorf("clear %s: %w", resolveTable(table)+"_fts", err)
+	if err := clearStandaloneFTS(ctx, tx, ftsTable); err != nil {
+		return fmt.Errorf("clear %s: %w", ftsTable, err)
 	}
 
 	// Step 10: DROP old + RENAME new. Triggers and indexes attached
@@ -499,8 +500,8 @@ func rebuildOneMemoriesTable(ctx context.Context, tx *sql.Tx, table, newTable, f
 	// the bulk INSERT from firing the triggers (which would
 	// double-index every row in the shadow table). The triggers
 	// come back online for subsequent user-driven INSERTs/UPDATEs.
-	if err := repopulateStandaloneFTS(ctx, tx, resolveTable(table)+"_fts", resolveTable(table)); err != nil {
-		return fmt.Errorf("repopulate %s_fts: %w", table, err)
+	if err := repopulateStandaloneFTS(ctx, tx, ftsTable, table); err != nil {
+		return fmt.Errorf("repopulate %s: %w", ftsTable, err)
 	}
 	for _, t := range triggers {
 		// DROP first in case the rebuild is a re-run after a
@@ -637,10 +638,10 @@ type triggerShape struct {
 // column declarations with full NOT NULL / DEFAULT / PRIMARY KEY
 // constraints preserved.
 func readColumnShapes(ctx context.Context, tx *sql.Tx, table string) ([]columnShape, error) {
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-		`SELECT name, type, "notnull", COALESCE(dflt_value, ''), pk FROM pragma_table_info(%q) ORDER BY cid`,
-		resolveTable(table),
-	))
+	rows, err := tx.QueryContext(ctx,
+		`SELECT name, type, "notnull", COALESCE(dflt_value, ''), pk FROM pragma_table_info(?) ORDER BY cid`,
+		table,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -932,12 +933,9 @@ func repopulateStandaloneFTS(ctx context.Context, tx *sql.Tx, ftsTable, table st
 	// skip the repopulate and let the sync trigger rebuild
 	// incrementally. resolveTable is recognized by audit-sql as a
 	// safe table-name resolver (see isTableNameResolver).
-	colCheck := fmt.Sprintf(
-		`SELECT COUNT(*) FROM pragma_table_info(%q) WHERE name IN ('content','collection','session_id','tags')`,
-		resolveTable(ftsTable),
-	)
+	colCheck := `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name IN ('content','collection','session_id','tags')`
 	var colCount int
-	if err := tx.QueryRowContext(ctx, colCheck).Scan(&colCount); err != nil {
+	if err := tx.QueryRowContext(ctx, colCheck, ftsTable).Scan(&colCount); err != nil {
 		return err
 	}
 	if colCount < 4 {
@@ -947,7 +945,7 @@ func repopulateStandaloneFTS(ctx context.Context, tx *sql.Tx, ftsTable, table st
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(
 		"INSERT INTO %s(rowid, content, collection, session_id, tags) "+
 			"SELECT rowid, content, collection, session_id, tags FROM %s",
-		resolveTable(ftsTable), resolveTable(table),
+		ftsTable, table,
 	))
 	return err
 }
