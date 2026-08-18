@@ -36,6 +36,19 @@ func isDuplicateColumnError(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column name")
 }
 
+// isNoSuchTableError reports whether err is a SQLite "no such table"
+// failure. Used by the drift-remediation sweep to gracefully skip the
+// shared.memories branch on single-DB / test paths that never call
+// attachShared. Matches both the bare "no such table" form and the
+// shared-schema-prefixed "no such table: shared.memories" form.
+func isNoSuchTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such table")
+}
+
 // defaultLogRotateBytes is the default file-size threshold for log rotation
 // (watchdog.jsonl, mirror.jsonl). At 5 MiB the JSONL files stay readable
 // by `jq`, `tail`, and text editors without paging. Operators can override
@@ -157,12 +170,33 @@ func rotateLogIfNeeded(path string, thresholdBytes int64) error {
 // nature and the same Exec race; the Exec calls are kept as belt-and-
 // suspenders for the first connection, but _foreign_keys is the load-bearing
 // guarantee.)
-func sqliteWriteDSN(path string) string {
+// SqliteWriteDSN appends the foreign-key pragma to a SQLite DSN so that
+// the resulting *sql.DB enforces foreign keys at the connection level.
+//
+// Exported so callers outside this package (cmd/mpm, tests) can construct
+// the same DSN shape without drifting from the load-bearing guarantee here.
+// The internal alias sqliteWriteDSN is preserved for the three call sites
+// inside this package.
+//
+// Empty input is treated as ":memory:" — mattn/go-sqlite3 interprets a DSN
+// starting with '?' as "create a file with that literal name". An unguarded
+// empty path therefore silently creates a SQLite file named "?_foreign_keys=1"
+// in the cwd rather than opening the intended path. Returning ":memory:" on
+// empty input converts the caller mistake into the in-memory DB.
+func SqliteWriteDSN(path string) string {
+	if path == "" {
+		return ":memory:"
+	}
 	if strings.Contains(path, "?") {
 		return path + "&_foreign_keys=1"
 	}
 	return path + "?_foreign_keys=1"
 }
+
+// sqliteWriteDSN is the internal alias used by the three call sites within
+// this package — kept identical to SqliteWriteDSN to preserve the
+// "one helper, one DSN strategy" invariant.
+func sqliteWriteDSN(path string) string { return SqliteWriteDSN(path) }
 
 // dbFileName is the canonical filename for the MPM database.
 // Previously mpm_memory.db - renamed 2026-04-01 to reflect its unified nature.
@@ -785,25 +819,54 @@ func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interf
 	}
 }
 
-// QueryTracked runs db.Query with timing.
+// queryTrackedDefaultRetries is the retry budget for QueryTracked when the
+// driver returns SQLITE_BUSY. Mirrors the default-budget policy in
+// ExecTracked callers that pass retries=5 — chosen as a conservative
+// match so long-running HybridSearch / recall scans survive the same
+// write-side contention ExecTracked already tolerates.
+const queryTrackedDefaultRetries = 5
+
+// QueryTracked runs db.Query with timing and SQLITE_BUSY retry-backoff.
+// Retries mirror ExecTracked (exponential 100ms→5s, capped) but with a
+// fixed default budget — query callers don't need to specify it because
+// every existing call site expects "transparent retry" semantics. If a
+// future call site needs a different budget, introduce a
+// QueryTrackedWithRetry variant rather than changing this signature.
 func (dm *DatabaseManager) QueryTracked(query string, args ...interface{}) (*sql.Rows, error) {
 	start := time.Now()
-	rows, err := dm.db.Query(query, args...)
-	elapsed := time.Since(start)
+	attempts := 0
+	backoff := 100 * time.Millisecond
+	maxBackoff := 5 * time.Second
 
-	entry := watchdogOp{
-		Timestamp:  start.UTC().Format(time.RFC3339Nano),
-		Operation:  "query",
-		DurationMs: elapsed.Milliseconds(),
-		Query:      truncateQuery(query),
-		Slow:       elapsed > slowQueryThreshold,
-	}
-	if err != nil {
-		entry.Error = err.Error()
-	}
-	dm.logWatchdog(entry)
+	for {
+		attempts++
+		rows, err := dm.db.Query(query, args...)
+		elapsed := time.Since(start)
 
-	return rows, err
+		if err != nil && isBusyError(err) && attempts <= queryTrackedDefaultRetries {
+			dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
+		}
+
+		entry := watchdogOp{
+			Timestamp:  start.UTC().Format(time.RFC3339Nano),
+			Operation:  "query",
+			DurationMs: elapsed.Milliseconds(),
+			Query:      truncateQuery(query),
+			Retries:    attempts - 1,
+			Slow:       elapsed > slowQueryThreshold,
+		}
+		if err != nil {
+			entry.Error = err.Error()
+		}
+		dm.logWatchdog(entry)
+
+		return rows, err
+	}
 }
 
 // QueryRowTracked runs db.QueryRow with timing.
@@ -904,6 +967,23 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+	// NOTE: SetMaxOpenConns(1) is INTENTIONALLY NOT called here.
+	//
+	// The architectural intent (CLAUDE.md, sqlopen_owner_test.go) reads
+	// as "single connection", but database/sql's connection pool cannot
+	// safely be limited to 1 in this codebase: a goroutine holding a
+	// connection inside an open transaction blocks any other goroutine
+	// that tries to Begin() a second transaction, which then deadlocks
+	// waiting for the first goroutine's transaction to release the
+	// connection it already holds. Verified empirically on 2026-08-14:
+	// a test run hung at database/sql.(*DB).connectionOpener after
+	// SetMaxOpenConns(1) was added.
+	//
+	// SQLite's WAL mode + busy_timeout=5000 + ExecTracked/QueryTracked
+	// retry-backoff handle the single-writer constraint at the driver
+	// level. The "single shared connection" claim in docs is aspirational
+	// — what we actually have is "many connections, but the writes are
+	// serialized via SQLite's file lock".
 
 	db.Exec("PRAGMA foreign_keys = ON")
 	db.Exec("PRAGMA journal_mode = WAL")
@@ -1703,6 +1783,17 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	if err := MigrateAllTimestampsToUnixEpoch(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("timestamps unification migration failed: %w", err)
+	}
+	// last_accessed_at_drift_v1 — focused remediation for the
+	// memories.last_accessed_at column. Even after the broad
+	// timestamps_unified_v1 sweep, several write paths continued
+	// inserting CURRENT_TIMESTAMP (TEXT) into this INTEGER column;
+	// a fresh write could reintroduce drift on a previously-clean
+	// database. The dedicated migration guarantees the column is
+	// INTEGER at boot, regardless of intermediate state.
+	if err := MigrateLastAccessedAtToUnixEpoch(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("last_accessed_at drift migration failed: %w", err)
 	}
 	if err := MigrateWeightToReal(tx); err != nil {
 		_ = tx.Rollback()
@@ -2527,7 +2618,7 @@ func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
 	result, err := tx.Exec(`
 		UPDATE memories
 		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
-			last_accessed_at = CURRENT_TIMESTAMP
+			last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, patchJSON, id)
 	if err != nil {
@@ -3729,7 +3820,7 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
+	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
 		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
 	}
 

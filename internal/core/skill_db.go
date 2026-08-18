@@ -326,7 +326,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		_, err = db.Exec(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
-			    updated_at = CURRENT_TIMESTAMP
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND deleted_at IS NULL
 		`, content, string(tagsJSON), string(metaJSON), id)
 		if err != nil {
