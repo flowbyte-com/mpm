@@ -233,10 +233,12 @@ type CoreDB interface {
 	GetLatestHandoff() (*Handoff, error)
 	GetLatestUnreadHandoff() (*Handoff, error)
 	GetHandoffByID(id string) (*Handoff, error)
+	GetHandoffBySessionID(sessionID string) (*Handoff, error)
 	MarkHandoffRead(id, readBy string) error
 	MarkLatestHandoffRead(readBy string) (*Handoff, error)
 	ListHandoffs(limit int, unreadOnly bool) ([]*Handoff, error)
 	PruneHandoffs(retentionDays int) (int64, error)
+	DeleteHandoff(id string) (int64, error)
 
 	// ─── Wakes ───────────────────────────────────────────────────────
 	ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error)
