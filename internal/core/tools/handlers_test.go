@@ -1255,6 +1255,12 @@ func TestAllDomainDispatchers(t *testing.T) {
 		// mpm_session
 		{"session/list_handoffs", handleMpmSession, "list_handoffs", map[string]interface{}{}},
 		{"session/handoff", handleMpmSession, "handoff", map[string]interface{}{}},
+		// session/shred_handoff: requires a real handoff id; seed in the
+		// dedicated TestShredHandoff_HappyPath test. The dispatch smoke
+		// here just verifies the action is recognised (no unknown-action
+		// error) — the underlying DeleteHandoff returns an error if id is
+		// missing, which is the documented contract.
+		{"session/shred_handoff", handleMpmSession, "shred_handoff", map[string]interface{}{"id": "nonexistent"}},
 		// mpm_wakes
 		{"wakes/list", handleMpmWakes, "list", map[string]interface{}{}},
 		{"wakes/list_tasks", handleMpmWakes, "list_tasks", map[string]interface{}{}},
