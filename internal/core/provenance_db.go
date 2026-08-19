@@ -100,6 +100,7 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 		nilOrString(prov.SessionID),
 		nilOrString(prov.InvocationID),
 		nilOrString(prov.ParentArtifactID),
+		nilOrString(prov.ParentInvocationID),
 		nilOrString(prov.ProviderMetadata),
 	}
 
@@ -112,8 +113,9 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 		reasoning_mode, reasoning_effort,
 		thinking_level, thinking_tokens, thinking_visible,
 		session_id, invocation_id, parent_artifact_id,
+		parent_invocation_id,
 		provider_metadata
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		args...,
 	)
 	if err != nil {

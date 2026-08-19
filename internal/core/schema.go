@@ -378,11 +378,28 @@ var BaseTables = []string{
 		session_id           TEXT,
 		invocation_id        TEXT,
 		parent_artifact_id   TEXT,
+		-- SQL comment inside the DDL: traces agent-of-agent invocation
+		-- trees. Distinct from parent_artifact_id (which traces artifact
+		-- causality); this column traces invocation causality. See the
+		-- Go comment above the block for the full rationale.
+		parent_invocation_id TEXT,
 		provider_metadata    TEXT,
 		UNIQUE (artifact_id, artifact_type),
-		CHECK (artifact_type IN ('memory','theory','lesson','decision')),
+		-- SQL comment inside the DDL: artifact_type covers the full
+		-- substrate surface for telemetry. The widening from the
+		-- original ('memory','theory','lesson','decision') is enforced
+		-- for existing alpha DBs by migrateArtifactProvenanceSchema.
+		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive')),
 		CHECK (actor_kind IN ('agent','human','import','system','unknown'))
 	);`,
+	// Go comment block: Reserved for the artifact_relations table.
+	// Cross-artifact edges (derived_from, supersedes, contradicts,
+	// supports, duplicates, promotes, challenges, resolves) will
+	// migrate here once it ships. Current scattered fields
+	// (metadata.derived_from_local_id, metadata.derived_from_skill_id,
+	// metadata.challenged_theory_id, etc.) are placeholders. NOT
+	// building before alpha — see decision
+	// artifact_relations_reserved_2026-08-19.
 	`CREATE INDEX IF NOT EXISTS idx_provenance_artifact
 		ON artifact_provenance(artifact_id, artifact_type);`,
 	`CREATE INDEX IF NOT EXISTS idx_provenance_model
@@ -393,6 +410,10 @@ var BaseTables = []string{
 		ON artifact_provenance(session_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_provenance_invocation
 		ON artifact_provenance(invocation_id);`,
+	// idx_provenance_parent_invocation is created in CommonIndexes
+	// (after SafeMigrations has added the column for legacy alpha DBs)
+	// rather than here, so the CREATE INDEX doesn't run before the
+	// column exists.
 
 	// ── Analytics Views (2026-08-08) ─────────────────────────────
 	//
@@ -990,6 +1011,17 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_tool_time
 		ON tool_invocations(tool_name, started_at DESC);`,
 
+	// idx_provenance_parent_invocation: powers the agent invocation
+	// tree reconstruction query (WHERE parent_invocation_id = ?).
+	// Lives in CommonIndexes (not BaseTables) because the column was
+	// added in alpha-3 telemetry hardening — SafeMigrations adds it
+	// first, then this CREATE INDEX runs against the live column.
+	// migrateArtifactProvenanceSchema also rebuilds it inside its
+	// table-recreate transaction; CREATE INDEX IF NOT EXISTS makes
+	// both paths idempotent.
+	`CREATE INDEX IF NOT EXISTS idx_provenance_parent_invocation
+		ON artifact_provenance(parent_invocation_id);`,
+
 	// ── Drill Run Ledger (2026-08-12) ──────────────────────────────
 	//
 	// One row per drill execution. The compatibility-matrix query
@@ -1017,6 +1049,11 @@ var CommonIndexes = []string{
 // SafeMigrations contains column additions that may be needed for existing databases.
 // Format: table name, column name, column type
 var SafeMigrations = [][3]string{
+	// alpha-3 telemetry: parent_invocation_id on artifact_provenance
+	// (pre-added by SafeMigrations so CommonIndexes' CREATE INDEX
+	// succeeds before the broader CHECK widening in
+	// migrateArtifactProvenanceSchema runs).
+	{"artifact_provenance", "parent_invocation_id", "TEXT"},
 	{"topics", "parent_topic_id", "TEXT"},
 	{"topics", "embedding", "BLOB"},
 	{"memories", "embedding", "BLOB"},

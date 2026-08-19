@@ -350,7 +350,7 @@ func (dm *DatabaseManager) getEffectiveProvenance() *EffectiveProvenance {
 	if r == nil {
 		return &EffectiveProvenance{ActorKind: "unknown"}
 	}
-	return r.Resolve("", "", "")
+	return r.Resolve("", "", "", "")
 }
 
 // provenanceWithParent returns an effective provenance with
@@ -362,7 +362,22 @@ func (dm *DatabaseManager) provenanceWithParent(parentArtifactID string) *Effect
 	if r == nil {
 		return &EffectiveProvenance{ActorKind: "unknown", ParentArtifactID: parentArtifactID}
 	}
-	return r.Resolve("", "", parentArtifactID)
+	return r.Resolve("", "", parentArtifactID, "")
+}
+
+// provenanceWithParentInvocation returns an effective provenance with
+// parent_invocation_id set to the spawning invocation's ID. Used by
+// agents that spawn sub-invocations (Hermes → Claude Code → memory)
+// so the resulting artifact's provenance row can be walked back to
+// its origin via the invocation tree. Nullable: agents that did not
+// themselves get spawned by a parent invocation pass "" (the column
+// stores NULL).
+func (dm *DatabaseManager) provenanceWithParentInvocation(parentInvocationID string) *EffectiveProvenance {
+	r := dm.GetProvenanceResolver()
+	if r == nil {
+		return &EffectiveProvenance{ActorKind: "unknown", ParentInvocationID: parentInvocationID}
+	}
+	return r.Resolve("", "", "", parentInvocationID)
 }
 
 // nodeUnwrapTx returns the *sql.Tx from a DBNode. When DBNode is a
@@ -1743,6 +1758,17 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// rebuild runs against the renamed table.
 	if err := dm.migrateAuditLevelConstraint(); err != nil {
 		return fmt.Errorf("migrateAuditLevelConstraint: %w", err)
+	}
+
+	// Constraint migration: widen artifact_provenance for alpha-3
+	// telemetry. Adds parent_invocation_id column (traces agent-of-agent
+	// invocation trees) and extends artifact_type CHECK to include
+	// 'handoff' and 'directive'. Idempotent — same read-sqlite_master /
+	// skip-if-current pattern as migrateAuditLevelConstraint. Rebuilds
+	// the six indexes inline so the migration is atomic with the
+	// table recreate.
+	if err := dm.migrateArtifactProvenanceSchema(); err != nil {
+		return fmt.Errorf("migrateArtifactProvenanceSchema: %w", err)
 	}
 
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
