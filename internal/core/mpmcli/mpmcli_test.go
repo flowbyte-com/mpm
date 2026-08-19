@@ -38,3 +38,34 @@ func TestActiveContextFromEnv_Populated(t *testing.T) {
 		t.Errorf("Persona = %q, want openclaw-808", ac.Persona)
 	}
 }
+
+// TestActiveContextFromEnv_MPM_FRAMEWORK pins the directive-scope
+// transport contract: MPM_FRAMEWORK populates ActiveContext.FrameworkName,
+// which ReadDirectivesForFramework uses to filter wake-time directives.
+// Empty/unset must fall back to "mcp" so existing single-MCP callers
+// see no behaviour change.
+func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
+	t.Run("unset defaults to mcp", func(t *testing.T) {
+		t.Setenv("MPM_FRAMEWORK", "")
+		ac := ActiveContextFromEnv()
+		if ac.FrameworkName != "mcp" {
+			t.Errorf("FrameworkName = %q, want mcp", ac.FrameworkName)
+		}
+	})
+
+	t.Run("openclaw reaches FrameworkName", func(t *testing.T) {
+		t.Setenv("MPM_FRAMEWORK", "openclaw")
+		ac := ActiveContextFromEnv()
+		if ac.FrameworkName != "openclaw" {
+			t.Errorf("FrameworkName = %q, want openclaw", ac.FrameworkName)
+		}
+	})
+
+	t.Run("opencode reaches FrameworkName", func(t *testing.T) {
+		t.Setenv("MPM_FRAMEWORK", "opencode")
+		ac := ActiveContextFromEnv()
+		if ac.FrameworkName != "opencode" {
+			t.Errorf("FrameworkName = %q, want opencode", ac.FrameworkName)
+		}
+	})
+}

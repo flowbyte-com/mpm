@@ -93,9 +93,19 @@ func ApplyDirectives(dm interface {
 // runs is benign — only one wins, the other sees ErrNoRows on lookup
 // and skips. Collection is 'directives' (matches the MCP read path);
 // is_prime_directive is set to 1 for legacy web/CLI read compatibility.
+//
+// Scope is materialised into metadata JSON. Empty/unset scope defaults
+// to "global" at write time so legacy seeded rows (no scope in metadata)
+// match the same predicate in ReadDirectivesForFramework via the
+// json_extract(metadata, '$.scope') IS NULL branch. See
+// docs/architecture/directives.md §3.
 func insertSeedRow(db *sql.DB, sd SeedDirective) error {
 	tagsJSON := "[" + strings.Join(quoteStrings(sd.Tags), ",") + "]"
-	meta := `{"is_prime_directive":1,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`
+	scope := sd.Scope
+	if scope == "" {
+		scope = "global"
+	}
+	meta := fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`, scope)
 	_, err := db.Exec(`
 		INSERT OR IGNORE INTO memories
 		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance)
