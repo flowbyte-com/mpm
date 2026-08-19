@@ -901,3 +901,86 @@ hard failure; many are correct as-is (e.g. `HealthCheck` partial
 responses). Tracked in the WISHLIST entry for the pre-alpha lint
 sweep — out of scope for this cut.
 
+## 2026-08-19 — Directive Scope Contract: Multi-Framework Substrate
+
+Two-commit feature that closes the multi-framework directive routing
+problem before the alpha flip. Anchored as `2c6ac2d` (docs contract)
+and shipped as `9704816` (implementation). Full design rationale
+captured in the architecture doc; changelog entry covers the operator
+surface only.
+
+### Background
+
+Five agent frameworks share the MPM substrate today: `openclaw`,
+`opencode`, `pi`, `claude-code`, `hermes`. Before this change, every
+agent received every directive — global and framework-specific alike
+— which meant an OpenCode-specific directive could accidentally
+pollute an OpenClaw wake context, or vice versa. The natural fix
+would be to let each plugin implement its own scope filter, but that
+produces N subtly-different implementations of the same policy. The
+right move is to push the filtering down to the substrate.
+
+### Resolution: scope evaluated by the substrate, not the plugin
+
+The grammar is flat (`"global" | "framework:<id>"`), the storage is
+metadata JSON on the existing `memories` row (no new column, no
+schema migration), and the identity reaches MPM via the `MPM_FRAMEWORK`
+env var on the MCP launch config (same pattern as the existing
+`MPM_ACTIVE_MODE` / `MPM_ACTIVE_PERSONA` reads). The plugin declares
+framework identity; MPM filters. Plugins stay thin transport shims.
+
+### Key Properties (full contract at `docs/architecture/directives.md`)
+
+- **Additive, not replacement.** Global directives always apply;
+  matching scoped directives are added on top. A framework-specific
+  directive can never swallow a fundamental rule like the wake
+  protocol — additive-by-construction prevents the
+  `framework:opencode` row from accidentally suppressing
+  `mpm-seed-read-wake-context`.
+- **Deterministic ordering.** Within the active set, directives are
+  sorted by `StableID` ascending so the agent's wake context is
+  byte-stable across runs. No `priority` field — YAGNI for v1, and
+  the absence of a numeric priority prevents the inevitable
+  `priority: 9999` arms race.
+- **Centralized evaluation.** `ReadDirectivesForFramework(fw)` is the
+  wake-time filter; `ReadDirectives()` stays as the admin/CLI/web-DB
+  no-filter view. The MCP `handleReadDirectives` reports the active
+  framework in its response envelope so debuggers can verify which
+  scope was applied without tailing daemon logs.
+- **Backward compat by construction.** Empty/unset `Scope` defaults
+  to `"global"` at materialisation time. Legacy rows seeded before
+  scope existed match the `json_extract(metadata, '$.scope') IS NULL`
+  branch and surface to every framework — no migration needed.
+- **Safe defaults on the MCP transport.** `MPM_FRAMEWORK` unset
+  defaults to `"mcp"` (the existing single-MCP behaviour), and
+  `ReadDirectivesForFramework` falls back to global-only when the
+  framework is the empty string. A framework-scoped directive never
+  accidentally surfaces to an unidentified caller.
+
+### Files Changed (10)
+
+- `docs/architecture/directives.md` — NEW — the canonical contract (108 lines)
+- `internal/core/seed/directives.go` — `+Scope` field on `SeedDirective`; all four baseline directives explicitly set `Scope="global"`
+- `internal/core/seed/engine.go` — `insertSeedRow` materialises scope into metadata JSON, defaulting empty to `"global"`
+- `internal/core/directive_tools.go` — `+ReadDirectivesForFramework(fw string)`; `ReadDirectives()` unchanged
+- `internal/core/tools/handlers.go` — `handleReadDirectives` uses framework-filtered function and reports `framework` in response envelope
+- `internal/core/core.go` — `+ReadDirectivesForFramework` on `CoreDB` interface
+- `internal/core/mpmcli/mpmcli.go` — `ActiveContextFromEnv` reads `MPM_FRAMEWORK`
+- `internal/core/directive_tools_test.go` — NEW — 6 tests (additive union, scope isolation, empty-framework safety, legacy null-scope, deterministic ordering, admin view)
+- `internal/core/seed/engine_test.go` — +2 tests (all baselines global; scope materialised in metadata)
+- `internal/core/mpmcli/mpmcli_test.go` — +`TestActiveContextFromEnv_MPM_FRAMEWORK` (3 subtests)
+
+### Pre-Commit Gate
+
+All gates pass on the implementation commit (`9704816`):
+
+- `go build ./...` — clean
+- `mpm-lint --gate` — all 9 classification gates green (scans/closes/tx/ctx/go/mutex/sql/fd/imports). `ContentHash()` deliberately excludes `Scope` — scope is routing metadata, not textual content, so changing scope doesn't trigger false-positive drift alerts on `mpm ops init directives`.
+- Synthesis / Reliability / Lifecycle / Wake-Context test sweep — clean
+
+### Follow-Ups (deliberately deferred, not blockers)
+
+1. `mpm directives` CLI output gains a `scope` column — cosmetic, post-alpha CLI sweep
+2. OpenClaw runtime config picks up `MPM_FRAMEWORK=openclaw` — one-line `openclaw config set mcp.servers.mpm.env.MPM_FRAMEWORK openclaw` when the first framework:openclaw directive ships
+3. Seed registry gains a demonstration `framework:openclaw` directive — to prove the wiring end-to-end on a live wake, defer until operator surfaces a real OpenClaw-specific rule that diverges from LLM defaults
+
