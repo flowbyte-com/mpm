@@ -1517,3 +1517,52 @@ func TestHealthCheck_DbPathSurface(t *testing.T) {
 		t.Errorf("expected non-empty db_path, got: %v", m["db_path"])
 	}
 }
+
+// TestShredHandoff_ByIdempotentBySessionID verifies the full lifecycle
+// and the idempotency contract closed by MPM-GAP-SHRED-HANDOFF-2026-08-19:
+// shredding by session_id after the row is already gone must return the
+// same no-op shape as the by-id path (shredded=false, rows_deleted=0)
+// instead of a validation error.
+func TestShredHandoff_ByIdempotentBySessionID(t *testing.T) {
+	dm := newTestSharedDM(t)
+	ac := internal.ActiveContext{Agent: "test", SessionID: "test"}
+
+	seed, err := dm.EndSession("test_probe_session_999", "Ephemeral probe handoff", internal.HandoffClean, nil, nil)
+	if err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	first, err := handleMpmSession(dm, ac, map[string]interface{}{
+		"action": "shred_handoff",
+		"params": map[string]interface{}{"session_id": "test_probe_session_999"},
+	})
+	if err != nil {
+		t.Fatalf("first shred by session_id: %v", err)
+	}
+	m, ok := first.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", first)
+	}
+	if m["shredded"] != true || m["rows_deleted"] != int64(1) {
+		t.Fatalf("first shred: want shredded=true rows_deleted=1, got %v", m)
+	}
+
+	second, err := handleMpmSession(dm, ac, map[string]interface{}{
+		"action": "shred_handoff",
+		"params": map[string]interface{}{"session_id": "test_probe_session_999"},
+	})
+	if err != nil {
+		t.Fatalf("second shred by session_id must be a no-op, got error: %v", err)
+	}
+	m, ok = second.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", second)
+	}
+	if m["shredded"] != false || m["rows_deleted"] != int64(0) {
+		t.Errorf("second shred: want shredded=false rows_deleted=0, got %v", m)
+	}
+
+	if _, err := dm.GetHandoffByID(seed.ID); err != sql.ErrNoRows {
+		t.Errorf("handoff %s still readable after shred, err=%v", seed.ID, err)
+	}
+}
