@@ -345,11 +345,16 @@ func (r *SQLRule) classifySprintf(call *ast.CallExpr, parentMap map[ast.Node]ast
 	if len(call.Args) < 1 {
 		return SQLBuilt
 	}
-	format, ok := call.Args[0].(*ast.BasicLit)
-	if !ok || format.Kind != token.STRING {
+	// The format string is sometimes split across two adjacent string
+	// literals joined with `+` — common for SQL statements that exceed
+	// 80 cols. The Go parser preserves this as a *ast.BinaryExpr of two
+	// *ast.BasicLits (concatAllStatic can prove the parts are all string
+	// literals, so the result is still a static format).
+	formatValue, ok := stringLitConcat(call.Args[0])
+	if !ok {
 		return SQLBuilt
 	}
-	verbCount := sprintfVerbCount(format.Value)
+	verbCount := sprintfVerbCount(formatValue)
 
 	if len(call.Args)-1 != verbCount {
 		return SQLBuilt
@@ -360,6 +365,36 @@ func (r *SQLRule) classifySprintf(call *ast.CallExpr, parentMap map[ast.Node]ast
 		}
 	}
 	return SQLFmtSafe
+}
+
+// stringLitConcat returns the concatenated string value of an expression
+// that is either a single string *ast.BasicLit, or a flat *ast.BinaryExpr
+// tree whose leaves are all string *ast.BasicLits joined by `+`. This is
+// the shape Go's parser produces for `fmt.Sprintf("foo %s" + "bar %s",
+// ...)` — long SQL statements that exceed the 80-col limit are typically
+// written this way. Returns ("", false) for any other shape.
+func stringLitConcat(e ast.Expr) (string, bool) {
+	switch t := e.(type) {
+	case *ast.BasicLit:
+		if t.Kind != token.STRING {
+			return "", false
+		}
+		return t.Value, true
+	case *ast.BinaryExpr:
+		if t.Op != token.ADD {
+			return "", false
+		}
+		left, ok := stringLitConcat(t.X)
+		if !ok {
+			return "", false
+		}
+		right, ok := stringLitConcat(t.Y)
+		if !ok {
+			return "", false
+		}
+		return left + right, true
+	}
+	return "", false
 }
 
 // isSafeInterpolation reports whether an interpolated piece is provably not
