@@ -110,7 +110,16 @@ async function callMpmTool(tool, payload, opts) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(bin, ["call", tool, "--payload", JSON.stringify(payload)], {
+      // 2026-08-13 dispatcher contract: mpm call requires an explicit
+      // {action, params:{}} envelope. `extractParamsOrFail` rejects any
+      // payload missing `params` — so callers passing `{action: "..."}`
+      // (e.g. health_check) must be normalized here, at the subprocess
+      // boundary, before they hit the CLI.
+      const envelope =
+        payload && typeof payload === "object" && payload.params && typeof payload.params === "object"
+          ? payload
+          : { ...(payload || {}), params: {} };
+      child = spawn(bin, ["call", tool, "--payload", JSON.stringify(envelope)], {
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, MPM_LOG_FORMAT: "json" },
       });
