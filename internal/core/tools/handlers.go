@@ -1730,6 +1730,51 @@ func handleListHandoffs(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	}, nil
 }
 
+// handleShredHandoff removes a handoff by id. Handoffs are bootstrap
+// data — destroying one removes the previous session's commitments,
+// open questions, and ended-state from wake context permanently. The
+// shred is idempotent: re-shredding an unknown id returns
+// shredded=false with no error (the previous gap: callers had to
+// inspect rows-affected and decide; this normalizes the contract).
+//
+// Required:
+//
+//	id — handoff id (NOT session_id; look up via session_handoff or
+//	     list_handoffs first if you only have the session_id).
+//
+// Closes MPM-GAP-SHRED-HANDOFF-2026-08-19.
+func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		// Accept session_id for callers that have only the session
+		// identifier (the common test-handoff case). Lookup is a
+		// best-effort convenience; if the row doesn't exist the
+		// downstream DeleteHandoff returns 0 rows and we surface
+		// shredded=false cleanly.
+		if sid, ok := p["session_id"].(string); ok && sid != "" {
+			h, err := dm.GetHandoffBySessionID(sid)
+			if err == nil && h != nil {
+				id = h.ID
+			}
+		}
+	}
+	if id == "" {
+		return nil, fmt.Errorf("shred_handoff: 'id' (or 'session_id') is required")
+	}
+
+	n, err := dm.DeleteHandoff(id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":  true,
+		"shredded": n > 0,
+		"handoff_id": id,
+		"rows_deleted": n,
+		"message": "handoff shredded",
+	}, nil
+}
+
 // handleQueryGlobalRules returns memories from the shared DB that
 // are marked is_global = 1. This is the read-side of the multi-agent
 // shared epistemology: every agent on the workstation sees the same
@@ -3181,6 +3226,8 @@ func handleMpmSession(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleSessionHandoff(dm, ac, params)
 	case "list_handoffs":
 		return handleListHandoffs(dm, ac, params)
+	case "shred_handoff":
+		return handleShredHandoff(dm, ac, params)
 	case "flush":
 		return handleFlushScratchpad(dm, ac, params)
 	case "read":
@@ -3190,7 +3237,7 @@ func handleMpmSession(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	case "promote_scratchpad":
 		return handlePromoteScratchpad(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_session. Valid actions include end, handoff, list_handoffs, flush, read, discard, promote_scratchpad", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_session. Valid actions include end, handoff, list_handoffs, shred_handoff, flush, read, discard, promote_scratchpad", action)
 	}
 }
 

@@ -32,7 +32,7 @@ func TestHandoff_EndSession_InsertsAndReadsBack(t *testing.T) {
 	require.NotZero(t, h.EndedAt)
 
 	// Read it back via the helper
-	got, err := dm.getHandoffBySessionID("session-test-1")
+	got, err := dm.GetHandoffBySessionID("session-test-1")
 	require.NoError(t, err)
 	require.Equal(t, h.ID, got.ID, "id should match between write and read-back")
 	require.Equal(t, h.Summary, got.Summary)
@@ -192,4 +192,57 @@ func TestHandoff_EndSession_RejectsBadInputs(t *testing.T) {
 func newHandoffTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
 	return NewTestDM(t)
+}
+
+// TestHandoff_DeleteHandoff_RemovesRow pins the happy path: write a
+// handoff, delete it by id, verify the row is gone and a follow-up
+// lookup returns sql.ErrNoRows.
+//
+// Closes MPM-GAP-SHRED-HANDOFF-2026-08-19: before DeleteHandoff, the
+// only way to remove a handoff was direct SQL. Tests and integration
+// smoke scripts had to bypass the supported interface.
+func TestHandoff_DeleteHandoff_RemovesRow(t *testing.T) {
+	dm := newHandoffTestDM(t)
+
+	h, err := dm.EndSession(
+		"session-shred-1",
+		"round 1 — to be shredded",
+		HandoffClean,
+		[]string{"will be deleted"},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, h)
+	require.NotEmpty(t, h.ID)
+
+	n, err := dm.DeleteHandoff(h.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "exactly one row deleted")
+
+	// Lookup must now return sql.ErrNoRows — the row is truly gone.
+	_, err = dm.GetHandoffByID(h.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+// TestHandoff_DeleteHandoff_Idempotent pins the contract that
+// re-shredding an unknown id is a no-op (0 rows, no error). The handler
+// surface uses this to report shredded=false cleanly when the caller
+// passes a stale id.
+func TestHandoff_DeleteHandoff_Idempotent(t *testing.T) {
+	dm := newHandoffTestDM(t)
+
+	n, err := dm.DeleteHandoff("never-existed")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), n)
+
+	// Empty id is rejected up front (programming error, not a real shred).
+	_, err = dm.DeleteHandoff("")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "id is required")
+
+	// Nil DB rejects up front (same shape as EndSession's nil-DB guard).
+	var nilDM *DatabaseManager
+	_, err = nilDM.DeleteHandoff("any")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "db not initialized")
 }

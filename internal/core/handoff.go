@@ -154,20 +154,24 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 	// Read the persisted row back so the caller sees the canonical id
 	// (the one that survived the upsert, not a now-stale generated id)
 	// and the canonical created_at (preserved across upserts).
-	persisted, err := dm.getHandoffBySessionID(sessionID)
+	persisted, err := dm.GetHandoffBySessionID(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("EndSession: read back: %w", err)
 	}
 	return persisted, nil
 }
 
-// getHandoffBySessionID returns the handoff row for a session. Returns
-// sql.ErrNoRows if none exists. Internal helper for EndSession to
-// canonicalize the upsert result.
+// GetHandoffBySessionID returns the handoff row for a session. Returns
+// sql.ErrNoRows if none exists. Promoted from getHandoffBySessionID
+// (private) when shred_handoff was added — callers that hold only a
+// session identifier (the common case for tests, plugin shutdown
+// hooks, and integration smoke scripts) need a public lookup path
+// before shredding. The handoff id is required for DeleteHandoff, so
+// callers that have only session_id must round-trip through here.
 //
 // Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
 // timestamps_unified_v1). The driver scans them directly into int64.
-func (dm *DatabaseManager) getHandoffBySessionID(sessionID string) (*Handoff, error) {
+func (dm *DatabaseManager) GetHandoffBySessionID(sessionID string) (*Handoff, error) {
 	row := dm.db.QueryRow(`
 		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
 		FROM session_handoffs WHERE session_id = ?`, sessionID)
@@ -323,6 +327,43 @@ func (dm *DatabaseManager) PruneHandoffs(retentionDays int) (int64, error) {
 		return 0, fmt.Errorf("PruneHandoffs: %w", err)
 	}
 	n, _ := result.RowsAffected()
+	return n, nil
+}
+
+// DeleteHandoff removes a single handoff by id. Returns
+// (rowsAffected, error) so callers can distinguish "not found" (0 rows,
+// no error) from a real DB failure. Use session_id lookup first when
+// the caller holds the session identifier but not the handoff id.
+//
+// Handoffs are bootstrap data: destroying one removes the previous
+// session's commitments, open questions, and ended-state from wake
+// context permanently. The destruction is loud (AuditWarn) because it
+// is irreversible and there is no recycle bin — operators reading the
+// audit ledger should see exactly when a handoff was removed and why.
+//
+// Closes MPM-GAP-SHRED-HANDOFF-2026-08-19: before this method,
+// `mpm_session` had no shred path for handoffs and tests had to bypass
+// the supported interface (direct SQL) to clean up after themselves.
+func (dm *DatabaseManager) DeleteHandoff(id string) (int64, error) {
+	if dm == nil || dm.db == nil {
+		return 0, fmt.Errorf("DeleteHandoff: db not initialized")
+	}
+	if id == "" {
+		return 0, fmt.Errorf("DeleteHandoff: id is required")
+	}
+	result, err := dm.db.Exec(`DELETE FROM session_handoffs WHERE id = ?`, id)
+	if err != nil {
+		dm.LogAudit(AuditWarn, "handoff", "DeleteHandoff failed: "+err.Error(), "", AuditContext{
+			"handoff_id": id,
+		})
+		return 0, fmt.Errorf("DeleteHandoff: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n > 0 {
+		dm.LogAudit(AuditWarn, "handoff", "DeleteHandoff shredded handoff row", "", AuditContext{
+			"handoff_id": id,
+		})
+	}
 	return n, nil
 }
 
