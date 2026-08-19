@@ -637,3 +637,141 @@ only converted the column *values*, never the column *affinity*.
 - All 11 internal/core packages and 6 main-module packages green
   with `-race`.
 
+## 2026-08-19 — Pre-Alpha Cut #2: OpenClaw ↔ MPM Integration Hardening
+
+Three defect IDs shipped in one tag roll (`v0.1.0-prealpha.2`). The
+common thread: gaps in the OpenClaw ↔ MPM integration that the alpha
+dogfooding surfaced but pre-alpha-1 cut without.
+
+### 1. `mpm_session` gains `shred_handoff` action (`c7cefb4`)
+
+Closes `MPM-GAP-SHRED-HANDOFF-2026-08-19`.
+
+Before this commit, `mpm_session` had read paths (`end`, `handoff`,
+`list_handoffs`) but no supported destroy path. Tests and integration
+smoke scripts (notably the alpha-integration handoff
+`84bd0965b465d416` / session_id
+`openclaw-alpha-integration-test-2026-08-19`) had to drop to direct
+SQL — bypassing the supported interface — to clean up after themselves.
+
+- **`feat(core): DeleteHandoff(id)`** — single-row `DELETE` returning
+  `(rowsAffected, error)`. Idempotent contract: re-shredding an
+  unknown id returns `n=0` with no error, surfacing `shredded=false`
+  cleanly to callers. Loud `AuditWarn` on real destruction (handoffs
+  are bootstrap data; destruction is irreversible).
+- **`feat(core): promoted `getHandoffBySessionID` → `GetHandoffBySessionID`**
+  — callers that hold only a session identifier need a public lookup
+  before shredding (the common test/plugin case).
+- **`feat(core): handleShredHandoff`** wired into the `mpm_session`
+  dispatcher. Accepts either `id` (handoff id) or `session_id`
+  (look up first; convenience for the test-cleanup case). Updates the
+  valid-actions error message.
+- **Tests:** `TestHandoff_DeleteHandoff_RemovesRow` (happy path,
+  with `sql.ErrNoRows` read-back), `TestHandoff_DeleteHandoff_Idempotent`
+  (unknown id, empty id, nil DB). `TestAllDomainDispatchers` gains the
+  `session/shred_handoff` entry to keep the dispatcher-table smoke test
+  honest against future refactors.
+
+Live verification (`mpm call mpm_session --payload '{action: end, …}'`
+then `… '{action: shred_handoff, params: {session_id: …}}'`):
+
+```
+{"handoff_id":"…","message":"handoff shredded","rows_deleted":1,
+ "shredded":true,"success":true}
+```
+
+### 2. `openclaw-mpm-memory` params-envelope fix (`bcd1c02`, `58dd1f6`)
+
+Closes `MPM-OBSERVATION-PLUGIN-INDEX-AHEAD-OF-TAG-2026-08-19`.
+
+The dispatcher requires every payload to carry an explicit
+`{action, params:{}}` envelope (`extractParamsOrFail` rejects payloads
+missing `params`). The plugin's `callMpmTool` was passing
+`{action: "health_check"}` (no `params`) straight to `mpm call`, which
+the dispatcher then rejected with `"unknown error: missing \"params\" envelope"`.
+
+- **`fix(plugin): params envelope at the subprocess boundary`** —
+  `callMpmTool` now normalizes the payload shape: if the incoming
+  payload lacks `params`, attach `{params: {}}` before serialization.
+  Action-level errors (network failure, dispatcher rejection) are
+  unchanged; only the payload shape is repaired. The plugin's three
+  sub-paths (search / get / admin) all funnel through this single
+  helper, so one fix covers every parameterless action.
+- **`fix(plugin): bump to 0.1.2`** — version bump so npm semver can
+  distinguish v0.1.1 (which still rejects parameterless calls) from
+  v0.1.2 (which normalizes them).
+
+### 3. Companion fix: `~/.mpm/.mcp.json` absolute path
+
+Fixes `MPM-DEFECT-MCP-PATH-RELATIVE-2026-08-19`. This file lives in
+the operator's home directory (outside the MPM repo); the MPM-side
+defect was a stale `./bin/mpm-mcp` + `MPM_WORKSPACE=.` pair that
+silently broke the MCP stdio bundle whenever the gateway's cwd wasn't
+`~/.mpm`. Replaced with absolute paths
+(`/home/v/.mpm/bin/mpm-mcp` + `MPM_WORKSPACE=/home/v/.mpm`) matching
+the canonical `agent_plugins/openclaw-mpm-memory/.mcp.json` snapshot.
+
+### Tag: `v0.1.0-prealpha.2`
+
+Annotation tag on `58dd1f6`. The prior tag (`v0.1.0-prealpha.1`,
+commit `238dd10`) is left frozen in history; `mpm-alpha` (rolling
+alias) advanced to `58dd1f6`. Reproducibility-from-tag for the
+plugin's `health_check` path is now intact (v0.1.0-prealpha.1 did NOT
+include the params-envelope fix; prealpha-2 does).
+
+### Pre-alpha housekeeping
+
+Two companion commits ship alongside the defect fixes — restoring the
+working-tree hygiene that the dogfooding window tolerated but the
+2026-08-25 alpha cut cannot:
+
+- **`chore(gitignore): quarantine transient SQLite + cmd/mpm/backup`** —
+  extends `.gitignore` with `*.db`, `*.db-wal`, `*.db-shm`, `store.db`,
+  and `cmd/mpm/backup` so `git add .` doesn't permanently commit a
+  binary database to clone history.
+- **`test(handlers): track backup singleton regression`** — commits
+  `cmd/mpm/handlers_backup_singleton_test.go` (previously untracked
+  regression test for the backup subsystem).
+- **`docs(plugin): pin 2026-08-19 alpha integration validation receipt`** —
+  commits `agent_plugins/openclaw-mpm-memory/VALIDATION-2026-08-19.md`
+  (audit record of the four-surface validation that drove this cut).
+
+### `mpm-lint` gate restore
+
+The pre-commit `mpm-lint --gate` was failing on two pre-existing
+violations that the dogfooding window tolerated via `--no-verify`:
+
+1. **`sql-built` false positive** in
+   `internal/core/migration_memories_affinity_rebuild.go:945`
+   (`repopulateStandaloneFTS`). The scanner's `classifySprintf`
+   cast the format-string arg to `*ast.BasicLit`, which fails when
+   the SQL is split across two adjacent string literals joined
+   with `+` (the shape Go emits for statements that exceed 80 cols).
+   The interpolated args are allowlist-guarded upstream
+   (`rebuildMemoriesFtsTableAllowlist[ftsTable]` /
+   `rebuildMemoriesTableAllowlist[table]` — the static analysis
+   confirmed the helper was correctly identifying them; only the
+   format-string extraction was failing). Fix: new `stringLitConcat`
+   helper accepts a flat `*ast.BinaryExpr` tree of string `*ast.BasicLit`s
+   and returns the concatenated value. Pinned by
+   `TestSQL_SprintfConcatFormatString_AllowlistGuarded` so the gate
+   can never silently regress.
+2. **2 `no-check` sites** in
+   `internal/core/migration_memories_affinity_rebuild.go`
+   (`checksumMemoriesTable` line 863, `countMemoriesFKViolations`
+   line 967) — `Scan` into composite values without explicit
+   `if err != nil { return err }` after the assignment. Both
+   converted to the explicit-check form (the existing `return X,
+   err` tail-end was already correct in spirit but the scanner
+   demands the explicit `if` form).
+
+Gate now exits 0 on clean code without `--no-verify`. The 58
+`logged-swallow` sites in the scans report (logged but not
+returned) and 220 `hard-fail` sites (err properly returned — the
+correct class) are not gated by default. The 58 logged-swallow
+sites are best-effort "log a warning, default to 0/empty, continue"
+patterns where the caller wanted graceful degradation rather than
+hard failure; many are correct as-is (e.g. `HealthCheck` partial
+responses). Tracked in the WISHLIST entry for the pre-alpha lint
+sweep — out of scope for this cut.
+
