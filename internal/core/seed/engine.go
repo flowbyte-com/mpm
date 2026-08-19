@@ -50,21 +50,42 @@ func ApplyDirectives(dm interface {
 	}
 
 	for _, sd := range SeedDirectives {
-		// 1. Look up existing row by id.
+		// 1. Look up the row by id, including soft-deleted rows.
+		// Liveness is sentinel-agnostic: NULL and 0 both mean "live"
+		// (legacy installs wrote deleted_at = 0; current code writes
+		// NULL and soft-deletes with a real Unix-epoch value).
 		var existingContent string
 		var existingID string
+		var existingDeleted sql.NullInt64
 		err := db.QueryRow(
-			`SELECT id, content FROM memories WHERE id = ? AND deleted_at IS NULL`,
+			`SELECT id, content, deleted_at FROM memories WHERE id = ?`,
 			sd.StableID,
-		).Scan(&existingID, &existingContent)
+		).Scan(&existingID, &existingContent, &existingDeleted)
 		if err != nil && err != sql.ErrNoRows {
 			return summary, fmt.Errorf("seed lookup %s: %w", sd.StableID, err)
 		}
 
+		softDeleted := err == nil && existingDeleted.Valid && existingDeleted.Int64 > 0
+
 		switch {
-		case err == sql.ErrNoRows:
-			// 2a. No existing row — insert.
-			if err := insertSeedRow(db, sd); err != nil {
+		case err == sql.ErrNoRows || softDeleted:
+			// 2a. No live row. Insert if truly absent, otherwise revive
+			// the soft-deleted row with the current seed content.
+			//
+			// INSERT OR IGNORE alone cannot restore a shredded baseline:
+			// the stable-id PRIMARY KEY is still occupied by the dead
+			// row, so the insert is silently swallowed while the summary
+			// reports "Created". The tiered-fallback contract says the
+			// baseline is non-negotiable ("standalone runtime is never
+			// directive-blind"), so re-init must UNDELETE rather than
+			// collide. This also makes `mpm ops init directives` actually
+			// usable as the documented recovery path after an accidental
+			// shred.
+			if softDeleted {
+				if err := reviveSeedRow(db, sd); err != nil {
+					return summary, fmt.Errorf("revive %s: %w", sd.StableID, err)
+				}
+			} else if err := insertSeedRow(db, sd); err != nil {
 				return summary, fmt.Errorf("insert %s: %w", sd.StableID, err)
 			}
 			summary.Created = append(summary.Created, sd.StableID)
@@ -74,7 +95,7 @@ func ApplyDirectives(dm interface {
 			return summary, fmt.Errorf("lookup %s: %w", sd.StableID, err)
 
 		default:
-			// 2c. Row exists — compare content.
+			// 2c. Live row exists — compare content.
 			if strings.TrimSpace(existingContent) == strings.TrimSpace(sd.Content) {
 				summary.Skipped = append(summary.Skipped, sd.StableID)
 			} else {
@@ -86,6 +107,29 @@ func ApplyDirectives(dm interface {
 	}
 
 	return summary, nil
+}
+
+// reviveSeedRow restores a soft-deleted seed row (see ApplyDirectives
+// 2a). A soft-deleted stable id still occupies the PRIMARY KEY, so a
+// plain insert would be silently swallowed by INSERT OR IGNORE. UNDELETE
+// instead and refresh the row with the current seed content/tags/scope.
+// The FTS reindex and memory-revision triggers fire on the UPDATE, so
+// the revived directive becomes searchable and revisioned like any
+// other write.
+func reviveSeedRow(db *sql.DB, sd SeedDirective) error {
+	tagsJSON := "[" + strings.Join(quoteStrings(sd.Tags), ",") + "]"
+	scope := sd.Scope
+	if scope == "" {
+		scope = "global"
+	}
+	meta := fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`, scope)
+	_, err := db.Exec(`
+		UPDATE memories
+		SET deleted_at = NULL, content = ?, tags = ?, metadata = ?,
+		    is_prime_directive = 1, collection = 'directives'
+		WHERE id = ? AND deleted_at IS NOT NULL AND deleted_at > 0`,
+		sd.Content, tagsJSON, meta, sd.StableID)
+	return err
 }
 
 // insertSeedRow writes one seed row. Uses INSERT OR IGNORE on the

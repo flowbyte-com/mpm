@@ -1,33 +1,35 @@
 // engine_skills_test.go — Task 15 of the skills-layer plan.
 //
-// Pins three contracts for ApplySkills:
-//   1. First run creates the rows (one per SeedSkills entry).
+// Pins three contracts for seed.ApplySkills:
+//   1. First run creates the rows (one per seed.SeedSkills entry).
 //   2. Re-run is a no-op (idempotent): all rows in Skipped.
 //   3. Operator's local edit to the seeded row's content is preserved,
 //      not overwritten — flagged in `Updated` for visibility.
 
-package seed
+package seed_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/flowbyte-com/mpm-core/seed"
 )
 
 func TestApplySkills_FirstRunCreatesAll(t *testing.T) {
 	dm := newTestDM(t)
 
-	summary, err := ApplySkills(dm)
+	summary, err := seed.ApplySkills(dm)
 	require.NoError(t, err)
 
-	require.Equal(t, len(SeedSkills), len(summary.Created),
+	require.Equal(t, len(seed.SeedSkills), len(summary.Created),
 		"first run should create every seeded skill, got Created=%v", summary.Created)
 	require.Equal(t, 0, len(summary.Skipped), "first run has nothing to skip")
 	require.Equal(t, 0, len(summary.Updated), "first run has nothing drifted")
 
 	// Verify the rows are actually present in the DB at the deterministic
 	// id that ReadSkill/ListSkills resolve against.
-	for _, s := range SeedSkills {
+	for _, s := range seed.SeedSkills {
 		savedID, err := s.SavedID()
 		require.NoError(t, err)
 		var got string
@@ -40,11 +42,11 @@ func TestApplySkills_FirstRunCreatesAll(t *testing.T) {
 func TestApplySkills_IdempotentOnSecondRun(t *testing.T) {
 	dm := newTestDM(t)
 
-	first, err := ApplySkills(dm)
+	first, err := seed.ApplySkills(dm)
 	require.NoError(t, err)
 	require.NotZero(t, len(first.Created))
 
-	second, err := ApplySkills(dm)
+	second, err := seed.ApplySkills(dm)
 	require.NoError(t, err)
 
 	require.Equal(t, 0, len(second.Created), "second run must create zero rows")
@@ -56,12 +58,12 @@ func TestApplySkills_IdempotentOnSecondRun(t *testing.T) {
 func TestApplySkills_DriftDetected(t *testing.T) {
 	dm := newTestDM(t)
 
-	first, err := ApplySkills(dm)
+	first, err := seed.ApplySkills(dm)
 	require.NoError(t, err)
 	require.NotZero(t, len(first.Created))
 
 	// Mutate one seeded skill's content in place — operator's local edit.
-	savedID, err := SeedSkills[0].SavedID()
+	savedID, err := seed.SeedSkills[0].SavedID()
 	require.NoError(t, err)
 	_, err = dm.SQLDB().Exec(
 		`UPDATE memories SET content = content || '
@@ -69,7 +71,7 @@ func TestApplySkills_DriftDetected(t *testing.T) {
 [locally edited]' WHERE id = ?`, savedID)
 	require.NoError(t, err)
 
-	second, err := ApplySkills(dm)
+	second, err := seed.ApplySkills(dm)
 	require.NoError(t, err)
 
 	require.NotZero(t, len(second.Updated),
