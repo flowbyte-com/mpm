@@ -24,7 +24,11 @@ import (
 // every whitelisted site must have a one-line reason.
 func TestNoNewDirectStderrWrites(t *testing.T) {
 	allowedSites := map[string]string{
-		"call.go:100":       "JSON error envelope for `mpm call` — must be raw JSON, not user-formatted",
+		// call.go:100 was a JSON error envelope written to stderr.
+		// Removed 2026-08-19: error envelopes now route through writeEnvelope
+		// to os.Stdout (lesson 2b22765cd1b13a81; theory d8c64fe9b7528d53).
+		// All `mpm call` envelopes (success or failure) live on stdout;
+		// stderr is reserved for zap log lines only.
 		"simple_cmds.go:619": "Multi-line usage help text — structured output, not a single error message",
 		"simple_cmds.go:621": "Multi-line usage help text — structured output, not a single error message",
 	}
