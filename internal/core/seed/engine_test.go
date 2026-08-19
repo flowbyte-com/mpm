@@ -160,3 +160,49 @@ func TestContentHash_StableForSameInput(t *testing.T) {
 	// 64 hex chars = SHA-256.
 	require.Equal(t, 64, len(a), "ContentHash must be 64 hex chars (SHA-256), got %d", len(a))
 }
+
+// TestSeedDirective_AllBaselinesAreGlobal pins the default scope on the
+// baseline cognitive bootstrap. Every entry shipped in SeedDirectives
+// must be reachable by every agent framework — no framework-scoped
+// directive in the baseline. If a future contributor adds a baseline
+// directive without Scope="global", this catches it before alpha ships.
+func TestSeedDirective_AllBaselinesAreGlobal(t *testing.T) {
+	for _, sd := range SeedDirectives {
+		scope := sd.Scope
+		if scope == "" {
+			scope = "global"
+		}
+		require.Equal(t, "global", scope,
+			"baseline directive %s must have Scope=\"global\" or unset (which defaults to global); got %q",
+			sd.StableID, sd.Scope)
+	}
+}
+
+// TestApplyDirectives_ScopeMaterialisedInMetadata pins that the
+// seed engine writes metadata.scope correctly. ReadDirectivesForFramework
+// relies on this JSON field for its WHERE clause; if insertSeedRow stops
+// materialising scope, framework-scoped directives silently break.
+func TestApplyDirectives_ScopeMaterialisedInMetadata(t *testing.T) {
+	dm := newTestDM(t)
+
+	_, err := ApplyDirectives(dm)
+	require.NoError(t, err)
+
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, json_extract(metadata, '$.scope') FROM memories
+		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		  AND deleted_at IS NULL
+		ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		var scope *string
+		require.NoError(t, rows.Scan(&id, &scope))
+		require.NotNil(t, scope, "seeded directive %s must have metadata.scope set", id)
+		require.Equal(t, "global", *scope,
+			"seeded baseline directive %s must materialise scope=global in metadata, got %q",
+			id, *scope)
+	}
+}

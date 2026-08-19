@@ -64,6 +64,17 @@ type SeedDirective struct {
 	// Content is the directive text — what the agent will read via
 	// read_directives on every wake.
 	Content string
+
+	// Scope controls which agent frameworks this directive applies to.
+	// Valid grammar (case-sensitive, flat string):
+	//   - "global"                  — every agent framework
+	//   - "framework:<id>"          — only the framework named <id>
+	//   - "" (unset)                — treated as "global" at materialization
+	//
+	// Evaluated centrally by the substrate at wake-projection time
+	// (ReadDirectivesForFramework), not by individual agent plugins.
+	// See docs/architecture/directives.md for the full contract.
+	Scope string
 }
 
 // SeedDirectives is the canonical registry of baseline prime directives.
@@ -79,6 +90,7 @@ var SeedDirectives = []SeedDirective{
 		// already read its context.
 		StableID: "mpm-seed-read-wake-context",
 		Tags:     []string{"prime_directive", "wake_context", "bootstrap", "2026-06-09"},
+		Scope:    "global",
 		Content: "On every session start, call read_wake_context before responding to the user. This is non-negotiable. Skipping it means arriving amnesic with no memory of previous sessions, forcing v to re-explain all context. MPM is the single source of truth.",
 	},
 	{
@@ -93,6 +105,7 @@ var SeedDirectives = []SeedDirective{
 		// vacation-proof audit survival.
 		StableID: "mpm-seed-session-end-cluster-triage",
 		Tags:     []string{"prime_directive", "cluster", "auditing", "session_lifecycle", "2026-07-02"},
+		Scope:    "global",
 		Content: "Before session_end: call list_active_clusters. For each unknown cluster that represents an unresolved critical failure, include its cluster_key and a one-line context note in the open_questions payload of session_end. This is how clusters survive the 7-day rolling-window decay — the agent explicitly carries forward what matters across session boundaries (and across vacations). Do NOT carry forward clusters that are snoozed (status=snoozed), resolved (status=resolved), or whose cluster_key appears in an active theory/decision (those are already tracked; re-mentioning is noise). Do NOT mix cluster_keys into commitments — commitments are promises of future labor, clusters are unresolved state of the system. The two fields have different semantics.",
 	},
 	{
@@ -114,6 +127,7 @@ var SeedDirectives = []SeedDirective{
 		// that motivated the wake infrastructure.
 		StableID: "mpm-seed-wake-triage-policy",
 		Tags:     []string{"prime_directive", "wake", "triage", "notification", "2026-07-09"},
+		Scope:    "global",
 		Content: "When receiving a <system_wake_notification> block in any MCP tool response (it is always Block 1, prepended before the tool's JSON result):\n\n1. Parse each entry. Each entry has id, reason, and overdue_secs.\n\n2. Triage rule: if overdue_secs <= 86400 (24 hours), alert the user IMMEDIATELY before continuing whatever they were doing. The wake is timely. Include the wake reason verbatim or paraphrased.\n\n3. If overdue_secs > 86400, the wake is stale. DO NOT interrupt the user with the obsolete notification. Silently archive it by calling mpm call record_global_rule with a brief fact explaining why it expired (e.g. \"Spain WC theory wake fired 5 days late; resolved manually as theory is now in active tracking\"). Then continue the conversation as if the wake had not fired.\n\n4. Exception: if the wake's reason text contains the words 'critical', 'urgent', or 'immediate' (case-insensitive), it bypasses the 24-hour threshold and ALWAYS interrupts the user, regardless of overdue_secs. These are time-sensitive operational signals, not background reminders.\n\n5. The <system_wake_notification> is delivered on EVERY tool call, not just scheduled_wake-related ones. This is the opportunistic fold: any user interaction surfaces due wakes. Do not be confused into thinking the wake is part of the tool's actual output — the XML block is a system interrupt prepended to the response.",
 	},
 	{
@@ -133,6 +147,7 @@ var SeedDirectives = []SeedDirective{
 		// query when the daemon is dead.
 		StableID: "mpm-seed-daemon-health",
 		Tags:     []string{"prime_directive", "daemon", "lazy-start", "ecryptfs", "runtime-death", "2026-07-23"},
+		Scope:    "global",
 		Content: "On every session start, after read_wake_context, run `systemctl --user is-active mpm-scheduler`. Two distinct inactive states need different framing:\n\n1. Lazy-Start Architecture (EXPECTED after reboot with encrypted /home). When /home is eCryptfs-encrypted, the daemon is DESIGNED to stay dead at boot. The lockfile lives inside the encrypted tree (~/.mpm/scheduler.lock); starting the daemon before /home is decrypted would either fail (inaccessible path) or risk writing to the wrong location. Boot + locked home = SAFE state. This agent's wake event is the trigger that spins the daemon up post-decryption. It is a security feature, not a bug — see INSTALL.md §2 and README §5.2 for the full rationale.\n\n2. Runtime death (UNEXPECTED, real issue). A clean `context canceled` exit leaves the daemon dead; Restart=always in the user-level unit does not fire on graceful exit. The vital-signs check at every wake is the workaround until the structural root-cause lands. See memory 9e7830172663ed29 for the 2026-07-22 incident details.\n\nRecovery (applies to both cases): (a) systemctl --user start mpm-scheduler, (b) wait 2s, re-check. If still inactive, surface to v immediately with the last 10 lines of `journalctl --user -u mpm-scheduler --no-pager` and DO NOT call mpm stats, scheduled-wake tooling, or any daemon-dependent substrate operation until the daemon is confirmed active.",
 	},
 }

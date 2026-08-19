@@ -263,6 +263,7 @@ type CoreDB interface {
 
 	// ─── Directives ──────────────────────────────────────────────────
 	ReadDirectives() ([]map[string]interface{}, error)
+	ReadDirectivesForFramework(fw string) ([]map[string]interface{}, error)
 	ProactiveRecallHint(conversationText string, maxHints int, minScore float64) ([]map[string]interface{}, error)
 
 	// ─── GC ──────────────────────────────────────────────────────────
