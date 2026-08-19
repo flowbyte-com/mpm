@@ -26,8 +26,12 @@ func handleBackup(args []string) int {
 	if dm == nil {
 		return 1
 	}
+	// Extract the path string only. Do NOT call dm.Close() — dbManager is
+	// a process-wide singleton reused by every CLI invocation in this
+	// process, and closing it here would break every subsequent command.
+	// The 2026-08-13 audit flagged this; the regression is locked in by
+	// cmd/mpm/handlers_backup_singleton_test.go::TestHandleBackup_LeavesSingletonAlive.
 	dbPath := dm.DBPath()
-	dm.Close()
 
 	// Default output: timestamped .sql next to the source DB.
 	outputPath := defaultBackupPath(dbPath)
@@ -88,9 +92,15 @@ func handleRestoreDB(args []string) int {
 	if dm == nil {
 		return 1
 	}
+	// Extract the path strings only. Do NOT call dm.Close() — dbManager is
+	// a process-wide singleton reused by every CLI invocation in this
+	// process. The actual restore writes through a fresh sql.Open below
+	// (line ~145), not through the singleton, so closing the singleton
+	// here serves no purpose and breaks every subsequent command. The
+	// 2026-08-13 audit flagged this; regression locked in by
+	// cmd/mpm/handlers_backup_singleton_test.go::TestHandleRestoreDB_LeavesSingletonAlive.
 	dbDir := filepath.Dir(dm.DBPath())
 	dbPath := dm.DBPath()
-	dm.Close()
 
 	cleanPath := filepath.Clean(sqlPath)
 	if !strings.HasPrefix(cleanPath, dbDir+string(filepath.Separator)) {
@@ -206,8 +216,14 @@ func defaultBackupPath(dbPath string) string {
 // flushWal runs `PRAGMA wal_checkpoint(TRUNCATE)` against dbPath so the dump
 // captures all writes, not just what's in the main file. Uses a transient
 // sql.DB connection (caller's connection is presumed closed or about to be).
+//
+// DSN: must use mpminternal.SqliteWriteDSN so the transient connection
+// opens with foreign_keys=ON. A bare path would leave FK enforcement at
+// the SQLite default (off), which lets the checkpoint silently drop rows
+// that violate foreign-key constraints. The 2026-08-13 audit flagged
+// this; locked in by handlers_backup_singleton_test.go::TestFlushWal_PassesForeignKeysPragma.
 func flushWal(dbPath string) error {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", mpminternal.SqliteWriteDSN(dbPath))
 	if err != nil {
 		return err
 	}
