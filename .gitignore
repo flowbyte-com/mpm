@@ -104,6 +104,12 @@ backups/
 docs/superpowers/
 active.json
 
+# Ad-hoc agent system prompts used to drive one-shot validation flows
+# (e.g. the mpm_intergration_check prompt used during the 2026-08-19
+# alpha-integration dogfooding). These are local working artifacts for
+# the agent's task harness, never tracked in the MPM core repo.
+sys_prompts/
+
 # Nested Go build outputs (when building inside cmd/ subdirs via
 # `go build ./cmd/mpm` rather than the root-level `make build`).
 # Prevents accidental commits of stale local builds that shadow
