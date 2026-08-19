@@ -1,9 +1,9 @@
-// Package seed (engine_capabilities.go) — ApplyCapabilities runtime.
+// Package cap (capabilities_seed.go) — ApplyCapabilities runtime.
 //
-// Mirrors ApplyDirectives (engine.go) and ApplySkills (engine.go)
-// for the capability subsystem. Walks the SeedCapabilities
-// registry and idempotently inserts each entry into the
-// capabilities table. Contract:
+// Mirrors ApplyDirectives (seed/engine.go) and ApplySkills
+// (seed/engine.go) for the capability subsystem. Walks the
+// SeedCapabilities registry and idempotently inserts each entry into
+// the capabilities table. Contract:
 //
 //   - Row absent (no live id matching SavedID)        → Created
 //   - Row present, source_code matches the seed       → Skipped
@@ -16,16 +16,26 @@
 //
 // Initial state on insert is "validated" (not "active") so
 // the lifecycle is exercised: probation → active is earned
-// on first real invocations. See capabilities.go file header
-// for the rationale.
+// on first real invocations. See seed/capabilities.go file
+// header for the rationale.
 //
 // Routing:
-//   ApplyCapabilities goes through capability.Store.InsertCapabilityProposal
-//   (the canonical writer) so the scanner, linter-exempt path for
-//   curated source, name-uniqueness check, and dependency check all
-//   run — same guarantees any operator proposal gets. The seed does
-//   NOT short-circuit with a raw INSERT.
-package seed
+//
+//	ApplyCapabilities goes through capability.Store.InsertCapabilityProposal
+//	(the canonical writer) so the scanner, linter-exempt path for
+//	curated source, name-uniqueness check, and dependency check all
+//	run — same guarantees any operator proposal gets. The seed does
+//	NOT short-circuit with a raw INSERT.
+//
+// Why this lives in its own subpackage: the capability package
+// imports the parent mpm-core module (executor, store, lifecycle),
+// so the seed package itself must stay free of that dependency —
+// the core module's boot path (db.go initUnifiedSchema) imports
+// seed for the directive bootstrap, and an import chain back into
+// the parent package would be a cycle. Only the capability-seeding
+// runtime needs capability; the registry types (SeedCapability,
+// SeedCapabilities) stay in package seed.
+package cap
 
 import (
 	"database/sql"
@@ -33,12 +43,13 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/capability"
+	"github.com/flowbyte-com/mpm-core/seed"
 )
 
 // capabilityStoreSeeding is the slice of the capability.Store
 // interface that ApplyCapabilities depends on. Defined as a
 // local interface so tests can inject a fake without depending
-// on the full Store surface (and so the seed package stays
+// on the full Store surface (and so the seed engine stays
 // decoupled from any future capability API drift).
 //
 // Why InsertCapabilityProposalWithID (not InsertCapabilityProposal):
@@ -75,12 +86,13 @@ type capabilityStoreSeeding interface {
 // single-writer).
 //
 // Returns a SeedSummary whose buckets reflect the lifecycle:
-//   Created — capability rows newly inserted (validated state).
-//   Skipped — row present, source_code matches the seed.
-//   Drifted — row present, source_code differs from seed
-//             (operator's edit preserved; flagged for visibility).
-func ApplyCapabilities(store capabilityStoreSeeding) (SeedSummary, error) {
-	return ApplyCapabilitiesFromBundle(store, SeedCapabilities)
+//
+//	Created — capability rows newly inserted (validated state).
+//	Skipped — row present, source_code matches the seed.
+//	Drifted — row present, source_code differs from seed
+//	          (operator's edit preserved; flagged for visibility).
+func ApplyCapabilities(store capabilityStoreSeeding) (seed.SeedSummary, error) {
+	return ApplyCapabilitiesFromBundle(store, seed.SeedCapabilities)
 }
 
 // ApplyCapabilitiesFromBundle walks the supplied bundle and
@@ -95,8 +107,8 @@ func ApplyCapabilities(store capabilityStoreSeeding) (SeedSummary, error) {
 // has merged a sidecar JSON on top of the compiled registry.
 // The CLI command `mpm capability seed` is the canonical
 // caller; tests use it to seed custom bundles.
-func ApplyCapabilitiesFromBundle(store capabilityStoreSeeding, bundle []SeedCapability) (SeedSummary, error) {
-	summary := SeedSummary{
+func ApplyCapabilitiesFromBundle(store capabilityStoreSeeding, bundle []seed.SeedCapability) (seed.SeedSummary, error) {
+	summary := seed.SeedSummary{
 		Created: []string{},
 		Skipped: []string{},
 		Updated: []string{},
@@ -149,36 +161,36 @@ func ApplyCapabilitiesFromBundle(store capabilityStoreSeeding, bundle []SeedCapa
 
 // seedCapabilityToProposal converts a SeedCapability into the
 // canonical capability.Proposal shape. Lives as a free function
-// rather than a SeedCapability method so the seed package stays
+// rather than a SeedCapability method so the seed subpackage stays
 // the only consumer of capability.Proposal's typed API (keeps
 // the test surface small).
 //
 // Conversion rules:
 //
-//   Name            ← sc.Name
-//   Purpose         ← sc.Purpose
-//   SourceCode      ← sc.SourceCode
-//   SourceLanguage  ← sc.SourceLanguage
-//   Tags            ← sc.Tags (StringSlice, JSON-encoded at the
-//                     store layer)
-//   RequestedDomain ← sc.RequestedDomain (cast to ExecutionDomain)
-//   DependsOn       ← sc.DependsOn (resolved to cap.<name> ids;
-//                     empty slice for the Tier 1 primitives)
-//   AuthorAgent     ← "seed:baseline" (matches skills precedent)
-//   InitialState    ← StateValidated (post-lint, post-dry-run;
-//                     the forge tick promotes to probation on
-//                     first invocation)
-//   Metadata        ← sc.Metadata merged with seed-tracking fields:
-//                       content_hash  : sc.ContentHash()
-//                       stable_id     : sc.StableID
-//                       tier          : "1" (for the Tier 1 set)
-//                       primitive     : "true"
-//                       risk_class    : "low"
-//                     Operator-added metadata overrides the seed-
-//                     tracking fields if it conflicts (rare; a
-//                     metadata.content_hash override would be
-//                     surprising but not catastrophic).
-func seedCapabilityToProposal(sc SeedCapability, savedID string) *capability.Proposal {
+//	Name            ← sc.Name
+//	Purpose         ← sc.Purpose
+//	SourceCode      ← sc.SourceCode
+//	SourceLanguage  ← sc.SourceLanguage
+//	Tags            ← sc.Tags (StringSlice, JSON-encoded at the
+//	                  store layer)
+//	RequestedDomain ← sc.RequestedDomain (cast to ExecutionDomain)
+//	DependsOn       ← sc.DependsOn (resolved to cap.<name> ids;
+//	                  empty slice for the Tier 1 primitives)
+//	AuthorAgent     ← "seed:baseline" (matches skills precedent)
+//	InitialState    ← StateValidated (post-lint, post-dry-run;
+//	                  the forge tick promotes to probation on
+//	                  first invocation)
+//	Metadata        ← sc.Metadata merged with seed-tracking fields:
+//	                  content_hash  : sc.ContentHash()
+//	                  stable_id     : sc.StableID
+//	                  tier          : "1" (for the Tier 1 set)
+//	                  primitive     : "true"
+//	                  risk_class    : "low"
+//	                Operator-added metadata overrides the seed-
+//	                tracking fields if it conflicts (rare; a
+//	                metadata.content_hash override would be
+//	                surprising but not catastrophic).
+func seedCapabilityToProposal(sc seed.SeedCapability, savedID string) *capability.Proposal {
 	// Resolve DependsOn from names to cap.<name> ids. Empty
 	// input → empty output (no normalization needed).
 	depIDs := make([]string, 0, len(sc.DependsOn))

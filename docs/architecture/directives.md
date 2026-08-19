@@ -49,6 +49,48 @@ Scope identity lives within the row's `metadata` JSON payload rather than requir
 * Any directive lacking `metadata.scope` implicitly evaluates as `"global"`.
 * All existing baseline seed directives default to `"global"`.
 
+### Tiered Fallback Seeding (2026-08-19)
+
+The four constitutional baseline directives (`mpm-seed-*` in
+`internal/core/seed/directives.go`) are **auto-seeded into the LOCAL store
+at boot**: `NewDatabaseManager` runs `seed.ApplyDirectives` after
+`initUnifiedSchema`, so a standalone runtime without an attached shared DB
+is never directive-blind. The hermetic test constructor
+(`NewDatabaseManagerForDB` + `InitSchema`) deliberately does not seed, so
+fixtures assert on their own rows.
+
+```text
+Tier 1  LOCAL bootstrap  ── always seeded at NewDatabaseManager boot
+Tier 2  SHARED overlay   ── union when MPM_SHARED_DB is attached
+```
+
+Seeding is idempotent by stable-id primary key:
+
+* Live row, matching content → skipped.
+* Live row, drifted content → operator's edit preserved, flagged (`Updated`).
+* Row absent → inserted (`Created`).
+* Row soft-deleted → **revived** with the current seed content (`Created`).
+  A shredded baseline still occupies the stable-id PK, so a plain
+  `INSERT OR IGNORE` would be silently swallowed while reporting
+  "Created" — the baseline is non-negotiable, so re-init UNDELETEs it.
+  This makes `mpm ops init directives` the documented recovery path after
+  an accidental shred or a decay sweep.
+
+Liveness is **sentinel-agnostic**: `deleted_at` NULL and `0` both mean
+live (legacy installs wrote `0`; current code writes NULL and soft-deletes
+with a Unix-epoch value). `ReadDirectivesForFramework` and the seed
+dedup use `COALESCE(deleted_at, 0) = 0`, so legacy databases with
+`deleted_at = 0` rows surface their directives instead of silently
+reporting an empty baseline. Operators with pre-2026-08-19 databases
+holding `deleted_at = 0` rows should normalize once:
+
+```sql
+UPDATE memories SET deleted_at = NULL WHERE deleted_at = 0;
+```
+
+(This also restores visibility of any other `deleted_at = 0` memories,
+which every current reader treats as live.)
+
 ---
 
 ## 4. Resolution & Evaluation Pipeline
@@ -79,8 +121,9 @@ $$\text{Active Directives} = \text{Directives}(\text{scope} = \text{"global"}) \
 ### Precedence & Conflicts
 
 1. **Additive, Not Replacement:** Framework-specific directives augment global directives; they do not overwrite or suppress global invariants.
-2. **Deterministic Ordering:** Within an active set, directives are ordered deterministically by ascending `StableID`.
-3. **Conflict Boundaries:** If two directives contain contradictory behavioral rules, they are considered an authoring defect in the seed registry. There is no runtime override weighting or numerical priority field.
+2. **Tiered Overlay:** With a shared DB attached, `ReadDirectivesForFramework` returns the union of the local baseline and the shared overlay, deduplicated by id — on an id collision the shared row wins (the shared DB is the multi-agent authority). Sorting is by ascending id, so the returned set is byte-stable across runs.
+3. **Deterministic Ordering:** Within an active set, directives are ordered deterministically by ascending `StableID`.
+4. **Conflict Boundaries:** If two directives contain contradictory behavioral rules, they are considered an authoring defect in the seed registry. There is no runtime override weighting or numerical priority field.
 
 ---
 

@@ -8,7 +8,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/capability"
-	"github.com/flowbyte-com/mpm-core/seed"
+	seedcap "github.com/flowbyte-com/mpm-core/seed/cap"
 
 	"github.com/stretchr/testify/require"
 )
@@ -303,4 +303,4 @@ func countCapabilityRows(t *testing.T, dm *internal.DatabaseManager) int {
 
 // _ guards against unused-import lints if the test surface evolves.
 var _ = strings.TrimSpace
-var _ = seed.ApplyCapabilitiesFromBundle
+var _ = seedcap.ApplyCapabilitiesFromBundle

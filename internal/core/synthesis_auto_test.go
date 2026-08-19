@@ -488,9 +488,10 @@ func TestMarkMemorySynthCooldown_NilAndEmpty(t *testing.T) {
 	// empty id → no-op.
 	markMemorySynthCooldown(dm, "")
 	// Both must not have created any rows (the empty dm might, but
-	// nil must not).
+	// nil must not). Directives are excluded — the boot path seeds
+	// the constitutional baseline into any file-backed DM.
 	var rows int
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&rows); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE collection != 'directives'`).Scan(&rows); err != nil {
 		t.Fatalf("COUNT: %v", err)
 	}
 	if rows != 0 {
