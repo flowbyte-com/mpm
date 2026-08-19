@@ -506,6 +506,14 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		`SELECT MIN(created_at) FROM memories WHERE id IN (`+strings.Join(idPlaceholders, ",")+`)`,
 		idArgs...,
 	).Scan(&oldestCreatedAt); err != nil {
+		// MIN over an empty set returns NULL (not ErrNoRows), so an
+		// error here is a real query failure — log it rather than
+		// silently swallowing. The oldestCreatedAt = nil fallback
+		// degrades gracefully (the synthetic memory gets its own
+		// created_at from the SaveMemory call earlier) so this path
+		// is best-effort by design, but a silent miss would mask
+		// genuine DB trouble from the audit log.
+		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: oldest created_at query failed, falling back to synthetic memory's own created_at: %v", err), "", AuditContext{})
 		oldestCreatedAt = nil
 	}
 
@@ -539,7 +547,9 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	// 9. Preserve oldest created_at from the source fragments
 	if oldestCreatedAt != nil && *oldestCreatedAt != "" {
-		dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = ? WHERE id = ?", *oldestCreatedAt, newSynthID)
+		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = ? WHERE id = ?", *oldestCreatedAt, newSynthID); err != nil {
+			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: created_at preservation UPDATE failed (synth=%s): %v", newSynthID, err), "", AuditContext{})
+		}
 	}
 
 	// 10. Transfer topic_memberships from all source IDs to the new synthetic memory
@@ -552,19 +562,25 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	for i := range allIDs {
 		topicPlaceholders[i] = "?"
 	}
-	dm.SQLDB().ExecContext(ctx,
+	if _, err := dm.SQLDB().ExecContext(ctx,
 		`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, role, created_at)
 		 SELECT ?, topic_id, role, created_at
 		 FROM topic_memberships
 		 WHERE memory_id IN (`+strings.Join(topicPlaceholders, ",")+`)`,
 		topicArgs...,
-	)
+	); err != nil {
+		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: topic_memberships transfer failed (synth=%s): %v", newSynthID, err), "", AuditContext{})
+	}
 
 	// 11. Soft-delete originals (candidates + triggering memory)
 	for _, c := range toMerge {
-		dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID)
+		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID); err != nil {
+			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", c.ID, err), "", AuditContext{})
+		}
 	}
-	dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID)
+	if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID); err != nil {
+		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", newID, err), "", AuditContext{})
+	}
 
 	// 12. Persist the synth_runs ledger entry + stamp cooldown on R.
 	// recordSynthRun: content_hash → first/last_run_at + run_count.

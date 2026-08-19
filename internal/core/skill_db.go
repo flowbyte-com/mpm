@@ -313,6 +313,13 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 				// gets is_latest=false.
 				isLatest = false
 			}
+		} else if err != sql.ErrNoRows {
+			// Real query failure (not the expected "no other
+			// versions" ErrNoRows case). We can't determine
+			// isLatest correctly, so log and degrade to true
+			// (new skill appears as latest; a re-save will fix
+			// the flag if needed).
+			dm.LogAudit(AuditWarn, "skill_db", fmt.Sprintf("SaveSkill: other-version lookup failed (id=%s), defaulting isLatest=true: %v", id, err), "", AuditContext{})
 		}
 		// err == sql.ErrNoRows: no other versions, this is the only
 		// (or highest) version, is_latest=true.
