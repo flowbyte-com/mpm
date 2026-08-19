@@ -36,6 +36,7 @@ func TestArtifactProvenance_TableSchemaFingerprint(t *testing.T) {
 		"session_id TEXT, " +
 		"invocation_id TEXT, " +
 		"parent_artifact_id TEXT, " +
+		"parent_invocation_id TEXT, " +
 		"provider_metadata TEXT)"
 
 	// Smoke assertion: the table exists, regardless of whitespace.
@@ -57,6 +58,7 @@ func TestArtifactProvenance_TableSchemaFingerprint(t *testing.T) {
 		"artifact_type",
 		"actor_kind",
 		"schema_version",
+		"parent_invocation_id",
 		"UNIQUE (artifact_id, artifact_type)",
 		"CHECK (artifact_type IN",
 		"CHECK (actor_kind IN",
@@ -402,7 +404,7 @@ func TestProvenance_CascadeMaterializerSetsParent(t *testing.T) {
 
 	// Verify the resolver produces the correct parent override.
 	resolver := dm.GetProvenanceResolver()
-	eff := resolver.Resolve("", "", deadID)
+	eff := resolver.Resolve("", "", deadID, "")
 	if eff.ParentArtifactID != deadID {
 		t.Errorf("parent override = %q, want %q", eff.ParentArtifactID, deadID)
 	}
@@ -411,7 +413,7 @@ func TestProvenance_CascadeMaterializerSetsParent(t *testing.T) {
 	parent := deadID
 	var gotProv *EffectiveProvenance
 	err := dm.WithProvenanceOverride(
-		resolver.Resolve("", "", parent),
+		resolver.Resolve("", "", parent, ""),
 		func() error {
 			gotProv = dm.getEffectiveProvenance()
 			return nil
@@ -511,6 +513,140 @@ func TestProvenance_OpaqueProviderMetadataRawPreservation(t *testing.T) {
 	var v map[string]interface{}
 	if err := json.Unmarshal([]byte(got), &v); err != nil {
 		t.Errorf("stored metadata is not a valid JSON object: %v", err)
+	}
+}
+
+// TestProvenance_ParentInvocationIDStoredAndQueryable pins the
+// agent-of-agent invocation tree primitive. Records two artifacts
+// where the second's parent_invocation_id points at the first
+// artifact's invocation_id, then verifies the WHERE
+// parent_invocation_id = ? reconstruction query returns the expected
+// child. This is the load-bearing test for the alpha-3 telemetry
+// primitive: future analysis will pivot on this exact query shape.
+func TestProvenance_ParentInvocationIDStoredAndQueryable(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	dm.ProvenanceResolver = NewFromStatic(&CreationProvenance{
+		ActorKind:     "agent",
+		FrameworkName: "hermes",
+		ProviderName:  "minimax",
+		ModelName:     "MiniMax-M3",
+	})
+
+	// Parent invocation — Hermes spawns Claude Code sub-invocation.
+	parentArtifactID := "art-parent"
+	parentInvocationID := "inv-parent-001"
+	parent := dm.GetProvenanceResolver().Resolve(
+		"sess-x", parentInvocationID, "", "",
+	)
+	tx, err := dm.db.Begin()
+	if err != nil {
+		t.Fatalf("begin parent: %v", err)
+	}
+	if r := dm.RecordArtifactProvenance(tx, parentArtifactID, "memory", parent); !r.Recorded {
+		t.Fatalf("record parent: %+v", r)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit parent: %v", err)
+	}
+
+	// Child invocation — Claude Code writes a memory inside
+	// the spawning invocation. The child artifact's
+	// parent_invocation_id must point at the parent's invocation_id
+	// so the telemetry tree can be reconstructed.
+	childArtifactID := "art-child"
+	child := dm.GetProvenanceResolver().Resolve(
+		"sess-x", "inv-child-001", "", parentInvocationID,
+	)
+	tx, err = dm.db.Begin()
+	if err != nil {
+		t.Fatalf("begin child: %v", err)
+	}
+	if r := dm.RecordArtifactProvenance(tx, childArtifactID, "memory", child); !r.Recorded {
+		t.Fatalf("record child: %+v", r)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit child: %v", err)
+	}
+
+	// 1. Column is stored verbatim.
+	var gotParent string
+	if err := dm.db.QueryRow(
+		`SELECT parent_invocation_id FROM artifact_provenance WHERE artifact_id = ?`,
+		childArtifactID,
+	).Scan(&gotParent); err != nil {
+		t.Fatalf("read child parent_invocation_id: %v", err)
+	}
+	if gotParent != parentInvocationID {
+		t.Errorf("child parent_invocation_id = %q, want %q", gotParent, parentInvocationID)
+	}
+
+	// 2. The reconstruction query returns the expected child.
+	var reconstructedID string
+	if err := dm.db.QueryRow(
+		`SELECT artifact_id FROM artifact_provenance WHERE parent_invocation_id = ?`,
+		parentInvocationID,
+	).Scan(&reconstructedID); err != nil {
+		t.Fatalf("reconstruction query: %v", err)
+	}
+	if reconstructedID != childArtifactID {
+		t.Errorf("reconstructed artifact = %q, want %q", reconstructedID, childArtifactID)
+	}
+
+	// 3. Root invocation (no parent) has NULL parent_invocation_id.
+	var rootParent sql.NullString
+	if err := dm.db.QueryRow(
+		`SELECT parent_invocation_id FROM artifact_provenance WHERE artifact_id = ?`,
+		parentArtifactID,
+	).Scan(&rootParent); err != nil {
+		t.Fatalf("read root parent_invocation_id: %v", err)
+	}
+	if rootParent.Valid {
+		t.Errorf("root invocation parent_invocation_id = %q, want NULL", rootParent.String)
+	}
+}
+
+// TestArtifactProvenance_MigrationIsIdempotent pins the contract that
+// migrateArtifactProvenanceSchema can be called repeatedly on the
+// same DB without error and without data loss. Catches the
+// "table doesn't exist" early-return and the "already migrated"
+// skip-path regressions.
+func TestArtifactProvenance_MigrationIsIdempotent(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// First call: on a fresh NewTestDM, the table already has the
+	// alpha-3 schema (CREATE TABLE IF NOT EXISTS + migration
+	// idempotent skip). Idempotent.
+	if err := dm.migrateArtifactProvenanceSchema(); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := dm.migrateArtifactProvenanceSchema(); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	// Sanity: column present, constraint widened.
+	var columnCount int
+	if err := dm.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('artifact_provenance') WHERE name = 'parent_invocation_id'`,
+	).Scan(&columnCount); err != nil {
+		t.Fatalf("column check: %v", err)
+	}
+	if columnCount != 1 {
+		t.Errorf("parent_invocation_id column count = %d, want 1", columnCount)
+	}
+
+	var checkSQL string
+	if err := dm.db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact_provenance'`,
+	).Scan(&checkSQL); err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	for _, must := range []string{"'handoff'", "'directive'"} {
+		if !contains(checkSQL, must) {
+			t.Errorf("artifact_type CHECK missing %q\nGot: %s", must, checkSQL)
+		}
 	}
 }
 
