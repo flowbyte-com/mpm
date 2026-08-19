@@ -23,6 +23,10 @@ import (
 // collection='directives' (the MCP path) or has is_prime_directive=1
 // (the legacy column-based path). Both identifiers reach the same set
 // once either is set — see the directives section of README.md.
+//
+// ReadDirectives returns ALL directives regardless of scope; it is the
+// admin / CLI / web-DB view. The runtime agent wake path uses
+// ReadDirectivesForFramework instead, which filters by scope.
 func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, metadata, created_at FROM memories
@@ -32,6 +36,69 @@ func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query directives: %w", err)
+	}
+	defer rows.Close()
+	var directives []map[string]interface{}
+	for rows.Next() {
+		var id, content, createdAt string
+		var metaJSON *string
+		if err := rows.Scan(&id, &content, &metaJSON, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning directive row: %w", err)
+		}
+		var meta map[string]interface{}
+		if metaJSON != nil && *metaJSON != "" {
+			json.Unmarshal([]byte(*metaJSON), &meta)
+		}
+		directives = append(directives, map[string]interface{}{
+			"id":         id,
+			"content":    content,
+			"metadata":   meta,
+			"created_at": createdAt,
+		})
+	}
+	return directives, nil
+}
+
+// ReadDirectivesForFramework returns the prime directives that apply to
+// the given agent framework. Scope filtering is the substrate's job, not
+// the plugin's — every framework id reaches MPM via MPM_FRAMEWORK env at
+// mpm-mcp startup (see internal/core/mpmcli.ActiveContextFromEnv) and is
+// passed to this function by handleReadDirectives.
+//
+// Selection rule (additive union, see docs/architecture/directives.md §4):
+//
+//	directives where scope IS NULL  (legacy rows pre-scope)
+//	OR scope = "global"
+//	OR scope = "framework:<fw>"
+//
+// Empty `fw` falls back to "global only" (the unset-MPM_FRAMEWORK default
+// is the safe one — never accidentally surface a framework-specific
+// directive to an unidentified caller).
+//
+// Returned rows are sorted by id ASC for deterministic agent wake order.
+func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]interface{}, error) {
+	var scopedVal interface{}
+	if fw != "" {
+		scopedVal = "framework:" + fw
+	} else {
+		// When framework is unset, no row matches the "framework:<fw>"
+		// branch (sqlite parameter NULL ≠ any string literal). Global
+		// + null-scope rows still match. This is the intended behaviour.
+		scopedVal = nil
+	}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, content, metadata, created_at FROM memories
+		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		  AND deleted_at IS NULL
+		  AND (
+		    json_extract(metadata, '$.scope') IS NULL
+		    OR json_extract(metadata, '$.scope') = 'global'
+		    OR json_extract(metadata, '$.scope') = ?
+		  )
+		ORDER BY id ASC
+	`, scopedVal)
+	if err != nil {
+		return nil, fmt.Errorf("query directives for framework %q: %w", fw, err)
 	}
 	defer rows.Close()
 	var directives []map[string]interface{}

@@ -1064,10 +1064,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	return result, nil
 }
 
-// callReadDirectives returns prime directives.
+// callReadDirectives returns prime directives filtered to the active
+// framework. Scope resolution lives in the substrate, not in the agent
+// plugin — MPM_FRAMEWORK env (read by mpmcli.ActiveContextFromEnv at
+// mpm-mcp boot) populates ac.FrameworkName here. See
+// docs/architecture/directives.md §4-§5.
 func handleReadDirectives(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
 
-	directives, err := dm.ReadDirectives()
+	directives, err := dm.ReadDirectivesForFramework(ac.FrameworkName)
 	if err != nil {
 		return nil, err
 	}
@@ -1075,6 +1079,7 @@ func handleReadDirectives(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _
 		"success":    true,
 		"directives": directives,
 		"count":      len(directives),
+		"framework":  ac.FrameworkName,
 	}, nil
 }
 

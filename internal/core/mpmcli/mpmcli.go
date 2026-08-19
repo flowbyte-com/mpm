@@ -32,11 +32,28 @@ func ResolveWorkspace() string {
 // server writes to that session. The drill orchestrator sets it before
 // spawning a real framework harness (e.g. Claude Code) so the audit
 // rows attributable to that drill can be queried together.
+//
+// MPM_FRAMEWORK, when set, identifies the calling agent framework
+// (e.g. "openclaw", "opencode", "pi", "claude-code", "hermes"). The
+// substrate uses this for wake-time directive scope filtering
+// (ReadDirectivesForFramework in internal/core/directive_tools.go) so
+// framework-scoped directives only reach their intended consumer.
+// Unset defaults to "mcp" so existing single-MCP callers see no
+// behaviour change — ReadDirectivesForFramework falls back to
+// global-only when framework is the empty string, so the hardcoded
+// default never accidentally surfaces a framework-scoped directive.
+//
+// See docs/architecture/directives.md §5 for the runtime transport
+// contract.
 func ActiveContextFromEnv() internal.ActiveContext {
+	framework := os.Getenv("MPM_FRAMEWORK")
+	if framework == "" {
+		framework = "mcp"
+	}
 	return internal.ActiveContext{
-		Mode:         os.Getenv("MPM_ACTIVE_MODE"),
-		Persona:      os.Getenv("MPM_ACTIVE_PERSONA"),
-		SessionID:    os.Getenv("MPM_SESSION_ID"),
-		FrameworkName: "mcp",
+		Mode:          os.Getenv("MPM_ACTIVE_MODE"),
+		Persona:       os.Getenv("MPM_ACTIVE_PERSONA"),
+		SessionID:     os.Getenv("MPM_SESSION_ID"),
+		FrameworkName: framework,
 	}
 }
