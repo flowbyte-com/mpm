@@ -1758,7 +1758,21 @@ func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		// shredded=false cleanly.
 		if sid, ok := p["session_id"].(string); ok && sid != "" {
 			h, err := dm.GetHandoffBySessionID(sid)
-			if err == nil && h != nil {
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					// Already shredded or never existed — idempotent
+					// no-op so repeat shreds return the same shape as
+					// the by-id path instead of a validation error.
+					return map[string]interface{}{
+						"success":      true,
+						"shredded":     false,
+						"rows_deleted": int64(0),
+						"message":      "handoff not found; nothing to shred",
+					}, nil
+				}
+				return nil, fmt.Errorf("lookup handoff by session %q: %w", sid, err)
+			}
+			if h != nil {
 				id = h.ID
 			}
 		}
