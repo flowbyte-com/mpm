@@ -47,6 +47,16 @@ internal/src/db/
 mpm-backup-*.sql
 src/db/mpm.db.backup-*
 
+# SQLite runtime databases (whole-file form). WAL mode writes
+# `*.db-wal` and `*.db-shm` (already covered below); standard journal
+# mode writes `*.db-journal` (also covered below). The whole-file
+# pattern catches the database file itself, which was previously
+# un-guarded — any stray `*.db` in the working tree (test fixtures,
+# agent scratchpads, dev databases) could be accidentally committed.
+*.db
+# Bare top-level SQLite scratch database used by dev scripts.
+store.db
+
 # SQLite WAL and shared memory files (runtime artifacts)
 *.db-wal
 *.db-shm
@@ -102,6 +112,13 @@ cmd/mpm/mpm
 cmd/mpm-mcp/mpm-mcp
 cmd/mpm-scheduler/mpm-scheduler
 cmd/mpm-critic/mpm-critic
+
+# cmd/mpm/backup is the runtime/CLI artifact used by the backup-db /
+# restore-db subsystem. Tracked by the canonical archive at
+# internal/core/scripts/ (when present); the `cmd/mpm/backup` symlink
+# or file is rebuilt on demand by `mpm backup-db` and must never
+# enter git history (binary artifact, regenerated every run).
+cmd/mpm/backup
 
 # Top-level `audit-scans` binary (cmd/audit-scans built directly via
 # `go build ./cmd/audit-scans` rather than through the bin/ pipeline).
