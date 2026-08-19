@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/seed"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -1013,6 +1014,13 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Baseline Cognitive Bootstrap — every production runtime boots
+	// with the constitutional directives present (see the helper doc).
+	if err := manager.seedBaselineDirectives(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("seed baseline directives: %w", err)
+	}
+
 	// Check and rotate watchdog/mirror logs at startup so operators don't
 	// need to rely solely on manual `mpm ops logs rotate`. Auto-rotation
 	// also happens on each tracked Exec/Query; the startup check catches
@@ -1895,6 +1903,30 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	return nil
+}
+
+// seedBaselineDirectives runs the Baseline Cognitive Bootstrap
+// (tiered fallback seeding, 2026-08-19): the four constitutional
+// global directives are ALWAYS seeded into the local store, so a
+// standalone runtime (no MPM_SHARED_DB) is never directive-blind.
+// Idempotent by stable-id primary key — existing rows with matching
+// content are skipped, operator edits are preserved (flagged, never
+// overwritten). Deliberately NOT part of initUnifiedSchema: that
+// function is also the hermetic test path (NewDatabaseManagerForDB +
+// InitSchema), which must stay directive-free so fixture assertions
+// don't depend on boot policy. Production entry points all construct
+// via NewDatabaseManager, so the guarantee holds for every runtime
+// binary (CLI, MCP, scheduler, critic). `mpm ops init directives`
+// remains available for manual re-init / shared-DB seeding.
+func (dm *DatabaseManager) seedBaselineDirectives() error {
+	summary, err := seed.ApplyDirectives(dm)
+	if err != nil {
+		return fmt.Errorf("seed baseline directives: %w", err)
+	}
+	if len(summary.Created) > 0 {
+		slog.Info("baseline directives seeded", "created", len(summary.Created))
+	}
 	return nil
 }
 

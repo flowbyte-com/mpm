@@ -986,9 +986,17 @@ func TestHandleHealthCheck_PassesThrough(t *testing.T) {
 }
 
 // TestHandleHealthCheck_ReflectsState pins that the handler reflects
-// domain state — adding a memory bumps memories_active.
+// domain state — adding a memory bumps memories_active. The boot path
+// seeds the four constitutional directives into file-backed DMs, so
+// the assertion is a delta over the baseline rather than an absolute.
 func TestHandleHealthCheck_ReflectsState(t *testing.T) {
 	dm := newTestSharedDM(t)
+	var baseline int64
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`,
+	).Scan(&baseline); err != nil {
+		t.Fatalf("baseline count: %v", err)
+	}
 	if _, err := dm.SQLDB().Exec(`
 		INSERT INTO memories (id, collection, content, deleted_at, created_at, updated_at)
 		VALUES ('mem-hc-handler-1', 'memories', 'handler test', NULL, '2026-07-06', '2026-07-06')
@@ -1000,8 +1008,8 @@ func TestHandleHealthCheck_ReflectsState(t *testing.T) {
 		t.Fatalf("handleHealthCheck: %v", err)
 	}
 	m := out.(map[string]interface{})
-	if n, _ := m["memories_active"].(int64); n != 1 {
-		t.Errorf("memories_active: got %d, want 1", n)
+	if n, _ := m["memories_active"].(int64); n != baseline+1 {
+		t.Errorf("memories_active: got %d, want %d", n, baseline+1)
 	}
 }
 

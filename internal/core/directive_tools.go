@@ -15,6 +15,8 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 )
 
@@ -75,6 +77,15 @@ func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 // is the safe one — never accidentally surface a framework-specific
 // directive to an unidentified caller).
 //
+// Tiered sources (tiered fallback seeding, 2026-08-19):
+//
+//	1. Local constitutional baseline — always present (seeded at boot by
+//	   initUnifiedSchema via seed.ApplyDirectives).
+//	2. Shared overlay — when MPM_SHARED_DB is attached, shared.memories
+//	   directive rows are merged additively. Rows are deduplicated by
+//	   stable id; a shared row with the same id as a local row wins
+//	   (org-wide policy overrides the local copy).
+//
 // Returned rows are sorted by id ASC for deterministic agent wake order.
 func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]interface{}, error) {
 	var scopedVal interface{}
@@ -86,10 +97,51 @@ func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]i
 		// + null-scope rows still match. This is the intended behaviour.
 		scopedVal = nil
 	}
+
+	local, err := dm.queryDirectivesScope("", scopedVal)
+	if err != nil {
+		return nil, fmt.Errorf("query directives for framework %q: %w", fw, err)
+	}
+
+	// Shared overlay: additive union when a shared DB is attached.
+	if dm.SharedAttached() != "" {
+		shared, err := dm.queryDirectivesScope("shared.", scopedVal)
+		if err != nil {
+			// Shared attachment is an additive layer; a broken shared
+			// schema must not blind the local constitutional baseline.
+			slog.Warn("shared directive overlay query failed; continuing local-only", "error", err.Error())
+		} else {
+			byID := make(map[string]map[string]interface{}, len(local)+len(shared))
+			for _, d := range local {
+				byID[d["id"].(string)] = d
+			}
+			for _, d := range shared {
+				// Shared wins on id collision (org-wide policy override).
+				byID[d["id"].(string)] = d
+			}
+			merged := make([]map[string]interface{}, 0, len(byID))
+			for _, d := range byID {
+				merged = append(merged, d)
+			}
+			sort.Slice(merged, func(i, j int) bool {
+				return merged[i]["id"].(string) < merged[j]["id"].(string)
+			})
+			return merged, nil
+		}
+	}
+	return local, nil
+}
+
+// queryDirectivesScope runs the scope-filtered directive query against
+// the given schema prefix ("" for the local memories table, "shared."
+// for an attached shared DB). The scan/parse logic is shared between the
+// local baseline and the shared overlay so both tiers surface identical
+// row shapes.
+func (dm *DatabaseManager) queryDirectivesScope(schemaPrefix string, scopedVal interface{}) ([]map[string]interface{}, error) {
 	rows, err := dm.SQLDB().Query(`
-		SELECT id, content, metadata, created_at FROM memories
+		SELECT id, content, metadata, created_at FROM `+schemaPrefix+`memories
 		WHERE (collection = 'directives' OR is_prime_directive = 1)
-		  AND deleted_at IS NULL
+		  AND COALESCE(deleted_at, 0) = 0
 		  AND (
 		    json_extract(metadata, '$.scope') IS NULL
 		    OR json_extract(metadata, '$.scope') = 'global'
@@ -98,7 +150,7 @@ func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]i
 		ORDER BY id ASC
 	`, scopedVal)
 	if err != nil {
-		return nil, fmt.Errorf("query directives for framework %q: %w", fw, err)
+		return nil, err
 	}
 	defer rows.Close()
 	var directives []map[string]interface{}

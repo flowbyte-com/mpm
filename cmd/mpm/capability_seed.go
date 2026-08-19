@@ -23,7 +23,7 @@
 //
 //	registry:  internal/core/seed/capabilities.go (SeedCapabilities slice)
 //	loader:    internal/core/seed/capabilities_loader.go (LoadBundledCapabilities)
-//	engine:    internal/core/seed/engine_capabilities.go (ApplyCapabilitiesFromBundle)
+//	engine:    internal/core/seed/cap/capabilities_seed.go (ApplyCapabilitiesFromBundle)
 //	cli:       this file (handleCapabilitySeed)
 //	router:    cmd/mpm/router.go (case "capability": "seed")
 package main
@@ -34,6 +34,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/capability"
 	"github.com/flowbyte-com/mpm-core/seed"
+	seedcap "github.com/flowbyte-com/mpm-core/seed/cap"
 )
 
 // handleCapabilitySeed is the entry point for `mpm capability seed`.
@@ -87,7 +88,7 @@ func handleCapabilitySeed(args []string) int {
 	//    directly) so the sidecar's overrides + additions are
 	//    honored.
 	store := capability.NewStore(dm)
-	summary, err := seed.ApplyCapabilitiesFromBundle(store, bundle.Merged)
+	summary, err := seedcap.ApplyCapabilitiesFromBundle(store, bundle.Merged)
 	if err != nil {
 		printError("seed capabilities: %v", err)
 		return 1

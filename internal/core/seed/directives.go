@@ -1,14 +1,20 @@
 // Package seed holds the Baseline Cognitive Bootstrap — the reference
 // prime directives that close MPM's advanced cognitive loops.
 //
-// These directives are NOT auto-loaded at install time. The "Truth is
-// external" and "no auto-noise" principles forbid silent state
-// mutation just because the binary booted. Instead, the operator runs
+// Tiered fallback seeding (2026-08-19): the four baseline directives
+// ARE auto-loaded into the LOCAL store at boot (NewDatabaseManager
+// calls ApplyDirectives on every production constructor). A standalone
+// runtime without MPM_SHARED_DB is never directive-blind — the
+// constitutional rules of engagement (wake-context reads, cluster
+// triage, wake triage, daemon health) are always present. The hermetic
+// test constructor (NewDatabaseManagerForDB + InitSchema) deliberately
+// does NOT seed, so fixtures assert on their own rows. Idempotent by
+// stable-id primary key: existing rows with matching content are
+// skipped, operator edits are preserved and flagged, never overwritten.
 //
-//	mpm ops init directives
-//
-// to seed them. The command is idempotent (existing directives are
-// detected by exact-content match and skipped), so it's safe to re-run.
+// `mpm ops init directives` remains available for manual re-init (e.g.
+// after an accidental shred, or to seed the shared DB of a
+// multi-agent workspace).
 //
 // What the Baseline Cognitive Bootstrap provides
 // ---------------------------------------------
