@@ -861,7 +861,10 @@ func checksumMemoriesTable(ctx context.Context, tx *sql.Tx, table string, useStr
 		createdAtExpr, lastAccessExpr, table,
 	)
 	err := tx.QueryRowContext(ctx, q).Scan(&c.RowCount, &c.DistinctID, &c.CreatedAtSum, &c.LastAccessSum)
-	return c, err
+	if err != nil {
+		return c, err
+	}
+	return c, nil
 }
 
 // clearStandaloneFTS empties the standalone FTS5 shadow table
@@ -965,7 +968,10 @@ func repopulateStandaloneFTS(ctx context.Context, tx *sql.Tx, ftsTable, table st
 func countMemoriesFKViolations(ctx context.Context, tx *sql.Tx) (int, error) {
 	var n int
 	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE session_id IS NOT NULL AND session_id != '' AND session_id NOT IN (SELECT id FROM sessions)`).Scan(&n)
-	return n, err
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // isTimestampColumn reports whether col is in the rebuild target
