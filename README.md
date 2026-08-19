@@ -1555,6 +1555,61 @@ For fresh installs, MPM ships a small set of reference directives that close the
 
 > **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
+#### Multi-Framework Scope
+
+Directives can target a specific agent framework, the whole substrate, or both at once. Scope lives in metadata JSON on the directive's `memories` row; evaluation is centralised in MPM core, not in agent plugins.
+
+Grammar (flat, case-sensitive strings):
+
+```text
+scope = "global" | "framework:<id>"
+```
+
+- `"global"` — every agent framework receives this directive
+- `"framework:<id>"` — only the named framework receives it. Standard ids: `openclaw`, `opencode`, `pi`, `claude-code`, `hermes`
+- empty / unset — treated as `"global"` at materialisation time (legacy-row backward compat — rows seeded before scope existed match the same predicate)
+
+How a framework identifies itself: the MCP host exports `MPM_FRAMEWORK=<id>` on the `mpm-mcp` child process env (same pattern as `MPM_ACTIVE_MODE`/`MPM_ACTIVE_PERSONA`). `mpmcli.ActiveContextFromEnv` reads it and populates `ActiveContext.FrameworkName`. The MCP `handleReadDirectives` uses that to filter via `ReadDirectivesForFramework(fw)`. When `MPM_FRAMEWORK` is unset, `FrameworkName` defaults to `"mcp"` — existing single-MCP callers see no behaviour change.
+
+Resolution model (additive union, evaluated by MPM):
+
+```text
+Active Directives = Global(Directives) ∪ MatchingScoped(Directives, fw)
+```
+
+Global directives always apply. Framework-scoped directives are added on top — they never replace global invariants, so a `framework:opencode` row can never accidentally swallow `mpm-seed-read-wake-context`. Within the active set, deterministic ordering by `StableID` ASC keeps the agent's wake context byte-stable across runs.
+
+Operational example (OpenClaw):
+
+```bash
+# 1. Tag the agent framework at the MCP layer
+openclaw config set mcp.servers.mpm.env.MPM_FRAMEWORK openclaw
+
+# 2. Seed a framework-specific directive when OpenClaw tool conventions diverge
+mpm call mpm_memory --payload '{
+  "action":"save",
+  "params":{
+    "fact":"OpenClaw-specific behavioural rule",
+    "collection":"directives",
+    "tags":["prime_directive","openclaw"],
+    "metadata":{
+      "scope":"framework:openclaw",
+      "stable_id":"openclaw-tool-conventions-v1"
+    }
+  }
+}'
+
+# 3. Verify the wiring — admin view shows every directive regardless of scope
+mpm directives
+
+# 4. Runtime agent wake context reflects only the applicable subset,
+#    and the response envelope reports which scope was applied
+mpm call mpm_context --payload '{"action":"read_directives","params":{}}'
+# → response: { "success":true, "directives":[...], "count":N, "framework":"openclaw" }
+```
+
+**Full contract:** `docs/architecture/directives.md` — grammar, evaluation pipeline, precedence rules, conflict boundaries, authoring rules for operators.
+
 #### Skills (Procedural Memory)
 
 *Markdown-frontmatter procedures stored as `collection='skills'` rows — discoverable via list / read / proactive_recall_hint, shareable to shared DB with operator consent.*
