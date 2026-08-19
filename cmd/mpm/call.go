@@ -95,12 +95,16 @@ func handleCall(args []string) int {
 	recordToolInvocation(dm.SQLDB(), ac, tool.Name, payload,
 		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
 	if err != nil {
-		// Errors are JSON to stderr so the agent can parse them
-		// Direct fmt.Fprintf to stderr: JSON error envelope for `mpm call` — must be raw JSON, not user-formatted.
-		fmt.Fprintf(os.Stderr, "%s\n", must(json.Marshal(map[string]interface{}{
+		// Structured error envelope. Both success and error envelopes route
+		// through writeEnvelope so the stdout/stderr contract is uniform:
+		// JSON envelope on stdout, zap log lines on stderr. The previous
+		// implementation wrote the error envelope to stderr, which broke
+		// every agent adapter that follows the documented contract by
+		// reading only stdout (see lesson 2b22765cd1b13a81).
+		writeEnvelope(os.Stdout, map[string]interface{}{
 			"success": false,
 			"error":   err.Error(),
-		})))
+		})
 		return 1
 	}
 
@@ -128,8 +132,31 @@ func handleCall(args []string) int {
 		result = resultMap
 	}
 
-	fmt.Println(string(must(json.Marshal(result))))
+	writeEnvelope(os.Stdout, result)
 	return 0
+}
+
+// writeEnvelope serializes v as JSON and writes it as a single line to w,
+// followed by a newline. Both the success and error paths of `mpm call`
+// route through this so the stdout/stderr contract is uniform:
+//
+//	stderr  → zap log lines (file perms sweep, audit, etc.)
+//	stdout  → JSON envelope (success or failure)
+//
+// Centralizing the write means a future change to the envelope format
+// (e.g. NDJSON, JSON Lines) is a one-line edit, and the contract is
+// testable in isolation. See TestCallErrorEnvelope_RoutesToStdout for
+// the contract test.
+func writeEnvelope(w io.Writer, v interface{}) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		// json.Marshal of a concrete map[string]interface{} or registry
+		// handler result can't fail — this is a defensive guard for future
+		// payload shapes. Surface a synthetic error envelope so the caller
+		// still gets parseable JSON.
+		data = []byte(`{"success":false,"error":"envelope marshal failed"}`)
+	}
+	_, _ = fmt.Fprintln(w, string(data))
 }
 
 // parsePayload extracts JSON from --payload flag, --payload-file flag, or stdin.
