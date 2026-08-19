@@ -78,7 +78,14 @@ type EffectiveProvenance struct {
 	SessionID        string
 	InvocationID     string
 	ParentArtifactID string
-	ProviderMetadata string
+	// ParentInvocationID traces agent-of-agent invocation causality.
+	// Distinct from ParentArtifactID: that column says "this artifact
+	// was derived from that artifact"; this column says "this artifact
+	// was produced inside an invocation spawned by that invocation".
+	// Both nullable; together they power the future telemetry binary's
+	// invocation-tree reconstruction (`WHERE parent_invocation_id = ?`).
+	ParentInvocationID string
+	ProviderMetadata   string
 }
 
 // ProvenanceResolver holds the process-wide base provenance. Construct
@@ -121,33 +128,40 @@ func (r *ProvenanceResolver) Base() *CreationProvenance {
 // and the base is the effective provenance. For long-lived MCP
 // servers, the base is process-wide but the effective provenance is
 // per-call.
+//
+// parentInvocationID is the per-call pointer to the spawning
+// invocation. Agents that spawn sub-invocations (Hermes → Claude
+// Code → memory) set this so the resulting artifact's provenance row
+// can be walked back to its origin via the invocation tree. Nullable;
+// defaults to empty string when the current invocation has no parent.
 func (r *ProvenanceResolver) Resolve(
-	sessionID, invocationID, parentArtifactID string,
+	sessionID, invocationID, parentArtifactID, parentInvocationID string,
 ) *EffectiveProvenance {
 	if r == nil || r.base == nil {
 		return &EffectiveProvenance{ActorKind: "unknown"}
 	}
 	return &EffectiveProvenance{
-		ActorKind:        r.base.ActorKind,
-		ActorID:          r.base.ActorID,
-		FrameworkName:    r.base.FrameworkName,
-		FrameworkVersion: r.base.FrameworkVersion,
-		FrameworkAdapter: r.base.FrameworkAdapter,
-		ProviderName:     r.base.ProviderName,
-		ModelName:        r.base.ModelName,
-		ModelRevision:    r.base.ModelRevision,
-		APIEndpoint:      r.base.APIEndpoint,
-		Temperature:      r.base.Temperature,
-		MaxTokens:        r.base.MaxTokens,
-		ReasoningMode:    r.base.ReasoningMode,
-		ReasoningEffort:  r.base.ReasoningEffort,
-		ThinkingLevel:    r.base.ThinkingLevel,
-		ThinkingTokens:   r.base.ThinkingTokens,
-		ThinkingVisible:  r.base.ThinkingVisible,
-		SessionID:        pickFirst(sessionID, r.base.SessionID),
-		InvocationID:     invocationID,
-		ParentArtifactID: parentArtifactID,
-		ProviderMetadata: r.base.ProviderMetadata,
+		ActorKind:          r.base.ActorKind,
+		ActorID:            r.base.ActorID,
+		FrameworkName:      r.base.FrameworkName,
+		FrameworkVersion:   r.base.FrameworkVersion,
+		FrameworkAdapter:   r.base.FrameworkAdapter,
+		ProviderName:       r.base.ProviderName,
+		ModelName:          r.base.ModelName,
+		ModelRevision:      r.base.ModelRevision,
+		APIEndpoint:        r.base.APIEndpoint,
+		Temperature:        r.base.Temperature,
+		MaxTokens:          r.base.MaxTokens,
+		ReasoningMode:      r.base.ReasoningMode,
+		ReasoningEffort:    r.base.ReasoningEffort,
+		ThinkingLevel:      r.base.ThinkingLevel,
+		ThinkingTokens:     r.base.ThinkingTokens,
+		ThinkingVisible:    r.base.ThinkingVisible,
+		SessionID:          pickFirst(sessionID, r.base.SessionID),
+		InvocationID:       invocationID,
+		ParentArtifactID:   parentArtifactID,
+		ParentInvocationID: parentInvocationID,
+		ProviderMetadata:   r.base.ProviderMetadata,
 	}
 }
 

@@ -65,7 +65,7 @@ func TestProvenance_ResolverResolvePerCallOverrides(t *testing.T) {
 	t.Setenv("MPM_SESSION_ID", "sess-base")
 
 	r := NewFromEnv()
-	eff := r.Resolve("sess-override", "inv-1", "parent-x")
+	eff := r.Resolve("sess-override", "inv-1", "parent-x", "parent-inv-x")
 
 	if eff.SessionID != "sess-override" {
 		t.Errorf("session override = %q, want sess-override", eff.SessionID)
