@@ -872,6 +872,91 @@ Multiple agents on a single workstation can share a single source of truth for h
 
 **Why SQLite ATTACH, not Postgres, not a separate service.** The design contract is single-workstation scope. SQLite ATTACH gives the architecture without adding a server, a network boundary, or a new failure mode. The trade-off is no cross-DB transactions — accepted because rule writes are append-mostly and operator-gated.
 
+#### Scope: `mpm.db` vs `shared.db`
+
+These two databases solve different problems. Conflating them is the most common misread of the architecture.
+
+- **`mpm.db`** is **host-shared** — one DB per host (`~/.mpm/src/db/mpm.db` by default, override via `MPM_WORKSPACE`). Every local agent on that host (OpenClaw, OpenCode, Claude Code, Pi, Hermes, the MCP server, the scheduler, the critic) opens the same file. There is **no inter-agent federation required**; SQLite's single-writer WAL + `busy_timeout=5s` serialises writes without coordination.
+- **`shared.db`** is **project- or organisation-shared** — a *separate* file that crosses host and team boundaries. It is what a repo's `.mpm/shared.db` looks like when committed to git, or what a CI cluster mounts as a shared volume. It is **not** the same thing as `mpm.db`, and it is **not** auto-created.
+
+```
+┌─────────────────── Single host ───────────────────┐
+│  OpenClaw   OpenCode   Claude Code   Pi          │
+│       \       |       /       \      |          │
+│        \      |      /         \     |          │
+│         ────── mpm.db (host-local) ──────        │
+└──────────────────────────────────────────────────┘
+
+┌────── Cross-host / cross-team ──────┐
+│  host A            host B           │
+│  mpm.db            mpm.db           │
+│    \                /               │
+│     ── shared.db (ATTACHed) ──      │
+│     (git, NFS, shared volume)       │
+└─────────────────────────────────────┘
+```
+
+The host's `mpm.db` cannot be checked into git because it contains local file paths, private session handoffs, ephemeral scratchpads, and hundreds of daily write-churn rows. `shared.db` is the subset worth committing: vetted, high-value, operator-gated knowledge.
+
+#### Why `shared.db` Exists
+
+Three problems it solves that `mpm.db` alone cannot:
+
+1. **Cross-Machine Collaboration.** Three developers (or five cloud worker nodes) on the same repo need an upstream knowledge base they can all read and write through the same substrate. They cannot share a single host-local `mpm.db`. They need a distributable file — `shared.db` — committed to the repo or mounted as a shared volume.
+2. **Ephemeral vs Curated Knowledge Isolation.** `mpm.db` holds everything: untested hypotheses, working context, test runs, raw observations. `shared.db` holds only the subset that has earned its keep: org-wide prime directives, proven architectural theories, canonical lessons, resolution/arbitration memory. The 20× write-churn of local dev work does not pollute the 1× write-churn of curated knowledge.
+3. **Read-Only Governance.** Operators can mount a company-wide or repo-wide `shared.db` as **read-only** (`MPM_SHARED_READONLY=1`). Local agents read organisational rules without having permission to pollute the shared source with hallucinated memories. Promotion to global (`promote_to_global`) is a separate operator-gated action that crosses the read-only boundary.
+
+#### When `shared.db` Is Created
+
+Not during standard single-user local dogfooding. The shared DB is instantiated when one of these operator actions happens:
+
+- **Repository bootstrap** — a team lead commits `.mpm/shared.db` (gitignored or git-tracked by team convention) and sets `MPM_SHARED_DB` in the team's CI / dev-container config.
+- **Promoting local knowledge upstream** — an operator runs `record_global_rule --confirm=true` against an existing local memory, which writes the first row into the shared DB and materialises the file on disk.
+- **Multi-agent cluster / CI deployment** — a shared volume is provisioned and the orchestrator sets `MPM_SHARED_DB` for every node.
+
+The default single-user install has no `shared.db`. Local agents run on `mpm.db` alone. The OpenCode smoke test's `shared_attached: false` is the canonical local-dogfooding state, not a defect.
+
+#### How `shared.db` Is Created and Structured
+
+There is no explicit `mpm ops init --shared` command. Creation happens implicitly on first boot:
+
+1. Operator sets `MPM_SHARED_DB=/path/to/project/.mpm/shared.db`.
+2. The next `mpm` / `mpm-mcp` / `mpm-scheduler` boot calls `attachShared(sharedPath)` in `internal/core/db.go`.
+3. `attachShared` ensures the directory exists (`os.MkdirAll`, mode 0700), ATTACHes the file via `ATTACH DATABASE '<path>' AS shared` (creating it if absent — SQLite creates the file on first write), and runs the canonical `BaseTables` DDL (`CREATE TABLE IF NOT EXISTS`) plus `SafeMigrations` against the attached schema.
+4. After boot, `mpm ops shared status` confirms: `MPM_SHARED_DB` value, `shared_attached: true|false`, `shared.memories` row count, `is_global=1` count, file size.
+
+The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
+
+#### How Agents Know to Use It
+
+The agent doesn't. The routing lives entirely inside the MPM core.
+
+```
+Agent process (mpm-mcp / mpm CLI / scheduler)
+        │
+        │ reads MPM_SHARED_DB at boot
+        ▼
+internal/core/db.go attachShared()
+        │
+        ├── path exists?  ─── no ──→ local-only mode (shared_attached: false)
+        │     │
+        │     yes
+        ▼
+   ATTACH as 'shared', run BaseTables + SafeMigrations
+        │
+        ▼
+shared_attached: true
+        │
+        │ every read tool (mpm_memory, mpm_context, …)
+        │ unions local + shared transparently
+        ▼
+Agent sees one merged view
+```
+
+When the agent calls `mpm_memory action=query`, `mpm_context action=read_directives`, or any read tool, the core queries both sources and merges. For directives, `ReadDirectivesForFramework` reads the local baseline (the four baseline directives seeded by `mpm ops init directives` against the *local* `mpm.db`) and overlays the shared-database directives, deduplicating by `stable_id` (shared takes precedence — it is the operator-curated truth). For memory searches, FTS5 runs across both schemas and merges relevance scores with a multiplicative **Shared Premium** (1.20× for shared results, 1.35× when the shared row also matches a `query_global_rules` scan). House rules outrank noisy local memories without being able to *invent* matches.
+
+The agent never makes a decision to "call shared.db". It calls `mpm_memory` or `mpm_context`, and MPM serves the union. The only agent-visible surface is the `shared_attached` boolean in `health_check` responses — present so operators can verify the wiring, not so agents need to branch on it.
+
 #### Layer 0 — Federation
 
 Each workspace has its own `mpm.db` (per-project tactical memory). An optional shared database, identified by the `MPM_SHARED_DB` environment variable, is ATTACHed as the `shared` schema when that env var is set. There is NO default path — if `MPM_SHARED_DB` is unset, mpm runs in local-only mode with no shared schema. Cross-DB queries become plain SQL. The convention `~/.mpm/shared/shared.db` is a reasonable default for operators who want one, but it must be opted into via the env var.
