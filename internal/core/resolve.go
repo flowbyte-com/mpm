@@ -62,12 +62,16 @@ func (dm *DatabaseManager) LoadMemoryProvenance(memoryID string) (ProvenanceScor
 	// Reinforcement count isn't a first-class column; we approximate
 	// from the evidence count attached to the memory via the
 	// evidence_store pipeline. The query is cheap and the
-	// approximation is good enough for ranking.
+	// approximation is good enough for ranking. A query failure
+	// degrades gracefully to 0 reinforcement (rank drops to
+	// confidence+age weight), which is acceptable; we log so the
+	// shared DB issue surfaces in the audit log.
 	var evCount int
 	if err := dm.db.QueryRow(`
 		SELECT COUNT(*) FROM shared.evidence
 		WHERE artifact_id = ? AND artifact_type = 'memory'
 	`, memoryID).Scan(&evCount); err != nil {
+		dm.LogAudit(AuditWarn, "resolve", fmt.Sprintf("LoadMemoryProvenance: shared.evidence count failed (memory=%s), defaulting to 0: %v", memoryID, err), "", AuditContext{})
 		evCount = 0
 	}
 	ps.Reinforcement = math.Min(float64(evCount)/10.0, 1.0)
