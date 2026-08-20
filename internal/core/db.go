@@ -1819,6 +1819,10 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("normalize legacy deleted_at=0 sentinel: %w", err)
 	}
+	if err := MigrateExpiresAtZeroToNull(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("normalize legacy expires_at=0 sentinel: %w", err)
+	}
 	if err := MigrateAllTimestampsToUnixEpoch(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("timestamps unification migration failed: %w", err)
