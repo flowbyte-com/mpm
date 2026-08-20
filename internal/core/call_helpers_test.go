@@ -718,6 +718,36 @@ func TestCallHelpers_RunGC_StaleTheorySweep(t *testing.T) {
 	assert.Empty(t, disabled.StaleTheories, "disabled sweep reports nothing")
 }
 
+// TestRunGC_ZeroDecayCollectionsExempt pins the GC/maintenance-policy
+// alignment: collections with DecayPercent <= 0 (decisions — the
+// append-only audit trail) must be exempt from the GC forgetting curve,
+// while decayable collections still decay.
+func TestRunGC_ZeroDecayCollectionsExempt(t *testing.T) {
+	dm := newTestDM(t)
+	old := `CAST(strftime('%s','now', '-100 days') AS INTEGER)`
+
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight, created_at, last_accessed_at) VALUES (?, 'decisions', 'audit row', 3, `+old+`, `+old+`)`, 0, "dec-1")
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight, created_at, last_accessed_at) VALUES (?, 'memories', 'decayable row', 3, `+old+`, `+old+`)`, 0, "mem-1")
+	require.NoError(t, err)
+
+	_, err = dm.ExecTracked(`DELETE FROM system_config WHERE key = 'last_gc_at'`, 0)
+	require.NoError(t, err)
+	res, err := dm.RunGC(GCOptions{DryRun: false})
+	require.NoError(t, err)
+	require.True(t, res.Ran)
+
+	var w int
+	require.NoError(t, dm.QueryRowTracked(`SELECT weight FROM memories WHERE id = 'dec-1'`).Scan(&w))
+	assert.Equal(t, 3, w, "decisions rows must not decay (append-only audit trail)")
+	for _, d := range res.DeadMemories {
+		assert.NotEqual(t, "dec-1", d["id"], "zero-decay rows must never be flagged dead")
+	}
+
+	require.NoError(t, dm.QueryRowTracked(`SELECT weight FROM memories WHERE id = 'mem-1'`).Scan(&w))
+	assert.Less(t, w, 3, "decayable collections still feel the forgetting curve")
+}
+
 // TestShredMemory_BroadSweepCoversPiGap is the regression test for the
 // 2026-08-11 finding: shredding a memory left orphan rows in
 // session_handoffs (and a handful of other top-level artifact tables).
