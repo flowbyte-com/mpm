@@ -211,25 +211,29 @@ func handleCascadeMaterialize(args []string) int {
 // materialize loop to falsely confirm the queue is drained, silently
 // leaving pending rows unprocessed.
 func pendingCount() (int, error) {
-	if dbManager == nil {
-		return 0, fmt.Errorf("database not available")
-	}
-	var n int
-	if err := dbManager.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count pending cascade outbox rows: %w", err)
-	}
-	return n, nil
+	return countCascadeByStatus("pending")
 }
 
 // processingCount returns the number of 'processing' rows in the cascade outbox,
 // or an error if the query fails.
 func processingCount() (int, error) {
+	return countCascadeByStatus("processing")
+}
+
+// countCascadeByStatus returns the row count for a cascade outbox status,
+// or an error if the DB is unavailable or the query fails. Centralised so
+// every consumer (materialize loop, list-dead-letters summary) gets the
+// same error-propagating behaviour instead of duplicating warn-and-default
+// patterns.
+func countCascadeByStatus(status string) (int, error) {
 	if dbManager == nil {
 		return 0, fmt.Errorf("database not available")
 	}
 	var n int
-	if err := dbManager.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count processing cascade outbox rows: %w", err)
+	if err := dbManager.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = ?`, status,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count cascade outbox rows (status=%s): %w", status, err)
 	}
 	return n, nil
 }
@@ -310,20 +314,30 @@ func handleListDeadLetters(args []string) int {
 		fmt.Printf("\nTotal dead-letter intents: %d\n", count)
 	}
 
-	// Also print a summary of all non-pending states. Best-effort counts;
-	// each one logs a warning and defaults to 0 on failure.
-	var pending, processing, materialized, failed int
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&pending); err != nil {
-		usererror.Warn("handleListDeadLetters: failed to count pending cascade outbox rows, defaulting to 0: %v", err)
+	// Also print a summary of all non-pending states. Use the same error-
+	// propagating helpers as the materialize loop so a count failure
+	// surfaces with exit 1 instead of misleading the operator with
+	// zeroed counts (which would suggest the queue is empty when it
+	// may not be).
+	pending, perr := pendingCount()
+	if perr != nil {
+		usererror.Error("handleListDeadLetters: count pending: %v", perr)
+		return 1
 	}
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&processing); err != nil {
-		usererror.Warn("handleListDeadLetters: failed to count processing cascade outbox rows, defaulting to 0: %v", err)
+	processing, perr := processingCount()
+	if perr != nil {
+		usererror.Error("handleListDeadLetters: count processing: %v", perr)
+		return 1
 	}
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'materialized'`).Scan(&materialized); err != nil {
-		usererror.Warn("handleListDeadLetters: failed to count materialized cascade outbox rows, defaulting to 0: %v", err)
+	materialized, perr := countCascadeByStatus("materialized")
+	if perr != nil {
+		usererror.Error("handleListDeadLetters: count materialized: %v", perr)
+		return 1
 	}
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'failed'`).Scan(&failed); err != nil {
-		usererror.Warn("handleListDeadLetters: failed to count failed cascade outbox rows, defaulting to 0: %v", err)
+	failed, perr := countCascadeByStatus("failed")
+	if perr != nil {
+		usererror.Error("handleListDeadLetters: count failed: %v", perr)
+		return 1
 	}
 
 	fmt.Printf("\nOutbox summary — pending=%d processing=%d materialized=%d failed=%d\n",
