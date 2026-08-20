@@ -645,6 +645,7 @@ func handleGCRun(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[stri
 		"updated":                 out.Updated,
 		"audit_pruned":            out.AuditPruned,
 		"handoff_pruned":          out.HandoffPruned,
+		"cascade_outbox_pruned":   out.CascadeOutboxPruned,
 		"dead_memory_count":       len(out.DeadMemories),
 		"dead_memories":           out.DeadMemories,
 		"stale_theory_days":       staleDays,

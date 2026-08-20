@@ -30,6 +30,7 @@ func handleRestore(args []string) int {
 			return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
 		}
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	// Restore deleted_at, reset weight to max(original weight, 1) to prevent 0-weight limbo.
@@ -40,6 +41,7 @@ func handleRestore(args []string) int {
 	)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 	affected, _ := result.RowsAffected()
 	if affected == 0 {

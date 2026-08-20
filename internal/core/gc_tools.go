@@ -53,6 +53,7 @@ type GCRunResult struct {
 	Shredded              int
 	AuditPruned           int
 	HandoffPruned         int
+	CascadeOutboxPruned   int
 	DeadMemories          []map[string]interface{} // first 50 dead for inspection
 	StaleTheories         []map[string]interface{} // pending theories older than StaleTheoryDays
 	StaleTheoriesResolved int                     // theories auto-resolved as disproven (non-dry-run only)
@@ -106,13 +107,18 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		return result, nil
 	}
 
-	// Audit + handoff retention sweeps (always run on a successful
-	// claim — these are cheap and central to the GC contract).
+	// Audit + handoff + cascade-outbox retention sweeps (always run on a
+	// successful claim — these are cheap and central to the GC contract).
+	// The cascade outbox grows monotonically with every shred event;
+	// without a sweep the table accumulates forever on long-running daemons.
 	if pruned, err := dm.PruneAuditLog(30); err == nil {
 		result.AuditPruned = int(pruned)
 	}
 	if pruned, err := dm.PruneHandoffs(90); err == nil {
 		result.HandoffPruned = int(pruned)
+	}
+	if pruned, err := dm.PruneCascadeOutbox(30); err == nil {
+		result.CascadeOutboxPruned = int(pruned)
 	}
 
 	// Compute decay for every non-deleted memory.
