@@ -85,8 +85,6 @@ type CoreDB interface {
 	PruneOlderThan(beforeUnixSec int64) (int, error)
 	PruneNeverAccessed() (int, error)
 	DecayWeights(policies map[string]DecayPolicy, intervalDays int) (int, error)
-	ArchiveStaleMemories(archiveDays int) (int, error)
-	RunLifecycleDecayAndArchival(decayRate float64, archiveDays int) error
 	RunSelfMaintenance() (map[string]interface{}, error)
 
 	// ─── Topics ──────────────────────────────────────────────────────
