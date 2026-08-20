@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"testing"
 	"time"
@@ -613,6 +614,75 @@ func TestCallHelpers_RunGC_AppliesUpdatesWhenNotDryRun(t *testing.T) {
 	assert.Less(t, newWeight, 7, "weight must decrease after decay")
 }
 
+func TestCallHelpers_RunGC_StaleTheorySweep(t *testing.T) {
+	dm := newTestDM(t)
+	pendingMeta := `{"status":"pending"}`
+	// 1. Stale pending theory — 60 days old, visible → must be flagged.
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, metadata, weight, created_at) VALUES (?, 'theories', 'stale hypothesis', ?, 1, CAST(strftime('%s','now', '-60 days') AS INTEGER))`, 0, "th-stale", pendingMeta)
+	require.NoError(t, err)
+	// 2. Young pending theory — 5 days old → must NOT be flagged.
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, metadata, weight, created_at) VALUES (?, 'theories', 'fresh hypothesis', ?, 1, CAST(strftime('%s','now', '-5 days') AS INTEGER))`, 0, "th-fresh", pendingMeta)
+	require.NoError(t, err)
+	// 3. Stale but expired (legacy invisible row, expires_at=0) → swept
+	// TOO: the sweep clears expires_at and resolves it in one tx, so
+	// expired ghosts cannot accumulate as unactionable pending rows.
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, metadata, weight, created_at, expires_at) VALUES (?, 'theories', 'legacy ghost hypothesis', ?, 1, CAST(strftime('%s','now', '-60 days') AS INTEGER), 0)`, 0, "th-ghost", pendingMeta)
+	require.NoError(t, err)
+
+	// Dry run: flag only, never write.
+	dry, err := dm.RunGC(GCOptions{DryRun: true, StaleTheoryDays: 30})
+	require.NoError(t, err)
+	require.True(t, dry.Ran)
+	require.Equal(t, 2, len(dry.StaleTheories), "visible stale + expired ghost both flagged")
+	flagged := map[string]bool{}
+	for _, s := range dry.StaleTheories {
+		flagged[s["id"].(string)] = true
+	}
+	assert.True(t, flagged["th-stale"], "visible stale theory flagged")
+	assert.True(t, flagged["th-ghost"], "expired ghost flagged")
+	assert.Equal(t, 0, dry.StaleTheoriesResolved, "dry run must not resolve")
+	var st string
+	require.NoError(t, dm.QueryRowTracked(`SELECT json_extract(metadata, '$.status') FROM memories WHERE id = 'th-stale'`).Scan(&st))
+	assert.Equal(t, "pending", st, "dry run leaves status untouched")
+
+	// Non-dry run: resolve exactly the stale visible theory.
+	// Clear the cooldown claim from the dry run so the next pass may run.
+	_, err = dm.ExecTracked(`DELETE FROM system_config WHERE key = 'last_gc_at'`, 0)
+	require.NoError(t, err)
+	real, err := dm.RunGC(GCOptions{DryRun: false, StaleTheoryDays: 30})
+	require.NoError(t, err)
+	require.True(t, real.Ran)
+	require.Equal(t, 2, len(real.StaleTheories), "non-dry-run still reports the flag list")
+	assert.Equal(t, 2, real.StaleTheoriesResolved, "both theories resolved")
+
+	require.NoError(t, dm.QueryRowTracked(`SELECT json_extract(metadata, '$.status') FROM memories WHERE id = 'th-stale'`).Scan(&st))
+	assert.Equal(t, "disproven", st, "stale theory flipped to disproven")
+	require.NoError(t, dm.QueryRowTracked(`SELECT json_extract(metadata, '$.status') FROM memories WHERE id = 'th-fresh'`).Scan(&st))
+	assert.Equal(t, "pending", st, "fresh theory untouched")
+	require.NoError(t, dm.QueryRowTracked(`SELECT json_extract(metadata, '$.status') FROM memories WHERE id = 'th-ghost'`).Scan(&st))
+	assert.Equal(t, "disproven", st, "expired ghost resolved too")
+	var ghostExpires sql.NullInt64
+	require.NoError(t, dm.QueryRowTracked(`SELECT expires_at FROM memories WHERE id = 'th-ghost'`).Scan(&ghostExpires))
+	assert.False(t, ghostExpires.Valid, "expired ghost had expires_at cleared")
+
+	// Second non-dry run: idempotent — nothing left to resolve.
+	_, err = dm.ExecTracked(`DELETE FROM system_config WHERE key = 'last_gc_at'`, 0)
+	require.NoError(t, err)
+	again, err := dm.RunGC(GCOptions{DryRun: false, StaleTheoryDays: 30})
+	require.NoError(t, err)
+	require.True(t, again.Ran)
+	assert.Equal(t, 0, len(again.StaleTheories), "nothing stale remains")
+	assert.Equal(t, 0, again.StaleTheoriesResolved, "second run is a no-op")
+
+	// StaleTheoryDays=0 (or negative) disables the sweep entirely.
+	_, err = dm.ExecTracked(`DELETE FROM system_config WHERE key = 'last_gc_at'`, 0)
+	require.NoError(t, err)
+	disabled, err := dm.RunGC(GCOptions{DryRun: false, StaleTheoryDays: 0})
+	require.NoError(t, err)
+	require.True(t, disabled.Ran)
+	assert.Empty(t, disabled.StaleTheories, "disabled sweep reports nothing")
+}
+
 // TestShredMemory_BroadSweepCoversPiGap is the regression test for the
 // 2026-08-11 finding: shredding a memory left orphan rows in
 // session_handoffs (and a handful of other top-level artifact tables).
@@ -710,4 +780,40 @@ func TestShredMemory_BroadSweepCoversPiGap(t *testing.T) {
 	var intents int
 	require.NoError(t, dm.QueryRowTracked(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE dead_artifact_id = ?`, id).Scan(&intents))
 	assert.GreaterOrEqual(t, intents, 0, "cascade outbox is the destination, not a sweep target")
+}
+
+// TestWeightFractional_SurvivesAllReadPaths pins the 2026-08-20 stability
+// pass: memories.weight is REAL and legacy/fractional values (4.5, produced
+// by mpm recall feedback + GC decay) must not crash any read path that
+// scans the column into an int. Regression for the GetMemory crash class.
+func TestWeightFractional_SurvivesAllReadPaths(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, tags, metadata, weight, created_at) VALUES (?, 'memories', 'fractional weight row', '[]', '{"status":"pending"}', 4.5, CAST(strftime('%s','now') AS INTEGER))`, 0, "frac-1")
+	require.NoError(t, err)
+
+	mem, err := dm.GetMemory("frac-1")
+	require.NoError(t, err, "GetMemory must not crash on fractional weight")
+	assert.Equal(t, 4, mem["weight"].(int), "weight truncated to int in map contract")
+
+	_, err = dm.GetMemoriesByRelevance("memories", 10)
+	require.NoError(t, err, "DM GetMemoriesByRelevance must not crash")
+
+	_, err = dm.GetMemoriesForExport("memories", "", "")
+	require.NoError(t, err, "GetMemoriesForExport must not crash")
+
+	store := &MemoryStore{DB: &SQLiteConnection{DB: dm.SQLDB()}, DM: dm}
+	_, err = store.GetContextualMemories([]string{}, "", 10)
+	require.NoError(t, err, "GetContextualMemories must not crash")
+
+	_, err = store.GetMemoriesByRelevance("memories", 10)
+	require.NoError(t, err, "MemoryStore GetMemoriesByRelevance must not crash")
+
+	_, err = store.SpacedReinforcementReview(1, 10)
+	require.NoError(t, err, "SpacedReinforcementReview must not crash")
+
+	_, err = dm.GetNegativeWeightMemories()
+	require.NoError(t, err, "GetNegativeWeightMemories must not crash")
+
+	_, err = dm.GetMemoryRevisions("frac-1")
+	require.NoError(t, err, "GetMemoryRevisions must not crash")
 }

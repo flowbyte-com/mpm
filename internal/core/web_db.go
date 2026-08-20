@@ -244,7 +244,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var tagsNS, metadataNS sql.NullString
 	var sessionID, sourceDB, sourceID *string
 	var promotedAt *float64
-	var weight int
+	var weight float64
 
 	err := dm.db.QueryRow(`
 		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
@@ -270,7 +270,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 		"tags":       tags,
 		"metadata":   metadata,
 		"created_at": createdAt,
-		"weight":     weight,
+		"weight":     int(weight),
 	}
 	if sessionID != nil {
 		m["session_id"] = *sessionID
@@ -391,11 +391,13 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 	for rows.Next() {
 		var r MemoryRef
 		var content string
-		if err := rows.Scan(&r.ID, &content, &r.Collection, &r.Weight); err != nil {
+		var weight float64
+		if err := rows.Scan(&r.ID, &content, &r.Collection, &weight); err != nil {
 			// Diagnostic — skip this row but keep going.
 			dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetTopicTopMemories: scan failed, skipping row: %v", err), "", AuditContext{"topic_id": topicID})
 			continue
 		}
+		r.Weight = int(weight)
 		if len(content) > 120 {
 			r.Content = content[:120] + "…"
 		} else {
@@ -607,7 +609,8 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 	for rows.Next() {
 		var id, collection, content, tagsJSON, metadataJSON, createdAt string
 		var sessionID *string
-		var reinforcementCount, weight int
+		var reinforcementCount int
+		var weight float64
 		var lastAccessedAt, expiresAt *string
 
 		err := rows.Scan(&id, &collection, &content, &sessionID, &tagsJSON, &metadataJSON,
@@ -624,7 +627,7 @@ func (dm *DatabaseManager) GetMemoriesByRelevance(collection string, limit int) 
 			"metadata":            metadataJSON,
 			"created_at":          createdAt,
 			"reinforcement_count": reinforcementCount,
-			"weight":              weight,
+			"weight":              int(weight),
 		}
 		if sessionID != nil {
 			m["session_id"] = *sessionID
@@ -748,13 +751,13 @@ func (dm *DatabaseManager) GetNegativeWeightMemories() ([]map[string]interface{}
 	var results []map[string]interface{}
 	for rows.Next() {
 		var id, collection, content, metadata, createdAt string
-		var weight int
+		var weight float64
 		if err := rows.Scan(&id, &collection, &content, &weight, &metadata, &createdAt); err != nil {
 			return nil, fmt.Errorf("scanning negative-weight memory row: %w", err)
 		}
 		results = append(results, map[string]interface{}{
 			"id": id, "collection": collection, "content": content,
-			"weight": weight, "metadata": metadata, "created_at": createdAt,
+			"weight": int(weight), "metadata": metadata, "created_at": createdAt,
 		})
 	}
 	return results, rows.Err()
@@ -1493,7 +1496,8 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 	var memories []map[string]interface{}
 	for rows.Next() {
 		var id, coll, content, tags, metadata, createdAt, lastAccessed, expiresAt string
-		var rc, weight, isLongTerm int
+		var rc, isLongTerm int
+		var weight float64
 		err := rows.Scan(&id, &coll, &content, &tags, &metadata, &createdAt, &rc, &weight, &isLongTerm, &lastAccessed, &expiresAt)
 		if err != nil {
 			return nil, fmt.Errorf("scanning export memory row: %w", err)
@@ -1506,7 +1510,7 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 			"metadata":            metadata,
 			"created_at":          createdAt,
 			"reinforcement_count": rc,
-			"weight":              weight,
+			"weight":              int(weight),
 			"is_long_term":        isLongTerm,
 			"last_accessed_at":    lastAccessed,
 			"expires_at":          expiresAt,

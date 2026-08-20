@@ -1585,6 +1585,7 @@ func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int
 		`SELECT id, content FROM memories
 		 WHERE collection = 'theories'
 		   AND deleted_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		   AND json_extract(metadata, '$.status') = 'pending'
 		 ORDER BY created_at DESC
 		 LIMIT ?`,

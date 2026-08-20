@@ -262,6 +262,7 @@ func countTheoriesByStatus(dm *mpminternal.DatabaseManager, status string) (int,
 	var count int
 	query := `SELECT COUNT(*) FROM memories
 		WHERE collection = 'theories' AND deleted_at IS NULL
+		AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		AND json_extract(metadata, '$.status') = ?`
 	if err := dm.SQLDB().QueryRow(query, status).Scan(&count); err != nil {
 		return 0, fmt.Errorf("countTheoriesByStatus: %w", err)
