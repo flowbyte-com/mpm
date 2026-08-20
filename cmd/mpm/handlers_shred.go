@@ -36,7 +36,13 @@ func handleShred(args []string) int {
 	default:
 		// Legacy: single item by ID (topic/session)
 		if len(args) < 2 {
-			return handleShredHelp()
+			// Bare ID with no subcommand — the primary dispatcher routes
+			// `mpm shred <id>` here for memory shred (router.go:298).
+			// Routing to handleShredHelp returns exit 0, which silently
+			// tells the user a shred happened when it didn't — a trap the
+			// hygiene pass hit live. Route unknown bare targets to the
+			// memory-shred path so a typo'd/bogus id fails loudly instead.
+			return handleShredMem(append([]string{"shred"}, args...))
 		}
 		id := args[1]
 		switch targetType {
