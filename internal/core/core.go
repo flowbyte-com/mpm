@@ -240,6 +240,9 @@ type CoreDB interface {
 	PruneHandoffs(retentionDays int) (int64, error)
 	DeleteHandoff(id string) (int64, error)
 
+	// ─── Cascade Outbox ──────────────────────────────────────────────
+	PruneCascadeOutbox(retentionDays int) (int64, error)
+
 	// ─── Wakes ───────────────────────────────────────────────────────
 	ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error)
 	CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error)

@@ -325,9 +325,14 @@ func (dm *DatabaseManager) DeleteScheduledTask(id string) error {
 	if id == "" {
 		return fmt.Errorf("id is required")
 	}
-	_, err := dm.db.Exec(`DELETE FROM scheduled_tasks WHERE id = ?`, id)
+	res, err := dm.db.Exec(`DELETE FROM scheduled_tasks WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete scheduled_task %q: %w", id, err)
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("delete scheduled_task %q rows-affected: %w", id, err)
+	} else if affected == 0 {
+		return fmt.Errorf("delete scheduled_task: no row with id %s", id)
 	}
 	return nil
 }

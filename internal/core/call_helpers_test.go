@@ -908,6 +908,80 @@ func TestPromoteDeletedGuard(t *testing.T) {
 	assert.Equal(t, 0, ltm, "soft-deleted is_long_term unchanged")
 }
 
+// TestDeleteScheduledTask_MissingID pins the silent-success fix: a
+// delete on a nonexistent id must error, not return nil.
+func TestDeleteScheduledTask_MissingID(t *testing.T) {
+	dm := newTestDM(t)
+	err := dm.DeleteScheduledTask("nonexistent-task-id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent-task-id")
+}
+
+// TestDeleteTopic_MissingID pins the silent-success fix: deleting a
+// nonexistent topic must error.
+func TestDeleteTopic_MissingID(t *testing.T) {
+	dm := newTestDM(t)
+	err := dm.DeleteTopic("nonexistent-topic-id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent-topic-id")
+}
+
+// TestPruneCascadeOutbox pins the retention sweep: terminal intents
+// (status='materialized' or 'failed') older than retentionDays are
+// deleted; live intents (pending/processing) are untouched regardless
+// of age.
+func TestPruneCascadeOutbox(t *testing.T) {
+	dm := newTestDM(t)
+
+	now := time.Now().Unix()
+	old := now - 60*86400      // 60 days ago
+	fresh := now - 1*86400      // 1 day ago
+
+	// Seed: 4 terminal intents (2 old materialized, 1 old failed, 1 fresh materialized)
+	//       + 2 live intents (1 old pending, 1 old processing)
+	seeds := []struct {
+		id        string
+		status    string
+		updatedAt int64
+	}{
+		{"old-mat-1", "materialized", old},
+		{"old-mat-2", "materialized", old},
+		{"old-fail", "failed", old},
+		{"fresh-mat", "materialized", fresh},
+		{"old-pend", "pending", old},
+		{"old-proc", "processing", old},
+	}
+	for _, s := range seeds {
+		_, err := dm.ExecTracked(`
+			INSERT INTO epistemic_cascade_outbox
+				(id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
+				 downstream_artifact_id, downstream_artifact_type,
+				 reason, status, attempt_count, created_at, updated_at)
+			VALUES (?, ?, 'x', 'memory', 'y', 'memory', 'test', ?, 0, ?, ?)
+		`, 0, s.id, "evt-"+s.id, s.status, s.updatedAt, s.updatedAt)
+		require.NoError(t, err)
+	}
+
+	// 30-day retention should delete the 3 old terminal intents and
+	// preserve everything else (fresh terminal + all live).
+	n, err := dm.PruneCascadeOutbox(30)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), n, "3 old terminal intents pruned")
+
+	// Confirm: the 3 old terminal rows are gone; the other 3 survive.
+	var remaining []string
+	rows, err := dm.SQLDB().Query(`SELECT id FROM epistemic_cascade_outbox ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		remaining = append(remaining, id)
+	}
+	assert.ElementsMatch(t, []string{"fresh-mat", "old-pend", "old-proc"}, remaining,
+		"only fresh terminal + all live intents must survive")
+}
+
 // TestMemoryStats_PartitionIsConsistent pins the stats partition
 // invariants so a future GetMemoryStats tweak can't reintroduce the
 // '340 + 0 != 429' confusion:

@@ -277,10 +277,21 @@ func handleRm(args []string) int {
 	// because the singleton lookup doesn't introduce one.
 	var err error
 
-	// Soft delete by setting deleted_at (INTEGER Unix epoch, matches expires_at)
-	_, err = dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, id)
+	// Soft delete by setting deleted_at (INTEGER Unix epoch, matches expires_at).
+	// Guard on deleted_at IS NULL so re-deleting a deleted row is a
+	// no-op (idempotent) AND so we can detect a missing id via the
+	// rows-affected check.
+	res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ? AND deleted_at IS NULL`, id)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
+	}
+	if affected, aerr := res.RowsAffected(); aerr != nil {
+		usererror.Error("%v", aerr)
+		return 1
+	} else if affected == 0 {
+		usererror.Error("rm failed: no live memory with id %s (not found or already deleted)", id)
+		return 1
 	}
 
 	fmt.Printf("Deleted memory %s\n", id)
@@ -565,7 +576,7 @@ func handleSnooze(args []string) int {
 	var err error
 
 	// Bump weight by 1 (cap at 9 to prevent LTM promotion), refresh timestamp
-	_, err = dm.SQLDB().Exec(`
+	res, err := dm.SQLDB().Exec(`
 		UPDATE memories
 		SET weight = MIN(weight + 1, 9),
 		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER)
@@ -573,6 +584,14 @@ func handleSnooze(args []string) int {
 	`, days, id)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
+	}
+	if affected, aerr := res.RowsAffected(); aerr != nil {
+		usererror.Error("%v", aerr)
+		return 1
+	} else if affected == 0 {
+		usererror.Error("snooze failed: no live memory with id %s (not found or deleted)", id)
+		return 1
 	}
 
 	fmt.Printf("Snoozed memory %s (+1 weight, +%d day(s) last_accessed)\n", id, days)

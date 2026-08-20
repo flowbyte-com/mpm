@@ -213,6 +213,15 @@ func handleGC(args []string) int {
 		} else if pruned > 0 {
 			fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
 		}
+
+		// Cascade outbox retention sweep — 30 days. Terminal intents
+		// (materialized/failed) accumulate monotonically with every
+		// shred event; without a sweep the table grows forever.
+		if pruned, err := dm.PruneCascadeOutbox(30); err != nil {
+			slog.Warn("cascade outbox prune failed", "error", err.Error(), "retention_days", 30)
+		} else if pruned > 0 {
+			fmt.Printf("Pruned %d terminal cascade intents older than 30 days\n", pruned)
+		}
 	}
 
 	// Get all non-deleted memories

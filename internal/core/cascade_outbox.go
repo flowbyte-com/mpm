@@ -752,3 +752,32 @@ func nullableText(s string) sql.NullString {
 	}
 	return sql.NullString{String: s, Valid: true}
 }
+
+// PruneCascadeOutbox hard-deletes terminal-state cascade intents
+// (status='materialized' or 'failed') older than retentionDays, where
+// age is measured from updated_at. The outbox grows monotonically with
+// every shred/cascade event; without a retention sweep the table
+// accumulates forever on long-running daemons.
+//
+// Default retention: 30 days. Terminal intents have served their
+// purpose by then (the materialized theory row or the dead-letter
+// audit row holds the permanent record). Live pending/processing
+// intents are untouched.
+func (dm *DatabaseManager) PruneCascadeOutbox(retentionDays int) (int64, error) {
+	if dm == nil || dm.db == nil {
+		return 0, fmt.Errorf("PruneCascadeOutbox: db not initialized")
+	}
+	if retentionDays < 1 {
+		retentionDays = 30
+	}
+	res, err := dm.db.Exec(`
+		DELETE FROM epistemic_cascade_outbox
+		WHERE status IN ('materialized', 'failed')
+		  AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)
+	`, retentionDays)
+	if err != nil {
+		return 0, fmt.Errorf("PruneCascadeOutbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}

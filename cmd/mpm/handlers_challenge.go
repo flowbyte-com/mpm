@@ -63,9 +63,9 @@ func handleChallenge(args []string) int {
 	}
 	defer tx.Rollback()
 
-	// 1. Patch memory metadata with forward link
+	// 1. Patch memory metadata with forward link (guard on live row)
 	result, err := tx.Exec(
-		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
+		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
 		string(patchJSON), id)
 	if err != nil {
 		return respond("", fmt.Sprintf("Error patching memory: %v\n", err), 1)
@@ -134,7 +134,7 @@ func handleChallengeRestore(args []string) int {
 	resolvePatch := map[string]interface{}{"status": "disproven", "memory_id": nil}
 	resolveJSON, _ := json.Marshal(resolvePatch)
 	_, err = tx.Exec(
-		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
+		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
 		string(resolveJSON), theoryID)
 	if err != nil {
 		return respond("", fmt.Sprintf("Error resolving theory: %v\n", err), 1)
@@ -144,7 +144,7 @@ func handleChallengeRestore(args []string) int {
 	clearPatch := map[string]interface{}{"status": nil, "challenged_theory_id": nil}
 	clearJSON, _ := json.Marshal(clearPatch)
 	_, err = tx.Exec(
-		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
+		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
 		string(clearJSON), id)
 	if err != nil {
 		return respond("", fmt.Sprintf("Error clearing memory status: %v\n", err), 1)

@@ -3360,14 +3360,23 @@ func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) error
 // Previously, the membership DELETE ran first, so a failed UPDATE left an
 // active topic with no members — a confusing state for any UI listing.
 func (dm *DatabaseManager) DeleteTopic(topicID string) error {
+	if topicID == "" {
+		return fmt.Errorf("topic_id is required")
+	}
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return fmt.Errorf("DeleteTopic: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`UPDATE topics SET is_active = 0 WHERE id = ?`, topicID); err != nil {
+	res, err := tx.Exec(`UPDATE topics SET is_active = 0 WHERE id = ?`, topicID)
+	if err != nil {
 		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("DeleteTopic: rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("DeleteTopic: no topic with id %s", topicID)
 	}
 	if _, err := tx.Exec(`DELETE FROM topic_memberships WHERE topic_id = ?`, topicID); err != nil {
 		return err
