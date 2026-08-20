@@ -108,51 +108,61 @@ func handleGC(args []string) int {
 	// GC run reported rowsAffected=0 and printed "Skipped"). Fixed 2026-06-26.
 	gcTimestampJSON, _ := json.Marshal(map[string]string{"updated_at": now.Format(time.RFC3339)})
 
-	// Atomic frequency cap: claim the GC slot by lazy-initialising the
-	// last_gc_at row, then doing a compare-and-swap against its timestamp.
-	// The previous plain UPDATE returned 0 rowsAffected on a fresh DB (no
-	// row existed) which the engine then misread as "cooldown active",
-	// silently aborting the maintenance loop. The upsert pattern fixes this:
-	//   - row missing                  → INSERT happens           → rowsAffected=1 (claim)
-	//   - row exists, no updated_at    → UPDATE fires (no timestamp to gate on) → rowsAffected=1 (claim)
-	//   - row exists, old timestamp    → ON CONFLICT UPDATE fires  → rowsAffected=1 (claim)
-	//   - row exists, hot timestamp    → ON CONFLICT UPDATE no-ops → rowsAffected=0 (skip)
-	//   - operator deleted             → next run self-heals      → rowsAffected=1 (claim)
-	// The empty-JSON case ('{}') used to silently no-op because json_extract
-	// on a missing key returns NULL, and `NULL < <anything>` is NULL (falsy),
-	// short-circuiting the WHERE clause. Adding the explicit IS NULL clause
-	// treats "no timestamp" as "claim it" — same semantic as a fresh row.
-	// The cooldown check is inside the DO UPDATE WHERE clause so the
-	// atomicity of the compare-and-swap is preserved across concurrent
-	// GC invocations.
-	result, err := dm.SQLDB().Exec(`
-		INSERT INTO system_config (key, raw_json, content_hash)
-		VALUES ('last_gc_at', ?, '')
-		ON CONFLICT(key) DO UPDATE SET
-		  raw_json = excluded.raw_json,
-		  updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE (
-		  system_config.raw_json IS NULL
-		  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
-		  OR datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
-		)
-	`, string(gcTimestampJSON), strconv.Itoa(maxAgeHours))
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		// last_gc_at was updated by another process while we were working — skip this run.
-		// Re-read and report the actual last GC time.
-		lastGC, _ := dm.GetSystemConfig("last_gc_at")
-		if updatedAt, ok := lastGC["updated_at"].(string); ok {
-			if last, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
-				fmt.Printf("Skipped: last gc was %s\n", last.Format("2006-01-02 15:04"))
-				return 0
-			}
+	// Dry runs are read-only — they don't claim the cooldown. Otherwise a
+	// user inspecting the dead-memory preview would block their next real
+	// GC for 24h. The cooldown is only meaningful for runs that mutate
+	// state (decay writes, purge, review soft-deletes).
+	if !dryRun {
+		// Atomic frequency cap: claim the GC slot by lazy-initialising the
+		// last_gc_at row, then doing a compare-and-swap against its timestamp.
+		// The previous plain UPDATE returned 0 rowsAffected on a fresh DB (no
+		// row existed) which the engine then misread as "cooldown active",
+		// silently aborting the maintenance loop. The upsert pattern fixes this:
+		//   - row missing                  → INSERT happens           → rowsAffected=1 (claim)
+		//   - row exists, no updated_at    → UPDATE fires (no timestamp to gate on) → rowsAffected=1 (claim)
+		//   - row exists, old timestamp    → ON CONFLICT UPDATE fires  → rowsAffected=1 (claim)
+		//   - row exists, hot timestamp    → ON CONFLICT UPDATE no-ops → rowsAffected=0 (skip)
+		//   - operator deleted             → next run self-heals      → rowsAffected=1 (claim)
+		// The empty-JSON case ('{}') used to silently no-op because json_extract
+		// on a missing key returns NULL, and `NULL < <anything>` is NULL (falsy),
+		// short-circuiting the WHERE clause. Adding the explicit IS NULL clause
+		// treats "no timestamp" as "claim it" — same semantic as a fresh row.
+		// The cooldown check is inside the DO UPDATE WHERE clause so the
+		// atomicity of the compare-and-swap is preserved across concurrent
+		// GC invocations.
+		result, err := dm.SQLDB().Exec(`
+			INSERT INTO system_config (key, raw_json, content_hash)
+			VALUES ('last_gc_at', ?, '')
+			ON CONFLICT(key) DO UPDATE SET
+			  raw_json = excluded.raw_json,
+			  updated_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE (
+			  system_config.raw_json IS NULL
+			  OR json_extract(system_config.raw_json, '$.updated_at') IS NULL
+			  OR datetime(json_extract(system_config.raw_json, '$.updated_at')) < datetime('now', '-' || ? || ' hours')
+			)
+		`, string(gcTimestampJSON), strconv.Itoa(maxAgeHours))
+		if err != nil {
+			usererror.Error("gc: cooldown claim: %v", err)
+			return 1
 		}
-		fmt.Println("Skipped: recent GC detected")
-		return 0
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			// last_gc_at was updated by another process while we were working — skip this run.
+			// Re-read and report the actual last GC time.
+			lastGC, _ := dm.GetSystemConfig("last_gc_at")
+			if updatedAt, ok := lastGC["updated_at"].(string); ok {
+				if last, parseErr := time.Parse(time.RFC3339, updatedAt); parseErr == nil {
+					fmt.Printf("Skipped: last gc was %s\n", last.Format("2006-01-02 15:04"))
+					return 0
+				}
+			}
+			fmt.Println("Skipped: recent GC detected")
+			return 0
+		}
+		// Atomic update succeeded — we have the lock. Proceed with GC.
+		// Note: all subsequent work happens AFTER this atomic check-and-set.
 	}
-	// Atomic update succeeded — we have the lock. Proceed with GC.
-	// Note: all subsequent work happens AFTER this atomic check-and-set.
 
 	// Purge mode: hard delete old reviewed memories and exit.
 	//
@@ -166,7 +176,7 @@ func handleGC(args []string) int {
 	//   UPDATE memories
 	//   SET deleted_at = datetime(deleted_at, 'unixepoch')
 	//   WHERE typeof(deleted_at) = 'integer';
-	if purge {
+	if purge && !dryRun {
 		result, err := dm.SQLDB().Exec(`
 			DELETE FROM memories
 			WHERE deleted_at IS NOT NULL
@@ -179,24 +189,30 @@ func handleGC(args []string) int {
 		fmt.Printf("Purged %d old deleted memories\n", purged)
 		return 0
 	}
+	if purge && dryRun {
+		// Surface the purge intent without writing.
+		fmt.Println("Dry run: --purge would hard-delete soft-deleted memories older than 30 days.")
+	}
 
 	// Audit log retention sweep — drop entries older than 30 days. Wired
 	// into the GC cycle rather than a separate cron because GC is the
 	// canonical cleanup pass and we want one place to tune retention.
-	if pruned, err := dm.PruneAuditLog(30); err != nil {
-		slog.Warn("audit prune failed", "error", err.Error(), "retention_days", 30)
-	} else if pruned > 0 {
-		fmt.Printf("Pruned %d audit log entries older than 30 days\n", pruned)
-	}
+	if !dryRun {
+		if pruned, err := dm.PruneAuditLog(30); err != nil {
+			slog.Warn("audit prune failed", "error", err.Error(), "retention_days", 30)
+		} else if pruned > 0 {
+			fmt.Printf("Pruned %d audit log entries older than 30 days\n", pruned)
+		}
 
-	// Session handoffs retention sweep — 90 days. Handoffs are
-	// higher-signal, lower-volume than audit log, so they get a longer
-	// retention window. The next session may need to look back more than
-	// 30 days to understand a long-running project.
-	if pruned, err := dm.PruneHandoffs(90); err != nil {
-		slog.Warn("handoff prune failed", "error", err.Error(), "retention_days", 90)
-	} else if pruned > 0 {
-		fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
+		// Session handoffs retention sweep — 90 days. Handoffs are
+		// higher-signal, lower-volume than audit log, so they get a longer
+		// retention window. The next session may need to look back more than
+		// 30 days to understand a long-running project.
+		if pruned, err := dm.PruneHandoffs(90); err != nil {
+			slog.Warn("handoff prune failed", "error", err.Error(), "retention_days", 90)
+		} else if pruned > 0 {
+			fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
+		}
 	}
 
 	// Get all non-deleted memories

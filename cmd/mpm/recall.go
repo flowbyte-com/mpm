@@ -618,7 +618,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 		       m.reference_id
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
-		WHERE m.deleted_at IS NULL`
+		WHERE m.deleted_at IS NULL` + mpminternal.MemoryExpireClauseM
 
 	if query != "" {
 		ftsQuery += " AND memories_fts MATCH ?"
@@ -680,7 +680,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 		       last_accessed_at,
 		       reference_id
 		FROM memories
-		WHERE deleted_at IS NULL AND collection = ?
+		WHERE deleted_at IS NULL AND collection = ?` + mpminternal.MemoryExpireClause + `
 		  AND (content LIKE ? OR tags LIKE ?)`
 
 	args = []interface{}{collection, likePattern, likePattern}
