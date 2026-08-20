@@ -32,6 +32,11 @@ type GCOptions struct {
 	Aggressive     bool // doubled decay rate
 	MaxAgeHours    int  // cooldown between successive GC runs
 	StaleTheoryDays int // pending theories older than this (days) are flagged/resolved; <= 0 disables
+	// Policies overrides the per-collection decay protection map. Nil
+	// uses DefaultDecayPolicies: collections with DecayPercent <= 0
+	// (decisions — the append-only audit trail) are exempt from the GC
+	// forgetting curve, matching the maintenance-path semantics.
+	Policies map[string]DecayPolicy
 }
 
 // GCRunResult is the structured output of dm.RunGC. Every numeric field
@@ -111,8 +116,12 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 	}
 
 	// Compute decay for every non-deleted memory.
+	policies := opts.Policies
+	if policies == nil {
+		policies = DefaultDecayPolicies
+	}
 	rows, err := dm.db.Query(`
-		SELECT id, weight, last_accessed_at, created_at, is_long_term
+		SELECT id, collection, weight, last_accessed_at, created_at, is_long_term
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
@@ -130,12 +139,18 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 
 	for rows.Next() {
 		result.Scanned++
-		var id string
+		var id, collection string
 		var weight float64
 		var lastAccessed, createdAt *int64
 		var isLTM bool
-		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
+		if err := rows.Scan(&id, &collection, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
 			return nil, fmt.Errorf("scanning GC candidate memory row: %w", err)
+		}
+		// Zero-decay collections (append-only audit trails like
+		// decisions) are exempt from the forgetting curve — the
+		// maintenance path protects them, and so does GC.
+		if p, ok := policies[collection]; ok && p.DecayPercent <= 0 {
+			continue
 		}
 		last := lastAccessed
 		if last == nil {
