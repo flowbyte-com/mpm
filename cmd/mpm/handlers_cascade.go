@@ -131,9 +131,14 @@ func handleCascadeMaterialize(args []string) int {
 			usererror.Error("materialize batch: %v", err)
 			return 1
 		}
+		nPending, perr := pendingCount()
+		if perr != nil {
+			usererror.Error("count pending: %v", perr)
+			return 1
+		}
 		fmt.Printf("materialized=%d failed=%d pending_after=%d elapsed=%s\n",
 			report.Materialized, report.Failed,
-			pendingCount(), time.Since(start))
+			nPending, time.Since(start))
 		return 0
 	}
 
@@ -144,7 +149,11 @@ func handleCascadeMaterialize(args []string) int {
 	for {
 		iteration++
 		if *maxIterations > 0 && iteration > *maxIterations {
-			nPending := pendingCount()
+			nPending, perr := pendingCount()
+			if perr != nil {
+				usererror.Error("count pending: %v", perr)
+				return 1
+			}
 			fmt.Printf("materialized=%d failed=%d pending_after=%d elapsed=%s\n",
 				0, 0, nPending, time.Since(start))
 			return 2 // timeout
@@ -158,10 +167,21 @@ func handleCascadeMaterialize(args []string) int {
 		}
 
 		// If the batch produced no forward progress, poll until empty.
+		// A query failure here must NOT be treated as "drained" — bail out
+		// so the operator can investigate rather than silently exit with
+		// the queue still containing pending/processing rows.
 		idlePolls := 0
 		for {
-			nPending := pendingCount()
-			nProcessing := processingCount()
+			nPending, perr := pendingCount()
+			if perr != nil {
+				usererror.Error("count pending during drain: %v", perr)
+				return 1
+			}
+			nProcessing, perr := processingCount()
+			if perr != nil {
+				usererror.Error("count processing during drain: %v", perr)
+				return 1
+			}
 			if nPending == 0 && nProcessing == 0 {
 				idlePolls++
 				if idlePolls >= idlePollsToConfirmDrain {
@@ -186,30 +206,32 @@ func handleCascadeMaterialize(args []string) int {
 	}
 }
 
-// pendingCount returns the number of 'pending' rows in the cascade outbox.
-func pendingCount() int {
-	dm := getDB()
-	if dm == nil {
-		return -1
+// pendingCount returns the number of 'pending' rows in the cascade outbox,
+// or an error if the query fails. Returning 0 on error would cause the
+// materialize loop to falsely confirm the queue is drained, silently
+// leaving pending rows unprocessed.
+func pendingCount() (int, error) {
+	if dbManager == nil {
+		return 0, fmt.Errorf("database not available")
 	}
 	var n int
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
-		usererror.Warn("pendingCount: failed to count pending cascade outbox rows, defaulting to 0: %v", err)
+	if err := dbManager.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'pending'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count pending cascade outbox rows: %w", err)
 	}
-	return n
+	return n, nil
 }
 
-// processingCount returns the number of 'processing' rows in the cascade outbox.
-func processingCount() int {
-	dm := getDB()
-	if dm == nil {
-		return -1
+// processingCount returns the number of 'processing' rows in the cascade outbox,
+// or an error if the query fails.
+func processingCount() (int, error) {
+	if dbManager == nil {
+		return 0, fmt.Errorf("database not available")
 	}
 	var n int
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n); err != nil {
-		usererror.Warn("processingCount: failed to count processing cascade outbox rows, defaulting to 0: %v", err)
+	if err := dbManager.SQLDB().QueryRow(`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status = 'processing'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count processing cascade outbox rows: %w", err)
 	}
-	return n
+	return n, nil
 }
 
 // handleListDeadLetters runs `mpm cascade list-dead-letters`.

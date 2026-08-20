@@ -144,3 +144,33 @@ func TestCascadeListDeadLetters_DoesNotAcquireLock(t *testing.T) {
 	// signal. This comment documents the assumption.)
 	_ = strings.Contains // silence unused import linter for future debugging
 }
+
+// TestPendingCount_PropagatesDBError pins the contract that pendingCount
+// surfaces DB errors instead of silently returning 0. The materialize
+// loop relies on this: returning 0 on error would falsely confirm the
+// queue is drained, leaving pending rows unprocessed. Exercised via the
+// nil-DB path (the only one the CLI singleton can be flipped to without
+// mocking the SQL driver); both nil-DM and query-error paths now share
+// the same error-propagating code.
+func TestPendingCount_PropagatesDBError(t *testing.T) {
+	// Force getDB's sync.Once to fire so the singleton is initialised,
+	// then swap dbManager to nil so pendingCount's nil-DM branch fires.
+	// (Without the warmup, the first pendingCount call would itself
+	// run the Once and re-set dbManager to a live DM — defeating the
+	// nil injection.)
+	_ = getDB()
+	savedDM := dbManager
+	dbManager = nil
+	defer func() { dbManager = savedDM }()
+
+	n, err := pendingCount()
+	if err == nil {
+		t.Errorf("pendingCount must return an error when no DB is available, got nil")
+	}
+	if n != 0 {
+		t.Errorf("pendingCount: n = %d, want 0 on error", n)
+	}
+	if err != nil && !strings.Contains(err.Error(), "database not available") {
+		t.Errorf("pendingCount error %q must mention 'database not available'", err.Error())
+	}
+}
