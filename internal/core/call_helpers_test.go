@@ -883,6 +883,31 @@ func TestWeightFractional_SurvivesAllReadPaths(t *testing.T) {
 	require.NoError(t, err, "GetMemoryRevisions must not crash")
 }
 
+// TestPromoteDeletedGuard pins the invariant that the CLI promote
+// UPDATE pattern (the weight=10 / is_long_term=1 step in handlePromote)
+// must reject soft-deleted rows so promote can't resurrect them.
+// Mirrors the SQL: `UPDATE memories SET weight=10, is_long_term=1
+// WHERE id=? AND deleted_at IS NULL`.
+func TestPromoteDeletedGuard(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight, deleted_at) VALUES (?, 'memories', 'gone', 1, CAST(strftime('%s','now') AS INTEGER))`, 0, "prom-gone")
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight) VALUES (?, 'memories', 'live', 1)`, 0, "prom-live")
+	require.NoError(t, err)
+
+	res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL`, "prom-gone")
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), affected, "promote on a soft-deleted id must not touch the row")
+
+	var w int
+	var ltm int
+	require.NoError(t, dm.QueryRowTracked(`SELECT weight, is_long_term FROM memories WHERE id = 'prom-gone'`).Scan(&w, &ltm))
+	assert.Equal(t, 1, w, "soft-deleted weight unchanged")
+	assert.Equal(t, 0, ltm, "soft-deleted is_long_term unchanged")
+}
+
 // TestMemoryStats_PartitionIsConsistent pins the stats partition
 // invariants so a future GetMemoryStats tweak can't reintroduce the
 // '340 + 0 != 429' confusion:

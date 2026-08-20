@@ -1296,17 +1296,17 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	stats["expired"] = expired
 
 	// By collection
-	rows, err := dm.db.Query(`
+	collRows, err := dm.db.Query(`
 		SELECT collection, COUNT(*) as count FROM memories
 		WHERE deleted_at IS NULL GROUP BY collection ORDER BY count DESC
 	`)
 	if err == nil {
-		defer rows.Close()
+		defer collRows.Close()
 		var byCollection []map[string]interface{}
-		for rows.Next() {
+		for collRows.Next() {
 			var coll string
 			var count int
-			if err := rows.Scan(&coll, &count); err != nil {
+			if err := collRows.Scan(&coll, &count); err != nil {
 				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: by_collection scan failed, skipping: %v", err), "", AuditContext{})
 				continue
 			}
@@ -1316,7 +1316,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	}
 
 	// By tag (top 20)
-	rows, err = dm.db.Query(`
+	tagRows, err := dm.db.Query(`
 		SELECT json_each.value as tag, COUNT(*) as count
 		FROM memories, json_each(memories.tags)
 		WHERE deleted_at IS NULL
@@ -1325,12 +1325,12 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		LIMIT 20
 	`)
 	if err == nil {
-		defer rows.Close()
+		defer tagRows.Close()
 		var byTag []map[string]interface{}
-		for rows.Next() {
+		for tagRows.Next() {
 			var tag string
 			var count int
-			if err := rows.Scan(&tag, &count); err != nil {
+			if err := tagRows.Scan(&tag, &count); err != nil {
 				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: by_tag scan failed, skipping: %v", err), "", AuditContext{})
 				continue
 			}
@@ -1340,17 +1340,17 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	}
 
 	// Reinforcement distribution
-	rows, err = dm.db.Query(`
+	distRows, err := dm.db.Query(`
 		SELECT reinforcement_count, COUNT(*) as count
 		FROM memories WHERE deleted_at IS NULL
 		GROUP BY reinforcement_count ORDER BY reinforcement_count
 	`)
 	if err == nil {
-		defer rows.Close()
+		defer distRows.Close()
 		var dist []map[string]interface{}
-		for rows.Next() {
+		for distRows.Next() {
 			var rc, count int
-			if err := rows.Scan(&rc, &count); err != nil {
+			if err := distRows.Scan(&rc, &count); err != nil {
 				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: reinforce_dist scan failed, skipping: %v", err), "", AuditContext{})
 				continue
 			}
@@ -1361,7 +1361,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 
 	// ── Epistemic Provenance Registry (ISR Telemetry) ──────────────────────
 	// Nested grouping: agent → model/compute → persona
-	rows, err = dm.db.Query(`
+	isrRows, err := dm.db.Query(`
 		SELECT COALESCE(json_extract(metadata, '$.provenance.agent'), 'unknown') as agent,
 		       COALESCE(json_extract(metadata, '$.provenance.model'), 'unknown') as model,
 		       COALESCE(json_extract(metadata, '$.provenance.compute'), 'unknown') as compute,
@@ -1378,7 +1378,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		ORDER BY agent, total DESC
 	`)
 	if err == nil {
-		defer rows.Close()
+		defer isrRows.Close()
 
 		type isrPersona struct {
 			persona string
@@ -1398,10 +1398,10 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		var agents []isrAgent
 		agentIndex := make(map[string]int)
 
-		for rows.Next() {
+		for isrRows.Next() {
 			var agent, model, compute, persona sql.NullString
 			var total, active int
-			if err := rows.Scan(&agent, &model, &compute, &persona, &total, &active); err != nil {
+			if err := isrRows.Scan(&agent, &model, &compute, &persona, &total, &active); err != nil {
 				dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: ISR scan failed, skipping: %v", err), "", AuditContext{})
 				continue
 			}
