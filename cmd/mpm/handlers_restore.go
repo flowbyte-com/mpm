@@ -19,7 +19,7 @@ func handleRestore(args []string) int {
 
 	// Fetch current state to preserve is_long_term and avoid overwriting weight
 	var currentIsLTM int
-	var currentWeight int
+	var currentWeight float64
 	var err error
 	err = dm.SQLDB().QueryRow(
 		`SELECT COALESCE(is_long_term, 0), COALESCE(weight, 1) FROM memories WHERE id = ?`,

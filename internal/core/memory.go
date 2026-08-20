@@ -1598,13 +1598,15 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 		var createdAt int64
 		var lastAccessed *int64
 		var sessionID sql.NullString
+		var weight float64
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
-			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
+			&mem.ReinforcementCount, &weight, &lastAccessed)
 		if err != nil {
 			return nil, fmt.Errorf("scanning spaced reinforcement memory row: %w", err)
 		}
+		mem.Weight = int(weight)
 
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
@@ -1695,13 +1697,15 @@ func (s *MemoryStore) GetContextualMemories(contextTags []string, sessionContext
 		var createdAt int64
 		var lastAccessed *int64
 		var sessionID sql.NullString
+		var weight float64
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
-			&mem.ReinforcementCount, &mem.Weight, &lastAccessed)
+			&mem.ReinforcementCount, &weight, &lastAccessed)
 		if err != nil {
 			return nil, fmt.Errorf("scanning contextual memory row: %w", err)
 		}
+		mem.Weight = int(weight)
 
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
@@ -2958,13 +2962,15 @@ func (s *MemoryStore) GetMemoriesByRelevance(collection string, limit int) ([]*M
 		var embedding []byte
 		var createdAt int64
 		var sessionID sql.NullString
+		var weight float64
 
 		err := rows.Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID,
 			&tagsJSON, &metadataJSON, &embedding, &createdAt,
-			&mem.ReinforcementCount, &mem.Weight)
+			&mem.ReinforcementCount, &weight)
 		if err != nil {
 			return nil, fmt.Errorf("scanning relevance memory row: %w", err)
 		}
+		mem.Weight = int(weight)
 
 		if sessionID.Valid {
 			mem.SessionID = sessionID.String
