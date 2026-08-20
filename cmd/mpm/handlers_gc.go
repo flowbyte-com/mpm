@@ -201,7 +201,7 @@ func handleGC(args []string) int {
 
 	// Get all non-deleted memories
 	rows, err := dm.SQLDB().Query(`
-		SELECT id, weight, last_accessed_at, created_at, is_long_term
+		SELECT id, collection, weight, last_accessed_at, created_at, is_long_term
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
@@ -228,13 +228,20 @@ func handleGC(args []string) int {
 
 	for rows.Next() {
 		scanned++
-		var id string
+		var id, collection string
 		var weight float64
 		var lastAccessed, createdAt *int64
 		var isLongTerm bool
 
-		if err := rows.Scan(&id, &weight, &lastAccessed, &createdAt, &isLongTerm); err != nil {
+		if err := rows.Scan(&id, &collection, &weight, &lastAccessed, &createdAt, &isLongTerm); err != nil {
 			usererror.Warn("handleGC: scan failed for memory row, skipping: %v", err)
+			continue
+		}
+
+		// Zero-decay collections (append-only audit trails like
+		// decisions) are exempt from the forgetting curve — mirrors the
+		// RunGC exemption so the CLI and the tool agree.
+		if policy, ok := mpminternal.DefaultDecayPolicies[collection]; ok && policy.DecayPercent <= 0 {
 			continue
 		}
 
