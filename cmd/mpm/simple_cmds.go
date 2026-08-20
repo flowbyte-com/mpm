@@ -300,6 +300,7 @@ func handlePatchMemory(args []string) int {
 	// Basic JSON validity check
 	if !strings.HasPrefix(strings.TrimSpace(patchJSON), "{") {
 		usererror.Error("patch must be a JSON object string")
+		return 1
 	}
 
 	dm := getDB()
@@ -315,6 +316,7 @@ func handlePatchMemory(args []string) int {
 	err = dm.UpdateMemoryMetadata(id, patchJSON)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	fmt.Printf("Patched metadata for memory %s\n", id)
@@ -345,12 +347,13 @@ func handlePromote(args []string) int {
 		return 1
 	}
 
-	// Update weight to 10 and is_long_term = 1
-	if res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ?`, id); err != nil {
+	// Update weight to 10 and is_long_term = 1. Guard on deleted_at so a
+	// soft-deleted row can't be silently resurrected by promote.
+	if res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL`, id); err != nil {
 		usererror.Error("%v", err)
 		return 1
 	} else if affected, aerr := res.RowsAffected(); aerr != nil || affected == 0 {
-		usererror.Error("promote failed: no row with id %s (not found, deleted, or expired)", id)
+		usererror.Error("promote failed: no live row with id %s (not found or deleted)", id)
 		return 1
 	}
 
@@ -397,11 +400,13 @@ func handleFeedback(args []string) int {
 		if isChallenged {
 			if err := dm.ChallengeAndReinforce(id, delta); err != nil {
 				usererror.Error("%v", err)
+				return 1
 			}
 			fmt.Printf("⚡ Reinforced memory %s (+%d) — challenge cleared\n", id, delta)
 		} else {
 			if err := dm.ReinforceMemory(id, delta); err != nil {
 				usererror.Error("%v", err)
+				return 1
 			}
 			fmt.Printf("⚡ Reinforced memory %s (+%d)\n", id, delta)
 		}
@@ -409,6 +414,7 @@ func handleFeedback(args []string) int {
 		// Negative feedback: weaken with hard floor at 1
 		if err := dm.AdjustMemoryWeight(id, delta); err != nil {
 			usererror.Error("%v", err)
+			return 1
 		}
 		// Check if already at minimum
 		updated, _ := dm.GetMemory(id)
@@ -481,12 +487,12 @@ func handleWeaken(args []string) int {
 	err = dm.WeakenMemory(id, delta)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	fmt.Printf("Weakened memory %s (-%d)\n", id, delta)
 	return 0
 }
-
 // mpm set-weight <id> <weight> — Set weight directly
 func handleSetWeight(args []string) int {
 	if len(args) < 3 {
@@ -498,9 +504,11 @@ func handleSetWeight(args []string) int {
 	w, err := strconv.Atoi(args[2])
 	if err != nil {
 		usererror.Error("invalid weight '%s'", args[2])
+		return 1
 	}
 	if w < 0 || w > 100 {
-		usererror.Error("weight must be 0-100")
+		usererror.Error("weight must be 0-100 (got %d)", w)
+		return 1
 	}
 
 	dm := getDB()
@@ -508,9 +516,20 @@ func handleSetWeight(args []string) int {
 		return 1
 	}
 
-	_, err = dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ?`, w, id)
+	// Defense Triad rule 3: assert the row exists and is live. A bare
+	// `WHERE id = ?` would resurrect soft-deleted rows and silently
+	// succeed on a typo'd id.
+	res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL`, w, id)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
+	}
+	if affected, aerr := res.RowsAffected(); aerr != nil {
+		usererror.Error("%v", aerr)
+		return 1
+	} else if affected == 0 {
+		usererror.Error("set-weight failed: no live memory with id %s (not found or deleted)", id)
+		return 1
 	}
 
 	fmt.Printf("Set weight of %s to %d\n", id, w)
