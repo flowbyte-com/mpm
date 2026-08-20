@@ -376,13 +376,15 @@ func handlePromote(args []string) int {
 // handleFeedback dispatches +<id> and -<id> shortcuts.
 // Delta sign is determined by the caller: +1 for reinforce, -1 for weaken.
 func handleFeedback(args []string) int {
-	if len(args) < 2 {
+	if len(args) < 3 {
 		usererror.Error("internal: handleFeedback requires id and delta")
+		return 1
 	}
 	id := args[1]
 	delta, err := strconv.Atoi(args[2])
 	if err != nil || delta == 0 {
 		usererror.Error("invalid delta %q", args[2])
+		return 1
 	}
 
 	dm := getDB()
@@ -448,9 +450,16 @@ func handleReinforce(args []string) int {
 	id := args[1]
 	delta := 1
 	if len(args) >= 3 {
-		if d, err := strconv.Atoi(args[2]); err == nil {
-			delta = d
+		d, err := strconv.Atoi(args[2])
+		if err != nil {
+			usererror.Error("reinforce: invalid delta %q (must be an integer)", args[2])
+			return 1
 		}
+		if d <= 0 {
+			usererror.Error("reinforce: delta must be >= 1 (got %d) — use `mpm weaken` to reduce weight", d)
+			return 1
+		}
+		delta = d
 	}
 
 	dm := getDB()
@@ -466,6 +475,7 @@ func handleReinforce(args []string) int {
 	err = dm.ReinforceMemory(id, delta)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	fmt.Printf("Reinforced memory %s (+%d)\n", id, delta)
@@ -482,9 +492,16 @@ func handleWeaken(args []string) int {
 	id := args[1]
 	delta := 1
 	if len(args) >= 3 {
-		if d, err := strconv.Atoi(args[2]); err == nil {
-			delta = d
+		d, err := strconv.Atoi(args[2])
+		if err != nil {
+			usererror.Error("weaken: invalid delta %q (must be an integer)", args[2])
+			return 1
 		}
+		if d <= 0 {
+			usererror.Error("weaken: delta must be >= 1 (got %d) — use `mpm reinforce` to increase weight", d)
+			return 1
+		}
+		delta = d
 	}
 
 	dm := getDB()
@@ -560,9 +577,16 @@ func handleSnooze(args []string) int {
 	for i := 2; i < len(args); i++ {
 		if args[i] == "--days" && i+1 < len(args) {
 			i++
-			if d, err := strconv.Atoi(args[i]); err == nil && d > 0 {
-				days = d
+			d, err := strconv.Atoi(args[i])
+			if err != nil {
+				usererror.Error("snooze: invalid --days %q (must be a positive integer)", args[i])
+				return 1
 			}
+			if d <= 0 {
+				usererror.Error("snooze: --days must be >= 1 (got %d)", d)
+				return 1
+			}
+			days = d
 		}
 	}
 

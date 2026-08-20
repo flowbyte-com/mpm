@@ -138,17 +138,20 @@ func handlePrune(args []string) int {
 		duration, parseErr := parseDuration(*olderThan)
 		if parseErr != nil {
 			usererror.Error("Invalid duration '%s': %v", *olderThan, parseErr)
+			return 1
 		}
 		cutoff := time.Now().Add(-duration)
 		count, pruneErr = dm.PruneOlderThan(cutoff.Unix())
 		if pruneErr != nil {
 			usererror.Error("Prune failed: %v", pruneErr)
+			return 1
 		}
 		fmt.Printf("Pruned %d memories older than %s (before %s)\n", count, *olderThan, cutoff.Format(time.RFC3339))
 	} else if *neverAccessed {
 		count, pruneErr = dm.PruneNeverAccessed()
 		if pruneErr != nil {
 			usererror.Error("Prune failed: %v", pruneErr)
+			return 1
 		}
 		fmt.Printf("Pruned %d memories never accessed\n", count)
 	} else {
@@ -156,6 +159,7 @@ func handlePrune(args []string) int {
 		count, pruneErr = dm.PruneExpired()
 		if pruneErr != nil {
 			usererror.Error("Prune failed: %v", pruneErr)
+			return 1
 		}
 		fmt.Printf("Pruned %d expired memories\n", count)
 	}
