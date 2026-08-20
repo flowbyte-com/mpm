@@ -917,6 +917,49 @@ func TestDeleteScheduledTask_MissingID(t *testing.T) {
 	assert.Contains(t, err.Error(), "nonexistent-task-id")
 }
 
+// TestPromote_RefusesLessons pins the collection guard: promoting a
+// lessons row must fail with a clear error (lessons have their own
+// lifecycle; LTM would lock them against decay), not silently set
+// weight=10 + is_long_term=1. Promoting a memories row still works.
+func TestPromote_RefusesLessons(t *testing.T) {
+	dm := newTestDM(t)
+
+	// Seed one lessons row and one memories row.
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight) VALUES (?, 'lessons', 'lesson', 1)`, 0, "les-1")
+	require.NoError(t, err)
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight) VALUES (?, 'memories', 'memory', 1)`, 0, "mem-1")
+	require.NoError(t, err)
+
+	// Capture the lessons row's pre-promote state (used to confirm
+	// the post-promote scan reads the same row — collection may have
+	// a non-1 default weight via migration, so we don't assert a
+	// specific starting value).
+	var preExists int
+	require.NoError(t, dm.QueryRowTracked(`SELECT COUNT(*) FROM memories WHERE id = 'les-1'`).Scan(&preExists))
+	require.Equal(t, 1, preExists, "lessons row must exist pre-promote")
+
+	// Promote the lessons row — must error.
+	_, err = dm.PromoteMemory("les-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lessons")
+
+	// Confirm the lessons row was NOT mutated by the promote (weight
+	// != 10 and is_long_term != 1 — those are the values promote would
+	// have set). The exact starting weight is collection-dependent.
+	var w float64
+	var ltm int
+	require.NoError(t, dm.QueryRowTracked(`SELECT weight, is_long_term FROM memories WHERE id = 'les-1'`).Scan(&w, &ltm))
+	assert.NotEqual(t, float64(10), w, "lessons weight must not be 10")
+	assert.NotEqual(t, 1, ltm, "lessons is_long_term must not be 1")
+
+	// Promote the memories row — must succeed and set weight=10.
+	_, err = dm.PromoteMemory("mem-1")
+	require.NoError(t, err)
+	require.NoError(t, dm.QueryRowTracked(`SELECT weight, is_long_term FROM memories WHERE id = 'mem-1'`).Scan(&w, &ltm))
+	assert.Equal(t, float64(10), w)
+	assert.Equal(t, 1, ltm)
+}
+
 // TestDeleteTopic_MissingID pins the silent-success fix: deleting a
 // nonexistent topic must error.
 func TestDeleteTopic_MissingID(t *testing.T) {

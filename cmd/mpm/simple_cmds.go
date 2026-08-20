@@ -359,12 +359,35 @@ func handlePromote(args []string) int {
 	}
 
 	// Update weight to 10 and is_long_term = 1. Guard on deleted_at so a
-	// soft-deleted row can't be silently resurrected by promote.
-	if res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL`, id); err != nil {
+	// soft-deleted row can't be silently resurrected by promote, AND on
+	// collection != 'lessons' so a lessons row (which has its own
+	// lifecycle) can't be silently locked into LTM by promote.
+	res, err := dm.SQLDB().Exec(`
+		UPDATE memories
+		SET weight = 10, is_long_term = 1
+		WHERE id = ? AND deleted_at IS NULL AND collection != 'lessons'
+	`, id)
+	if err != nil {
 		usererror.Error("%v", err)
 		return 1
-	} else if affected, aerr := res.RowsAffected(); aerr != nil || affected == 0 {
-		usererror.Error("promote failed: no live row with id %s (not found or deleted)", id)
+	}
+	affected, aerr := res.RowsAffected()
+	if aerr != nil {
+		usererror.Error("%v", aerr)
+		return 1
+	}
+	if affected == 0 {
+		// Distinguish "missing/deleted" from "rejected as lesson".
+		var exists int
+		if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ? AND deleted_at IS NULL`, id).Scan(&exists); err != nil {
+			usererror.Error("%v", err)
+			return 1
+		}
+		if exists == 0 {
+			usererror.Error("promote failed: no live row with id %s (not found or deleted)", id)
+		} else {
+			usererror.Error("promote refused: lessons rows have their own lifecycle; use `mpm lessons` commands instead")
+		}
 		return 1
 	}
 
@@ -584,6 +607,14 @@ func handleSnooze(args []string) int {
 			}
 			if d <= 0 {
 				usererror.Error("snooze: --days must be >= 1 (got %d)", d)
+				return 1
+			}
+			// Cap snooze at 1 year so a typo can't quietly turn a
+			// memory into a "never accessed / never decays" row
+			// without going through `mpm promote`. Use promote for
+			// permanent durability.
+			if d > 365 {
+				usererror.Error("snooze: --days capped at 365 (got %d) — use `mpm promote` for permanent durability", d)
 				return 1
 			}
 			days = d
