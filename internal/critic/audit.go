@@ -39,17 +39,25 @@ type Hunt interface {
 // persist. The orchestrator calls cli.Call(Tool, Payload) to write it
 // via the mpm CLI. The CLI is used (not direct mpm-core calls) so the
 // Critic is decoupled from mpm-core's internal API surface.
+//
+// Tool and Action map to the current `mpm call` envelope: the call is
+// `mpm call <Tool> --payload '{"action":"<Action>","params":<Payload>}'`.
+// Keeping both fields on the Finding (rather than just the legacy
+// flat-tool-name string) means a future rename from `mpm_memory` to
+// `mpm_mind` or from `challenge` to `flag_stale` can't silently strand
+// the critic again — TestCriticCanPublishFinding pins the contract.
 type Finding struct {
-	Tool     string                 // mpm tool name, e.g. "save_lesson"
+	Tool     string                 // mpm tool name, e.g. "mpm_memory"
+	Action   string                 // tool action, e.g. "challenge"
 	Reason   string                 // human-readable description, used in logs
-	Payload  map[string]interface{} // tool-specific args
+	Payload  map[string]interface{} // tool-specific params
 	Priority int                    // 0=low (informational), 1=medium, 2=high
 }
 
 // CLIRunner abstracts the mpm CLI invocation. Production uses ExecCLI
 // (real subprocess); tests can substitute a fake.
 type CLIRunner interface {
-	Call(ctx context.Context, tool string, payload map[string]interface{}) error
+	Call(ctx context.Context, tool, action string, payload map[string]interface{}) error
 }
 
 // ExecCLI invokes `mpm call <tool> --payload <json>` as a subprocess.
@@ -61,12 +69,24 @@ type ExecCLI struct {
 
 // Call runs the mpm call synchronously and returns an error on non-zero
 // exit or stderr output.
-func (c *ExecCLI) Call(ctx context.Context, tool string, payload map[string]interface{}) error {
+//
+// The `action` and `params` arguments are wrapped into the current
+// `mpm call` envelope:
+//
+//	mpm call <tool> --payload '{"action":"<action>","params":<params>}'
+//
+// Callers (hunts) populate Tool + Action on the Finding; this wrapper
+// ensures the published payload matches what the live tool expects.
+func (c *ExecCLI) Call(ctx context.Context, tool, action string, payload map[string]interface{}) error {
 	mpm := c.MPMPath
 	if mpm == "" {
 		mpm = "mpm"
 	}
-	jsonPayload, err := json.Marshal(payload)
+	envelope := map[string]interface{}{
+		"action": action,
+		"params": payload,
+	}
+	jsonPayload, err := json.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
@@ -161,9 +181,10 @@ func (a *Audit) Run(ctx context.Context) error {
 	// Emit findings via CLI. Failures are logged but do not stop the cycle.
 	emitted := 0
 	for _, f := range allFindings {
-		if err := a.cli.Call(ctx, f.Tool, f.Payload); err != nil {
+		if err := a.cli.Call(ctx, f.Tool, f.Action, f.Payload); err != nil {
 			a.log.Error("emit finding failed",
 				"tool", f.Tool,
+				"action", f.Action,
 				"reason", f.Reason,
 				"err", err)
 			continue
@@ -176,7 +197,8 @@ func (a *Audit) Run(ctx context.Context) error {
 		"hunts_run", len(a.hunts),
 		"findings_total", len(allFindings),
 		"findings_emitted", emitted,
-		"duration", time.Since(cycleStart).String())
+		"findings_failed", len(allFindings)-emitted,
+		"duration_ms", time.Since(cycleStart).Milliseconds())
 	return nil
 }
 

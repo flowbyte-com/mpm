@@ -78,13 +78,14 @@ type fakeCLI struct {
 
 type fakeCall struct {
 	Tool    string
+	Action  string
 	Payload map[string]interface{}
 }
 
-func (f *fakeCLI) Call(_ context.Context, tool string, payload map[string]interface{}) error {
+func (f *fakeCLI) Call(_ context.Context, tool, action string, payload map[string]interface{}) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fakeCall{Tool: tool, Payload: payload})
+	f.calls = append(f.calls, fakeCall{Tool: tool, Action: action, Payload: payload})
 	if f.failTool != "" && tool == f.failTool {
 		return errors.New("synthetic failure: " + tool)
 	}
@@ -161,8 +162,8 @@ func TestSurvivalAsymmetryHunt_FiresAboveThreshold(t *testing.T) {
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
 	}
-	if findings[0].Tool != "save_lesson" {
-		t.Errorf("expected save_lesson, got %s", findings[0].Tool)
+	if findings[0].Tool != "mpm_lessons" || findings[0].Action != "save" {
+		t.Errorf("expected mpm_lessons/save, got %s/%s", findings[0].Tool, findings[0].Action)
 	}
 	if findings[0].Priority != 2 {
 		t.Errorf("expected priority 2, got %d", findings[0].Priority)
@@ -251,8 +252,11 @@ func TestStaleMemoryHunt_FlagsOldMemory(t *testing.T) {
 		t.Fatalf("expected 2 findings (old-1 + old-2), got %d", len(findings))
 	}
 	for _, f := range findings {
-		if f.Tool != "challenge_memory" {
-			t.Errorf("expected challenge_memory, got %s", f.Tool)
+		if f.Tool != "mpm_memory" {
+			t.Errorf("expected mpm_memory, got %s", f.Tool)
+		}
+		if f.Action != "challenge" {
+			t.Errorf("expected challenge action, got %s", f.Action)
 		}
 		if f.Priority != 1 {
 			t.Errorf("expected priority 1, got %d", f.Priority)
@@ -301,8 +305,8 @@ func TestWeakTheoryHunt_FlagsBelowThreshold(t *testing.T) {
 		t.Fatalf("expected 2 findings (weak-1 + weak-2), got %d", len(findings))
 	}
 	for _, f := range findings {
-		if f.Tool != "save_lesson" {
-			t.Errorf("expected save_lesson, got %s", f.Tool)
+		if f.Tool != "mpm_lessons" || f.Action != "save" {
+			t.Errorf("expected mpm_lessons/save, got %s/%s", f.Tool, f.Action)
 		}
 	}
 }
@@ -356,8 +360,8 @@ func TestPoisonPillHunt_PicksHighestConfidenceMemory(t *testing.T) {
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 poison pill, got %d", len(findings))
 	}
-	if findings[0].Tool != "propose_theory" {
-		t.Errorf("expected propose_theory, got %s", findings[0].Tool)
+	if findings[0].Tool != "mpm_theories" || findings[0].Action != "propose" {
+		t.Errorf("expected mpm_theories/propose, got %s/%s", findings[0].Tool, findings[0].Action)
 	}
 	hyp, ok := findings[0].Payload["hypothesis"].(string)
 	if !ok || !contains(hyp, "high-1") {
@@ -392,12 +396,12 @@ func TestAudit_Run_EmitsFindingsViaCLI(t *testing.T) {
 	}
 	foundSaveLesson := false
 	for _, c := range calls {
-		if c.Tool == "save_lesson" {
+		if c.Tool == "mpm_lessons" && c.Action == "save" {
 			foundSaveLesson = true
 		}
 	}
 	if !foundSaveLesson {
-		t.Errorf("expected save_lesson emission in calls=%v", calls)
+		t.Errorf("expected mpm_lessons/save emission in calls=%v", calls)
 	}
 }
 
@@ -415,15 +419,15 @@ func TestAudit_Run_PoisonPillOnCycleFive(t *testing.T) {
 		}
 	}
 
-	// Find a propose_theory call (poison pill). Should be exactly 1.
+	// Find an mpm_theories/propose call (poison pill). Should be exactly 1.
 	proposeCount := 0
 	for _, c := range cli.Calls() {
-		if c.Tool == "propose_theory" {
+		if c.Tool == "mpm_theories" && c.Action == "propose" {
 			proposeCount++
 		}
 	}
 	if proposeCount != 1 {
-		t.Errorf("expected exactly 1 propose_theory (poison pill on cycle 5), got %d", proposeCount)
+		t.Errorf("expected exactly 1 mpm_theories/propose (poison pill on cycle 5), got %d", proposeCount)
 	}
 }
 
@@ -447,7 +451,7 @@ func TestAudit_Run_HuntFailureDoesNotStopCycle(t *testing.T) {
 	// The WeakTheory hunt should still have emitted its finding.
 	found := false
 	for _, c := range cli.Calls() {
-		if c.Tool == "save_lesson" {
+		if c.Tool == "mpm_lessons" && c.Action == "save" {
 			found = true
 			break
 		}
@@ -459,7 +463,7 @@ func TestAudit_Run_HuntFailureDoesNotStopCycle(t *testing.T) {
 
 func TestAudit_Run_EmitFailureLogsButContinues(t *testing.T) {
 	a, _ := newTestAudit(t)
-	a.cli.(*fakeCLI).failTool = "save_lesson" // every save_lesson call errors
+	a.cli.(*fakeCLI).failTool = "mpm_lessons" // every lesson-save call errors
 	ctx := context.Background()
 
 	seedMemory(t, a, "weak", "theories", "weak", "", 0.3, "", time.Now())
@@ -495,4 +499,92 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestCriticCanPublishFinding is the contract test that pins the
+// critic's publishing path. It runs the orchestrator end-to-end with
+// the fake CLI and asserts the captured Call payload matches the live
+// `mpm call` envelope:
+//
+//	mpm call <Tool> --payload '{"action":"<Action>","params":<Payload>}'
+//
+// If a future rename breaks `mpm_memory` → `mpm_mind`, or `challenge` →
+// `flag_stale`, the captured envelope drifts and this test fails. The
+// whole point of this test is to prevent the failure mode where every
+// critic emit silently errors with "unknown tool" — exactly the bug
+// the live critic had before this stage-1 fix.
+func TestCriticCanPublishFinding(t *testing.T) {
+	a, cli := newTestAudit(t)
+	ctx := context.Background()
+
+	// Seed a stale memory so StaleMemoryHunt fires with the full
+	// challenge envelope.
+	old := time.Now().Add(-60 * 24 * time.Hour)
+	seedMemory(t, a, "stale-1", "memories", "ancient content", "", 0.8, "", old)
+
+	if err := a.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Find the challenge emit. The fake captures every Call verbatim
+	// — Tool + Action + Payload are the contract.
+	var challenge *fakeCall
+	for i := range cli.Calls() {
+		c := &cli.Calls()[i]
+		if c.Tool == "mpm_memory" && c.Action == "challenge" {
+			challenge = c
+			break
+		}
+	}
+	if challenge == nil {
+		t.Fatalf("no challenge emit captured; calls=%v", cli.Calls())
+	}
+
+	// Payload MUST carry the params the live `mpm_memory challenge`
+	// action expects — memoryId + evidence. If a future rename moves
+	// these field names, the test fails before the bug ships.
+	memoryID, ok := challenge.Payload["memoryId"].(string)
+	if !ok || memoryID != "stale-1" {
+		t.Errorf("payload.memoryId = %v, want \"stale-1\"", challenge.Payload["memoryId"])
+	}
+	evidence, ok := challenge.Payload["evidence"].(string)
+	if !ok || evidence == "" {
+		t.Errorf("payload.evidence missing or empty: %v", challenge.Payload["evidence"])
+	}
+}
+
+// TestCriticEnvelopesAreCurrent is the meta-contract: every Tool/Action
+// the critic publishes must reference a tool that exists in the live
+// `mpm call` envelope. We can't shell out to `mpm` from a unit test
+// reliably, but we can assert the Finding's Tool+Action combo isn't
+// one of the historically-broken legacy names. This is the test that
+// fails immediately if someone reintroduces "challenge_memory" (which
+// the live envelope rejected with "unknown tool").
+func TestCriticEnvelopesAreCurrent(t *testing.T) {
+	forbidden := map[string]string{
+		"challenge_memory":  "legacy — use mpm_memory + challenge",
+		"save_lesson":       "legacy — use mpm_lessons + save",
+		"propose_theory":    "legacy — use mpm_theories + propose",
+	}
+
+	// Drain every published Finding across all hunts by running each
+	// in isolation. We can't enumerate hunts from outside, but the
+	// public Run() path emits them — so seed the DB to fire all three.
+	a, cli := newTestAudit(t)
+	ctx := context.Background()
+
+	seedMemory(t, a, "old-mem", "memories", "old", "", 0.8, "", time.Now().Add(-60*24*time.Hour))
+	seedMemory(t, a, "weak-theory", "theories", "weak", "", 0.3, "", time.Now())
+
+	if err := a.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, c := range cli.Calls() {
+		if why, bad := forbidden[c.Tool]; bad {
+			t.Errorf("critic published legacy tool name %q (%s) — the live envelope rejects it as unknown", c.Tool, why)
+		}
+		if c.Action == "" {
+			t.Errorf("critic published Finding with empty Action for tool=%s — the mpm call envelope requires action+params", c.Tool)
+		}
+	}
 }
