@@ -29,6 +29,11 @@ func handleProposeTheory(args []string) int {
 	if hypothesis == "" {
 		hypothesis = strings.TrimSpace(input)
 	}
+	// Reject empty/whitespace-only hypotheses so a stray `mpm propose_theory
+	// "   "` doesn't create an empty theories row.
+	if strings.TrimSpace(hypothesis) == "" {
+		return respond("", "propose_theory: hypothesis is required (non-empty)\n", 1)
+	}
 	if status == "" {
 		status = "pending"
 	}
@@ -112,6 +117,11 @@ func handleResolveTheory(args []string) int {
 		id = filtered[0]
 		conclusion = ""
 	}
+	// Reject empty conclusion so a stray `mpm resolve_theory <id>` doesn't
+	// resolve the theory without recording what was learned.
+	if strings.TrimSpace(conclusion) == "" {
+		return respond("", "resolve_theory: conclusion is required (non-empty)\n", 1)
+	}
 
 	dm := getDB()
 	if dm == nil {
@@ -165,8 +175,12 @@ func handleResolveTheory(args []string) int {
 		return respond("", fmt.Sprintf("Failed to resolve theory: %v\n", err), 1)
 	}
 
-	// Bump weight — reinforces the resolved theory
-	dm.ReinforceMemory(id, 1)
+	// Bump weight — reinforces the resolved theory. Defense Triad rule 3:
+	// surface errors so a missing/deleted row doesn't print "resolved"
+	// after the metadata patch succeeded.
+	if err := dm.ReinforceMemory(id, 1); err != nil {
+		return respond("", fmt.Sprintf("Failed to reinforce resolved theory: %v\n", err), 1)
+	}
 
 	return respond("", fmt.Sprintf("✅ Theory resolved: %s — %s\n", id, conclusion), 0)
 }
