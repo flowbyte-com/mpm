@@ -29,7 +29,7 @@ import (
 // any test that touches scheduled_tasks.
 func newScheduledTaskDM(t *testing.T) *DatabaseManager {
 	t.Helper()
-	dm := newTestWakeDM(t)
+	dm := newTestDM(t)
 	// Belt-and-braces: wipe scheduled_tasks at start AND register
 	// cleanup at end. The first wipe handles accumulated state from
 	// prior tests in this run; the cleanup handles the inverse case
