@@ -229,7 +229,7 @@ func handleGC(args []string) int {
 	for rows.Next() {
 		scanned++
 		var id string
-		var weight int
+		var weight float64
 		var lastAccessed, createdAt *int64
 		var isLongTerm bool
 
@@ -256,8 +256,8 @@ func handleGC(args []string) int {
 			t := time.Unix(*createdAt, 0)
 			createdAtTime = &t
 		}
-		decay := computeDecay(float64(weight), daysSinceAccess, isLongTerm, createdAtTime, aggressive, monotonicNow)
-		newWeight := float64(weight) - decay
+		decay := computeDecay(weight, daysSinceAccess, isLongTerm, createdAtTime, aggressive, monotonicNow)
+		newWeight := weight - decay
 
 		// Floor
 		if newWeight < -10.0 {
@@ -265,11 +265,11 @@ func handleGC(args []string) int {
 		}
 		// LTM protection: preserve memories that are explicitly marked LTM OR have weight >= 10.
 		// Applying the floor BEFORE dead detection ensures LTM memories are never flagged for deletion.
-		if (mpminternal.IsLTMMemory(isLongTerm, weight)) && newWeight < 1.0 {
+		if (mpminternal.IsLTMMemory(isLongTerm, int(weight))) && newWeight < 1.0 {
 			newWeight = 1.0
 		}
 		// Record delta for batch update
-		deltas = append(deltas, weightDelta{id: id, oldWeight: weight, newWeight: newWeight, isLTM: mpminternal.IsLTMMemory(isLongTerm, weight)})
+		deltas = append(deltas, weightDelta{id: id, oldWeight: int(weight), newWeight: newWeight, isLTM: mpminternal.IsLTMMemory(isLongTerm, int(weight))})
 
 		// Dead if <= 0 (post-clamp) and not LTM — LTM memories are never eligible for deletion.
 		// Also catches already-dead memories (weight already <= 0 from a previous GC)
@@ -283,7 +283,7 @@ func handleGC(args []string) int {
 			deadMemories = append(deadMemories, map[string]interface{}{
 				"id":      id,
 				"content": deadContent,
-				"weight":  weight,
+				"weight":  int(weight),
 				"decay":   decay,
 			})
 		}

@@ -28,7 +28,7 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 	var (
 		id, content, tagsJSON, metaJSON, collection, createdAt string
 		isGlobal, isPrime                                      int
-		weight                                                 int
+		weight                                                 float64
 		deletedAt                                              sql.NullString
 	)
 
@@ -85,7 +85,7 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 		Metadata:    meta,
 		IsGlobal:    isGlobal == 1,
 		IsLatest:    isLatest,
-		Weight:      weight,
+		Weight:      int(weight),
 		CreatedAt:   createdAt,
 		Name:        fm.Name,
 		Version:     fm.Version,
@@ -144,7 +144,8 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 	var all []parsedRow
 	for rows.Next() {
 		var id, content string
-		var isGlobal, weight int
+		var isGlobal int
+		var weight float64
 		if err := rows.Scan(&id, &content, &isGlobal, &weight); err != nil {
 			return nil, fmt.Errorf("scanning skill row: %w", err)
 		}
@@ -154,7 +155,7 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 		}
 		all = append(all, parsedRow{
 			id: id, name: fm.Name, version: fm.Version,
-			whenToUse: fm.WhenToUse, isGlobal: isGlobal == 1, weight: weight,
+			whenToUse: fm.WhenToUse, isGlobal: isGlobal == 1, weight: int(weight),
 		})
 	}
 	if err := rows.Err(); err != nil {

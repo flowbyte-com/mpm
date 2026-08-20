@@ -235,7 +235,8 @@ func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, collection, content string
-		var reinforcementCount, weight int64
+		var reinforcementCount int64
+		var weight float64
 		var lastAccess, createdAt int64
 
 		if err := rows.Scan(&id, &collection, &content, &reinforcementCount, &weight, &lastAccess, &createdAt); err != nil {
@@ -246,7 +247,7 @@ func scanMemoriesFromRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 			"collection":          collection,
 			"content":             content,
 			"reinforcement_count": reinforcementCount,
-			"weight":              weight,
+			"weight":              int(weight),
 			"last_accessed_at":    lastAccess,
 			"created_at":          createdAt,
 		})

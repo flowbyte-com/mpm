@@ -490,7 +490,7 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 		key, sql string
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`},
-		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND json_extract(metadata, '$.status') = 'pending'`},
+		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
 		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ?`},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
@@ -1599,7 +1599,8 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 	for rows.Next() {
 		var id, content, coll sql.NullString
 		var tags, meta, createdAt, updatedAt sql.NullString
-		var weight, reinforcement, isGlobal sql.NullInt64
+		var weight sql.NullFloat64
+		var reinforcement, isGlobal sql.NullInt64
 		if err := rows.Scan(&id, &content, &coll, &tags, &meta, &weight, &reinforcement,
 			&createdAt, &updatedAt, &isGlobal); err != nil {
 			return nil, fmt.Errorf("scanning global rule row: %w", err)
@@ -1610,7 +1611,7 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 			"collection":          coll.String,
 			"tags":                tags.String,
 			"metadata":            meta.String,
-			"weight":              int(weight.Int64),
+			"weight":              int(weight.Float64),
 			"reinforcement_count": int(reinforcement.Int64),
 			"created_at":          createdAt.String,
 			"updated_at":          updatedAt.String,
@@ -3774,11 +3775,13 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 	var revisions []MemoryRevision
 	for rows.Next() {
 		var r MemoryRevision
+		var weight float64
 		if err := rows.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
-			&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
+			&weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
 			&r.ChallengedTheoryID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning memory revision row: %w", err)
 		}
+		r.Weight = int(weight)
 		revisions = append(revisions, r)
 	}
 	if revisions == nil {
@@ -3821,12 +3824,14 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 	`, memoryID, asOf.Unix())
 
 	var r MemoryRevision
+	var weight float64
 	err = row.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
-		&r.Weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
+		&weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
 		&r.ChallengedTheoryID, &r.CreatedAt)
 	if err != nil {
 		return nil, nil // no revision found for that time
 	}
+	r.Weight = int(weight)
 	return &r, nil
 }
 
@@ -4183,7 +4188,8 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 	// Read the local row.
 	var content, collection string
 	var tagsNS, metaNS sql.NullString
-	var weight, reinforcement int
+	var weight float64
+	var reinforcement int
 	err := dm.db.QueryRow(`
 		SELECT content, collection, tags, metadata, weight, COALESCE(reinforcement_count, 0)
 		FROM memories

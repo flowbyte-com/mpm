@@ -611,35 +611,45 @@ func handleSynthesizeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 }
 
 // callGCRun wraps dm.RunGC with a typed payload. Safe defaults:
-// dry_run=true (no writes), aggressive=false, max_age_hours=24.
-// Callers must explicitly set dry_run=false to mutate state. The full
-// CLI flag surface (--review, --purge, --shred-negative) stays on
-// `mpm gc` because those modes are operationally distinct.
+// dry_run=true (no writes), aggressive=false, max_age_hours=24,
+// stale_theory_days=30 (pending theories older than 30 days are
+// flagged; auto-resolved only when dry_run=false). Callers must
+// explicitly set dry_run=false to mutate state. The full CLI flag
+// surface (--review, --purge, --shred-negative) stays on `mpm gc`
+// because those modes are operationally distinct.
 func handleGCRun(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	dryRun := parseBoolDefault(p["dry_run"], true) // safe default
 	aggressive := parseBoolDefault(p["aggressive"], false)
 	maxAge := int(internal.ParseFloatOr(p["max_age_hours"], 24))
+	staleDays := int(internal.ParseFloatOr(p["stale_theory_days"], 30))
+	if staleDays < 0 {
+		staleDays = 0
+	}
 
 	out, err := dm.RunGC(internal.GCOptions{
-		DryRun:      dryRun,
-		Aggressive:  aggressive,
-		MaxAgeHours: maxAge,
+		DryRun:          dryRun,
+		Aggressive:      aggressive,
+		MaxAgeHours:     maxAge,
+		StaleTheoryDays: staleDays,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	result := map[string]interface{}{
-		"success":           true,
-		"dry_run":           dryRun,
-		"cooldown_skip":     out.CooldownSkip,
-		"ran":               out.Ran,
-		"scanned":           out.Scanned,
-		"updated":           out.Updated,
-		"audit_pruned":      out.AuditPruned,
-		"handoff_pruned":    out.HandoffPruned,
-		"dead_memory_count": len(out.DeadMemories),
-		"dead_memories":     out.DeadMemories,
+		"success":                 true,
+		"dry_run":                 dryRun,
+		"cooldown_skip":           out.CooldownSkip,
+		"ran":                     out.Ran,
+		"scanned":                 out.Scanned,
+		"updated":                 out.Updated,
+		"audit_pruned":            out.AuditPruned,
+		"handoff_pruned":          out.HandoffPruned,
+		"dead_memory_count":       len(out.DeadMemories),
+		"dead_memories":           out.DeadMemories,
+		"stale_theory_days":       staleDays,
+		"stale_theories":          out.StaleTheories,
+		"stale_theories_resolved": out.StaleTheoriesResolved,
 	}
 	if out.LastGCRan != nil {
 		result["last_gc_ran"] = mpminternal.FormatUnixSeconds(*out.LastGCRan)
