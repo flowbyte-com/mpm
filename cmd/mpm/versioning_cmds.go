@@ -86,9 +86,11 @@ func handleDiff(args []string) int {
 	v2Info, ok2 := versions[v2]
 	if !ok1 {
 		usererror.Error("version %d not found for memory %s", v1, id)
+		return 1
 	}
 	if !ok2 {
 		usererror.Error("version %d not found for memory %s", v2, id)
+		return 1
 	}
 
 	dmp := diffmatchpatch.New()
