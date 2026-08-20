@@ -882,3 +882,42 @@ func TestWeightFractional_SurvivesAllReadPaths(t *testing.T) {
 	_, err = dm.GetMemoryRevisions("frac-1")
 	require.NoError(t, err, "GetMemoryRevisions must not crash")
 }
+
+// TestMemoryStats_PartitionIsConsistent pins the stats partition
+// invariants so a future GetMemoryStats tweak can't reintroduce the
+// '340 + 0 != 429' confusion:
+//   - Total = Active + Deleted   (the primary partition)
+//   - Expired ⊆ Active           (live rows past TTL; never deleted)
+//   - Expired and Deleted are disjoint
+func TestMemoryStats_PartitionIsConsistent(t *testing.T) {
+	dm := newTestDM(t)
+
+	// Live row, no TTL.
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'live')`, 0, "st-live")
+	require.NoError(t, err)
+	// Live row, expired TTL (past).
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, expires_at) VALUES (?, 'memories', 'past', 1000)`, 0, "st-past")
+	require.NoError(t, err)
+	// Live row, future TTL.
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, expires_at) VALUES (?, 'memories', 'future', 4102444800)`, 0, "st-future")
+	require.NoError(t, err)
+	// Soft-deleted row with past TTL — must NOT count in expired.
+	_, err = dm.ExecTracked(`INSERT INTO memories (id, collection, content, expires_at, deleted_at) VALUES (?, 'memories', 'gone', 1000, CAST(strftime('%s','now') AS INTEGER))`, 0, "st-gone")
+	require.NoError(t, err)
+
+	stats, err := dm.GetMemoryStats()
+	require.NoError(t, err)
+
+	// GetMemoryStats scans counts into Go int, so direct assertion is safe.
+	total, _ := stats["total"].(int)
+	active, _ := stats["active"].(int)
+	deleted, _ := stats["deleted"].(int)
+	expired, _ := stats["expired"].(int)
+
+	assert.Equal(t, 4, total, "all four fixtures")
+	assert.Equal(t, 3, active, "deleted row excluded from active")
+	assert.Equal(t, 1, deleted, "deleted row counted once")
+	assert.Equal(t, 1, expired, "live past-TTL row only; the deleted past-TTL row must be excluded")
+	assert.Equal(t, active+deleted, total, "Total = Active + Deleted")
+	assert.LessOrEqual(t, expired, active, "Expired ⊆ Active")
+}

@@ -30,16 +30,24 @@ func handleStats(args []string) int {
 }
 
 func printStats(s map[string]interface{}) {
+	total := safeInt(s["total"])
+	active := safeInt(s["active"])
+	deleted := safeInt(s["deleted"])
+	expired := safeInt(s["expired"])
+	live := active - expired
 	fmt.Println("\n📊 MPM Memory Statistics")
 	fmt.Println("══════════════════════════════════════════")
 
-	fmt.Printf("\n  Total Memories:     %v\n", s["total"])
-	fmt.Printf("  Active:            %v\n", s["active"])
-	fmt.Printf("  Deleted:           %v\n", s["deleted"])
-	fmt.Printf("  LTM (Long-Term):   %v\n", s["ltm"])
-	fmt.Printf("  Reinforced:        %v\n", s["reinforced"])
-	fmt.Printf("  Never Accessed:    %v ⚠️\n", s["never_accessed"])
-	fmt.Printf("  Expired:           %v\n", s["expired"])
+	fmt.Printf("\n  Total Memories:          %d\n", total)
+	fmt.Printf("    ├── Active:            %d\n", active)
+	fmt.Printf("    │     ├── Live:        %d\n", live)
+	fmt.Printf("    │     └── Expired:     %d\n", expired)
+	fmt.Printf("    └── Deleted:           %d\n", deleted)
+
+	fmt.Printf("\n  Active detail:\n")
+	fmt.Printf("    LTM (Long-Term):       %d\n", safeInt(s["ltm"]))
+	fmt.Printf("    Reinforced:            %d\n", safeInt(s["reinforced"]))
+	fmt.Printf("    Never Accessed:        %d ⚠️\n", safeInt(s["never_accessed"]))
 
 	fmt.Printf("\n  By Collection:\n")
 	if collections, ok := s["by_collection"].([]map[string]interface{}); ok {
