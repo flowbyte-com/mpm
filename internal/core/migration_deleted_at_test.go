@@ -33,7 +33,8 @@ func setupMigrationTestDB(t *testing.T) *sql.DB {
 	CREATE TABLE IF NOT EXISTS memories (
 		id TEXT PRIMARY KEY,
 		content TEXT NOT NULL,
-		deleted_at INTEGER
+		deleted_at INTEGER,
+		expires_at REAL
 	);
 	CREATE TABLE IF NOT EXISTS schema_migrations (
 		id TEXT PRIMARY KEY,
