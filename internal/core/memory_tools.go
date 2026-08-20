@@ -596,8 +596,18 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		}
 	}
 
-	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, memoryID); err != nil {
+	res, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, memoryID)
+	if err != nil {
 		return nil, fmt.Errorf("shred: delete memory: %w", err)
+	}
+	// Defense Triad rule 3: a shred of a nonexistent id must fail loudly,
+	// not report success. The broad sweep above is idempotent by design
+	// (zero rows on a miss), so the memory DELETE is the authority on
+	// whether the shred actually happened.
+	if affected, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("shred: delete memory rows-affected: %w", err)
+	} else if affected == 0 {
+		return nil, fmt.Errorf("shred: no memory row with id %s (already shredded, deleted, or never existed)", memoryID)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("shred: commit: %w", err)
