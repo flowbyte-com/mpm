@@ -88,6 +88,14 @@ func handleAdd(args []string) int {
 		},
 	}
 
+	// Size guard: cap memory content at 1 MiB so a stray huge --content
+	// (or paste of a binary blob) can't OOM the CLI. The reference
+	// ingest path has its own 100 MiB ceiling tuned for parsed text.
+	const maxAddBytes = 1 << 20 // 1 MiB
+	if len(content) > maxAddBytes {
+		return usererror.Error("memory content too large: %d bytes (max %d = 1 MiB); split into chunks or use `mpm reference add`", len(content), maxAddBytes)
+	}
+
 	// Auto-embed: try real embeddings, fall back to hash if provider unavailable
 	var embedding []float32
 	cfg := mpminternal.DefaultEmbeddingConfig()
@@ -741,6 +749,15 @@ func handleRefAdd(args []string) int {
 	filePath := fs.Arg(0)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return usererror.Error("File not found: %s", filePath)
+	}
+
+	// Size guard: cap reference ingest at 100 MiB so a stray huge file
+	// can't OOM the CLI. The parsed content (text extracted from PDF/
+	// EPUB) is usually a fraction of the raw file size; this is a
+	// defence-in-depth ceiling on the input, not on memory use.
+	const maxRefBytes = 100 << 20 // 100 MiB
+	if info, err := os.Stat(filePath); err == nil && info.Size() > maxRefBytes {
+		return usererror.Error("reference file too large: %d bytes (max %d = 100 MiB)", info.Size(), maxRefBytes)
 	}
 
 	// Validate chunk size range (flag.Parse already applied the value)
