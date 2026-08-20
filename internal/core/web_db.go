@@ -1283,7 +1283,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(&neverAccessed); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: never_accessed count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')`).Scan(&expired); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND deleted_at IS NULL`).Scan(&expired); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: expired count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 
