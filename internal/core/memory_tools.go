@@ -771,13 +771,33 @@ func (dm *DatabaseManager) PromoteMemory(memoryID string) (map[string]interface{
 	// the memory's reinforcement count and TTL reflect "this is permanent."
 	_ = dm.SetMemoryTTL(memoryID, time.Time{})
 	_ = dm.ReinforceMemory(memoryID, 9)
-	res, err := dm.db.Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL`, memoryID)
+	// Collection guard: refuse to LTM-promote a lessons row, which
+	// would lock the row against the lessons lifecycle (lessons are
+	// managed by their own commands and shouldn't bypass decay via
+	// LTM). Directives, decisions, theories, notes, memories are all
+	// safe — LTM on them is either idempotent (directives) or just
+	// weight=10 (no destructive side-effect).
+	res, err := dm.db.Exec(`
+		UPDATE memories
+		SET weight = 10, is_long_term = 1
+		WHERE id = ? AND deleted_at IS NULL AND collection != 'lessons'
+	`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("promote: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return nil, fmt.Errorf("promote: memory %q not found", memoryID)
+		// Distinguish "missing" from "rejected as lesson": check
+		// whether the row exists at all so the caller gets a useful
+		// error instead of a generic "not found".
+		var exists int
+		if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("promote: existence probe: %w", err)
+		}
+		if exists == 0 {
+			return nil, fmt.Errorf("promote: memory %q not found", memoryID)
+		}
+		return nil, fmt.Errorf("promote: refused — lessons rows have their own lifecycle; use `mpm lessons` commands instead")
 	}
 	return map[string]interface{}{
 		"success":      true,
