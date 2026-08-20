@@ -64,6 +64,9 @@ func handleTopicAdd(args []string) int {
 	}
 
 	name := args[0]
+	if strings.TrimSpace(name) == "" {
+		return respond("", "topic name cannot be empty", 1)
+	}
 	description := ""
 	jsonOutput, cleanedArgs := ExtractJSONFlag(args)
 

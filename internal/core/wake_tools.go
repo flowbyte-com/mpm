@@ -664,10 +664,23 @@ func resolveTargetTime(s string, now time.Time) (int64, error) {
 		if n < 0 {
 			return 0, fmt.Errorf("absolute target_time must be non-negative (got %d)", n)
 		}
+		// Cap absolute target_time at 10 years in the future so a
+		// typo (extra digit, wrong unit) can't schedule a wake for
+		// year 33658 that the scheduler would never fire. The cap
+		// matches the snooze --days cap.
+		maxFuture := now.Add(10 * 365 * 24 * time.Hour).Unix()
+		if n > maxFuture {
+			return 0, fmt.Errorf("absolute target_time too far in the future (max 10 years, got epoch %d = ~%s)", n, time.Unix(n, 0).UTC().Format("2006-01-02"))
+		}
 		return n, nil
 	}
 	if d, err := parseDuration(s); err == nil {
-		return now.Add(d).Unix(), nil
+		target := now.Add(d).Unix()
+		maxFuture := now.Add(10 * 365 * 24 * time.Hour).Unix()
+		if target > maxFuture {
+			return 0, fmt.Errorf("relative target_time too far in the future (max 10 years, got duration %s)", d)
+		}
+		return target, nil
 	}
 	// ISO 8601 absolute timestamp — same contract every other MPM time
 	// field honors (snooze_until, since). RFC3339Nano covers the "Z"
@@ -676,6 +689,10 @@ func resolveTargetTime(s string, now time.Time) (int64, error) {
 	// scheduler consistent with parseClusterSnoozeUntil.
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
 		if t, err := time.Parse(layout, s); err == nil {
+			maxFuture := now.Add(10 * 365 * 24 * time.Hour)
+			if t.After(maxFuture) {
+				return 0, fmt.Errorf("ISO-8601 target_time too far in the future (max 10 years, got %s)", t.UTC().Format(time.RFC3339))
+			}
 			return t.Unix(), nil
 		}
 	}

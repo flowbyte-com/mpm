@@ -341,6 +341,7 @@ func handleMaintain(args []string) int {
 	stats, err := dm.RunSelfMaintenance()
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	fmt.Println("\n✅ Self-maintenance complete:")

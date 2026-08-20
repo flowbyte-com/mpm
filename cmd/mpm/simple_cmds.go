@@ -54,8 +54,14 @@ func handleAdd(args []string) int {
 	// Extract content: use first positional arg, or join all for multi-word content
 	if fs.NArg() == 0 {
 		usererror.Error("content required")
+		return 1
 	}
 	content := strings.Join(fs.Args(), " ")
+
+	if *weight < 1 || *weight > 100 {
+		usererror.Error("--weight must be 1-100 (got %d)", *weight)
+		return 1
+	}
 
 	dm := getDB()
 	if dm == nil {
@@ -99,14 +105,20 @@ func handleAdd(args []string) int {
 	id, err := dm.SaveMemory(*collection, content, *session, tags, metadata, embedding, isLongTerm, *weight)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	// Set TTL if specified
 	if *ttl != "" {
-		dur, err := parseDuration(*ttl)
-		if err == nil {
-			t := time.Now().Add(dur)
-			dm.SetMemoryTTL(id, t)
+		dur, parseErr := parseDuration(*ttl)
+		if parseErr != nil {
+			usererror.Error("invalid --ttl %q: %v", *ttl, parseErr)
+			return 1
+		}
+		t := time.Now().Add(dur)
+		if err := dm.SetMemoryTTL(id, t); err != nil {
+			usererror.Error("%v", err)
+			return 1
 		}
 	}
 
@@ -147,6 +159,7 @@ func handleLs(args []string) int {
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	filtered := memories
@@ -800,6 +813,7 @@ func handleRefAdd(args []string) int {
 	existing, err := mpminternal.FindReferenceBySourcePath(dm.SQLDB(), filePath)
 	if err != nil {
 		usererror.Error("Error looking up existing reference: %v", err)
+		return 1
 	}
 	if existing != nil && existing.ContentHash == contentHash {
 		if *jsonOutput {
@@ -900,6 +914,7 @@ func handleRefList(args []string) int {
 	refs, err := dm.ListReferences(50, 0)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	if len(refs) == 0 {
@@ -1128,6 +1143,7 @@ func handleRefSearch(args []string) int {
 	chunks, err := dm.SearchReferenceChunks(query, 20)
 	if err != nil {
 		usererror.Error("%v", err)
+		return 1
 	}
 
 	if len(chunks) == 0 {
@@ -1400,6 +1416,7 @@ func handleRefAdmit(args []string) int {
 	candidates, err := dm.FindAdmissionCandidates(*limit)
 	if err != nil {
 		usererror.Error("Error finding candidates: %v", err)
+		return 1
 	}
 	if len(candidates) == 0 {
 		if *jsonOutput {
