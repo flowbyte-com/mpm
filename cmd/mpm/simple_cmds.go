@@ -783,24 +783,28 @@ func handleRefAdd(args []string) int {
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			usererror.Error("Error reading file: %v", err)
+			return 1
 		}
 		content = mpminternal.StripHTML(string(data))
 	case ".txt", ".md":
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			usererror.Error("Error reading file: %v", err)
+			return 1
 		}
 		content = string(data)
 	default:
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			usererror.Error("Unsupported file type: %s", ext)
+			usererror.Error("Error reading file: %v", err)
+			return 1
 		}
 		content = string(data)
 	}
 
 	if parseErr != nil {
 		usererror.Error("Error parsing file: %v", parseErr)
+		return 1
 	}
 
 	title := filepath.Base(filePath)
