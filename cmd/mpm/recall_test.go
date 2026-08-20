@@ -403,3 +403,64 @@ func TestMain(m *testing.M) {
 	os.Setenv("HOME", tmpDir)
 	os.Exit(m.Run())
 }
+
+// TestKeywordSearchWithTime_ExcludesExpiredRows pins the
+// MemoryExpireClause on the recall path: a memory whose expires_at is
+// in the past must NOT be returned by keywordSearchWithTime, regardless
+// of whether the FTS5 path or the LIKE fallback is taken.
+func TestKeywordSearchWithTime_ExcludesExpiredRows(t *testing.T) {
+	db := setupTestDB(t)
+
+	insertMemory(t, db, "live-1", "memories", "shared keyword live", "", "[]")
+	insertMemory(t, db, "live-2", "memories", "shared keyword future ttl", "", "[]")
+	insertMemory(t, db, "expired-1", "memories", "shared keyword past ttl", "", "[]")
+
+	// Set expires_at: live-2 far in the future, expired-1 in the past.
+	if _, err := db.Exec(`UPDATE memories SET expires_at = ? WHERE id = ?`, 4102444800, "live-2"); err != nil {
+		t.Fatalf("set future expires_at: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memories SET expires_at = ? WHERE id = ?`, 1000, "expired-1"); err != nil {
+		t.Fatalf("set past expires_at: %v", err)
+	}
+
+	rows, err := keywordSearchWithTime(db, "keyword", "memories", "", "", 0, "", 50)
+	if err != nil {
+		t.Fatalf("keywordSearchWithTime: %v", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		var content, sessionID, tags, metadata, createdAt sql.NullString
+		var reinforcementCount, weight sql.NullInt64
+		var lastAccessed sql.NullString
+		var referenceID sql.NullString
+		if err := rows.Scan(&id, &content, &sessionID, &tags, &metadata, &createdAt, &reinforcementCount, &weight, &lastAccessed, &referenceID); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	assertNoExpired(t, ids)
+	assertContains(t, ids, "live-1")
+	assertContains(t, ids, "live-2")
+}
+
+func assertContains(t *testing.T, ids []string, want string) {
+	t.Helper()
+	for _, id := range ids {
+		if id == want {
+			return
+		}
+	}
+	t.Errorf("expected id %q in results, got %v", want, ids)
+}
+
+func assertNoExpired(t *testing.T, ids []string) {
+	t.Helper()
+	for _, id := range ids {
+		if id == "expired-1" {
+			t.Errorf("expired row leaked into recall results: %v", ids)
+		}
+	}
+}
