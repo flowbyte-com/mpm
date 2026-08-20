@@ -29,8 +29,6 @@ func TestNoNewDirectStderrWrites(t *testing.T) {
 		// to os.Stdout (lesson 2b22765cd1b13a81; theory d8c64fe9b7528d53).
 		// All `mpm call` envelopes (success or failure) live on stdout;
 		// stderr is reserved for zap log lines only.
-		"simple_cmds.go:619": "Multi-line usage help text — structured output, not a single error message",
-		"simple_cmds.go:621": "Multi-line usage help text — structured output, not a single error message",
 	}
 
 	dir := "."

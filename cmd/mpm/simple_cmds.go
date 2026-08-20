@@ -336,11 +336,23 @@ func handlePromote(args []string) int {
 	}
 
 	// Clear TTL (make permanent) and reinforce heavily
-	dm.SetMemoryTTL(id, time.Time{})
-	dm.ReinforceMemory(id, 9)
+	if err := dm.SetMemoryTTL(id, time.Time{}); err != nil {
+		usererror.Error("%v", err)
+		return 1
+	}
+	if err := dm.ReinforceMemory(id, 9); err != nil {
+		usererror.Error("%v", err)
+		return 1
+	}
 
 	// Update weight to 10 and is_long_term = 1
-	dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ?`, id)
+	if res, err := dm.SQLDB().Exec(`UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ?`, id); err != nil {
+		usererror.Error("%v", err)
+		return 1
+	} else if affected, aerr := res.RowsAffected(); aerr != nil || affected == 0 {
+		usererror.Error("promote failed: no row with id %s (not found, deleted, or expired)", id)
+		return 1
+	}
 
 	fmt.Printf("Promoted memory %s to LTM (weight=10)\n", id)
 	return 0
@@ -614,11 +626,9 @@ func handleRefAdd(args []string) int {
 	}
 
 	if fs.NArg() < 1 {
-		usererror.Usage("mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]")
-// Multi-line usage help text — structured output, not a single error message
-		fmt.Fprintf(os.Stderr, "  --reason: import reason (why this is being added; seed of the admission justification chain)\n")
-// Multi-line usage help text — structured output, not a single error message
-		fmt.Fprintf(os.Stderr, "  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)\n")
+		usererror.Usage("mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]\n" +
+			"  --reason: import reason (why this is being added; seed of the admission justification chain)\n" +
+			"  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)")
 		return 1
 	}
 
