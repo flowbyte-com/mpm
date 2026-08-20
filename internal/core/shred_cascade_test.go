@@ -86,15 +86,17 @@ func TestShredMemoryWithCascade_MemoryPath(t *testing.T) {
 	assert.Equal(t, 0, memCount, "memory must be soft-deleted by cascade")
 }
 
-// TestShredMemoryWithCascade_NonExistentIsIdempotent proves a shred of a
-// non-existent id returns success without error — same idempotent
-// semantics as the prior implementation.
-func TestShredMemoryWithCascade_NonExistentIsIdempotent(t *testing.T) {
+// TestShredMemoryWithCascade_NonExistentFailsLoudly proves a shred of a
+// non-existent id errors instead of reporting success — Defense Triad
+// rule 3 applied to shred. The prior contract (silent success on a
+// missing id) let `mpm shred <typo>` tell the operator a memory was
+// shredded when nothing happened.
+func TestShredMemoryWithCascade_NonExistentFailsLoudly(t *testing.T) {
 	dm := NewTestDM(t)
 
-	result, err := dm.ShredMemoryWithCascade("0000000000000000")
-	require.NoError(t, err, "non-existent id must be idempotent (no error)")
-	assert.True(t, result["success"].(bool))
+	_, err := dm.ShredMemoryWithCascade("0000000000000000")
+	require.Error(t, err, "a shred of a nonexistent id must fail loudly, not report success")
+	assert.Contains(t, err.Error(), "0000000000000000")
 }
 
 // TestShredMemoryWithCascade_EmptyIDRejected proves the empty-id guard

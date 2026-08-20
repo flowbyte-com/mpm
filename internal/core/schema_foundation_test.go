@@ -95,6 +95,22 @@ func newTestStore(t *testing.T) *MemoryStore {
 	return store
 }
 
+// TestSchema_SafeMigrationTablesAllowlisted guards the MemoryStore
+// migration runner: every table referenced by SafeMigrations must be
+// present in validTableNames, or addColumnIfNotExists hard-fails init
+// ("invalid table name"). The alpha-3 artifact_provenance parent_
+// invocation_id migration shipped without the allowlist entry and took
+// down every MemoryStore.InitSQLite caller (the whole standalone core
+// module) — this pins the invariant so a future migration table addition
+// cannot silently break init again.
+func TestSchema_SafeMigrationTablesAllowlisted(t *testing.T) {
+	for _, m := range SafeMigrations {
+		table := m[0]
+		require.True(t, validTableNames[table],
+			"SafeMigration targets table %q which is missing from validTableNames — MemoryStore.InitSQLite would fail", table)
+	}
+}
+
 // getTableColumns returns the column names of a table.
 func getTableColumns(t *testing.T, db *sql.DB, name string) []string {
 	t.Helper()

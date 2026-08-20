@@ -198,6 +198,7 @@ var validTableNames = map[string]bool{
 	"external_db_cursors": true,
 	"reference_docs":      true,
 	"reference_chunks":    true,
+	"artifact_provenance": true,
 }
 
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.
