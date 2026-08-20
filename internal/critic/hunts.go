@@ -102,7 +102,8 @@ func (h *SurvivalAsymmetryHunt) Run(ctx context.Context, a *Audit) ([]Finding, e
 
 	// Asymmetry confirmed. Emit finding.
 	finding := Finding{
-		Tool:   "save_lesson",
+		Tool:   "mpm_lessons",
+		Action: "save",
 		Reason: "survival asymmetry exceeds threshold",
 		Payload: map[string]interface{}{
 			"fact": fmt.Sprintf(
@@ -165,7 +166,8 @@ func (h *StaleMemoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) 
 			desc = desc[:97] + "..."
 		}
 		findings = append(findings, Finding{
-			Tool:   "challenge_memory",
+			Tool:   "mpm_memory",
+			Action: "challenge",
 			Reason: fmt.Sprintf("stale memory %s: %s", id, desc),
 			Payload: map[string]interface{}{
 				"memoryId": id,
@@ -222,7 +224,8 @@ func (h *WeakTheoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) {
 			desc = desc[:97] + "..."
 		}
 		findings = append(findings, Finding{
-			Tool:   "save_lesson",
+			Tool:   "mpm_lessons",
+			Action: "save",
 			Reason: fmt.Sprintf("weak pending theory %s (conf=%.3f): %s", id, conf, desc),
 			Payload: map[string]interface{}{
 				"fact": fmt.Sprintf(
@@ -290,7 +293,8 @@ func (h *PoisonPillHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) {
 		h.Cycle, id, conf, desc)
 
 	finding := Finding{
-		Tool:   "propose_theory",
+		Tool:   "mpm_theories",
+		Action: "propose",
 		Reason: fmt.Sprintf("poison pill cycle %d targeting %s", h.Cycle, id),
 		Payload: map[string]interface{}{
 			"hypothesis":         hyp,
