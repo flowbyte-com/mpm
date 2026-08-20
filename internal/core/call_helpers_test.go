@@ -376,6 +376,41 @@ func TestCallHelpers_WeakenMemory_HonorsFloor(t *testing.T) {
 	assert.GreaterOrEqual(t, w, 1, "weight floor at 1 — a typo can't drive weight negative")
 }
 
+// TestWritePaths_ErrorOnMissingRow pins the Defense-Triad-3 write-path
+// assertions: UpdateMemory, ReinforceMemory, AdjustMemoryWeight,
+// WeakenMemory, and SetMemoryTTL must fail loudly on a typo'd/nonexistent
+// id instead of returning a silent 0-row success.
+func TestWritePaths_ErrorOnMissingRow(t *testing.T) {
+	dm := newTestDM(t)
+
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"UpdateMemory", func() error { return dm.UpdateMemory("nope", "content", nil, nil) }},
+		{"ReinforceMemory", func() error { return dm.ReinforceMemory("nope", 3) }},
+		{"AdjustMemoryWeight", func() error { return dm.AdjustMemoryWeight("nope", 2) }},
+		{"WeakenMemory", func() error { return dm.WeakenMemory("nope", 2) }},
+		{"SetMemoryTTL", func() error { return dm.SetMemoryTTL("nope", time.Now().Add(time.Hour)) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			require.Error(t, err, "silent 0-row success is a lie the substrate must not tell")
+			assert.Contains(t, err.Error(), "nope")
+		})
+	}
+
+	// Sanity: the same writes succeed on a real row.
+	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content, weight) VALUES (?, 'memories', 'x', 5)`, 0, "mem-1")
+	require.NoError(t, err)
+	require.NoError(t, dm.UpdateMemory("mem-1", "y", nil, nil))
+	require.NoError(t, dm.ReinforceMemory("mem-1", 3))
+	require.NoError(t, dm.AdjustMemoryWeight("mem-1", 2))
+	require.NoError(t, dm.WeakenMemory("mem-1", 2))
+	require.NoError(t, dm.SetMemoryTTL("mem-1", time.Now().Add(time.Hour)))
+}
+
 func TestCallHelpers_SnoozeMemory_BumpsWeightAndTimestamp(t *testing.T) {
 	dm := newTestDM(t)
 	// last_accessed_at is INTEGER (Unix-epoch seconds) after the timestamps

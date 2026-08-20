@@ -418,6 +418,9 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 }
 
 // UpdateMemory updates an existing memory's content and metadata.
+// Errors with ErrMemoryNotFound-equivalent when the id doesn't exist —
+// a silent 0-row success would let callers believe a typo'd id was
+// updated (Defense Triad rule 3: verify persistence).
 func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error {
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
@@ -425,16 +428,25 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	embeddingJSON, _ := json.Marshal(embedding)
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
-	_, err := dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
 		    updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("update memory rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
+	}
+	return nil
 }
 
 // ReinforceMemory increments the reinforcement count and weight.
+// Errors when the id matches no row (no silent no-op success).
 func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
@@ -443,25 +455,41 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	if weightGain == 0 {
 		weightGain = 1
 	}
-	_, err := dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightGain, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("reinforce memory rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("reinforce memory: no row with id %s (not found, deleted, or expired)", id)
+	}
+	return nil
 }
 
 // AdjustMemoryWeight adjusts weight by delta with a hard floor of 1.
-// Used by the +/- feedback shortcuts.
+// Used by the +/- feedback shortcuts. Errors when the id matches no row.
 func (dm *DatabaseManager) AdjustMemoryWeight(id string, delta int) error {
-	_, err := dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET weight = MAX(weight + ?, 1),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("adjust memory weight rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("adjust memory weight: no row with id %s (not found, deleted, or expired)", id)
+	}
+	return nil
 }
 
 // ChallengeAndReinforce clears the challenged status (if any) and applies
@@ -534,19 +562,28 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 }
 
 // WeakenMemory decrements reinforcement count and reduces weight.
+// Errors when the id matches no row (no silent no-op success).
 func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
 	}
 	weightLoss := (delta + 1) / 2
-	_, err := dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 0),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightLoss, id)
-	return err
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("weaken memory rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("weaken memory: no row with id %s (not found, deleted, or expired)", id)
+	}
+	return nil
 }
 
 // SetMemoryTTL sets an expiration time on a memory.
@@ -557,14 +594,24 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 // lexicographically compare the two and the filter will leak expired
 // rows (T > space in ASCII).
 func (dm *DatabaseManager) SetMemoryTTL(id string, expiresAt time.Time) error {
+	var res sql.Result
+	var err error
 	if expiresAt.IsZero() {
-		_, err := dm.db.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
+		res, err = dm.db.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
+	} else {
+		res, err = dm.db.Exec(`
+			UPDATE memories SET expires_at = ? WHERE id = ?
+		`, expiresAt.Unix(), id)
+	}
+	if err != nil {
 		return err
 	}
-	_, err := dm.db.Exec(`
-		UPDATE memories SET expires_at = ? WHERE id = ?
-	`, expiresAt.Unix(), id)
-	return err
+	if affected, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("set memory ttl rows-affected: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("set memory ttl: no row with id %s (not found, deleted, or expired)", id)
+	}
+	return nil
 }
 
 // PruneExpired removes memories that have passed their expires_at time.
