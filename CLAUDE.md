@@ -87,6 +87,8 @@ mpm/
 │   ├── core.go               # CoreDB interface (~180 methods) + compile-time assertion
 │   ├── admission.go          # AdmitResult, AdmitChainEntry (exported)
 │   └── go.mod                # Standalone module; main go.mod has replace directive
+├── internal/pointer/          # URI grammar and Resolver interface
+├── internal/blobstore/       # Consumer-neutral filesystem blob store
 ├── src/db/mpm.db             # Single canonical database (WAL mode)
 ├── mode/ persona/            # JSON / Markdown configs for behavioral modes
 └── docs/                     # ARCHITECTURE_SPLIT.md (shipped retro), WISHLIST.md
