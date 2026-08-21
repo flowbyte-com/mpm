@@ -34,6 +34,7 @@ BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
+TELEMETRY_BINARY := mpm-telemetry
 BUILD_DIR   := bin
 # Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in scripts/install.sh).
 # Override with `make install PREFIX=/somewhere` for non-standard layouts.
@@ -52,6 +53,7 @@ GO := $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
+CGO_LDFLAGS := -lm
 
 .PHONY: all build install service-scheduler service install-system-service uninstall-service gen-cli clean test lint help
 
@@ -68,7 +70,8 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-alpha)"
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
 
 # Verify the canonical install location contains all four binaries.
 # `make build` already writes to bin/, which IS $(PREFIX)/bin/ when the repo
@@ -146,9 +149,10 @@ gen-cli:
 
 # Run tests
 test:
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
-	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
+	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 
 # Run golangci-lint (advisory only — does not gate CI).
 # Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
