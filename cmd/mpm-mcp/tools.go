@@ -186,7 +186,7 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		if err != nil {
 			auditStatus = "error"
 		}
-		recordToolInvocation(dm.SQLDB(), auditAC, req.Params.Name, payload,
+		recordToolInvocation(dm, auditAC, req.Params.Name, payload,
 			startedAt, completedAt, extractAction(payload), auditStatus, err)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
@@ -273,15 +273,17 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		// a visually distinct XML notification block. Uses the raw JSON text
 		// for the primary content so any client that doesn't understand the
 		// wake block still gets clean machine-readable output.
-		if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
-			notification := core.FormatWakeNotification(due)
-			prepended := make([]mcp.Content, 0, len(content)+1)
-			prepended = append(prepended, mcp.TextContent{
-				Type: mcp.ContentTypeText,
-				Text: notification,
-			})
-			prepended = append(prepended, content...)
-			content = prepended
+		if dm != nil {
+			if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
+				notification := core.FormatWakeNotification(due)
+				prepended := make([]mcp.Content, 0, len(content)+1)
+				prepended = append(prepended, mcp.TextContent{
+					Type: mcp.ContentTypeText,
+					Text: notification,
+				})
+				prepended = append(prepended, content...)
+				content = prepended
+			}
 		}
 
 		return &mcp.CallToolResult{Content: content}, nil
@@ -311,6 +313,22 @@ func jsonResult(v interface{}) *mcp.CallToolResult {
 		return mcp.NewToolResultText(fmt.Sprintf("%q", fmt.Sprintf("%v", v)))
 	}
 	return mcp.NewToolResultText(string(b))
+}
+
+// mcpAdapterForTest wires test doubles into the global policy/blob vars
+// and delegates to mcpAdapter. The defer restores the originals so tests
+// are fully isolated from each other. Callers must call RestoreGlobals() after
+// all adapter calls complete.
+func mcpAdapterForTest(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.HandlerFunc, bs blobstore.BlobStore, op tools.OutputPolicy) (func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error), func()) {
+	origBS := blobStore
+	origOP := outputPolicy_
+	blobStore = bs
+	outputPolicy_ = op
+	restore := func() {
+		blobStore = origBS
+		outputPolicy_ = origOP
+	}
+	return mcpAdapter(dm, ac, handler), restore
 }
 
 // ── Arg helpers ────────────────────────────────────────────────────────────
