@@ -57,6 +57,20 @@ var allowedStatus = map[string]bool{
 }
 
 func ParseFrame(raw []byte) (Frame, error) {
+	// Ping frames carry only {"event_type":"ping"} and skip all schema validation.
+	// Extract event_type from raw JSON without full unmarshal to decide early.
+	var pingCheck struct {
+		EventType string `json:"event_type"`
+	}
+	if err := json.Unmarshal(raw, &pingCheck); err != nil {
+		return Frame{}, &ValidationError{Reason: fmt.Sprintf("malformed_json: %v", err)}
+	}
+	if pingCheck.EventType == "ping" {
+		var f Frame
+		_ = json.Unmarshal(raw, &f) // populate whatever fields are present
+		return f, nil
+	}
+
 	var f Frame
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return Frame{}, &ValidationError{Reason: fmt.Sprintf("malformed_json: %v", err)}

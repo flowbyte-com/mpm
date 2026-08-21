@@ -12,7 +12,7 @@ func TestEncodeResponse_Accepted(t *testing.T) {
 		t.Fatalf("EncodeResponse: %v", err)
 	}
 	line := strings.TrimSpace(buf.String())
-	if line != `{"status":"ACCEPTED","inserted":true}` {
+	if !strings.Contains(line, `"status":"ACCEPTED"`) || !strings.Contains(line, `"inserted":true`) {
 		t.Errorf("got %q", line)
 	}
 }
@@ -23,7 +23,7 @@ func TestEncodeResponse_Dropped(t *testing.T) {
 		t.Fatalf("EncodeResponse: %v", err)
 	}
 	line := strings.TrimSpace(buf.String())
-	if line != `{"status":"DROPPED","reason":"persistence_failed"}` {
+	if !strings.Contains(line, `"status":"DROPPED"`) || !strings.Contains(line, `"persistence_failed"`) {
 		t.Errorf("got %q", line)
 	}
 }

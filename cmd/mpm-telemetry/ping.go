@@ -1,7 +1,55 @@
 package main
 
-import "errors"
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"time"
+)
 
 func runPing(args []string) error {
-	return errors.New("not implemented")
+	workspace := os.Getenv("MPM_WORKSPACE")
+	if workspace == "" {
+		return fmt.Errorf("MPM_WORKSPACE is required")
+	}
+	socketPath := os.Getenv("MPM_TELEMETRY_SOCKET")
+	if socketPath == "" {
+		socketPath = filepath.Join(workspace, "runtime", "mpm-telemetry.sock")
+	}
+
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("dial socket %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+
+	// Send a ping frame: a single NDJSON line with event_type=ping.
+	// The collector will respond with a handshake describing its version
+	// and current state.
+	if _, err := conn.Write([]byte(`{"event_type":"ping"}` + "\n")); err != nil {
+		return fmt.Errorf("write ping: %w", err)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	if !scanner.Scan() {
+		return fmt.Errorf("read handshake: %v", scanner.Err())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		return fmt.Errorf("parse handshake: %w", err)
+	}
+	out, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
 }
