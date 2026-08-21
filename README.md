@@ -27,9 +27,9 @@ Instead of assigning arbitrary confidence scores, confidence is derived from evi
 
 Instead of rewriting memories, beliefs evolve while history remains intact.
 
-One persistent cognitive substrate. One SQLite database. Four cooperating binaries. No vector database. No distributed infrastructure. No web UI.
+One persistent cognitive substrate. One SQLite database. Five cooperating binaries. No vector database. No distributed infrastructure. No web UI.
 
-`mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. Three surfaces share one substrate: the human-facing CLI (`mpm <verb>` cognitive vocabulary), the agent-facing JSON-RPC (`mpm call <tool>`), and the MCP server (`mpm-mcp`) for AI agents.
+`mpm` runs continuously in the background: a hardened SQLite data plane, an autonomous 03:00 UTC diagnostic critic, and an MCP server (`mpm-mcp`) for machine-to-machine integration. Three surfaces share one substrate: the human-facing CLI (`mpm <verb>` cognitive vocabulary), the agent-facing JSON-RPC (`mpm call <tool>`), and the MCP server (`mpm-mcp`) for AI agents. A fourth sibling — `mpm-telemetry` — records raw LLM invocation economics into its own `telemetry.db` without touching the MPM substrate. See [§6.6](#66-telemetry-sidecar-mpm-telemetry).
 
 MPM models reasoning processes — belief formation, evidence weighting, theory tracking, self-correction. It does not claim to reproduce human cognition. "Cognitive" describes *what kind of object is being persisted*, not a claim about machine minds.
 
@@ -512,10 +512,10 @@ Five minutes from zero to first decision. Choose your depth:
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/mpm
 cd ~/mpm
-make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
+make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 ```
 
-The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all four binaries to `$HOME/.local/bin`. For a full systemd + OpenClaw install, run `./scripts/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all five binaries to `$HOME/.local/bin`. For a full systemd + OpenClaw install, run `./scripts/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
@@ -524,8 +524,8 @@ For autonomous operation — the scheduler dispatches system-kind wakes (critic 
 ```bash
 git clone https://github.com/flowbyte-com/mpm
 cd mpm
-make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
-make install         # optional — copies all four to $HOME/.local/bin (no sudo)
+make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
+make install         # optional — copies all five to $HOME/.local/bin (no sudo)
 ```
 
 **Install the scheduler as a systemd user service:**
@@ -1013,6 +1013,38 @@ The dispatcher pulls pending event wakes after every handler returns, so the age
 - Cold-start does NOT replay old wakes. `mpm_memory action=query` handles history; event wakes are real-time push only.
 
 For the DDL, fan-out algorithm, auto-broadcast hooks, tests, and smoke behind this stack, see **Appendix A** (Layers 0-3) and **Appendix B** (Layer 4).
+
+### 6.6 Telemetry Sidecar (mpm-telemetry)
+
+`mpm-telemetry` is a sibling binary that records **raw LLM invocation economics** — one record per `messages.create()` call (or equivalent), no derivation, no aggregation, no USD math. It is deliberately ignorant of MPM's cognitive substrate: a separate SQLite database (`$MPM_WORKSPACE/telemetry.db`), no foreign keys to `mpm.db`, no new columns in `memories`, no dependency from `mpm` or `mpm-mcp` onto this binary. The two surfaces can be deployed, evolved, or removed independently.
+
+**What gets recorded.** Per invocation: invocation_id, parent_invocation_id, session_id, framework + version, provider + model + revision, started_at, completed_at, status (completed / failed / cancelled / timed_out), stop_reason, the five token counters (input, output, cache_read, cache_write, reasoning), duration_ms, and an opaque provider_metadata blob. NULL means "not reported" — explicitly-zero means "zero". Token values come from the LLM provider's response; MPM does not second-guess them.
+
+**What does NOT get recorded.** Prices, USD amounts, cost projections, vendor markups, ROI metrics. Pricing lives in an external, versioned JSON catalog (`internal/telemetry/testdata/one-model.json` is the canonical fixture; operators ship their own) and is applied at **read time** by `bin/mpm-telemetry cost --pricing <file>`. The raw ledger is the source of truth; the projected cost is a derived view that can be re-run against any historical snapshot without re-ingesting frames.
+
+**Wire format.** Frame bodies are newline-delimited JSON over a Unix socket (`$MPM_WORKSPACE/runtime/mpm-telemetry.sock`, override via `MPM_TELEMETRY_SOCKET`). The wire schema is versioned (`"schema_version":"v1"`). Unknown schema versions are rejected at the protocol boundary. Idempotent retries (same `invocation_id`, same payload) return `{"status":"ACCEPTED","inserted":false,...}`; conflicting duplicates (same id, different payload) return `{"status":"REJECTED","reason":"invocation_id_payload_conflict"}`. SQLite is the canonical store with WAL mode + 5s `busy_timeout` — the same single-connection-via-discipline that the MPM core uses.
+
+**Client-side push, non-blocking.** Agents emit frames via the `telemetry_adapter.py` library (`agent_plugins/claude-code-mpm/src/telemetry_adapter.py`). The adapter returns immediately; a background daemon thread drains a per-process ring buffer (capacity 1000) over the socket with a 100ms connect timeout. If the collector is absent, frames are evicted oldest-first on overflow and the agent is never blocked. Spec invariant: collector availability MUST NOT affect agent correctness.
+
+**Subcommands.**
+
+```
+mpm-telemetry serve                       # Run the socket collector (default)
+mpm-telemetry ping                        # Handshake: collector_version, protocol_version, schema_version, queue_depth, uptime_seconds
+mpm-telemetry query invocation <id>       # Read one row
+mpm-telemetry query session   <id>        # Aggregate rows for a session
+mpm-telemetry query since     <unix-sec>  # Read rows newer than cutoff
+mpm-telemetry cost --pricing <file>       # Apply external pricing at read time
+mpm-telemetry observe [--since] [--threshold] [--min-invocations]
+                                         # HighTokenNoArtifactHunt: anomaly detector
+                                         # (observation, NOT ROI metric; human arbitrates)
+```
+
+`observe` is the cross-DB anomaly detector. It aggregates token burn per session via the telemetry ledger, then asks MPM (via `mpm call mpm_provenance --payload '{"action":"count_by_session",...}'`) how many artifacts the session produced. Sessions with high token burn and zero new artifacts surface as `type: "observation"` lessons — descriptive, not prescriptive. The cross-DB call is parameterized so the test suite injects a stub; the production shell-out is in `cmd/mpm-telemetry/observe.go`.
+
+**Verification.** `scripts/smoke_telemetry.sh` is a hermetic end-to-end test: boots the collector in a temp dir, sends 3 synthetic frames + an idempotent retry + a conflicting duplicate + a bad-schema frame, runs `query` / `cost` / `observe --dry-run`, asserts the row count via sqlite. Exits 0 on success.
+
+**Why a separate binary.** Billing data has different retention, export, and access-control semantics than cognitive data. Mixing them would force operators to ship a single retention policy, single access control, single export pipeline. Keeping `telemetry.db` separate means finance/ops teams can ship their own retention without negotiating with cognitive-data stakeholders.
 
 ---
 
