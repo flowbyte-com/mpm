@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-08-21 — Phantom FTS5 Corruption Fix (WAL Timing Race)
+
+**Bug:** `mpm_system` `health_check` via the MCP server reported `ok: false`
+with `integrity_status: "fts5: checksum mismatch for table 'memories_fts'"`
+while `PRAGMA fts5_integrity_check` and `PRAGMA integrity_check` on the
+same database file returned clean. The Go layer was hallucinating corruption;
+the SQLite file was provably intact.
+
+**Root cause:** `DatabaseManager.HealthCheck()` ran `PRAGMA quick_check`
+without first checkpointing the WAL. When a concurrent writer held
+uncommitted frames in the WAL at the moment `quick_check` ran, the FTS5
+virtual table could see a page in an intermediate write state, producing
+a checksum mismatch. The error message was real SQLite output — but the
+condition was a pure timing artifact, not data loss.
+
+**Fix:** Added `PRAGMA wal_checkpoint(TRUNCATE)` as a best-effort pre-check
+before `PRAGMA quick_check` in `HealthCheck()`. This flushes all WAL
+frames to the main database and resets the WAL file, eliminating the
+race window. Errors from the checkpoint are logged and ignored — it is
+best-effort; the integrity check always runs regardless.
+
+```go
+// internal/core/db.go — HealthCheck()
+_, _ = dm.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+```
+
+**Also removed:** legacy `mpm_hermes_loader.py` and its broken symlink
+`tools/mpm_plugin -> /home/v/workspace/projects/mpm/hermes-mpm-plugin` from
+`~/.hermes/hermes-agent/tools/`. These were pre-MCP dead code; Hermes
+now uses the `mcp_servers` config. The dead loader risked confusing
+future debugging sessions without providing any current functionality.
+
+**Tests:** all green (`make test`), all core packages green.
+
 ## 2026-08-13 → 2026-08-18 — Pre-Alpha Hardening Cycle
 
 Five-day hardening arc (Days 1–5 of the pre-alpha cycle) that closed
