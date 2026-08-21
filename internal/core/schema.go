@@ -1046,6 +1046,23 @@ var CommonIndexes = []string{
 		ON drill_runs(drill_id, started_at DESC);`,
 }
 
+// BlobsTable contains the blob storage table for MCP result spilling.
+var BlobsTable = []string{
+	`CREATE TABLE IF NOT EXISTS blobs (
+		id             TEXT PRIMARY KEY,
+		source_tool    TEXT NOT NULL,
+		source_call_id TEXT,
+		session_id     TEXT,
+		size_bytes     INTEGER NOT NULL,
+		content_type   TEXT NOT NULL DEFAULT 'application/json',
+		created_at     INTEGER NOT NULL,
+		expires_at     INTEGER NOT NULL,
+		checksum       TEXT
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_blobs_expires_at ON blobs(expires_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_blobs_session_id ON blobs(session_id);`,
+}
+
 // SafeMigrations contains column additions that may be needed for existing databases.
 // Format: table name, column name, column type
 var SafeMigrations = [][3]string{
