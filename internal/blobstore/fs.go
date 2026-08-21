@@ -577,13 +577,16 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 		}
 	}
 
-	// Find DB rows with no corresponding file.
+	// Find DB rows with no corresponding file. Collect IDs first, then close
+	// the cursor before executing any DELETEs — otherwise with a single
+	// connection (SetMaxOpenConns=1), the DELETE blocks waiting for the
+	// cursor to release its shared lock while the cursor blocks waiting
+	// for a free connection.
 	rows, err := f.db.QueryContext(ctx, `SELECT id FROM blobs`)
 	if err != nil {
 		return stats, err
 	}
-	defer rows.Close()
-
+	var orphanIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -591,8 +594,15 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 		}
 		path := f.payloadPath(id)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			log.Printf("blobstore: orphan DB row %q has no payload file, removing", id)
-			_, _ = f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id)
+			orphanIDs = append(orphanIDs, id)
+		}
+	}
+	rows.Close()
+
+	for _, id := range orphanIDs {
+		log.Printf("blobstore: orphan DB row %q has no payload file, removing", id)
+		_, err := f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id)
+		if err == nil {
 			stats.OrphansDeleted++
 		}
 	}
