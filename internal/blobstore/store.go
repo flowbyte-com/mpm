@@ -66,4 +66,5 @@ type BlobStore interface {
 	Search(ctx context.Context, id string, query SearchQuery) ([]Match, error)
 	GCExpired(ctx context.Context, now time.Time) (GCStats, error)
 	GCSweepOrphans(ctx context.Context, grace time.Duration) (GCStats, error)
+	TTL() time.Duration
 }
