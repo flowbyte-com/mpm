@@ -27,9 +27,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/flowbyte-com/mpm/internal/blobstore"
+	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/logging"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
@@ -115,8 +118,24 @@ func main() {
 		log.Fatalf("mpm-mcp: build router: %v", err)
 	}
 
+	// Build blob store.
+	blobDir := filepath.Join(workspace, "blobs")
+	ttl := 24 * time.Hour
+	if envTTL := os.Getenv("MPM_BLOB_TTL"); envTTL != "" {
+		if d, derr := time.ParseDuration(envTTL); derr == nil && d > 0 {
+			ttl = d
+		}
+	}
+	blobStore, err := blobstore.NewFilesystemBackend(dm.SQLDB(), blobDir, ttl)
+	if err != nil {
+		log.Fatalf("mpm-mcp: build blob store: %v", err)
+	}
+
+	// Output policy for MCP result bounding.
+	outputPolicy := tools.DefaultOutputPolicy()
+
 	s := server.NewMCPServer("mpm-mcp", "0.1.0")
-	RegisterAllTools(s, dm, ac, router)
+	RegisterAllTools(s, dm, ac, router, blobStore, outputPolicy)
 
 	// Translate SIGTERM/SIGINT into a context cancellation so the
 	// stdio server can shut down cleanly. The defer above releases

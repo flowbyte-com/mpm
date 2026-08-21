@@ -15,21 +15,30 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"time"
-
+	"github.com/flowbyte-com/mpm/internal/blobstore"
 	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 const emptyWakeContext = "Wake context is empty. Ready for context."
+
+// blobStore and outputPolicy_ are initialised once at server boot and closed
+// over by mcpAdapter so every tool invocation can apply the output policy.
+var (
+	blobStore     blobstore.BlobStore // interface; concrete *FilesystemBackend set at boot
+	outputPolicy_ tools.OutputPolicy
+)
 
 // RegisterAllTools registers every entry in tools.Registry on the given
 // MCP server. The "route" tool is special: its handler closes over the
@@ -39,7 +48,9 @@ const emptyWakeContext = "Wake context is empty. Ready for context."
 // This replaces the previous 35-line s.AddTool(...) block plus 30
 // handle*() adapter functions — both have been moved to the registry
 // or the single mcpAdapter closure below.
-func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router) {
+func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
+	blobStore = bs
+	outputPolicy_ = op
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {
 			continue // registered below with the live router closure
@@ -77,6 +88,7 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 // req.GetArguments() (a map[string]interface{}). The registry Handler
 // already takes that shape directly — we just need to:
 //   - convert errors to mcp.NewToolResultErrorFromErr
+//   - apply the OutputPolicy (DecisionPass or DecisionSpill)
 //   - convert the result to a JSON text result
 //   - opportunistically fold any due scheduled_wakes into the response
 //
@@ -105,45 +117,66 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
 		}
 
-		// Opportunistic wake fold (Phase 5a): check for due wakes and append
+		// Apply the output policy: decide whether to pass-through or spill.
+		decision, _, err := outputPolicy_.Apply(ctx, result)
+		if err != nil {
+			// Policy check failed (e.g. context cancelled); return error.
+			return mcp.NewToolResultError("output policy check failed: " + err.Error()), nil
+		}
+
+		// Marshal once — used for both pass and spill paths.
+		jsonBytes, jErr := json.Marshal(result)
+		if jErr != nil {
+			jsonBytes = []byte(fmt.Sprintf("%q", fmt.Sprintf("%v", result)))
+		}
+
+		var content []mcp.Content
+
+		if decision == tools.DecisionSpill {
+			// Spill: store result in blob store and return an envelope.
+			ttl := blobStore.TTL()
+			meta := blobstore.Metadata{
+				SourceTool:  req.Params.Name,
+				SizeBytes:   int64(len(jsonBytes)),
+				ContentType: "application/json",
+				CreatedAt:   time.Now(),
+				ExpiresAt:   time.Now().Add(ttl),
+			}
+			ptr, putErr := blobStore.Put(ctx, bytes.NewReader(jsonBytes), meta)
+			if putErr != nil {
+				slog.Error("mcpAdapter: blobStore.Put failed", "err", putErr)
+				return mcp.NewToolResultError("internal: spill failed; result suppressed"), nil
+			}
+
+			// Build preview from first keys of the result object.
+			preview := buildSpillPreview(jsonBytes)
+
+			envelope := map[string]interface{}{
+				"status":       "spilled",
+				"pointer":      fmt.Sprintf("mpm://blob/%s", ptr.ID),
+				"size_bytes":   int64(len(jsonBytes)),
+				"content_type": "application/json",
+				"source_tool":  req.Params.Name,
+				"preview":      preview,
+				"expires_at":   meta.ExpiresAt.Format(time.RFC3339),
+			}
+			envBytes, _ := json.Marshal(envelope)
+			content = []mcp.Content{
+				mcp.TextContent{Type: mcp.ContentTypeText, Text: string(envBytes)},
+			}
+		} else {
+			// Pass: return the JSON result directly.
+			content = []mcp.Content{
+				mcp.TextContent{Type: mcp.ContentTypeText, Text: string(jsonBytes)},
+			}
+		}
+
+		// Opportunistic wake fold (Phase 5a): check for due wakes and prepend
 		// a visually distinct XML notification block. Uses the raw JSON text
 		// for the primary content so any client that doesn't understand the
 		// wake block still gets clean machine-readable output.
-		var jsonText string
-		if resultMap, ok := result.(map[string]interface{}); ok {
-			b, jErr := json.Marshal(resultMap)
-			if jErr != nil {
-				jsonText = fmt.Sprintf("%q", fmt.Sprintf("%v", result))
-			} else {
-				jsonText = string(b)
-			}
-		} else {
-			b, jErr := json.Marshal(result)
-			if jErr != nil {
-				jsonText = fmt.Sprintf("%q", fmt.Sprintf("%v", result))
-			} else {
-				jsonText = string(b)
-			}
-		}
-
-		// Build the content array: [wake notification?, json result]
-		//
-		// Block order matters: the wake notification (if any) is prepended
-		// as Block 1 so it is the first thing the LLM reads, never lost
-		// to truncation or "lost in the middle" syndrome when a tool
-		// returns a large payload. The JSON tool result is Block 2.
-		content := []mcp.Content{
-			mcp.TextContent{
-				Type: mcp.ContentTypeText,
-				Text: jsonText,
-			},
-		}
-
 		if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
 			notification := core.FormatWakeNotification(due)
-			// Prepend the notification as Block 1 so it is the very
-			// first content the LLM sees. Build a new slice rather than
-			// inserting at index 0 to keep the code obvious.
 			prepended := make([]mcp.Content, 0, len(content)+1)
 			prepended = append(prepended, mcp.TextContent{
 				Type: mcp.ContentTypeText,
@@ -249,4 +282,36 @@ func parseStringSliceArg(v interface{}) []string {
 		return t
 	}
 	return nil
+}
+
+// buildSpillPreview extracts a preview from a spilled JSON result.
+// Returns approximate item count and first few keys for the spill envelope.
+func buildSpillPreview(jsonBytes []byte) map[string]interface{} {
+	var v interface{}
+	if err := json.Unmarshal(jsonBytes, &v); err != nil {
+		return map[string]interface{}{"kind": "unknown", "approx_items": 0, "first_keys": []string{}}
+	}
+
+	result := map[string]interface{}{"kind": "unknown", "approx_items": 0, "first_keys": []string{}}
+
+	switch val := v.(type) {
+	case []interface{}:
+		result["kind"] = "array"
+		result["approx_items"] = len(val)
+	case map[string]interface{}:
+		result["kind"] = "json"
+		result["approx_items"] = len(val)
+		keys := make([]string, 0, 4)
+		for k := range val {
+			if len(keys) >= 4 {
+				break
+			}
+			keys = append(keys, k)
+		}
+		result["first_keys"] = keys
+	default:
+		result["kind"] = fmt.Sprintf("%T", v)
+	}
+
+	return result
 }
