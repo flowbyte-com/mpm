@@ -193,7 +193,7 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		}
 
 		// Apply the output policy: decide whether to pass-through or spill.
-		decision, _, err := outputPolicy_.Apply(ctx, result)
+		decision, threshold, err := outputPolicy_.Apply(ctx, result)
 		if err != nil {
 			// Policy check failed (e.g. context cancelled); return error.
 			return mcp.NewToolResultError("output policy check failed: " + err.Error()), nil
@@ -204,6 +204,15 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		if jErr != nil {
 			jsonBytes = []byte(fmt.Sprintf("%q", fmt.Sprintf("%v", result)))
 		}
+
+		// Phase 1 blob telemetry: log output policy decision.
+		decisionStr := map[tools.Decision]string{tools.DecisionPass: "pass", tools.DecisionSpill: "spill"}[decision]
+		slog.Info("mcp_output_policy",
+			"decision", decisionStr,
+			"serialized_bytes", len(jsonBytes),
+			"threshold_bytes", threshold,
+			"tool", req.Params.Name,
+		)
 
 		var content []mcp.Content
 
@@ -219,9 +228,23 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			}
 			ptr, putErr := blobStore.Put(ctx, bytes.NewReader(jsonBytes), meta)
 			if putErr != nil {
-				slog.Error("mcpAdapter: blobStore.Put failed", "err", putErr)
+				slog.Error("mcp_spill_failed",
+					"error", putErr.Error(),
+					"serialized_bytes", len(jsonBytes),
+					"tool", req.Params.Name,
+				)
 				return mcp.NewToolResultError("internal: spill failed; result suppressed"), nil
 			}
+
+			// Phase 1 blob telemetry: log successful spill.
+			slog.Info("mcp_spill",
+				"blob_id", ptr.ID,
+				"size_bytes", meta.SizeBytes,
+				"content_type", meta.ContentType,
+				"expires_at_unix", meta.ExpiresAt.Unix(),
+				"tool", req.Params.Name,
+				"call_id", "", // not available in this context
+			)
 
 			// Build preview from first keys of the result object.
 			preview := buildSpillPreview(jsonBytes)
