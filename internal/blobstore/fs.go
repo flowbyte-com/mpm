@@ -53,6 +53,11 @@ func (f *FilesystemBackend) payloadPath(id string) string {
 	return filepath.Join(f.blobDir, id)
 }
 
+// TTL returns the configured time-to-live for new blobs.
+func (f *FilesystemBackend) TTL() time.Duration {
+	return f.ttl
+}
+
 // textContentType returns true if the given content-type should receive UTF-8
 // boundary protection when reading partial ranges.
 func textContentType(ct string) bool {
