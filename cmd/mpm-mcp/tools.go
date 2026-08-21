@@ -76,6 +76,33 @@ func (a *blobStoreAdapter) Search(ctx context.Context, id string, query tools.Se
 	return result, nil
 }
 
+// pointerResolverAdapter wraps a *blobStoreAdapter and satisfies
+// tools.pointerResolverInterface so that mpm://blob/<id> URIs resolve
+// through the blob store. The Phase 1 blob-only enforcement is done in
+// handleMpmResolve; this adapter handles the resolution.
+type pointerResolverAdapter struct {
+	bs *blobStoreAdapter
+}
+
+func (a *pointerResolverAdapter) Resolve(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	reader, meta, err := a.bs.Get(ctx, p.ID, tools.GetOptions{})
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+	defer reader.Close()
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+
+	return tools.Resolution{
+		ContentType: meta.ContentType,
+		Reader:     io.NopCloser(bytes.NewReader(content)),
+		Metadata:   nil,
+	}, nil
+}
+
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
 // blobStore and outputPolicy_ are initialised once at server boot and closed
@@ -95,7 +122,9 @@ var (
 // or the single mcpAdapter closure below.
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
-	tools.SetBlobStore(&blobStoreAdapter{bs: bs}) // wire Phase 1 blob tools
+	blobAdapter := &blobStoreAdapter{bs: bs}
+	tools.SetBlobStore(blobAdapter)           // wire Phase 1 blob tools
+	tools.SetResolver(&pointerResolverAdapter{bs: blobAdapter}) // wire mpm_resolve
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {
