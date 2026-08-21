@@ -15,6 +15,9 @@ import (
 const buildVersion = "dev"
 
 func main() {
+	// Inject build version into the telemetry package before any subcommand runs.
+	telemetry.SetBuildVersion(buildVersion)
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)

@@ -21,10 +21,21 @@ const (
 	StatusRejected = "REJECTED"
 )
 
+// BuildVersion is the injected collector version. Set by main() via SetBuildVersion.
+var BuildVersion = "dev"
+
+// SetBuildVersion updates the global BuildVersion.
+func SetBuildVersion(v string) { BuildVersion = v }
+
 type Response struct {
-	Status   string `json:"status"`
-	Inserted bool   `json:"inserted,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Status           string `json:"status"`
+	Inserted         bool   `json:"inserted,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	CollectorVersion string `json:"collector_version,omitempty"`
+	ProtocolVersion  string `json:"protocol_version,omitempty"`
+	SchemaVersion   string `json:"schema_version,omitempty"`
+	QueueDepth       int    `json:"queue_depth"`
+	UptimeSeconds    int64  `json:"uptime_seconds"`
 }
 
 // EncodeResponse writes r as a single NDJSON line (terminated with \n).
