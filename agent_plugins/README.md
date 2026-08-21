@@ -16,10 +16,12 @@ Each agent (framework / CLI / harness) gets one subdirectory here.
 
 | Agent | Path | Mechanism | Surface | Status |
 |---|---|---|---|---|
-| **OpenClaw** | [`openclaw-mpm-memory/`](./openclaw-mpm-memory/) | (a) OpenClaw plugin (`memory_search`/`memory_get` slot, kind:memory) + (b) MCP stdio server | read+write | alpha-validated 2026-08-19 |
+| **OpenClaw** | [`openclaw-mpm-memory/`](./openclaw-mpm-memory/) | (a) OpenClaw plugin (`memory_search`/`memory_get` slot, kind:memory) + (b) MCP stdio server | read+write | **alpha-validated 2026-08-19** |
 | OpenClaw | [`mpm-auto-route/`](./mpm-auto-route/) | OpenClaw plugin (turn-key mode/persona switch via `mpm route --apply`) | bootstrap inject | live |
-| OpenCode | [`opencode-mpm/`](./opencode-mpm/) | OpenCode extension (TypeScript) | full | live |
-| Pi | [`pi-mpm/`](./pi-mpm/) | Pi extension (TypeScript) | full | live |
+| **OpenCode** | [`opencode-mpm/`](./opencode-mpm/) | OpenCode plugin (TypeScript, 16 tools via `mpm call`) | full | **alpha-validated 2026-08-19** |
+| **Claude Code** | [`claude-code-mpm/`](./claude-code-mpm/) | Claude Code MCP server (`~/.claude/.mcp.json`, 16 tools via `mpm-mcp`) | full | **alpha-validated 2026-08-19** |
+| **Hermes** | [`hermes-mpm/`](./hermes-mpm/) | Hermes MCP client (`~/.hermes/config.yaml`, 16 tools via `mpm-mcp`) | full | **READY 2026-08-21** |
+| Pi | [`pi-mpm/`](./pi-mpm/) | Pi extension (TypeScript, 16 tools via `mpm call`) | full | live |
 | (auto-route lives at the install root) | [`mpm-auto-route/`](./mpm-auto-route/) | OpenClaw plugin (per-turn router) | bootstrap inject | live |
 
 ## OpenClaw — the canonical integration story
@@ -114,3 +116,6 @@ plugin's boot-time health check will refuse to register if the live
 | Date | Agent | Verdict | Notes |
 |---|---|---|---|
 | 2026-08-19 | OpenClaw | **READY** | Tests A–E live-verified; error paths tested; PATH/DB invariants exercised. See [`openclaw-mpm-memory/VALIDATION-2026-08-19.md`](./openclaw-mpm-memory/VALIDATION-2026-08-19.md). |
+| 2026-08-19 | OpenCode | **READY** | Tests A–E live-verified via fresh `opencode run` sessions + plugin-level tests. Plugin required repair (missing `id` export) before it could load. See [`opencode-mpm/VALIDATION-2026-08-19.md`](./opencode-mpm/VALIDATION-2026-08-19.md). |
+| 2026-08-19 | Claude Code | **READY** | 9/10 tests PASS, 1/10 INSPECTED via direct JSON-RPC against `mpm-mcp`. Integration uses canonical `mpm-mcp` server. See [`claude-code-mpm/VALIDATION-2026-08-19.md`](./claude-code-cpm/VALIDATION-2026-08-19.md). |
+| 2026-08-21 | Hermes | **READY** | Tests A–E live-verified via MCP. MCP wiring was already active and functional. Phantom FTS5 corruption bug fixed (WAL timing race in HealthCheck). Legacy dead code excised. See [`hermes-mpm/SKILL.md`](./hermes-mpm/SKILL.md). |
