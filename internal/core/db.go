@@ -461,6 +461,16 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}
 
 	// Integrity check (PRAGMA quick_check is cheap, runs in <100ms).
+	// First, checkpoint the WAL to ensure all uncommitted frames are flushed
+	// to the main DB. Without this, a concurrent writer holding an uncommitted
+	// WAL frame can cause PRAGMA quick_check to report a false FTS5 checksum
+	// mismatch even when the DB is perfectly healthy (the Go layer then reports
+	// "fts5: checksum mismatch" which is purely a WAL-read timing artifact).
+	// TRUNCATE also resets the WAL file, keeping it small.
+	// Errors here are non-fatal — the checkpoint is best-effort; the integrity
+	// check still runs regardless.
+	_, _ = dm.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+
 	var integrity string
 	if err := dm.db.QueryRow(`PRAGMA quick_check`).Scan(&integrity); err != nil {
 		out["ok"] = false
