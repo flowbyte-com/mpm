@@ -98,3 +98,19 @@ func TestParse_ErrPointerMalformed_QueryAndFragment(t *testing.T) {
 		})
 	}
 }
+
+func FuzzPointerParse(f *testing.F) {
+	// corpus: valid URIs
+	f.Add("mpm://blob/abc")
+	f.Add("mpm://blob/abc-def-123")
+	f.Fuzz(func(t *testing.T, uri string) {
+		p, err := Parse(uri)
+		// never panic
+		if err == nil {
+			// round-trip
+			if p.URI() != uri {
+				t.Errorf("round-trip mismatch: %q -> %q", uri, p.URI())
+			}
+		}
+	})
+}
