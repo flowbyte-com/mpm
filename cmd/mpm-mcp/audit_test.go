@@ -56,7 +56,7 @@ func TestRecordToolInvocation_WritesMCPRow(t *testing.T) {
 	started := time.Now()
 	completed := started.Add(10 * time.Millisecond)
 
-	recordToolInvocation(dm.SQLDB(),
+	recordToolInvocation(dm,
 		core.ActiveContext{SessionID: "mcp-test-session"},
 		"mpm_system", payload,
 		started, completed, "health_check", "success", nil)
@@ -91,7 +91,7 @@ func TestRecordToolInvocation_ErrorPath(t *testing.T) {
 	completed := started.Add(5 * time.Millisecond)
 	boom := errorString("intentional audit row error")
 
-	recordToolInvocation(dm.SQLDB(),
+	recordToolInvocation(dm,
 		core.ActiveContext{SessionID: "mcp-err-session"},
 		"mpm_context", map[string]interface{}{"action": "route"},
 		started, completed, "route", "error", boom)

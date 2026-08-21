@@ -13,7 +13,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,7 +28,7 @@ import (
 // metadata required by the drill scorer. Best-effort: errors are logged
 // at warn but never propagated to the caller.
 func recordToolInvocation(
-	dm sqlDBLike,
+	dm *core.DatabaseManager,
 	ac core.ActiveContext,
 	toolName string,
 	payload map[string]interface{},
@@ -62,7 +61,7 @@ func recordToolInvocation(
 		errorMessage = err.Error()
 	}
 
-	_, auditErr := dm.Exec(`
+	_, auditErr := dm.SQLDB().Exec(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
@@ -76,12 +75,6 @@ func recordToolInvocation(
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
 	}
-}
-
-// sqlDBLike is the minimal surface for audit inserts. Matches the
-// DatabaseManager.Exec signature via SQLDB().
-type sqlDBLike interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
 }
 
 // sha256OfPayload hashes the JSON-encoded payload so semantically-
