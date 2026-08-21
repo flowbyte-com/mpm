@@ -116,6 +116,7 @@ var CanonicalMPMSchema = []string{
 	"admission_log",
 	"artifact_provenance",
 	"audit_cluster_proposals",
+	"blobs",
 	"capabilities",
 	"capability_dependencies",
 	"capability_events",
