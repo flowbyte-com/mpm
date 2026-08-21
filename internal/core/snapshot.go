@@ -54,6 +54,10 @@ import (
 // resolver. Readers must be forward-compatible: skip unknown fields,
 // refuse to deserialize a future major version. Bump MAJOR on shape
 // changes, MINOR on additive fields, PATCH on cosmetic.
+//
+// Phase 1 blob table (blobs table + FilesystemBackend + mpm:// URI
+// scheme) was added in 2026-08. The schema addition is fully
+// additive and does not require a version bump here.
 const SnapshotSchemaVersion = "1.0.0"
 
 // DefaultMaxObservationWindowMs is the default ceiling for
