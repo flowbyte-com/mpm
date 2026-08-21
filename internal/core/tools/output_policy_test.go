@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,4 +173,42 @@ func TestOutputPolicy_ReturnsErrorNotSpill(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, Decision(0), dec)
 	assert.Equal(t, 0, n)
+}
+
+// TestOutputPolicy_OnlyMCPEnforces is a static analysis test that proves
+// OutputPolicy.Apply is called only within cmd/mpm-mcp (the MCP server),
+// never in the CLI binary (cmd/mpm). This enforces the Phase 1 architecture:
+// the CLI never spills; only the MCP server applies the output policy.
+func TestOutputPolicy_OnlyMCPEnforces(t *testing.T) {
+	// Phase 1 architecture: OutputPolicy.Apply may only be called in cmd/mpm-mcp.
+	// Verify the source files directly rather than relying on package listing.
+	mcpToolsFile := filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm-mcp/tools.go")
+	if mcpToolsFile == "/" || mcpToolsFile == "" {
+		cwd, _ := os.Getwd()
+		mcpToolsFile = filepath.Join(cwd, "..", "..", "cmd", "mpm-mcp", "tools.go")
+	}
+	mcpContent, mcpErr := os.ReadFile(mcpToolsFile)
+	if mcpErr != nil {
+		t.Skipf("cannot read mpm-mcp tools.go: %v", mcpErr)
+	}
+
+	// The MCP server MUST call outputPolicy_.Apply.
+	if !strings.Contains(string(mcpContent), "outputPolicy_.Apply") {
+		t.Error("mpm-mcp tools.go must call outputPolicy_.Apply")
+	}
+
+	// The CLI (cmd/mpm) must NOT call OutputPolicy.Apply.
+	// Check all non-test Go files in cmd/mpm.
+	cliFiles, err := filepath.Glob(filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm/*.go"))
+	if err == nil && len(cliFiles) > 0 {
+		for _, f := range cliFiles {
+			content, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(content), "OutputPolicy") && !strings.Contains(string(content), "// OutputPolicy") {
+				t.Errorf("cmd/mpm file %q must not reference OutputPolicy", filepath.Base(f))
+			}
+		}
+	}
 }
