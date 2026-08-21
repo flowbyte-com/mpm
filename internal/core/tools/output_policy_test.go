@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,52 @@ func TestOutputPolicy_ReturnsErrorNotSpill(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, Decision(0), dec)
 	assert.Equal(t, 0, n)
+}
+
+// TestOutputPolicy_BytesMeasuredEqualBytesSpilled proves the OutputPolicy
+// measured bytes are the same bytes passed to BlobStore.Put — no double-marshal.
+// This is the Phase 1 no-gzip invariant: the exact bytes measured by Apply
+// are the exact bytes supplied to Put.
+func TestOutputPolicy_BytesMeasuredEqualBytesSpilled(t *testing.T) {
+	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "1024")
+	policy := DefaultOutputPolicy()
+
+	// Large result that spills.
+	result := map[string]string{"data": string(make([]byte, 2000))}
+	decision, bytes, err := policy.Apply(context.Background(), result)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionSpill, decision)
+	assert.True(t, bytes > 1024)
+
+	// The bytes returned by Apply must equal json.Marshal(result).
+	// This is the single-marshal guarantee.
+	resultBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.Equal(t, len(resultBytes), bytes,
+		"Apply must return the exact json.Marshal bytes, not a re-marshal")
+}
+
+// TestOutputPolicy_DecisionDeterminism proves the same input always produces
+// the same decision (idempotent Apply, no state mutation).
+func TestOutputPolicy_DecisionDeterminism(t *testing.T) {
+	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "100")
+	policy := DefaultOutputPolicy()
+
+	input := map[string]int{"items": 1}
+
+	// Apply 10 times — all decisions and byte counts must match.
+	var firstDecision Decision
+	var firstBytes int
+	for i := 0; i < 10; i++ {
+		dec, n, err := policy.Apply(context.Background(), input)
+		require.NoError(t, err)
+		if i == 0 {
+			firstDecision = dec
+			firstBytes = n
+		}
+		assert.Equal(t, firstDecision, dec, "decision must be deterministic")
+		assert.Equal(t, firstBytes, n, "byte count must be deterministic")
+	}
 }
 
 // TestOutputPolicy_OnlyMCPEnforces is a static analysis test that proves

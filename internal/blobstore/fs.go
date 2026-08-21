@@ -548,8 +548,14 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 			continue
 		}
 		name := entry.Name()
-		if name == "" || strings.HasSuffix(name, ".tmp") {
+		if name == "" {
 			continue
+		}
+		// .tmp files are orphans too — they are leftover from crashed Put operations.
+		// GC is responsible for cleaning them up (not Put itself, per spec).
+		isTmp := strings.HasSuffix(name, ".tmp")
+		if isTmp {
+			name = strings.TrimSuffix(name, ".tmp")
 		}
 
 		info, err := entry.Info()
@@ -560,13 +566,16 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 		stats.Scanned++
 
 		// Check if file is older than grace.
-		if info.ModTime().Before(graceCutoff) {
+		if info.ModTime().Before(graceCutoff) || isTmp {
 			// Verify no DB row exists.
 			var exists int
 			err := f.db.QueryRowContext(ctx, `SELECT 1 FROM blobs WHERE id = ?`, name).Scan(&exists)
 			if err == sql.ErrNoRows {
-				// Orphan — delete file.
+				// Orphan — delete the actual file (could be .tmp or final blob).
 				path := f.payloadPath(name)
+				if isTmp {
+					path = path + ".tmp"
+				}
 				if err := os.Remove(path); err == nil {
 					stats.OrphansDeleted++
 				}
@@ -610,9 +619,8 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 		}
 	}
 
-	orphanRowCount := len(orphanIDs)
 	slog.Info("blob_gc_run",
-		"scanned", stats.Scanned+orphanRowCount,
+		"scanned", stats.Scanned,
 		"expired_deleted", 0, // this pass doesn't count expired
 		"orphans_deleted", stats.OrphansDeleted,
 		"orphans_skipped_grace", stats.OrphansSkipped,
