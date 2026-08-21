@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -535,6 +536,7 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 
 	entries, err := os.ReadDir(f.blobDir)
 	if err != nil {
+		slog.Error("blob_gc_failed", "error", err.Error())
 		return stats, err
 	}
 
@@ -584,6 +586,7 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 	// for a free connection.
 	rows, err := f.db.QueryContext(ctx, `SELECT id FROM blobs`)
 	if err != nil {
+		slog.Error("blob_gc_failed", "error", err.Error())
 		return stats, err
 	}
 	var orphanIDs []string
@@ -606,6 +609,17 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 			stats.OrphansDeleted++
 		}
 	}
+
+	orphanRowCount := len(orphanIDs)
+	slog.Info("blob_gc_run",
+		"scanned", stats.Scanned+orphanRowCount,
+		"expired_deleted", 0, // this pass doesn't count expired
+		"orphans_deleted", stats.OrphansDeleted,
+		"orphans_skipped_grace", stats.OrphansSkipped,
+		"freed_bytes", stats.FreedBytes,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"success", true,
+	)
 
 	stats.DurationMs = time.Since(start).Milliseconds()
 	stats.Success = true
