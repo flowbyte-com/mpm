@@ -4,12 +4,15 @@ go 1.26.6
 
 replace github.com/flowbyte-com/mpm-core => ./internal/core
 
+replace github.com/flowbyte-com/mpm-core/tools => ./internal/core/tools
+replace github.com/flowbyte-com/mpm/internal/blobstore => ./internal/blobstore
+
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/creack/pty v1.1.24
 	github.com/flowbyte-com/mpm-core v0.0.0-00010101000000-000000000000
-	github.com/flowbyte-com/mpm/internal/core/tools v0.0.0
+	github.com/flowbyte-com/mpm-core/tools v0.0.0
 	github.com/mark3labs/mcp-go v0.55.1
 	github.com/mattn/go-sqlite3 v1.14.37
 	github.com/stretchr/testify v1.11.1
