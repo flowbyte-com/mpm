@@ -399,9 +399,9 @@ func buildSpillPreview(jsonBytes []byte) map[string]interface{} {
 	case map[string]interface{}:
 		result["kind"] = "json"
 		result["approx_items"] = len(val)
-		keys := make([]string, 0, 4)
+		keys := make([]string, 0, 5)
 		for k := range val {
-			if len(keys) >= 4 {
+			if len(keys) >= 5 {
 				break
 			}
 			keys = append(keys, k)
