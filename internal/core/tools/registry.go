@@ -26,7 +26,10 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 
 	"github.com/flowbyte-com/mpm-core"
 )
@@ -53,4 +56,89 @@ type Tool struct {
 	Schema      json.RawMessage
 	Handler     HandlerFunc
 }
+
+// ── Blob store and resolver wiring ───────────────────────────────────────
+//
+// Phase 1: the MCP server constructs the BlobStore and wires it to the
+// tools package via SetBlobStore. Handlers access it via blobStoreForHandlers.
+//
+// BlobStore and pointer types are defined locally (not imported) because
+// the tools package lives in mpm-core and cannot import the main module's
+// internal/ packages. The concrete types (blobstore.FilesystemBackend,
+// pointer.Resolver) are passed in via SetBlobStore/SetResolver.
+
+var blobStoreForHandlers blobStoreInterface
+
+// blobStoreInterface is the subset of the blobstore.BlobStore interface
+// needed by Phase 1 tool handlers. Defined locally so mpm-core's tools
+// package does not need to import the main module's internal/blobstore.
+type blobStoreInterface interface {
+	Get(ctx context.Context, id string, opts GetOptions) (io.ReadCloser, Metadata, error)
+	Search(ctx context.Context, id string, query SearchQuery) ([]Match, error)
+}
+
+// GetOptions, Metadata, SearchQuery, Match are exported so the adapter in
+// cmd/mpm-mcp can construct and reference them when implementing this interface.
+type GetOptions struct {
+	Offset   int64
+	MaxBytes int64
+}
+
+type Metadata struct {
+	ContentType string
+	SizeBytes   int64
+}
+
+type SearchQuery struct {
+	Query           string
+	Regex           bool
+	CaseInsensitive bool
+	MaxMatches      int
+	MaxBytes        int64
+}
+
+type Match struct {
+	LineNo     int
+	ByteOffset int64
+	Snippet    string
+}
+
+// SetBlobStore makes bs available to Phase 1 tool handlers.
+func SetBlobStore(bs blobStoreInterface) { blobStoreForHandlers = bs }
+
+// pointerResolverInterface matches the pointer.Resolver signature needed
+// by handleMpmResolve.
+type pointerResolverInterface interface {
+	Resolve(ctx context.Context, p pointerType, opts pointerResolveOptions) (pointerResolution, error)
+}
+
+type pointerType struct {
+	Kind string
+	ID   string
+}
+
+type pointerResolveOptions struct {
+	MaxBytes int64
+}
+
+type pointerResolution struct {
+	ContentType string
+	Reader     io.ReadCloser
+	Metadata   map[string]interface{}
+}
+
+var pointerErrUnsupportedKind = errors.New("pointer: unsupported kind for Phase 1")
+
+var globalResolver pointerResolverInterface
+
+// SetResolver wires a pointer.Resolver into the tools package.
+func SetResolver(r pointerResolverInterface) { globalResolver = r }
+
+// Sentinel errors matching blobstore.ErrBlobMissing / ErrBlobNotFound so
+// handlers can use errors.Is without importing the main module's blobstore.
+var (
+	errBlobMissing  = errors.New("blobstore: file missing (DB row exists)")
+	errBlobNotFound = errors.New("blobstore: no DB row for blob")
+)
+
 //go:generate go run ../../cmd/gen-readme

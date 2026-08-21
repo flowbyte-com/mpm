@@ -197,6 +197,27 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text (NOT ids — the coordinator never sees ids)."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel","description":"Dispatch strategy. v0.1 only supports 'parallel'."},"timeout_secs":{"type":"number","description":"Optional total timeout in seconds for the orchestration. If zero or omitted, the caller's context governs."}},"required":["components","prompt"]}`),
 		Handler:     handleRequestReview,
 	},
+
+	// ── Phase 1: Pointer / Blob tools ──────────────────────────────────────
+
+	{
+		Name:        "mpm_resolve",
+		Description: "Resolve a mpm:// URI to its content. Phase 1 supports mpm://blob/<id> only.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string"},"max_bytes":{"type":"integer","default":0}},"required":["uri"]}`),
+		Handler:     handleMpmResolve,
+	},
+	{
+		Name:        "mpm_blob_read",
+		Description: "Read a blob with byte offset and server-side max_bytes cap.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","default":0},"max_bytes":{"type":"integer","default":51200}},"required":["id"]}`),
+		Handler:     handleMpmBlobRead,
+	},
+	{
+		Name:        "mpm_blob_search",
+		Description: "Server-side regex search within a blob.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string","maxLength":256},"regex":{"type":"boolean","default":false},"case_insensitive":{"type":"boolean","default":false},"max_matches":{"type":"integer","default":20},"max_bytes":{"type":"integer","default":51200}},"required":["id","query"]}`),
+		Handler:     handleMpmBlobSearch,
+	},
 }
 
 // ByName returns the tool with the given name, or false.

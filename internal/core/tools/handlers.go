@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -3509,4 +3510,212 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	default:
 		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster", action)
 	}
+}
+
+// ── Pointer / Blob tools (Phase 1) ────────────────────────────────────────
+
+// handleMpmResolve resolves a mpm:// URI to its content via the global resolver.
+// Phase 1 supports mpm://blob/<id> only. max_bytes applies a soft ceiling
+// on the amount of content returned; 0 means unlimited.
+func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	uri, _ := payload["uri"].(string)
+	if uri == "" {
+		return nil, fmt.Errorf("uri is required")
+	}
+	maxBytes, _ := payload["max_bytes"].(float64) // JSON numbers are float64
+
+	// Parse the mpm:// URI locally (mpm-core cannot import main module's pointer).
+	ptr, err := parsePointerURI(uri)
+	if err != nil {
+		return nil, err
+	}
+
+	if globalResolver == nil {
+		return nil, fmt.Errorf("mpm_resolve: resolver not initialized (mpm-mcp may not support blob tools)")
+	}
+
+	result, err := globalResolver.Resolve(context.Background(), ptr, pointerResolveOptions{MaxBytes: int64(maxBytes)})
+	if err != nil {
+		return nil, err
+	}
+	defer result.Reader.Close()
+
+	content, err := io.ReadAll(result.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"content":      string(content),
+		"content_type": result.ContentType,
+		"metadata":     result.Metadata,
+	}, nil
+}
+
+// parsePointerURI parses a mpm:// URI into a pointerType.
+// Duplicates internal/pointer.Parse logic here so mpm-core tools does not
+// need to import the main module's pointer package.
+func parsePointerURI(uri string) (pointerType, error) {
+	const scheme = "mpm://"
+	if len(uri) < len(scheme) || uri[:len(scheme)] != scheme {
+		return pointerType{}, fmt.Errorf("pointer: wrong scheme (expected mpm://)")
+	}
+	path := uri[len(scheme):]
+
+	slashIdx := -1
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			slashIdx = i
+			break
+		}
+	}
+	if slashIdx <= 0 {
+		return pointerType{}, fmt.Errorf("pointer: malformed URI")
+	}
+
+	kind := path[:slashIdx]
+	id := path[slashIdx+1:]
+	if kind == "" || id == "" {
+		return pointerType{}, fmt.Errorf("pointer: malformed URI")
+	}
+	// Validate id: lowercase alphanumeric plus hyphens.
+	for _, c := range id {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return pointerType{}, fmt.Errorf("pointer: malformed URI")
+		}
+	}
+	return pointerType{Kind: kind, ID: id}, nil
+}
+
+// handleMpmBlobRead reads a blob with byte offset and a server-side max_bytes
+// ceiling of 256 KB. Rejects binary content types in Phase 1.
+func handleMpmBlobRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	id, _ := payload["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	offset, _ := payload["offset"].(float64)
+	maxBytes, _ := payload["max_bytes"].(float64)
+
+	// Server ceiling: 256 KB.
+	const serverMax = 256 * 1024
+	effectiveMax := int64(maxBytes)
+	if effectiveMax <= 0 {
+		effectiveMax = 50 * 1024 // sensible default
+	}
+	if effectiveMax > serverMax {
+		effectiveMax = serverMax
+	}
+
+	opts := GetOptions{
+		Offset:   int64(offset),
+		MaxBytes: effectiveMax,
+	}
+
+	reader, meta, err := blobStoreForHandlers.Get(context.Background(), id, opts)
+	if err != nil {
+		if errors.Is(err, errBlobMissing) {
+			return nil, fmt.Errorf("blob %s: file missing (DB row exists)", id)
+		}
+		if errors.Is(err, errBlobNotFound) {
+			return nil, fmt.Errorf("blob %s: not found", id)
+		}
+		return nil, err
+	}
+	defer reader.Close()
+
+	// Phase 1: reject binary materialization.
+	ct := meta.ContentType
+	if ct != "text/plain" && ct != "application/json" && !strings.HasPrefix(ct, "text/") {
+		return nil, fmt.Errorf("binary materialization not supported in Phase 1; use a tool that returns text")
+	}
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	size := meta.SizeBytes
+	nextOffset := int64(offset) + int64(len(content))
+	hasMore := nextOffset < size
+
+	return map[string]interface{}{
+		"content":        string(content),
+		"content_type":   ct,
+		"offset":         int64(offset),
+		"bytes_returned": len(content),
+		"next_offset":    nextOffset,
+		"has_more":       hasMore,
+	}, nil
+}
+
+// handleMpmBlobSearch performs server-side regex or substring search within a blob.
+// Server ceilings: 100 matches, 256 KB scanned. Query must be ≤256 chars.
+func handleMpmBlobSearch(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	id, _ := payload["id"].(string)
+	query, _ := payload["query"].(string)
+	useRegex, _ := payload["regex"].(bool)
+	caseInsensitive, _ := payload["case_insensitive"].(bool)
+	maxMatches, _ := payload["max_matches"].(float64)
+	maxBytes, _ := payload["max_bytes"].(float64)
+
+	if id == "" || query == "" {
+		return nil, fmt.Errorf("id and query are required")
+	}
+
+	// Server ceilings.
+	const serverMaxMatches = 100
+	const serverMaxBytes = 256 * 1024
+
+	effectiveMaxMatches := int(maxMatches)
+	if effectiveMaxMatches <= 0 {
+		effectiveMaxMatches = 20
+	}
+	if effectiveMaxMatches > serverMaxMatches {
+		effectiveMaxMatches = serverMaxMatches
+	}
+
+	effectiveMaxBytes := int64(maxBytes)
+	if effectiveMaxBytes <= 0 {
+		effectiveMaxBytes = 50 * 1024
+	}
+	if effectiveMaxBytes > serverMaxBytes {
+		effectiveMaxBytes = serverMaxBytes
+	}
+
+	// Query length limit.
+	if len(query) > 256 {
+		return nil, fmt.Errorf("query exceeds 256 char limit")
+	}
+
+	sq := SearchQuery{
+		Query:           query,
+		Regex:           useRegex,
+		CaseInsensitive: caseInsensitive,
+		MaxMatches:      effectiveMaxMatches,
+		MaxBytes:        effectiveMaxBytes,
+	}
+
+	matches, err := blobStoreForHandlers.Search(context.Background(), id, sq)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]interface{}, 0, len(matches))
+	for _, m := range matches {
+		result = append(result, map[string]interface{}{
+			"line_no":     m.LineNo,
+			"byte_offset": m.ByteOffset,
+			"snippet":     m.Snippet,
+		})
+	}
+
+	truncated := len(matches) >= effectiveMaxMatches
+
+	return map[string]interface{}{
+		"matches":        result,
+		"match_count":    len(matches),
+		"truncated":      truncated,
+		"bytes_returned": int64(len(matches) * 100), // approximation
+	}, nil
 }
