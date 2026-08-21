@@ -13,7 +13,7 @@
 # use scripts/install.sh --system.
 #
 # Targets:
-#   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic
+#   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 #   make install             - Verify binaries are at $(PREFIX)/bin/ (canonical). No copy step.
 #   make service-scheduler   - [LEGACY/OPT-IN] Install mpm-scheduler systemd USER unit
 #                              (fails on encrypted home dirs — use scripts/install.sh instead)
@@ -91,7 +91,7 @@ install: build
 	else \
 	    echo "    (bin/ is the canonical location; no copy needed)"; \
 	fi
-	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY)"
+	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
 
 # Install the mpm-scheduler systemd user service.
 # The unit is templated for the standard ~/projects/mpm layout; override
