@@ -1,0 +1,15 @@
+{
+  "entries": [
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5",
+      "input_per_1k": 3.0,
+      "output_per_1k": 15.0,
+      "cache_read_per_1k": 0.3,
+      "cache_write_per_1k": 3.75,
+      "reasoning_per_1k": 15.0,
+      "effective_from": "2026-08-01",
+      "effective_to": "2027-01-01"
+    }
+  ]
+}
