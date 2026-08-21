@@ -9,6 +9,7 @@
 package telemetry
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -70,3 +71,77 @@ func Open(path string) (*Store, error) {
 func (s *Store) DB() *sql.DB     { return s.db }
 func (s *Store) Path() string   { return s.path }
 func (s *Store) Close() error   { return s.db.Close() }
+
+// QueryInvocation retrieves a single frame by invocation ID.
+// Uses a transaction and delegates to loadFrameByID for consistency
+// with the InsertFrame conflict-detection path.
+func (s *Store) QueryInvocation(ctx context.Context, id string) (Frame, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Frame{}, err
+	}
+	defer tx.Rollback()
+	return loadFrameByID(ctx, tx, id)
+}
+
+// QuerySession returns all frames for a given session ID, ordered by started_at.
+func (s *Store) QuerySession(ctx context.Context, sessionID string) ([]Frame, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT invocation_id FROM telemetry_invocation
+		WHERE session_id = ?
+		ORDER BY started_at ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.loadMany(ctx, ids)
+}
+
+// QuerySince returns all frames with started_at >= cutoffSec, ordered by started_at.
+func (s *Store) QuerySince(ctx context.Context, cutoffSec int64) ([]Frame, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT invocation_id FROM telemetry_invocation
+		WHERE started_at >= ?
+		ORDER BY started_at ASC`, cutoffSec)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.loadMany(ctx, ids)
+}
+
+// loadMany resolves a list of invocation IDs to Frames by calling QueryInvocation
+// for each. N+1 pattern is acceptable for v1 (writes are infrequent, reads are infrequent).
+func (s *Store) loadMany(ctx context.Context, ids []string) ([]Frame, error) {
+	out := make([]Frame, 0, len(ids))
+	for _, id := range ids {
+		f, err := s.QueryInvocation(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}

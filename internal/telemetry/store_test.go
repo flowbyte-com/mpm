@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -45,4 +46,60 @@ func TestOpenAppliesIdempotently(t *testing.T) {
 		t.Fatalf("second Open (must be idempotent): %v", err)
 	}
 	s2.Close()
+}
+
+func TestQueryInvocation(t *testing.T) {
+	s := newStore(t)
+	f := sampleFrame()
+	if _, err := s.InsertFrame(context.Background(), f); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := s.QueryInvocation(context.Background(), f.InvocationID)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got.InvocationID != f.InvocationID {
+		t.Errorf("got %q, want %q", got.InvocationID, f.InvocationID)
+	}
+}
+
+func TestQuerySession(t *testing.T) {
+	s := newStore(t)
+	f := sampleFrame()
+	sess := "sess_test"
+	f.SessionID = &sess
+	if _, err := s.InsertFrame(context.Background(), f); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	rows, err := s.QuerySession(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 1 || rows[0].InvocationID != f.InvocationID {
+		t.Errorf("got %d rows, want 1", len(rows))
+	}
+}
+
+func TestQuerySince(t *testing.T) {
+	s := newStore(t)
+	f := sampleFrame()
+	f.StartedAt = 1000
+	f.CompletedAt = 1001
+	if _, err := s.InsertFrame(context.Background(), f); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	rows, err := s.QuerySince(context.Background(), 500)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("got %d rows, want 1 (cutoff=500)", len(rows))
+	}
+	rows, err = s.QuerySince(context.Background(), 2000)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("got %d rows, want 0 (cutoff=2000)", len(rows))
+	}
 }
