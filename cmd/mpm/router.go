@@ -113,6 +113,7 @@ func NewRouter() *CommandRouter {
 		"mode":       {Name: "mode", Description: "Manage modes"},
 		"wake":       {Name: "wake", Description: "Show wake context (--json, --strict)", MinArgs: 0},
 		"gc":         {Name: "gc", Description: "Run decay sweep (--dry-run, --review, --purge)"},
+		"blob":       {Name: "blob", Description: "Blob storage management (gc)"},
 		"tasks":      {Name: "tasks", Description: "Manage scheduled tasks (upsert|list|delete)", MinArgs: 0},
 		"lint":       {Name: "lint", Description: "Validate router frontmatter (YAML + regex compile)", MinArgs: 0},
 		"backup":     {Name: "backup", Description: "Export database to SQL dump (optional path arg)"},
@@ -211,6 +212,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleWake(args)
 	case "gc":
 		return handleGC(args)
+	case "blob":
+		return handleBlob(args)
 	case "tasks":
 		return handleTasksCommand(args[1:])
 	case "backup":
@@ -902,6 +905,54 @@ func printDebugHelp() {
 	fmt.Println()
 	fmt.Println("Subcommands:")
 	for _, sc := range debugSubcommandDescs {
+		fmt.Printf("  %-22s %s\n", sc.name, sc.desc)
+	}
+	fmt.Println()
+}
+
+// ============================================================================
+// Blob Namespace — Blob storage: gc
+// ============================================================================
+
+// handleBlob routes to the appropriate blob subcommand.
+func handleBlob(args []string) int {
+	if len(args) < 2 {
+		printBlobHelp()
+		return 0
+	}
+
+	subCmd := args[1]
+	subArgs := args[2:]
+
+	switch subCmd {
+	case "gc":
+		return handleBlobGC(subArgs)
+	case "help":
+		printBlobHelp()
+		return 0
+	default:
+		printBlobHelp()
+		return 1
+	}
+}
+
+// blobSubcommandDescs is the canonical list of blob subcommands.
+var blobSubcommandDescs = []struct {
+	name string
+	desc string
+}{
+	{"gc [--dry-run|-n]", "Garbage-collect expired and orphaned blobs"},
+	{"help", "Show this help"},
+}
+
+func printBlobHelp() {
+	fmt.Println()
+	fmt.Println("mpm blob — Blob storage management")
+	fmt.Println()
+	fmt.Println("Usage: mpm blob <subcommand> [arguments]")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	for _, sc := range blobSubcommandDescs {
 		fmt.Printf("  %-22s %s\n", sc.name, sc.desc)
 	}
 	fmt.Println()
