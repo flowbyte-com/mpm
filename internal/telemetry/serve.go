@@ -13,9 +13,22 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
+// Server holds collector state visible to connections.
+type Server struct {
+	StartedAt time.Time
+}
+
+// Serve starts the Unix-socket collector and blocks until ctx is cancelled.
+// The returned Server carries the start time used for uptime_seconds in pings.
 func Serve(ctx context.Context, store *Store, socketPath string) error {
+	srv := &Server{StartedAt: time.Now()}
+	return serve(ctx, store, socketPath, srv)
+}
+
+func serve(ctx context.Context, store *Store, socketPath string, srv *Server) error {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir socket dir: %w", err)
 	}
@@ -50,12 +63,12 @@ func Serve(ctx context.Context, store *Store, socketPath string) error {
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
-			handleConn(c, store)
+			handleConn(c, store, srv)
 		}(conn)
 	}
 }
 
-func handleConn(c net.Conn, store *Store) {
+func handleConn(c net.Conn, store *Store, srv *Server) {
 	defer c.Close()
 	for {
 		f, err := DecodeFrame(c)
@@ -67,6 +80,17 @@ func handleConn(c net.Conn, store *Store) {
 			}
 			// EOF or unrecoverable scan error: close cleanly.
 			return
+		}
+		if f.EventType == "ping" {
+			_ = EncodeResponse(c, Response{
+				Status:           StatusAccepted,
+				CollectorVersion: BuildVersion,
+				ProtocolVersion:  SchemaVersion,
+				SchemaVersion:    SchemaVersion,
+				QueueDepth:       0, // single-goroutine per conn in v1
+				UptimeSeconds:    int64(time.Since(srv.StartedAt).Seconds()),
+			})
+			continue
 		}
 		res, err := store.InsertFrame(context.Background(), f)
 		if err != nil {
