@@ -3530,11 +3530,16 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return nil, err
 	}
 
-	if globalResolver == nil {
-		return nil, fmt.Errorf("mpm_resolve: resolver not initialized (mpm-mcp may not support blob tools)")
+	// Phase 1: only blob kind is supported.
+	if ptr.Kind != "blob" {
+		return nil, fmt.Errorf("%w: Phase 1 supports mpm://blob/<id> only; got mpm://%s/", ErrUnsupportedKind, ptr.Kind)
 	}
 
-	result, err := globalResolver.Resolve(context.Background(), ptr, pointerResolveOptions{MaxBytes: int64(maxBytes)})
+	if globalResolver == nil {
+		return nil, fmt.Errorf("mpm_resolve: resolver not initialized; SetResolver was not called at mpm-mcp boot")
+	}
+
+	result, err := globalResolver.Resolve(context.Background(), ptr, ResolveOptions{MaxBytes: int64(maxBytes)})
 	if err != nil {
 		return nil, err
 	}
@@ -3552,13 +3557,13 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	}, nil
 }
 
-// parsePointerURI parses a mpm:// URI into a pointerType.
+// parsePointerURI parses a mpm:// URI into a Pointer.
 // Duplicates internal/pointer.Parse logic here so mpm-core tools does not
 // need to import the main module's pointer package.
-func parsePointerURI(uri string) (pointerType, error) {
+func parsePointerURI(uri string) (Pointer, error) {
 	const scheme = "mpm://"
 	if len(uri) < len(scheme) || uri[:len(scheme)] != scheme {
-		return pointerType{}, fmt.Errorf("pointer: wrong scheme (expected mpm://)")
+		return Pointer{}, fmt.Errorf("pointer: wrong scheme (expected mpm://)")
 	}
 	path := uri[len(scheme):]
 
@@ -3570,21 +3575,21 @@ func parsePointerURI(uri string) (pointerType, error) {
 		}
 	}
 	if slashIdx <= 0 {
-		return pointerType{}, fmt.Errorf("pointer: malformed URI")
+		return Pointer{}, fmt.Errorf("pointer: malformed URI")
 	}
 
 	kind := path[:slashIdx]
 	id := path[slashIdx+1:]
 	if kind == "" || id == "" {
-		return pointerType{}, fmt.Errorf("pointer: malformed URI")
+		return Pointer{}, fmt.Errorf("pointer: malformed URI")
 	}
 	// Validate id: lowercase alphanumeric plus hyphens.
 	for _, c := range id {
 		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
-			return pointerType{}, fmt.Errorf("pointer: malformed URI")
+			return Pointer{}, fmt.Errorf("pointer: malformed URI")
 		}
 	}
-	return pointerType{Kind: kind, ID: id}, nil
+	return Pointer{Kind: kind, ID: id}, nil
 }
 
 // handleMpmBlobRead reads a blob with byte offset and a server-side max_bytes
@@ -3712,10 +3717,18 @@ func handleMpmBlobSearch(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 
 	truncated := len(matches) >= effectiveMaxMatches
 
+	// Compute actual bytes from snippets.
+	var bytesReturned int64
+	for _, m := range result {
+		if s, ok := m["snippet"].(string); ok {
+			bytesReturned += int64(len(s))
+		}
+	}
+
 	return map[string]interface{}{
 		"matches":        result,
 		"match_count":    len(matches),
 		"truncated":      truncated,
-		"bytes_returned": int64(len(matches) * 100), // approximation
+		"bytes_returned": bytesReturned,
 	}, nil
 }

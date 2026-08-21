@@ -106,28 +106,30 @@ type Match struct {
 // SetBlobStore makes bs available to Phase 1 tool handlers.
 func SetBlobStore(bs blobStoreInterface) { blobStoreForHandlers = bs }
 
-// pointerResolverInterface matches the pointer.Resolver signature needed
-// by handleMpmResolve.
-type pointerResolverInterface interface {
-	Resolve(ctx context.Context, p pointerType, opts pointerResolveOptions) (pointerResolution, error)
-}
-
-type pointerType struct {
-	Kind string
-	ID   string
-}
-
-type pointerResolveOptions struct {
+// ResolveOptions, Resolution, and Pointer are the pointer resolver types needed by Phase 1.
+type ResolveOptions struct {
 	MaxBytes int64
 }
 
-type pointerResolution struct {
+type Resolution struct {
 	ContentType string
 	Reader     io.ReadCloser
 	Metadata   map[string]interface{}
 }
 
-var pointerErrUnsupportedKind = errors.New("pointer: unsupported kind for Phase 1")
+// Pointer is the pointer type used by the resolver interface.
+type Pointer struct {
+	Kind string
+	ID   string
+}
+
+// pointerResolverInterface matches the pointer.Resolver signature needed by handleMpmResolve.
+type pointerResolverInterface interface {
+	Resolve(ctx context.Context, p Pointer, opts ResolveOptions) (Resolution, error)
+}
+
+// ErrUnsupportedKind is returned when a pointer kind is not supported in Phase 1.
+var ErrUnsupportedKind = errors.New("pointer: unsupported kind for Phase 1")
 
 var globalResolver pointerResolverInterface
 
