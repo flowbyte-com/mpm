@@ -1740,6 +1740,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 			return fmt.Errorf("failed to execute reference schema: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
+
+	// Blob storage table — MCP result spilling (Phase 1 pointer architecture).
+	for _, sqlQuery := range BlobsTable {
+		if _, err := dm.db.Exec(sqlQuery); err != nil {
+			return fmt.Errorf("failed to execute blob schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
