@@ -34,6 +34,7 @@ BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
+TELEMETRY_BINARY := mpm-telemetry
 BUILD_DIR   := bin
 # Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in scripts/install.sh).
 # Override with `make install PREFIX=/somewhere` for non-standard layouts.
@@ -68,7 +69,8 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), and $(BUILD_DIR)/$(CRITIC_BINARY) (mpm-alpha)"
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
 
 # Verify the canonical install location contains all four binaries.
 # `make build` already writes to bin/, which IS $(PREFIX)/bin/ when the repo
@@ -147,6 +149,7 @@ gen-cli:
 # Run tests
 test:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 
