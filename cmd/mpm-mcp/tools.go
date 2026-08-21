@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -30,6 +31,50 @@ import (
 	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
 )
+
+// blobStoreAdapter wraps the concrete *blobstore.FilesystemBackend so it
+// satisfies the tools.blobStoreInterface expected by the tools package.
+// Defined here (in the main module) because mpm-core cannot import the main
+// module's internal/blobstore package.
+type blobStoreAdapter struct {
+	bs *blobstore.FilesystemBackend
+}
+
+func (a *blobStoreAdapter) Get(ctx context.Context, id string, opts tools.GetOptions) (io.ReadCloser, tools.Metadata, error) {
+	reader, meta, err := a.bs.Get(ctx, id, blobstore.GetOptions{
+		Offset:   opts.Offset,
+		MaxBytes: opts.MaxBytes,
+	})
+	if err != nil {
+		return nil, tools.Metadata{}, err
+	}
+	return reader, tools.Metadata{
+		ContentType: meta.ContentType,
+		SizeBytes:   meta.SizeBytes,
+	}, nil
+}
+
+func (a *blobStoreAdapter) Search(ctx context.Context, id string, query tools.SearchQuery) ([]tools.Match, error) {
+	matches, err := a.bs.Search(ctx, id, blobstore.SearchQuery{
+		Query:           query.Query,
+		Regex:           query.Regex,
+		CaseInsensitive: query.CaseInsensitive,
+		MaxMatches:      query.MaxMatches,
+		MaxBytes:        query.MaxBytes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]tools.Match, 0, len(matches))
+	for _, m := range matches {
+		result = append(result, tools.Match{
+			LineNo:     m.LineNo,
+			ByteOffset: m.ByteOffset,
+			Snippet:    m.Snippet,
+		})
+	}
+	return result, nil
+}
 
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
@@ -50,6 +95,7 @@ var (
 // or the single mcpAdapter closure below.
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
+	tools.SetBlobStore(&blobStoreAdapter{bs: bs}) // wire Phase 1 blob tools
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {
