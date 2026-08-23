@@ -112,6 +112,10 @@ type ResolveOptions struct {
 }
 
 type Resolution struct {
+	// Pointer is the canonical mpm:// URI for the resolved artifact.
+	Pointer string
+	// Bounded is true when Reader contains a truncated representation.
+	Bounded     bool
 	ContentType string
 	Reader     io.ReadCloser
 	Metadata   map[string]interface{}
