@@ -303,6 +303,14 @@ type CoreDB interface {
 	RecordRetrievalSuccess(nodeID, nodeType string) error
 	IncrementSuccess(nodeID, nodeType string) error
 	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
+
+	// ─── Work (Durable Intended Actions) ──────────────────────────
+	AddWork(title, content, sessionID string) (*Work, error)
+	GetWork(id string) (*Work, error)
+	ListWorks() ([]*Work, error)
+	UpdateWork(id string, status WorkStatus) (*Work, error)
+	CompleteWork(id string) (*Work, error)
+	CancelWork(id string) (*Work, error)
 }
 
 // Compile-time assertion that *DatabaseManager satisfies CoreDB.
