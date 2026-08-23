@@ -808,6 +808,8 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 // Begin starts a new database transaction. Exported so packages that import
 // mpm-core (e.g. mpm-core/tools) can begin their own txs for non-atomic
 // provenance writes.
+//
+//nolint:tx // exported Tx-returning API — caller is responsible for commit/rollback
 func (dm *DatabaseManager) Begin() (*sql.Tx, error) {
 	return dm.db.Begin()
 }
