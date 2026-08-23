@@ -805,6 +805,13 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 	return err
 }
 
+// Begin starts a new database transaction. Exported so packages that import
+// mpm-core (e.g. mpm-core/tools) can begin their own txs for non-atomic
+// provenance writes.
+func (dm *DatabaseManager) Begin() (*sql.Tx, error) {
+	return dm.db.Begin()
+}
+
 // ExecTracked runs db.Exec with timing and optional retry-backoff.
 // If retries > 0 the query is re-attempted on SQLITE_BUSY with exponential
 // backoff (100ms, 200ms, 400ms, … capped at 5s).
@@ -1800,6 +1807,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// skip-if-current pattern as migrateAuditLevelConstraint. Rebuilds
 	// the six indexes inline so the migration is atomic with the
 	// table recreate.
+	if err := dm.migrateArtifactProvenanceWorkType(); err != nil {
+		return fmt.Errorf("migrateArtifactProvenanceWorkType: %w", err)
+	}
 	if err := dm.migrateArtifactProvenanceSchema(); err != nil {
 		return fmt.Errorf("migrateArtifactProvenanceSchema: %w", err)
 	}
@@ -2647,7 +2657,7 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 		}
 		if tx != nil {
 			res := dm.RecordArtifactProvenance(
-				tx, id, artifactType, prov,
+				tx, id, artifactType, prov, false,
 			)
 			if !res.Recorded {
 				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
@@ -3601,7 +3611,7 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		}
 		if tx != nil {
 			res := dm.RecordArtifactProvenance(
-				tx, id, "lesson", prov,
+				tx, id, "lesson", prov, false,
 			)
 			if !res.Recorded {
 				dm.LogAudit(AuditWarn, "provenance", "record failed", "", AuditContext{
@@ -4609,6 +4619,47 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	event.ParentInvocationID = parentInvocationID
 
 	return &event, nil
+}
+
+// RecordWorkArtifactProvenance writes an artifact_provenance row for a newly
+// created work item. It opens its own short-lived transaction when called
+// outside an active transaction (e.g., from a handler after the main tx
+// has committed). Provenance failures are non-fatal — errors are logged
+// and the function returns without propagating.
+func (dm *DatabaseManager) RecordWorkArtifactProvenance(workID string, actorKind, actorID, frameworkName, sessionID string) {
+	prov := &EffectiveProvenance{
+		ActorKind:     actorKind,
+		ActorID:       actorID,
+		FrameworkName: frameworkName,
+		SessionID:     sessionID,
+	}
+	// Begin our own tx. The provenance row is non-fatal, so if the tx
+	// cannot start we log and continue without propagating the error.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		dm.LogAudit(AuditWarn, "provenance", "RecordWorkArtifactProvenance tx begin failed", "", AuditContext{
+			"work_id": workID,
+			"reason":  err.Error(),
+		})
+		return
+	}
+	res := dm.RecordArtifactProvenance(tx, workID, "work", prov, true /* skipAudit: provenance row is enough; own error log handles failures */)
+	if !res.Recorded {
+		tx.Rollback()
+		dm.LogAudit(AuditWarn, "provenance", "RecordWorkArtifactProvenance record failed", "", AuditContext{
+			"work_id":         workID,
+			"reason":          res.ValidationReason,
+			"sql_error":       res.SQLError,
+			"artifact_type":   "work",
+		})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		dm.LogAudit(AuditWarn, "provenance", "RecordWorkArtifactProvenance commit failed", "", AuditContext{
+			"work_id": workID,
+			"reason":  err.Error(),
+		})
+	}
 }
 
 // GetWorkEvents returns all events for a work item ordered by event_index ASC.
