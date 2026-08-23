@@ -4414,9 +4414,14 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 }
 
 // AppendWorkEvent appends an immutable event to the work_events ledger.
-// It is always called inside a WithTx transaction so the event INSERT and
-// the works-row projection UPDATE commit atomically.
-func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance) (*WorkEvent, error) {
+// When called inside a WithTx callback, pass the node from the callback so all
+// writes join the same transaction. When called outside a WithTx, pass nil and
+// the event INSERT and works-row projection UPDATE commit atomically via SQLite's
+// WAL mode + busy_timeout (no separate transaction needed).
+//
+// node: DBNode from WithTx callback. Use node.ExecTracked/QueryRowTracked when
+// non-nil; fall back to dm.db when nil.
+func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error) {
 	// 1. Resolve provenance: base from dm, then per-field override from ep.
 	base := dm.getEffectiveProvenance()
 	if base == nil {
@@ -4474,11 +4479,19 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		id = GenerateID()
 	}
 
-	// 3. Determine event_index inside the transaction.
+	// 3. Determine event_index. Use node.QueryRowTracked if inside WithTx,
+	// otherwise fall back to dm.db.QueryRow.
 	var eventIndex int
-	err := dm.db.QueryRow(`
-		SELECT COALESCE(MAX(event_index), -1) + 1 FROM work_events WHERE work_id = ?
-	`, workID).Scan(&eventIndex)
+	var err error
+	if node != nil {
+		err = node.QueryRowTracked(`
+			SELECT COALESCE(MAX(event_index), -1) + 1 FROM work_events WHERE work_id = ?
+		`, workID).Scan(&eventIndex)
+	} else {
+		err = dm.db.QueryRow(`
+			SELECT COALESCE(MAX(event_index), -1) + 1 FROM work_events WHERE work_id = ?
+		`, workID).Scan(&eventIndex)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("get next event_index: %w", err)
 	}
@@ -4500,61 +4513,80 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		newStatus = "open"
 	}
 
-	// 5. Insert the event row.
-	//
-	// Use dm.db.Exec directly inside the caller's WithTx transaction.
-	// When called without an active transaction the DB will serialise
-	// the writes automatically (WAL + busy_timeout). We do NOT open
-	// a nested transaction here because AppendWorkEvent is designed to
-	// be called inside WithTx by its callers.
-	//
-	// title/content/note are only set when non-empty (empty string → NULL
-	// in the database, which omits the field via omitempty on read-back).
+	// 5. Insert the event row. Use node.ExecTracked if inside WithTx,
+	// otherwise dm.db.Exec.
 	title := event.Title
 	content := event.Content
 	note := event.Note
 
-	_, err = dm.db.Exec(`
-		INSERT INTO work_events (
-			id, work_id, event_index, event_type, created_at,
-			actor_kind, actor_id, framework_name, framework_version,
-			provider_name, model_name, model_revision,
-			session_id, invocation_id, parent_invocation_id,
-			note, title, content
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		id, workID, eventIndex, string(event.EventType), now,
-		actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
-		nullString(providerName), nullString(modelName), nullString(modelRevision),
-		nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
-		nullString(note), nullString(title), nullString(content),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert work_event: %w", err)
+	var execErr error
+	if node != nil {
+		_, execErr = node.ExecTracked(`
+			INSERT INTO work_events (
+				id, work_id, event_index, event_type, created_at,
+				actor_kind, actor_id, framework_name, framework_version,
+				provider_name, model_name, model_revision,
+				session_id, invocation_id, parent_invocation_id,
+				note, title, content
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, 0,
+			id, workID, eventIndex, string(event.EventType), now,
+			actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
+			nullString(providerName), nullString(modelName), nullString(modelRevision),
+			nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
+			nullString(note), nullString(title), nullString(content),
+		)
+	} else {
+		_, execErr = dm.db.Exec(`
+			INSERT INTO work_events (
+				id, work_id, event_index, event_type, created_at,
+				actor_kind, actor_id, framework_name, framework_version,
+				provider_name, model_name, model_revision,
+				session_id, invocation_id, parent_invocation_id,
+				note, title, content
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			id, workID, eventIndex, string(event.EventType), now,
+			actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
+			nullString(providerName), nullString(modelName), nullString(modelRevision),
+			nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
+			nullString(note), nullString(title), nullString(content),
+		)
+	}
+	if execErr != nil {
+		return nil, fmt.Errorf("insert work_event: %w", execErr)
 	}
 
-	// 6. Update the works row as a derived projection.
-	// completed_at is set to NULL when event_type is 'reopened'; otherwise
-	// it is only set when event_type is 'completed'; for all other types
-	// it is left unchanged (the COALESCE in the UPDATE preserves existing
-	// value when the SET expression evaluates to NULL).
-	var updateSQL string
-	if newCompletedAt != nil {
-		updateSQL = `
-			UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-			WHERE id = ?`
-		_, err = dm.db.Exec(updateSQL, newStatus, now, *newCompletedAt, workID)
-	} else if event.EventType == WorkEventTypeReopened {
-		// Explicitly clear completed_at on reopen.
-		updateSQL = `
-			UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-			WHERE id = ?`
-		_, err = dm.db.Exec(updateSQL, newStatus, now, workID)
+	// 6. Update the works row as a derived projection. Same pattern:
+	// use node when inside WithTx, dm.db otherwise.
+	if node != nil {
+		if newCompletedAt != nil {
+			_, err = node.ExecTracked(`
+				UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+				WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
+		} else if event.EventType == WorkEventTypeReopened {
+			_, err = node.ExecTracked(`
+				UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+				WHERE id = ?`, 0, newStatus, now, workID)
+		} else {
+			_, err = node.ExecTracked(`
+				UPDATE works SET status = ?, updated_at = ?
+				WHERE id = ?`, 0, newStatus, now, workID)
+		}
 	} else {
-		updateSQL = `
-			UPDATE works SET status = ?, updated_at = ?
-			WHERE id = ?`
-		_, err = dm.db.Exec(updateSQL, newStatus, now, workID)
+		if newCompletedAt != nil {
+			_, err = dm.db.Exec(`
+				UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+				WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
+		} else if event.EventType == WorkEventTypeReopened {
+			_, err = dm.db.Exec(`
+				UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+				WHERE id = ?`, newStatus, now, workID)
+		} else {
+			_, err = dm.db.Exec(`
+				UPDATE works SET status = ?, updated_at = ?
+				WHERE id = ?`, newStatus, now, workID)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update works projection: %w", err)
