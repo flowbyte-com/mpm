@@ -1776,6 +1776,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Migration: create work_events table and seed initial created events for
+	// existing works rows. Idempotent — uses migrated_at flag to prevent
+	// double-seeding and CREATE TABLE IF NOT EXISTS for the table itself.
+	if err := dm.migrateWorkEvents(); err != nil {
+		return fmt.Errorf("migrateWorkEvents: %w", err)
+	}
+
 	// Constraint migration: relax system_audit_log.level CHECK to include
 	// 'info'. One-shot, idempotent (detects existing-new constraint via
 	// sqlite_master.sql). Indices attached to the table get dropped by
@@ -4318,4 +4325,104 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 		return "", fmt.Errorf("insert shared copy: %w", err)
 	}
 	return newID, nil
+}
+
+// migrateWorkEvents creates the work_events table and seeds initial created events
+// for existing works rows that have not yet been migrated. Idempotent: uses
+// CREATE TABLE IF NOT EXISTS for the table and WHERE migrated_at IS NULL for the
+// seed so re-running on an already-migrated DB is a no-op.
+func (dm *DatabaseManager) migrateWorkEvents() error {
+	// Step 1: ensure the work_events table exists (no-op if already created via
+	// WorkTables on a fresh DB).
+	workEventsDDL := `CREATE TABLE IF NOT EXISTS work_events (
+		id                    TEXT PRIMARY KEY,
+		work_id               TEXT NOT NULL,
+		event_index           INTEGER NOT NULL,
+		event_type            TEXT NOT NULL
+		                      CHECK (event_type IN (
+		                        'created','note_appended','completed',
+		                        'cancelled','reopened',
+		                        'title_updated','content_updated'
+		                      )),
+		created_at            INTEGER NOT NULL
+		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		actor_kind           TEXT NOT NULL,
+		actor_id             TEXT,
+		framework_name        TEXT,
+		framework_version     TEXT,
+		provider_name         TEXT,
+		model_name            TEXT,
+		model_revision        TEXT,
+		session_id            TEXT,
+		invocation_id         TEXT,
+		parent_invocation_id TEXT,
+		note                  TEXT,
+		title                 TEXT,
+		content               TEXT,
+		UNIQUE(work_id, event_index)
+	);`
+	if _, err := dm.db.Exec(workEventsDDL); err != nil {
+		return fmt.Errorf("create work_events table: %w", err)
+	}
+
+	// Step 2: create indexes if they don't exist (no-op if already created).
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_work_events_session ON work_events(session_id);`,
+	}
+	for _, idx := range indexes {
+		if _, err := dm.db.Exec(idx); err != nil {
+			return fmt.Errorf("create work_events index: %w", err)
+		}
+	}
+
+	// Step 3: seed initial created events for existing works rows that have not
+	// yet been migrated. The migrated_at IS NULL predicate makes this idempotent.
+	seedSQL := `
+		INSERT INTO work_events
+			(id, work_id, event_index, event_type, created_at,
+			 actor_kind, actor_id, session_id, title, content)
+		SELECT
+			lower(hex(randomblob(16))),
+			id, 0, 'created', created_at,
+			'agent', '', COALESCE(session_id, ''),
+			title, content
+		FROM works
+		WHERE migrated_at IS NULL;
+	`
+	if _, err := dm.db.Exec(seedSQL); err != nil {
+		return fmt.Errorf("seed work_events: %w", err)
+	}
+
+	// Step 4: mark all unmigrated works rows as migrated.
+	if _, err := dm.db.Exec(`UPDATE works SET migrated_at = CAST(strftime('%s','now') AS INTEGER) WHERE migrated_at IS NULL`); err != nil {
+		return fmt.Errorf("mark works migrated: %w", err)
+	}
+
+	return nil
+}
+
+// AppendWorkEvent appends an immutable event to the work_events ledger.
+// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance) (*WorkEvent, error) {
+	panic("TODO: implement in Task 2")
+}
+
+// GetWorkEvents returns all events for a work item ordered by event_index ASC.
+// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+func (dm *DatabaseManager) GetWorkEvents(workID string) ([]*WorkEvent, error) {
+	panic("TODO: implement in Task 2")
+}
+
+// GetLatestWorkEvent returns the most recent event for a work item.
+// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error) {
+	panic("TODO: implement in Task 2")
+}
+
+// RecomputeWorkProjection recomputes the works row status/updated_at from the event ledger.
+// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
+	panic("TODO: implement in Task 2")
 }

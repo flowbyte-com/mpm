@@ -311,6 +311,12 @@ type CoreDB interface {
 	UpdateWork(id string, status WorkStatus) (*Work, error)
 	CompleteWork(id string) (*Work, error)
 	CancelWork(id string) (*Work, error)
+
+	// ─── Work Events (Event-Sourced History) ────────────────────
+	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance) (*WorkEvent, error)
+	GetWorkEvents(workID string) ([]*WorkEvent, error)
+	GetLatestWorkEvent(workID string) (*WorkEvent, error)
+	RecomputeWorkProjection(workID string) error
 }
 
 // Compile-time assertion that *DatabaseManager satisfies CoreDB.
