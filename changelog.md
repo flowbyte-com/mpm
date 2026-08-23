@@ -1,5 +1,92 @@
 # Changelog
 
+## 2026-08-23 — Work Primitive v2: Event-Sourced Work Model
+
+Event-sourced rewrite of the Work primitive. The `works` row is now a
+recomputed projection from an append-only `work_events` ledger rather
+than a directly-mutable record. Every state change is an immutable
+event; the current work state is derived at read time.
+
+### Architecture
+
+- **`work_events` table** — append-only event ledger with event_index
+  computed as `MAX(event_index)+1` per work_id. Columns: `id`,
+  `work_id`, `event_index`, `event_type`, `payload` (JSON),
+  `provenance` (JSON), `created_at`. New event types:
+  `created`, `status_changed`, `note_appended`, `reopened`.
+
+- **`works` row as projection** — `completed_at`, `status`, and
+  `updated_at` columns are recomputed from the event log via
+  `RecomputeWorkProjection(workID)`. No longer updated directly;
+  derived on every read.
+
+- **Atomic event append** — `AppendWorkEvent(workID, event, ep, node)`
+  accepts a `node DBNode` parameter. When called inside a `WithTx`
+  block, uses `node.ExecTracked`/`node.QueryRowTracked` so all writes
+  join the caller's transaction. All five handlers
+  (`create`/`complete`/`cancel`/`note`/`reopen`) wrap event appends
+  in `WithTx`.
+
+- **UNIQUE constraint** on `(work_id, event_index)` — concurrent
+  appends from two independent SQLite connections race to the write
+  lock; exactly one wins, the other gets a constraint error. Test:
+  `TestHandleMpmWork_ConcurrentAppends_OneWinsConstraintError` uses
+  `file:mpm-concurrent-%d?mode=memory&cache=shared` with two
+  independent `*sql.DB` instances to produce genuine SQLite-level
+  write-lock contention.
+
+### New Handlers
+
+| Action | Handler | Event type |
+|--------|---------|------------|
+| `history` | `handleHistoryWork` | — (reads `work_events` directly) |
+| `note` | `handleNoteWork` | `note_appended` |
+| `reopen` | `handleReopenWork` | `reopened` |
+
+The `create` handler now writes the initial `created` event alongside
+the `works` row INSERT, both inside the same `WithTx`.
+
+### Provenance Integration
+
+Every event carries provenance context (`actor_kind`, `actor_id`,
+`framework_name`, `framework_version`, `provider_name`, `model_name`,
+`model_revision`, `session_id`, `invocation_id`,
+`parent_invocation_id`) built from `ActiveContext` via
+`workEffectiveProvenance(dm, ac)`. Provenance write is non-fatal:
+if `RecordArtifactProvenance` fails, the event append succeeds and
+the failure is logged to `system_audit_log`.
+
+### Provenance Migration Fix
+
+Migration `migrateArtifactProvenance` now drops the `artifact_provenance`
+view before renaming the old table, then recreates the view after.
+Prevents corruption if process crashes mid-migration with the view
+still referencing the pre-rename table name.
+
+### Files Changed
+
+- `internal/core/db.go` — `AppendWorkEvent`, `GetWorkEvents`,
+  `GetLatestWorkEvent`, `RecomputeWorkProjection`, `nullString` helper
+- `internal/core/work_events.go` — event type constants, `WorkEvent` struct
+- `internal/core/schema.go` — `work_events` table in `WorkTables`,
+  `migrated_at` SafeMigration for `works`
+- `internal/core/core.go` — CoreDB interface updated with event methods
+- `internal/core/tools/work_handlers.go` — all five handlers refactored,
+  `handleHistoryWork`/`handleNoteWork`/`handleReopenWork` added,
+  `workEffectiveProvenance` helper
+- `internal/core/tools/registry_list.go` — `history`/`note`/`reopen`
+  added to action enum
+- `internal/core/tools/work_handlers_test.go` — 17 tests including
+  `TestHandleMpmWork_ConcurrentAppends_OneWinsConstraintError`
+- `internal/core/provenance_migration.go` — view DROP/CREATE around table rename
+
+### Tests
+
+All 17 `TestHandleMpmWork*` tests pass. Full tools package suite:
+PASS. Build: OK.
+
+---
+
 ## 2026-08-21 — Phantom FTS5 Corruption Fix (WAL Timing Race)
 
 **Bug:** `mpm_system` `health_check` via the MCP server reported `ok: false`
