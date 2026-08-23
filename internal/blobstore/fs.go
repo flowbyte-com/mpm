@@ -565,23 +565,40 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 
 		stats.Scanned++
 
-		// Check if file is older than grace.
-		if info.ModTime().Before(graceCutoff) || isTmp {
-			// Verify no DB row exists.
-			var exists int
-			err := f.db.QueryRowContext(ctx, `SELECT 1 FROM blobs WHERE id = ?`, name).Scan(&exists)
-			if err == sql.ErrNoRows {
-				// Orphan — delete the actual file (could be .tmp or final blob).
-				path := f.payloadPath(name)
-				if isTmp {
-					path = path + ".tmp"
-				}
-				if err := os.Remove(path); err == nil {
-					stats.OrphansDeleted++
-				}
-			} else if err == nil {
-				// DB row exists — skip.
-				stats.OrphansSkipped++
+		// .tmp files are always orphans — leftover from a crashed Put before
+		// the rename. Always delete regardless of age.
+		if isTmp {
+			path := f.payloadPath(name) + ".tmp"
+			if err := os.Remove(path); err == nil {
+				stats.OrphansDeleted++
+			}
+			continue
+		}
+
+		// Check whether a DB row exists for this file.
+		var exists int
+		err = f.db.QueryRowContext(ctx, `SELECT 1 FROM blobs WHERE id = ?`, name).Scan(&exists)
+		if err == sql.ErrNoRows {
+			// No DB row — this is an orphan (e.g. crash between rename and INSERT).
+			// Delete it regardless of mtime; the grace period only protects files
+			// that have a corresponding DB row and are waiting for the INSERT to
+			// settle.
+			path := f.payloadPath(name)
+			if err := os.Remove(path); err == nil {
+				stats.OrphansDeleted++
+			}
+			continue
+		} else if err != nil {
+			// DB error — skip to avoid deleting a file we couldn't verify.
+			stats.OrphansSkipped++
+			continue
+		}
+
+		// DB row exists. Only delete if the file is older than grace.
+		if info.ModTime().Before(graceCutoff) {
+			path := f.payloadPath(name)
+			if err := os.Remove(path); err == nil {
+				stats.OrphansDeleted++
 			}
 		} else {
 			stats.OrphansSkipped++

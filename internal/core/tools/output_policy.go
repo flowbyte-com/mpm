@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"strconv"
@@ -16,7 +15,11 @@ const (
 )
 
 type OutputPolicy interface {
-	Apply(ctx context.Context, result any) (Decision, int, error)
+	// Apply decides whether a serialized result should be returned directly
+	// (DecisionPass) or spilled to blob store (DecisionSpill). The caller
+	// is responsible for marshaling once and passing the serialized bytes;
+	// this method only measures length — it does not marshal.
+	Apply(ctx context.Context, serialized []byte) (Decision, int, error)
 }
 
 type defaultOutputPolicy struct {
@@ -42,19 +45,13 @@ func DefaultOutputPolicy() OutputPolicy {
 	return &defaultOutputPolicy{threshold: threshold}
 }
 
-func (p *defaultOutputPolicy) Apply(ctx context.Context, result any) (Decision, int, error) {
-	// Check context cancellation before marshaling.
+func (p *defaultOutputPolicy) Apply(ctx context.Context, serialized []byte) (Decision, int, error) {
+	// Check context cancellation before measuring.
 	if err := ctx.Err(); err != nil {
 		return 0, 0, err
 	}
 
-	data, err := json.Marshal(result)
-	if err != nil {
-		// Marshal failure returns error, not DecisionSpill.
-		return 0, 0, err
-	}
-
-	n := len(data)
+	n := len(serialized)
 	if n > p.threshold {
 		return DecisionSpill, n, nil
 	}

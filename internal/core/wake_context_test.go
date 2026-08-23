@@ -40,7 +40,7 @@ func TestWakeContext_EmptyListsAreNotOmitted(t *testing.T) {
 	// where no subsystems have produced state yet. The struct fields
 	// below mirror what GatherWakeContext does on an empty DB.
 	data := WakeContextData{
-		ContextVersion:   "wake-context-v4-session-identity",
+		ContextVersion:   "wake-context-v5",
 		GeneratedAt:      time.Now().Unix(),
 		RecentTopics:     make([]string, 0),
 		RecentMemories:   make([]WakeContextMemory, 0),

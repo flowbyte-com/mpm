@@ -25,7 +25,7 @@ var Registry = []Tool{
 		Name: "mpm_memory",
 		Description: `Memory CRUD and lifecycle. Actions:
   save — Persist a fact. Required: params.fact (string). Optional: params.collection, params.tags, params.weight, params.ttl, params._confidence_band, params._reasoning_depth.
-  query — Search memories (FTS5 + semantic). Required: params.query (string). Optional: params.limit, params.collection, params.scope ("all"|"local"|"shared").
+  query — Search memories (FTS5 + semantic). Required: params.query (string). Optional: params.limit, params.collection, params.scope ("all"|"local"|"shared"). Phase 2B: params.projection (bool) — when true, returns summary+pointer+retrieval_metadata instead of full content.
   shred — Soft-delete a memory or hard-delete a lesson. Required: params.memory_id.
   reinforce — Bump weight + reinforcement_count. Required: params.memory_id. Optional: params.delta (int, default 1).
   weaken — Reduce weight + reinforcement_count. Required: params.memory_id. Optional: params.delta (int, default 1).
@@ -37,7 +37,7 @@ var Registry = []Tool{
   synthesize — LLM dedup/merge. Required: params.memory_id.
   challenge — Weaken + create theory from contradiction. Required: params.memory_id, params.evidence.
   commit_milestone — Narrative milestone (save wrapper). Required: params.summary (≥50 chars). Optional: params.flavor ("shipped"|"insight"), params.tags.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},"params":{"type":"object","properties":{"projection":{"type":"boolean","description":"Phase 2B: return summary+pointer+retrieval_metadata instead of full content"}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmMemory,
 	},
 	{
@@ -59,9 +59,9 @@ var Registry = []Tool{
 		Name: "mpm_lessons",
 		Description: `Lesson lifecycle. Actions:
   save — Persist a lesson learned. Required: params.fact (string). Optional: params.type ("warning"|"practice"|"insight"), params.tags, params.source_ids.
-  search — Search lessons by FTS5. Required: params.query (string).
-  list — List lessons. Optional: params.type ("warning"|"practice"|"insight").`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","search","list"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+  search — Search lessons by FTS5. Required: params.query (string). Optional: params.projection (bool) — when true, returns summary+pointer+retrieval_metadata instead of full content.
+  list — List lessons. Optional: params.type ("warning"|"practice"|"insight"), params.projection (bool).`,
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","search","list"]},"params":{"type":"object","properties":{"projection":{"type":"boolean","description":"Phase 2D: return summary+pointer+retrieval_metadata instead of full content"}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmLessons,
 	},
 	{
@@ -202,8 +202,8 @@ var Registry = []Tool{
 
 	{
 		Name:        "mpm_resolve",
-		Description: "Resolve a mpm:// URI to its content. Phase 1 supports mpm://blob/<id> only.",
-		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string"},"max_bytes":{"type":"integer","default":0}},"required":["uri"]}`),
+		Description: "Resolve a mpm:// URI to its content. Phase 2 supports mpm://blob/<id>, mpm://memory/<id>, mpm://lesson/<id>, and mpm://theory/<id>. max_bytes applies a soft materialization ceiling; 0 means unlimited.",
+		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"}},"required":["uri"]}`),
 		Handler:     handleMpmResolve,
 	},
 	{

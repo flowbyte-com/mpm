@@ -87,6 +87,118 @@ PASS. Build: OK.
 
 ---
 
+## 2026-08-21 — Phase 2: Pointer-Native Memory Projections
+
+Pointer-native cognitive projections so oversized results are rarely produced
+in the first place. Core rule: **"Inline what the agent needs to decide.
+Pointer what the agent may need to inspect."**
+
+### Phase 2A — Artifact Pointer Resolvers
+
+`mpm_resolve` now handles four URI kinds:
+
+| Kind | Example | Behaviour |
+|------|---------|-----------|
+| `blob` | `mpm://blob/<id>` | Phase 1 — unchanged |
+| `memory` | `mpm://memory/<id>` | Bounded materialization via `SummarizeBounded(max_bytes)` |
+| `lesson` | `mpm://lesson/<id>` | Full content, `bounded: false` |
+| `theory` | `mpm://theory/<id>` | Authoritative validation (`collection='theories'`), full content |
+
+Resolution fires `RecordRetrieval` on every attempt regardless of outcome.
+Telemetry failures do not fail resolution. All four kinds share
+`artifactResolverAdapter` in `cmd/mpm-mcp/tools.go`, replacing the
+Phase 1 `pointerResolverAdapter`.
+
+**New file:** `internal/core/summarize.go` — canonical rune-based
+`SummarizeMemory` (256-char summaries for Phase 2B/2C) and
+`SummarizeBounded` (byte-level truncation for Phase 2A resolver
+materialization). Byte-level truncation was avoided throughout to
+prevent Unicode corruption.
+
+### Phase 2B — Pointer-Native Recall
+
+`mpm_memory query` gains `projection=true` param. When set, returns
+`[]ProjectedMemoryEntry` (summary + pointer + retrieval_metadata) instead
+of full content:
+
+```json
+{
+  "mode": "projected",
+  "memories": [{
+    "id": "<short-id>",
+    "summary": "first 256 chars via SummarizeMemory",
+    "pointer": "mpm://memory/<id>",
+    "type": "memory",
+    "tags": ["..."],
+    "collection": "memories",
+    "created_at": 1234567890,
+    "reinforcement_count": 3,
+    "weight": 8,
+    "retrieval_metadata": {
+      "reuse_count": 12,
+      "success_count": 10,
+      "last_retrieved_at": "2026-08-21T10:00:00Z"
+    },
+    "score": 14.0,
+    "rationale": "3reinforcements · weight=8 · 2026-08-19",
+    "is_stale": false
+  }]
+}
+```
+
+`retrieval_metadata` key is always present; value is `null` when the
+artifact has never been retrieved. `retrieval_metadata` table populated
+by Phase 1 `RecordRetrieval` calls — no new write path needed.
+
+**CLI:** `mpm recall --projected` flag added, producing identical output shape.
+
+### Phase 2C — Wake Context Migration
+
+`WakeContextMemory` struct changed from `Content string` to
+`Summary string + Pointer string`. `recentMemories` and `recentMilestones`
+now compute `Summary` via `SummarizeMemory(content, 256)` at read time.
+`WakeContextVersion` bumped from `wake-context-v4-session-identity`
+to `wake-context-v5` (breaking change for any caller parsing
+`RecentMemories[].Content`).
+
+### Phase 2D — Lesson/Theory Projections
+
+`mpm_lessons` gains `projection=true` on both `search` and `list` actions.
+Returns `[]ProjectedLessonEntry`:
+
+```json
+{
+  "mode": "projected",
+  "lessons": [{
+    "id": "<id>",
+    "summary": "full lesson content (compact)",
+    "pointer": "mpm://lesson/<id>",
+    "type": "warning",
+    "tags": ["sqlite", "concurrency"],
+    "created_at": "2026-08-20T...",
+    "retrieval_metadata": { "reuse_count": 5, ... },
+    "rationale": "warning · sqlite, concurrency"
+  }]
+}
+```
+
+**No schema migrations.** Summaries are computed at read time via
+`SummarizeMemory`. `projection=false` (default) preserves full
+backward-compatible content output.
+
+### Cross-Cutting Invariants Maintained
+
+- **Phase 1 is the final MCP safety net** — bounded representations still
+  flow through `OutputPolicy.Apply` before crossing the MCP wire
+- **Projection never mutates the authoritative artifact** — all reads,
+  no writes
+- **`retrieval_metadata` key always present** in projected output;
+  `null` when never retrieved
+
+**Tests:** all green (`make test`).
+
+---
+
 ## 2026-08-21 — Phantom FTS5 Corruption Fix (WAL Timing Race)
 
 **Bug:** `mpm_system` `health_check` via the MCP server reported `ok: false`

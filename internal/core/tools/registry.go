@@ -114,11 +114,14 @@ type ResolveOptions struct {
 type Resolution struct {
 	// Pointer is the canonical mpm:// URI for the resolved artifact.
 	Pointer string
-	// Bounded is true when Reader contains a truncated representation.
-	Bounded     bool
 	ContentType string
 	Reader     io.ReadCloser
 	Metadata   map[string]interface{}
+	// Bounded is true when Reader contains a truncated representation
+	// of the artifact (against max_bytes). The original remains fully
+	// addressable through Pointer. Never spilled — Phase 1 OutputPolicy
+	// handles transport overflow.
+	Bounded bool
 }
 
 // Pointer is the pointer type used by the resolver interface.
@@ -132,8 +135,8 @@ type pointerResolverInterface interface {
 	Resolve(ctx context.Context, p Pointer, opts ResolveOptions) (Resolution, error)
 }
 
-// ErrUnsupportedKind is returned when a pointer kind is not supported in Phase 1.
-var ErrUnsupportedKind = errors.New("pointer: unsupported kind for Phase 1")
+// ErrUnsupportedKind is returned when a pointer kind is not supported.
+var ErrUnsupportedKind = errors.New("pointer: unsupported kind")
 
 var globalResolver pointerResolverInterface
 

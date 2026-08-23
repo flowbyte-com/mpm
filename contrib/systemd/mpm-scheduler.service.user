@@ -19,6 +19,7 @@ Description=MPM universal wake executor (USER-level, alpha default)
 # recover because the failure is during initial ExecStart, not runtime
 # crash. See lesson 071911bc.
 After=default.target
+RequiresMountsFor=%h
 
 [Service]
 Type=simple

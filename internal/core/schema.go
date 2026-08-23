@@ -692,6 +692,8 @@ var WorkTables = []string{
 		content      TEXT NOT NULL DEFAULT '',
 		status       TEXT NOT NULL DEFAULT 'open'
 		             CHECK (status IN ('open', 'done', 'cancelled')),
+		verification TEXT NOT NULL DEFAULT 'unverified'
+		             CHECK (verification IN ('unverified','verified','partial','contradicted')),
 		created_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		updated_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		completed_at INTEGER,
@@ -704,6 +706,7 @@ var WorkTables = []string{
 	// work_events: append-only ledger of Work state transitions (event-sourced).
 	// UNIQUE(work_id, event_index) enforces monotonic event_index per work item.
 	// CHECK constraint enumerates the exact event type vocabulary.
+	// Phase 2 adds evidence fields for provenance/verification design.
 	`CREATE TABLE IF NOT EXISTS work_events (
 		id                    TEXT PRIMARY KEY,
 		work_id               TEXT NOT NULL,
@@ -712,7 +715,8 @@ var WorkTables = []string{
 		                      CHECK (event_type IN (
 		                        'created','note_appended','completed',
 		                        'cancelled','reopened',
-		                        'title_updated','content_updated'
+		                        'title_updated','content_updated',
+		                        'claimed_complete','evidence_observed'
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
@@ -729,6 +733,13 @@ var WorkTables = []string{
 		note                  TEXT,
 		title                 TEXT,
 		content               TEXT,
+		-- Phase 2: provenance evidence layer
+		git_head_before       TEXT,
+		git_head_after        TEXT,
+		dirty_before          INTEGER DEFAULT 0,
+		dirty_after           INTEGER DEFAULT 0,
+		changed_files         TEXT,        -- JSON array of file paths
+		committed             INTEGER DEFAULT 0,
 		UNIQUE(work_id, event_index)
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
@@ -1142,7 +1153,7 @@ var SafeMigrations = [][3]string{
 	{"memories", "source_id", "TEXT"},
 	{"memories", "promoted_at", "REAL"},
 	{"sessions", "embedding", "BLOB"},
-	{"sessions", "metadata", "TEXT"},
+	{"sessions", "metadata", "JSON"},
 	{"raw_memories", "next_retry", "TEXT"},
 	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
 	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
@@ -1170,4 +1181,14 @@ var SafeMigrations = [][3]string{
 	// work_events migration (Phase 2 work primitive v2):
 	// migrated_at tracks which works rows have been seeded with initial created events.
 	{"works", "migrated_at", "INTEGER"},
+
+	// Phase 2 provenance/verification (Aug 23 incident):
+	// verification status on works; evidence fields on work_events.
+	{"works", "verification", "TEXT"},
+	{"work_events", "git_head_before", "TEXT"},
+	{"work_events", "git_head_after", "TEXT"},
+	{"work_events", "dirty_before", "INTEGER DEFAULT 0"},
+	{"work_events", "dirty_after", "INTEGER DEFAULT 0"},
+	{"work_events", "changed_files", "TEXT"},
+	{"work_events", "committed", "INTEGER DEFAULT 0"},
 }

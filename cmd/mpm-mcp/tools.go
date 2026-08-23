@@ -76,28 +76,37 @@ func (a *blobStoreAdapter) Search(ctx context.Context, id string, query tools.Se
 	return result, nil
 }
 
-// pointerResolverAdapter wraps a *blobStoreAdapter and satisfies
-// tools.pointerResolverInterface so that mpm://blob/<id> URIs resolve
-// through the blob store. Phase 1 blob-only enforcement is done in
-// handleMpmResolve; this adapter handles the resolution.
-type pointerResolverAdapter struct {
-	bs *blobStoreAdapter
-	dm *core.DatabaseManager
+// artifactResolverAdapter handles all Phase 2 pointer kinds. It satisfies
+// tools.pointerResolverInterface. Blob resolution delegates to the
+// blobStoreAdapter (Phase 1 behavior, bit-for-bit preserved). Memory,
+// lesson, and theory resolutions use the DatabaseManager directly.
+// Retrieval telemetry is recorded on every attempt (fire-and-forget).
+type artifactResolverAdapter struct {
+	blobBS *blobStoreAdapter
+	dm     *core.DatabaseManager
 }
 
-func (a *pointerResolverAdapter) Resolve(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+func (a *artifactResolverAdapter) Resolve(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
 	switch p.Kind {
 	case "blob":
 		return a.resolveBlob(ctx, p, opts)
 	case "work":
 		return a.resolveWork(ctx, p, opts)
+	case "memory":
+		return a.resolveMemory(ctx, p, opts)
+	case "lesson":
+		return a.resolveLesson(ctx, p, opts)
+	case "theory":
+		return a.resolveTheory(ctx, p, opts)
 	default:
-		return tools.Resolution{}, fmt.Errorf("unsupported pointer kind: %s", p.Kind)
+		return tools.Resolution{}, fmt.Errorf("%w: Phase 2 supports blob/work/memory/lesson/theory", tools.ErrUnsupportedKind)
 	}
 }
 
-func (a *pointerResolverAdapter) resolveBlob(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
-	reader, meta, err := a.bs.Get(ctx, p.ID, tools.GetOptions{})
+// resolveBlob is Phase 1 blob resolution — bit-for-bit identical to the
+// previous pointerResolverAdapter behavior.
+func (a *artifactResolverAdapter) resolveBlob(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	reader, meta, err := a.blobBS.Get(ctx, p.ID, tools.GetOptions{})
 	if err != nil {
 		return tools.Resolution{}, err
 	}
@@ -109,13 +118,15 @@ func (a *pointerResolverAdapter) resolveBlob(ctx context.Context, p tools.Pointe
 	}
 
 	return tools.Resolution{
+		Pointer:     "mpm://blob/" + p.ID,
 		ContentType: meta.ContentType,
 		Reader:     io.NopCloser(bytes.NewReader(content)),
 		Metadata:   nil,
+		Bounded:    false,
 	}, nil
 }
 
-func (a *pointerResolverAdapter) resolveWork(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+func (a *artifactResolverAdapter) resolveWork(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
 	work, err := a.dm.GetWork(p.ID)
 	if err != nil {
 		return tools.Resolution{}, err
@@ -146,6 +157,85 @@ func (a *pointerResolverAdapter) resolveWork(ctx context.Context, p tools.Pointe
 	}, nil
 }
 
+func (a *artifactResolverAdapter) resolveMemory(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	mem, err := a.dm.GetMemory(p.ID)
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+	content, _ := mem["content"].(string)
+
+	// Bounded materialization: truncate to max_bytes, default 512 bytes.
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	bounded := len(content) > maxBytes
+	if bounded {
+		content = core.SummarizeBounded(content, maxBytes)
+	}
+
+	// Fire-and-forget retrieval telemetry.
+	_ = a.dm.RecordRetrieval(p.ID, "memory")
+
+	return tools.Resolution{
+		Pointer:     "mpm://memory/" + p.ID,
+		ContentType: "text/plain",
+		Reader:     io.NopCloser(strings.NewReader(content)),
+		Metadata:   mem,
+		Bounded:    bounded,
+	}, nil
+}
+
+func (a *artifactResolverAdapter) resolveLesson(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	lesson, err := a.dm.GetLesson(p.ID)
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+
+	// Lessons are compact — return in full, no bounding needed.
+	_ = a.dm.RecordRetrieval(p.ID, "lesson")
+
+	return tools.Resolution{
+		Pointer:     "mpm://lesson/" + p.ID,
+		ContentType: "text/plain",
+		Reader:     io.NopCloser(strings.NewReader(lesson.Content)),
+		Metadata: map[string]interface{}{
+			"id":                 lesson.ID,
+			"type":               string(lesson.Type),
+			"tags":               lesson.Tags,
+			"reinforcement_count": lesson.ReinforcementCount,
+			"created":            lesson.Created,
+		},
+		Bounded: false,
+	}, nil
+}
+
+func (a *artifactResolverAdapter) resolveTheory(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	mem, err := a.dm.GetMemory(p.ID)
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+	collection, _ := mem["collection"].(string)
+	if collection != "theories" {
+		return tools.Resolution{}, fmt.Errorf("mpm://theory/%s: not a theory (collection=%q)", p.ID, collection)
+	}
+	content, _ := mem["content"].(string)
+	_ = a.dm.RecordRetrieval(p.ID, "theory")
+
+	return tools.Resolution{
+		Pointer:     "mpm://theory/" + p.ID,
+		ContentType: "text/plain",
+		Reader:     io.NopCloser(strings.NewReader(content)),
+		Metadata: map[string]interface{}{
+			"id":         mem["id"],
+			"collection": collection,
+			"weight":     mem["weight"],
+			"tags":       mem["tags"],
+		},
+		Bounded: false,
+	}, nil
+}
+
 const emptyWakeContext = "Wake context is empty. Ready for context."
 
 // blobStore and outputPolicy_ are initialised once at server boot and closed
@@ -166,8 +256,8 @@ var (
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
 	blobAdapter := &blobStoreAdapter{bs: bs}
-	tools.SetBlobStore(blobAdapter)           // wire Phase 1 blob tools
-	tools.SetResolver(&pointerResolverAdapter{bs: blobAdapter, dm: dm}) // wire mpm_resolve
+	tools.SetBlobStore(blobAdapter)                                // wire Phase 1 blob tools
+	tools.SetResolver(&artifactResolverAdapter{blobBS: blobAdapter, dm: dm}) // wire Phase 2 mpm_resolve
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {
@@ -235,17 +325,17 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
 		}
 
-		// Apply the output policy: decide whether to pass-through or spill.
-		decision, threshold, err := outputPolicy_.Apply(ctx, result)
-		if err != nil {
-			// Policy check failed (e.g. context cancelled); return error.
-			return mcp.NewToolResultError("output policy check failed: " + err.Error()), nil
-		}
-
-		// Marshal once — used for both pass and spill paths.
+		// Marshal once — used for both output policy decision and response.
 		jsonBytes, jErr := json.Marshal(result)
 		if jErr != nil {
 			jsonBytes = []byte(fmt.Sprintf("%q", fmt.Sprintf("%v", result)))
+		}
+
+		// Apply the output policy using the already-serialized bytes.
+		decision, threshold, err := outputPolicy_.Apply(ctx, jsonBytes)
+		if err != nil {
+			// Policy check failed (e.g. context cancelled); return error.
+			return mcp.NewToolResultError("output policy check failed: " + err.Error()), nil
 		}
 
 		// Phase 1 blob telemetry: log output policy decision.

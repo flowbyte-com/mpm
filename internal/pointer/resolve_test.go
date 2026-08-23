@@ -6,6 +6,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,11 +21,11 @@ func (m *mockResolver) Resolve(ctx context.Context, p Pointer, opts ResolveOptio
 }
 
 func TestResolve_NilResolver(t *testing.T) {
-	// When r is nil, Resolve returns ErrUnsupportedKind for any pointer.
+	// When r is nil, Resolve returns tools.ErrUnsupportedKind for any pointer.
 	ctx := context.Background()
 	p := Pointer{Kind: "blob", ID: "test-id"}
 	res, err := Resolve(ctx, nil, p, ResolveOptions{})
-	require.ErrorIs(t, err, ErrUnsupportedKind)
+	require.ErrorIs(t, err, tools.ErrUnsupportedKind)
 	require.Zero(t, res)
 }
 

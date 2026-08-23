@@ -89,7 +89,7 @@ def _socket_path_from_env() -> str:
     if not workspace:
         # Adapter is best-effort; missing workspace means telemetry is disabled.
         return ""
-    return os.path.join(workspace, "runtime", "mpm-telemetry.sock")
+    return os.path.join(workspace, "run", "mpm-telemetry.sock")
 
 
 class TelemetryEmitter:

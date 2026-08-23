@@ -1,0 +1,51 @@
+[Unit]
+Description=MPM telemetry collector (USER-level, Phase 2)
+# MPM is a headless cognitive substrate. See the project README:
+#   https://github.com/flowbyte-com/mpm
+#
+# This is the USER-level unit and the DEFAULT install target.
+# scripts/install.sh installs it to
+# $HOME/.config/systemd/user/mpm-telemetry.service.
+#
+# Canonical install layout: $HOME/.mpm/bin/ for binaries, $HOME/.mpm/ for
+# data + socket + telemetry.db. This service points at the canonical location;
+# no /usr/local copy, no /usr/bin copy, no PATH-ordering concern.
+#
+# On hosts with encrypted home, this unit may silently fail at boot
+# because user@UID.service starts via linger but cannot read binaries
+# in /home/$USER/ until login + decrypt. Restart=on-failure does not
+# recover because the failure is during initial ExecStart, not runtime
+# crash. This is the Lazy-Start Architecture's safety property — the
+# lock file lives inside the encrypted tree and starting before decrypt
+# is simply not possible. See lesson 24be03ec71a5981f.
+After=default.target
+RequiresMountsFor=%h
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.mpm
+ExecStart=%h/.mpm/bin/mpm-telemetry serve
+
+# Runtime paths
+Environment=MPM_WORKSPACE=%h/.mpm
+Environment=MPM_DB_PATH=%h/.mpm/src/db/mpm.db
+Environment=MPM_TELEMETRY_SOCKET=%h/.mpm/run/mpm-telemetry.sock
+Environment=MPM_TELEMETRY_DB=%h/.mpm/telemetry.db
+
+EnvironmentFile=-%h/.config/mpm/mpm.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# run/ dir must exist; mkdir is done by the install step.
+# telemetry.db is created by the process on first boot.
+ReadWritePaths=%h/.mpm %h/.mpm/run
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mpm-telemetry
+
+[Install]
+WantedBy=default.target
