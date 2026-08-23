@@ -384,3 +384,46 @@ func TestHandleMpmWork_Reopen_MissingWorkID(t *testing.T) {
 		t.Fatal("expected error for missing work_id, got nil")
 	}
 }
+
+// TestHandleMpmWork_ProvenanceOnCreate verifies that creating a work via
+// handleCreateWork results in an artifact_provenance row with artifact_type='work'.
+// This is the integration test for Task 4 provenance integration.
+func TestHandleMpmWork_ProvenanceOnCreate(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	result, err := handleMpmWork(dm, internal.ActiveContext{Agent: "test-agent", SessionID: "test-session"}, map[string]interface{}{
+		"action": "create",
+		"params": map[string]interface{}{
+			"title":   "Provenance test work",
+			"content": "testing artifact_provenance integration",
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmWork create: %v", err)
+	}
+	workID := result.(map[string]interface{})["id"].(string)
+
+	// Query artifact_provenance directly for this work.
+	var provCount int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'work'`,
+		workID,
+	).Scan(&provCount); err != nil {
+		t.Fatalf("query artifact_provenance: %v", err)
+	}
+	if provCount == 0 {
+		t.Fatal("expected a row in artifact_provenance for newly created work")
+	}
+
+	// Verify actor_kind is captured (should be 'agent' from ActiveContext).
+	var actorKind string
+	if err := dm.SQLDB().QueryRow(
+		`SELECT actor_kind FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'work'`,
+		workID,
+	).Scan(&actorKind); err != nil {
+		t.Fatalf("query actor_kind: %v", err)
+	}
+	if actorKind != "agent" {
+		t.Errorf("actor_kind = %q, want %q", actorKind, "agent")
+	}
+}

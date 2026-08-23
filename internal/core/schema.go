@@ -389,7 +389,7 @@ var BaseTables = []string{
 		-- substrate surface for telemetry. The widening from the
 		-- original ('memory','theory','lesson','decision') is enforced
 		-- for existing alpha DBs by migrateArtifactProvenanceSchema.
-		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive')),
+		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive','work')),
 		CHECK (actor_kind IN ('agent','human','import','system','unknown'))
 	);`,
 	// Go comment block: Reserved for the artifact_relations table.
