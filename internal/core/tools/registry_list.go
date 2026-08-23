@@ -218,6 +218,21 @@ var Registry = []Tool{
 		Schema:      json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string","maxLength":256},"regex":{"type":"boolean","default":false},"case_insensitive":{"type":"boolean","default":false},"max_matches":{"type":"integer","default":20},"max_bytes":{"type":"integer","default":51200}},"required":["id","query"]}`),
 		Handler:     handleMpmBlobSearch,
 	},
+
+	// ── Work primitive ────────────────────────────────────────────────
+
+	{
+		Name: "mpm_work",
+		Description: `Work lifecycle. Actions:
+  create — Create a work item. Required: params.title (string). Optional: params.content, params.session_id.
+  list — List open work items ordered by created_at DESC. No params required.
+  show — Get a work item by ID. Required: params.work_id.
+  update — Update a work item's status. Required: params.work_id, params.status (open|done|cancelled).
+  complete — Mark a work item as done. Required: params.work_id.
+  cancel — Mark a work item as cancelled. Required: params.work_id.`,
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["create","list","show","update","complete","cancel"]},"params":{"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"session_id":{"type":"string"},"work_id":{"type":"string"},"status":{"type":"string","enum":["open","done","cancelled"]}},"additionalProperties":true}},"required":["action"]}`),
+		Handler: handleMpmWork,
+	},
 }
 
 // ByName returns the tool with the given name, or false.
