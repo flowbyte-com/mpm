@@ -3501,6 +3501,16 @@ func sourceSessionIDOrNil(s string) interface{} {
 	return s
 }
 
+// nullString converts an empty string to a typed nil so the INSERT writes
+// NULL rather than '' to a nullable TEXT column. This preserves the
+// NULL/empty-string distinction at the SQL boundary.
+func nullString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // AddLesson adds a new lesson, checking for duplicates by content hash
 func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
 	if err := ValidateLessonType(string(lessonType)); err != nil {
@@ -4404,25 +4414,357 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 }
 
 // AppendWorkEvent appends an immutable event to the work_events ledger.
-// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+// It is always called inside a WithTx transaction so the event INSERT and
+// the works-row projection UPDATE commit atomically.
 func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance) (*WorkEvent, error) {
-	panic("TODO: implement in Task 2")
+	// 1. Resolve provenance: base from dm, then per-field override from ep.
+	base := dm.getEffectiveProvenance()
+	if base == nil {
+		base = &EffectiveProvenance{ActorKind: "unknown"}
+	}
+	actorKind := base.ActorKind
+	actorID := base.ActorID
+	frameworkName := base.FrameworkName
+	frameworkVersion := base.FrameworkVersion
+	providerName := base.ProviderName
+	modelName := base.ModelName
+	modelRevision := base.ModelRevision
+	sessionID := base.SessionID
+	invocationID := base.InvocationID
+	parentInvocationID := base.ParentInvocationID
+	if ep != nil {
+		if ep.ActorKind != "" {
+			actorKind = ep.ActorKind
+		}
+		if ep.ActorID != "" {
+			actorID = ep.ActorID
+		}
+		if ep.FrameworkName != "" {
+			frameworkName = ep.FrameworkName
+		}
+		if ep.FrameworkVersion != "" {
+			frameworkVersion = ep.FrameworkVersion
+		}
+		if ep.ProviderName != "" {
+			providerName = ep.ProviderName
+		}
+		if ep.ModelName != "" {
+			modelName = ep.ModelName
+		}
+		if ep.ModelRevision != "" {
+			modelRevision = ep.ModelRevision
+		}
+		if ep.SessionID != "" {
+			sessionID = ep.SessionID
+		}
+		if ep.InvocationID != "" {
+			invocationID = ep.InvocationID
+		}
+		if ep.ParentInvocationID != "" {
+			parentInvocationID = ep.ParentInvocationID
+		}
+	}
+	if actorKind == "" {
+		actorKind = "unknown"
+	}
+
+	// 2. Generate ID if not set.
+	id := event.ID
+	if id == "" {
+		id = GenerateID()
+	}
+
+	// 3. Determine event_index inside the transaction.
+	var eventIndex int
+	err := dm.db.QueryRow(`
+		SELECT COALESCE(MAX(event_index), -1) + 1 FROM work_events WHERE work_id = ?
+	`, workID).Scan(&eventIndex)
+	if err != nil {
+		return nil, fmt.Errorf("get next event_index: %w", err)
+	}
+
+	// 4. Derive works-row projection values before the event INSERT.
+	now := time.Now().Unix()
+	var newStatus string
+	var newCompletedAt *int64
+	switch event.EventType {
+	case WorkEventTypeCompleted:
+		newStatus = "done"
+		newCompletedAt = &now
+	case WorkEventTypeCancelled:
+		newStatus = "cancelled"
+	case WorkEventTypeReopened:
+		newStatus = "open"
+		newCompletedAt = nil // clear terminal state
+	default:
+		newStatus = "open"
+	}
+
+	// 5. Insert the event row.
+	//
+	// Use dm.db.Exec directly inside the caller's WithTx transaction.
+	// When called without an active transaction the DB will serialise
+	// the writes automatically (WAL + busy_timeout). We do NOT open
+	// a nested transaction here because AppendWorkEvent is designed to
+	// be called inside WithTx by its callers.
+	//
+	// title/content/note are only set when non-empty (empty string → NULL
+	// in the database, which omits the field via omitempty on read-back).
+	title := event.Title
+	content := event.Content
+	note := event.Note
+
+	_, err = dm.db.Exec(`
+		INSERT INTO work_events (
+			id, work_id, event_index, event_type, created_at,
+			actor_kind, actor_id, framework_name, framework_version,
+			provider_name, model_name, model_revision,
+			session_id, invocation_id, parent_invocation_id,
+			note, title, content
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		id, workID, eventIndex, string(event.EventType), now,
+		actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
+		nullString(providerName), nullString(modelName), nullString(modelRevision),
+		nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
+		nullString(note), nullString(title), nullString(content),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert work_event: %w", err)
+	}
+
+	// 6. Update the works row as a derived projection.
+	// completed_at is set to NULL when event_type is 'reopened'; otherwise
+	// it is only set when event_type is 'completed'; for all other types
+	// it is left unchanged (the COALESCE in the UPDATE preserves existing
+	// value when the SET expression evaluates to NULL).
+	var updateSQL string
+	if newCompletedAt != nil {
+		updateSQL = `
+			UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+			WHERE id = ?`
+		_, err = dm.db.Exec(updateSQL, newStatus, now, *newCompletedAt, workID)
+	} else if event.EventType == WorkEventTypeReopened {
+		// Explicitly clear completed_at on reopen.
+		updateSQL = `
+			UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+			WHERE id = ?`
+		_, err = dm.db.Exec(updateSQL, newStatus, now, workID)
+	} else {
+		updateSQL = `
+			UPDATE works SET status = ?, updated_at = ?
+			WHERE id = ?`
+		_, err = dm.db.Exec(updateSQL, newStatus, now, workID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update works projection: %w", err)
+	}
+
+	// 7. Return the WorkEvent with assigned id and event_index.
+	event.ID = id
+	event.WorkID = workID
+	event.EventIndex = eventIndex
+	event.CreatedAt = now
+	event.ActorKind = actorKind
+	event.ActorID = actorID
+	event.FrameworkName = frameworkName
+	event.FrameworkVersion = frameworkVersion
+	event.ProviderName = providerName
+	event.ModelName = modelName
+	event.ModelRevision = modelRevision
+	event.SessionID = sessionID
+	event.InvocationID = invocationID
+	event.ParentInvocationID = parentInvocationID
+
+	return &event, nil
 }
 
 // GetWorkEvents returns all events for a work item ordered by event_index ASC.
-// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
 func (dm *DatabaseManager) GetWorkEvents(workID string) ([]*WorkEvent, error) {
-	panic("TODO: implement in Task 2")
+	rows, err := dm.db.Query(`
+		SELECT
+			id, work_id, event_index, event_type, created_at,
+			actor_kind,
+			COALESCE(actor_id, '') AS actor_id,
+			COALESCE(framework_name, '') AS framework_name,
+			COALESCE(framework_version, '') AS framework_version,
+			COALESCE(provider_name, '') AS provider_name,
+			COALESCE(model_name, '') AS model_name,
+			COALESCE(model_revision, '') AS model_revision,
+			COALESCE(session_id, '') AS session_id,
+			COALESCE(invocation_id, '') AS invocation_id,
+			COALESCE(parent_invocation_id, '') AS parent_invocation_id,
+			COALESCE(note, '') AS note,
+			COALESCE(title, '') AS title,
+			COALESCE(content, '') AS content
+		FROM work_events
+		WHERE work_id = ?
+		ORDER BY event_index ASC
+	`, workID)
+	if err != nil {
+		return nil, fmt.Errorf("get work events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]*WorkEvent, 0)
+	for rows.Next() {
+		var e WorkEvent
+		var eventType string
+		if err := rows.Scan(
+			&e.ID, &e.WorkID, &e.EventIndex, &eventType, &e.CreatedAt,
+			&e.ActorKind,
+			&e.ActorID,
+			&e.FrameworkName,
+			&e.FrameworkVersion,
+			&e.ProviderName,
+			&e.ModelName,
+			&e.ModelRevision,
+			&e.SessionID,
+			&e.InvocationID,
+			&e.ParentInvocationID,
+			&e.Note,
+			&e.Title,
+			&e.Content,
+		); err != nil {
+			return nil, fmt.Errorf("scan work event row: %w", err)
+		}
+		e.EventType = WorkEventType(eventType)
+		events = append(events, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return events, nil
 }
 
 // GetLatestWorkEvent returns the most recent event for a work item.
-// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
 func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error) {
-	panic("TODO: implement in Task 2")
+	var e WorkEvent
+	var eventType string
+	err := dm.db.QueryRow(`
+		SELECT
+			id, work_id, event_index, event_type, created_at,
+			actor_kind,
+			COALESCE(actor_id, '') AS actor_id,
+			COALESCE(framework_name, '') AS framework_name,
+			COALESCE(framework_version, '') AS framework_version,
+			COALESCE(provider_name, '') AS provider_name,
+			COALESCE(model_name, '') AS model_name,
+			COALESCE(model_revision, '') AS model_revision,
+			COALESCE(session_id, '') AS session_id,
+			COALESCE(invocation_id, '') AS invocation_id,
+			COALESCE(parent_invocation_id, '') AS parent_invocation_id,
+			COALESCE(note, '') AS note,
+			COALESCE(title, '') AS title,
+			COALESCE(content, '') AS content
+		FROM work_events
+		WHERE work_id = ?
+		ORDER BY event_index DESC
+		LIMIT 1
+	`, workID).Scan(
+		&e.ID, &e.WorkID, &e.EventIndex, &eventType, &e.CreatedAt,
+		&e.ActorKind,
+		&e.ActorID,
+		&e.FrameworkName,
+		&e.FrameworkVersion,
+		&e.ProviderName,
+		&e.ModelName,
+		&e.ModelRevision,
+		&e.SessionID,
+		&e.InvocationID,
+		&e.ParentInvocationID,
+		&e.Note,
+		&e.Title,
+		&e.Content,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest work event: %w", err)
+	}
+	e.EventType = WorkEventType(eventType)
+	return &e, nil
 }
 
 // RecomputeWorkProjection recomputes the works row status/updated_at from the event ledger.
-// Implements the CoreDB interface (body is a panic stub — implemented in Task 2).
+// It derives status from the last event type, updated_at from MAX(created_at) of events,
+// and completed_at from the created_at of the completed event (if any).
+// This is used when the works row may have drifted from the event log.
 func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
-	panic("TODO: implement in Task 2")
+	// Read all events for this work.
+	rows, err := dm.db.Query(`
+		SELECT event_type, created_at
+		FROM work_events
+		WHERE work_id = ?
+		ORDER BY event_index ASC
+	`, workID)
+	if err != nil {
+		return fmt.Errorf("query work events for projection: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		lastEventType string
+		maxCreatedAt int64
+		completedAt  *int64
+	)
+	for rows.Next() {
+		var eventType string
+		var createdAt int64
+		if err := rows.Scan(&eventType, &createdAt); err != nil {
+			return fmt.Errorf("scan event for projection: %w", err)
+		}
+		lastEventType = eventType
+		if createdAt > maxCreatedAt {
+			maxCreatedAt = createdAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows iteration: %w", err)
+	}
+
+	if lastEventType == "" {
+		// No events for this work — nothing to recompute.
+		return nil
+	}
+
+	// Derive status from last event type.
+	var status string
+	switch lastEventType {
+	case "completed":
+		status = "done"
+		// Find the created_at of the completed event.
+		row := dm.db.QueryRow(`
+			SELECT created_at FROM work_events
+			WHERE work_id = ? AND event_type = 'completed'
+			ORDER BY event_index DESC LIMIT 1
+		`, workID)
+		var ts int64
+		if err := row.Scan(&ts); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("get completed_at for projection: %w", err)
+		}
+		if err == nil {
+			completedAt = &ts
+		}
+	case "cancelled":
+		status = "cancelled"
+		completedAt = nil
+	default:
+		status = "open"
+		completedAt = nil
+	}
+
+	// Update the works row.
+	if maxCreatedAt == 0 {
+		maxCreatedAt = time.Now().Unix()
+	}
+	_, err = dm.db.Exec(`
+		UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+		WHERE id = ?
+	`, status, maxCreatedAt, completedAt, workID)
+	if err != nil {
+		return fmt.Errorf("update works projection: %w", err)
+	}
+	return nil
 }
