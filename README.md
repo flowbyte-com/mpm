@@ -276,7 +276,9 @@ Where the choice is open, prefer:
 
 ### 3.5 What MPM maintains
 
-MPM maintains six distinct durable dimensions of state around an agent:
+MPM maintains two classes of durable state around an agent.
+
+**Persistent agent state** — what the agent carries between sessions:
 
 | Dimension | Question it answers |
 |---|---|
@@ -284,17 +286,51 @@ MPM maintains six distinct durable dimensions of state around an agent:
 | **Work** | What is it trying to accomplish? |
 | **Reference** | What should it consult? |
 | **Persona / Mode** | How should the agent behave? |
+| **Directives** | What rules or instructions govern its behaviour? |
+
+**Execution record** — what MPM observes about what happened:
+
+| Dimension | Question it answers |
+|---|---|
 | **Provenance** | Who or what produced this? |
 | **Evidence** | What actually happened? |
 
-The first three are the agent's **internal knowledge stack** — what it knows, what it intends, and what external material it can consult. The second three govern **how it operates** — its behavioural mode, how its outputs were generated, and what the observable consequences were.
+The distinction between the five state primitives matters:
 
-The distinction between provenance and evidence is important:
+- **Memory** is what the agent synthesises internally.
+- **Reference** is external material ingested for consultation — distinct from Memory.
+- **Persona** describes *how* the agent should present or conduct itself.
+- **Mode** describes *the operating context or behavioural regime*.
+- **Directive** expresses *an explicit constraint, instruction, or rule the agent should follow*.
 
-- **Provenance** answers: *How was this artifact or event produced?* (framework, model, invocation, instruction context)
-- **Evidence** answers: *What observable state resulted?* (git changes, file state, verification status)
+For example:
 
-Together they give MPM a causal chain — from instruction through execution to observable outcome — without MPM ever deciding who is at fault. That is an analytical conclusion, not a recorded fact.
+```
+Persona:   careful investigator
+Mode:       debugging
+Directive:  never modify production data
+Reference:  database migration specification
+Work:       investigate migration failure
+Memory:     previous migration failures
+```
+
+Provenance and Evidence are not state the agent controls — they are the substrate's own observation of execution. Together they give MPM a causal chain from instruction through execution to observable outcome:
+
+```
+Directive
+    ↓
+Agent behaviour (Persona / Mode)
+    ↓
+Work
+    ↓
+Execution
+    ├── Provenance  (who/what/under what config)
+    └── Evidence    (git state, verification, what actually happened)
+```
+
+This is why MPM can answer questions ordinary memory systems cannot: not just "what did the agent remember?" but "what instruction governed that action, what execution produced it, and what observable evidence confirms it?"
+
+**Architectural test:** Every MPM primitive fits one of five categories — state, instruction, context, execution, or evidence. Proposed features that don't fit one of these deserve suspicion before they become new tables.
 
 ### 3.6 The epistemic snapshot
 
