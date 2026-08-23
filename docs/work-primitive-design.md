@@ -516,80 +516,288 @@ When completing work produces durable knowledge, the agent can create a memory o
 
 ---
 
-### Phase 2: Provenance + Verification
+### Phase 2: Work History + Provenance
 
 **Date:** 2026-08-23  
 **Trigger:** Aug 23 incident — Claude Code claimed documentation updated, but README unchanged and changelog uncommitted. The session ended normally; the failure was invisible until forensic replay.
 
-**Core insight:** Agents can be confidently wrong about completion. "done" as currently recorded means "the agent declared this complete" — not "the evidence supports that declaration". These are categorically different facts.
+---
 
-**Design principle:** Work items distinguish three layers that must never be conflated:
+## Core insight: attribution vs causation
 
-1. **Agent assertion** — what the agent claims happened
-2. **Observed evidence** — git status, file state at action time
-3. **Persisted state** — what actually committed
+**The most important design invariant:**
 
-**Schema changes:**
+> Work history records evidence. It does not assign fault.
 
-`works` table gains:
-```sql
-verification TEXT CHECK (verification IN ('unverified','verified','partial','contradicted'))
-```
+It is valid to record: "this invocation, using this model, produced this event."
 
-`work_events` table gains evidence fields:
-```sql
-git_head_before  TEXT,
-git_head_after   TEXT,
-dirty_before     INTEGER,   -- 0 or 1
-dirty_after      INTEGER,   -- 0 or 1
-changed_files     TEXT,      -- JSON array of file paths
-committed        INTEGER    -- 0 or 1
-```
+It is NOT valid for Work history to assert: "this model caused the resulting bug."
 
-**Verification status transitions:**
+That is a later analytical conclusion, not a recorded fact. The distinction must be preserved in the design and made explicit in code documentation.
 
-| Status | Meaning |
-|--------|--------|
-| `unverified` | Default on `claimed_complete` event. No evidence collected yet. |
-| `verified` | Evidence confirms all expected conditions met. |
-| `partial` | Some evidence observed but incomplete (e.g. changelog modified, README unchanged). |
-| `contradicted` | Evidence directly contradicts claim (e.g. agent claims done, git shows no changes). |
+This is the **attribution ≠ causation** invariant. Provenance records correlation. Analysis assigns causation. Never conflate them.
 
-**Event flow for a completion claim:**
+---
+
+## What Work history actually represents
+
+A Work history event is a durable record that answers:
+
+> What happened to this Work item, when did it happen, which execution caused it, what instruction context produced it, and what observable evidence resulted?
+
+Not a changelog. Not an audit log. Not a transcript. An **evidence trail**.
+
+The canonical query Work history enables:
 
 ```
-work_claimed_complete
-  actor: {model, session, invocation}
-  evidence: {
-    git_head_before: "abc123",
-    git_head_after:  "def456",    -- or same if nothing committed
-    dirty_before:    true,
-    dirty_after:     false,        -- true if uncommitted changes remain
-    changed_files:   ["README.md", "changelog.md"],
-    committed:      false         -- did the git head move?
-  }
-
-→ verification = 'partial'  (if committed=false but changed_files non-empty)
-→ verification = 'verified' (if committed=true and all expected files in changed_files)
-→ verification = 'contradicted' (if committed=false and changed_files empty)
+Work #abc → event → invocation_id → session
+  → framework/agent → model → reasoning configuration
+  → instruction provenance → observable result
 ```
 
-**Why separate `claimed_complete` from `completed`:**
+If a Work item leads to a bad implementation, you can trace back through this chain. MPM does not decide who is guilty — it preserves the evidence necessary to reconstruct what happened.
 
-`completed` in Phase 1 is the agent assertion. Phase 2 introduces `claimed_complete` as the primary completion event — capturing what the agent believed it accomplished at the moment of declaration. The `verification` field is computed from the evidence, not assigned by the agent.
+---
 
-This means a Work item can be:
-- `status=done, verification=unverified` — agent declared complete, no evidence collected yet
-- `status=done, verification=partial` — evidence shows incomplete persistence (Aug 23 case)
-- `status=done, verification=verified` — evidence confirms completion
-- `status=done, verification=contradicted` — agent claimed done, evidence shows nothing happened
+## Four-layer event model
 
-**Prompt hash by default:** Do not store full prompts. Store `prompt_hash` (SHA-256), `prompt_length`, and optionally `prompt_id` from provenance system. This prevents MPM from becoming an accidental transcript warehouse while retaining enough provenance to answer "was this the same instruction?"
+Every Work history event has four layers, kept distinct:
 
-**Non-Goals (Phase 2):**
-- Automatic verification execution (Phase 3)
-- Verification via external CI/build checks
-- Storing full prompts or conversation context
+```
+WORK EVENT
+ │
+ ├── What happened?
+ │   created / updated / claimed_complete / evidence_observed / note / etc.
+ │
+ ├── Who/what executed it?
+ │   framework_name, model_name, reasoning configuration
+ │
+ ├── Which execution caused the event?
+ │   invocation_id, session_id, parent_invocation_id, parent_artifact_id
+ │
+ └── What instruction context produced it?
+     (see Instruction provenance section)
+```
+
+**Layer 1 (what)** is the event type. Immutable, sequenced by `event_index`.
+
+**Layer 2 (who)** comes from existing provenance — do not duplicate. Reuse `EffectiveProvenance` or equivalent.
+
+**Layer 3 (which execution)** uses existing correlation IDs — invocation_id, session_id, parent_invocation_id. These already provide enough correlation to reconstruct execution ancestry without adding redundant fields.
+
+**Layer 4 (instruction context)** is the only genuinely new dimension. See below.
+
+---
+
+## Reuse existing provenance mechanisms first
+
+**Critical design principle:** MPM already has provenance machinery. Do not create parallel provenance systems.
+
+Before adding any new field, investigate:
+
+1. Does `invocation_id` / `parent_invocation_id` / `parent_artifact_id` already provide sufficient execution correlation?
+2. Does MPM's existing directive scoping system have an instruction identity that Work events should reference?
+3. Is there an existing `instruction_id` or equivalent in the provenance resolver?
+4. Can `session_id` + `invocation_id` chains reconstruct the instruction ancestry without new fields?
+
+**Danger to avoid:** accidentally creating multiple subtly different copies of the same correlation information:
+
+```
+provenance / directive provenance / instruction provenance /
+work provenance / telemetry provenance / agent provenance
+```
+
+If existing mechanisms can represent instruction causality, extend them. If they cannot, that is the only valid justification for adding new fields.
+
+---
+
+## Instruction provenance
+
+The one dimension Work history adds beyond existing provenance: **what directive caused this event?**
+
+The purpose is to trace a bad Work outcome back to the original instruction — not just the model that executed it. A model following a bad directive is not guilty; a directive that led to a bad outcome may be.
+
+**Design questions to resolve before adding fields:**
+
+1. Does `parent_invocation_id` / `parent_artifact_id` chain already provide sufficient instruction correlation?
+2. Does the directive scoping work (`feat/directive-scoping`) have an instruction identity Work events should reference?
+3. What is the minimal representation?
+   - `instruction_hash` (SHA-256 of instruction text) — correlation without storage
+   - `instruction_id` — reference to existing directive system
+   - `instruction_source` — system/developer/user/agent
+   - `instruction_role` — direct/inherited/generated/resumed
+
+**Store hashes, not content.** `instruction_hash` provides correlation without turning Work history into a transcript warehouse. The full instruction lives where it was already stored; Work history holds only the reference.
+
+**Do NOT add instruction provenance fields speculatively.** Resolve whether existing correlation IDs are sufficient before implementation.
+
+---
+
+## Work notes as immutable history events
+
+There is a meaningful difference between:
+
+```
+event:
+  status changed: open → in_progress
+```
+
+and:
+
+```
+note:
+  "Found that the telemetry adapter isn't forwarding invocation_id."
+```
+
+The first is structured lifecycle history. The second is **working history** — what the agent discovered or decided while working on this item.
+
+**Design decision:** `note` events are first-class immutable Work history entries, not mutable content on the Work struct:
+
+```
+Work
+├── current state (title, status, verification)
+└── append-only history
+  ├── created
+  ├── note          ← agent's working history
+  ├── updated       ← title/content changed
+  ├── evidence      ← git/state observation
+  ├── claimed_complete
+  ├── verification  ← computed from evidence
+  └── reopened
+```
+
+Notes capture thinking that led to decisions without requiring explicit promotion to a memory.
+
+---
+
+## Git evidence: the observable result layer
+
+For completion-related events, Work history records what the repository actually shows:
+
+```
+ChangedFiles: ["README.md", "changelog.md"]
+GitHeadBefore: "abc123"
+GitHeadAfter:  "abc123"   ← no commit
+DirtyAfter: true           ← uncommitted changes remain
+Committed: false
+```
+
+This is the **observable evidence** layer. It does not say "the agent lied." It says "the repository shows this state." The gap between claim and evidence is a fact, not an accusation.
+
+**Aug 23 case as designed:**
+
+```
+Work: Update README and changelog
+
+23 Aug 13:01  claimed_complete
+  ChangedFiles: ["changelog.md"]
+  GitHeadAfter: unchanged
+  Committed: false
+
+23 Aug 13:01  evidence_observed
+  README: unchanged        ← claimed but not observed
+  changelog: modified      ← observed, uncommitted
+  committed: false
+
+→ verification = 'partial'
+```
+
+This is more informative than either "done" or "not done." It shows exactly what happened and what didn't.
+
+---
+
+## Verification as computed state
+
+`verification` is NOT set by the agent. It is computed from evidence:
+
+| Evidence pattern | Verification |
+|-----------------|--------------|
+| `committed=true`, all expected files in `changed_files` | `verified` |
+| `committed=false`, `changed_files` non-empty | `partial` |
+| `committed=false`, `changed_files` empty | `contradicted` |
+| No evidence collected yet | `unverified` |
+
+---
+
+## User-facing Work history
+
+Work history is the user-facing concept. `work_events` is the implementation.
+
+```bash
+mpm work history <id>
+```
+
+produces:
+
+```
+Work: Update README and changelog
+
+23 Aug 13:01  created
+  framework: claude-code
+  model: claude-sonnet-4
+
+23 Aug 13:01  claimed_complete
+  framework: claude-code
+  model: claude-sonnet-4
+
+23 Aug 13:01  evidence_observed
+  changelog: modified (uncommitted)
+  README: unchanged
+  committed: false
+
+23 Aug 20:14  verification: partial
+```
+
+Unlike `changelog.md`, Work history cannot vanish into a worktree — it lives in MPM's durable SQLite substrate. Humanity invented version control and then immediately needed another system to track whether the version control change itself happened. Work history is that system.
+
+---
+
+## Security/privacy principle
+
+> **Work history records the evidence necessary to reconstruct responsibility, not a transcript of everything that happened.**
+
+MPM must not become: "SQLite database containing every instruction anyone ever gave an agent."
+
+Implementation principle: **correlation + hashes + references**, not full prompt storage. Raw instruction content is retained only where an existing subsystem already deliberately stores it.
+
+This is the same principle that governs existing provenance: describe how an artifact was created, not the full content of what was created.
+
+---
+
+## Implementation status (as of 2026-08-23)
+
+**Done (Phase 1 + Phase 2 schema):**
+- `works` table with `verification` field
+- `work_events` table with event-index sequencing
+- Actor provenance: `framework_name`, `model_name`, `invocation_id`, `session_id`, `parent_invocation_id`
+- Git evidence: `git_head_before/after`, `dirty_before/after`, `changed_files`, `committed`
+- Event types: `created`, `note_appended`, `updated`, `claimed_complete`, `evidence_observed`, `completed`, `cancelled`, `reopened`
+- `verification` on `works`: `unverified | verified | partial | contradicted`
+
+**Not yet implemented:**
+- Instruction provenance fields (investigate existing directive identity first)
+- `mpm work history` command
+- Evidence computation logic (setting `verification` from git state)
+- Binding `claimed_complete` / `evidence_observed` into the `complete` handler
+- Attribution ≠ causation invariant documented in code
+- Bounded history output in `mpm_work show`
+- Integration with existing provenance resolver (not parallel system)
+
+**Deferred:**
+- Storing full instruction content
+- Automatic verification via external CI
+- Cross-Work causal chain analysis
+- Verification webhooks or alerts
+
+---
+
+## Design questions requiring human review
+
+1. Does `invocation_id → parent_invocation_id → parent_artifact_id` chain provide sufficient instruction correlation without new fields?
+2. Does the directive scoping system have an `instruction_id` Work events should reference?
+3. What is the minimum instruction provenance representation? Is `instruction_hash` sufficient, or is `instruction_id` reference needed?
+4. Should `claimed_complete` and `evidence_observed` be separate event types, or should evidence be bundled into the completion event?
+5. Should verification be computed eagerly (at event creation) or lazily (at `mpm work show` time)?
 
 ---
 
