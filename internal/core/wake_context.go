@@ -93,6 +93,11 @@ type WakeContextData struct {
 	// scratchpad rows. v5+ may carry structured entries; v4 keeps the
 	// prose form for compatibility with existing call sites.
 	ScratchpadOrphans string `json:"scratchpad_orphans"`
+	// OpenWorks are work items with status='open'. Bounded to 5 items,
+	// ordered by created_at ASC (oldest first so the agent sees what has
+	// been waiting longest). Non-nil empty slice always emitted per
+	// WakeContextData invariant 3.
+	OpenWorks []WakeContextWork `json:"open_works"`
 
 	// Constraints & Capabilities — the "what rules apply, what tools".
 	// GlobalRules only populated when MPM_SHARED_DB is attached.
@@ -331,6 +336,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.OverdueWakes = make([]OverdueWake, 0)
 	data.GlobalRules = make([]WakeContextRule, 0)
 	data.AvailableSkills = make([]SkillSummary, 0)
+	data.OpenWorks = make([]WakeContextWork, 0)
 
 	// Pull the latest unread handoff. The mark-read happens here so
 	// re-reading wake context (e.g. in the same session) doesn't re-show
@@ -371,6 +377,7 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	}
 	data.RecentTopics = topics
 	data.AuditSummary = dm.AuditSummary()
+	data.OpenWorks = dm.gatherOpenWorks()
 
 	// Epistemic pressure — single COUNT query against the view plus
 	// the system_config threshold lookup, folded into one sub-millisecond
@@ -1051,4 +1058,35 @@ func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (boo
 		return false, err
 	}
 	return matched != 0, nil
+}
+
+// gatherOpenWorks returns up to 5 open work items for wake context,
+// ordered by created_at ASC (oldest first). Titles are truncated to 120 chars.
+func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
+	rows, err := dm.db.Query(`
+		SELECT id, title, status, created_at
+		FROM works WHERE status = 'open'
+		ORDER BY created_at ASC
+		LIMIT 5
+	`)
+	if err != nil {
+		dm.LogAudit(AuditWarn, "wake_context", "gatherOpenWorks: "+err.Error(), "", AuditContext{})
+		return nil
+	}
+	defer rows.Close()
+
+	out := make([]WakeContextWork, 0, 5)
+	for rows.Next() {
+		var w WakeContextWork
+		if err := rows.Scan(&w.ID, &w.Title, &w.Status, &w.CreatedAt); err != nil {
+			dm.LogAudit(AuditWarn, "wake_context", "gatherOpenWorks scan: "+err.Error(), "", AuditContext{})
+			continue
+		}
+		w.Pointer = "mpm://work/" + w.ID
+		if len(w.Title) > 120 {
+			w.Title = w.Title[:120]
+		}
+		out = append(out, w)
+	}
+	return out
 }
