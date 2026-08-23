@@ -199,6 +199,7 @@ var validTableNames = map[string]bool{
 	"reference_docs":      true,
 	"reference_chunks":    true,
 	"artifact_provenance": true,
+	"works":               true,
 }
 
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.
@@ -275,6 +276,14 @@ func (s *MemoryStore) InitSQLite() error {
 	// Use shared index definitions
 	for _, sql := range CommonIndexes {
 		s.DB.Exec(sql)
+	}
+
+	// Work items tables (works + work_events) — must run before SafeMigrations
+	// so the works table exists before ALTER TABLE ADD COLUMN is applied.
+	for _, sql := range WorkTables {
+		if _, err := s.DB.Exec(sql); err != nil {
+			return fmt.Errorf("failed to create work table: %w", err)
+		}
 	}
 
 	// Migration: add new columns to existing databases using safe addColumnIfNotExists

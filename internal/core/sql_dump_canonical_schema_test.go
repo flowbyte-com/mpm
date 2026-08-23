@@ -81,7 +81,8 @@ func scanSchemaSources(t *testing.T) (map[string]bool, error) {
 	// NOT be in the canonical allow-list because they exist only during a
 	// migration window.
 	transientTables := map[string]bool{
-		"system_audit_log_new": true, // rename target in migrateAuditLevelConstraint
+		"system_audit_log_new":       true,  // rename target in migrateAuditLevelConstraint
+		"artifact_provenance_work":    true,  // rename target in migrateArtifactProvenanceWorkType
 	}
 
 	matches, err := filepath.Glob("*.go")

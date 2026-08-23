@@ -153,6 +153,8 @@ var CanonicalMPMSchema = []string{
 	"tool_invocations",
 	"vector_assignments",
 	"vector_clusters",
+	"work_events",
+	"works",
 }
 
 // RuntimeCanonicalSchema holds tables created by runtime migrations or
