@@ -138,9 +138,11 @@ func (a *pointerResolverAdapter) resolveWork(ctx context.Context, p tools.Pointe
 	_ = a.dm.RecordRetrieval(p.ID, "work")
 
 	return tools.Resolution{
+		Pointer:     "mpm://work/" + p.ID,
 		ContentType: "text/plain",
 		Reader:      io.NopCloser(strings.NewReader(content)),
 		Metadata:    nil,
+		Bounded:     bounded,
 	}, nil
 }
 
