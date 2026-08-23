@@ -54,36 +54,21 @@ func workEffectiveProvenance(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 	return prov
 }
 
-// recordWorkProvenance attempts to write an artifact_provenance row for a newly
-// created work. Failures are non-fatal — the error is logged but the handler
-// returns success.
+// recordWorkProvenance writes an artifact_provenance row for a newly created
+// work. Failures are non-fatal — the error is logged but the handler returns
+// success.
 func recordWorkProvenance(dm mpminternal.CoreDB, workID string, ac mpminternal.ActiveContext) {
 	if workID == "" {
 		return
 	}
-	// RecordArtifactProvenance is on *DatabaseManager, not the CoreDB interface.
-	// Type-assert to access it. The dm passed to handlers is always a
-	// *DatabaseManager at runtime.
-	type hasRecordArtifactProvenance interface {
-		RecordArtifactProvenance(artifactID, artifactType string, prov *mpminternal.EffectiveProvenance) mpminternal.ProvenanceRecordResult
+	// dm is always *DatabaseManager at runtime. Use the convenience method
+	// RecordWorkArtifactProvenance which handles its own transaction.
+	dbm, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		return
 	}
-	type hasLogAudit interface {
-		LogAudit(level mpminternal.AuditLevel, component, message, stack string, ctx mpminternal.AuditContext)
-	}
-	if dbm, ok := dm.(hasRecordArtifactProvenance); ok {
-		prov := workEffectiveProvenance(dm, ac)
-		res := dbm.RecordArtifactProvenance(workID, "work", prov)
-		if !res.Recorded {
-			if logger, ok := dm.(hasLogAudit); ok {
-				logger.LogAudit(mpminternal.AuditWarn, "provenance", "work provenance record failed", "", mpminternal.AuditContext{
-					"work_id":        workID,
-					"artifact_type": "work",
-					"reason":        res.ValidationReason,
-					"sql_error":     res.SQLError,
-				})
-			}
-		}
-	}
+	prov := workEffectiveProvenance(dm, ac)
+	dbm.RecordWorkArtifactProvenance(workID, prov.ActorKind, prov.ActorID, prov.FrameworkName, prov.SessionID)
 }
 
 func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
