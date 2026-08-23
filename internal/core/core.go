@@ -313,7 +313,7 @@ type CoreDB interface {
 	CancelWork(id string) (*Work, error)
 
 	// ─── Work Events (Event-Sourced History) ────────────────────
-	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance) (*WorkEvent, error)
+	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error)
 	GetWorkEvents(workID string) ([]*WorkEvent, error)
 	GetLatestWorkEvent(workID string) (*WorkEvent, error)
 	RecomputeWorkProjection(workID string) error

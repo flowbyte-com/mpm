@@ -227,10 +227,13 @@ var Registry = []Tool{
   create — Create a work item. Required: params.title (string). Optional: params.content, params.session_id.
   list — List open work items ordered by created_at DESC. No params required.
   show — Get a work item by ID. Required: params.work_id.
-  update — Update a work item's status. Required: params.work_id, params.status (open|done|cancelled).
-  complete — Mark a work item as done. Required: params.work_id.
-  cancel — Mark a work item as cancelled. Required: params.work_id.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["create","list","show","update","complete","cancel"]},"params":{"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"session_id":{"type":"string"},"work_id":{"type":"string"},"status":{"type":"string","enum":["open","done","cancelled"]}},"additionalProperties":true}},"required":["action"]}`),
+  update — Update a work item's status (deprecated; use title/content params instead). Required: params.work_id, params.status (open|done|cancelled). Prefer: params.title or params.content for explicit events.
+  complete — Mark a work item as done. Required: params.work_id. Optional: params.note.
+  cancel — Mark a work item as cancelled. Required: params.work_id. Optional: params.note.
+  history — Get full event history for a work item. Required: params.work_id.
+  note — Append a contextual note to a work item's history. Required: params.work_id, params.note.
+  reopen — Re-open a completed or cancelled work item. Required: params.work_id.`,
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["create","list","show","update","complete","cancel","history","note","reopen"]},"params":{"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"session_id":{"type":"string"},"work_id":{"type":"string"},"status":{"type":"string","enum":["open","done","cancelled"]},"note":{"type":"string"}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmWork,
 	},
 }
