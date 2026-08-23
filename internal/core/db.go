@@ -4034,6 +4034,129 @@ func (dm *DatabaseManager) DecayWeights(policies map[string]DecayPolicy, interva
 	return total, nil
 }
 
+// AddWork inserts a new work item and returns it after read-back assertion.
+func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, error) {
+	id := GenerateID()
+	now := time.Now().Unix()
+
+	var sessionIDArg interface{}
+	if sessionID != "" {
+		sessionIDArg = sessionID
+	}
+
+	_, err := dm.db.Exec(`
+		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id)
+		VALUES (?, ?, ?, 'open', ?, ?, ?)
+	`, id, title, content, now, now, sessionIDArg)
+	if err != nil {
+		return nil, fmt.Errorf("insert work: %w", err)
+	}
+
+	// Read-back assertion
+	work, err := dm.GetWork(id)
+	if err != nil {
+		return nil, fmt.Errorf("write verification failed for %s: %w", id, err)
+	}
+	return work, nil
+}
+
+func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
+	var w Work
+	var content, sessionID sql.NullString
+	var completedAt sql.NullInt64
+	err := dm.db.QueryRow(`
+		SELECT id, title, content, status, created_at, updated_at, completed_at, session_id
+		FROM works WHERE id = ?
+	`, id).Scan(&w.ID, &w.Title, &content, &w.Status, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("work not found: %s", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get work: %w", err)
+	}
+	if content.Valid {
+		w.Content = content.String
+	}
+	if completedAt.Valid {
+		w.CompletedAt = &completedAt.Int64
+	}
+	if sessionID.Valid {
+		w.SessionID = sessionID.String
+	}
+	return &w, nil
+}
+
+func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
+	rows, err := dm.db.Query(`
+		SELECT id, title, content, status, created_at, updated_at, completed_at, session_id
+		FROM works WHERE status = 'open'
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list works: %w", err)
+	}
+	defer rows.Close()
+
+	var works []*Work
+	for rows.Next() {
+		var w Work
+		var content, sessionID sql.NullString
+		var completedAt sql.NullInt64
+		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
+			return nil, fmt.Errorf("scan work row: %w", err)
+		}
+		if content.Valid {
+			w.Content = content.String
+		}
+		if completedAt.Valid {
+			w.CompletedAt = &completedAt.Int64
+		}
+		if sessionID.Valid {
+			w.SessionID = sessionID.String
+		}
+		works = append(works, &w)
+	}
+	return works, nil
+}
+
+func (dm *DatabaseManager) CompleteWork(id string) (*Work, error) {
+	return dm.updateWorkStatus(id, WorkStatusDone)
+}
+
+func (dm *DatabaseManager) CancelWork(id string) (*Work, error) {
+	return dm.updateWorkStatus(id, WorkStatusCancelled)
+}
+
+func (dm *DatabaseManager) UpdateWork(id string, status WorkStatus) (*Work, error) {
+	return dm.updateWorkStatus(id, status)
+}
+
+func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work, error) {
+	now := time.Now().Unix()
+	var completedAt interface{}
+	if status == WorkStatusDone {
+		completedAt = now
+	}
+	// NULL completed_at when moving out of done/cancelled
+	if status == WorkStatusOpen {
+		completedAt = nil
+	}
+
+	res, err := dm.db.Exec(`
+		UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?
+	`, status, now, completedAt, id)
+	if err != nil {
+		return nil, fmt.Errorf("update work status: %w", err)
+	}
+
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return nil, fmt.Errorf("work not found: %s", id)
+	}
+
+	return dm.GetWork(id)
+}
+
 // GetLessonStats returns statistics about lessons
 func (dm *DatabaseManager) GetLessonStats() (map[string]interface{}, error) {
 	stats := map[string]interface{}{
