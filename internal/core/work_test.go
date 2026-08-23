@@ -1,6 +1,9 @@
 package internal
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestWorkStatusValues(t *testing.T) {
 	if WorkStatusOpen != "open" {
@@ -38,5 +41,13 @@ func TestWorkStatusConstants(t *testing.T) {
 	}
 	if string(WorkStatusCancelled) != "cancelled" {
 		t.Errorf("WorkStatusCancelled string = %q, want 'cancelled'", string(WorkStatusCancelled))
+	}
+}
+
+func TestSummarizeWork(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	result := SummarizeWork(long, 120)
+	if len(result) > 120 {
+		t.Errorf("len(SummarizeWork) = %d, want <= 120", len(result))
 	}
 }
