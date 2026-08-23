@@ -32,14 +32,6 @@ func handleMpmWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload 
 	}
 }
 
-// typeAssertDBM converts a CoreDB to *DatabaseManager for accessing Work-specific methods
-// that are on DatabaseManager but not yet on the CoreDB interface.
-// This is safe within the tools package because dm is always a *DatabaseManager
-// (DatabaseManager implements CoreDB, and tools always receives a *DatabaseManager).
-func typeAssertDBM(dm mpminternal.CoreDB) *mpminternal.DatabaseManager {
-	return dm.(*mpminternal.DatabaseManager)
-}
-
 func handleCreateWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
 	title, _ := p["title"].(string)
 	if title == "" {
@@ -48,7 +40,7 @@ func handleCreateWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfac
 	content, _ := p["content"].(string)
 	sessionID, _ := p["session_id"].(string)
 
-	w, err := typeAssertDBM(dm).AddWork(title, content, sessionID)
+	w, err := dm.AddWork(title, content, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +48,7 @@ func handleCreateWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfac
 }
 
 func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
-	works, err := typeAssertDBM(dm).ListWorks()
+	works, err := dm.ListWorks()
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +64,7 @@ func handleShowWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for show")
 	}
-	w, err := typeAssertDBM(dm).GetWork(workID)
+	w, err := dm.GetWork(workID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +80,7 @@ func handleUpdateWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfac
 	if statusStr == "" {
 		return nil, fmt.Errorf("status is required for update")
 	}
-	w, err := typeAssertDBM(dm).UpdateWork(workID, mpminternal.WorkStatus(statusStr))
+	w, err := dm.UpdateWork(workID, mpminternal.WorkStatus(statusStr))
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +92,7 @@ func handleCompleteWork(dm mpminternal.CoreDB, p map[string]interface{}) (interf
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for complete")
 	}
-	w, err := typeAssertDBM(dm).CompleteWork(workID)
+	w, err := dm.CompleteWork(workID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +104,7 @@ func handleCancelWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfac
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for cancel")
 	}
-	w, err := typeAssertDBM(dm).CancelWork(workID)
+	w, err := dm.CancelWork(workID)
 	if err != nil {
 		return nil, err
 	}
