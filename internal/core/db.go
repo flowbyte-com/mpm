@@ -1748,6 +1748,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Work items table
+	for _, sqlQuery := range WorkTables {
+		if _, err := dm.db.Exec(sqlQuery); err != nil {
+			return fmt.Errorf("failed to execute work schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)

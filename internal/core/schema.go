@@ -684,6 +684,24 @@ var ReferenceTables = []string{
 	);`,
 }
 
+// WorkTables contains the work-items table and indexes.
+var WorkTables = []string{
+	`CREATE TABLE IF NOT EXISTS works (
+		id            TEXT PRIMARY KEY,
+		title        TEXT NOT NULL,
+		content      TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'open'
+		             CHECK (status IN ('open', 'done', 'cancelled')),
+		created_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		completed_at INTEGER,
+		session_id   TEXT
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_session ON works(session_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_created ON works(created_at DESC);`,
+}
+
 // ReferenceIndexes contains the indexes that support the reference tables.
 // Separate from CommonIndexes so isolated reference DBs (test fixtures)
 // get the matching indexes too — without them, queries against the audit
