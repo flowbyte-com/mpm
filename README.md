@@ -6,18 +6,22 @@
 
 > **Looking to install?** See [INSTALL.md](INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
 
-MPM stands for **Mnemonic Persistence Maintainer**. It is an observable substrate for long-lived autonomous systems. Persistent memory is just one observable. Capabilities, decisions, theories, and execution telemetry are all governed by the same self-observing foundation. The substrate is closed under observation: every operation on MPM is itself observable through MPM's own tools.
+MPM (Managed Persistent Memory) is a durable state substrate for AI agents, providing persistent memory, work, provenance, and evidence across sessions.
+
+> *Add managed persistent memory to your agents.*
+
+MPM is an observable substrate for long-lived autonomous systems. Persistent memory is just one capability. Work, provenance, decisions, theories, and execution telemetry are all governed by the same self-observing foundation. The substrate is closed under observation: every operation on MPM is itself observable through MPM's own tools.
 
 Traditional memory systems answer one question:
 
 > *What does the agent remember?*
 
-MPM attempts to answer four:
+MPM answers four:
 
-* What does the agent believe?
-* Why does it believe it?
-* How certain is it?
-* What evidence could change its mind?
+* What does the agent know?
+* What is it trying to accomplish?
+* Who/what produced this?
+* What actually happened?
 
 Those questions lead to a different architecture.
 
@@ -256,7 +260,7 @@ For the deeper mechanics (atomic recompute, evidence registry, trigger wiring, s
 
 ### 3.4 Reframe, not rename
 
-MPM stands for **Mnemonic Persistence Maintainer** — a memory aid, not a memory store. The on-disk tables (`memories`, `topics`, `lessons`) keep their historical names for schema stability: renaming them would be a destructive migration across every existing database.
+MPM (Managed Persistent Memory) — a memory aid, not a memory store. The on-disk tables (`memories`, `topics`, `lessons`) keep their historical names for schema stability: renaming them would be a destructive migration across every existing database.
 
 Where the choice is open, prefer:
 
