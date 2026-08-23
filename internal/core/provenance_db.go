@@ -51,16 +51,24 @@ type ProvenanceRecordResult struct {
 //
 // The SQLite failure path uses SAVEPOINT isolation so the artifact's
 // INSERT is unaffected.
+//
+// If skipAudit is true, LogAudit calls within this function are skipped.
+// Use this when called from a context that already holds an active db
+// transaction and LogAudit's direct dm.db.Exec() call would fight for
+// the write lock (e.g., from RecordWorkArtifactProvenance).
 func (dm *DatabaseManager) RecordArtifactProvenance(
 	tx *sql.Tx,
 	artifactID, artifactType string,
 	prov *EffectiveProvenance,
+	skipAudit bool,
 ) ProvenanceRecordResult {
 	// Pre-tx validation. Rejections never touch the tx.
 	if reason := validateProvenance(prov); reason != "" {
-		dm.LogAudit(AuditWarn, "provenance", "validation rejected: "+reason, "", AuditContext{
-			"artifact_id": artifactID,
-		})
+		if !skipAudit {
+			dm.LogAudit(AuditWarn, "provenance", "validation rejected: "+reason, "", AuditContext{
+				"artifact_id": artifactID,
+			})
+		}
 		return ProvenanceRecordResult{ValidationReason: reason}
 	}
 
@@ -68,9 +76,11 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 	// artifact tx may be in a degraded state already; we don't try to
 	// operate on it further.
 	if _, err := tx.Exec("SAVEPOINT prov_rec"); err != nil {
-		dm.LogAudit(AuditError, "provenance", "savepoint failed: "+err.Error(), "", AuditContext{
-			"artifact_id": artifactID,
-		})
+		if !skipAudit {
+			dm.LogAudit(AuditError, "provenance", "savepoint failed: "+err.Error(), "", AuditContext{
+				"artifact_id": artifactID,
+			})
+		}
 		return ProvenanceRecordResult{SQLError: err.Error()}
 	}
 
@@ -122,18 +132,22 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 		// Rollback the SAVEPOINT only — the artifact tx is preserved.
 		tx.Exec("ROLLBACK TO SAVEPOINT prov_rec")
 		tx.Exec("RELEASE SAVEPOINT prov_rec")
-		dm.LogAudit(AuditError, "provenance", "insert failed: "+err.Error(), "", AuditContext{
-			"artifact_id": artifactID,
-		})
+		if !skipAudit {
+			dm.LogAudit(AuditError, "provenance", "insert failed: "+err.Error(), "", AuditContext{
+				"artifact_id": artifactID,
+			})
+		}
 		return ProvenanceRecordResult{SQLError: err.Error()}
 	}
 
 	if _, err := tx.Exec("RELEASE SAVEPOINT prov_rec"); err != nil {
 		// Unusual — the SAVEPOINT was opened and the INSERT succeeded,
 		// but RELEASE failed. Don't fail the result; log it.
-		dm.LogAudit(AuditWarn, "provenance", "release savepoint failed: "+err.Error(), "", AuditContext{
-			"artifact_id": artifactID,
-		})
+		if !skipAudit {
+			dm.LogAudit(AuditWarn, "provenance", "release savepoint failed: "+err.Error(), "", AuditContext{
+				"artifact_id": artifactID,
+			})
+		}
 	}
 	return ProvenanceRecordResult{Recorded: true}
 }
