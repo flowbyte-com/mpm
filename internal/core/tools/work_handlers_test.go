@@ -1,7 +1,12 @@
 package tools
 
 import (
+	"database/sql"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core"
 )
@@ -425,5 +430,141 @@ func TestHandleMpmWork_ProvenanceOnCreate(t *testing.T) {
 	}
 	if actorKind != "agent" {
 		t.Errorf("actor_kind = %q, want %q", actorKind, "agent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 5 integration tests (Section 14 adversarial tests)
+// ---------------------------------------------------------------------------
+// Coverage of Tasks 1-3 and 5 from the task brief:
+// - Task 1 (history returns events in order):        covered by TestHandleMpmWork_History
+// - Task 2 (note appends note_appended event):       covered by TestHandleMpmWork_Note
+// - Task 3 (reopen clears completed_at, appends):   covered by TestHandleMpmWork_Reopen
+// - Task 5 (provenance row at creation):              covered by TestHandleMpmWork_ProvenanceOnCreate
+// Only the adversarial concurrent-append test (Task 4) is new below.
+
+// TestHandleMpmWork_ConcurrentAppends_OneWinsConstraintError is the adversarial
+// integration test from Section 14. Two independent *sql.DB connections both
+// call AppendWorkEvent for the same work_id simultaneously. The UNIQUE(work_id,
+// event_index) constraint ensures exactly one succeeds.
+//
+// We use two separate *sql.DB instances with a shared-cache in-memory database
+// because Go's sql.DB pool serializes access — two connections bypass that and
+// produce genuine SQLite-level contention.
+//
+// The in-memory shared-cache approach produces a "table is locked" error on the
+// SELECT (SQLITE_LOCKED) when the second goroutine arrives while the first holds
+// the write lock. The file-based approach (WAL) can allow both goroutines'
+// SELECTs to succeed concurrently, computing the same event_index; the second
+// INSERT then hits the UNIQUE constraint. Both are valid adversarial shapes.
+// The test accepts both: the invariant is that exactly one succeeds.
+func TestHandleMpmWork_ConcurrentAppends_OneWinsConstraintError(t *testing.T) {
+	// Shared-cache in-memory DB so both connections see the same database.
+	// The file: prefix with mode=memory&cache=shared creates a shared
+	// in-memory database accessible by multiple connections.
+	dsn := fmt.Sprintf("file:mpm-concurrent-%d?mode=memory&cache=shared", time.Now().UnixNano())
+
+	db1, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open db1: %v", err)
+	}
+	defer db1.Close()
+	db2, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open db2: %v", err)
+	}
+	defer db2.Close()
+
+	// Establish the shared DB before InitSchema runs.
+	if _, err := db1.Exec("SELECT 1"); err != nil {
+		t.Fatalf("establish shared db: %v", err)
+	}
+
+	dm1 := internal.NewDatabaseManagerForDB(db1)
+	if err := dm1.InitSchema(); err != nil {
+		t.Fatalf("init schema on db1: %v", err)
+	}
+	dm2 := internal.NewDatabaseManagerForDB(db2)
+	if err := dm2.InitSchema(); err != nil {
+		t.Fatalf("init schema on db2: %v", err)
+	}
+
+	// Create a work via dm1 so it has event_index=0 (created).
+	w, err := handleMpmWork(dm1, internal.ActiveContext{}, map[string]interface{}{
+		"action": "create",
+		"params": map[string]interface{}{
+			"title": "Concurrent append target",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	workID := w.(map[string]interface{})["id"].(string)
+
+	// Rendezvous so both goroutines truly start simultaneously.
+	startCh := make(chan struct{})
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	for _, dm := range []*internal.DatabaseManager{dm1, dm2} {
+		go func(dbm *internal.DatabaseManager) {
+			defer wg.Done()
+			<-startCh // block until released; both goroutines release together
+
+			err := dbm.WithTx(func(node internal.DBNode) error {
+				_, err := dbm.AppendWorkEvent(workID, internal.WorkEvent{
+					EventType: internal.WorkEventTypeNoteAppended,
+					Note:      "concurrent note attempt",
+				}, nil, node)
+				return err
+			})
+			errCh <- err
+		}(dm)
+	}
+
+	close(startCh) // fire both simultaneously
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for e := range errCh {
+		if e != nil {
+			errs = append(errs, e)
+		}
+	}
+
+	// Exactly one must fail; the other must succeed.
+	if len(errs) == 0 {
+		t.Fatal("expected exactly one goroutine to fail, but both succeeded")
+	}
+	if len(errs) == 2 {
+		t.Fatal("expected exactly one goroutine to succeed, but both failed")
+	}
+
+	// The failure must be a SQLite adversarial error: either UNIQUE (both
+	// computed same index and second INSERT was evaluated) or LOCKED (second
+	// arrived while first held the write lock). Both are correct outcomes;
+	// both prove the DB serializes concurrent writers.
+	if len(errs) == 1 {
+		errStr := errs[0].Error()
+		isCorrectErr := strings.Contains(errStr, "UNIQUE") ||
+			strings.Contains(errStr, "constraint") ||
+			strings.Contains(errStr, "locked")
+		if !isCorrectErr {
+			t.Errorf("expected UNIQUE/locked/constraint error, got: %v", errs[0])
+		}
+	}
+
+	// Verify exactly 2 events exist (created + one winner's note_appended).
+	events, err := dm1.GetWorkEvents(workID)
+	if err != nil {
+		t.Fatalf("GetWorkEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Errorf("expected exactly 2 events (created + one note_appended), got %d", len(events))
+	}
+	if len(events) == 2 && events[1].EventType != internal.WorkEventTypeNoteAppended {
+		t.Errorf("surviving event type = %q, want %q", events[1].EventType, internal.WorkEventTypeNoteAppended)
 	}
 }
