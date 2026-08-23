@@ -144,6 +144,7 @@ Every persistent object inside MPM exists because it answers a different cogniti
 | Memory | Something observed or learned |
 | Decision | A choice and its rationale |
 | Theory | A testable hypothesis |
+| Work | A tracked unit of work with immutable event history |
 | Lesson | Reusable knowledge |
 | Evidence | Information supporting or challenging another artifact |
 
@@ -190,6 +191,20 @@ STATUS: pending
 ```
 
 Theories create a structured workflow for experimentation and debugging.
+
+#### Work
+
+A tracked unit of work with an immutable event-sourced history. Every state change is recorded as an append-only event; the current state (`status`, `completed_at`, `updated_at`) is derived at read time via `RecomputeWorkProjection`.
+
+```
+mpm call mpm_work '{"action":"create","params":{"title":"Fix the parser bug","note":"Suspect flag ordering in cli.go"}}'
+mpm call mpm_work '{"action":"complete","params":{"work_id":"<id>"}}'
+mpm call mpm_work '{"action":"history","params":{"work_id":"<id>"}}'
+mpm call mpm_work '{"action":"note","params":{"work_id":"<id>","note":"Confirmed: --json before positional causes parse failure"}}'
+mpm call mpm_work '{"action":"reopen","params":{"work_id":"<id>"}}'
+```
+
+New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
 
 #### Lesson
 

@@ -389,7 +389,7 @@ var BaseTables = []string{
 		-- substrate surface for telemetry. The widening from the
 		-- original ('memory','theory','lesson','decision') is enforced
 		-- for existing alpha DBs by migrateArtifactProvenanceSchema.
-		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive')),
+		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive','work')),
 		CHECK (actor_kind IN ('agent','human','import','system','unknown'))
 	);`,
 	// Go comment block: Reserved for the artifact_relations table.
@@ -682,6 +682,58 @@ var ReferenceTables = []string{
 		created_at INTEGER NOT NULL,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
+}
+
+// WorkTables contains the work-items table and indexes.
+var WorkTables = []string{
+	`CREATE TABLE IF NOT EXISTS works (
+		id            TEXT PRIMARY KEY,
+		title        TEXT NOT NULL,
+		content      TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'open'
+		             CHECK (status IN ('open', 'done', 'cancelled')),
+		created_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		completed_at INTEGER,
+		session_id   TEXT
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_session ON works(session_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_works_created ON works(created_at DESC);`,
+
+	// work_events: append-only ledger of Work state transitions (event-sourced).
+	// UNIQUE(work_id, event_index) enforces monotonic event_index per work item.
+	// CHECK constraint enumerates the exact event type vocabulary.
+	`CREATE TABLE IF NOT EXISTS work_events (
+		id                    TEXT PRIMARY KEY,
+		work_id               TEXT NOT NULL,
+		event_index           INTEGER NOT NULL,
+		event_type            TEXT NOT NULL
+		                      CHECK (event_type IN (
+		                        'created','note_appended','completed',
+		                        'cancelled','reopened',
+		                        'title_updated','content_updated'
+		                      )),
+		created_at            INTEGER NOT NULL
+		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		actor_kind           TEXT NOT NULL,
+		actor_id             TEXT,
+		framework_name        TEXT,
+		framework_version     TEXT,
+		provider_name         TEXT,
+		model_name            TEXT,
+		model_revision        TEXT,
+		session_id            TEXT,
+		invocation_id         TEXT,
+		parent_invocation_id TEXT,
+		note                  TEXT,
+		title                 TEXT,
+		content               TEXT,
+		UNIQUE(work_id, event_index)
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_work_events_session ON work_events(session_id);`,
 }
 
 // ReferenceIndexes contains the indexes that support the reference tables.
@@ -1114,4 +1166,8 @@ var SafeMigrations = [][3]string{
 	// on memory delete to detect "foundational rotted, theory orphaned".
 	// Format: JSON array of strings, e.g. ["mem-abc","les-def"].
 	{"memories", "dependencies",       "TEXT"},
+
+	// work_events migration (Phase 2 work primitive v2):
+	// migrated_at tracks which works rows have been seeded with initial created events.
+	{"works", "migrated_at", "INTEGER"},
 }

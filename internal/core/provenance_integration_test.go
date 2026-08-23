@@ -134,7 +134,7 @@ func TestProvenance_ValidationRejectsBadAPIEndpoint(t *testing.T) {
 				ActorKind:   "agent",
 				APIEndpoint: tc.url,
 			}
-			res := dm.RecordArtifactProvenance(tx, "art-1", "memory", prov)
+			res := dm.RecordArtifactProvenance(tx, "art-1", "memory", prov, false)
 			if res.Recorded {
 				t.Errorf("expected rejection for %q, got Recorded=true", tc.url)
 			}
@@ -177,7 +177,7 @@ func TestProvenance_ValidationRejectsMalformedProviderMetadata(t *testing.T) {
 				ActorKind:        "agent",
 				ProviderMetadata: tc.meta,
 			}
-			res := dm.RecordArtifactProvenance(tx, "art-1", "memory", prov)
+			res := dm.RecordArtifactProvenance(tx, "art-1", "memory", prov, false)
 			if res.Recorded {
 				t.Errorf("expected rejection for %q, got Recorded=true", tc.meta)
 			}
@@ -209,7 +209,7 @@ func TestProvenanceFailure_NeverPoisonsArtifactTransaction(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	prov := &EffectiveProvenance{ActorKind: "agent", ModelName: "sonnet"}
-	res := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov)
+	res := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov, false)
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestProvenance_NoDuplicateArtifactRecords(t *testing.T) {
 	prov := &EffectiveProvenance{ActorKind: "agent", ModelName: "sonnet"}
 
 	tx1, _ := dm.db.Begin()
-	res1 := dm.RecordArtifactProvenance(tx1, artifactID, "memory", prov)
+	res1 := dm.RecordArtifactProvenance(tx1, artifactID, "memory", prov, false)
 	if !res1.Recorded {
 		t.Fatalf("first record should succeed: %+v", res1)
 	}
@@ -250,7 +250,7 @@ func TestProvenance_NoDuplicateArtifactRecords(t *testing.T) {
 	}
 
 	tx2, _ := dm.db.Begin()
-	res2 := dm.RecordArtifactProvenance(tx2, artifactID, "memory", prov)
+	res2 := dm.RecordArtifactProvenance(tx2, artifactID, "memory", prov, false)
 	if res2.Recorded {
 		t.Errorf("second record should fail; got Recorded=true")
 	}
@@ -279,7 +279,7 @@ func TestProvenance_SchemaVersionDefaultV1(t *testing.T) {
 
 	tx, _ := dm.db.Begin()
 	prov := &EffectiveProvenance{ActorKind: "agent"}
-	if r := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov); !r.Recorded {
+	if r := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov, false); !r.Recorded {
 		t.Fatalf("record: %+v", r)
 	}
 	tx.Commit()
@@ -496,7 +496,7 @@ func TestProvenance_OpaqueProviderMetadataRawPreservation(t *testing.T) {
 	prov := &EffectiveProvenance{ActorKind: "agent", ProviderMetadata: raw}
 
 	tx, _ := dm.db.Begin()
-	if r := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov); !r.Recorded {
+	if r := dm.RecordArtifactProvenance(tx, artifactID, "memory", prov, false); !r.Recorded {
 		t.Fatalf("record: %+v", r)
 	}
 	tx.Commit()
@@ -544,7 +544,7 @@ func TestProvenance_ParentInvocationIDStoredAndQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin parent: %v", err)
 	}
-	if r := dm.RecordArtifactProvenance(tx, parentArtifactID, "memory", parent); !r.Recorded {
+	if r := dm.RecordArtifactProvenance(tx, parentArtifactID, "memory", parent, false); !r.Recorded {
 		t.Fatalf("record parent: %+v", r)
 	}
 	if err := tx.Commit(); err != nil {
@@ -563,7 +563,7 @@ func TestProvenance_ParentInvocationIDStoredAndQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin child: %v", err)
 	}
-	if r := dm.RecordArtifactProvenance(tx, childArtifactID, "memory", child); !r.Recorded {
+	if r := dm.RecordArtifactProvenance(tx, childArtifactID, "memory", child, false); !r.Recorded {
 		t.Fatalf("record child: %+v", r)
 	}
 	if err := tx.Commit(); err != nil {

@@ -209,3 +209,27 @@ func TestGetRecentUserTopics_OrderedNewestFirst(t *testing.T) {
 	require.Equal(t, []string{"user-topic-c", "user-topic-b", "user-topic-a"}, got,
 		"newest topic must come first")
 }
+
+func TestWakeContext_OpenWorks(t *testing.T) {
+	dm, err := NewDatabaseManager(":memory:")
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	dm.AddWork("First work item", "", "")
+	dm.AddWork("Second work item", "", "")
+
+	ctx, err := dm.GatherWakeContext()
+	if err != nil {
+		t.Fatalf("GatherWakeContext: %v", err)
+	}
+	if len(ctx.OpenWorks) < 2 {
+		t.Errorf("len(OpenWorks) = %d, want at least 2", len(ctx.OpenWorks))
+	}
+	for _, w := range ctx.OpenWorks {
+		if !strings.HasPrefix(w.Pointer, "mpm://work/") {
+			t.Errorf("Pointer = %q, want prefix 'mpm://work/'", w.Pointer)
+		}
+	}
+}
