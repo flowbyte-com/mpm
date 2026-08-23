@@ -78,13 +78,25 @@ func (a *blobStoreAdapter) Search(ctx context.Context, id string, query tools.Se
 
 // pointerResolverAdapter wraps a *blobStoreAdapter and satisfies
 // tools.pointerResolverInterface so that mpm://blob/<id> URIs resolve
-// through the blob store. The Phase 1 blob-only enforcement is done in
+// through the blob store. Phase 1 blob-only enforcement is done in
 // handleMpmResolve; this adapter handles the resolution.
 type pointerResolverAdapter struct {
 	bs *blobStoreAdapter
+	dm *core.DatabaseManager
 }
 
 func (a *pointerResolverAdapter) Resolve(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	switch p.Kind {
+	case "blob":
+		return a.resolveBlob(ctx, p, opts)
+	case "work":
+		return a.resolveWork(ctx, p, opts)
+	default:
+		return tools.Resolution{}, fmt.Errorf("unsupported pointer kind: %s", p.Kind)
+	}
+}
+
+func (a *pointerResolverAdapter) resolveBlob(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
 	reader, meta, err := a.bs.Get(ctx, p.ID, tools.GetOptions{})
 	if err != nil {
 		return tools.Resolution{}, err
@@ -100,6 +112,35 @@ func (a *pointerResolverAdapter) Resolve(ctx context.Context, p tools.Pointer, o
 		ContentType: meta.ContentType,
 		Reader:     io.NopCloser(bytes.NewReader(content)),
 		Metadata:   nil,
+	}, nil
+}
+
+func (a *pointerResolverAdapter) resolveWork(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {
+	work, err := a.dm.GetWork(p.ID)
+	if err != nil {
+		return tools.Resolution{}, err
+	}
+
+	content := work.Title
+	if work.Content != "" {
+		content = work.Title + "\n\n" + work.Content
+	}
+
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	bounded := len(content) > maxBytes
+	if bounded {
+		content = core.SummarizeWork(content, maxBytes)
+	}
+
+	_ = a.dm.RecordRetrieval(p.ID, "work")
+
+	return tools.Resolution{
+		ContentType: "text/plain",
+		Reader:      io.NopCloser(strings.NewReader(content)),
+		Metadata:    nil,
 	}, nil
 }
 
@@ -124,7 +165,7 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	blobStore = bs
 	blobAdapter := &blobStoreAdapter{bs: bs}
 	tools.SetBlobStore(blobAdapter)           // wire Phase 1 blob tools
-	tools.SetResolver(&pointerResolverAdapter{bs: blobAdapter}) // wire mpm_resolve
+	tools.SetResolver(&pointerResolverAdapter{bs: blobAdapter, dm: dm}) // wire mpm_resolve
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
 		if tool.Name == "route" {

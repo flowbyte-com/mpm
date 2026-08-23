@@ -3515,7 +3515,7 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 // ── Pointer / Blob tools (Phase 1) ────────────────────────────────────────
 
 // handleMpmResolve resolves a mpm:// URI to its content via the global resolver.
-// Phase 1 supports mpm://blob/<id> only. max_bytes applies a soft ceiling
+// Phase 1 supports mpm://blob/<id> and mpm://work/<id>. max_bytes applies a soft ceiling
 // on the amount of content returned; 0 means unlimited.
 func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	uri, _ := payload["uri"].(string)
@@ -3530,9 +3530,9 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return nil, err
 	}
 
-	// Phase 1: only blob kind is supported.
-	if ptr.Kind != "blob" {
-		return nil, fmt.Errorf("%w: Phase 1 supports mpm://blob/<id> only; got mpm://%s/", ErrUnsupportedKind, ptr.Kind)
+	// Phase 1: only blob and work kinds are supported.
+	if ptr.Kind != "blob" && ptr.Kind != "work" {
+		return nil, fmt.Errorf("%w: unsupported kind: %s", ErrUnsupportedKind, ptr.Kind)
 	}
 
 	if globalResolver == nil {
