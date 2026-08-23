@@ -149,6 +149,7 @@ Every persistent object inside MPM exists because it answers a different cogniti
 | Decision | A choice and its rationale |
 | Theory | A testable hypothesis |
 | Work | A tracked unit of work with immutable event history |
+| Reference | External material for the agent to consult |
 | Lesson | Reusable knowledge |
 | Evidence | Information supporting or challenging another artifact |
 
@@ -210,7 +211,9 @@ mpm call mpm_work '{"action":"reopen","params":{"work_id":"<id>"}}'
 
 New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
 
-#### Lesson
+#### Reference
+
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are stored with their source URL, section markers, and ingestion timestamp, and are searchable via the same FTS5 index as memories.
 
 Reusable knowledge that survives across tasks — best practices, warnings, patterns, and insights.
 
@@ -258,6 +261,8 @@ For the deeper mechanics (atomic recompute, evidence registry, trigger wiring, s
 
 > **Implementation note:** The properties are enforced by property tests in `internal/core/confidence_test.go`. The tests describe what the formula means, not what it currently is. The implementation can change; the meaning survives.
 
+> **Reference** in this table refers to `reference` artifacts — external material ingested into MPM for the agent to consult, distinct from `memory` which is the agent's own synthesized knowledge.
+
 ### 3.4 Reframe, not rename
 
 MPM (Managed Persistent Memory) — a memory aid, not a memory store. The on-disk tables (`memories`, `topics`, `lessons`) keep their historical names for schema stability: renaming them would be a destructive migration across every existing database.
@@ -269,7 +274,29 @@ Where the choice is open, prefer:
 - "Epistemology" over "knowledge management" when the lifecycle matters
 - "Substrate" over "database" when the system is the point
 
-### 3.5 The epistemic snapshot
+### 3.5 What MPM maintains
+
+MPM maintains six distinct durable dimensions of state around an agent:
+
+| Dimension | Question it answers |
+|---|---|
+| **Memory** | What does the agent know? |
+| **Work** | What is it trying to accomplish? |
+| **Reference** | What should it consult? |
+| **Persona / Mode** | How should the agent behave? |
+| **Provenance** | Who or what produced this? |
+| **Evidence** | What actually happened? |
+
+The first three are the agent's **internal knowledge stack** — what it knows, what it intends, and what external material it can consult. The second three govern **how it operates** — its behavioural mode, how its outputs were generated, and what the observable consequences were.
+
+The distinction between provenance and evidence is important:
+
+- **Provenance** answers: *How was this artifact or event produced?* (framework, model, invocation, instruction context)
+- **Evidence** answers: *What observable state resulted?* (git changes, file state, verification status)
+
+Together they give MPM a causal chain — from instruction through execution to observable outcome — without MPM ever deciding who is at fault. That is an analytical conclusion, not a recorded fact.
+
+### 3.6 The epistemic snapshot
 
 Every memory saved through `mcp-mcp` carries a `metadata._epistemic_snapshot`
 block — a system-stamped envelope that captures the epistemic environment
