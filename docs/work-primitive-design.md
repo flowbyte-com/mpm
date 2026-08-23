@@ -791,6 +791,71 @@ This is the same principle that governs existing provenance: describe how an art
 
 ---
 
+## Known Integration Gap: Provenance Ingestion at Framework Boundary
+
+**Audit finding (2026-08-23):** The `work_events` schema already captures full `EffectiveProvenance` — model identity, execution configuration, invocation correlation, reasoning settings. The chain is correct in the database layer. However, MCP/framework entry points currently do not populate `MPM_PROVENANCE*`, causing `EffectiveProvenance` to fall back to `actor_kind=unknown` with most execution fields absent.
+
+**Architectural invariant this establishes:**
+
+> `ActiveContext` tells you **who operates MPM**.
+
+> `EffectiveProvenance` tells you **how the operation was generated**.
+
+> These are not interchangeable. Work history preserves both without substituting one for the other.
+
+**Intended provenance chain:**
+
+```
+Framework / agent
+  │ execution context
+  ▼
+MPM_PROVENANCE (env vars or JSON blob)
+  │
+  ▼
+ProvenanceResolver
+  │
+  ▼
+EffectiveProvenance
+  │
+  ├── Work events
+  ├── Memory artifacts
+  ├── Lessons
+  ├── Theories
+  └── other provenance-bearing artifacts
+```
+
+**Current broken chain:**
+
+```
+Framework / agent
+  │
+  ├── MPM_ACTIVE_* ──────► ActiveContext ──────► work_events
+  │                                        (framework attribution only)
+  │
+  └── execution metadata ──X──► MPM_PROVENANCE
+  │                         (not populated)
+  ▼
+mostly empty provenance on work_events
+```
+
+**Conformance requirement:** Every framework integration capable of supplying execution provenance SHOULD populate the MPM provenance boundary (`MPM_PROVENANCE*` or `MPM_SESSION_ID`) before invoking MPM. This is not an OpenClaw-specific patch — it is a framework integration standard.
+
+**Framework integration status:**
+
+| Integration | Framework ID | Model | Invocation | Reasoning config | Status |
+|-------------|-------------|-------|------------|-----------------|--------|
+| OpenClaw | available | available (needs fwd) | available (needs fwd) | available (needs fwd) | not wired |
+| Claude Code | available | unknown | unknown | unknown | not tested |
+| Pi | unknown | unknown | unknown | unknown | not tested |
+| OpenCode | unknown | unknown | unknown | unknown | not tested |
+| Hermes | unknown | unknown | unknown | unknown | not tested |
+
+**Acceptance test:** The same Work operation executed through different frameworks SHOULD produce distinguishable event provenance (framework, model, reasoning_effort, invocation_id). Run the same `mpm work create` through two different framework/model combinations and verify `work_events` shows distinct provenance per event.
+
+**What this gap is NOT:** A reason to add columns to `work_events`. The schema is correct. The ingestion pipeline is the work.
+
+---
+
 ## Design questions requiring human review
 
 1. Does `invocation_id → parent_invocation_id → parent_artifact_id` chain provide sufficient instruction correlation without new fields?
@@ -798,6 +863,8 @@ This is the same principle that governs existing provenance: describe how an art
 3. What is the minimum instruction provenance representation? Is `instruction_hash` sufficient, or is `instruction_id` reference needed?
 4. Should `claimed_complete` and `evidence_observed` be separate event types, or should evidence be bundled into the completion event?
 5. Should verification be computed eagerly (at event creation) or lazily (at `mpm work show` time)?
+6. Which framework integrations should be conformance-tested first (suggest: OpenClaw as the actively-developed integration)?
+7. Should MPM publish a provenance conformance checklist for framework integrators?
 
 ---
 
