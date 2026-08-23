@@ -40,10 +40,14 @@ BUILD_DIR   := bin
 # Override with `make install PREFIX=/somewhere` for non-standard layouts.
 PREFIX      ?= $(HOME)/.mpm
 SERVICE_NAME := mpm-scheduler
-SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service
+SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service.user
 SERVICE_DST := $(HOME)/.config/systemd/user/$(SERVICE_NAME).service
 SYSTEM_SERVICE_SRC := contrib/systemd/$(SERVICE_NAME).service.system
 SYSTEM_SERVICE_DST := /etc/systemd/system/$(SERVICE_NAME).service
+
+TELEMETRY_SERVICE_NAME := mpm-telemetry
+TELEMETRY_SERVICE_SRC := contrib/systemd/$(TELEMETRY_SERVICE_NAME).service.user
+TELEMETRY_SERVICE_DST := $(HOME)/.config/systemd/user/$(TELEMETRY_SERVICE_NAME).service
 
 # Find go: prefer $PATH, fall back to common install locations.
 # Allows `make` to work in non-interactive shells (CI, subshells) where
@@ -55,7 +59,7 @@ BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
 
-.PHONY: all build install service-scheduler service install-system-service uninstall-service gen-cli clean test lint help
+.PHONY: all build install service-scheduler service-telemetry service install-system-service uninstall-service gen-cli clean test lint help
 
 all: build
 
@@ -117,6 +121,24 @@ service-scheduler:
 	@echo "    systemctl --user enable --now $(SERVICE_NAME)"
 	@echo "    systemctl --user status $(SERVICE_NAME)"
 	@echo "    journalctl --user -u $(SERVICE_NAME) -f"
+
+# Install the mpm-telemetry systemd user service.
+# Same lazy-start architecture as mpm-scheduler: designed to stay dead
+# at boot on encrypted-home hosts; lock file inside encrypted tree makes
+# pre-decrypt start impossible. Wake event from scheduler is the trigger.
+service-telemetry:
+	@echo "⚠  This target installs a USER-level systemd unit."
+	@echo "   It silently fails on encrypted home directories."
+	@echo ""
+	@install -Dm644 $(TELEMETRY_SERVICE_SRC) $(TELEMETRY_SERVICE_DST)
+	@mkdir -p $(HOME)/.mpm/run
+	@systemctl --user daemon-reload
+	@echo "✓ Installed $(TELEMETRY_SERVICE_DST)"
+	@echo ""
+	@echo "  Next steps:"
+	@echo "    systemctl --user enable --now $(TELEMETRY_SERVICE_NAME)"
+	@echo "    systemctl --user status $(TELEMETRY_SERVICE_NAME)"
+	@echo "    journalctl --user -u $(TELEMETRY_SERVICE_NAME) -f"
 
 # Alias for the common case.
 service: service-scheduler

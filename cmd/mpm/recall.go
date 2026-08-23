@@ -73,6 +73,7 @@ func handleRecall(args []string) int {
 	vectorWeight := fs.Float64("vector-weight", 0.5, "Vector weight in hybrid search (0=FTS5-only, 1=vector-only)")
 	asOf := fs.String("as-of", "", "Point-in-time reconstruction: retrieve memory state as of this timestamp (unix-epoch seconds or RFC3339)")
 	why := fs.Bool("why", false, "Show why each memory was retrieved (provenance: score factors, FTS terms, source engine)")
+	projected := fs.Bool("projected", false, "Pointer-native output: summary + pointer + retrieval_metadata instead of full content")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
 		fmt.Println("\nRecall options:")
@@ -84,6 +85,7 @@ func handleRecall(args []string) int {
 	// may place these flags after the query.
 	preprocessed := make([]string, 0, len(args))
 	jsonFlagSeen := false
+	projectedFlagSeen := false
 	tokenBudgetVal := 0
 	weightBelowVal := 0
 	beforeVal := ""
@@ -156,6 +158,11 @@ func handleRecall(args []string) int {
 			beforeVal = strings.TrimPrefix(arg, "--before=")
 			continue
 		}
+		if arg == "--projected" {
+			projectedFlagSeen = true
+			removeIdxs[realIdx] = true
+			continue
+		}
 	}
 
 	for i, arg := range args {
@@ -180,6 +187,9 @@ func handleRecall(args []string) int {
 	}
 	if beforeVal != "" {
 		*before = beforeVal
+	}
+	if projectedFlagSeen {
+		*projected = true
 	}
 
 	hasFilter := *weightBelow > 0 || *before != "" || *since != "" || *until != "" || *collection != "memories"
@@ -418,6 +428,76 @@ func handleRecall(args []string) int {
 		if truncated {
 			output["truncated"] = true
 			output["truncated_notice"] = fmt.Sprintf("[Truncated: token budget of %d reached — showing %d of %d results]", budget, len(result), len(entries))
+		}
+		data, _ := json.Marshal(output)
+		fmt.Println(string(data))
+		return 0
+	}
+
+	// Phase 2B: pointer-native projected output for CLI recall.
+	if *projected {
+		type retrievalMetadata struct {
+			ReuseCount      int    `json:"reuse_count"`
+			SuccessCount    int    `json:"success_count"`
+			LastRetrievedAt string `json:"last_retrieved_at,omitempty"`
+		}
+		type projectedEntry struct {
+			ID                 string           `json:"id"`
+			Summary            string           `json:"summary"`
+			Pointer            string           `json:"pointer"`
+			Type               string           `json:"type"`
+			Tags               string           `json:"tags,omitempty"`
+			Collection         string           `json:"collection"`
+			CreatedAt          string           `json:"created_at"`
+			ReinforcementCount int              `json:"reinforcement_count"`
+			Weight             int              `json:"weight"`
+			RetrievalMetadata  *retrievalMetadata `json:"retrieval_metadata"`
+			Score              float64          `json:"score"`
+			Rationale           string          `json:"rationale"`
+			IsStale            bool             `json:"is_stale"`
+		}
+		result := make([]projectedEntry, 0, len(entries))
+		for _, e := range entries {
+			summary := mpminternal.SummarizeMemory(e.content, 256)
+			score := computeScore(e.reinforcementCount, e.weight)
+			rationale := formatRationale(e.reinforcementCount, e.weight, e.lastAccessedAt)
+			isStale := isMemoryStale(e.createdAt, e.lastAccessedAt, *staleDays)
+
+			var retMeta *retrievalMetadata
+			meta, err := dm.GetRetrievalMetadata(e.id)
+			if err == nil && meta.ReuseCount > 0 {
+				lastRetrieved := ""
+				if meta.LastRetrievedAt != nil {
+					lastRetrieved = time.Unix(*meta.LastRetrievedAt, 0).Format(time.RFC3339)
+				}
+				retMeta = &retrievalMetadata{
+					ReuseCount:      meta.ReuseCount,
+					SuccessCount:    meta.SuccessCount,
+					LastRetrievedAt: lastRetrieved,
+				}
+			}
+
+			result = append(result, projectedEntry{
+				ID:                 shortID(e.id),
+				Summary:            summary,
+				Pointer:            "mpm://memory/" + e.id,
+				Type:               "memory",
+				Tags:               e.tags,
+				Collection:         *collection,
+				CreatedAt:          mpminternal.FormatUnixSeconds(e.createdAt),
+				ReinforcementCount:  e.reinforcementCount,
+				Weight:             e.weight,
+				RetrievalMetadata:   retMeta,
+				Score:              score,
+				Rationale:           rationale,
+				IsStale:            isStale,
+			})
+		}
+		output := map[string]interface{}{
+			"query":    query,
+			"mode":     "projected",
+			"memories": result,
+			"count":    len(result),
 		}
 		data, _ := json.Marshal(output)
 		fmt.Println(string(data))

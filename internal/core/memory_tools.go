@@ -436,17 +436,19 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 			banner = challengeWarning
 		}
 		items = append(items, map[string]interface{}{
-			"id":                   m.ID,
-			"content":              m.Content,
-			"weight":               m.Weight,
-			"tags":                 m.Tags,
-			"collection":           m.Collection,
-			"origin":               m.Origin,
-			"banner":               banner,
-			"is_concept_drift":     m.IsConceptDrift,
-			"is_challenged":        m.IsChallenged,
-			"challenged_theory_id": m.ChallengedTheoryID,
-			"combined_score":       m.CombinedScore,
+			"id":                    m.ID,
+			"content":               m.Content,
+			"weight":                m.Weight,
+			"tags":                  m.Tags,
+			"collection":            m.Collection,
+			"created_at":            m.CreatedAt,
+			"reinforcement_count":   m.ReinforcementCount,
+			"origin":                m.Origin,
+			"banner":                banner,
+			"is_concept_drift":      m.IsConceptDrift,
+			"is_challenged":         m.IsChallenged,
+			"challenged_theory_id":  m.ChallengedTheoryID,
+			"combined_score":        m.CombinedScore,
 		})
 	}
 	return items

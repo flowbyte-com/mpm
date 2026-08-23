@@ -23,7 +23,7 @@ func runServe(args []string) error {
 	}
 	socketPath := os.Getenv("MPM_TELEMETRY_SOCKET")
 	if socketPath == "" {
-		socketPath = filepath.Join(workspace, "runtime", "mpm-telemetry.sock")
+		socketPath = filepath.Join(workspace, "run", "mpm-telemetry.sock")
 	} else {
 		socketPath = filepath.Clean(socketPath)
 	}

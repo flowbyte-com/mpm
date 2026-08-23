@@ -14,6 +14,12 @@ func SummarizeBounded(s string, maxChars int) string {
 	return string(runes[:maxChars])
 }
 
+// SummarizeMemory truncates content to maxChars, breaking at rune boundaries.
+// Used by wake-context Phase 2C to produce bounded memory summaries.
+func SummarizeMemory(content string, maxChars int) string {
+	return SummarizeBounded(content, maxChars)
+}
+
 // SummarizeWork truncates a work title to maxChars, breaking at rune boundaries.
 func SummarizeWork(title string, maxChars int) string {
 	return SummarizeBounded(title, maxChars)

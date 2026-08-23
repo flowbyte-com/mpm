@@ -551,20 +551,27 @@ systemctl --user daemon-reload                      # (make service-scheduler al
 systemctl --user enable --now mpm-scheduler         # enable + start
 systemctl --user status mpm-scheduler               # verify
 journalctl --user -u mpm-scheduler -f               # follow logs
+
+make service-telemetry                             # copies telemetry unit to ~/.config/systemd/user/
+mkdir -p ~/.mpm/run
+systemctl --user enable --now mpm-telemetry         # enable + start
+systemctl --user status mpm-telemetry               # verify
+journalctl --user -u mpm-telemetry -f              # follow logs
 ```
 
 > **Lazy-Start Architecture (encrypted `/home`).** When `/home` is eCryptfs-encrypted,
-> the scheduler daemon is **designed to stay dead at boot**. The lockfile lives inside
-> the encrypted tree (`~/.mpm/scheduler.lock`); starting the daemon before `/home`
-> is decrypted would either fail (inaccessible path) or risk writing to the wrong
-> location. The architecture treats *boot + locked home* as the SAFE state and
-> expects the agent's first wake context (`AGENTS.md` Session Startup step 2) to
-> spin the daemon up *after* decryption is complete. This isolates the daemon's
-> first write to a moment when the substrate is verifiably writable. **It is a
-> security feature, not a bug.** Lesson `24be03ec71a5981f` codifies the rationale.
+> both the scheduler and telemetry daemons are **designed to stay dead at boot**.
+> The lockfile and socket path live inside the encrypted tree; starting before
+> `/home` is decrypted would either fail (inaccessible path) or risk writing to the
+> wrong location. The architecture treats *boot + locked home* as the SAFE state
+> and expects the agent's first wake context (`AGENTS.md` Session Startup step 2)
+> to spin both daemons up *after* decryption is complete. This isolates each
+> daemon's first write to a moment when the substrate is verifiably writable.
+> **It is a security feature, not a bug.** Lesson `24be03ec71a5981f` codifies the
+> rationale.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
-> headless deployments) can opt out via the drop-in documented in INSTALL.md
+> headless deployments) can opt out via the drop-ins documented in INSTALL.md
 > Troubleshooting.
 
 The default unit assumes `~/projects/mpm` layout. Override via either:
@@ -1038,7 +1045,7 @@ For the DDL, fan-out algorithm, auto-broadcast hooks, tests, and smoke behind th
 
 **What does NOT get recorded.** Prices, USD amounts, cost projections, vendor markups, ROI metrics. Pricing lives in an external, versioned JSON catalog (`internal/telemetry/testdata/one-model.json` is the canonical fixture; operators ship their own) and is applied at **read time** by `bin/mpm-telemetry cost --pricing <file>`. The raw ledger is the source of truth; the projected cost is a derived view that can be re-run against any historical snapshot without re-ingesting frames.
 
-**Wire format.** Frame bodies are newline-delimited JSON over a Unix socket (`$MPM_WORKSPACE/runtime/mpm-telemetry.sock`, override via `MPM_TELEMETRY_SOCKET`). The wire schema is versioned (`"schema_version":"v1"`). Unknown schema versions are rejected at the protocol boundary. Idempotent retries (same `invocation_id`, same payload) return `{"status":"ACCEPTED","inserted":false,...}`; conflicting duplicates (same id, different payload) return `{"status":"REJECTED","reason":"invocation_id_payload_conflict"}`. SQLite is the canonical store with WAL mode + 5s `busy_timeout` — the same single-connection-via-discipline that the MPM core uses.
+**Wire format.** Frame bodies are newline-delimited JSON over a Unix socket (`$MPM_WORKSPACE/run/mpm-telemetry.sock`, override via `MPM_TELEMETRY_SOCKET`). The wire schema is versioned (`"schema_version":"v1"`). Unknown schema versions are rejected at the protocol boundary. Idempotent retries (same `invocation_id`, same payload) return `{"status":"ACCEPTED","inserted":false,...}`; conflicting duplicates (same id, different payload) return `{"status":"REJECTED","reason":"invocation_id_payload_conflict"}`. SQLite is the canonical store with WAL mode + 5s `busy_timeout` — the same single-connection-via-discipline that the MPM core uses.
 
 **Client-side push, non-blocking.** Agents emit frames via the `telemetry_adapter.py` library (`agent_plugins/claude-code-mpm/src/telemetry_adapter.py`). The adapter returns immediately; a background daemon thread drains a per-process ring buffer (capacity 1000) over the socket with a 100ms connect timeout. If the collector is absent, frames are evicted oldest-first on overflow and the agent is never blocked. Spec invariant: collector availability MUST NOT affect agent correctness.
 

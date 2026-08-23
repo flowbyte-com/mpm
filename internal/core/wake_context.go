@@ -47,7 +47,7 @@ import (
 type WakeContextData struct {
 	// Metadata — emitted on every read so consumers can detect stale
 	// payloads and (in v5+) reason about which schema they got.
-	ContextVersion string `json:"context_version"` // e.g., "wake-context-v4-session-identity"
+	ContextVersion string `json:"context_version"` // e.g., "wake-context-v5"
 	GeneratedAt    int64  `json:"generated_at"`     // unix seconds, when the struct was assembled
 	AsOf           int64  `json:"as_of"`            // unix seconds, the substrate-state timestamp
 
@@ -139,16 +139,14 @@ type EpistemicPressureData struct {
 // TTL threshold (decay_at, set on flush + reset on UPSERT). The
 // surface uses presentation thresholds; gc_run --scratchpads uses
 // the TTL. Decoupling is the "no invisible orphans" mandate.
-const (
-	ScratchpadFreshHours       = 24.0
-	ScratchpadDormantDays      = 7.0
-	ScratchpadThesisPreviewMax = 200
-)
+const ScratchpadThesisPreviewMax = 200
 
 // WakeContextMemory is the trimmed memory reference shown in wake context.
+// Phase 2C: changed from Content to Summary + Pointer for bounded orientation.
 type WakeContextMemory struct {
 	ID        string `json:"id"`
-	Content   string `json:"content"`
+	Summary   string `json:"summary"`  // first 256 chars via SummarizeMemory
+	Pointer   string `json:"pointer"`  // "mpm://memory/<id>"
 	CreatedAt string `json:"created_at"`
 }
 
@@ -275,7 +273,7 @@ func readActiveState(dm *DatabaseManager) (mode, persona string) {
 // WakeContextData (rename, semantic change, removal). Pure additions —
 // new fields, new truncation flags — stay at the same version because
 // the JSON wire form remains a strict superset of older versions.
-const wakeContextCurrentVersion = "wake-context-v4-session-identity"
+const wakeContextCurrentVersion = "wake-context-v5"
 
 // MaxWakeContextBytes is the hard cap on the JSON wire form of the
 // wake-context payload. 32 KB is enough for the bounded orientation
@@ -561,11 +559,18 @@ func (dm *DatabaseManager) recentMemories(limit int) ([]WakeContextMemory, error
 
 	var out []WakeContextMemory
 	for rows.Next() {
-		var m WakeContextMemory
-		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
+		var id, content, createdAt string
+		if err := rows.Scan(&id, &content, &createdAt); err != nil {
 			return nil, fmt.Errorf("scanning wake context recent memory row: %w", err)
 		}
-		out = append(out, m)
+		// Phase 2C: bounded summary instead of full content.
+		summary := SummarizeMemory(content, 256)
+		out = append(out, WakeContextMemory{
+			ID:        id,
+			Summary:   summary,
+			Pointer:   "mpm://memory/" + id,
+			CreatedAt: createdAt,
+		})
 	}
 	return out, nil
 }
@@ -604,11 +609,18 @@ func (dm *DatabaseManager) recentMilestones(limit int) ([]WakeContextMemory, err
 
 	var out []WakeContextMemory
 	for rows.Next() {
-		var m WakeContextMemory
-		if err := rows.Scan(&m.ID, &m.Content, &m.CreatedAt); err != nil {
+		var id, content, createdAt string
+		if err := rows.Scan(&id, &content, &createdAt); err != nil {
 			return nil, fmt.Errorf("scanning wake context recent milestone row: %w", err)
 		}
-		out = append(out, m)
+		// Phase 2C: bounded summary instead of full content.
+		summary := SummarizeMemory(content, 256)
+		out = append(out, WakeContextMemory{
+			ID:        id,
+			Summary:   summary,
+			Pointer:   "mpm://memory/" + id,
+			CreatedAt: createdAt,
+		})
 	}
 	return out, nil
 }
@@ -688,15 +700,15 @@ func formatWakeContext(d WakeContextData) string {
 			if i >= 5 {
 				break
 			}
-			content := m.Content
-			if len(content) > 80 {
-				content = content[:80]
+			summary := m.Summary
+			if len(summary) > 80 {
+				summary = summary[:80]
 			}
 			ageSuffix := ""
 			if len(m.CreatedAt) >= 10 {
 				ageSuffix = " (" + m.CreatedAt[:10] + ")"
 			}
-			lines = append(lines, fmt.Sprintf("  - %s%s", content, ageSuffix))
+			lines = append(lines, fmt.Sprintf("  - %s%s", summary, ageSuffix))
 		}
 	}
 	if len(d.RecentMilestones) > 0 {
@@ -705,15 +717,15 @@ func formatWakeContext(d WakeContextData) string {
 			if i >= 5 {
 				break
 			}
-			content := m.Content
-			if len(content) > 120 {
-				content = content[:120] + "…"
+			summary := m.Summary
+			if len(summary) > 120 {
+				summary = summary[:120] + "…"
 			}
 			ageSuffix := ""
 			if len(m.CreatedAt) >= 10 {
 				ageSuffix = " (" + m.CreatedAt[:10] + ")"
 			}
-			lines = append(lines, fmt.Sprintf("  - %s%s", content, ageSuffix))
+			lines = append(lines, fmt.Sprintf("  - %s%s", summary, ageSuffix))
 		}
 	}
 	if d.AuditSummary != "" {
@@ -896,21 +908,6 @@ func previewThesisTruncated(s string) string {
 	return s[:ScratchpadThesisPreviewMax] + "..."
 }
 
-// scratchpadAgeTag maps an age-in-hours to a presentation tag using
-// the ScratchpadFreshHours / ScratchpadDormantDays thresholds. The
-// thresholds are presentation-only; the wake-context query does NOT
-// filter by them (orphan-surfacing mandate — see schema.go comment).
-// gc_run --scratchpads is the one true vacuum path.
-func scratchpadAgeTag(ageHours float64) string {
-	if ageHours > ScratchpadDormantDays*24 {
-		return "[Expired]"
-	}
-	if ageHours > ScratchpadFreshHours {
-		return "[Dormant]"
-	}
-	return "[Fresh]"
-}
-
 // ScratchpadOrphansSummary returns the agent-facing wake-context block
 // for unpromoted scratchpad rows from previous sessions. Empty string
 // when no orphans exist (caller skips the line entirely).
@@ -924,6 +921,77 @@ func scratchpadAgeTag(ageHours float64) string {
 //
 // Telemetry mirrors auditSummaryRich: a transient DB hiccup returns
 // "" so wake context isn't flooded by error noise.
+// scratchpadLifecycle classifies a scratchpad's decay state.
+// These labels drive the operator-facing diagnostic output.
+type scratchpadLifecycle struct {
+	Status string // "active" | "expired" | "orphaned"
+	Tag    string // "[Active]" | "[Expired]" | "[Orphaned]"
+}
+
+// scrubDecayAt converts the raw scan result (NULL, int, or time.Time)
+// into a Unix timestamp seconds integer, or -1 if unparseable.
+// Handles both integer Unix timestamps (test fixtures) and
+// time.Time ISO8601 strings (production DB) and time.Time values.
+func scrubDecayAt(raw interface{}) (int, bool) {
+	if raw == nil {
+		return 0, false // nil → no TTL
+	}
+	switch v := raw.(type) {
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case time.Time:
+		return int(v.Unix()), true
+	case string:
+		t, err := time.Parse("2006-01-02 15:04:05", v)
+		if err != nil {
+			t2, err2 := time.Parse(time.RFC3339, v)
+			if err2 != nil {
+				return -1, false
+			}
+			return int(t2.Unix()), true
+		}
+		return int(t.Unix()), true
+	default:
+		return -1, false
+	}
+}
+
+func classifyScratchpad(decayAtRaw interface{}, now int, sessionExists bool) scratchpadLifecycle {
+	decaySecs, ok := scrubDecayAt(decayAtRaw)
+	// nil or unparseable → no TTL set → permanently active
+	if !ok || decaySecs > now {
+		return scratchpadLifecycle{Status: "active", Tag: "[Active]"}
+	}
+	// TTL has crossed. If no session record exists, it cannot be
+	// recovered through the normal promote/discard path — that is
+	// the orphan condition: broken reference, not merely old content.
+	if !sessionExists {
+		return scratchpadLifecycle{Status: "orphaned", Tag: "[Orphaned]"}
+	}
+	return scratchpadLifecycle{Status: "expired", Tag: "[Expired]"}
+}
+
+// ScratchpadOrphansSummary returns the agent-facing wake-context block
+// for scratchpads from previous sessions. Empty string when none exist.
+//
+// Classification contract (locked 2026-08-22):
+//   - active   : decay_at > now  — still within TTL, not yet recoverable
+//   - expired  : decay_at <= now AND session record exists — TTL crossed
+//               normally; can be promoted or discarded via normal path
+//   - orphaned : decay_at <= now AND no session record — broken reference;
+//               cannot auto-recover; operator action required
+//
+// The orphan condition is an integrity anomaly, not a lifecycle state.
+// Expired is a normal TTL completion — the vacuum path (gc_run
+// --scratchpads) handles these. Active scratchpads are working state
+// and do not require action.
+//
+// Internal query is deliberately broad (all previous-session scratchpads,
+// ignoring decay_at at the WHERE layer) to surface orphans that might
+// otherwise be hidden by a decay_at filter. Classification happens in
+// the presentation layer, not the query.
 func (dm *DatabaseManager) ScratchpadOrphansSummary() (string, error) {
 	if dm == nil || dm.db == nil {
 		return "", nil
@@ -934,58 +1002,87 @@ func (dm *DatabaseManager) ScratchpadOrphansSummary() (string, error) {
 		currentSession, _ = s["session_id"].(string)
 	}
 
+	now := int(time.Now().Unix())
+
+	// LEFT JOIN against session_handoffs to detect the orphan condition:
+	// a scratchpad with no corresponding session record cannot be
+	// recovered through the normal promote/discard path.
 	rows, err := dm.db.Query(`
-		SELECT session_id, thesis,
-		       (CAST(strftime('%s','now') AS INTEGER) - updated_at) / 3600.0 AS age_hours
-		FROM ephemeral_scratchpad
-		WHERE session_id != ?`,
+		SELECT
+			es.session_id,
+			es.thesis,
+			es.decay_at,
+			(CAST(strftime('%s','now') AS INTEGER) - es.updated_at) / 3600.0 AS age_hours,
+			sh.session_id IS NOT NULL AS session_exists
+		FROM ephemeral_scratchpad es
+		LEFT JOIN session_handoffs sh ON es.session_id = sh.session_id
+		WHERE es.session_id != ?
+		ORDER BY
+			CASE
+				WHEN es.decay_at IS NULL THEN 0
+				WHEN es.decay_at > CAST(strftime('%s','now') AS INTEGER) THEN 0
+				WHEN sh.session_id IS NOT NULL THEN 1
+				ELSE 2
+			END,
+			es.updated_at DESC`,
 		currentSession)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("scratchpad orphans query: %w", err)
 	}
 	defer rows.Close()
 
+	counts := map[string]int{"active": 0, "expired": 0, "orphaned": 0}
 	var lines []string
-	tagCounts := map[string]int{"[Fresh]": 0, "[Dormant]": 0, "[Expired]": 0}
+
 	for rows.Next() {
 		var id, thesis string
+		var decayAtRaw interface{} // NULL, int Unix timestamp, or time.Time
 		var ageHours float64
-		if err := rows.Scan(&id, &thesis, &ageHours); err != nil {
-			return "", fmt.Errorf("scanning scratchpad orphan row: %w", err)
+		var sessionExists bool
+		if err := rows.Scan(&id, &thesis, &decayAtRaw, &ageHours, &sessionExists); err != nil {
+			return "", fmt.Errorf("scanning scratchpad row: %w", err)
 		}
-		tag := scratchpadAgeTag(ageHours)
-		tagCounts[tag]++
-		lines = append(lines, fmt.Sprintf("  * %s session %s: %s", tag, id, previewThesisTruncated(thesis)))
+
+		lc := classifyScratchpad(decayAtRaw, now, sessionExists)
+		counts[lc.Status]++
+
+		line := fmt.Sprintf("  * %s session %s: %s",
+			lc.Tag, id, previewThesisTruncated(thesis))
+
+		// Orphaned scratchpads need operator attention and cannot be
+		// auto-recovered. Expired-but-session-backed ones are normal
+		// TTL completions — note the TTL crossing for provenance.
+		if lc.Status == "orphaned" {
+			line += "  ⚠ no session record — promote_scratchpad or discard required"
+		} else if lc.Status == "expired" {
+			line += "  (TTL expired)"
+		}
+
+		lines = append(lines, line)
 	}
+
 	if len(lines) == 0 {
 		return "", nil
 	}
 
-	// Aggregate header summary. Mirrors the auditSummaryRich pattern
-	// ("N events since DATE"): a glance tells v whether to act now or
-	// defer. Break down by age tag so stale orphans (the ones most
-	// likely to be safely discardable) are visually separable.
-	total := tagCounts["[Fresh]"] + tagCounts["[Dormant]"] + tagCounts["[Expired]"]
+	// Header mirrors the auditSummary pattern: three-way count gives
+	// the operator an immediate Glance/Defer/Act signal.
+	// "orphaned" is the only count that demands immediate attention.
 	header := fmt.Sprintf(
-		"- Ephemeral Scratchpads (%d orphan%s pending; Action Required: promote_scratchpad, amend, or discard): "+
-			"Fresh=%d, Dormant=%d, Expired=%d",
-		total,
-		ternaryPlural(total),
-		tagCounts["[Fresh]"], tagCounts["[Dormant]"], tagCounts["[Expired]"])
+		"- Ephemeral Scratchpads (active=%d, expired=%d, orphaned=%d):",
+		counts["active"], counts["expired"], counts["orphaned"])
+
+	// If any orphaned entries exist, surface the action reminder inline.
+	// Expired entries are normal lifecycle — no action required from the
+	// wake-context glance. Active entries are working state — leave them
+	// quiet until TTL crosses.
+	if counts["orphaned"] > 0 {
+		header += "  Action Required: promote_scratchpad or discard for orphaned entries."
+	}
+
 	out := []string{header}
 	out = append(out, lines...)
 	return strings.Join(out, "\n"), nil
-}
-
-// ternaryPlural returns "s" unless count == 1 (matches English
-// pluralization for "1 orphan pending" vs "0/N orphans pending").
-// Extracted so the orphan header reads naturally without inline
-// conditionals in fmt format strings.
-func ternaryPlural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 // humanizeOverdueSecs renders an overdue duration in seconds as the

@@ -7,7 +7,8 @@
 #   1. make install                       — rebuild + sync to $HOME/.mpm/bin/
 #   2. openclaw gateway restart           — gateway respawns mpm-mcp with new binary
 #   3. systemctl --user restart mpm-scheduler  — scheduler is independent of gateway
-#   4. Verify live mpm-mcp PID matches the just-built sha
+#   4. systemctl --user restart mpm-telemetry  — telemetry collector is independent of gateway
+#   5. sha verification
 #
 # Why this script exists: the live MCP server is started once at gateway
 # boot and only picks up a new binary on gateway restart. mpm-scheduler
@@ -67,12 +68,6 @@ echo "==> Restarting OpenClaw gateway..."
 openclaw gateway restart
 
 # 3. Restart mpm-scheduler (independent daemon) ───────────────────────
-# mpm-scheduler runs under user-level systemd — NOT a child of the
-# gateway. The gateway restart doesn't propagate here, so we need a
-# separate restart for any deploy that touches scheduler code
-# (ProcessScheduledTasks, HandlerFuncs, etc). Caught the 2026-07-24 case
-# where the install landed but the scheduler kept running stale code.
-# Bake it in.
 SCHED_ACTIVE_BEFORE=$(systemctl --user is-active mpm-scheduler 2>/dev/null || echo "unknown")
 if [[ "$SCHED_ACTIVE_BEFORE" == "active" ]]; then
   echo "==> Restarting user-level mpm-scheduler (independent of gateway)..."
@@ -81,7 +76,17 @@ else
   echo "==> mpm-scheduler not active (state: $SCHED_ACTIVE_BEFORE) — no restart needed"
 fi
 
-# 4. Verify live mpm-mcp is the new binary ─────────────────────────────
+# 4. Restart mpm-telemetry (independent daemon) ───────────────────────
+mkdir -p "$HOME/.mpm/run"
+TELEM_ACTIVE_BEFORE=$(systemctl --user is-active mpm-telemetry 2>/dev/null || echo "unknown")
+if [[ "$TELEM_ACTIVE_BEFORE" == "active" ]]; then
+  echo "==> Restarting user-level mpm-telemetry..."
+  systemctl --user restart mpm-telemetry
+else
+  echo "==> mpm-telemetry not active (state: $TELEM_ACTIVE_BEFORE) — no restart needed"
+fi
+
+# 5. Verify live mpm-mcp is the new binary ───────────────────────────
 sleep 1
 LIVE_PID=$(pgrep -f "$CANONICAL_BIN/mpm-mcp" | head -1 || true)
 if [[ -n "$LIVE_PID" ]]; then
