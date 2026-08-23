@@ -113,26 +113,44 @@ func TestBlobGC_ExpiredPass(t *testing.T) {
 	}
 }
 
-// TestBlobGC_OrphanSweepRespectsGrace verifies that orphan files within the grace
-// period are skipped, while older orphans are deleted.
+// TestBlobGC_OrphanSweepRespectsGrace verifies that:
+//   - Orphan files (no DB row) are always deleted regardless of mtime
+//   - Legitimate files (DB row present, old mtime) are deleted after grace expires
+//   - Legitimate files (DB row present, fresh mtime) are preserved within grace
 func TestBlobGC_OrphanSweepRespectsGrace(t *testing.T) {
 	dm := mpminternal.NewTestDM(t)
 	blobDir := setupBlobGCHandler(t, dm)
 
 	now := time.Now()
 
-	// Create an orphan file with an old mtime (simulate age > grace).
+	// Orphan: no DB row, old mtime → deleted regardless of grace.
 	oldOrphan := filepath.Join(blobDir, "old-orphan")
 	if err := os.WriteFile(oldOrphan, []byte("old orphan"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	os.Chtimes(oldOrphan, now.Add(-2*time.Hour), now.Add(-2*time.Hour))
 
-	// Create an orphan file with a recent mtime (within grace period).
+	// Orphan: no DB row, fresh mtime → deleted regardless of grace
+	// (no DB row = crash survivor, must be removed to avoid leak).
 	freshOrphan := filepath.Join(blobDir, "fresh-orphan")
 	if err := os.WriteFile(freshOrphan, []byte("fresh orphan"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+
+	// Legitimate: DB row present, old mtime → deleted (past grace).
+	oldLegit := filepath.Join(blobDir, "old-legit")
+	if err := os.WriteFile(oldLegit, []byte("old legit"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	os.Chtimes(oldLegit, now.Add(-2*time.Hour), now.Add(-2*time.Hour))
+	insertBlob(t, dm, "old-legit", "test", 9, "text/plain", now.Add(-2*time.Hour), now.Add(24*time.Hour))
+
+	// Legitimate: DB row present, fresh mtime → preserved (within grace).
+	freshLegit := filepath.Join(blobDir, "fresh-legit")
+	if err := os.WriteFile(freshLegit, []byte("fresh legit"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	insertBlob(t, dm, "fresh-legit", "test", 11, "text/plain", now, now.Add(24*time.Hour))
 
 	origGrace := os.Getenv("MPM_BLOB_ORPHAN_GRACE")
 	os.Setenv("MPM_BLOB_ORPHAN_GRACE", "1h")
@@ -149,14 +167,22 @@ func TestBlobGC_OrphanSweepRespectsGrace(t *testing.T) {
 		t.Errorf("handleBlobGC: got exit %d, want 0", rc)
 	}
 
-	// Old orphan should be deleted.
+	// Both orphan files (no DB row) are deleted regardless of mtime.
 	if _, err := os.Stat(oldOrphan); !os.IsNotExist(err) {
-		t.Errorf("old orphan file still exists after GC (should have been swept)")
+		t.Errorf("old orphan (no DB row) still exists after GC")
+	}
+	if _, err := os.Stat(freshOrphan); !os.IsNotExist(err) {
+		t.Errorf("fresh orphan (no DB row) still exists after GC")
 	}
 
-	// Fresh orphan should remain (within grace).
-	if _, err := os.Stat(freshOrphan); os.IsNotExist(err) {
-		t.Errorf("fresh orphan file was deleted (should have been skipped as within grace period)")
+	// Old legitimate file (DB row, past grace) should be deleted.
+	if _, err := os.Stat(oldLegit); !os.IsNotExist(err) {
+		t.Errorf("old legitimate file still exists after GC (should have been swept)")
+	}
+
+	// Fresh legitimate file (DB row, within grace) should be preserved.
+	if _, err := os.Stat(freshLegit); os.IsNotExist(err) {
+		t.Errorf("fresh legitimate file was deleted (should have been preserved within grace)")
 	}
 }
 

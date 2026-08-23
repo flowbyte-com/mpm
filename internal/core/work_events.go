@@ -4,13 +4,16 @@ package internal
 type WorkEventType string
 
 const (
-	WorkEventTypeCreated        WorkEventType = "created"
-	WorkEventTypeNoteAppended  WorkEventType = "note_appended"
-	WorkEventTypeCompleted     WorkEventType = "completed"
-	WorkEventTypeCancelled     WorkEventType = "cancelled"
-	WorkEventTypeReopened     WorkEventType = "reopened"
-	WorkEventTypeTitleUpdated  WorkEventType = "title_updated"
+	WorkEventTypeCreated         WorkEventType = "created"
+	WorkEventTypeNoteAppended   WorkEventType = "note_appended"
+	WorkEventTypeCompleted      WorkEventType = "completed"
+	WorkEventTypeCancelled      WorkEventType = "cancelled"
+	WorkEventTypeReopened      WorkEventType = "reopened"
+	WorkEventTypeTitleUpdated   WorkEventType = "title_updated"
 	WorkEventTypeContentUpdated WorkEventType = "content_updated"
+	// Phase 2: provenance/verification events
+	WorkEventTypeClaimedComplete    WorkEventType = "claimed_complete"
+	WorkEventTypeEvidenceObserved   WorkEventType = "evidence_observed"
 )
 
 // WorkEvent is an immutable record of one state transition in a Work item's lifetime.
@@ -37,4 +40,14 @@ type WorkEvent struct {
 	Note   string `json:"note,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Content string `json:"content,omitempty"`
+
+	// Phase 2: provenance evidence layer
+	// Captured at event creation time to create an immutable snapshot
+	// of the repository/workspace state at the moment of the action.
+	GitHeadBefore  string `json:"git_head_before,omitempty"`   // git rev-parse HEAD before action
+	GitHeadAfter   string `json:"git_head_after,omitempty"`    // git rev-parse HEAD after action
+	DirtyBefore    bool   `json:"dirty_before"`               // git status --porcelain had output
+	DirtyAfter     bool   `json:"dirty_after"`                // git status --porcelain has output after
+	ChangedFiles   []string `json:"changed_files,omitempty"`  // files from git diff --name-only
+	Committed      bool   `json:"committed"`                  // git head moved (commit succeeded)
 }

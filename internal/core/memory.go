@@ -200,6 +200,7 @@ var validTableNames = map[string]bool{
 	"reference_chunks":    true,
 	"artifact_provenance": true,
 	"works":               true,
+	"work_events":         true,
 }
 
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.

@@ -246,11 +246,25 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var promotedAt *float64
 	var weight float64
 
-	err := dm.db.QueryRow(`
+	// BEGIN IMMEDIATE ensures a consistent read snapshot. Without a transaction,
+	// a concurrent GC batch UPDATE commit can cause GetMemory to observe a
+	// partially-applied weight change. IMMEDIATE acquires a write lock at start
+	// but GetMemory itself is read-only, so this only prevents the GC batch
+	// from committing mid-scan — it does not block concurrent reads.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	err = tx.QueryRow(`
 		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL`+MemoryExpireClause+`
 	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 

@@ -68,9 +68,8 @@ type mockOutputPolicy struct {
 	decision tools.Decision
 }
 
-func (m *mockOutputPolicy) Apply(ctx context.Context, result any) (tools.Decision, int, error) {
-	data, _ := json.Marshal(result)
-	return m.decision, len(data), nil
+func (m *mockOutputPolicy) Apply(ctx context.Context, serialized []byte) (tools.Decision, int, error) {
+	return m.decision, len(serialized), nil
 }
 
 // TestMCPAdapter_BytesMeasuredEqualBytesSpilled proves no double-marshal.
@@ -94,18 +93,16 @@ func TestMCPAdapter_BytesMeasuredEqualBytesSpilled(t *testing.T) {
 		"total": 2,
 	}
 	resultBytes, _ := json.Marshal(result)
-	decision, _, _ := op.Apply(context.Background(), result)
+	decision, _, _ := op.Apply(context.Background(), resultBytes)
 	require.Equal(t, tools.DecisionSpill, decision)
-	jsonBytes, _ := json.Marshal(result)
-	assert.Equal(t, resultBytes, jsonBytes)
 	meta := blobstore.Metadata{
 		SourceTool:  "test_tool",
-		SizeBytes:   int64(len(jsonBytes)),
+		SizeBytes:   int64(len(resultBytes)),
 		ContentType: "application/json",
 		CreatedAt:   time.Now(),
 		ExpiresAt:   time.Now().Add(24 * time.Hour),
 	}
-	_, err := mockBS.Put(context.Background(), bytes.NewReader(jsonBytes), meta)
+	_, err := mockBS.Put(context.Background(), bytes.NewReader(resultBytes), meta)
 	require.NoError(t, err)
 	require.Len(t, mockBS.putCalls, 1)
 	stored, _ := io.ReadAll(mockBS.putCalls[0].reader)
@@ -130,7 +127,7 @@ func TestMCPAdapter_NoSuccessfulResultIsTruncated(t *testing.T) {
 		"tags":    []string{"tag1", "tag2", "tag3"},
 	}
 	jsonBytes, _ := json.Marshal(result)
-	decision, _, _ := op.Apply(context.Background(), result)
+	decision, _, _ := op.Apply(context.Background(), jsonBytes)
 	require.Equal(t, tools.DecisionPass, decision)
 	assert.Contains(t, string(jsonBytes), "this is a test memory")
 	assert.Contains(t, string(jsonBytes), "tag1")
@@ -157,9 +154,9 @@ func TestMCPAdapter_SpillFailureIsBoundedError(t *testing.T) {
 	outputPolicy_ = op
 
 	result := map[string]interface{}{"id": "large-result", "data": make([]byte, 100_000)}
-	decision, _, _ := op.Apply(context.Background(), result)
-	require.Equal(t, tools.DecisionSpill, decision)
 	jsonBytes, _ := json.Marshal(result)
+	decision, _, _ := op.Apply(context.Background(), jsonBytes)
+	require.Equal(t, tools.DecisionSpill, decision)
 	meta := blobstore.Metadata{
 		SourceTool:  "test_tool",
 		SizeBytes:   int64(len(jsonBytes)),
@@ -196,7 +193,7 @@ func TestMCPAdapter_SpillEnvelopeSchema(t *testing.T) {
 		"tags":    []string{"a", "b"},
 	}
 	jsonBytes, _ := json.Marshal(result)
-	decision, _, _ := op.Apply(context.Background(), result)
+	decision, _, _ := op.Apply(context.Background(), jsonBytes)
 	require.Equal(t, tools.DecisionSpill, decision)
 	meta := blobstore.Metadata{
 		SourceTool:  "mpm_recall",

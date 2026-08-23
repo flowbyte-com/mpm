@@ -103,19 +103,28 @@ func TestScratchpad_DiscardDeletesRow(t *testing.T) {
 	}
 }
 
-func TestScratchpadOrphansSummary_FreshTag(t *testing.T) {
+// ─── ScratchpadOrphansSummary lifecycle-tag tests ─────────────────────────
+//
+// Classification contract (2026-08-22):
+//   active   : decay_at > now  — still within TTL
+//   expired  : decay_at <= now AND session record exists — TTL crossed normally
+//   orphaned : decay_at <= now AND no session record — broken reference; operator action required
+
+// TestScratchpadOrphansSummary_ActiveTag: NULL decay_at → [Active]
+// (no TTL set — never expires on a schedule; must be explicitly discarded)
+func TestScratchpadOrphansSummary_ActiveTag(t *testing.T) {
 	dm := scratchpadDM(t)
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting) VALUES (?, ?, ?)`,
-		"orphan-A", "recent thesis", ""); err != nil {
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"active-A", "recent thesis"); err != nil {
 		t.Fatal(err)
 	}
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
-	if !strings.Contains(out, "[Fresh]") {
-		t.Errorf("expected [Fresh] tag in output:\n%s", out)
+	if !strings.Contains(out, "[Active]") {
+		t.Errorf("expected [Active] tag for NULL decay_at:\n%s", out)
 	}
-	if !strings.Contains(out, "orphan-A") {
+	if !strings.Contains(out, "active-A") {
 		t.Errorf("expected session_id in output:\n%s", out)
 	}
 	if !strings.Contains(out, "recent thesis") {
@@ -123,44 +132,63 @@ func TestScratchpadOrphansSummary_FreshTag(t *testing.T) {
 	}
 }
 
+// TestScratchpadOrphansSummary_ExpiredTag: past decay_at + session record → [Expired] + "(TTL expired)"
 func TestScratchpadOrphansSummary_ExpiredTag(t *testing.T) {
 	dm := scratchpadDM(t)
-	// Backdate updated_at to >7d ago.
-	if _, err := dm.db.Exec(`
-		INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at)
-		VALUES (?, ?, CAST(strftime('%s','now', '-8 days') AS INTEGER))`,
-		"orphan-stale", "ancient thesis"); err != nil {
+	sessID := "expired-sess"
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
+		 VALUES (?, ?, CAST(strftime('%s','now','-1 hour') AS INTEGER))`,
+		sessID, "past-TTL thesis"); err != nil {
+		t.Fatal(err)
+	}
+	// session_handoffs row makes it "expired" rather than "orphaned"
+	if _, err := dm.db.Exec(
+		`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary)
+		 VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER), 'clean', 'test')`,
+		"handoff-"+sessID, sessID); err != nil {
 		t.Fatal(err)
 	}
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if !strings.Contains(out, "[Expired]") {
-		t.Errorf("expected [Expired] tag in output:\n%s", out)
+		t.Errorf("expected [Expired] tag for past decay_at with session:\n%s", out)
+	}
+	if !strings.Contains(out, "(TTL expired)") {
+		t.Errorf("expired scratchpad must show TTL expiry note:\n%s", out)
+	}
+	if strings.Contains(out, "no session record") {
+		t.Errorf("expired (not orphaned) scratchpad should NOT show orphan warning:\n%s", out)
 	}
 }
 
-func TestScratchpadOrphansSummary_DormantTag(t *testing.T) {
+// TestScratchpadOrphansSummary_OrphanedTag: past decay_at + NO session record → [Orphaned] + warning
+func TestScratchpadOrphansSummary_OrphanedTag(t *testing.T) {
 	dm := scratchpadDM(t)
-	// Backdate to 2 days — between 24h and 7d.
-	if _, err := dm.db.Exec(`
-		INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at)
-		VALUES (?, ?, CAST(strftime('%s','now', '-2 days') AS INTEGER))`,
-		"orphan-dormant", "stale-but-not-ancient"); err != nil {
+	// Past decay_at but no session_handoffs row — broken reference
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
+		 VALUES (?, ?, CAST(strftime('%s','now','-1 hour') AS INTEGER))`,
+		"orphan-sess", "past-TTL thesis, no session record"); err != nil {
 		t.Fatal(err)
 	}
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
-	if !strings.Contains(out, "[Dormant]") {
-		t.Errorf("expected [Dormant] tag in output:\n%s", out)
+	if !strings.Contains(out, "[Orphaned]") {
+		t.Errorf("expected [Orphaned] tag:\n%s", out)
+	}
+	if !strings.Contains(out, "no session record") {
+		t.Errorf("orphaned scratchpad must show no-session-record warning:\n%s", out)
 	}
 }
 
+// TestScratchpadOrphansSummary_TruncatesLongThesis: thesis truncated to max preview length
 func TestScratchpadOrphansSummary_TruncatesLongThesis(t *testing.T) {
 	dm := scratchpadDM(t)
 	longThesis := strings.Repeat("x", 500)
 	if _, err := dm.db.Exec(
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
-		"orphan-long", longThesis); err != nil {
+		"active-long", longThesis); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,7 +196,6 @@ func TestScratchpadOrphansSummary_TruncatesLongThesis(t *testing.T) {
 	if !strings.Contains(out, "...") {
 		t.Errorf("expected truncation ellipsis in output:\n%s", out)
 	}
-	// Should NOT contain the full 500-char string.
 	if strings.Contains(out, longThesis) {
 		t.Errorf("expected truncated output, got full thesis")
 	}
@@ -178,37 +205,39 @@ func TestScratchpadOrphansSummary_EmptyWhenNoOrphans(t *testing.T) {
 	dm := scratchpadDM(t)
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if out != "" {
-		t.Errorf("expected empty output for no orphans, got:\n%s", out)
+		t.Errorf("expected empty output for no scratchpads, got:\n%s", out)
 	}
 }
 
+// TestScratchpadOrphansSummary_SkipsCurrentSession: current session's scratchpad not surfaced
 func TestScratchpadOrphansSummary_SkipsCurrentSession(t *testing.T) {
 	dm := scratchpadDM(t)
 
-	// Insert a scratchpad AND a memory row from "current" session (so GetLastSession returns it).
+	// Insert current session so GetLastSession returns it.
 	if _, err := dm.db.Exec(
-		`INSERT INTO sessions (id, session_id, content, content_hash, source_path, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, session_id, content, content_hash, source_path, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"sess-current-id", "current-sess", "current session content", "hash-current", "", "{}"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting) VALUES (?, ?, ?)`,
-		"current-sess", "current scratchpad — should NOT surface", ""); err != nil {
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"current-sess", "current scratchpad — should NOT surface"); err != nil {
 		t.Fatal(err)
 	}
-	// And an orphan that SHOULD surface.
+	// A scratchpad from a DIFFERENT session SHOULD surface.
 	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting) VALUES (?, ?, ?)`,
-		"orphan-X", "orphan from previous session", ""); err != nil {
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"other-sess", "previous session scratchpad"); err != nil {
 		t.Fatal(err)
 	}
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	if strings.Contains(out, "current-sess") {
-		t.Errorf("current-session scratchpad should not surface as orphan, got:\n%s", out)
+		t.Errorf("current-session scratchpad should not surface, got:\n%s", out)
 	}
-	if !strings.Contains(out, "orphan-X") {
-		t.Errorf("expected orphan-X in output, got:\n%s", out)
+	if !strings.Contains(out, "other-sess") {
+		t.Errorf("expected other-sess in output, got:\n%s", out)
 	}
 }
 
@@ -350,93 +379,75 @@ func TestSaveMemoryNode_NoRaceWindow(t *testing.T) {
 
 // ─── Aggregate-header tests for ScratchpadOrphansSummary ──────────────
 //
-// The header carries two pieces of information: total orphan count
-// (with grammatical pluralization) and per-tag breakdown. Both must
-// stay accurate as the row set evolves.
+// The header carries three counts: active, expired, orphaned.
+// The orphaned count is the only one that demands immediate attention.
 
-func TestScratchpadOrphansSummary_AggregateHeader_MixedAges(t *testing.T) {
+func TestScratchpadOrphansSummary_AggregateHeader_MixedLifecycle(t *testing.T) {
 	dm := scratchpadDM(t)
+	now := "CAST(strftime('%s','now') AS INTEGER)"
 
-	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))`,
-		"orphan-fresh-1", "fresh one"); err != nil { t.Fatal(err) }
-	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))`,
-		"orphan-fresh-2", "fresh two"); err != nil { t.Fatal(err) }
-	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now', '-2 days') AS INTEGER))`,
-		"orphan-dormant-1", "dormant one"); err != nil { t.Fatal(err) }
-	if _, err := dm.db.Exec(
-		`INSERT INTO ephemeral_scratchpad (session_id, thesis, updated_at) VALUES (?, ?, CAST(strftime('%s','now', '-10 days') AS INTEGER))`,
-		"orphan-expired-1", "expired one"); err != nil { t.Fatal(err) }
-
-	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
-
-	if !strings.Contains(out, "4 orphans pending") {
-		t.Errorf("expected '4 orphans pending' header, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Fresh=2") {
-		t.Errorf("expected 'Fresh=2' breakdown, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Dormant=1") {
-		t.Errorf("expected 'Dormant=1' breakdown, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Expired=1") {
-		t.Errorf("expected 'Expired=1' breakdown, got:\n%s", out)
-	}
-}
-
-func TestScratchpadOrphansSummary_AggregateHeader_SingularPluralization(t *testing.T) {
-	dm := scratchpadDM(t)
-
+	// Two active (NULL decay_at)
 	if _, err := dm.db.Exec(
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
-		"orphan-solo", "lonely"); err != nil { t.Fatal(err) }
+		"active-1", "active one"); err != nil { t.Fatal(err) }
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
+		"active-2", "active two"); err != nil { t.Fatal(err) }
+	// One expired (past decay_at + session record)
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
+		 VALUES (?, ?, CAST(strftime('%s','now','-1 hour') AS INTEGER))`,
+		"expired-sess", "expired one"); err != nil { t.Fatal(err) }
+	if _, err := dm.db.Exec(
+		`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary)
+		 VALUES (?, ?, `+now+`, 'clean', 'test')`,
+		"handoff-expired", "expired-sess"); err != nil { t.Fatal(err) }
+	// One orphaned (past decay_at, no session record)
+	if _, err := dm.db.Exec(
+		`INSERT INTO ephemeral_scratchpad (session_id, thesis, decay_at)
+		 VALUES (?, ?, CAST(strftime('%s','now','-1 hour') AS INTEGER))`,
+		"orphan-solo", "orphaned one"); err != nil { t.Fatal(err) }
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
-	if !strings.Contains(out, "1 orphan pending") {
-		t.Errorf("expected singular '1 orphan pending' (no 's'), got:\n%s", out)
+
+	// Header: active=2, expired=1, orphaned=1
+	if !strings.Contains(out, "active=2") {
+		t.Errorf("expected active=2 in header, got: %s", out)
 	}
-	if strings.Contains(out, "1 orphans") {
-		t.Errorf("'1 orphans' is grammatically wrong, got:\n%s", out)
+	if !strings.Contains(out, "expired=1") {
+		t.Errorf("expected expired=1 in header, got: %s", out)
+	}
+	if !strings.Contains(out, "orphaned=1") {
+		t.Errorf("expected orphaned=1 in header, got: %s", out)
+	}
+	// Orphaned action reminder must appear when orphaned > 0
+	if !strings.Contains(out, "Action Required") {
+		t.Errorf("action reminder must appear when orphaned > 0: %s", out)
 	}
 }
 
-func TestScratchpadOrphansSummary_AggregateHeader_PluralZeroAndN(t *testing.T) {
-	dm := scratchpadDM(t)
-	// Zero orphans → no output at all (header only renders with content).
-	if got, err := dm.ScratchpadOrphansSummary(); err != nil { t.Fatal(err) } else if got != "" {
-		t.Errorf("zero orphans should produce empty output, got:\n%s", got)
-	}
-}
-
+// TestScratchpadOrphansSummary_HeaderOnFirstLine: header is the first line
 func TestScratchpadOrphansSummary_HeaderOnFirstLine(t *testing.T) {
 	dm := scratchpadDM(t)
 	if _, err := dm.db.Exec(
 		`INSERT INTO ephemeral_scratchpad (session_id, thesis) VALUES (?, ?)`,
-		"orphan-A", "test"); err != nil { t.Fatal(err) }
+		"active-A", "test"); err != nil {
+		t.Fatal(err)
+	}
 
 	out, err := dm.ScratchpadOrphansSummary(); if err != nil { t.Fatal(err) }
 	lines := strings.Split(out, "\n")
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "- Ephemeral Scratchpads") {
-		t.Errorf("first line should be the header, got:\n%v", lines)
+		t.Errorf("first line should be the header, got: %v", lines)
 	}
 }
 
-func TestTernaryPlural(t *testing.T) {
-	cases := []struct {
-		n    int
-		want string
-	}{
-		{0, "s"},   // "0 orphans"
-		{1, ""},    // "1 orphan"
-		{2, "s"},   // "2 orphans"
-		{99, "s"},  // "99 orphans"
-	}
-	for _, c := range cases {
-		got := ternaryPlural(c.n)
-		if got != c.want {
-			t.Errorf("ternaryPlural(%d) = %q, want %q", c.n, got, c.want)
-		}
+// TestScratchpadOrphansSummary_AggregateHeader_Empty: zero scratchpads → empty output
+func TestScratchpadOrphansSummary_AggregateHeader_Empty(t *testing.T) {
+	dm := scratchpadDM(t)
+	if got, err := dm.ScratchpadOrphansSummary(); err != nil { t.Fatal(err) } else if got != "" {
+		t.Errorf("empty scratchpad set should produce empty output, got: %s", got)
 	}
 }
+
+

@@ -9,16 +9,28 @@ const (
 	WorkStatusCancelled  WorkStatus = "cancelled"
 )
 
+// WorkVerification represents the epistemic verification state of a work item.
+// Distinguishes agent assertion from observable evidence from persisted state.
+type WorkVerification string
+
+const (
+	WorkVerificationUnverified  WorkVerification = "unverified"  // default, no evidence collected
+	WorkVerificationVerified    WorkVerification = "verified"    // evidence confirms completion
+	WorkVerificationPartial     WorkVerification = "partial"     // some evidence, incomplete
+	WorkVerificationContradicted WorkVerification = "contradicted" // evidence contradicts claim
+)
+
 // Work is a durable representation of an intended future action.
 type Work struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Content     string     `json:"content,omitempty"`
-	Status      WorkStatus `json:"status"`
-	CreatedAt   int64      `json:"created_at"`
-	UpdatedAt   int64      `json:"updated_at"`
-	CompletedAt *int64     `json:"completed_at,omitempty"`
-	SessionID   string     `json:"session_id,omitempty"`
+	ID            string           `json:"id"`
+	Title         string           `json:"title"`
+	Content       string           `json:"content,omitempty"`
+	Status        WorkStatus       `json:"status"`
+	Verification  WorkVerification `json:"verification"`
+	CreatedAt     int64            `json:"created_at"`
+	UpdatedAt     int64            `json:"updated_at"`
+	CompletedAt   *int64           `json:"completed_at,omitempty"`
+	SessionID     string           `json:"session_id,omitempty"`
 }
 
 // WakeContextWork is the bounded projection of a work item for wake context.

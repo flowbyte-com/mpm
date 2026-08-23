@@ -59,8 +59,8 @@ func TestRecentMilestones_OnlyAnchoredRows(t *testing.T) {
 		t.Fatalf("expected 2 milestones (anchored), got %d: %+v", len(got), got)
 	}
 	for i, m := range got {
-		if !containsMS(m.Content, "milestone:") {
-			t.Errorf("got[%d] content %q is not a milestone", i, m.Content)
+		if !containsMS(m.Summary, "milestone:") {
+			t.Errorf("got[%d] content %q is not a milestone", i, m.Summary)
 		}
 	}
 }
@@ -86,7 +86,7 @@ func TestRecentMilestones_Only30DayWindow(t *testing.T) {
 		t.Fatalf("expected 2 milestones in 30d window (edge+today), got %d: %+v", len(got), got)
 	}
 	for _, m := range got {
-		if m.Content == "ancient: pre-window" {
+		if m.Summary == "ancient: pre-window" {
 			t.Errorf("ancient milestone leaked into 30d window: %+v", m)
 		}
 	}
@@ -107,11 +107,11 @@ func TestRecentMilestones_Limit(t *testing.T) {
 	if len(got) != 5 {
 		t.Fatalf("expected exactly 5 (limit), got %d", len(got))
 	}
-	if !containsMS(got[0].Content, "#G") {
-		t.Errorf("newest milestone expected to be '#G' (most recent insert), got %q", got[0].Content)
+	if !containsMS(got[0].Summary, "#G") {
+		t.Errorf("newest milestone expected to be '#G' (most recent insert), got %q", got[0].Summary)
 	}
-	if !containsMS(got[4].Content, "#C") {
-		t.Errorf("oldest retained milestone expected to be '#C' (4th insert), got %q", got[4].Content)
+	if !containsMS(got[4].Summary, "#C") {
+		t.Errorf("oldest retained milestone expected to be '#C' (4th insert), got %q", got[4].Summary)
 	}
 }
 
@@ -143,8 +143,8 @@ func TestRecentMilestones_DoesNotMisclassifyPrefixes(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 milestone (the trap filtered out), got %d: %+v", len(got), got)
 	}
-	if got[0].Content != "real milestone" {
-		t.Errorf("expected 'real milestone', got %q", got[0].Content)
+	if got[0].Summary != "real milestone" {
+		t.Errorf("expected 'real milestone', got %q", got[0].Summary)
 	}
 }
 

@@ -12,19 +12,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// marshal encodes a value to JSON bytes. Used by tests that need to supply
+// pre-serialized bytes to OutputPolicy.Apply.
+func marshal(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
 func TestOutputPolicy_ThresholdBoundary(t *testing.T) {
 	// threshold=10: strict > is needed to spill.
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "10")
 	policy := DefaultOutputPolicy()
 
 	// 8 bytes -> Pass (8 <= 10)
-	dec, n, err := policy.Apply(context.Background(), map[string]int{"ab": 1})
+	dec, n, err := policy.Apply(context.Background(), marshal(map[string]int{"ab": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
 	assert.Equal(t, 8, n) // {"ab":1} = 8 bytes
 
 	// 11 bytes -> Spill (11 > 10); {"abcde":1} = 11 bytes
-	dec, n, err = policy.Apply(context.Background(), map[string]int{"abcde": 1})
+	dec, n, err = policy.Apply(context.Background(), marshal(map[string]int{"abcde": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionSpill, dec)
 	assert.Equal(t, 11, n) // {"abcd":1} = 11 bytes
@@ -42,15 +49,15 @@ func TestOutputPolicy_ThresholdBoundary_EdgeCases(t *testing.T) {
 	// {"abcde":1}= 11 bytes -> Spill (11 > 10)
 	testCases := []struct {
 		name     string
-		input    any
+		input    []byte
 		expected Decision
 		wantLen  int
 	}{
-		{"7 bytes", map[string]int{"a": 1}, DecisionPass, 7},
-		{"8 bytes", map[string]int{"ab": 1}, DecisionPass, 8},
-		{"9 bytes", map[string]int{"abc": 1}, DecisionPass, 9},
-		{"10 bytes at boundary", map[string]int{"abcd": 1}, DecisionPass, 10},  // {"abcd":1} = 10 == threshold
-		{"11 bytes over", map[string]int{"abcde": 1}, DecisionSpill, 11},         // {"abcde":1} = 11 > threshold
+		{"7 bytes", marshal(map[string]int{"a": 1}), DecisionPass, 7},
+		{"8 bytes", marshal(map[string]int{"ab": 1}), DecisionPass, 8},
+		{"9 bytes", marshal(map[string]int{"abc": 1}), DecisionPass, 9},
+		{"10 bytes at boundary", marshal(map[string]int{"abcd": 1}), DecisionPass, 10}, // {"abcd":1} = 10 == threshold
+		{"11 bytes over", marshal(map[string]int{"abcde": 1}), DecisionSpill, 11},      // {"abcde":1} = 11 > threshold
 	}
 
 	for _, tc := range testCases {
@@ -63,20 +70,16 @@ func TestOutputPolicy_ThresholdBoundary_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestOutputPolicy_MarshalFailureReturnsError(t *testing.T) {
+func TestOutputPolicy_BytesNotModifiedByApply(t *testing.T) {
+	// Apply must not modify the serialized bytes passed to it.
 	policy := DefaultOutputPolicy()
+	original := []byte(`{"key":"value"}`)
 
-	type cyclic struct {
-		C *cyclic `json:"c"`
-	}
-	c := &cyclic{}
-	c.C = c
-
-	dec, n, err := policy.Apply(context.Background(), c)
-	assert.Error(t, err)
-	assert.Equal(t, Decision(0), dec)
-	assert.Equal(t, 0, n)
-	assert.NotEqual(t, DecisionSpill, dec)
+	dec, n, err := policy.Apply(context.Background(), original)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionPass, dec)
+	assert.Equal(t, len(original), n)
+	assert.Equal(t, `{"key":"value"}`, string(original), "bytes must not be modified by Apply")
 }
 
 func TestOutputPolicy_ContextCanceled(t *testing.T) {
@@ -85,7 +88,7 @@ func TestOutputPolicy_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	dec, n, err := policy.Apply(ctx, map[string]int{"a": 1})
+	dec, n, err := policy.Apply(ctx, marshal(map[string]int{"a": 1}))
 	assert.Error(t, err)
 	assert.Equal(t, Decision(0), dec)
 	assert.Equal(t, 0, n)
@@ -94,11 +97,9 @@ func TestOutputPolicy_ContextCanceled(t *testing.T) {
 
 func TestOutputPolicy_NoBlobStoreReference(t *testing.T) {
 	// Architecture guard: ensure no blobstore import exists in output_policy.go.
-	// Uses an absolute path so it works regardless of CWD.
 	thisFile := filepath.Join(os.Getenv("MPM_WORKSPACE"),
 		"internal/core/tools/output_policy.go")
 	if thisFile == "/" || thisFile == "" {
-		// Fallback: construct from test process working dir.
 		cwd, _ := os.Getwd()
 		thisFile = filepath.Join(cwd, "output_policy.go")
 	}
@@ -114,7 +115,7 @@ func TestOutputPolicy_DefaultThreshold(t *testing.T) {
 	policy := DefaultOutputPolicy()
 
 	// {"a":1} = 7 bytes; with default 10240, always passes.
-	dec, n, err := policy.Apply(context.Background(), map[string]int{"a": 1})
+	dec, n, err := policy.Apply(context.Background(), marshal(map[string]int{"a": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
 	assert.Equal(t, 7, n)
@@ -124,12 +125,12 @@ func TestOutputPolicy_EnvVarOverride(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "1024")
 	policy := DefaultOutputPolicy()
 
-	dec, _, err := policy.Apply(context.Background(), map[string]int{"a": 1})
+	dec, _, err := policy.Apply(context.Background(), marshal(map[string]int{"a": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
 
 	large := map[string]string{"data": string(make([]byte, 2000))}
-	dec, n, err := policy.Apply(context.Background(), large)
+	dec, n, err := policy.Apply(context.Background(), marshal(large))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionSpill, dec)
 	assert.True(t, n > 1024)
@@ -139,10 +140,10 @@ func TestOutputPolicy_EnvVarInvalid(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "not-a-number")
 	policy := DefaultOutputPolicy()
 
-	dec, n, err := policy.Apply(context.Background(), map[string]int{"a": 1})
+	dec, n, err := policy.Apply(context.Background(), marshal(map[string]int{"a": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
-	assert.Equal(t, 7, n)
+	assert.Equal(t, 7, n) // falls back to 10240
 }
 
 func TestOutputPolicy_EnvVarZero(t *testing.T) {
@@ -150,7 +151,7 @@ func TestOutputPolicy_EnvVarZero(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "0")
 	policy := DefaultOutputPolicy()
 
-	dec, _, err := policy.Apply(context.Background(), map[string]int{"a": 1})
+	dec, _, err := policy.Apply(context.Background(), marshal(map[string]int{"a": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
 }
@@ -159,34 +160,21 @@ func TestOutputPolicy_NegativeEnvVar(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "-5")
 	policy := DefaultOutputPolicy()
 
-	dec, _, err := policy.Apply(context.Background(), map[string]int{"a": 1})
+	dec, _, err := policy.Apply(context.Background(), marshal(map[string]int{"a": 1}))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionPass, dec)
 }
 
-func TestOutputPolicy_ReturnsErrorNotSpill(t *testing.T) {
-	policy := DefaultOutputPolicy()
-	type untagged struct {
-		C chan int `json:"c"`
-	}
-
-	dec, n, err := policy.Apply(context.Background(), untagged{})
-	assert.Error(t, err)
-	assert.Equal(t, Decision(0), dec)
-	assert.Equal(t, 0, n)
-}
-
-// TestOutputPolicy_BytesMeasuredEqualBytesSpilled proves the OutputPolicy
-// measured bytes are the same bytes passed to BlobStore.Put — no double-marshal.
-// This is the Phase 1 no-gzip invariant: the exact bytes measured by Apply
-// are the exact bytes supplied to Put.
-func TestOutputPolicy_BytesMeasuredEqualBytesSpilled(t *testing.T) {
+// TestOutputPolicy_BytesMeasuredEqualBytesReturned proves the single-marshal
+// guarantee: the bytes returned by Apply are exactly the json.Marshal bytes,
+// not a second marshal of the result. This is the Phase 1 no-waste invariant.
+func TestOutputPolicy_BytesMeasuredEqualsJsonMarshal(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "1024")
 	policy := DefaultOutputPolicy()
 
 	// Large result that spills.
 	result := map[string]string{"data": string(make([]byte, 2000))}
-	decision, bytes, err := policy.Apply(context.Background(), result)
+	decision, bytes, err := policy.Apply(context.Background(), marshal(result))
 	require.NoError(t, err)
 	assert.Equal(t, DecisionSpill, decision)
 	assert.True(t, bytes > 1024)
@@ -205,7 +193,7 @@ func TestOutputPolicy_DecisionDeterminism(t *testing.T) {
 	t.Setenv("MPM_MCP_MAX_RESULT_BYTES", "100")
 	policy := DefaultOutputPolicy()
 
-	input := map[string]int{"items": 1}
+	input := marshal(map[string]int{"items": 1})
 
 	// Apply 10 times — all decisions and byte counts must match.
 	var firstDecision Decision

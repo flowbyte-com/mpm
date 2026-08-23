@@ -8,7 +8,9 @@ import (
 var (
 	ErrPointerMalformed   = errors.New("pointer: malformed URI")
 	ErrPointerWrongScheme = errors.New("pointer: wrong scheme")
-	ErrUnsupportedKind    = errors.New("pointer: unsupported kind for Phase 1")
+	// ErrUnsupportedKind is defined in github.com/flowbyte-com/mpm-core/tools
+	// and used by resolve.go to maintain a single sentinel value across
+	// the pointer and tools packages.
 )
 
 // idPattern matches valid blob/file IDs: lowercase alphanumeric plus hyphens.

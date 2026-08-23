@@ -3,6 +3,8 @@ package pointer
 import (
 	"context"
 	"io"
+
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 type ResolveOptions struct {
@@ -21,10 +23,10 @@ type Resolver interface {
 }
 
 // Resolve calls r.Resolve if r is non-nil.
-// When r is nil (Phase 1 — blobstore not yet wired), it returns ErrUnsupportedKind.
+// When r is nil (Phase 1 — blobstore not yet wired), it returns tools.ErrUnsupportedKind.
 func Resolve(ctx context.Context, r Resolver, p Pointer, opts ResolveOptions) (Resolution, error) {
 	if r == nil {
-		return Resolution{}, ErrUnsupportedKind
+		return Resolution{}, tools.ErrUnsupportedKind
 	}
 	return r.Resolve(ctx, p, opts)
 }

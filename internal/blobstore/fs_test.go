@@ -577,25 +577,53 @@ func TestGCSweepOrphans_RespectsGrace(t *testing.T) {
 	now := time.Now()
 
 	// Create an old orphan file (no DB row, mtime > grace).
+	// Deleted regardless of grace — no DB row means genuine orphan
+	// (crash between rename and INSERT, never inserted).
 	oldPath := filepath.Join(blobDir, "old-orphan")
 	require.NoError(t, os.WriteFile(oldPath, []byte("old"), 0o600))
 	require.NoError(t, os.Chtimes(oldPath, now.Add(-2*time.Hour), now.Add(-2*time.Hour)))
 
 	// Create a fresh orphan file (no DB row, mtime < grace).
+	// ALSO deleted regardless of grace — files with no DB row are always
+	// orphans; grace only protects files that have a DB row and might
+	// still be referenced by an in-flight request.
 	freshPath := filepath.Join(blobDir, "fresh-orphan")
 	require.NoError(t, os.WriteFile(freshPath, []byte("fresh"), 0o600))
 	// chtimes on a fresh file leaves it with recent mtime.
+
+	// Create a legitimate file with DB row, but old mtime > grace.
+	// Should be deleted (orphaned after its DB row was removed).
+	oldLegitPath := filepath.Join(blobDir, "old-legit")
+	require.NoError(t, os.WriteFile(oldLegitPath, []byte("legit"), 0o600))
+	require.NoError(t, os.Chtimes(oldLegitPath, now.Add(-2*time.Hour), now.Add(-2*time.Hour)))
+	_, err = db.Exec(`INSERT INTO blobs (id, source_tool, size_bytes, content_type, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"old-legit", "test", 4, "text/plain", now.Unix(), now.Add(24*time.Hour).Unix())
+	require.NoError(t, err)
+
+	// Create a legitimate file with DB row, fresh mtime < grace.
+	// Should be preserved — file is still referenced by its DB row.
+	freshLegitPath := filepath.Join(blobDir, "fresh-legit")
+	require.NoError(t, os.WriteFile(freshLegitPath, []byte("legit"), 0o600))
+	_, err = db.Exec(`INSERT INTO blobs (id, source_tool, size_bytes, content_type, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"fresh-legit", "test", 4, "text/plain", now.Unix(), now.Add(24*time.Hour).Unix())
+	require.NoError(t, err)
 
 	// Run GC with 1-hour grace.
 	stats, err := fs.GCSweepOrphans(context.Background(), 1*time.Hour)
 	require.NoError(t, err)
 	assert.True(t, stats.Success)
 
-	// Old orphan should be deleted.
+	// Both orphan files (no DB row) are deleted regardless of mtime.
 	_, err = os.Stat(oldPath)
-	assert.True(t, os.IsNotExist(err), "old orphan should be deleted by GC")
-
-	// Fresh orphan should remain.
+	assert.True(t, os.IsNotExist(err), "old orphan (no DB row) should be deleted")
 	_, err = os.Stat(freshPath)
-	assert.NoError(t, err, "fresh orphan within grace period should be preserved")
+	assert.True(t, os.IsNotExist(err), "fresh orphan (no DB row) should be deleted")
+
+	// Old legitimate file (DB row present, mtime > grace) should be deleted.
+	_, err = os.Stat(oldLegitPath)
+	assert.True(t, os.IsNotExist(err), "old legitimate file (DB row, past grace) should be deleted")
+
+	// Fresh legitimate file (DB row present, within grace) should be preserved.
+	_, err = os.Stat(freshLegitPath)
+	assert.NoError(t, err, "fresh legitimate file (DB row, within grace) should be preserved")
 }

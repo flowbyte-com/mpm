@@ -175,6 +175,114 @@ func handleCommitMilestone(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 }
 
 // callQueryLongTermMemory searches memory for context.
+// ── Phase 2B: Pointer-native recall ─────────────────────────────────────────
+
+// RetrievedEntryMetadata is the retrieval telemetry for a single artifact.
+// Stable schema: the key is always present in the JSON output; the value is
+// null when the artifact has never been retrieved.
+type RetrievedEntryMetadata struct {
+	ReuseCount      int    `json:"reuse_count"`
+	SuccessCount    int    `json:"success_count"`
+	LastRetrievedAt string `json:"last_retrieved_at,omitempty"` // RFC3339; "" = never
+}
+
+// ProjectedMemoryEntry is the Phase 2B pointer-native recall output shape.
+// Instead of full content, the agent receives a summary, the canonical pointer URI,
+// and retrieval telemetry. This keeps the recall payload bounded while preserving
+// a cheap re-retrieval path via mpm_resolve.
+type ProjectedMemoryEntry struct {
+	ID                 string                  `json:"id"`
+	Summary            string                  `json:"summary"`          // first 256 chars via SummarizeMemory
+	Pointer            string                  `json:"pointer"`          // "mpm://memory/<id>"
+	Type               string                  `json:"type"`             // always "memory"
+	Tags               []string                `json:"tags,omitempty"`
+	Collection         string                  `json:"collection"`
+	CreatedAt          int64                   `json:"created_at"`
+	ReinforcementCount int                     `json:"reinforcement_count"`
+	Weight             int                     `json:"weight"`
+	// RetrievalMetadata key always present; null when never retrieved.
+	RetrievalMetadata *RetrievedEntryMetadata `json:"retrieval_metadata"`
+	Score             float64                 `json:"score"`
+	Rationale         string                  `json:"rationale"`
+	IsStale           bool                    `json:"is_stale"`
+}
+
+// ProjectedLessonEntry is the Phase 2D pointer-native lesson output shape.
+// Compact lessons are returned in full; the pointer enables re-retrieval.
+type ProjectedLessonEntry struct {
+	ID                 string                  `json:"id"`
+	Summary            string                  `json:"summary"`    // full (lessons are compact)
+	Pointer            string                  `json:"pointer"`   // "mpm://lesson/<id>"
+	Type               string                  `json:"type"`      // warning/practice/insight
+	Tags               []string                `json:"tags,omitempty"`
+	CreatedAt          string                  `json:"created_at"`
+	ReinforcementCount int                     `json:"reinforcement_count"`
+	// RetrievalMetadata key always present; null when never retrieved.
+	RetrievalMetadata *RetrievedEntryMetadata `json:"retrieval_metadata"`
+	Rationale         string                  `json:"rationale"`
+}
+
+// computeScore derives a scalar from a memory map for projected output.
+// Mirrors the scoring logic used in the FTS retrieval path.
+func computeScore(mem map[string]interface{}) float64 {
+	score, _ := mem["combined_score"].(float64)
+	if score == 0 {
+		weight, _ := mem["weight"].(int)
+		reinf, _ := mem["reinforcement_count"].(int)
+		score = float64(reinf*2) + float64(weight)*1.5
+	}
+	return score
+}
+
+// formatRationaleForMemory produces a human-readable provenance string for
+// a projected memory entry.
+func formatRationaleForMemory(mem map[string]interface{}) string {
+	parts := make([]string, 0, 3)
+	if coll, ok := mem["collection"].(string); ok && coll != "" {
+		parts = append(parts, coll)
+	}
+	if w, ok := mem["weight"].(int); ok && w > 0 {
+		parts = append(parts, fmt.Sprintf("weight %d", w))
+	}
+	if r, ok := mem["reinforcement_count"].(int); ok && r > 0 {
+		parts = append(parts, fmt.Sprintf("%dx ref", r))
+	}
+	if len(parts) == 0 {
+		return "memory"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// isMemoryStaleForProjection returns true when a memory has not been accessed
+// in the last 14 days.
+func isMemoryStaleForProjection(mem map[string]interface{}) bool {
+	// last_accessed_at may be nil for memories created before the column was added.
+	v, ok := mem["last_accessed_at"]
+	if !ok || v == nil {
+		// Fall back to created_at.
+		v, ok = mem["created_at"]
+		if !ok {
+			return false
+		}
+	}
+	var unixSec int64
+	switch n := v.(type) {
+	case float64:
+		unixSec = int64(n)
+	case int64:
+		unixSec = n
+	case int:
+		unixSec = int64(n)
+	default:
+		return false
+	}
+	if unixSec == 0 {
+		return false
+	}
+	age := time.Now().Unix() - unixSec
+	return age > 14*24*3600
+}
+
 func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	if query == "" {
@@ -206,6 +314,70 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			_ = dm.RecordRetrieval(id, coll)
 		}
 	}
+
+	// Phase 2B: pointer-native projection.
+	projection, _ := p["projection"].(bool)
+	if projection {
+		projected := make([]ProjectedMemoryEntry, 0, len(items))
+		for _, mem := range items {
+			// Extract fields from the map.
+			id, _ := mem["id"].(string)
+			content, _ := mem["content"].(string)
+			tags, _ := mem["tags"].([]string)
+			coll, _ := mem["collection"].(string)
+			createdAt, _ := mem["created_at"].(float64)
+			reinf, _ := mem["reinforcement_count"].(int)
+			weight, _ := mem["weight"].(int)
+
+			summary := internal.SummarizeMemory(content, 256)
+
+			// Retrieval metadata: key always present, null when never retrieved.
+			var retMeta *RetrievedEntryMetadata
+			if dm != nil {
+				meta, err := dm.GetRetrievalMetadata(id)
+				if err == nil && meta.ReuseCount > 0 {
+					lastRetrieved := ""
+					if meta.LastRetrievedAt != nil {
+						lastRetrieved = time.Unix(*meta.LastRetrievedAt, 0).Format(time.RFC3339)
+					}
+					retMeta = &RetrievedEntryMetadata{
+						ReuseCount:      meta.ReuseCount,
+						SuccessCount:    meta.SuccessCount,
+						LastRetrievedAt: lastRetrieved,
+					}
+				}
+			}
+
+			rationale := formatRationaleForMemory(mem)
+			isStale := isMemoryStaleForProjection(mem)
+
+			projected = append(projected, ProjectedMemoryEntry{
+				ID:                  id,
+				Summary:             summary,
+				Pointer:             "mpm://memory/" + id,
+				Type:                "memory",
+				Tags:                tags,
+				Collection:          coll,
+				CreatedAt:           int64(createdAt),
+				ReinforcementCount:  reinf,
+				Weight:              weight,
+				RetrievalMetadata:   retMeta,
+				Score:               computeScore(mem),
+				Rationale:           rationale,
+				IsStale:             isStale,
+			})
+		}
+		return map[string]interface{}{
+			"success": true,
+			"mode":    "projected",
+			"query":   query,
+			"memories": projected,
+			"count":   len(projected),
+			"scope":   defaultScope(scope),
+		}, nil
+	}
+
+	// Default: full-content output (Phase 1 behavior, unchanged).
 	return map[string]interface{}{
 		"success":  true,
 		"memories": items,
@@ -762,6 +934,61 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			_ = dm.RecordRetrieval(id, "lesson")
 		}
 	}
+
+	// Phase 2D: pointer-native projection.
+	projection, _ := p["projection"].(bool)
+	if projection {
+		projected := make([]ProjectedLessonEntry, 0, len(items))
+		for _, item := range items {
+			id, _ := item["id"].(string)
+			content, _ := item["content"].(string)
+			lessonType, _ := item["type"].(string)
+			tags, _ := item["tags"].([]string)
+			created, _ := item["created_at"].(string)
+
+			summary := internal.SummarizeMemory(content, 256)
+
+			var retMeta *RetrievedEntryMetadata
+			if dm != nil {
+				meta, err := dm.GetRetrievalMetadata(id)
+				if err == nil && meta.ReuseCount > 0 {
+					lastRetrieved := ""
+					if meta.LastRetrievedAt != nil {
+						lastRetrieved = time.Unix(*meta.LastRetrievedAt, 0).Format(time.RFC3339)
+					}
+					retMeta = &RetrievedEntryMetadata{
+						ReuseCount:      meta.ReuseCount,
+						SuccessCount:    meta.SuccessCount,
+						LastRetrievedAt: lastRetrieved,
+					}
+				}
+			}
+
+			rationale := fmt.Sprintf("%s · %dx ref", lessonType, 0)
+			if tags != nil && len(tags) > 0 {
+				rationale = strings.Join(tags, ", ")
+			}
+
+			projected = append(projected, ProjectedLessonEntry{
+				ID:                 id,
+				Summary:            summary,
+				Pointer:            "mpm://lesson/" + id,
+				Type:               lessonType,
+				Tags:               tags,
+				CreatedAt:          created,
+				RetrievalMetadata:   retMeta,
+				Rationale:          rationale,
+			})
+		}
+		return map[string]interface{}{
+			"success": true,
+			"mode":    "projected",
+			"query":   query,
+			"lessons": projected,
+			"count":   len(projected),
+		}, nil
+	}
+
 	return map[string]interface{}{
 		"success": true,
 		"results": items,
@@ -777,6 +1004,60 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if err != nil {
 		return nil, err
 	}
+
+	// Phase 2D: pointer-native projection.
+	projection, _ := p["projection"].(bool)
+	if projection {
+		projected := make([]ProjectedLessonEntry, 0, len(items))
+		for _, item := range items {
+			id, _ := item["id"].(string)
+			content, _ := item["content"].(string)
+			lessonType, _ := item["type"].(string)
+			tags, _ := item["tags"].([]string)
+			created, _ := item["created_at"].(string)
+
+			summary := internal.SummarizeMemory(content, 256)
+
+			var retMeta *RetrievedEntryMetadata
+			if dm != nil {
+				meta, err := dm.GetRetrievalMetadata(id)
+				if err == nil && meta.ReuseCount > 0 {
+					lastRetrieved := ""
+					if meta.LastRetrievedAt != nil {
+						lastRetrieved = time.Unix(*meta.LastRetrievedAt, 0).Format(time.RFC3339)
+					}
+					retMeta = &RetrievedEntryMetadata{
+						ReuseCount:      meta.ReuseCount,
+						SuccessCount:    meta.SuccessCount,
+						LastRetrievedAt: lastRetrieved,
+					}
+				}
+			}
+
+			rationale := fmt.Sprintf("%s · %dx ref", lessonType, 0)
+			if tags != nil && len(tags) > 0 {
+				rationale = strings.Join(tags, ", ")
+			}
+
+			projected = append(projected, ProjectedLessonEntry{
+				ID:                 id,
+				Summary:            summary,
+				Pointer:            "mpm://lesson/" + id,
+				Type:               lessonType,
+				Tags:               tags,
+				CreatedAt:          created,
+				RetrievalMetadata:   retMeta,
+				Rationale:          rationale,
+			})
+		}
+		return map[string]interface{}{
+			"success": true,
+			"mode":    "projected",
+			"lessons": projected,
+			"count":   len(projected),
+		}, nil
+	}
+
 	return map[string]interface{}{
 		"success": true,
 		"lessons": items,
@@ -932,7 +1213,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	for _, m := range data.RecentMemories {
 		memRefs = append(memRefs, map[string]interface{}{
 			"id":         m.ID,
-			"content":    m.Content,
+			"summary":    m.Summary,
+			"pointer":    m.Pointer,
 			"created_at": m.CreatedAt,
 		})
 		// Observability Layer: every node pulled into the boot prompt
@@ -945,7 +1227,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	for _, m := range data.RecentMilestones {
 		milestoneRefs = append(milestoneRefs, map[string]interface{}{
 			"id":         m.ID,
-			"content":    m.Content,
+			"summary":    m.Summary,
+			"pointer":    m.Pointer,
 			"created_at": m.CreatedAt,
 		})
 		_ = dm.RecordRetrieval(m.ID, "memory")
@@ -3515,8 +3798,9 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 // ── Pointer / Blob tools (Phase 1) ────────────────────────────────────────
 
 // handleMpmResolve resolves a mpm:// URI to its content via the global resolver.
-// Phase 1 supports mpm://blob/<id> and mpm://work/<id>. max_bytes applies a soft ceiling
-// on the amount of content returned; 0 means unlimited.
+// Phase 2 supports mpm://blob/<id>, mpm://memory/<id>, mpm://lesson/<id>,
+// and mpm://theory/<id>. max_bytes applies a soft ceiling on the amount of
+// content returned; 0 means unlimited (subject to the resolver's own limits).
 func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
 	uri, _ := payload["uri"].(string)
 	if uri == "" {
@@ -3530,9 +3814,9 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return nil, err
 	}
 
-	// Phase 1: only blob and work kinds are supported.
-	if ptr.Kind != "blob" && ptr.Kind != "work" {
-		return nil, fmt.Errorf("%w: unsupported kind: %s", ErrUnsupportedKind, ptr.Kind)
+	// Phase 2: all four kinds are supported.
+	if ptr.Kind != "blob" && ptr.Kind != "work" && ptr.Kind != "memory" && ptr.Kind != "lesson" && ptr.Kind != "theory" {
+		return nil, fmt.Errorf("%w: Phase 2 supports mpm://blob/, work/, memory/, lesson/, and theory/", ErrUnsupportedKind)
 	}
 
 	if globalResolver == nil {
@@ -3550,17 +3834,37 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return nil, err
 	}
 
-	return map[string]interface{}{
+	resp := map[string]interface{}{
 		"content":      string(content),
 		"content_type": result.ContentType,
-		"metadata":     result.Metadata,
-	}, nil
+		"pointer":      result.Pointer,
+		"bounded":      result.Bounded,
+	}
+	if result.Metadata != nil {
+		resp["metadata"] = result.Metadata
+	}
+	return resp, nil
 }
 
 // parsePointerURI parses a mpm:// URI into a Pointer.
 // Duplicates internal/pointer.Parse logic here so mpm-core tools does not
 // need to import the main module's pointer package.
+// parsePointerURI is a local copy of pointer.Parse for use by the tools
+// package, which cannot import the main module's internal/pointer package.
+// This implementation must stay in sync with pointer.Parse.
+//
+// Key invariants shared with pointer.Parse:
+//   - Rejects URIs containing '?' or '#' (query/fragment components)
+//   - Validates id against ^[a-z0-9-]+$
+//   - Returns ErrPointerWrongScheme / ErrPointerMalformed as documented
 func parsePointerURI(uri string) (Pointer, error) {
+	// Reject query strings and fragments before scheme check (same as pointer.Parse).
+	for _, c := range uri {
+		if c == '?' || c == '#' {
+			return Pointer{}, fmt.Errorf("pointer: malformed URI")
+		}
+	}
+
 	const scheme = "mpm://"
 	if len(uri) < len(scheme) || uri[:len(scheme)] != scheme {
 		return Pointer{}, fmt.Errorf("pointer: wrong scheme (expected mpm://)")
@@ -3583,7 +3887,7 @@ func parsePointerURI(uri string) (Pointer, error) {
 	if kind == "" || id == "" {
 		return Pointer{}, fmt.Errorf("pointer: malformed URI")
 	}
-	// Validate id: lowercase alphanumeric plus hyphens.
+	// Validate id: lowercase alphanumeric plus hyphens (same as pointer.Parse).
 	for _, c := range id {
 		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
 			return Pointer{}, fmt.Errorf("pointer: malformed URI")
