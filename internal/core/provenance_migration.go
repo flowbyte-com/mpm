@@ -157,7 +157,22 @@ func (dm *DatabaseManager) migrateArtifactProvenanceWorkType() error {
 	if strings.Contains(createSQL, "'work'") {
 		// Check if the view is also corrupted.
 		var viewSQL string
-		_ = dm.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='view' AND name='v_model_memory_yield'`).Scan(&viewSQL)
+		err := dm.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='view' AND name='v_model_memory_yield'`).Scan(&viewSQL)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			// View doesn't exist or other error, best-effort probe
+			return nil
+		}
+		if viewSQL == "" || !strings.Contains(viewSQL, "artifact_provenance_old") {
+			// View is fine or absent — nothing to do.
+			return nil
+		}
+		if err != nil {
+			// Best-effort probe for view state; view may not exist
+			return nil
+		}
 		if viewSQL == "" || !strings.Contains(viewSQL, "artifact_provenance_old") {
 			// View is fine or absent — nothing to do.
 			return nil
@@ -211,7 +226,16 @@ func (dm *DatabaseManager) migrateArtifactProvenanceWorkType() error {
 		},
 	}
 	for _, v := range viewsToRestore {
-		if _, err := dm.db.Exec("DROP VIEW IF EXISTS " + v[0]); err != nil {
+		var dropSQL string
+		switch v[0] {
+		case "v_model_memory_yield":
+			dropSQL = "DROP VIEW IF EXISTS v_model_memory_yield"
+		case "v_model_theory_utility":
+			dropSQL = "DROP VIEW IF EXISTS v_model_theory_utility"
+		default:
+			return fmt.Errorf("migrateArtifactProvenanceWorkType: unknown view %q", v[0])
+		}
+		if _, err := dm.db.Exec(dropSQL); err != nil {
 			return fmt.Errorf("migrateArtifactProvenanceWorkType: drop view: %w", err)
 		}
 	}
@@ -311,8 +335,17 @@ func (dm *DatabaseManager) migrateArtifactProvenanceWorkType() error {
 
 	// Recreate the dropped views against the new artifact_provenance table.
 	for _, v := range viewsToRestore {
-		if _, err := dm.db.Exec(v[1]); err != nil {
-			return fmt.Errorf("migrateArtifactProvenanceWorkType: recreate view %s: %w", v[0], err)
+		var dropSQL string
+		switch v[0] {
+		case "v_model_memory_yield":
+			dropSQL = "DROP VIEW IF EXISTS v_model_memory_yield"
+		case "v_model_theory_utility":
+			dropSQL = "DROP VIEW IF EXISTS v_model_theory_utility"
+		default:
+			return fmt.Errorf("migrateArtifactProvenanceWorkType: unknown view %q", v[0])
+		}
+		if _, err := dm.db.Exec(dropSQL); err != nil {
+			return fmt.Errorf("migrateArtifactProvenanceWorkType: drop view: %w", err)
 		}
 	}
 

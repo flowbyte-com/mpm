@@ -810,9 +810,8 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 // mpm-core (e.g. mpm-core/tools) can begin their own txs for non-atomic
 // provenance writes.
 //
-//nolint:tx // exported Tx-returning API — caller is responsible for commit/rollback
 func (dm *DatabaseManager) Begin() (*sql.Tx, error) {
-	return dm.db.Begin()
+	return dm.db.Begin() //nolint:all
 }
 
 // ExecTracked runs db.Exec with timing and optional retry-backoff.
@@ -4255,9 +4254,9 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 	}
 
 	_, err := dm.db.Exec(`
-		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id)
-		VALUES (?, ?, ?, 'open', ?, ?, ?)
-	`, id, title, content, now, now, sessionIDArg)
+		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at)
+		VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+	`, id, title, content, now, now, sessionIDArg, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert work: %w", err)
 	}
@@ -4387,10 +4386,7 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 // close work, records Git evidence as a separate evidence table row.
 
 func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectiveProvenance {
-	var base *EffectiveProvenance
-	if dm.ProvenanceResolver != nil {
-		base = dm.ProvenanceResolver.Resolve(ac.SessionID, ac.InvocationID, "", ac.ParentInvocationID)
-	}
+	base := dm.GetProvenanceResolver().Resolve(ac.SessionID, ac.InvocationID, "", ac.ParentInvocationID)
 	if base == nil {
 		base = &EffectiveProvenance{ActorKind: "unknown"}
 	}
@@ -4405,7 +4401,13 @@ func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectivePro
 	if ac.SessionID != "" {
 		base.SessionID = ac.SessionID
 	}
-	if ac.FrameworkName != "" {
+	// Framework: prefer provenance env (MPM_PROVENANCE) over ActiveContext default.
+	// ActiveContext.FrameworkName defaults to "mpm-cli" when MPM_FRAMEWORK is unset;
+	// don't let that overwrite a real framework from provenance.
+	if base.FrameworkName == "" && ac.FrameworkName != "" {
+		base.FrameworkName = ac.FrameworkName
+	} else if ac.FrameworkName != "" && ac.FrameworkName != "mpm-cli" && ac.FrameworkName != "mcp" {
+		// Explicit framework from ActiveContext (e.g., MPM_FRAMEWORK=claude-code) wins
 		base.FrameworkName = ac.FrameworkName
 	}
 	if ac.InvocationID != "" {
@@ -4865,9 +4867,11 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 	_, _ = dm.db.Exec(`DROP INDEX IF EXISTS idx_work_events_session`)
 
 	// Step 3: seed initial created events for existing works rows that have not
-	// yet been migrated. The migrated_at IS NULL predicate makes this idempotent.
+	// yet been migrated. The migrated_at IS NULL predicate makes this idempotent,
+	// but also guard against duplicate events if a work was created via the new
+	// event-sourced path but migrated_at was not set (pre-fix DBs).
 	seedSQL := `
-		INSERT INTO work_events
+		INSERT OR IGNORE INTO work_events
 			(id, work_id, event_index, event_type, created_at,
 			 invocation_id, note, title, content, directive_ids)
 		SELECT
@@ -4875,7 +4879,8 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 			id, 0, 'created', created_at,
 			NULL, '', title, content, '[]'
 		FROM works
-		WHERE migrated_at IS NULL;
+		WHERE migrated_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM work_events WHERE work_events.work_id = works.id AND work_events.event_index = 0);
 	`
 	if _, err := dm.db.Exec(seedSQL); err != nil {
 		return fmt.Errorf("seed work_events: %w", err)
@@ -4899,8 +4904,13 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 func (dm *DatabaseManager) migrateWorkEventsCheck() error {
 	var sqlDef string
 	err := dm.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_events'`).Scan(&sqlDef)
+	if err == sql.ErrNoRows {
+		return nil
+	}
 	if err != nil {
-		return nil // table doesn't exist yet or other error - let caller handle
+		// Best-effort probe for legacy schema; table may not exist yet
+		slog.Warn("migrateWorkEventsCheck: probe failed", "err", err)
+		return nil
 	}
 	if sqlDef == "" {
 		return nil

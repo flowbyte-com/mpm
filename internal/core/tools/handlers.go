@@ -1877,17 +1877,14 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}, nil
 }
 
-// callSessionEnd writes a handoff for the just-ended session. The agent
-// calls this before exiting so the next session can pick up the thread.
+// handleHandoffWrite writes a handoff record for inter-session communication.
+// Intentions must be expressed as Work items; open questions as Theories.
+// The handoff record itself carries only the session summary and state.
 //
-// Args:
-//
-//	--session_id     (required) opaque session identifier (UUID is fine)
-//	--summary        (required) 1-3 sentence description of what was done
-//	--state          (optional) clean | crashed | interrupted | force_end; default clean
-//	--commitments    (optional) JSON array of strings; things this session committed to do
-//	--open_questions (optional) JSON array of strings; things still unresolved
-func handleSessionEnd(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+// Option B (hard schema rejection): commitments and open_questions are not
+// accepted. If the agent passes them, the tool schema validation error fires.
+// This trains the agent to use Work and Theories instead.
+func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
@@ -1901,28 +1898,10 @@ func handleSessionEnd(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		state = internal.HandoffClean
 	}
 
-	var commitments []string
-	if v, ok := p["commitments"]; ok {
-		if arr, ok := v.([]interface{}); ok {
-			for _, item := range arr {
-				if s, ok := item.(string); ok && s != "" {
-					commitments = append(commitments, s)
-				}
-			}
-		}
-	}
-	var openQuestions []string
-	if v, ok := p["open_questions"]; ok {
-		if arr, ok := v.([]interface{}); ok {
-			for _, item := range arr {
-				if s, ok := item.(string); ok && s != "" {
-					openQuestions = append(openQuestions, s)
-				}
-			}
-		}
-	}
-
-	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
+	// Option B: do NOT accept commitments/open_questions.
+	// EndSession still accepts them for DB back-compat but they are always empty
+	// from this handler onward. The discipline is enforced by the tool schema.
+	h, err := dm.EndSession(sessionID, summary, state, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1930,13 +1909,13 @@ func handleSessionEnd(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		"success":    true,
 		"handoff":    h,
 		"handoff_id": h.ID,
-		"message":    "session ended; handoff written. Next wake will surface it.",
+		"message":    "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
 	}, nil
 }
 
-// callSessionHandoff returns the most recent handoff. The agent's wake
-// context surfaces unread handoffs automatically, but this tool is
-// available for explicit re-reads of any handoff (read or unread).
+// handleHandoffRead returns the most recent handoff. The wake context
+// surfaces unread handoffs automatically; this tool is for explicit
+// re-reads of any handoff (read or unread).
 //
 // Args:
 //
@@ -1947,7 +1926,7 @@ func handleSessionEnd(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 //	             the wake context's handoff.
 //	--unread    (optional) "true" to return only unread handoffs;
 //	             default false (returns latest regardless of read state)
-func handleSessionHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleHandoffRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	markRead := false
 	if v, ok := p["mark_read"]; ok {
 		if b, ok := v.(bool); ok {
@@ -1995,14 +1974,14 @@ func handleSessionHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 // ptrTime is a small helper for the session_handoff tool.
 func ptrTime(t time.Time) *time.Time { return &t }
 
-// callListHandoffs returns recent handoffs. Useful for the agent to see
-// the history of its own sessions.
+// handleHandoffList returns recent handoffs in descending created_at order.
+// Scan to find unresolved threads without booting a session.
 //
 // Args:
 //
 //	--limit      (optional) max handoffs; default 10, max 500
 //	--unread     (optional) "true" to filter to unread; default false
-func handleListHandoffs(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleHandoffList(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	limit := 10
 	if v, ok := p["limit"]; ok {
 		switch t := v.(type) {
@@ -3527,31 +3506,49 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	}
 }
 
-func handleMpmSession(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
-	params, err := extractParamsOrFail("mpm_session", payload)
+// handleMpmHandoff is the entry point for the mpm_handoff tool.
+// Covers cross-session communication: write, read, list, and shred handoffs.
+// Scratchpad operations moved to handleMpmScratchpad.
+func handleMpmHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	params, err := extractParamsOrFail("mpm_handoff", payload)
 	if err != nil {
 		return nil, err
 	}
 	action, _ := payload["action"].(string)
 	switch action {
-	case "end":
-		return handleSessionEnd(dm, ac, params)
-	case "handoff":
-		return handleSessionHandoff(dm, ac, params)
-	case "list_handoffs":
-		return handleListHandoffs(dm, ac, params)
-	case "shred_handoff":
+	case "write":
+		return handleHandoffWrite(dm, ac, params)
+	case "read":
+		return handleHandoffRead(dm, ac, params)
+	case "list":
+		return handleHandoffList(dm, ac, params)
+	case "shred":
 		return handleShredHandoff(dm, ac, params)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_handoff. Valid actions: write, read, list, shred", action)
+	}
+}
+
+// handleMpmScratchpad is the entry point for the mpm_scratchpad tool.
+// Covers intra-session volatile working memory: flush, read, discard, promote.
+// Handoff operations moved to handleMpmHandoff.
+func handleMpmScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	params, err := extractParamsOrFail("mpm_scratchpad", payload)
+	if err != nil {
+		return nil, err
+	}
+	action, _ := payload["action"].(string)
+	switch action {
 	case "flush":
 		return handleFlushScratchpad(dm, ac, params)
 	case "read":
 		return handleReadScratchpad(dm, ac, params)
 	case "discard":
 		return handleDiscardScratchpad(dm, ac, params)
-	case "promote_scratchpad":
+	case "promote":
 		return handlePromoteScratchpad(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_session. Valid actions include end, handoff, list_handoffs, shred_handoff, flush, read, discard, promote_scratchpad", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_scratchpad. Valid actions: flush, read, discard, promote", action)
 	}
 }
 
