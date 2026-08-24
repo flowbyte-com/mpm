@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -3523,6 +3524,186 @@ func nullString(s string) interface{} {
 	return s
 }
 
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func jsonMarshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+// computeVerification derives works.verification from git evidence.
+// isClaim distinguishes completed/claimed_complete (true) from evidence_observed (false).
+func computeVerification(headBefore, headAfter string, dirtyBefore, dirtyAfter bool, changedFiles []string, committed bool, isClaim bool) string {
+	// No git repo / no snapshot — unverified.
+	if headBefore == "" && headAfter == "" && len(changedFiles) == 0 && !dirtyBefore && !dirtyAfter && !committed {
+		return "unverified"
+	}
+	if committed {
+		return "verified"
+	}
+	if len(changedFiles) > 0 || dirtyAfter {
+		return "partial"
+	}
+	if isClaim {
+		// Claimed completion but no observable change — contradicts claim.
+		return "contradicted"
+	}
+	return "unverified"
+}
+
+// GitSnapshot captures the observable repository state at event creation.
+// Best-effort: if git is not available or not a repo, all fields are empty/false.
+type GitSnapshot struct {
+	HeadBefore   string
+	HeadAfter    string
+	DirtyBefore  bool
+	DirtyAfter   bool
+	ChangedFiles []string
+	Committed    bool
+}
+
+// CaptureGitSnapshot runs git commands to capture repository state.
+// dir is the working directory to run git in; empty means ".".
+// It captures HEAD and dirty state before and after (both from a single
+// snapshot — committed is false unless the caller performed a commit
+// between two snapshots). For simplicity, before==after.
+func CaptureGitSnapshot(dir string) GitSnapshot {
+	if dir == "" {
+		dir = "."
+	}
+	ws := config.GetMPMDir()
+	// Try MPM workspace dir as fallback if dir is "." and not a git repo
+	tryDirs := []string{dir}
+	if ws != "" && ws != dir {
+		tryDirs = append(tryDirs, ws)
+	}
+	// Also try current working directory
+	if cwd, err := os.Getwd(); err == nil && cwd != dir && cwd != ws {
+		tryDirs = append(tryDirs, cwd)
+	}
+	for _, d := range tryDirs {
+		if snap, ok := captureGitSnapshotAt(d); ok {
+			return snap
+		}
+	}
+	return GitSnapshot{}
+}
+
+func captureGitSnapshotAt(dir string) (GitSnapshot, bool) {
+	// Check if dir is inside a git work tree
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return GitSnapshot{}, false
+	}
+	var snap GitSnapshot
+	// HEAD
+	if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+		// Need to run with Dir set; fallback: run again with Dir
+		cmd2 := exec.Command("git", "rev-parse", "HEAD")
+		cmd2.Dir = dir
+		if b, err := cmd2.Output(); err == nil {
+			snap.HeadBefore = strings.TrimSpace(string(b))
+			snap.HeadAfter = snap.HeadBefore
+		}
+		_ = out // unused, we re-ran with Dir correctly
+	} else {
+		// Try with Dir set correctly
+		cmd2 := exec.Command("git", "rev-parse", "HEAD")
+		cmd2.Dir = dir
+		if b, err := cmd2.Output(); err == nil {
+			snap.HeadBefore = strings.TrimSpace(string(b))
+			snap.HeadAfter = snap.HeadBefore
+		}
+	}
+	// dirty check
+	cmd3 := exec.Command("git", "status", "--porcelain")
+	cmd3.Dir = dir
+	if out, err := cmd3.Output(); err == nil {
+		trimmed := strings.TrimSpace(string(out))
+		snap.DirtyBefore = trimmed != ""
+		snap.DirtyAfter = snap.DirtyBefore
+		// changed files from status
+		if trimmed != "" {
+			lines := strings.Split(trimmed, "\n")
+			for _, line := range lines {
+				if len(line) < 3 {
+					continue
+				}
+				f := strings.TrimSpace(line[3:])
+				// Handle renames "R  old -> new"
+				if idx := strings.Index(f, " -> "); idx != -1 {
+					f = f[idx+4:]
+				}
+				if f != "" {
+					snap.ChangedFiles = append(snap.ChangedFiles, f)
+				}
+			}
+		}
+	}
+	// Also get changed files via diff --name-only if status missed
+	if len(snap.ChangedFiles) == 0 {
+		cmd4 := exec.Command("git", "diff", "--name-only", "HEAD")
+		cmd4.Dir = dir
+		if out, err := cmd4.Output(); err == nil {
+			s := strings.TrimSpace(string(out))
+			if s != "" {
+				for _, f := range strings.Split(s, "\n") {
+					f = strings.TrimSpace(f)
+					if f != "" {
+						snap.ChangedFiles = append(snap.ChangedFiles, f)
+					}
+				}
+			}
+		}
+	}
+	// untracked files
+	cmd5 := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	cmd5.Dir = dir
+	if out, err := cmd5.Output(); err == nil {
+		s := strings.TrimSpace(string(out))
+		if s != "" {
+			for _, f := range strings.Split(s, "\n") {
+				f = strings.TrimSpace(f)
+				if f != "" && !containsString(snap.ChangedFiles, f) {
+					snap.ChangedFiles = append(snap.ChangedFiles, f)
+				}
+			}
+		}
+	}
+	return snap, true
+}
+
+func containsString(arr []string, s string) bool {
+	for _, v := range arr {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// GetActiveDirectiveIDs returns the StableIDs of directives active for the
+// given framework. Best-effort: returns empty slice on error.
+// Exported so tools/work_handlers can record instruction provenance.
+func (dm *DatabaseManager) GetActiveDirectiveIDs(framework string) []string {
+	dirs, err := dm.ReadDirectivesForFramework(framework)
+	if err != nil || len(dirs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if id, ok := d["id"].(string); ok && id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // AddLesson adds a new lesson, checking for duplicates by content hash
 func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
 	if err := ValidateLessonType(string(lessonType)); err != nil {
@@ -4091,12 +4272,12 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 
 func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 	var w Work
-	var content, sessionID sql.NullString
+	var content, sessionID, verification sql.NullString
 	var completedAt sql.NullInt64
 	err := dm.db.QueryRow(`
-		SELECT id, title, content, status, created_at, updated_at, completed_at, session_id
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
 		FROM works WHERE id = ?
-	`, id).Scan(&w.ID, &w.Title, &content, &w.Status, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID)
+	`, id).Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("work not found: %s", id)
 	}
@@ -4105,6 +4286,11 @@ func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 	}
 	if content.Valid {
 		w.Content = content.String
+	}
+	if verification.Valid && verification.String != "" {
+		w.Verification = WorkVerification(verification.String)
+	} else {
+		w.Verification = WorkVerificationUnverified
 	}
 	if completedAt.Valid {
 		w.CompletedAt = &completedAt.Int64
@@ -4117,7 +4303,7 @@ func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 
 func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
 	rows, err := dm.db.Query(`
-		SELECT id, title, content, status, created_at, updated_at, completed_at, session_id
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
 		FROM works WHERE status = 'open'
 		ORDER BY created_at DESC
 	`)
@@ -4129,13 +4315,18 @@ func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
 	var works []*Work
 	for rows.Next() {
 		var w Work
-		var content, sessionID sql.NullString
+		var content, sessionID, verification sql.NullString
 		var completedAt sql.NullInt64
-		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
+		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
 			return nil, fmt.Errorf("scan work row: %w", err)
 		}
 		if content.Valid {
 			w.Content = content.String
+		}
+		if verification.Valid && verification.String != "" {
+			w.Verification = WorkVerification(verification.String)
+		} else {
+			w.Verification = WorkVerificationUnverified
 		}
 		if completedAt.Valid {
 			w.CompletedAt = &completedAt.Int64
@@ -4184,6 +4375,273 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 	}
 
 	return dm.GetWork(id)
+}
+
+// ── Work Event-Sourced API (thin-handler delegation target) ──────────────
+// These methods are the sole owners of work state transitions. Handlers in
+// work_handlers.go must remain thin: parse payload, fetch ActiveContext,
+// delegate here. No UPDATE works queries outside AppendWorkEvent.
+//
+// Each method is event-sourced: it appends an event via AppendWorkEvent
+// (which atomically updates the works projection) and, for actions that
+// close work, records Git evidence as a separate evidence table row.
+
+func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectiveProvenance {
+	var base *EffectiveProvenance
+	if dm.ProvenanceResolver != nil {
+		base = dm.ProvenanceResolver.Resolve(ac.SessionID, ac.InvocationID, "", ac.ParentInvocationID)
+	}
+	if base == nil {
+		base = &EffectiveProvenance{ActorKind: "unknown"}
+	}
+	if ac.Agent != "" {
+		base.ActorID = ac.Agent
+		if base.ActorKind == "unknown" {
+			base.ActorKind = "agent"
+		}
+	} else if base.ActorKind == "" {
+		base.ActorKind = "agent"
+	}
+	if ac.SessionID != "" {
+		base.SessionID = ac.SessionID
+	}
+	if ac.FrameworkName != "" {
+		base.FrameworkName = ac.FrameworkName
+	}
+	if ac.InvocationID != "" {
+		base.InvocationID = ac.InvocationID
+	} else if base.InvocationID == "" {
+		base.InvocationID = GenerateID()
+	}
+	if ac.ParentInvocationID != "" {
+		base.ParentInvocationID = ac.ParentInvocationID
+	}
+	if base.ModelName == "" && ac.Model != "" {
+		base.ModelName = ac.Model
+	}
+	if base.ActorKind == "" {
+		base.ActorKind = "agent"
+	}
+	return base
+}
+
+func (dm *DatabaseManager) recordGitEvidenceForWork(workID string) {
+	snap := CaptureGitSnapshot("")
+	if snap.HeadBefore == "" && snap.HeadAfter == "" && !snap.DirtyBefore && !snap.DirtyAfter && len(snap.ChangedFiles) == 0 {
+		return
+	}
+	notes := ""
+	if len(snap.ChangedFiles) > 0 {
+		notes = "git changed_files: " + strings.Join(snap.ChangedFiles, ", ")
+		if snap.Committed {
+			notes += " (committed)"
+		} else if snap.DirtyAfter {
+			notes += " (dirty)"
+		}
+	} else if snap.DirtyAfter {
+		notes = "git dirty"
+	}
+	if snap.HeadBefore != "" {
+		notes += " head_before=" + snap.HeadBefore[:7]
+	}
+	if snap.HeadAfter != "" && snap.HeadAfter != snap.HeadBefore {
+		notes += " head_after=" + snap.HeadAfter[:7]
+	}
+	_, _ = dm.AddEvidence(EvidenceInput{
+		ArtifactID:   workID,
+		ArtifactType: "work",
+		Type:         "observation",
+		SourceGroup:  "git",
+		CreatedBy:    "work_evidence",
+		Notes:        notes,
+		Strength:     0.6,
+	})
+}
+
+// CreateWorkWithContext creates a work and its initial event atomically.
+// Thin-handler target for mpm_work create.
+func (dm *DatabaseManager) CreateWorkWithContext(title, content, sessionID string, ac ActiveContext) (*Work, error) {
+	if title == "" {
+		return nil, fmt.Errorf("title is required for create")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	var workID string
+	err := dm.WithTx(func(node DBNode) error {
+		w, err := dm.AddWork(title, content, sessionID)
+		if err != nil {
+			return err
+		}
+		workID = w.ID
+		_, err = dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeCreated,
+			Title:        title,
+			Content:      content,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Record artifact provenance after commit (non-fatal)
+	tx, _ := dm.db.Begin()
+	if tx != nil {
+		res := dm.RecordArtifactProvenance(tx, workID, "work", prov, true)
+		if res.Recorded {
+			_ = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+	}
+	return dm.GetWork(workID)
+}
+
+// CompleteWorkWithContext marks work done via event-sourced append.
+func (dm *DatabaseManager) CompleteWorkWithContext(workID, note string, ac ActiveContext) (*Work, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for complete")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	err := dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeCompleted,
+			Note:         note,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dm.GetWork(workID)
+}
+
+// CancelWorkWithContext cancels work via event-sourced append.
+func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveContext) (*Work, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for cancel")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	err := dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeCancelled,
+			Note:         note,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dm.GetWork(workID)
+}
+
+// RecordGitEvidenceForWork captures Git state and writes it as an evidence
+// row (type: observation, source_group: git). Explicit evidence route for
+// work completion — separate from the event ledger.
+func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
+	dm.recordGitEvidenceForWork(workID)
+}
+
+// AddWorkNoteWithContext appends a note event.
+func (dm *DatabaseManager) AddWorkNoteWithContext(workID, note string, ac ActiveContext) (*WorkEvent, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for note")
+	}
+	if note == "" {
+		return nil, fmt.Errorf("note is required for note action")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	var event *WorkEvent
+	err := dm.WithTx(func(node DBNode) error {
+		var err error
+		event, err = dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeNoteAppended,
+			Note:         note,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	return event, err
+}
+
+// ReopenWorkWithContext reopens work via event-sourced append.
+func (dm *DatabaseManager) ReopenWorkWithContext(workID string, ac ActiveContext) (*Work, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for reopen")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	err := dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeReopened,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dm.GetWork(workID)
+}
+
+// UpdateWorkWithContext handles title/content/status updates via events.
+// Status is deprecated (maps to completed/cancelled/reopened) but still supported.
+func (dm *DatabaseManager) UpdateWorkWithContext(workID, title, content, statusStr string, ac ActiveContext) (*Work, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for update")
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	var eventType WorkEventType
+	switch {
+	case statusStr != "":
+		switch WorkStatus(statusStr) {
+		case WorkStatusDone:
+			eventType = WorkEventTypeCompleted
+		case WorkStatusCancelled:
+			eventType = WorkEventTypeCancelled
+		case WorkStatusOpen:
+			eventType = WorkEventTypeReopened
+		default:
+			return nil, fmt.Errorf("invalid status %q; must be open, done, or cancelled", statusStr)
+		}
+	case title != "":
+		eventType = WorkEventTypeTitleUpdated
+	case content != "":
+		eventType = WorkEventTypeContentUpdated
+	default:
+		return nil, fmt.Errorf("at least one of status, title, or content is required for update")
+	}
+	if statusStr != "" {
+		dm.LogAudit(AuditWarn, "work", "deprecated update status=X path used", "", AuditContext{"work_id": workID, "status": statusStr})
+	}
+	err := dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    eventType,
+			Title:        title,
+			Content:      content,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if eventType == WorkEventTypeCompleted || eventType == WorkEventTypeCancelled {
+		dm.recordGitEvidenceForWork(workID)
+	}
+	return dm.GetWork(workID)
 }
 
 // GetLessonStats returns statistics about lessons
@@ -4353,9 +4811,15 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 // for existing works rows that have not yet been migrated. Idempotent: uses
 // CREATE TABLE IF NOT EXISTS for the table and WHERE migrated_at IS NULL for the
 // seed so re-running on an already-migrated DB is a no-op.
+//
+// CHECK enum is kept in sync with WorkTables in schema.go (single source).
+// If they diverge, fresh DBs and migrated DBs accept different event types
+// — see forensic audit §15 #14. The canonical 9-value vocabulary includes
+// claimed_complete and evidence_observed for Phase-2 verification.
 func (dm *DatabaseManager) migrateWorkEvents() error {
 	// Step 1: ensure the work_events table exists (no-op if already created via
-	// WorkTables on a fresh DB).
+	// WorkTables on a fresh DB). Domain-neutral: only invocation linkage,
+	// event payload, and directive instruction provenance.
 	workEventsDDL := `CREATE TABLE IF NOT EXISTS work_events (
 		id                    TEXT PRIMARY KEY,
 		work_id               TEXT NOT NULL,
@@ -4364,52 +4828,52 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 		                      CHECK (event_type IN (
 		                        'created','note_appended','completed',
 		                        'cancelled','reopened',
-		                        'title_updated','content_updated'
+		                        'title_updated','content_updated',
+		                        'claimed_complete','evidence_observed'
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-		actor_kind           TEXT NOT NULL,
-		actor_id             TEXT,
-		framework_name        TEXT,
-		framework_version     TEXT,
-		provider_name         TEXT,
-		model_name            TEXT,
-		model_revision        TEXT,
-		session_id            TEXT,
 		invocation_id         TEXT,
 		parent_invocation_id TEXT,
 		note                  TEXT,
 		title                 TEXT,
 		content               TEXT,
+		directive_ids         TEXT DEFAULT '[]',
 		UNIQUE(work_id, event_index)
 	);`
 	if _, err := dm.db.Exec(workEventsDDL); err != nil {
 		return fmt.Errorf("create work_events table: %w", err)
 	}
 
+	// Step 1b: migrate legacy schema (extra provenance/git columns or old CHECK)
+	// to domain-neutral shape. See forensic fix.
+	if err := dm.migrateWorkEventsCheck(); err != nil {
+		return fmt.Errorf("migrate work_events check: %w", err)
+	}
+
 	// Step 2: create indexes if they don't exist (no-op if already created).
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_work_events_session ON work_events(session_id);`,
 	}
 	for _, idx := range indexes {
 		if _, err := dm.db.Exec(idx); err != nil {
 			return fmt.Errorf("create work_events index: %w", err)
 		}
 	}
+	// Drop legacy session index if column no longer exists (ignore error)
+	_, _ = dm.db.Exec(`DROP INDEX IF EXISTS idx_work_events_session`)
 
 	// Step 3: seed initial created events for existing works rows that have not
 	// yet been migrated. The migrated_at IS NULL predicate makes this idempotent.
 	seedSQL := `
 		INSERT INTO work_events
 			(id, work_id, event_index, event_type, created_at,
-			 actor_kind, actor_id, session_id, title, content)
+			 invocation_id, note, title, content, directive_ids)
 		SELECT
 			lower(hex(randomblob(16))),
 			id, 0, 'created', created_at,
-			'agent', '', COALESCE(session_id, ''),
-			title, content
+			NULL, '', title, content, '[]'
 		FROM works
 		WHERE migrated_at IS NULL;
 	`
@@ -4425,64 +4889,143 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 	return nil
 }
 
+// migrateWorkEventsCheck upgrades existing work_events tables to the
+// domain-neutral shape (no duplicate provenance, no git columns). Fresh
+// tables already have the correct CHECK and shape and are left untouched.
+// Handles three legacy cases:
+//   - old 7-value CHECK without claimed_complete/evidence_observed
+//   - provenance duplication (actor_kind etc.)
+//   - git domain-specific columns
+func (dm *DatabaseManager) migrateWorkEventsCheck() error {
+	var sqlDef string
+	err := dm.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_events'`).Scan(&sqlDef)
+	if err != nil {
+		return nil // table doesn't exist yet or other error - let caller handle
+	}
+	if sqlDef == "" {
+		return nil
+	}
+	hasClaimed := strings.Contains(sqlDef, "claimed_complete")
+	hasDirective := strings.Contains(sqlDef, "directive_ids")
+	hasActor := strings.Contains(sqlDef, "actor_kind")
+	hasGit := strings.Contains(sqlDef, "git_head_before")
+	// New shape: has claimed, has directive, no actor/git
+	if hasClaimed && hasDirective && !hasActor && !hasGit {
+		return nil
+	}
+	// Need to recreate table with domain-neutral schema.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx for check migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	newDDL := `CREATE TABLE work_events_new (
+		id                    TEXT PRIMARY KEY,
+		work_id               TEXT NOT NULL,
+		event_index           INTEGER NOT NULL,
+		event_type            TEXT NOT NULL
+		                      CHECK (event_type IN (
+		                        'created','note_appended','completed',
+		                        'cancelled','reopened',
+		                        'title_updated','content_updated',
+		                        'claimed_complete','evidence_observed'
+		                      )),
+		created_at            INTEGER NOT NULL
+		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		invocation_id         TEXT,
+		parent_invocation_id TEXT,
+		note                  TEXT,
+		title                 TEXT,
+		content               TEXT,
+		directive_ids         TEXT DEFAULT '[]',
+		UNIQUE(work_id, event_index)
+	);`
+	if _, err := tx.Exec(newDDL); err != nil {
+		return fmt.Errorf("create work_events_new: %w", err)
+	}
+	// Copy existing rows — handle various legacy column sets.
+	// Determine which columns exist in old table.
+	hasInvocation := strings.Contains(sqlDef, "invocation_id")
+	hasDirectiveOld := hasDirective
+	if hasInvocation && hasDirectiveOld {
+		if _, err := tx.Exec(`INSERT INTO work_events_new
+			(id, work_id, event_index, event_type, created_at,
+			 invocation_id, parent_invocation_id, note, title, content, directive_ids)
+			SELECT id, work_id, event_index, event_type, created_at,
+			       invocation_id, parent_invocation_id, note, title, content, COALESCE(directive_ids,'[]')
+			FROM work_events`); err != nil {
+			return fmt.Errorf("copy work_events data (full): %w", err)
+		}
+	} else if hasInvocation {
+		if _, err := tx.Exec(`INSERT INTO work_events_new
+			(id, work_id, event_index, event_type, created_at,
+			 invocation_id, parent_invocation_id, note, title, content, directive_ids)
+			SELECT id, work_id, event_index, event_type, created_at,
+			       invocation_id, parent_invocation_id, note, title, content, '[]'
+			FROM work_events`); err != nil {
+			return fmt.Errorf("copy work_events data (no directive): %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(`INSERT INTO work_events_new
+			(id, work_id, event_index, event_type, created_at,
+			 invocation_id, parent_invocation_id, note, title, content, directive_ids)
+			SELECT id, work_id, event_index, event_type, created_at,
+			       '', '', note, title, content, '[]'
+			FROM work_events`); err != nil {
+			return fmt.Errorf("copy work_events data (legacy): %w", err)
+		}
+	}
+	if _, err := tx.Exec(`DROP TABLE work_events`); err != nil {
+		return fmt.Errorf("drop old work_events: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE work_events_new RENAME TO work_events`); err != nil {
+		return fmt.Errorf("rename work_events_new: %w", err)
+	}
+	// Recreate indexes
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id)`); err != nil {
+		return fmt.Errorf("recreate idx_work_id: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id)`); err != nil {
+		return fmt.Errorf("recreate idx_invocation: %w", err)
+	}
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_work_events_session`); err != nil {
+		return fmt.Errorf("recreate idx_session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit check migration: %w", err)
+	}
+	return nil
+}
+
 // AppendWorkEvent appends an immutable event to the work_events ledger.
-// When called inside a WithTx callback, pass the node from the callback so all
-// writes join the same transaction. When called outside a WithTx, pass nil and
-// the event INSERT and works-row projection UPDATE commit atomically via SQLite's
-// WAL mode + busy_timeout (no separate transaction needed).
+// Domain-neutral: only invocation linkage and instruction provenance are
+// stored. Full execution telemetry lives in artifact_provenance and is
+// reachable via JOIN on invocation_id.
 //
 // node: DBNode from WithTx callback. Use node.ExecTracked/QueryRowTracked when
 // non-nil; fall back to dm.db when nil.
 func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error) {
-	// 1. Resolve provenance: base from dm, then per-field override from ep.
-	base := dm.getEffectiveProvenance()
-	if base == nil {
-		base = &EffectiveProvenance{ActorKind: "unknown"}
+	// 1. Resolve invocation linkage. Full provenance is in artifact_provenance;
+	// work_events stores only the join keys.
+	invocationID := event.InvocationID
+	parentInvocationID := event.ParentInvocationID
+	if invocationID == "" && ep != nil && ep.InvocationID != "" {
+		invocationID = ep.InvocationID
 	}
-	actorKind := base.ActorKind
-	actorID := base.ActorID
-	frameworkName := base.FrameworkName
-	frameworkVersion := base.FrameworkVersion
-	providerName := base.ProviderName
-	modelName := base.ModelName
-	modelRevision := base.ModelRevision
-	sessionID := base.SessionID
-	invocationID := base.InvocationID
-	parentInvocationID := base.ParentInvocationID
-	if ep != nil {
-		if ep.ActorKind != "" {
-			actorKind = ep.ActorKind
-		}
-		if ep.ActorID != "" {
-			actorID = ep.ActorID
-		}
-		if ep.FrameworkName != "" {
-			frameworkName = ep.FrameworkName
-		}
-		if ep.FrameworkVersion != "" {
-			frameworkVersion = ep.FrameworkVersion
-		}
-		if ep.ProviderName != "" {
-			providerName = ep.ProviderName
-		}
-		if ep.ModelName != "" {
-			modelName = ep.ModelName
-		}
-		if ep.ModelRevision != "" {
-			modelRevision = ep.ModelRevision
-		}
-		if ep.SessionID != "" {
-			sessionID = ep.SessionID
-		}
-		if ep.InvocationID != "" {
-			invocationID = ep.InvocationID
-		}
-		if ep.ParentInvocationID != "" {
-			parentInvocationID = ep.ParentInvocationID
+	if parentInvocationID == "" && ep != nil && ep.ParentInvocationID != "" {
+		parentInvocationID = ep.ParentInvocationID
+	}
+	if invocationID == "" {
+		// Fall back to resolver's invocation if available, else generate.
+		if base := dm.getEffectiveProvenance(); base != nil && base.InvocationID != "" {
+			invocationID = base.InvocationID
+		} else {
+			invocationID = GenerateID()
 		}
 	}
-	if actorKind == "" {
-		actorKind = "unknown"
+	if parentInvocationID == "" && ep != nil {
+		parentInvocationID = ep.ParentInvocationID
 	}
 
 	// 2. Generate ID if not set.
@@ -4512,8 +5055,10 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	now := time.Now().Unix()
 	var newStatus string
 	var newCompletedAt *int64
+	var newTitle *string
+	var newContent *string
 	switch event.EventType {
-	case WorkEventTypeCompleted:
+	case WorkEventTypeCompleted, WorkEventTypeClaimedComplete:
 		newStatus = "done"
 		newCompletedAt = &now
 	case WorkEventTypeCancelled:
@@ -4521,48 +5066,61 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	case WorkEventTypeReopened:
 		newStatus = "open"
 		newCompletedAt = nil // clear terminal state
+	case WorkEventTypeTitleUpdated:
+		newStatus = "" // no status change
+		if event.Title != "" {
+			t := event.Title
+			newTitle = &t
+		}
+	case WorkEventTypeContentUpdated:
+		newStatus = ""
+		if event.Content != "" {
+			c := event.Content
+			newContent = &c
+		}
+	case WorkEventTypeEvidenceObserved:
+		newStatus = ""
 	default:
 		newStatus = "open"
 	}
 
-	// 5. Insert the event row. Use node.ExecTracked if inside WithTx,
-	// otherwise dm.db.Exec.
+	// 5. Insert the event row. Domain-neutral: only invocation linkage + directive provenance.
 	title := event.Title
 	content := event.Content
 	note := event.Note
+	directiveIDsJSON := "[]"
+	if len(event.DirectiveIDs) > 0 {
+		if b, err := jsonMarshal(event.DirectiveIDs); err == nil {
+			directiveIDsJSON = string(b)
+		}
+	}
 
 	var execErr error
 	if node != nil {
 		_, execErr = node.ExecTracked(`
 			INSERT INTO work_events (
 				id, work_id, event_index, event_type, created_at,
-				actor_kind, actor_id, framework_name, framework_version,
-				provider_name, model_name, model_revision,
-				session_id, invocation_id, parent_invocation_id,
-				note, title, content
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				invocation_id, parent_invocation_id,
+				note, title, content, directive_ids
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, 0,
 			id, workID, eventIndex, string(event.EventType), now,
-			actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
-			nullString(providerName), nullString(modelName), nullString(modelRevision),
-			nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
+			nullString(invocationID), nullString(parentInvocationID),
 			nullString(note), nullString(title), nullString(content),
+			directiveIDsJSON,
 		)
 	} else {
 		_, execErr = dm.db.Exec(`
 			INSERT INTO work_events (
 				id, work_id, event_index, event_type, created_at,
-				actor_kind, actor_id, framework_name, framework_version,
-				provider_name, model_name, model_revision,
-				session_id, invocation_id, parent_invocation_id,
-				note, title, content
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				invocation_id, parent_invocation_id,
+				note, title, content, directive_ids
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			id, workID, eventIndex, string(event.EventType), now,
-			actorKind, nullString(actorID), nullString(frameworkName), nullString(frameworkVersion),
-			nullString(providerName), nullString(modelName), nullString(modelRevision),
-			nullString(sessionID), nullString(invocationID), nullString(parentInvocationID),
+			nullString(invocationID), nullString(parentInvocationID),
 			nullString(note), nullString(title), nullString(content),
+			directiveIDsJSON,
 		)
 	}
 	if execErr != nil {
@@ -4571,33 +5129,98 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 
 	// 6. Update the works row as a derived projection. Same pattern:
 	// use node when inside WithTx, dm.db otherwise.
-	if node != nil {
-		if newCompletedAt != nil {
-			_, err = node.ExecTracked(`
-				UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-				WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
-		} else if event.EventType == WorkEventTypeReopened {
-			_, err = node.ExecTracked(`
-				UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-				WHERE id = ?`, 0, newStatus, now, workID)
+	// Priority: title/content updates are direct field writes; status updates are status-machine writes.
+	// works is a cached projection — UPDATE happens in same atomic transaction as INSERT.
+	if newTitle != nil || newContent != nil {
+		if newTitle != nil && newContent != nil {
+			if node != nil {
+				_, err = node.ExecTracked(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, 0, *newTitle, *newContent, now, workID)
+			} else {
+				_, err = dm.db.Exec(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, *newTitle, *newContent, now, workID)
+			}
+		} else if newTitle != nil {
+			if node != nil {
+				_, err = node.ExecTracked(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, 0, *newTitle, now, workID)
+			} else {
+				_, err = dm.db.Exec(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, *newTitle, now, workID)
+			}
 		} else {
-			_, err = node.ExecTracked(`
-				UPDATE works SET status = ?, updated_at = ?
-				WHERE id = ?`, 0, newStatus, now, workID)
+			if node != nil {
+				_, err = node.ExecTracked(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, 0, *newContent, now, workID)
+			} else {
+				_, err = dm.db.Exec(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, *newContent, now, workID)
+			}
+		}
+	} else if newStatus != "" {
+		if newCompletedAt != nil {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+					WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+					WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
+			}
+		} else if event.EventType == WorkEventTypeReopened {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+					WHERE id = ?`, 0, newStatus, now, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+					WHERE id = ?`, newStatus, now, workID)
+			}
+		} else {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?
+					WHERE id = ?`, 0, newStatus, now, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?
+					WHERE id = ?`, newStatus, now, workID)
+			}
+		}
+	} else if newStatus != "" {
+		if newCompletedAt != nil {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+					WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+					WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
+			}
+		} else if event.EventType == WorkEventTypeReopened {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+					WHERE id = ?`, 0, newStatus, now, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
+					WHERE id = ?`, newStatus, now, workID)
+			}
+		} else {
+			if node != nil {
+				_, err = node.ExecTracked(`
+					UPDATE works SET status = ?, updated_at = ?
+					WHERE id = ?`, 0, newStatus, now, workID)
+			} else {
+				_, err = dm.db.Exec(`
+					UPDATE works SET status = ?, updated_at = ?
+					WHERE id = ?`, newStatus, now, workID)
+			}
 		}
 	} else {
-		if newCompletedAt != nil {
-			_, err = dm.db.Exec(`
-				UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-				WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
-		} else if event.EventType == WorkEventTypeReopened {
-			_, err = dm.db.Exec(`
-				UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-				WHERE id = ?`, newStatus, now, workID)
+		// Note or other event that doesn't affect works projection — just bump updated_at.
+		if node != nil {
+			_, err = node.ExecTracked(`UPDATE works SET updated_at = ? WHERE id = ?`, 0, now, workID)
 		} else {
-			_, err = dm.db.Exec(`
-				UPDATE works SET status = ?, updated_at = ?
-				WHERE id = ?`, newStatus, now, workID)
+			_, err = dm.db.Exec(`UPDATE works SET updated_at = ? WHERE id = ?`, now, workID)
 		}
 	}
 	if err != nil {
@@ -4609,14 +5232,6 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	event.WorkID = workID
 	event.EventIndex = eventIndex
 	event.CreatedAt = now
-	event.ActorKind = actorKind
-	event.ActorID = actorID
-	event.FrameworkName = frameworkName
-	event.FrameworkVersion = frameworkVersion
-	event.ProviderName = providerName
-	event.ModelName = modelName
-	event.ModelRevision = modelRevision
-	event.SessionID = sessionID
 	event.InvocationID = invocationID
 	event.ParentInvocationID = parentInvocationID
 
@@ -4665,23 +5280,17 @@ func (dm *DatabaseManager) RecordWorkArtifactProvenance(workID string, actorKind
 }
 
 // GetWorkEvents returns all events for a work item ordered by event_index ASC.
+// Domain-neutral: only invocation linkage + directive provenance + payload.
 func (dm *DatabaseManager) GetWorkEvents(workID string) ([]*WorkEvent, error) {
 	rows, err := dm.db.Query(`
 		SELECT
 			id, work_id, event_index, event_type, created_at,
-			actor_kind,
-			COALESCE(actor_id, '') AS actor_id,
-			COALESCE(framework_name, '') AS framework_name,
-			COALESCE(framework_version, '') AS framework_version,
-			COALESCE(provider_name, '') AS provider_name,
-			COALESCE(model_name, '') AS model_name,
-			COALESCE(model_revision, '') AS model_revision,
-			COALESCE(session_id, '') AS session_id,
 			COALESCE(invocation_id, '') AS invocation_id,
 			COALESCE(parent_invocation_id, '') AS parent_invocation_id,
 			COALESCE(note, '') AS note,
 			COALESCE(title, '') AS title,
-			COALESCE(content, '') AS content
+			COALESCE(content, '') AS content,
+			COALESCE(directive_ids, '[]') AS directive_ids
 		FROM work_events
 		WHERE work_id = ?
 		ORDER BY event_index ASC
@@ -4695,25 +5304,22 @@ func (dm *DatabaseManager) GetWorkEvents(workID string) ([]*WorkEvent, error) {
 	for rows.Next() {
 		var e WorkEvent
 		var eventType string
+		var directiveIDsJSON string
 		if err := rows.Scan(
 			&e.ID, &e.WorkID, &e.EventIndex, &eventType, &e.CreatedAt,
-			&e.ActorKind,
-			&e.ActorID,
-			&e.FrameworkName,
-			&e.FrameworkVersion,
-			&e.ProviderName,
-			&e.ModelName,
-			&e.ModelRevision,
-			&e.SessionID,
 			&e.InvocationID,
 			&e.ParentInvocationID,
 			&e.Note,
 			&e.Title,
 			&e.Content,
+			&directiveIDsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan work event row: %w", err)
 		}
 		e.EventType = WorkEventType(eventType)
+		if directiveIDsJSON != "" && directiveIDsJSON != "[]" {
+			_ = json.Unmarshal([]byte(directiveIDsJSON), &e.DirectiveIDs)
+		}
 		events = append(events, &e)
 	}
 	if err := rows.Err(); err != nil {
@@ -4726,41 +5332,28 @@ func (dm *DatabaseManager) GetWorkEvents(workID string) ([]*WorkEvent, error) {
 func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error) {
 	var e WorkEvent
 	var eventType string
+	var directiveIDsJSON string
 	err := dm.db.QueryRow(`
 		SELECT
 			id, work_id, event_index, event_type, created_at,
-			actor_kind,
-			COALESCE(actor_id, '') AS actor_id,
-			COALESCE(framework_name, '') AS framework_name,
-			COALESCE(framework_version, '') AS framework_version,
-			COALESCE(provider_name, '') AS provider_name,
-			COALESCE(model_name, '') AS model_name,
-			COALESCE(model_revision, '') AS model_revision,
-			COALESCE(session_id, '') AS session_id,
 			COALESCE(invocation_id, '') AS invocation_id,
 			COALESCE(parent_invocation_id, '') AS parent_invocation_id,
 			COALESCE(note, '') AS note,
 			COALESCE(title, '') AS title,
-			COALESCE(content, '') AS content
+			COALESCE(content, '') AS content,
+			COALESCE(directive_ids, '[]') AS directive_ids
 		FROM work_events
 		WHERE work_id = ?
 		ORDER BY event_index DESC
 		LIMIT 1
 	`, workID).Scan(
 		&e.ID, &e.WorkID, &e.EventIndex, &eventType, &e.CreatedAt,
-		&e.ActorKind,
-		&e.ActorID,
-		&e.FrameworkName,
-		&e.FrameworkVersion,
-		&e.ProviderName,
-		&e.ModelName,
-		&e.ModelRevision,
-		&e.SessionID,
 		&e.InvocationID,
 		&e.ParentInvocationID,
 		&e.Note,
 		&e.Title,
 		&e.Content,
+		&directiveIDsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -4769,17 +5362,19 @@ func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error)
 		return nil, fmt.Errorf("get latest work event: %w", err)
 	}
 	e.EventType = WorkEventType(eventType)
+	if directiveIDsJSON != "" && directiveIDsJSON != "[]" {
+		_ = json.Unmarshal([]byte(directiveIDsJSON), &e.DirectiveIDs)
+	}
 	return &e, nil
 }
 
-// RecomputeWorkProjection recomputes the works row status/updated_at from the event ledger.
-// It derives status from the last event type, updated_at from MAX(created_at) of events,
-// and completed_at from the created_at of the completed event (if any).
-// This is used when the works row may have drifted from the event log.
+// RecomputeWorkProjection recomputes the works row from the event ledger.
+// It derives status, title, content, verification, updated_at and
+// completed_at by replaying events in order — matching the projection
+// logic in AppendWorkEvent. Used when the works row may have drifted.
 func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
-	// Read all events for this work.
 	rows, err := dm.db.Query(`
-		SELECT event_type, created_at
+		SELECT event_type, created_at, title, content
 		FROM work_events
 		WHERE work_id = ?
 		ORDER BY event_index ASC
@@ -4790,64 +5385,68 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 	defer rows.Close()
 
 	var (
-		lastEventType string
-		maxCreatedAt int64
-		completedAt  *int64
+		title, content string
+		status         = "open"
+		verification   = "unverified"
+		maxCreatedAt   int64
+		completedAt    *int64
+		hasEvents      bool
 	)
 	for rows.Next() {
 		var eventType string
 		var createdAt int64
-		if err := rows.Scan(&eventType, &createdAt); err != nil {
+		var eTitle, eContent sql.NullString
+		if err := rows.Scan(&eventType, &createdAt, &eTitle, &eContent); err != nil {
 			return fmt.Errorf("scan event for projection: %w", err)
 		}
-		lastEventType = eventType
+		hasEvents = true
 		if createdAt > maxCreatedAt {
 			maxCreatedAt = createdAt
+		}
+		switch eventType {
+		case "created":
+			if eTitle.Valid && eTitle.String != "" {
+				title = eTitle.String
+			}
+			if eContent.Valid && eContent.String != "" {
+				content = eContent.String
+			}
+			status = "open"
+		case "completed", "claimed_complete":
+			status = "done"
+			completedAt = &createdAt
+		case "cancelled":
+			status = "cancelled"
+			completedAt = nil
+		case "reopened":
+			status = "open"
+			completedAt = nil
+		case "title_updated":
+			if eTitle.Valid && eTitle.String != "" {
+				title = eTitle.String
+			}
+		case "content_updated":
+			if eContent.Valid && eContent.String != "" {
+				content = eContent.String
+			}
+		case "evidence_observed":
+			// Evidence observed does not change status; verification
+			// derivation from git removed — keep as unverified.
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("rows iteration: %w", err)
 	}
-
-	if lastEventType == "" {
-		// No events for this work — nothing to recompute.
+	if !hasEvents {
 		return nil
 	}
-
-	// Derive status from last event type.
-	var status string
-	switch lastEventType {
-	case "completed":
-		status = "done"
-		// Find the created_at of the completed event.
-		row := dm.db.QueryRow(`
-			SELECT created_at FROM work_events
-			WHERE work_id = ? AND event_type = 'completed'
-			ORDER BY event_index DESC LIMIT 1
-		`, workID)
-		var ts int64
-		if err := row.Scan(&ts); err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("get completed_at for projection: %w", err)
-		}
-		if err == nil {
-			completedAt = &ts
-		}
-	case "cancelled":
-		status = "cancelled"
-		completedAt = nil
-	default:
-		status = "open"
-		completedAt = nil
-	}
-
-	// Update the works row.
 	if maxCreatedAt == 0 {
 		maxCreatedAt = time.Now().Unix()
 	}
 	_, err = dm.db.Exec(`
-		UPDATE works SET status = ?, updated_at = ?, completed_at = ?
+		UPDATE works SET status = ?, verification = ?, title = ?, content = ?, updated_at = ?, completed_at = ?
 		WHERE id = ?
-	`, status, maxCreatedAt, completedAt, workID)
+	`, status, verification, title, content, maxCreatedAt, completedAt, workID)
 	if err != nil {
 		return fmt.Errorf("update works projection: %w", err)
 	}
