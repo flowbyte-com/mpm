@@ -42,7 +42,7 @@ import (
 // (ResolveRatchet). Keyed rule -> class -> default.
 var defaultThresholds = map[string]map[string]int{
 	"scans": {
-		audit.ClassSilentContinue: 0,
+		audit.ClassSilentContinue: 1,
 		audit.ClassFakeHardFail:   0,
 		audit.ClassNoCheck:        0,
 	},
@@ -56,7 +56,7 @@ var defaultThresholds = map[string]map[string]int{
 		audit.TXClassExplicitRollback: 0,
 		audit.TXClassCommitOnly:       0,
 		audit.TXClassNoRollback:       0,
-		audit.TXClassUnknown:          0,
+		audit.TXClassUnknown:          1,
 	},
 	"ctx": {
 		audit.CtxInScopeDrop:  0,

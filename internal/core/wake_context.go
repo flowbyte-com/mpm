@@ -685,12 +685,16 @@ func (dm *DatabaseManager) ReadWakeContext() (string, error) {
 // .claude/mpm-mcp/server.py.
 func formatWakeContext(d WakeContextData) string {
 	var lines []string
-	if d.ActiveMode != "" {
-		lines = append(lines, "**Mode:** "+d.ActiveMode)
+	mode := d.ActiveMode
+	if mode == "" {
+		mode = "default"
 	}
-	if d.ActivePersona != "" {
-		lines = append(lines, "**Persona:** "+d.ActivePersona)
+	lines = append(lines, "**Mode:** "+mode)
+	persona := d.ActivePersona
+	if persona == "" {
+		persona = "default"
 	}
+	lines = append(lines, "**Persona:** "+persona)
 	if len(d.RecentTopics) > 0 {
 		lines = append(lines, "**Recent Topics:** "+strings.Join(d.RecentTopics, ", "))
 	}
@@ -772,13 +776,20 @@ func formatWakeContext(d WakeContextData) string {
 	if d.LastHandoff != nil {
 		lines = append(lines, formatHandoff(d.LastHandoff))
 	}
+	if len(d.OpenWorks) > 0 {
+		lines = append(lines, fmt.Sprintf("**Pending Work (%d):**", len(d.OpenWorks)))
+		for _, w := range d.OpenWorks {
+			lines = append(lines, fmt.Sprintf("  - %s [%s]", w.Title, w.Pointer))
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
 // formatHandoff renders a Handoff as a structured block. Designed to be
 // scannable but informative — the agent needs to know (1) when the last
-// session was, (2) what it was doing, (3) what it committed to do, and
-// (4) what's still unresolved. Anything beyond that is excess.
+// session was, (2) what it was doing, and (3) what state it left behind.
+// Commitments and Open Questions are now rendered via the OpenWorks and
+// Pending Theories projections respectively — no longer embedded here.
 //
 // Handoff timestamp fields are stored as INTEGER Unix-epoch seconds (see
 // migration timestamps_unified_v1); FormatUnixSeconds renders them at the
@@ -792,18 +803,6 @@ func formatHandoff(h *Handoff) string {
 	}
 	lines = append(lines, header)
 	lines = append(lines, "  - Summary: "+h.Summary)
-	if len(h.Commitments) > 0 {
-		lines = append(lines, "  - Commitments:")
-		for _, c := range h.Commitments {
-			lines = append(lines, "    - "+c)
-		}
-	}
-	if len(h.OpenQuestions) > 0 {
-		lines = append(lines, "  - Open Questions:")
-		for _, q := range h.OpenQuestions {
-			lines = append(lines, "    - "+q)
-		}
-	}
 	return strings.Join(lines, "\n")
 }
 
