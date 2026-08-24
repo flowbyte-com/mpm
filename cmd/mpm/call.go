@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
 )
@@ -76,6 +78,17 @@ func handleCall(args []string) int {
 		SessionID: getOrMakeSessionID(),
 		Agent:     resolveAgentID(),
 		Hostname:  resolveHostname(),
+		FrameworkName: func() string {
+			// Prefer MPM_FRAMEWORK (directive-scoping transport) over empty.
+			// ProvenanceResolver also aliases MPM_FRAMEWORK, but we set
+			// ActiveContext.FrameworkName explicitly so workEffectiveProvenance
+			// and audit both see it without env re-read.
+			if v := os.Getenv("MPM_FRAMEWORK"); v != "" {
+				return v
+			}
+			return "mpm-cli"
+		}(),
+		InvocationID: uuid.NewString(),
 	}
 
 	// Passive heartbeat (Arc 2): every MPM call that touches the

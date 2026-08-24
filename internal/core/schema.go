@@ -164,7 +164,7 @@ var BaseTables = []string{
 	`CREATE TABLE IF NOT EXISTS evidence (
 		id                  TEXT PRIMARY KEY,
 		artifact_id         TEXT NOT NULL,
-		artifact_type       TEXT NOT NULL CHECK (artifact_type IN ('memory','theory','decision','lesson')),
+		artifact_type       TEXT NOT NULL CHECK (artifact_type IN ('memory','theory','decision','lesson','work')),
 		type                TEXT NOT NULL,
 		source_group        TEXT NOT NULL,
 		strength            REAL NOT NULL CHECK (strength >= -1.0 AND strength <= 1.0),
@@ -720,31 +720,16 @@ var WorkTables = []string{
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-		actor_kind           TEXT NOT NULL,
-		actor_id             TEXT,
-		framework_name        TEXT,
-		framework_version     TEXT,
-		provider_name         TEXT,
-		model_name            TEXT,
-		model_revision        TEXT,
-		session_id            TEXT,
 		invocation_id         TEXT,
 		parent_invocation_id TEXT,
 		note                  TEXT,
 		title                 TEXT,
 		content               TEXT,
-		-- Phase 2: provenance evidence layer
-		git_head_before       TEXT,
-		git_head_after        TEXT,
-		dirty_before          INTEGER DEFAULT 0,
-		dirty_after           INTEGER DEFAULT 0,
-		changed_files         TEXT,        -- JSON array of file paths
-		committed             INTEGER DEFAULT 0,
+		directive_ids         TEXT DEFAULT '[]',
 		UNIQUE(work_id, event_index)
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
-	`CREATE INDEX IF NOT EXISTS idx_work_events_session ON work_events(session_id);`,
 }
 
 // ReferenceIndexes contains the indexes that support the reference tables.
@@ -1184,11 +1169,10 @@ var SafeMigrations = [][3]string{
 
 	// Phase 2 provenance/verification (Aug 23 incident):
 	// verification status on works; evidence fields on work_events.
+	// Git-specific columns removed — Git state now recorded as evidence
+	// table rows (type: observation), not hardcoded event columns.
+	// Duplicate provenance columns removed — join via invocation_id to
+	// artifact_provenance instead.
 	{"works", "verification", "TEXT"},
-	{"work_events", "git_head_before", "TEXT"},
-	{"work_events", "git_head_after", "TEXT"},
-	{"work_events", "dirty_before", "INTEGER DEFAULT 0"},
-	{"work_events", "dirty_after", "INTEGER DEFAULT 0"},
-	{"work_events", "changed_files", "TEXT"},
-	{"work_events", "committed", "INTEGER DEFAULT 0"},
+	{"work_events", "directive_ids", "TEXT DEFAULT '[]'"},
 }

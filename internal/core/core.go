@@ -311,6 +311,15 @@ type CoreDB interface {
 	UpdateWork(id string, status WorkStatus) (*Work, error)
 	CompleteWork(id string) (*Work, error)
 	CancelWork(id string) (*Work, error)
+	// Thin-handler delegation targets (event-sourced, atomic projection)
+	CreateWorkWithContext(title, content, sessionID string, ac ActiveContext) (*Work, error)
+	CompleteWorkWithContext(workID, note string, ac ActiveContext) (*Work, error)
+	CancelWorkWithContext(workID, note string, ac ActiveContext) (*Work, error)
+	AddWorkNoteWithContext(workID, note string, ac ActiveContext) (*WorkEvent, error)
+	ReopenWorkWithContext(workID string, ac ActiveContext) (*Work, error)
+	UpdateWorkWithContext(workID, title, content, statusStr string, ac ActiveContext) (*Work, error)
+	GetActiveDirectiveIDs(framework string) []string
+	RecordGitEvidenceForWork(workID string)
 
 	// ─── Work Events (Event-Sourced History) ────────────────────
 	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error)

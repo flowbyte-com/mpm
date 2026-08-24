@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -308,13 +310,24 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		if payload == nil {
 			payload = map[string]interface{}{}
 		}
+		// Per-call invocation correlation. Handler and audit share the same ID
+		// so work_events.invocation_id == tool_invocations.invocation_id for
+		// this turn. Honors MPM_FRAMEWORK/MPM_PROVENANCE_FRAMEWORK already on ac.
+		callAC := ac
+		if callAC.InvocationID == "" {
+			callAC.InvocationID = uuid.NewString()
+		}
+		if callAC.FrameworkName == "" {
+			callAC.FrameworkName = "mcp"
+		} else if callAC.FrameworkName == "mcp" {
+			// keep mcp
+		}
 		startedAt := time.Now()
-		result, err := handler(dm, ac, payload)
+		result, err := handler(dm, callAC, payload)
 		completedAt := time.Now()
 		// Audit insert is best-effort; audit failures must not propagate
 		// to the MCP client (see audit_hook.go for isolation contract).
-		auditAC := ac
-		auditAC.FrameworkName = "mcp"
+		auditAC := callAC
 		auditStatus := "success"
 		if err != nil {
 			auditStatus = "error"
