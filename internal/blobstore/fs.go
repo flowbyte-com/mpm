@@ -583,13 +583,16 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 			// Delete it regardless of mtime; the grace period only protects files
 			// that have a corresponding DB row and are waiting for the INSERT to
 			// settle.
+			slog.Warn("blob_gc: orphan file without DB row, deleting", "id", name)
 			path := f.payloadPath(name)
 			if err := os.Remove(path); err == nil {
 				stats.OrphansDeleted++
 			}
 			continue
-		} else if err != nil {
+		}
+		if err != nil {
 			// DB error — skip to avoid deleting a file we couldn't verify.
+			slog.Warn("blob_gc: exists check failed, skipping", "id", name, "err", err)
 			stats.OrphansSkipped++
 			continue
 		}
@@ -619,6 +622,7 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			slog.Warn("blob_gc: scan orphan id failed, skipping", "err", err)
 			continue
 		}
 		path := f.payloadPath(id)
