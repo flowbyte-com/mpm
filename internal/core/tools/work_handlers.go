@@ -39,38 +39,6 @@ func handleMpmWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload 
 	}
 }
 
-// workEffectiveProvenance builds an EffectiveProvenance from the ActiveContext
-// for work event writes. It captures actor_kind, actor_id, session_id, and
-// framework_name from the caller's context.
-func workEffectiveProvenance(dm mpminternal.CoreDB, ac mpminternal.ActiveContext) *mpminternal.EffectiveProvenance {
-	prov := &mpminternal.EffectiveProvenance{
-		ActorKind: "agent",
-		ActorID:   ac.Agent,
-		SessionID: ac.SessionID,
-	}
-	if ac.FrameworkName != "" {
-		prov.FrameworkName = ac.FrameworkName
-	}
-	return prov
-}
-
-// recordWorkProvenance writes an artifact_provenance row for a newly created
-// work. Failures are non-fatal — the error is logged but the handler returns
-// success.
-func recordWorkProvenance(dm mpminternal.CoreDB, workID string, ac mpminternal.ActiveContext) {
-	if workID == "" {
-		return
-	}
-	// dm is always *DatabaseManager at runtime. Use the convenience method
-	// RecordWorkArtifactProvenance which handles its own transaction.
-	dbm, ok := dm.(*mpminternal.DatabaseManager)
-	if !ok {
-		return
-	}
-	prov := workEffectiveProvenance(dm, ac)
-	dbm.RecordWorkArtifactProvenance(workID, prov.ActorKind, prov.ActorID, prov.FrameworkName, prov.SessionID)
-}
-
 func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	title, _ := p["title"].(string)
 	if title == "" {
@@ -78,39 +46,9 @@ func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	}
 	content, _ := p["content"].(string)
 	sessionID, _ := p["session_id"].(string)
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	var workID string
-	// All writes (works row INSERT + created event INSERT + works projection UPDATE)
-	// must be in ONE transaction so they commit atomically.
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		// Insert the works row using the tx-aware node.
-		w, err := dm.AddWork(title, content, sessionID)
-		if err != nil {
-			return err
-		}
-		workID = w.ID
-
-		// Append the created event inside the same transaction.
-		_, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: mpminternal.WorkEventTypeCreated,
-			Title:     title,
-			Content:   content,
-		}, prov, node)
-		return err
-	})
+	w, err := dm.CreateWorkWithContext(title, content, sessionID, ac)
 	if err != nil {
-		return nil, fmt.Errorf("create work: %w", err)
-	}
-
-	// Record provenance (non-fatal). Do this after the transaction commits
-	// so the provenance row is the last write. If it fails, we log and continue.
-	recordWorkProvenance(dm, workID, ac)
-
-	w, err := dm.GetWork(workID)
-	if err != nil {
-		return nil, fmt.Errorf("get work after create: %w", err)
+		return nil, err
 	}
 	return workToMapWork(w), nil
 }
@@ -139,138 +77,42 @@ func handleShowWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{
 	return workToMapWork(w), nil
 }
 
-// handleUpdateWork handles work updates. The status=X path is deprecated
-// (ruling 3); it maps to the appropriate event. Title and content changes
-// emit dedicated title_updated / content_updated events.
+// Thin handlers: parse payload, delegate to db.go event-sourced API.
+// No UPDATE works queries, no git logic, no provenance duplication.
+
 func handleUpdateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
-	if workID == "" {
-		return nil, fmt.Errorf("work_id is required for update")
-	}
 	statusStr, _ := p["status"].(string)
 	title, _ := p["title"].(string)
 	content, _ := p["content"].(string)
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	// Determine event type from params.
-	var eventType mpminternal.WorkEventType
-
-	switch {
-	case statusStr != "":
-		// Deprecated path: status=X maps to the appropriate event.
-		// This logs a deprecation warning but still works.
-		switch mpminternal.WorkStatus(statusStr) {
-		case mpminternal.WorkStatusDone:
-			eventType = mpminternal.WorkEventTypeCompleted
-		case mpminternal.WorkStatusCancelled:
-			eventType = mpminternal.WorkEventTypeCancelled
-		case mpminternal.WorkStatusOpen:
-			eventType = mpminternal.WorkEventTypeReopened
-		default:
-			return nil, fmt.Errorf("invalid status %q; must be open, done, or cancelled", statusStr)
-		}
-	case title != "":
-		eventType = mpminternal.WorkEventTypeTitleUpdated
-	case content != "":
-		eventType = mpminternal.WorkEventTypeContentUpdated
-	default:
-		return nil, fmt.Errorf("at least one of status, title, or content is required for update")
-	}
-
-	// Log deprecation warning for status path.
-	if statusStr != "" {
-		type hasLogAudit interface {
-			LogAudit(level mpminternal.AuditLevel, component, message, stack string, ctx mpminternal.AuditContext)
-		}
-		if logger, ok := dm.(hasLogAudit); ok {
-			logger.LogAudit(mpminternal.AuditWarn, "work", "deprecated update status=X path used", "", mpminternal.AuditContext{
-				"work_id": workID,
-				"status":  statusStr,
-			})
-		}
-	}
-
-	// Append the event inside a transaction (atomically updates works row projection).
-	var event *mpminternal.WorkEvent
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		var err error
-		event, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: eventType,
-			Title:     title,
-			Content:   content,
-		}, prov, node)
-		return err
-	})
+	w, err := dm.UpdateWorkWithContext(workID, title, content, statusStr, ac)
 	if err != nil {
-		return nil, fmt.Errorf("append %s event: %w", eventType, err)
-	}
-	_ = event
-
-	w, err := dm.GetWork(workID)
-	if err != nil {
-		return nil, fmt.Errorf("get work after update: %w", err)
+		return nil, err
 	}
 	return workToMapWork(w), nil
 }
 
 func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
-	if workID == "" {
-		return nil, fmt.Errorf("work_id is required for complete")
-	}
 	note, _ := p["note"].(string)
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	var event *mpminternal.WorkEvent
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		var err error
-		event, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: mpminternal.WorkEventTypeCompleted,
-			Note:      note,
-		}, prov, node)
-		return err
-	})
+	w, err := dm.CompleteWorkWithContext(workID, note, ac)
 	if err != nil {
-		return nil, fmt.Errorf("append completed event: %w", err)
+		return nil, err
 	}
-	_ = event
-
-	w, err := dm.GetWork(workID)
-	if err != nil {
-		return nil, fmt.Errorf("get work after complete: %w", err)
-	}
+	// Explicit evidence route: separate write to evidence table (not WorkEvent)
+	dm.RecordGitEvidenceForWork(workID)
 	return workToMapWork(w), nil
 }
 
 func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
-	if workID == "" {
-		return nil, fmt.Errorf("work_id is required for cancel")
-	}
 	note, _ := p["note"].(string)
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	var event *mpminternal.WorkEvent
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		var err error
-		event, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: mpminternal.WorkEventTypeCancelled,
-			Note:      note,
-		}, prov, node)
-		return err
-	})
+	w, err := dm.CancelWorkWithContext(workID, note, ac)
 	if err != nil {
-		return nil, fmt.Errorf("append cancelled event: %w", err)
+		return nil, err
 	}
-	_ = event
-
-	w, err := dm.GetWork(workID)
-	if err != nil {
-		return nil, fmt.Errorf("get work after cancel: %w", err)
-	}
+	// Explicit evidence route for cancellation as well
+	dm.RecordGitEvidenceForWork(workID)
 	return workToMapWork(w), nil
 }
 
@@ -294,72 +136,33 @@ func handleHistoryWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfa
 	return result, nil
 }
 
-// handleNoteWork appends a note_appended event to a work item's history.
 func handleNoteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
-	if workID == "" {
-		return nil, fmt.Errorf("work_id is required for note")
-	}
 	note, _ := p["note"].(string)
-	if note == "" {
-		return nil, fmt.Errorf("note is required for note action")
-	}
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	var event *mpminternal.WorkEvent
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		var err error
-		event, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: mpminternal.WorkEventTypeNoteAppended,
-			Note:      note,
-		}, prov, node)
-		return err
-	})
+	ev, err := dm.AddWorkNoteWithContext(workID, note, ac)
 	if err != nil {
-		return nil, fmt.Errorf("append note event: %w", err)
+		return nil, err
 	}
-
-	return workEventToMap(event), nil
+	return workEventToMap(ev), nil
 }
 
-// handleReopenWork appends a reopened event, clearing the terminal
-// state (completed_at) on the works row projection.
 func handleReopenWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
-	if workID == "" {
-		return nil, fmt.Errorf("work_id is required for reopen")
-	}
-
-	prov := workEffectiveProvenance(dm, ac)
-
-	var event *mpminternal.WorkEvent
-	err := dm.WithTx(func(node mpminternal.DBNode) error {
-		var err error
-		event, err = dm.AppendWorkEvent(workID, mpminternal.WorkEvent{
-			EventType: mpminternal.WorkEventTypeReopened,
-		}, prov, node)
-		return err
-	})
+	w, err := dm.ReopenWorkWithContext(workID, ac)
 	if err != nil {
-		return nil, fmt.Errorf("append reopened event: %w", err)
-	}
-	_ = event
-
-	w, err := dm.GetWork(workID)
-	if err != nil {
-		return nil, fmt.Errorf("get work after reopen: %w", err)
+		return nil, err
 	}
 	return workToMapWork(w), nil
 }
 
 func workToMapWork(w *mpminternal.Work) map[string]interface{} {
 	m := map[string]interface{}{
-		"id":         w.ID,
-		"title":      w.Title,
-		"status":     w.Status,
-		"created_at": w.CreatedAt,
-		"updated_at": w.UpdatedAt,
+		"id":           w.ID,
+		"title":        w.Title,
+		"status":       w.Status,
+		"verification": w.Verification,
+		"created_at":   w.CreatedAt,
+		"updated_at":   w.UpdatedAt,
 	}
 	if w.Content != "" {
 		m["content"] = w.Content
@@ -380,22 +183,6 @@ func workEventToMap(e *mpminternal.WorkEvent) map[string]interface{} {
 		"event_index": e.EventIndex,
 		"event_type":  e.EventType,
 		"created_at":  e.CreatedAt,
-		"actor_kind":  e.ActorKind,
-	}
-	if e.ActorID != "" {
-		m["actor_id"] = e.ActorID
-	}
-	if e.FrameworkName != "" {
-		m["framework_name"] = e.FrameworkName
-	}
-	if e.ProviderName != "" {
-		m["provider_name"] = e.ProviderName
-	}
-	if e.ModelName != "" {
-		m["model_name"] = e.ModelName
-	}
-	if e.SessionID != "" {
-		m["session_id"] = e.SessionID
 	}
 	if e.InvocationID != "" {
 		m["invocation_id"] = e.InvocationID
@@ -411,6 +198,9 @@ func workEventToMap(e *mpminternal.WorkEvent) map[string]interface{} {
 	}
 	if e.Content != "" {
 		m["content"] = e.Content
+	}
+	if len(e.DirectiveIDs) > 0 {
+		m["directive_ids"] = e.DirectiveIDs
 	}
 	return m
 }

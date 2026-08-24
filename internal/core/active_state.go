@@ -205,6 +205,13 @@ func resolveActiveComponent(dm *DatabaseManager, kind, requested, defaultName st
 // Empty values fall back to defaults at write time ("call" model,
 // "mpm_call" agent) so a zero-value ActiveContext produces sane
 // provenance without explicit configuration.
+//
+// NOTE: As of 2026-08-24, ActiveContext is the MODE/PERSONA lens only.
+// Provenance fields (provider, model, temperature, reasoning, invocation)
+// belong to EffectiveProvenance via ProvenanceResolver. ActiveContext
+// carries only the per-call invocation correlation IDs that must be
+// threaded from the dispatcher. All other provenance is resolved from
+// env via ProvenanceResolver — see forensic audit §9.
 type ActiveContext struct {
 	Mode    string
 	Persona string
@@ -224,6 +231,12 @@ type ActiveContext struct {
 	// populate tool_invocations.framework_name and to group the
 	// compatibility matrix. Empty is fine — defaults to "mpm-cli".
 	FrameworkName string
+	// InvocationID is the per-call correlation ID for this tool invocation.
+	// When set, it is threaded into EffectiveProvenance and work_events.
+	// Generate via GenerateID() at the dispatcher. Empty for unit tests.
+	InvocationID string
+	// ParentInvocationID traces agent-of-agent causality (Hermes → Claude Code).
+	ParentInvocationID string
 }
 
 // provenanceMeta is deprecated. The full provenance block is now

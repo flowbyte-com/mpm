@@ -64,7 +64,10 @@ func recordToolInvocation(
 		}
 	}()
 
-	invocationID := uuid.NewString()
+	invocationID := ac.InvocationID
+	if invocationID == "" {
+		invocationID = uuid.NewString()
+	}
 	id := uuid.NewString()
 	sessionID := ac.SessionID
 	if sessionID == "" {

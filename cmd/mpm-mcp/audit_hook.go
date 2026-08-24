@@ -47,9 +47,15 @@ func recordToolInvocation(
 		}
 	}()
 
-	invocationID := uuid.NewString()
+	invocationID := ac.InvocationID
+	if invocationID == "" {
+		invocationID = uuid.NewString()
+	}
 	id := uuid.NewString()
 	frameworkName := "mcp"
+	if ac.FrameworkName != "" && ac.FrameworkName != "mcp" {
+		frameworkName = ac.FrameworkName
+	}
 	actorKind := "agent"
 	sessionID := ac.SessionID
 	if sessionID == "" {
