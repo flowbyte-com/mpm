@@ -962,6 +962,96 @@ func TestHandleReadWakeContext_IncludesEpistemicPressure(t *testing.T) {
 	}
 }
 
+// TestHandleReadWakeContext_IncludesOpenWorks pins the wire-format
+// contract: works with status=open must surface in the read_wake_context
+// response under the open_works key. This test covers both populated and
+// empty cases. The open_works field was added to WakeContextData but
+// was absent from the handler's JSON serialization map — a silent drift
+// that caused the JSON wire format to omit pending work items while the
+// system-prompt format (which calls ReadWakeContext directly) rendered
+// them correctly.
+func TestHandleReadWakeContext_IncludesOpenWorks(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	// Case 1: empty — open_works key must be present (not omitted)
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	rawWorks, exists := m["open_works"]
+	if !exists {
+		t.Fatal("open_works key missing from read_wake_context response — handler copy drifted from WakeContextData struct")
+	}
+	works, ok := rawWorks.([]internal.WakeContextWork)
+	if !ok {
+		// WakeContextWork is not []interface{} so this cast may fail;
+		// try the generic interface{} slice path
+		worksIF, ok := rawWorks.([]interface{})
+		if !ok {
+			t.Fatalf("expected open_works to be []WakeContextWork or []interface{}, got %T", rawWorks)
+		}
+		if len(worksIF) != 0 {
+			t.Fatalf("expected empty open_works, got %d items", len(worksIF))
+		}
+	} else {
+		if len(works) != 0 {
+			t.Fatalf("expected empty open_works, got %d items", len(works))
+		}
+	}
+
+	// Case 2: populated — create a work item and verify it appears
+	w, err := dm.AddWork("Audit findings need fixing", "Close the open_works JSON drift", "session-openworks-test")
+	if err != nil {
+		t.Fatalf("AddWork: %v", err)
+	}
+
+	out2, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context after AddWork: %v", err)
+	}
+	m2, ok := out2.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out2)
+	}
+	rawWorks2, exists2 := m2["open_works"]
+	if !exists2 {
+		t.Fatal("open_works key missing from response after AddWork")
+	}
+	works2, ok := rawWorks2.([]internal.WakeContextWork)
+	if !ok {
+		works2IF, ok := rawWorks2.([]interface{})
+		if !ok {
+			t.Fatalf("expected []WakeContextWork, got %T", rawWorks2)
+		}
+		if len(works2IF) != 1 {
+			t.Fatalf("expected 1 work item, got %d", len(works2IF))
+		}
+		// At least verify it's a non-empty slice
+	} else {
+		if len(works2) != 1 {
+			t.Fatalf("expected 1 work item in open_works, got %d", len(works2))
+		}
+		if works2[0].ID != w.ID {
+			t.Errorf("open_works[0].ID: got %s, want %s", works2[0].ID, w.ID)
+		}
+		if works2[0].Verification != internal.WorkVerificationUnverified {
+			t.Errorf("new work verification: got %s, want unverified", works2[0].Verification)
+		}
+	}
+}
+
 // ── health_check tool ──────────────────────────────────────────────────
 
 // TestHandleHealthCheck_PassesThrough verifies the tool-layer wrapper

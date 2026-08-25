@@ -201,7 +201,7 @@ func handleProvenanceModelYield(args []string) int {
 	}
 	defer rows.Close()
 
-	fmt.Printf("Lifecycle measure for artifacts created in the last %d days.\n", days)
+	fmt.Printf("\nLifecycle measure for artifacts created in the last %d days.\n", days)
 	fmt.Printf("Survival is descriptive, not a quality score.\n\n")
 	fmt.Printf("%-32s  %-16s  %8s  %8s  %12s  %12s  %10s\n",
 		"model", "framework", "created", "survived", "survive_%", "reinforced", "challenged")
