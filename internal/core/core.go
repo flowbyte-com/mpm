@@ -320,6 +320,7 @@ type CoreDB interface {
 	UpdateWorkWithContext(workID, title, content, statusStr string, ac ActiveContext) (*Work, error)
 	GetActiveDirectiveIDs(framework string) []string
 	RecordGitEvidenceForWork(workID string)
+	DeriveWorkVerification(workID string) (WorkVerification, error)
 
 	// ─── Work Events (Event-Sourced History) ────────────────────
 	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error)
