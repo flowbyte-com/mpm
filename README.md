@@ -211,6 +211,17 @@ mpm call mpm_work '{"action":"reopen","params":{"work_id":"<id>"}}'
 
 New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
 
+**Phase 2 verification model.** The `complete` action emits `WorkEventTypeClaimedComplete` — an event recording that an agent *claimed* completion, not that the work is verified. Verification is derived separately via `DeriveWorkVerification`, which aggregates evidence rows (git observations, test results, file artifacts, manual review) into one of four epistemic states:
+
+| State | Meaning |
+|-------|---------|
+| `unverified` | No evidence collected (default) |
+| `partial` | Audit evidence present (e.g. git commit) but no outcome evidence |
+| `verified` | Outcome evidence confirms the claimed completion |
+| `contradicted` | Evidence contradicts the claim |
+
+`claimed_complete` changes the work's `status` to `done`; it does not change `verification`. The `evidence_observed` event type records that evidence was attached. The `status` column and the `verification` column are orthogonal — `status=done, verification=unverified` is a valid, expected state immediately after `complete` is called with no evidence yet attached.
+
 #### Reference
 
 External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are stored with their source URL, section markers, and ingestion timestamp, and are searchable via the same FTS5 index as memories.
@@ -224,6 +235,17 @@ Procedural memory: "how to act." A skill is a markdown document with YAML frontm
 #### Evidence
 
 Information that supports or challenges another artifact. Evidence is the substrate from which confidence is derived, never an artifact-level assertion of truth.
+
+**Calling-framework provenance.** When a non-MPM caller (Claude Code, OpenCode, a custom agent) invokes `mpm call`, MPM reads the following environment variables to record the calling framework's identity in its audit trail:
+
+| Env var | Purpose | Default |
+|---------|---------|---------|
+| `MPM_PROVENANCE_FRAMEWORK` | Caller identity | `mpm-cli` |
+| `MPM_PROVENANCE_MODEL` | Model name | _(empty)_ |
+| `MPM_PROVENANCE_INVOCATION_ID` | This invocation's unique ID | _(auto-generated)_ |
+| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | Parent invocation for agent-of-agent tracing | _(empty)_ |
+
+These populate `tool_invocations.framework_name` and `artifact_provenance.model_name`. Provenance records *how an artifact was created* — it does not assert that the artifact is correct or true.
 
 ### 3.2 Design Principles
 
@@ -906,6 +928,8 @@ When a drifting memory triggers this signature, the engine quarantines the memor
 MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`bin/mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. No plugin layer, no Node/TypeScript wrapper, no Python shim — one binary speaking MCP.
 
 The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders and their associated TypeScript sources are gone. The MCP server is the only integration surface for MCP-aware clients.
+
+For a step-by-step recipe for connecting Claude Code to MPM — including the SessionStart hook, `MPM_PROVENANCE_*` environment variables, and the `read_wake_context --format=system-prompt` injection path — see `docs/CLAUDE_CODE_INTEGRATION.md`.
 
 #### MCP tool surface
 
