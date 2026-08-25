@@ -261,6 +261,9 @@ Flags:
 
 The 'work' command never exposes the implementation name 'scratchpad';
 internally the substrate's existing scratchpad APIs are used.
+
+Note: additional work actions (create, complete, cancel, reopen, history,
+note) are available via the machine interface: mpm call mpm_work.
 `)
 }
 

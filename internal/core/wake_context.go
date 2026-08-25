@@ -780,7 +780,7 @@ func formatWakeContext(d WakeContextData) string {
 		lines = append(lines, fmt.Sprintf("**Pending Work (%d):**", len(d.OpenWorks)))
 		for _, w := range d.OpenWorks {
 			verif := ""
-			if w.Verification != "" && w.Verification != WorkVerificationUnverified {
+			if w.Verification != "" {
 				verif = " [" + string(w.Verification) + "]"
 			}
 			lines = append(lines, fmt.Sprintf("  - %s%s [%s]", w.Title, verif, w.Pointer))

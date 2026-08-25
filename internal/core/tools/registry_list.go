@@ -108,7 +108,7 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 		Description: `Agent session state, mode routing, and directive management.
 Use when: you need to understand the current agent mode/persona; you want to trigger a mode or persona switch based on task context; you need to read active behavioral directives governing the current session; you want to query the proactive recall hint for conversation-relevant memories.
 Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},"params":{"type":"object","properties":{"format":{"type":"string","enum":["system-prompt"],"description":"For read_wake_context: return human-readable text instead of JSON"}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmContext,
 	},
 	{
