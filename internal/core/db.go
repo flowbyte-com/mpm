@@ -1816,6 +1816,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		return fmt.Errorf("migrateArtifactProvenanceSchema: %w", err)
 	}
 
+	// Constraint migration: widen evidence.artifact_type CHECK to include
+	// 'work'. Required so evidence rows can reference work artifacts for the
+	// evidence-derived verification model. Same table-recreate pattern as
+	// migrateAuditLevelConstraint. Idempotent via sqlite_master check.
+	if err := dm.migrateEvidenceWorkType(); err != nil {
+		return fmt.Errorf("migrateEvidenceWorkType: %w", err)
+	}
+
 	// Backfill: set updated_at = created_at for rows migrated without updated_at
 	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
 
