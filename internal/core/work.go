@@ -35,9 +35,10 @@ type Work struct {
 
 // WakeContextWork is the bounded projection of a work item for wake context.
 type WakeContextWork struct {
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`    // truncated to 120 chars
-	Status    WorkStatus `json:"status"`
-	Pointer   string     `json:"pointer"` // "mpm://work/<id>"
-	CreatedAt int64      `json:"created_at"`
+	ID            string            `json:"id"`
+	Title         string            `json:"title"`    // truncated to 120 chars
+	Status        WorkStatus        `json:"status"`
+	Verification  WorkVerification  `json:"verification"`
+	Pointer       string            `json:"pointer"` // "mpm://work/<id>"
+	CreatedAt     int64             `json:"created_at"`
 }

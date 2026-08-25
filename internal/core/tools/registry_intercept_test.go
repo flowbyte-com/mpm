@@ -156,7 +156,8 @@ func TestRegistryIsWrappedAtInit(t *testing.T) {
 		"mpm_evidence",
 		"mpm_skills",
 		"mpm_references",
-		"mpm_session", // session_end / handoff are cognitive writes
+		"mpm_handoff",  // inter-session bridge: handoff write is a cognitive write
+		"mpm_scratchpad", // intra-session volatile state: flush/promote are cognitive writes
 		"mpm_system", // migrate / commit (no, that's memory) — audit writes
 		// Standalone tools that are still cognitive.
 		"log_to_changelog",

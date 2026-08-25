@@ -29,7 +29,7 @@ func runServe(args []string) error {
 	}
 	dbPath := os.Getenv("MPM_TELEMETRY_DB")
 	if dbPath == "" {
-		dbPath = filepath.Join(workspace, "telemetry.db")
+		dbPath = filepath.Join(workspace, "src", "db", "telemetry.db")
 	} else {
 		dbPath = filepath.Clean(dbPath)
 	}

@@ -779,7 +779,11 @@ func formatWakeContext(d WakeContextData) string {
 	if len(d.OpenWorks) > 0 {
 		lines = append(lines, fmt.Sprintf("**Pending Work (%d):**", len(d.OpenWorks)))
 		for _, w := range d.OpenWorks {
-			lines = append(lines, fmt.Sprintf("  - %s [%s]", w.Title, w.Pointer))
+			verif := ""
+			if w.Verification != "" && w.Verification != WorkVerificationUnverified {
+				verif = " [" + string(w.Verification) + "]"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s%s [%s]", w.Title, verif, w.Pointer))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1160,7 +1164,7 @@ func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (boo
 // ordered by created_at ASC (oldest first). Titles are truncated to 120 chars.
 func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 	rows, err := dm.db.Query(`
-		SELECT id, title, status, created_at
+		SELECT id, title, status, verification, created_at
 		FROM works WHERE status = 'open'
 		ORDER BY created_at ASC
 		LIMIT 5
@@ -1174,9 +1178,13 @@ func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 	out := make([]WakeContextWork, 0, 5)
 	for rows.Next() {
 		var w WakeContextWork
-		if err := rows.Scan(&w.ID, &w.Title, &w.Status, &w.CreatedAt); err != nil {
+		var verification sql.NullString
+		if err := rows.Scan(&w.ID, &w.Title, &w.Status, &verification, &w.CreatedAt); err != nil {
 			dm.LogAudit(AuditWarn, "wake_context", "gatherOpenWorks scan: "+err.Error(), "", AuditContext{})
 			continue
+		}
+		if verification.Valid {
+			w.Verification = WorkVerification(verification.String)
 		}
 		w.Pointer = "mpm://work/" + w.ID
 		if len(w.Title) > 120 {

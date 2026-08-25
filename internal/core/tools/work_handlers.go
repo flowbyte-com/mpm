@@ -99,8 +99,12 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	// Explicit evidence route: separate write to evidence table (not WorkEvent)
+	// Record git state as audit evidence, then derive verification.
+	// Git is one evidence source among equals; it never auto-verifies.
 	dm.RecordGitEvidenceForWork(workID)
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		// Non-fatal: verification stays at its last known value.
+	}
 	return workToMapWork(w), nil
 }
 
@@ -113,6 +117,9 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	}
 	// Explicit evidence route for cancellation as well
 	dm.RecordGitEvidenceForWork(workID)
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		// Non-fatal.
+	}
 	return workToMapWork(w), nil
 }
 
