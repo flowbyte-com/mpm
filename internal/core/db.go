@@ -3534,26 +3534,6 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// computeVerification derives works.verification from git evidence.
-// isClaim distinguishes completed/claimed_complete (true) from evidence_observed (false).
-func computeVerification(headBefore, headAfter string, dirtyBefore, dirtyAfter bool, changedFiles []string, committed bool, isClaim bool) string {
-	// No git repo / no snapshot — unverified.
-	if headBefore == "" && headAfter == "" && len(changedFiles) == 0 && !dirtyBefore && !dirtyAfter && !committed {
-		return "unverified"
-	}
-	if committed {
-		return "verified"
-	}
-	if len(changedFiles) > 0 || dirtyAfter {
-		return "partial"
-	}
-	if isClaim {
-		// Claimed completion but no observable change — contradicts claim.
-		return "contradicted"
-	}
-	return "unverified"
-}
-
 // GitSnapshot captures the observable repository state at event creation.
 // Best-effort: if git is not available or not a repo, all fields are empty/false.
 type GitSnapshot struct {
@@ -4449,7 +4429,7 @@ func (dm *DatabaseManager) recordGitEvidenceForWork(workID string) {
 	if snap.HeadAfter != "" && snap.HeadAfter != snap.HeadBefore {
 		notes += " head_after=" + snap.HeadAfter[:7]
 	}
-	_, _ = dm.AddEvidence(EvidenceInput{
+	_, err := dm.AddEvidence(EvidenceInput{
 		ArtifactID:   workID,
 		ArtifactType: "work",
 		Type:         "observation",
@@ -4458,6 +4438,9 @@ func (dm *DatabaseManager) recordGitEvidenceForWork(workID string) {
 		Notes:        notes,
 		Strength:     0.6,
 	})
+	if err != nil {
+		slog.Warn("recordGitEvidenceForWork: AddEvidence failed", "work_id", workID, "err", err)
+	}
 }
 
 // CreateWorkWithContext creates a work and its initial event atomically.
@@ -4509,7 +4492,7 @@ func (dm *DatabaseManager) CompleteWorkWithContext(workID, note string, ac Activ
 	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
 	err := dm.WithTx(func(node DBNode) error {
 		_, err := dm.AppendWorkEvent(workID, WorkEvent{
-			EventType:    WorkEventTypeCompleted,
+			EventType:    WorkEventTypeClaimedComplete,
 			Note:         note,
 			InvocationID: prov.InvocationID,
 			DirectiveIDs: directiveIDs,
@@ -4549,6 +4532,68 @@ func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveC
 // work completion — separate from the event ledger.
 func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
 	dm.recordGitEvidenceForWork(workID)
+}
+
+// DeriveWorkVerification computes and persists works.verification from evidence rows.
+// It applies conservative decision rules:
+//   - No evidence → unverified
+//   - Only audit evidence (git, ci) → partial
+//   - Outcome evidence (filesystem, test, api_response) + audit evidence → verified
+//   - Outcome evidence alone (no audit) → verified
+//   - Contradictory evidence → contradicted
+//
+// Git is audit evidence, never the authority. Verification requires outcome evidence
+// that the intended result was achieved. Action evidence alone is insufficient.
+// This function never fabricates verification; it assesses what is actually observed.
+func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerification, error) {
+	evidence, err := ListEvidenceForArtifact(dm, workID, "work")
+	if err != nil {
+		return WorkVerificationUnverified, fmt.Errorf("derive verification: list evidence: %w", err)
+	}
+
+	verification := WorkVerificationUnverified
+	if len(evidence) > 0 {
+		// Classify evidence by source group.
+		var hasOutcome, hasAudit, hasAction, hasContradiction bool
+		for _, e := range evidence {
+			switch e.SourceGroup {
+			case "filesystem", "test", "api_response", "manual_review":
+				hasOutcome = true
+			case "git", "ci", "external":
+				hasAudit = true
+			case "tool_invocation", "api_call", "process":
+				hasAction = true
+			}
+			// Strength near -1 indicates contradiction.
+			if e.Strength <= -0.7 {
+				hasContradiction = true
+			}
+		}
+
+		switch {
+		case hasContradiction:
+			verification = WorkVerificationContradicted
+		case hasOutcome:
+			// Outcome observed — sufficient for verified, regardless of audit.
+			verification = WorkVerificationVerified
+		case hasAudit && !hasOutcome:
+			// Audit evidence exists but no outcome evidence.
+			verification = WorkVerificationPartial
+		case hasAction && !hasOutcome && !hasAudit:
+			// Action occurred but no outcome observed.
+			verification = WorkVerificationUnverified
+		default:
+			// Evidence exists but doesn't fit a recognized category.
+			verification = WorkVerificationUnverified
+		}
+	}
+
+	// Persist the derived value to the works row.
+	_, err = dm.db.Exec(`UPDATE works SET verification = ? WHERE id = ?`, string(verification), workID)
+	if err != nil {
+		return WorkVerificationUnverified, fmt.Errorf("derive verification: persist: %w", err)
+	}
+	return verification, nil
 }
 
 // AddWorkNoteWithContext appends a note event.
@@ -5379,9 +5424,10 @@ func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error)
 }
 
 // RecomputeWorkProjection recomputes the works row from the event ledger.
-// It derives status, title, content, verification, updated_at and
-// completed_at by replaying events in order — matching the projection
-// logic in AppendWorkEvent. Used when the works row may have drifted.
+// It derives status, title, content, updated_at and completed_at by replaying
+// events in order. Verification is NOT derived from events — it is derived
+// from evidence rows by DeriveWorkVerification. Used when the works row may
+// have drifted from its event source.
 func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 	rows, err := dm.db.Query(`
 		SELECT event_type, created_at, title, content
@@ -5397,7 +5443,6 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 	var (
 		title, content string
 		status         = "open"
-		verification   = "unverified"
 		maxCreatedAt   int64
 		completedAt    *int64
 		hasEvents      bool
@@ -5440,8 +5485,8 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 				content = eContent.String
 			}
 		case "evidence_observed":
-			// Evidence observed does not change status; verification
-			// derivation from git removed — keep as unverified.
+			// Evidence observed does not change status or verification.
+			// Verification is derived from evidence rows by DeriveWorkVerification.
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -5454,9 +5499,9 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 		maxCreatedAt = time.Now().Unix()
 	}
 	_, err = dm.db.Exec(`
-		UPDATE works SET status = ?, verification = ?, title = ?, content = ?, updated_at = ?, completed_at = ?
+		UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?
 		WHERE id = ?
-	`, status, verification, title, content, maxCreatedAt, completedAt, workID)
+	`, status, title, content, maxCreatedAt, completedAt, workID)
 	if err != nil {
 		return fmt.Errorf("update works projection: %w", err)
 	}

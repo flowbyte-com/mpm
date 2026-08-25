@@ -355,6 +355,10 @@ func artifactExists(node DBNode, artifactID, artifactType string) (bool, error) 
 		// across both shapes — for the current view shape, `deleted` is
 		// not exposed, so this clause is benign.
 		deletedClause = ""
+	case "work":
+		// works table; no soft-delete column.
+		table = "works"
+		deletedClause = ""
 	default:
 		table = "memories"
 		deletedClause = " AND deleted_at IS NULL"

@@ -66,29 +66,33 @@ func handleCall(args []string) int {
 	// Build the ActiveContext from CLI-detected mode/persona.
 	// The MCP server constructs this once at boot and passes it directly;
 	// the CLI derives it from the active.json file on disk.
+	//
+	// Provenance env vars allow non-MPM callers (Claude Code, OpenCode, etc.)
+	// to identify themselves properly. MPM_PROVENANCE_FRAMEWORK is the
+	// canonical name; MPM_FRAMEWORK is accepted as a legacy alias.
 	injectActiveContext()
 	defer clearActiveContext()
+	frameworkName := os.Getenv("MPM_PROVENANCE_FRAMEWORK")
+	if frameworkName == "" {
+		frameworkName = os.Getenv("MPM_FRAMEWORK")
+	}
+	if frameworkName == "" {
+		frameworkName = "mpm-cli"
+	}
+	invocationID := os.Getenv("MPM_PROVENANCE_INVOCATION_ID")
+	if invocationID == "" {
+		invocationID = uuid.NewString()
+	}
 	ac := mpminternal.ActiveContext{
-		Mode:    activeMode,
-		Persona: activePersona,
-		// SessionID: stable per process. Arc 2 needs this so
-		// shared.event_wakes can target the right session and the
-		// heartbeat can update the right row. Generated lazily on
-		// the first call (see getOrMakeSessionID).
-		SessionID: getOrMakeSessionID(),
-		Agent:     resolveAgentID(),
-		Hostname:  resolveHostname(),
-		FrameworkName: func() string {
-			// Prefer MPM_FRAMEWORK (directive-scoping transport) over empty.
-			// ProvenanceResolver also aliases MPM_FRAMEWORK, but we set
-			// ActiveContext.FrameworkName explicitly so workEffectiveProvenance
-			// and audit both see it without env re-read.
-			if v := os.Getenv("MPM_FRAMEWORK"); v != "" {
-				return v
-			}
-			return "mpm-cli"
-		}(),
-		InvocationID: uuid.NewString(),
+		Mode:       activeMode,
+		Persona:    activePersona,
+		SessionID:  getOrMakeSessionID(),
+		Agent:      resolveAgentID(),
+		Hostname:   resolveHostname(),
+		Model:      os.Getenv("MPM_PROVENANCE_MODEL"),
+		FrameworkName: frameworkName,
+		InvocationID: invocationID,
+		ParentInvocationID: os.Getenv("MPM_PROVENANCE_PARENT_INVOCATION_ID"),
 	}
 
 	// Passive heartbeat (Arc 2): every MPM call that touches the

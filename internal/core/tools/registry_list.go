@@ -24,7 +24,7 @@ var Registry = []Tool{
 	{
 		Name: "mpm_memory",
 		Description: `Persistent memory for facts, learnings, and context the agent needs to carry across sessions.
-Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval.
+Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).`,
 		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},"params":{"type":"object","properties":{"projection":{"type":"boolean","description":"Phase 2B: return summary+pointer+retrieval_metadata instead of full content"}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmMemory,
@@ -101,7 +101,7 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 			},
 			"required": ["query"]
 		}`),
-		Handler: handleExplainRetrieval,
+		Handler: handleMpmRetrievalDiagnose,
 	},
 	{
 		Name: "mpm_context",
@@ -114,8 +114,7 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 	{
 		Name: "mpm_skills",
 		Description: `Reusable procedural knowledge stored as markdown with YAML frontmatter.
-Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read, and reused across sessions without re-inventing the procedure.
-Skills are versioned and can be shared globally or kept local to this workstation.`,
+Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.`,
 		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","read","list","delete","promote_to_global"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmSkills,
 	},
@@ -155,7 +154,7 @@ Promote to memory when the thought is complete and worth preserving. Discard whe
 	{
 		Name: "mpm_system",
 		Description: `Maintenance, diagnostics, and housekeeping for the MPM substrate.
-Use when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters.
+Use when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters; list active audit clusters (list_clusters).
 This tool is for system health — not for daily agent work. Prefer specific tools for regular operations.`,
 		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmSystem,

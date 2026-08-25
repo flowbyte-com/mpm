@@ -1260,15 +1260,15 @@ func TestAllDomainDispatchers(t *testing.T) {
 	}
 
 	tests := []domainTest{
-		// mpm_session
-		{"session/list_handoffs", handleMpmSession, "list_handoffs", map[string]interface{}{}},
-		{"session/handoff", handleMpmSession, "handoff", map[string]interface{}{}},
+		// mpm_handoff
+		{"handoff/list", handleMpmHandoff, "list", map[string]interface{}{}},
+		{"handoff/read", handleMpmHandoff, "read", map[string]interface{}{}},
 		// session/shred_handoff: requires a real handoff id; seed in the
 		// dedicated TestShredHandoff_HappyPath test. The dispatch smoke
 		// here just verifies the action is recognised (no unknown-action
 		// error) — the underlying DeleteHandoff returns an error if id is
 		// missing, which is the documented contract.
-		{"session/shred_handoff", handleMpmSession, "shred_handoff", map[string]interface{}{"id": "nonexistent"}},
+		{"handoff/shred", handleMpmHandoff, "shred", map[string]interface{}{"id": "nonexistent"}},
 		// mpm_wakes
 		{"wakes/list", handleMpmWakes, "list", map[string]interface{}{}},
 		{"wakes/list_tasks", handleMpmWakes, "list_tasks", map[string]interface{}{}},
@@ -1326,7 +1326,8 @@ func TestAllDomainUnknownActions(t *testing.T) {
 	}
 
 	dispatchers := []dispatcherInfo{
-		{"mpm_session", handleMpmSession},
+		{"mpm_handoff", handleMpmHandoff},
+		{"mpm_scratchpad", handleMpmScratchpad},
 		{"mpm_wakes", handleMpmWakes},
 		{"mpm_theories", handleMpmTheories},
 		{"mpm_lessons", handleMpmLessons},
@@ -1377,7 +1378,7 @@ func TestAllDomainNilParams(t *testing.T) {
 	}
 
 	dispatchers := []dispatcherInfo{
-		{"mpm_session", handleMpmSession, "list_handoffs"},
+		{"mpm_handoff", handleMpmHandoff, "list"},
 		{"mpm_wakes", handleMpmWakes, "list"},
 		{"mpm_theories", handleMpmTheories, "propose"},
 		{"mpm_lessons", handleMpmLessons, "list"},
@@ -1466,7 +1467,8 @@ func TestExtractParamsOrFail_LoudFailureTopLevelLeakAcrossAllDomainTools(t *test
 		handler func(internal.CoreDB, internal.ActiveContext, map[string]interface{}) (interface{}, error)
 	}{
 		{"mpm_memory", handleMpmMemory},
-		{"mpm_session", handleMpmSession},
+		{"mpm_handoff", handleMpmHandoff},
+		{"mpm_scratchpad", handleMpmScratchpad},
 		{"mpm_wakes", handleMpmWakes},
 		{"mpm_theories", handleMpmTheories},
 		{"mpm_lessons", handleMpmLessons},
@@ -1540,8 +1542,8 @@ func TestShredHandoff_ByIdempotentBySessionID(t *testing.T) {
 		t.Fatalf("EndSession: %v", err)
 	}
 
-	first, err := handleMpmSession(dm, ac, map[string]interface{}{
-		"action": "shred_handoff",
+	first, err := handleMpmHandoff(dm, ac, map[string]interface{}{
+		"action": "shred",
 		"params": map[string]interface{}{"session_id": "test_probe_session_999"},
 	})
 	if err != nil {
@@ -1555,8 +1557,8 @@ func TestShredHandoff_ByIdempotentBySessionID(t *testing.T) {
 		t.Fatalf("first shred: want shredded=true rows_deleted=1, got %v", m)
 	}
 
-	second, err := handleMpmSession(dm, ac, map[string]interface{}{
-		"action": "shred_handoff",
+	second, err := handleMpmHandoff(dm, ac, map[string]interface{}{
+		"action": "shred",
 		"params": map[string]interface{}{"session_id": "test_probe_session_999"},
 	})
 	if err != nil {

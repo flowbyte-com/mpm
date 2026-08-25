@@ -1191,7 +1191,17 @@ func handleListReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 // callReadWakeContext returns the last session's context. Data gathering is
 // delegated to internal.ReadWakeContext (single source of truth shared with
 // the Go MCP server).
-func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
+func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, params map[string]interface{}) (interface{}, error) {
+
+	// format=system-prompt returns the human-readable projection instead of JSON.
+	// Same WakeContextData, different presentation — per the Projection Principle.
+	if format, _ := params["format"].(string); format == "system-prompt" {
+		text, err := dm.ReadWakeContext()
+		if err != nil {
+			return nil, fmt.Errorf("read wake context (system-prompt): %w", err)
+		}
+		return map[string]interface{}{"success": true, "format": "system-prompt", "content": text}, nil
+	}
 
 	data, err := dm.GatherWakeContext()
 	if err != nil {
@@ -2882,7 +2892,7 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 // (zero-result queries, short-token drops, hyphen crashes). The
 // permanent addition makes the substrate's recall path debuggable
 // without throwing printfs at it.
-func handleExplainRetrieval(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleMpmRetrievalDiagnose(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query := internal.ParseStringOr(p["query"], "")
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -3525,7 +3535,7 @@ func handleMpmHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	case "shred":
 		return handleShredHandoff(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_handoff. Valid actions: write, read, list, shred", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_handoff. Valid actions include write, read, list, shred", action)
 	}
 }
 
@@ -3548,7 +3558,7 @@ func handleMpmScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	case "promote":
 		return handlePromoteScratchpad(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_scratchpad. Valid actions: flush, read, discard, promote", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_scratchpad. Valid actions include flush, read, discard, promote", action)
 	}
 }
 

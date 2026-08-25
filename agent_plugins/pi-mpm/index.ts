@@ -468,8 +468,8 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	// ---------- 3 Standalone Tools ----------------------------------------
 
 	pi.registerTool({
-		name: "explain_retrieval",
-		label: "MPM Explain Retrieval",
+		name: "mpm_retrieval_diagnose",
+		label: "MPM Retrieval Diagnose",
 		description:
 			"Run a standard FTS search and return a per-node diagnostic breakdown: Base FTS Match score, Reuse Count, Last Retrieved timestamp, and Success Count. The retrieval ordering is identical to mpm_memory/query — it layers observability on top without altering ranking. Use when you want to understand WHY a result ranked where it did.",
 		parameters: Type.Object({
@@ -480,9 +480,9 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 			trace: Type.Optional(Type.Boolean({ description: "When true, returns the 3-stage pipeline diagnostic." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const r = await callMpm("explain_retrieval", (params as Record<string, unknown>) ?? {});
+			const r = await callMpm("mpm_retrieval_diagnose", (params as Record<string, unknown>) ?? {});
 			if (!r.success) {
-				return { content: [{ type: "text", text: formatFailure("explain_retrieval", r) }], details: { ok: false } };
+				return { content: [{ type: "text", text: formatFailure("mpm_retrieval_diagnose", r) }], details: { ok: false } };
 			}
 			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
 		},

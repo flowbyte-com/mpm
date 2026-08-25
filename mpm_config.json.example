@@ -1,15 +1,152 @@
+// MPM Configuration — realistic example
+//
+// This file shows all available configuration options with representative
+// values. Copy to mpm_config.json in your workspace and edit as needed.
+//
+// Config resolution (first non-empty):
+//   1. mpm_config.json in workspace
+//   2. MPM_WORKSPACE env var (sets workspace root)
+//   3. ~/.mpm (default for user-space installs)
+//
+// ┌────────────────────────────────────────────────────────────────────────
+// │  WORKSPACE
+// └────────────────────────────────────────────────────────────────────────
 {
+  "workspace": "~/.mpm",
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  DATA DIRECTORIES
+  // │
+  // │  Memory and sessions dirs can be singular (string) or array.
+  // │  Arrays take precedence — use arrays for multi-directory setups.
+  // └────────────────────────────────────────────────────────────────────
   "memory_dirs": [
-    "/home/user/.openclaw/memory"
+    "~/.openclaw/memory"
   ],
   "sessions_dirs": [
-    "/home/user/.openclaw/agents/main/sessions"
+    "~/.openclaw/agents/main/sessions"
   ],
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  EXTERNAL DATABASES
+  // │
+  // │  Poll an external SQLite DB for memories on an interval.
+  // │  Useful for importing from legacy systems or sharing across hosts.
+  // └────────────────────────────────────────────────────────────────────
+  "external_dbs": [
+    {
+      "path": "/path/to/legacy memories.sqlite",
+      "label": "legacy-import",
+      "interval_seconds": 60
+    }
+  ],
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  OPENCLAW SOURCE DB
+  // │
+  // │  Path to the OpenClaw memory DB to ingest from.
+  // │  Default: ~/.openclaw/memory/main.sqlite
+  // └────────────────────────────────────────────────────────────────────
+  "openclaw_db_path": "~/.openclaw/memory/main.sqlite",
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  EXECUTION PROFILES  (preferred over legacy Synth block)
+  // │
+  // │  A profile is a (provider, model, parameters) tuple.
+  // │  Components bind to profiles by name.
+  // └────────────────────────────────────────────────────────────────────
+  "profiles": {
+    "default": {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "your-api-key-here",
+      "max_tokens": 4096,
+      "timeout_seconds": 300,
+      "temperature": 0.7
+    },
+    "fast": {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7-highspeed",
+      "base_url": "https://api.minimax.io/anthropic/v1",
+      "api_key": "your-api-key-here",
+      "max_tokens": 1024,
+      "timeout_seconds": 60,
+      "temperature": 0.3
+    },
+    "critic": {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "your-openrouter-key-here",
+      "max_tokens": 2048,
+      "timeout_seconds": 120,
+      "temperature": 0.2
+    }
+  },
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  COMPONENT → PROFILE BINDINGS
+  // │
+  // │  Maps substrate components to execution profiles above.
+  // │  Any component not explicitly bound falls back to "default".
+  // └────────────────────────────────────────────────────────────────────
+  "components": {
+    "memory": "default",
+    "critic": "critic",
+    "synth": "fast"
+  },
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  CAPABILITY → COMPONENT BINDINGS
+  // │
+  // │  Skills address capabilities (not components). Bindings tell the
+  // │  substrate which component fulfils each capability.
+  // └────────────────────────────────────────────────────────────────────
+  "capabilities": {
+    "reviewer": "critic",
+    "memory": "memory"
+  },
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  CLI COMMAND ALIASES
+  // │
+  // │  Shorthand for frequently-used commands.
+  // └────────────────────────────────────────────────────────────────────
+  "aliases": {
+    "mem": "recall",
+    "ml": "lesson list",
+    "s": "status"
+  },
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  SYNTHESIS KILL SWITCH
+  // │
+  // │  Set to false to disable background synthesis entirely.
+  // │  Default: true (synthesis enabled)
+  // └────────────────────────────────────────────────────────────────────
+  "synthesis_enabled": true,
+
+  // ┌────────────────────────────────────────────────────────────────────
+  // │  LEGACY SYNTH BLOCK
+  // │
+  // │  Still supported for backward compatibility, but profiles +
+  // │  components above are the preferred surface for new installs.
+  // └────────────────────────────────────────────────────────────────────
   "synth": {
     "model": "MiniMax-M2.7",
     "api_key": "your-api-key-here",
-    "base_url": "https://api.minimax.io/anthropic",
+    "base_url": "https://api.minimax.io/anthropic/v1",
     "max_tokens": 1024,
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "vendors": [
+      {
+        "name": "openai",
+        "api_key": "your-openai-key-here",
+        "model": "gpt-4o",
+        "base_url": "https://api.openai.com/v1",
+        "timeout_sec": 60
+      }
+    ]
   }
 }
