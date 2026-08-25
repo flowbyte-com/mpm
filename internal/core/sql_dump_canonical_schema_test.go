@@ -82,8 +82,9 @@ func scanSchemaSources(t *testing.T) (map[string]bool, error) {
 	// migration window.
 	transientTables := map[string]bool{
 		"system_audit_log_new":       true,  // rename target in migrateAuditLevelConstraint
-		"artifact_provenance_work":    true,  // rename target in migrateArtifactProvenanceWorkType
-		"work_events_new":             true,  // rename target in migrateWorkEventsCheck (domain-neutral migration)
+		"artifact_provenance_work":   true,  // rename target in migrateArtifactProvenanceWorkType
+		"work_events_new":            true,  // rename target in migrateWorkEventsCheck (domain-neutral migration)
+		"evidence_new":                true,  // rename target in migrateEvidenceWorkType
 	}
 
 	matches, err := filepath.Glob("*.go")

@@ -1316,6 +1316,7 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		"recent_milestones":   milestoneRefs,
 		// Attention & pending work.
 		"overdue_wakes":       overdueRefs,
+		"open_works":          data.OpenWorks,
 		"scratchpad_orphans":  data.ScratchpadOrphans,
 		"last_handoff":        data.LastHandoff,
 		// Constraints & capabilities.

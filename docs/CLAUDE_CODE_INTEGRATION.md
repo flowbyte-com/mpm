@@ -31,7 +31,7 @@ Returns a human-readable projection of the current wake context:
 ```
 
 ```bash
-mpm call read_wake_context --payload '{"params":{"format":"system-prompt"}}'
+mpm call mpm_context --payload '{"action":"read_wake_context","params":{"format":"system-prompt"}}'
 ```
 
 ### 1.2 Provenance Environment Variables
@@ -110,8 +110,8 @@ export MPM_PROVENANCE_PARENT_INVOCATION_ID="${CLAUDE_SESSION_ID:-}"
 # Retrieve and print the wake context. Claude Code captures stdout and injects
 # it into the session prompt. JSON success envelope is printed to stderr (or
 # suppressed); the human-readable context is on stdout.
-exec mpm call read_wake_context \
-  --payload '{"params":{"format":"system-prompt"}}' \
+exec mpm call mpm_context \
+  --payload '{"action":"read_wake_context","params":{"format":"system-prompt"}}' \
   2>/dev/null
 ```
 
@@ -150,7 +150,7 @@ root), this hook runs only for that project.
 ### 3.3 Semantic Contract: Session End ≠ Claimed Complete
 
 > **A Claude Code session ending does not automatically emit `claimed_complete`.**
-> Only emit it when the agent explicitly closes work via `mpm call complete_work`.
+> Only emit it when the agent explicitly closes work via `mpm call mpm_work --action complete`.
 
 Claude Code's `SessionEnd` hook has a 1.5-second shared budget and is not a
 reliable place to record completion. More importantly, a session ending is a
@@ -173,7 +173,7 @@ MPM wake context injected into session
     ↓
 Claude works; may record evidence via mpm call
     ↓
-Claude explicitly calls mpm call complete_work --work-id=xyz
+Claude explicitly calls mpm call mpm_work --action complete --work-id=xyz
     ↓
 MPM emits WorkEventTypeClaimedComplete
     ↓
@@ -197,14 +197,14 @@ Session starts (Claude Code)
     │       ├── export MPM_PROVENANCE_* from CLAUDE_* env vars
     │       │
     │       ▼
-    │   mpm call read_wake_context --format=system-prompt
+    │   mpm call mpm_context --action read_wake_context --format=system-prompt
     │       │
     │       ▼
     │   stdout ──▶ injected into Claude session prompt
     │
     ├─▶ Claude Code runs normally
     │
-    ├─▶ (optionally) mpm call complete_work --work-id=...
+    ├─▶ (optionally) mpm call mpm_work --action complete --work-id=...
     │       │
     │       ├── emits WorkEventTypeClaimedComplete
     │       ├── derives verification from evidence
@@ -232,10 +232,11 @@ mpm call mpm_work --payload '{
 # ... do the work ...
 
 # Claim completion (emits WorkEventTypeClaimedComplete)
-mpm call complete_work --payload '{
+mpm call mpm_work --payload '{
+  "action": "complete",
   "params": {
-    "work-id": "<id-from-above>",
-    "summary": "Refactored JWT validation, added PKCE support"
+    "work_id": "<id-from-above>",
+    "note": "Refactored JWT validation, added PKCE support"
   }
 }'
 ```

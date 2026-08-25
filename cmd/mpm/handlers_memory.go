@@ -223,16 +223,12 @@ func handleMemoryAdd(args []string) int {
 	injectActiveContext()
 	defer clearActiveContext()
 
-	// Build metadata with provenance + active context
-	memMetadata := map[string]interface{}{
-		"provenance": map[string]interface{}{
-			"source":  "human",
-			"model":   "direct",
-			"compute": "absolute",
-			"agent":   "mpm_cli",
-			"persona": "operator",
-		},
-	}
+	// Build metadata with active context only.
+	// Provenance is recorded in the artifact_provenance table (via RecordArtifactProvenance
+	// inside SaveMemoryNode), which is the canonical provenance record. The
+	// metadata.provenance block is no longer written — it previously contained
+	// hardcoded fake values (source=human, model=direct) that misled GetMemoryStats.
+	memMetadata := map[string]interface{}{}
 	if activeMode != "" {
 		memMetadata["active_mode"] = activeMode
 	}
