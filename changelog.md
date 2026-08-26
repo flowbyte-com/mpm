@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-08-26 — F7.1 Challenge-Restoration & F8.1 Cancel-Verification Coupling (P1 Blockers Closed)
+
+The two remaining alpha-blocker forks of "lifecycle state and verification/confidence state were written and read independently". Both fixes make the coupling structural rather than call-site-dependent, so the bugs cannot regress without breaking load-bearing gates.
+
+### F7.1 — Challenge / Restoration (CRITICAL FAILURE → RESOLVED)
+
+**Invariant.** A `mpm challenge` operation must (a) preserve the audited history (no row deletion), (b) drop the memory's confidence to a neutral floor while challenged, and (c) make restoration NOT silently re-promote verification — fresh evidence must be required to re-elevate confidence.
+
+**Fix.** `ChallengeMemory` (in `internal/core/db.go`) and `runChallenge` (in `cmd/mpm/handlers_challenge.go`) now execute inside a single transaction:
+
+1. Patch memory metadata with `status=challenged`, `challenged_at`, `challenged_prior_confidence`, `challenged_prior_weight`, forward-link to theory.
+2. **Neutralize evidence rows**: `UPDATE evidence SET expires_at = ? WHERE artifact_id = ? AND artifact_type = 'memory' AND expires_at IS NULL`. Rows are preserved in the table (audit trail intact) but cannot contribute to a confidence recompute because `loadEvidenceForRecompute` filters expired rows.
+3. Drop memory confidence to `ChallengedMemoryConfidenceFloor` (0.5, neutral on the sigmoid scale — see `internal/core/confidence.go`).
+
+`runChallengeRestore` clears operational flags and restores prior weight, but explicitly does NOT silently re-elevate confidence — it sets `confidence = ChallengedMemoryConfidenceFloor` on the restored row. `restored_from_challenge` and `restored_at` are stamped. The previously-neutralized evidence rows are NOT re-opened; they remain in the table for forensic reconstruction only.
+
+**Forensic metadata.** `challenged_at`, `challenged_prior_confidence`, `challenged_prior_weight`, `restored_from_challenge`, and `restored_at` are all captured/preserved through the cycle so a fresh agent can reconstruct the challenge history from any post-cycle state.
+
+### F8.1 — Cancel / Complete / Update Implying Verification (P1 BLOCKER → RESOLVED)
+
+**Invariant.** A `cancelled` `works.status` must NEVER co-occur with `works.verification = 'verified'` regardless of evidence pattern. `verified` is reserved for `open` or `done` status; on cancellation, the derivation must downgrade `verified` (or stay below it). Contradictory evidence still surfaces as `contradicted` even under cancellation (lifecycle consistency trumps confidence).
+
+**Fix.** `DeriveWorkVerification` (in `internal/core/db.go`) now performs a **lifecycle-status gate as its first check**:
+
+```go
+var statusStr string
+if statusStr == string(WorkStatusCancelled) {
+    if hasContradiction { verification = WorkVerificationContradicted }
+    else                 { verification = WorkVerificationUnverified }
+} else if len(evidence) > 0 {
+    // ... existing evidence-based derivation
+}
+```
+
+Every terminal-lifecycle transition (`CancelWork`, `CancelWorkWithContext`, `CompleteWorkWithContext`, `ReopenWorkWithContext`, `UpdateWorkWithContext`, legacy `updateWorkStatus`) now calls `DeriveWorkVerification` after the status mutation so the derived verification column can never lag the lifecycle column.
+
+### Shared Architectural Root Cause
+
+Both bugs share one root: lifecycle state and verification/confidence state were written and read independently, allowing cancellation to masquerade as verification, and restoration to masquerade as re-verification. The fix in both cases makes the coupling **structural** — `DeriveWorkVerification` consults `status` first, and `ChallengeMemory` neutralizes evidence atomically inside the same transaction that stamps the lifecycle flag. Call-site discipline cannot bypass these shapes.
+
+### Files Changed
+
+- `internal/core/db.go` — `ChallengeMemory`, `DeriveWorkVerification`, `CancelWork`/`CancelWorkWithContext`/`CompleteWorkWithContext`/`ReopenWorkWithContext`/`UpdateWorkWithContext`/`updateWorkStatus` (derivation calls added)
+- `cmd/mpm/handlers_challenge.go` — `runChallenge` and `runChallengeRestore` rewritten; exported `ChallengedMemoryConfidenceFloor = 0.5`
+- `internal/core/confidence.go` — added `ChallengedMemoryConfidenceFloor = 0.5` with explanatory doc
+- `internal/core/f71_f81_cancellation_challenge_test.go` — **NEW** — 17 regression tests (`TestF81_*` and `TestF71_*`, including adversarial sequences from the audit brief: `RUN → CANCEL → VERIFY → RESTORE → VERIFY` and `CHALLENGE → VERIFY → RESTORE → VERIFY`)
+- `internal/core/f6_f7_f12_evidence_regression_test.go` — `TestF12_ReopenEvidenceChangeRecomputeIdempotent` updated to assert the new F8.1 invariant (cancelled work must downgrade to unverified; reopen re-enables verification)
+
+### Validation
+
+- 831 core tests pass, 0 failures
+- 17 new regression tests pass
+- Existing `F11` (challenge) tests pass after handler rewrite
+- Existing `F12` recompute-idempotent test rewritten (the previous version codified the F8.1 bug; the new version asserts the correct invariant)
+- All pre-commit gates pass
+
+### Where to Look for a Fresh Agent
+
+- The architectural invariant: "`internal/core/db.go:DeriveWorkVerification` consults `works.status` first; cancelled locks below verified".
+- The challenge invariant: "`cmd/mpm/handlers_challenge.go:runChallenge` neutralizes evidence atomically; `runChallengeRestore` does NOT silently re-elevate confidence".
+- The regression tests live in `internal/core/f71_f81_cancellation_challenge_test.go` — 17 named tests cover every adversarial sequence in the audit brief.
+- The forensic floor: `ChallengedMemoryConfidenceFloor = 0.5` in both `internal/core/confidence.go` and `cmd/mpm/handlers_challenge.go`.
+
 ## 2026-08-23 — Work Primitive v2: Event-Sourced Work Model
 
 Event-sourced rewrite of the Work primitive. The `works` row is now a
