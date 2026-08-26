@@ -28,6 +28,19 @@ func InitialConfidence(artifactType string) float64 {
 	}
 }
 
+// ChallengedMemoryConfidenceFloor is the neutral confidence value a memory
+// receives while challenged and immediately after restoration. It is the
+// F7.1 invariant floor: a challenged memory cannot retain its pre-challenge
+// high confidence, and restoration does NOT silently re-promote the
+// pre-challenge value — fresh evidence is required to re-elevate the
+// memory's confidence above this floor.
+//
+// 0.5 is the neutral point on the sigmoid scale: log(0.5/0.5) = 0. With no
+// evidence, computeConfidence returns this value. Restoration leaves the
+// memory here explicitly so the audit trail reflects that the memory was
+// challenged, not silently re-trusted.
+const ChallengedMemoryConfidenceFloor = 0.5
+
 // artifactTypeFromCollection maps a `memories.collection` discriminator to the
 // artifact type used by the evidence system.
 func artifactTypeFromCollection(collection string) string {

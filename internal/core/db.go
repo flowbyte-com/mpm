@@ -4371,6 +4371,18 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 // async log) are wrapped in a single transaction. A concurrent ReinforceMemory
 // cannot interleave between the metadata patch and the weight decrement, so
 // the challenged memory is always observed in a consistent state.
+//
+// F7.1 (challenge-restoration): A challenge must neutralize the memory's
+// evidence and stamp the audit trail. Specifically:
+//   - Existing evidence rows are neutralized via expires_at = now (NOT
+//     deleted — they remain in the table for the audit trail but cannot
+//     contribute to a confidence recompute, since the loadEvidenceForRecompute
+//     filter already skips expired rows).
+//   - challenged_at (Unix-epoch seconds) is stamped so the cycle is
+//     reconstructable. F7.1 invariant: challenge must not silently destroy
+//     history.
+//   - The pre-challenge confidence is captured for forensic/audit purposes
+//     ONLY — restoration does NOT silently re-elevate it.
 func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evidence string) error {
 	if slashAmount < 0 {
 		return fmt.Errorf("ChallengeMemory: slashAmount must be >= 0 (got %d); a negative reduction would silently increase the disputed memory's weight", slashAmount)
@@ -4393,22 +4405,31 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 		return fmt.Errorf("ChallengeMemory: memory not found or deleted: %s", memoryID)
 	}
 
+	nowSec := time.Now().Unix()
+
 	patch := map[string]interface{}{
 		"status":               "challenged",
 		"challenged_theory_id": evidence,
+		"challenged_at":        nowSec,
 	}
 	patchJSON, _ := json.Marshal(patch)
 	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
 		return err
 	}
 
-	// Record the pre-challenge weight AFTER the status patch so restore sees
-	// both atomically. Read through the same tx for a consistent snapshot.
+	// Record the pre-challenge weight AND confidence AFTER the status
+	// patch so restore sees both atomically. Read through the same tx
+	// for a consistent snapshot. The prior_confidence value is forensic
+	// only; restoration does NOT silently re-elevate it (F7.1).
 	var priorWeight int
-	if err := tx.QueryRow(`SELECT COALESCE(weight, 1) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight); err != nil {
-		return fmt.Errorf("ChallengeMemory: read prior weight: %w", err)
+	var priorConfidence float64
+	if err := tx.QueryRow(`SELECT COALESCE(weight, 1), COALESCE(confidence, 0.5) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight, &priorConfidence); err != nil {
+		return fmt.Errorf("ChallengeMemory: read prior state: %w", err)
 	}
-	priorPatch := map[string]interface{}{"challenged_prior_weight": priorWeight}
+	priorPatch := map[string]interface{}{
+		"challenged_prior_weight":     priorWeight,
+		"challenged_prior_confidence": priorConfidence,
+	}
 	priorJSON, _ := json.Marshal(priorPatch)
 	if err := updateMemoryMetadataTx(tx, memoryID, string(priorJSON)); err != nil {
 		return err
@@ -4416,6 +4437,29 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 
 	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
 		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
+	}
+
+	// F7.1: neutralize existing evidence rows (set expires_at = now). The
+	// rows remain in the table for the audit trail but cannot contribute
+	// to a confidence recompute. The loadEvidenceForRecompute filter at
+	// evidence_store.go already skips expired rows, so no other code
+	// needs to change.
+	if _, err := tx.Exec(
+		`UPDATE evidence SET expires_at = ? WHERE artifact_id = ? AND artifact_type = 'memory' AND expires_at IS NULL`,
+		nowSec, memoryID,
+	); err != nil {
+		return fmt.Errorf("ChallengeMemory: neutralize evidence: %w", err)
+	}
+
+	// F7.1: drop confidence to the challenged floor. The challenged memory
+	// cannot retain its pre-challenge high confidence value; fresh evidence
+	// is required to re-elevate it after restoration. The confidence_history
+	// row that records this recompute is the auditable trail.
+	if _, err := tx.Exec(
+		`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
+		ChallengedMemoryConfidenceFloor, memoryID,
+	); err != nil {
+		return fmt.Errorf("ChallengeMemory: drop confidence: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -4819,6 +4863,15 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 		return nil, fmt.Errorf("work not found: %s", id)
 	}
 
+	// F8.1: status changes must keep verification in lockstep. Direct
+	// callers (CompleteWork, CancelWork, UpdateWork) bypass the event-
+	// sourced AppendWorkEvent path, so they cannot rely on the latter
+	// to call DeriveWorkVerification. Derive here so every status
+	// mutation triggers the lifecycle-coupling invariant.
+	if _, derr := dm.DeriveWorkVerification(id); derr != nil {
+		return nil, fmt.Errorf("update status: derive verification: %w", derr)
+	}
+
 	return dm.GetWork(id)
 }
 
@@ -4975,6 +5028,12 @@ func (dm *DatabaseManager) CompleteWorkWithContext(workID, note string, ac Activ
 	if err != nil {
 		return nil, err
 	}
+	// F8.1: terminal-lifecycle state transitions must keep verification
+	// derived state in lockstep. AppendWorkEvent updated status to 'done';
+	// re-derive so the verification column reflects the new lifecycle.
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		return nil, fmt.Errorf("complete: derive verification: %w", err)
+	}
 	return dm.GetWork(workID)
 }
 
@@ -4997,6 +5056,16 @@ func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveC
 	if err != nil {
 		return nil, err
 	}
+	// F8.1: cancellation MUST immediately downgrade verification. Without
+	// this call, the works.verification column stays at whatever value it
+	// had pre-cancel (often 'verified' from prior outcome evidence), and
+	// a follow-up DeriveWorkVerification driven by post-cancel evidence
+	// can promote it back to 'verified' — exactly the false-positive the
+	// audit flagged. Derive here is structural: the status gate sees the
+	// committed 'cancelled' status and locks verification below verified.
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		return nil, fmt.Errorf("cancel: derive verification: %w", err)
+	}
 	return dm.GetWork(workID)
 }
 
@@ -5007,8 +5076,9 @@ func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
 	dm.recordGitEvidenceForWork(workID)
 }
 
-// DeriveWorkVerification computes and persists works.verification from evidence rows.
-// It applies conservative decision rules:
+// DeriveWorkVerification computes and persists works.verification from evidence rows
+// AND the work item's lifecycle status. It applies conservative decision rules:
+//
 //   - No evidence → unverified
 //   - Only audit evidence (git, ci) → partial
 //   - Outcome evidence (filesystem, test, api_response) + audit evidence → verified
@@ -5017,15 +5087,67 @@ func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
 //
 // Git is audit evidence, never the authority. Verification requires outcome evidence
 // that the intended result was achieved. Action evidence alone is insufficient.
-// This function never fabricates verification; it assesses what is actually observed.
+//
+// F8.1 (cancel-implies-verification): Verification is coupled to lifecycle status.
+// A cancelled work MUST NOT surface as verified under any evidence pattern —
+// cancellation erases the legitimate "work was completed" claim because the
+// agent declared it would not produce the intended result. Any verified
+// evidence already on the cancelled work becomes the audit trail of a claim
+// that was withdrawn, not a success. The lifecycle-status gate below is
+// structural: it cannot be bypassed by a follow-up evidence write or a
+// re-derivation, because the gate is the first check before evidence is
+// even consulted.
+//
+// Specifically:
+//   - status='cancelled' AND contradictory evidence → contradicted
+//   - status='cancelled' AND no contradictory evidence → unverified
+//     (NOT verified, NOT partial, NOT contradicted-on-withdrawn-claim)
+//   - status='open'      → evidence-based derivation (may be verified)
+//   - status='done'      → evidence-based derivation (may be verified)
+//
+// This function never fabricates verification; it assesses what is actually
+// observed AND reflects the agent's explicit lifecycle intent.
 func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerification, error) {
 	evidence, err := ListEvidenceForArtifact(dm, workID, "work")
 	if err != nil {
 		return WorkVerificationUnverified, fmt.Errorf("derive verification: list evidence: %w", err)
 	}
 
+	// F8.1: Lifecycle-status gate. Read the work's status FIRST so the
+	// decision tree can short-circuit before evidence promotion happens.
+	// A missing row (deleted mid-derive) is treated as 'open' for safety —
+	// deleted work should not appear in any verification result set.
+	var statusStr string
+	if err := dm.db.QueryRow(`SELECT COALESCE(status, 'open') FROM works WHERE id = ?`, workID).Scan(&statusStr); err != nil {
+		if err == sql.ErrNoRows {
+			verification := WorkVerificationUnverified
+			return verification, nil
+		}
+		return WorkVerificationUnverified, fmt.Errorf("derive verification: read status: %w", err)
+	}
+
 	verification := WorkVerificationUnverified
-	if len(evidence) > 0 {
+	if statusStr == string(WorkStatusCancelled) {
+		// F8.1: cancellation locks verification BELOW verified. Evidence
+		// attached before or after cancellation is preserved as audit
+		// history, but it cannot promote the cancelled work back to a
+		// success state. A contradictory evidence row IS still surfaced
+		// as 'contradicted' (it explicitly documents the failure); any
+		// other evidence pattern yields 'unverified' — the cancelled
+		// work is neither a verified success nor a partial confidence.
+		var hasContradiction bool
+		for _, e := range evidence {
+			if e.Strength <= -0.7 {
+				hasContradiction = true
+				break
+			}
+		}
+		if hasContradiction {
+			verification = WorkVerificationContradicted
+		} else {
+			verification = WorkVerificationUnverified
+		}
+	} else if len(evidence) > 0 {
 		// Classify evidence by source group via the shared registry —
 		// the same vocabulary AddEvidence validates against (F6), so a
 		// value can never reach this switch unclassified.
@@ -5113,6 +5235,17 @@ func (dm *DatabaseManager) ReopenWorkWithContext(workID string, ac ActiveContext
 	if err != nil {
 		return nil, err
 	}
+	// F8.1: reopen puts work back into 'open' status, where the evidence
+	// gate is again allowed to promote verification. Re-derive so the
+	// fresh evidence picture is reflected immediately. Note: pre-cancel
+	// evidence rows are still in the table, so a high-confidence memory
+	// reopened from cancelled may now derive 'verified' from outcome
+	// evidence — but ONLY because the user explicitly reactivated the
+	// work. Cancellation cannot silently demote evidence rows; it only
+	// stops them from promoting verification while cancelled.
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		return nil, fmt.Errorf("reopen: derive verification: %w", err)
+	}
 	return dm.GetWork(workID)
 }
 
@@ -5162,6 +5295,14 @@ func (dm *DatabaseManager) UpdateWorkWithContext(workID, title, content, statusS
 	}
 	if eventType == WorkEventTypeCompleted || eventType == WorkEventTypeCancelled {
 		dm.recordGitEvidenceForWork(workID)
+	}
+	// F8.1: every terminal-lifecycle state transition must keep verification
+	// derived state in lockstep with status. Without this call, a path that
+	// moves status to 'cancelled' through the legacy update surface leaves
+	// verification stale at whatever value it had — the exact bug the audit
+	// flagged.
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		return nil, fmt.Errorf("update: derive verification: %w", err)
 	}
 	return dm.GetWork(workID)
 }
