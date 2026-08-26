@@ -150,7 +150,7 @@ root), this hook runs only for that project.
 ### 3.3 Semantic Contract: Session End ≠ Claimed Complete
 
 > **A Claude Code session ending does not automatically emit `claimed_complete`.**
-> Only emit it when the agent explicitly closes work via `mpm call mpm_work --action complete`.
+> Only emit it when the agent explicitly closes work via `mpm call mpm_work` with `{"action":"complete","params":{"work_id":"..."}}`.
 
 Claude Code's `SessionEnd` hook has a 1.5-second shared budget and is not a
 reliable place to record completion. More importantly, a session ending is a
@@ -173,7 +173,7 @@ MPM wake context injected into session
     ↓
 Claude works; may record evidence via mpm call
     ↓
-Claude explicitly calls mpm call mpm_work --action complete --work-id=xyz
+Claude explicitly calls: mpm call mpm_work --payload '{"action":"complete","params":{"work_id":"xyz"}}'
     ↓
 MPM emits WorkEventTypeClaimedComplete
     ↓
@@ -204,7 +204,7 @@ Session starts (Claude Code)
     │
     ├─▶ Claude Code runs normally
     │
-    ├─▶ (optionally) mpm call mpm_work --action complete --work-id=...
+    ├─▶ (optionally) mpm call mpm_work --payload '{"action":"complete","params":{"work_id":"..."}}'
     │       │
     │       ├── emits WorkEventTypeClaimedComplete
     │       ├── derives verification from evidence
@@ -244,11 +244,14 @@ mpm call mpm_work --payload '{
 ### Query audit trail from another session
 
 ```bash
-# View all Claude Code tool invocations (framework=claude-code)
-mpm call mpm_system --payload '{
-  "action": "query",
-  "params": {"sql": "SELECT invocation_id, tool_name, result_status FROM tool_invocations WHERE framework_name = '\''claude-code'\'' LIMIT 10"}
-}'
+# View all Claude Code tool invocations (framework=claude-code).
+# tool_invocations has no MCP aggregator action; read the workspace DB
+# directly (read-only) or use the audit-log surface for anomalies:
+sqlite3 -readonly "$MPM_WORKSPACE/src/db/mpm.db" \
+  "SELECT invocation_id, tool_name, result_status FROM tool_invocations WHERE framework_name = 'claude-code' LIMIT 10"
+
+# Anomaly ledger (audit events), via the supported mpm_system action:
+mpm call mpm_system --payload '{"action":"query_audit_log","params":{"days":7,"limit":20}}'
 ```
 
 ---

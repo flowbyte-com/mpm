@@ -702,6 +702,9 @@ var WorkTables = []string{
 	`CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);`,
 	`CREATE INDEX IF NOT EXISTS idx_works_session ON works(session_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_works_created ON works(created_at DESC);`,
+	// Serves the wake-context open-works query (status='open' ORDER BY
+	// updated_at DESC LIMIT 5) without a sort step.
+	`CREATE INDEX IF NOT EXISTS idx_works_status_updated ON works(status, updated_at DESC);`,
 
 	// work_events: append-only ledger of Work state transitions (event-sourced).
 	// UNIQUE(work_id, event_index) enforces monotonic event_index per work item.
@@ -755,6 +758,14 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection);`,
+	// Serves the F19 duplicate-save lookup (same collection + content hash).
+	// Lives in CommonIndexes because content_hash is added by SafeMigrations,
+	// which run before this block.
+	`CREATE INDEX IF NOT EXISTS idx_memories_coll_hash ON memories(collection, content_hash);`,
+	// F19 hard constraint: one live row per identity per collection. The
+	// partial predicate excludes legacy NULL/empty identity rows so index
+	// creation cannot fail on databases with historical duplicates.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_identity_live ON memories(collection, identity_hash) WHERE deleted_at IS NULL AND identity_hash IS NOT NULL AND identity_hash != '';`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_collection_deleted_created ON memories(collection, deleted_at, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_longterm ON memories(is_long_term, weight);`,
@@ -1125,6 +1136,11 @@ var SafeMigrations = [][3]string{
 	{"memories", "deleted_at", "INTEGER"},
 	{"memories", "reference_id", "TEXT"},
 	{"memories", "content_hash", "TEXT"},
+	// F19: persisted duplicate-identity key (collection+content+tags+
+	// stable metadata). Empty for legacy rows; the partial unique index
+	// below therefore only constrains NEW writes and cannot fail to build
+	// on databases that already contain pre-F19 duplicates.
+	{"memories", "identity_hash", "TEXT"},
 	{"memories", "is_prime_directive", "INTEGER DEFAULT 0"},
 	{"memories", "toxicity_score", "REAL"},
 	{"memories", "session_id", "TEXT"},

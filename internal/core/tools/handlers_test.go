@@ -789,8 +789,15 @@ func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
 	if len(refs) != 1 {
 		t.Fatalf("expected exactly 1 milestone in recent_milestones (hermetic DB), got %d: %+v", len(refs), refs)
 	}
-	if refs[0]["content"] != summary {
-		t.Errorf("milestone content drift:\n got: %s\nwant: %s", refs[0]["content"], summary)
+	// Wire contract (updated 2026-08-25): milestone refs carry
+	// id/summary/pointer/created_at, matching WakeContextMemory's JSON
+	// tags ("summary", not the pre-split "content") and mirroring the
+	// recent_memories ref shape so both lists share one contract.
+	if refs[0]["summary"] != summary {
+		t.Errorf("milestone summary drift:\n got: %s\nwant: %s", refs[0]["summary"], summary)
+	}
+	if refs[0]["pointer"] != "mpm://memory/"+myID {
+		t.Errorf("milestone pointer drift: got %v, want mpm://memory/%s", refs[0]["pointer"], myID)
 	}
 	if refs[0]["id"] != myID {
 		t.Errorf("milestone id drift: got %s, want %s", refs[0]["id"], myID)

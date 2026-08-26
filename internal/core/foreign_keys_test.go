@@ -181,7 +181,7 @@ func TestMemoryHardDelete_CascadesRevisions(t *testing.T) {
 		ArtifactID:         memID,
 		ArtifactType:       "memory",
 		Type:               "observation",
-		SourceGroup:        "fk-audit-test",
+		SourceGroup:        "git",
 		Strength:           0.8,
 		IndependenceFactor: 1.0,
 		CreatedBy:          "fk-audit",

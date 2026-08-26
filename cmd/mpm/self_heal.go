@@ -98,10 +98,10 @@ func saveSelfHealState(dm *mpminternal.DatabaseManager, state *SelfHealState) er
 	}
 	_, err = dm.SQLDB().Exec(`
 		INSERT INTO memories (id, collection, content, metadata, created_at, updated_at)
-		VALUES (?, 'projects', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		VALUES (?, 'projects', ?, ?, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER))
 		ON CONFLICT(id) DO UPDATE SET
 			metadata = excluded.metadata,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CAST(strftime('%s','now') AS INTEGER)
 	`, SelfHealStateID, "self-heal rate-limit marker", string(metaBytes))
 	return err
 }

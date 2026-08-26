@@ -22,11 +22,21 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 	if err != nil {
 		return nil, fmt.Errorf("memory not found: %w", err)
 	}
-	if err := dm.ChallengeMemory(memoryID, -2, evidence); err != nil {
+	// slashAmount is a POSITIVE weight reduction (see ChallengeMemory). The
+	// historic caller passed -2 here; ChallengeMemory computes
+	// `weight = MAX(1, weight - slashAmount)`, so a negative amount silently
+	// INCREASED the disputed memory's weight (5 → 7) — the exact opposite of
+	// "weaken". Challenging knowledge must never raise its rank.
+	if err := dm.ChallengeMemory(memoryID, 2, evidence); err != nil {
 		return nil, fmt.Errorf("weaken memory: %w", err)
 	}
-	theoryContent := fmt.Sprintf("CHALLENGED_MEMORY_ID: %s\nEVIDENCE: %s\nORIGINAL_CONTENT: %s",
-		memoryID, evidence, mem["content"])
+	// A challenge is an EVENT: repeating it with identical evidence still
+	// produces a distinct theory row (the CLI path behaves the same way).
+	// Baking the wall-clock into the content keeps each challenge's
+	// identity unique under the F19 idempotency rule without special-
+	// casing theories out of dedup.
+	theoryContent := fmt.Sprintf("CHALLENGED_MEMORY_ID: %s\nEVIDENCE: %s\nCHALLENGED_AT_NANO: %d\nORIGINAL_CONTENT: %s",
+		memoryID, evidence, time.Now().UnixNano(), mem["content"])
 	theoryMeta := map[string]interface{}{
 		"status":               "pending",
 		"challenged_memory_id": memoryID,
@@ -40,6 +50,23 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 	if err != nil {
 		return nil, fmt.Errorf("create theory: %w", err)
 	}
+
+	// Point the memory's forward link at the REAL theory row. ChallengeMemory
+	// stashes the raw evidence text into challenged_theory_id (the arbitration
+	// paths have no theory row); now that a theory exists, replace it so
+	// `mpm challenge restore` resolves the actual theory instead of no-oping
+	// against prose. The evidence text moves to challenged_evidence.
+	linkPatch, _ := json.Marshal(map[string]interface{}{
+		"challenged_theory_id": theory.ID,
+		"challenged_evidence":  evidence,
+	})
+	if _, err := dm.SQLDB().Exec(
+		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
+		string(linkPatch), memoryID,
+	); err != nil {
+		return nil, fmt.Errorf("link challenge theory: %w", err)
+	}
+
 	return map[string]interface{}{
 		"success":       true,
 		"memory_id":     memoryID,
@@ -348,6 +375,141 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 		"success": true,
 		"id":      memID,
 		"choice":  choice,
+	}, nil
+}
+
+// SupersedeDecision implements decision invalidation (audit finding F9).
+//
+// A corrected or superseding decision must be distinguishable from stale
+// knowledge WITHOUT deleting history. Mechanism:
+//
+//   - A new decision row is recorded (full RecordDecision semantics:
+//     provenance, active-context metadata).
+//   - The ORIGINAL is marked in metadata (superseded=true,
+//     superseded_by=<new id>, superseded_at=<rfc3339>) and tagged
+//     "superseded" + "superseded-by:<new id>" — the exact tag contract
+//     HybridSearch's Phase 5b correction-chain discount already honours
+//     (combined score × 0.25), so stale decisions no longer co-rank with
+//     current knowledge while remaining fully inspectable.
+//   - epistemic_provenance rows link old → new in both directions
+//     (source_ids on the new row; superseded_by pointer on the old row).
+//
+// Multiple corrections chain naturally: each supersede marks its own
+// predecessor, and every intermediate stays discoverable by following
+// superseded_by pointers. Competing replacements each carry their own
+// supersedes:<id> tag for audit.
+//
+// originalID must be an existing, live decision. An already-superseded
+// original is rejected — supersede the CURRENT decision instead, otherwise
+// two "current" readings could coexist.
+func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error) {
+	mem, err := dm.GetMemory(originalID)
+	if err != nil || mem == nil {
+		return nil, fmt.Errorf("original decision not found: %s", originalID)
+	}
+	if coll, _ := mem["collection"].(string); coll != "decisions" {
+		return nil, fmt.Errorf("memory %s is not a decision (collection: %s)", originalID, coll)
+	}
+	metaStr, _ := mem["metadata"].(string)
+	var existing map[string]interface{}
+	_ = json.Unmarshal([]byte(metaStr), &existing)
+	if v, _ := existing["superseded_by"].(string); v != "" {
+		return nil, fmt.Errorf("decision %s is already superseded by %s — supersede the current decision instead", originalID, v)
+	}
+
+	// Record the replacement first so we have its ID for the back-link.
+	allSourceIDs := append([]string{originalID}, sourceIDs...)
+	res, err := dm.RecordDecision(contextText, choice, rationale, outcome, tags, allSourceIDs, ac)
+	if err != nil {
+		return nil, err
+	}
+	newID, _ := res["id"].(string)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	patchJSON, _ := json.Marshal(map[string]interface{}{
+		"superseded":    true,
+		"superseded_by": newID,
+		"superseded_at": now,
+	})
+
+	// Mark the original inside one transaction: metadata patch + tags.
+	err = dm.WithTx(func(node DBNode) error {
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
+			0, string(patchJSON), originalID); err != nil {
+			return fmt.Errorf("mark superseded: %w", err)
+		}
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET tags = CASE
+				WHEN COALESCE(tags,'') = '' THEN ?
+				ELSE tags || ',' || ?
+			END WHERE id = ? AND deleted_at IS NULL`,
+			0, "superseded,superseded-by:"+newID, "superseded,superseded-by:"+newID, originalID); err != nil {
+			return fmt.Errorf("tag superseded: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	dm.LogAudit(AuditInfo, "epistemology",
+		fmt.Sprintf("supersede_decision %s -> %s", originalID, newID), "",
+		AuditContext{"original_id": originalID, "new_id": newID})
+
+	return map[string]interface{}{
+		"success":          true,
+		"original_id":      originalID,
+		"id":               newID,
+		"choice":           choice,
+		"superseded_at":    now,
+	}, nil
+}
+
+// InvalidateDecision retires a decision that is no longer valid WITHOUT a
+// replacement. History is preserved and inspectable; the tag drives the
+// HybridSearch supersession discount so it stops outranking current
+// knowledge. Idempotent: re-invalidating an already-invalidated decision
+// updates the reason but does not fail.
+func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[string]interface{}, error) {
+	mem, err := dm.GetMemory(decisionID)
+	if err != nil || mem == nil {
+		return nil, fmt.Errorf("decision not found: %s", decisionID)
+	}
+	if coll, _ := mem["collection"].(string); coll != "decisions" {
+		return nil, fmt.Errorf("memory %s is not a decision (collection: %s)", decisionID, coll)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	patchJSON, _ := json.Marshal(map[string]interface{}{
+		"invalidated":     true,
+		"invalidated_at":  now,
+		"invalid_reason":  reason,
+	})
+	err = dm.WithTx(func(node DBNode) error {
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
+			0, string(patchJSON), decisionID); err != nil {
+			return fmt.Errorf("mark invalidated: %w", err)
+		}
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET tags = CASE
+				WHEN COALESCE(tags,'') = '' THEN 'superseded'
+				ELSE tags || ',superseded'
+			END WHERE id = ? AND deleted_at IS NULL AND tags NOT LIKE '%superseded%'`,
+			0, decisionID); err != nil {
+			return fmt.Errorf("tag invalidated: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":       true,
+		"id":            decisionID,
+		"invalidated":   true,
+		"invalidated_at": now,
 	}, nil
 }
 

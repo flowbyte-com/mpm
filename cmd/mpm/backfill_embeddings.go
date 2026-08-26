@@ -49,7 +49,7 @@ func handleBackfillEmbeddings(args []string) int {
 	// Count total missing (no provider needed for this)
 	total, err := countMemoriesWithoutEmbedding(dm.SQLDB(), *collection)
 	if err != nil {
-		usererror.Error("Error counting memories: %v", err)
+		return usererror.Error("Error counting memories: %v", err)
 	}
 	fmt.Printf("   Total memories missing embeddings: %d\n", total)
 
@@ -67,7 +67,7 @@ func handleBackfillEmbeddings(args []string) int {
 	provider := cfg.Provider
 
 	if provider.Name() == "null" {
-		usererror.Error("no embedding provider available.\nSet OLLAMA_ENDPOINT and OLLAMA_MODEL env vars and ensure Ollama is running.")
+		return usererror.Error("no embedding provider available.\nSet OLLAMA_ENDPOINT and OLLAMA_MODEL env vars and ensure Ollama is running.")
 	}
 	fmt.Printf("⚡ Embedding backfill using %s\n", provider.Name())
 

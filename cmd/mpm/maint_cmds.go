@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log/slog"
 	"github.com/flowbyte-com/mpm-core/usererror"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -220,7 +220,7 @@ func handleExport(args []string) int {
 
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
-		usererror.Error("Export failed: %v", err)
+		return usererror.Error("Export failed: %v", err)
 	}
 
 	var writer *csv.Writer
@@ -229,7 +229,7 @@ func handleExport(args []string) int {
 	if *output != "" {
 		outputFile, err = os.Create(*output)
 		if err != nil {
-			usererror.Error("Cannot create output file: %v", err)
+			return usererror.Error("Cannot create output file: %v", err)
 		}
 		defer outputFile.Close()
 
@@ -242,7 +242,7 @@ func handleExport(args []string) int {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(memories); err != nil {
-			usererror.Error("JSON encode failed: %v", err)
+			return usererror.Error("JSON encode failed: %v", err)
 		}
 	} else if *format == "csv" {
 		if writer == nil {

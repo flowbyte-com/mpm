@@ -11,6 +11,7 @@
 package internal
 
 import (
+
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -113,6 +114,36 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 		}
 	}
 
+	// F19: explicit idempotency signal at the agent-facing surface. When
+	// this exact content already exists live in the collection, return the
+	// EXISTING row with duplicate=true instead of writing a second one.
+	if dupID := dm.FindLiveDuplicateMemory(collection, fact, tags, meta); dupID != "" {
+		existing, err := dm.GetMemory(dupID)
+		if err == nil && existing != nil {
+			echoContent, truncated := BoundInlineContent(fact)
+			// GetMemory returns tags as a raw JSON string; decode so the
+			// duplicate response matches the shape of a fresh save.
+			var existingTags []string
+			if tj, ok := existing["tags"].(string); ok {
+				_ = json.Unmarshal([]byte(tj), &existingTags)
+			}
+			result := map[string]interface{}{
+				"success":   true,
+				"id":        dupID,
+				"duplicate": true,
+				"content":   echoContent,
+				"weight":    existing["weight"],
+				"tags":      existingTags,
+				"pointer":   "mpm://memory/" + dupID,
+			}
+			if truncated {
+				result["content_truncated"] = true
+				result["content_bytes"] = len(fact)
+			}
+			return result, nil, nil
+		}
+	}
+
 	store, err := dm.getSharedStore()
 	if err != nil {
 		return nil, nil, fmt.Errorf("get memory store: %w", err)
@@ -140,12 +171,23 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 	// the memory insert.
 	applied, _ := dm.applyTheoryResolutions(fact, tags)
 
+	// F4: the save response bounds the echoed content. Persistence keeps
+	// the FULL payload; only the wire echo is bounded, explicitly flagged,
+	// and paired with a retrieval pointer. A 30 KB echo for a 30 KB save
+	// used to double the agent's context cost per write.
+	echoContent, truncated := BoundInlineContent(mem.Content)
 	result := map[string]interface{}{
 		"success": true,
 		"id":      mem.ID,
-		"content": mem.Content,
+		"content": echoContent,
 		"weight":  mem.Weight,
 		"tags":    mem.Tags,
+		"pointer": "mpm://memory/" + mem.ID,
+	}
+	if truncated {
+		result["content_truncated"] = true
+		result["content_bytes"] = len(mem.Content)
+		result["note"] = "content stored in full; inline echo bounded — retrieve via mpm_memory query or mpm_blob_read"
 	}
 	if len(applied) > 0 {
 		result["theory_resolutions_applied"] = applied

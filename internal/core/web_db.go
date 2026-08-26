@@ -550,8 +550,10 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 		}
 	}
 
-	// 2. Clear challenged status from memory
-	clearPatch := map[string]interface{}{"status": nil, "challenged_theory_id": nil}
+	// 2. Clear challenged status from memory (including the recorded
+	// pre-challenge weight — the user's +<id> is an explicit endorsement
+	// that supersedes the challenge, so the challenge bookkeeping goes).
+	clearPatch := map[string]interface{}{"status": nil, "challenged_theory_id": nil, "challenged_prior_weight": nil}
 	clearJSON, _ := json.Marshal(clearPatch)
 	_, err = tx.Exec(
 		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ?`,
@@ -1522,10 +1524,11 @@ func (dm *DatabaseManager) PruneNeverAccessed() (int, error) {
 // GetMemoriesForExport retrieves memories with optional filters
 func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string) ([]map[string]interface{}, error) {
 	query := `
-		SELECT id, collection, content, tags, metadata, created_at,
+		SELECT id, collection, content, COALESCE(tags,'[]'), COALESCE(metadata,'{}'),
+		       COALESCE(created_at, 0),
 		       COALESCE(reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(weight, 1) as weight,
-		       COALESCE(is_long_term, 0) as is_long_term,
+		       COALESCE(is_long_term, 0) is_long_term,
 		       COALESCE(last_accessed_at, '') as last_accessed_at,
 		       COALESCE(expires_at, '') as expires_at
 		FROM memories

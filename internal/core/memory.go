@@ -537,6 +537,9 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 	contentHashBytes := sha256.Sum256([]byte(content))
 	contentHash := hex.EncodeToString(contentHashBytes[:])
 
+	// F19 idempotency is enforced further below via the persisted
+	// identity_hash (collection + content + tags + stable metadata).
+
 	// Normalize createdAt to Unix-epoch seconds (INTEGER column). Accept
 	// either a numeric string or RFC3339 — matches saveMemoryRow's
 	// normalization so both write paths produce the same on-disk shape.
@@ -550,6 +553,25 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAtSec, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
 	return id, err
+}
+
+// findLiveDuplicateByIDHash returns the id of a live memory with the same
+// persisted F19 identity hash, or "". MemoryStore-side twin of db.go's
+// findLiveDuplicateNode for the addMemoryDirect insert path.
+func (s *MemoryStore) findLiveDuplicateByIDHash(collection, identityHash string) string {
+	if identityHash == "" {
+		return ""
+	}
+	var dupID string
+	err := s.DB.QueryRow(`
+		SELECT id FROM memories
+		WHERE collection = ? AND identity_hash = ? AND deleted_at IS NULL
+		LIMIT 1
+	`, collection, identityHash).Scan(&dupID)
+	if err != nil {
+		return ""
+	}
+	return dupID
 }
 
 // poisonPhraseCache holds loaded poison phrases in memory
@@ -1537,7 +1559,7 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 			// Delete all except the best
 			for k := 0; k < len(cluster); k++ {
 				if k != bestIdx {
-					s.execTracked(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, 0, cluster[k])
+					s.execTracked(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, 0, cluster[k])
 					consolidated++
 				}
 			}
@@ -2157,7 +2179,7 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 	// Set deleted_at so active-memory queries (WHERE deleted_at IS NULL) exclude this record.
 	result, err := s.DB.Exec(`
 		UPDATE memories
-		SET deleted_at = strftime('%s','now'),
+		SET deleted_at = CAST(strftime('%s','now') AS INTEGER),
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE id = ? AND collection = ?
 	`, id, collection)
@@ -2363,7 +2385,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete exact duplicates
 	for _, id := range dupeIDs {
-		s.execTracked("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", 0, id)
+		s.execTracked("UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 
@@ -2470,7 +2492,7 @@ func (s *MemoryStore) DedupeMemories() (*DedupResult, error) {
 
 	// Soft-delete near duplicates
 	for id := range seenNearDupes {
-		s.execTracked("UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", 0, id)
+		s.execTracked("UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", 0, id)
 		result.TotalDeleted++
 	}
 
@@ -2904,7 +2926,7 @@ func (s *MemoryStore) PruneExpired() (int, error) {
 	}
 
 	result, err := s.DB.Exec(`
-		UPDATE memories SET deleted_at = strftime('%s','now') WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
+		UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("prune expired failed: %w", err)

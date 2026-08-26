@@ -25,6 +25,9 @@ bin/
 mpm-agent/
 
 # Runtime state (never commit these)
+# Blob-store spill directory (runtime-generated MCP result spills).
+blobs/
+
 src/db/mpm.db
 src/db/mpm.db.old
 src/db/mirror.jsonl

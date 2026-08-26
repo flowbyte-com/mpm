@@ -29,19 +29,26 @@
 // now matches it.
 package internal
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // BuildFTS5Query converts a user query into an FTS5 MATCH expression
 // compatible with the porter unicode61 tokenizer. Each token gets a `*`
 // suffix for prefix matching; tokens are joined with whitespace (FTS5
 // implicit AND).
 //
+// Tokenization contract: the unicode61 indexer treats every character
+// except alphanumerics (and in-word apostrophes) as a separator. The
+// builder mirrors that exactly — queries like "HTTP/1.1" or "foo.bar"
+// produce the same token sequence the indexer stored, so technical
+// identifiers remain discoverable.
+//
 // Edge cases:
 //   - Empty/whitespace-only input returns "" so the caller can short-circuit.
-//   - FTS5 special characters (`^ " ( ) : *`) are stripped as spaces so they
-//     don't cause syntax errors or silent no-op filters.
-//   - Hyphens, underscores, and dots are treated as word separators,
-//     matching the unicode61 tokenizer's split behaviour.
+//   - FTS5 special characters (`^ " ( ) : *`) are separators, so they can
+//     never cause syntax errors or silent no-op filters.
 //
 // Example transformations:
 //
@@ -49,6 +56,7 @@ import "strings"
 //	"lazy start"        -> "lazy* start*"
 //	"ecryptfs"          -> "ecryptfs*"
 //	"lazy-start-mount"  -> "lazy* start* mount*"
+//	"HTTP/1.1"          -> "http* 1* 1*"
 //	"  hello   world  " -> "hello* world*"
 //	"\""                -> "" (empty after stripping)
 //
@@ -58,27 +66,21 @@ func BuildFTS5Query(query string) string {
 	if strings.TrimSpace(query) == "" {
 		return ""
 	}
-	// Strip FTS5 special characters that would cause syntax errors or
-	// silently no-op. Hyphens, underscores, and dots are intentionally
-	// preserved here — they're stripped below via FieldsFunc.
-	stripped := strings.NewReplacer(
-		`"`, " ",
-		`^`, " ",
-		`(`, " ",
-		`)`, " ",
-		`*`, " ",
-		`:`, " ",
-	).Replace(query)
-	// Split on whitespace + hyphens + underscores + dots. The unicode61
-	// tokenizer splits on the union of these, so query tokens match indexed
-	// tokens.
-	fields := strings.FieldsFunc(stripped, func(r rune) bool {
-		switch r {
-		case ' ', '\t', '\n', '\r', '-', '_', '.':
-			return true
+	fields := strings.FieldsFunc(query, func(r rune) bool {
+		if r == '\'' {
+			return false // unicode61 keeps in-word apostrophes as token chars
 		}
-		return false
+		return !isTokenChar(r)
 	})
+	// Drop tokens with no alphanumeric content (e.g. a standalone
+	// apostrophe): unicode61 only preserves apostrophes INSIDE words.
+	filtered := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if strings.IndexFunc(f, isTokenChar) >= 0 {
+			filtered = append(filtered, f)
+		}
+	}
+	fields = filtered
 	if len(fields) == 0 {
 		return ""
 	}
@@ -87,4 +89,10 @@ func BuildFTS5Query(query string) string {
 		parts[i] = f + "*"
 	}
 	return strings.Join(parts, " ")
+}
+
+// isTokenChar reports whether r belongs to a unicode61 token: Unicode
+// letters or digits.
+func isTokenChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

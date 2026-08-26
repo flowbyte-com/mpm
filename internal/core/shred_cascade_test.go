@@ -25,7 +25,7 @@ func TestShredMemoryWithCascade_LessonPath(t *testing.T) {
 	dm := NewTestDM(t)
 
 	lesson, err := dm.AddLesson("cascade wrapper lesson test", LessonTypeInsight,
-		[]string{"cascade-test"}, "test-session")
+		[]string{"git"}, "test-session")
 	require.NoError(t, err)
 	id := lesson.ID
 
@@ -60,7 +60,7 @@ func TestShredMemoryWithCascade_MemoryPath(t *testing.T) {
 	require.NoError(t, err)
 
 	memID, err := dm.SaveMemory("memories", "cascade wrapper memory test", "test-session",
-		[]string{"cascade-test"}, nil, nil, false, 5)
+		[]string{"git"}, nil, nil, false, 5)
 	require.NoError(t, err)
 	require.NoError(t, dm.AddMemoryToTopic(memID, topicID, "primary"))
 

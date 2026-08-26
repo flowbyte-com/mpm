@@ -94,9 +94,10 @@ type WakeContextData struct {
 	// prose form for compatibility with existing call sites.
 	ScratchpadOrphans string `json:"scratchpad_orphans"`
 	// OpenWorks are work items with status='open'. Bounded to 5 items,
-	// ordered by created_at ASC (oldest first so the agent sees what has
-	// been waiting longest). Non-nil empty slice always emitted per
-	// WakeContextData invariant 3.
+	// ordered by updated_at DESC (most recently touched first, so fresh
+	// and actively-updated work outranks stale history — see F3). The
+	// tiebreak is created_at DESC for deterministic ordering. Non-nil
+	// empty slice always emitted per WakeContextData invariant 3.
 	OpenWorks []WakeContextWork `json:"open_works"`
 
 	// Constraints & Capabilities — the "what rules apply, what tools".
@@ -291,7 +292,26 @@ var wakeContextTruncatedFieldNames = []string{
 	"recent_topics",
 }
 
+// GatherWakeContext assembles the wake context and CONSUMES the latest
+// unread handoff (marks it read). This is the agent-facing contract: a wake
+// delivers the handoff once.
+//
+// Presentation-only callers (dashboards, `mpm continue` composition) must
+// use GatherWakeContextReadOnly instead — rendering is not delivery, and a
+// consuming render steals the handoff from the agent's actual boot read
+// (audit finding F18: `mpm status` marked the handoff read, so
+// read_wake_context later saw none).
 func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
+	return dm.gatherWakeContext(true)
+}
+
+// GatherWakeContextReadOnly assembles the same wake context WITHOUT marking
+// the handoff read. Pure projection — safe to call for display.
+func (dm *DatabaseManager) GatherWakeContextReadOnly() (WakeContextData, error) {
+	return dm.gatherWakeContext(false)
+}
+
+func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextData, error) {
 	var data WakeContextData
 
 	// Metadata — emitted on every read. GeneratedAt and AsOf are the
@@ -336,11 +356,18 @@ func (dm *DatabaseManager) GatherWakeContext() (WakeContextData, error) {
 	data.AvailableSkills = make([]SkillSummary, 0)
 	data.OpenWorks = make([]WakeContextWork, 0)
 
-	// Pull the latest unread handoff. The mark-read happens here so
-	// re-reading wake context (e.g. in the same session) doesn't re-show
-	// the same handoff. Wake-context timestamp is the read-by token —
-	// distinct from any session_id since the agent may not have one.
-	h, herr := dm.MarkLatestHandoffRead("wake-context")
+	// Pull the latest unread handoff. In consume mode the mark-read happens
+	// here so re-reading wake context (e.g. in the same session) doesn't
+	// re-show the same handoff. Wake-context timestamp is the read-by
+	// token — distinct from any session_id since the agent may not have one.
+	// Read-only mode peeks: the handoff stays unread for the real consumer.
+	var h *Handoff
+	var herr error
+	if markHandoffRead {
+		h, herr = dm.MarkLatestHandoffRead("wake-context")
+	} else {
+		h, herr = dm.GetLatestUnreadHandoff()
+	}
 	if herr != nil && !errors.Is(herr, sql.ErrNoRows) {
 		// Non-fatal: log the handoff read failure to audit but continue
 		// with wake context. The handoff is bootstrap data; the agent
@@ -792,8 +819,10 @@ func formatWakeContext(d WakeContextData) string {
 // formatHandoff renders a Handoff as a structured block. Designed to be
 // scannable but informative — the agent needs to know (1) when the last
 // session was, (2) what it was doing, and (3) what state it left behind.
-// Commitments and Open Questions are now rendered via the OpenWorks and
-// Pending Theories projections respectively — no longer embedded here.
+//
+// F13: commitments and open questions round-trip through write → storage →
+// wake. They render here (bounded) so the system-prompt projection carries
+// the same continuity data the JSON projection does.
 //
 // Handoff timestamp fields are stored as INTEGER Unix-epoch seconds (see
 // migration timestamps_unified_v1); FormatUnixSeconds renders them at the
@@ -806,7 +835,35 @@ func formatHandoff(h *Handoff) string {
 			h.SessionID, FormatUnixSeconds(h.EndedAt), h.EndedState)
 	}
 	lines = append(lines, header)
-	lines = append(lines, "  - Summary: "+h.Summary)
+	summary := h.Summary
+	if len(summary) > 400 {
+		summary = summary[:400] + "…"
+	}
+	lines = append(lines, "  - Summary: "+summary)
+	if len(h.Commitments) > 0 {
+		lines = append(lines, "  - Commitments:")
+		for i, c := range h.Commitments {
+			if i >= 5 {
+				break // bounded like every other wake block
+			}
+			if len(c) > 120 {
+				c = c[:120] + "…"
+			}
+			lines = append(lines, "    - "+c)
+		}
+	}
+	if len(h.OpenQuestions) > 0 {
+		lines = append(lines, "  - Open questions:")
+		for i, q := range h.OpenQuestions {
+			if i >= 5 {
+				break
+			}
+			if len(q) > 120 {
+				q = q[:120] + "…"
+			}
+			lines = append(lines, "    - "+q)
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1161,12 +1218,21 @@ func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (boo
 }
 
 // gatherOpenWorks returns up to 5 open work items for wake context,
-// ordered by created_at ASC (oldest first). Titles are truncated to 120 chars.
+// most-recently-touched first: ORDER BY updated_at DESC, created_at DESC
+// as the determinism tiebreak.
+//
+// Ordering rationale (audit finding F3): created_at ASC surfaced the five
+// OLDEST open items — stale historical work — while fresh work a few rows
+// down never appeared. updated_at DESC puts current/relevant work at the
+// top: a newly created work and an old-but-just-updated work both surface,
+// while genuinely untouched old work sinks below the bound instead of
+// permanently occupying it. Closed/cancelled work is excluded by the
+// status='open' filter. Titles are truncated to 120 chars.
 func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 	rows, err := dm.db.Query(`
 		SELECT id, title, status, verification, created_at
 		FROM works WHERE status = 'open'
-		ORDER BY created_at ASC
+		ORDER BY updated_at DESC, created_at DESC
 		LIMIT 5
 	`)
 	if err != nil {

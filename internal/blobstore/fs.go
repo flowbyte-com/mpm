@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -418,56 +419,86 @@ func (f *FilesystemBackend) Search(ctx context.Context, id string, query SearchQ
 	lineNo := 1
 	lineStart := int64(0)
 	buf := make([]byte, 32*1024)
+	var carry []byte // partial line carried across chunk boundaries
 	bytesScanned := int64(0)
+
+	// Snippet cap: a match on a very long line (spilled payloads are
+	// single-line JSON) previously echoed the entire line back, which
+	// deterministically re-spilled the search response itself. Bound the
+	// snippet and mark the truncation.
+	const maxSnippetBytes = 240
+
+	processLine := func(line []byte) bool {
+		matched := false
+		if query.Regex {
+			matched = matcher.Match(line)
+		} else {
+			haystack := string(line)
+			needle := query.Query
+			if query.CaseInsensitive {
+				haystack = strings.ToLower(haystack)
+				needle = strings.ToLower(needle)
+			}
+			matched = strings.Contains(haystack, needle)
+		}
+		if matched {
+			snippet := line
+			if len(snippet) > maxSnippetBytes {
+				snippet = append(append(make([]byte, 0, maxSnippetBytes+3), snippet[:maxSnippetBytes]...), "..."...)
+			}
+			matches = append(matches, Match{
+				LineNo:     lineNo,
+				ByteOffset: lineStart,
+				Snippet:    string(snippet),
+			})
+		}
+		lineNo++
+		return !(query.MaxMatches > 0 && len(matches) >= query.MaxMatches)
+	}
 
 	for bytesScanned < maxBytes {
 		n, err := file.ReadAt(buf, offset)
-		if n > 0 {
-			chunkEnd := bytesScanned + int64(n)
-			for i := 0; i < n; i++ {
-				if buf[i] == '\n' {
-					line := buf[:i]
-					if query.Regex {
-						if matcher.Match(line) {
-							matches = append(matches, Match{
-								LineNo:     lineNo,
-								ByteOffset: lineStart,
-								Snippet:    string(line),
-							})
-						}
-					} else {
-						haystack := string(line)
-						needle := query.Query
-						if query.CaseInsensitive {
-							haystack = strings.ToLower(haystack)
-							needle = strings.ToLower(needle)
-						}
-						if strings.Contains(haystack, needle) {
-							matches = append(matches, Match{
-								LineNo:     lineNo,
-								ByteOffset: lineStart,
-								Snippet:    string(line),
-							})
-						}
-					}
-					if query.MaxMatches > 0 && len(matches) >= query.MaxMatches {
-						return matches, nil
-					}
-					lineNo++
-					lineStart = bytesScanned + int64(i) + 1
-				}
-			}
-			// If no newline found in this chunk, lineStart stays at current value
-			// (line spans across chunks).
-			bytesScanned = chunkEnd
-		}
-		if err == io.EOF {
+		if n <= 0 {
 			break
 		}
+		chunk := buf[:n]
+		if remaining := maxBytes - bytesScanned; int64(len(chunk)) > remaining {
+			chunk = chunk[:remaining]
+		}
+		pos := 0
+		for {
+			idx := bytes.IndexByte(chunk[pos:], '\n')
+			if idx < 0 {
+				break
+			}
+			line := append(carry, chunk[pos:pos+idx]...)
+			carry = carry[:0]
+			if !processLine(line) {
+				return matches, nil
+			}
+			lineStart = bytesScanned + int64(pos) + int64(idx) + 1
+			pos += idx + 1
+		}
+		carry = append(carry, chunk[pos:]...)
+		bytesScanned += int64(len(chunk))
+		offset += int64(len(chunk))
 		if err != nil {
 			break
 		}
-		offset += int64(n)
+	}
+	// Final line without a trailing newline: the previous implementation
+	// dropped it entirely (matching only fired on '\n'), which made every
+	// single-line blob — including spilled single-line JSON payloads —
+	// unsearchable (D4 follow-up, 2026-08-25).
+	// Flush the trailing partial line at ANY loop exit, not just EOF
+	// (Stage 7 fix). The previous `sawEOF &&` guard discarded the carry
+	// when the maxBytes scan window closed mid-line — which is the common
+	// case for spilled single-line JSON payloads, making mpm_blob_search
+	// return zero matches on exactly the blobs it was built to search.
+	// Treating end-of-window as end-of-line keeps byte offsets correct and
+	// matches the substring semantics of a bounded scan.
+	if len(carry) > 0 {
+		processLine(carry)
 	}
 
 	return matches, nil
@@ -560,6 +591,7 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 
 		info, err := entry.Info()
 		if err != nil {
+			slog.Warn("blob_gc: stat failed; skipping entry", "id", name, "err", err)
 			continue
 		}
 

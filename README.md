@@ -421,6 +421,9 @@ Notice what never happens. The original memory is never edited. Only confidence 
 
 The cognitive sequence above shows how artifacts come into being. The relationship below shows how their truth gets refined over time. The two are different things; conflating them is what made the earlier single-diagram view misleading.
 
+**`source_group` vocabulary (validated at write time).** Every evidence write (`mpm_evidence action=add`, `mpm evidence add`) validates `source_group` against the same registry the work verifier classifies with. Accepted values: outcome sources `filesystem`, `test`, `api_response`, `manual_review`; audit sources `git`, `ci`, `external`; action sources `tool_invocation`, `api_call`, `process`. Unknown values are rejected with an error enumerating the accepted set (discoverable via `mpm_evidence action=source_groups`) and leave no partial state. This closes the failure mode where unrecognized source groups were stored, silently ignored by the verifier, and permanently capped verification.
+
+
 A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached accumulate that evidence over time. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
 
 ```
@@ -458,6 +461,20 @@ RATIONALE: WordPress strips <style> blocks from post content via wp_kses_post() 
 
 mpm decisions
 ```
+
+**Invalidation / supersession.** A corrected choice must be distinguishable from stale knowledge without deleting history:
+
+```bash
+# Record a replacement; the original is tagged superseded/superseded-by:<new-id>
+# (HybridSearch discounts superseded rows to 0.25x score) and carries
+# metadata superseded=true, superseded_by=<new-id>.
+mpm call mpm_decisions --payload '{"action":"supersede","params":{"original_id":"<id>","choice":"<new choice>","rationale":"<why>"}}'
+
+# Retire a decision with no replacement:
+mpm call mpm_decisions --payload '{"action":"invalidate","params":{"decision_id":"<id>","reason":"<why>"}}'
+```
+
+Superseding an already-superseded decision is rejected — supersede the current reading instead. Every intermediate stays inspectable via its `superseded_by` pointer.
 
 ### 4.4 Theory Tracker
 
@@ -502,12 +519,18 @@ challenge ───────────────────────�
     └── shred ─────────────────────────────────────▶ [theory: deleted]
 ```
 
-- **`mpm challenge <id> "<evidence>"`** — atomic: patch memory metadata, create theory with back-link, weaken weight by 3.
-- **`mpm challenge restore <id>`** — atomic: resolve theory as disproven, clear memory flags.
+- **`mpm challenge <id> "<evidence>"`** — atomic: patch memory metadata, create theory with back-link. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
+- **`mpm challenge restore <id>`** — atomic: resolve theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing.
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
 **Auto-resolution on memory save (the implicit path).** Theories can also be closed out without an explicit `mpm resolve_theory` call. When `mpm_memory action=save` writes a memory carrying the tags `theory:<id>` AND `outcome:proven` (or `outcome:disproven`), the theory is atomically resolved in the same transaction as the memory insert. The result envelope returns `theory_resolutions_applied: ["<id>"]` when this fires; the resolved theory row carries `resolved_by=mpm_memory action=save:theory_resolve_hook` as the forensic marker. This is the preferred path for closing out a theory you've just verified — the evidence and the conclusion land in the same row, and the audit trail is the row itself rather than a separate `mpm resolve_theory` invocation.
+
+### 4.5.1 Save idempotency and bounded responses
+
+**Duplicate saves are deterministic, not background-magic.** Identity for a memory is the tuple *(collection, SHA-256 of content, tags, stable metadata)* — write-path stamps (`created`, `timestamp`, `source`, tag mirrors) and observation telemetry (`_epistemic_snapshot`, `weight_intent`) are excluded. An identical re-save returns the **existing row's id** with `duplicate: true` instead of writing a second indistinguishable row; the same identity rule is enforced inside both low-level insert paths. Content that differs in provenance metadata (human vs model capture) remains legitimately distinct — that distinction feeds the contradiction workflows.
+
+**Agent-facing payloads are bounded by design.** `mpm_memory save` echoes content up to 2 KB (override with `MPM_MAX_INLINE_CONTENT_BYTES`), flags larger echoes with `content_truncated: true` + `content_bytes`, and always returns an `mpm://memory/<id>` pointer; the full payload is persisted unchanged and retrievable by id or via `full_content: true`. Memory query bounds each hit the same way. Truncation is always explicit — a bounded echo can never be mistaken for complete content.
 
 ### 4.6 Proactive Recall
 
@@ -527,7 +550,7 @@ MPM models reasoning under uncertainty. Mistakes happen. The system is designed 
 
 Six canonical failure modes and the mechanism that handles each:
 
-**Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` weakens the memory's weight by 3, atomically creates a back-linked theory in pending status, and preserves the original artifact. The memory is not deleted — the original artifact is preserved. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
+**Bad evidence corrupting a decision.** A memory was anchored to evidence that turned out to be misread, fabricated, or context-dependent; the decision now rests on a false foundation. *Recovery:* `mpm challenge <id> "<why this is wrong>"` atomically creates a back-linked theory in pending status and preserves the original artifact; the tool surface (`mpm_memory action=challenge`) also weakens the stored weight by 2, recording the pre-challenge value for exact restoration. The memory is not deleted — the original artifact is preserved. A future operator can audit *why* the memory was believed, *when* it was challenged, and *what* eventually resolved the dispute.
 
 **Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
 
@@ -2609,6 +2632,14 @@ RETURNING *;
 The CTE-updating-read pattern is atomic — concurrent callers see disjoint wake_id sets.
 
 **Opportunistic fold.** `cmd/mpm/call.go` calls `CheckPendingEventWakes(ac.SessionID)` after every handler returns and folds the result into the `EventWakesPending` block on the response. So every MPM call surfaces pending event wakes automatically, without an explicit pull.
+
+### Wake open_works ordering
+
+`read_wake_context` surfaces at most five open work items ordered by `updated_at DESC` (created_at DESC as tiebreak): freshly created work and old-but-recently-touched work rank ahead of stale history, so a fresh agent sees current work instead of the five oldest items. Closed and cancelled work never appears. Both JSON and system-prompt projections consume identical underlying data; the handoff block renders once (consuming read) unless you gather read-only.
+
+### mpm_work response envelopes
+
+`mpm_work action=list` returns `{"success":true,"works":[...],"count":N}` and `action=history` returns `{"success":true,"work_id":"...","events":[...],"count":N}`. History events are enriched with `framework_name`/`model` resolved from authoritative provenance (`tool_invocations`, falling back to `artifact_provenance`) — absent optional metadata is omitted rather than fabricated. `works.session_id` is populated from the ActiveContext session when the caller omits it.
 
 ## B.6 Wake payload shape
 

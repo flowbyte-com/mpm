@@ -243,7 +243,7 @@ func markMemorySynthCooldown(dm CoreDB, memoryID string) {
 		return
 	}
 	dm.SQLDB().Exec(
-		`UPDATE memories SET last_synthesized_at = strftime('%s','now') WHERE id = ?`,
+		`UPDATE memories SET last_synthesized_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`,
 		memoryID,
 	)
 }
@@ -545,9 +545,9 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		return
 	}
 
-	// 9. Preserve oldest created_at from the source fragments
+	// 9. Preserve oldest created_at from the source fragments — canonical INTEGER
 	if oldestCreatedAt != nil && *oldestCreatedAt != "" {
-		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = ? WHERE id = ?", *oldestCreatedAt, newSynthID); err != nil {
+		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = CAST(? AS INTEGER) WHERE id = ?", *oldestCreatedAt, newSynthID); err != nil {
 			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: created_at preservation UPDATE failed (synth=%s): %v", newSynthID, err), "", AuditContext{})
 		}
 	}
@@ -574,11 +574,11 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	// 11. Soft-delete originals (candidates + triggering memory)
 	for _, c := range toMerge {
-		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", c.ID); err != nil {
+		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", c.ID); err != nil {
 			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", c.ID, err), "", AuditContext{})
 		}
 	}
-	if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?", newID); err != nil {
+	if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", newID); err != nil {
 		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", newID, err), "", AuditContext{})
 	}
 

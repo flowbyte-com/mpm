@@ -65,9 +65,14 @@ func TestHandleMpmWork_List(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleMpmWork list: %v", err)
 	}
-	list := result.([]map[string]interface{})
+	// F14: list is now enveloped like every sibling list surface.
+	env := result.(map[string]interface{})
+	list := env["works"].([]map[string]interface{})
 	if len(list) != 2 {
-		t.Errorf("len(list) = %d, want 2", len(list))
+		t.Errorf("len(works) = %d, want 2", len(list))
+	}
+	if env["success"] != true {
+		t.Errorf("envelope success = %v, want true", env["success"])
 	}
 }
 
@@ -232,17 +237,27 @@ func TestHandleMpmWork_History(t *testing.T) {
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
-	events := result.([]map[string]interface{})
-	if len(events) != 2 {
-		t.Fatalf("len(events) = %d, want 2", len(events))
+	// F14: history is enveloped.
+	env := result.(map[string]interface{})
+	allEvents := env["events"].([]map[string]interface{})
+	if len(allEvents) < 2 {
+		t.Fatalf("len(events) = %d, want >= 2", len(allEvents))
 	}
-	// First event is created (event_index 0).
-	if events[0]["event_index"].(int) != 0 {
-		t.Errorf("events[0] event_index = %v, want 0", events[0]["event_index"])
+	// F7/F12: evidence writes append evidence_observed events (and hosts
+	// with git state get one from the complete path). Assert the ledger
+	// shape rather than an exact total via stringly-typed comparisons:
+	// event_type is a named string type, so type-switch for robustness.
+	first := fmt.Sprint(allEvents[0]["event_type"])
+	if first != "created" || fmt.Sprint(allEvents[0]["event_index"]) != "0" {
+		t.Errorf("first event = %v@%v, want created@0",
+			allEvents[0]["event_type"], allEvents[0]["event_index"])
 	}
-	// Second event is completed (event_index 1).
-	if events[1]["event_index"].(int) != 1 {
-		t.Errorf("events[1] event_index = %v, want 1", events[1]["event_index"])
+	lastIdx := 0
+	for _, e := range allEvents {
+		fmt.Sscanf(fmt.Sprint(e["event_index"]), "%d", &lastIdx)
+	}
+	if lastIdx < 1 {
+		t.Errorf("last event_index = %d, want >= 1", lastIdx)
 	}
 }
 
@@ -356,13 +371,21 @@ func TestHandleMpmWork_Reopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
-	events := histResult.([]map[string]interface{})
-	if len(events) != 3 {
-		t.Fatalf("len(events) = %d, want 3", len(events))
+	envH := histResult.(map[string]interface{})
+	allEvents := envH["events"].([]map[string]interface{})
+	if len(allEvents) < 3 {
+		t.Fatalf("len(events) = %d, want >= 3 (created, completed, reopened)", len(allEvents))
 	}
-	// Third event should have event_index 2 (0=created, 1=completed, 2=reopened).
-	if events[2]["event_index"].(int) != 2 {
-		t.Errorf("events[2] event_index = %v, want 2", events[2]["event_index"])
+	// A reopened event must exist; evidence_observed may interleave when
+	// git state exists on the host.
+	var sawReopened bool
+	for _, e := range allEvents {
+		if fmt.Sprint(e["event_type"]) == "reopened" {
+			sawReopened = true
+		}
+	}
+	if !sawReopened {
+		t.Fatalf("no reopened event in history: %+v", allEvents)
 	}
 }
 

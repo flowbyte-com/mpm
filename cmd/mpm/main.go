@@ -342,6 +342,16 @@ func main() {
 	}
 
 	// Parse flags
+	// D5 (Stage 7): capture explicit -h/--help requests BEFORE the rewrite.
+	// parseFlags converts them into the literal token "help", which handlers
+	// would otherwise treat as data (`mpm rm <id> --help` deleted the memory).
+	router.helpRequested = false
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			router.helpRequested = true
+			break
+		}
+	}
 	args = router.parseFlags(args)
 	if len(args) == 0 || args[0] == "" {
 		PrintQuicklinks()
@@ -1510,7 +1520,11 @@ func PrintQuicklinks() {
 	// Section 2: Last Session.
 	fmt.Println("Last Session")
 	fmt.Println(divider)
-	if wake, err := dm.GatherWakeContext(); err == nil && wake.LastHandoff != nil {
+	// F18: the dashboard is a PRESENTATION surface — render without
+	// consuming the handoff. GatherWakeContext() marks the handoff read,
+	// so a mere `mpm status` run used to steal last_handoff from the
+	// agent's actual wake read.
+	if wake, err := dm.GatherWakeContextReadOnly(); err == nil && wake.LastHandoff != nil {
 		when := formatAgeUnix(wake.LastHandoff.EndedAt)
 		fmt.Printf("%s\n", when)
 		if wake.LastHandoff.Summary != "" {

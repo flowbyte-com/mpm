@@ -249,16 +249,39 @@ func handleRecordDecision(args []string) int {
 	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
 }
 
-// handleTheories lists theories with status chips. Supports filter: all, pending, resolved.
+// handleTheories lists theories with status chips.
+//
+// Usage: mpm theories [list|ls|all|pending|resolved|proven|disproven]
+//
+// The literal subcommand "list"/"ls" is consumed as "show everything"
+// — previously it leaked into the status filter where it matched no
+// row, so `mpm theories list` printed "No list theories found." even
+// with 61+ pending theories (audit finding F10).
+//
+// Status vocabulary: rows resolved through the MCP/arbitration paths
+// carry "proven"/"disproven" while the legacy CLI wrote "resolved".
+// The filter treats them as one family: "resolved" matches both
+// proven and disproven rows.
 func handleTheories(args []string) int {
+	dm := getDB()
+	if dm == nil {
+		return 1
+	}
+	return runTheories(dm, args)
+}
+
+// runTheories is the injectable core of `mpm theories` so tests can drive
+// it against a hermetic database.
+func runTheories(dm mpminternal.CoreDB, args []string) int {
 	filter := "all"
 	if len(args) > 0 {
 		filter = args[0]
 	}
-
-	dm := getDB()
-	if dm == nil {
-		return 1
+	switch filter {
+	case "list", "ls":
+		filter = "all"
+	case "help", "-h", "--help":
+		return respond("", "Usage: mpm theories [list|all|pending|resolved|proven|disproven]\n", 0)
 	}
 
 	memories, err := dm.GetMemoriesForExport("theories", "", "")
@@ -268,6 +291,17 @@ func handleTheories(args []string) int {
 
 	if len(memories) == 0 {
 		return respond("", "No theories yet. Run `mpm propose_theory` to propose your first theory.\n", 0)
+	}
+
+	statusMatches := func(status, filter string) bool {
+		switch filter {
+		case "all":
+			return true
+		case "resolved":
+			return status == "resolved" || status == "proven" || status == "disproven"
+		default:
+			return status == filter
+		}
 	}
 
 	count := 0
@@ -284,7 +318,7 @@ func handleTheories(args []string) int {
 			status = "pending"
 		}
 
-		if filter != "all" && status != filter {
+		if !statusMatches(status, filter) {
 			continue
 		}
 

@@ -9,6 +9,7 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -43,6 +44,69 @@ type EvidenceInput struct {
 	Notes              string
 }
 
+// EvidenceSourceGroupClass is how DeriveWorkVerification classifies
+// evidence by its origin. The classes — not individual values — drive
+// verification decisions.
+type EvidenceSourceGroupClass string
+
+const (
+	// SourceGroupOutcome: direct observation that the intended result was
+	// achieved. Sufficient for verified.
+	SourceGroupClassOutcome EvidenceSourceGroupClass = "outcome"
+	// SourceGroupAudit: an audit trail of process, not proof of outcome.
+	// Alone it yields partial.
+	SourceGroupClassAudit EvidenceSourceGroupClass = "audit"
+	// SourceGroupAction: something ran, but no result was observed.
+	SourceGroupClassAction EvidenceSourceGroupClass = "action"
+)
+
+// evidenceSourceGroupRegistry is the canonical source_group vocabulary.
+// It is the SINGLE SOURCE OF TRUTH shared by (a) AddEvidence validation —
+// unknown values are rejected instead of being silently ignored by the
+// verifier later (audit finding F6) — and (b) DeriveWorkVerification's
+// classification switch.
+var evidenceSourceGroupRegistry = map[string]EvidenceSourceGroupClass{
+	// Outcome sources.
+	"filesystem":    SourceGroupClassOutcome,
+	"test":          SourceGroupClassOutcome,
+	"api_response":  SourceGroupClassOutcome,
+	"manual_review": SourceGroupClassOutcome,
+	// Audit sources.
+	"git":      SourceGroupClassAudit,
+	"ci":       SourceGroupClassAudit,
+	"external": SourceGroupClassAudit,
+	// Action sources.
+	"tool_invocation": SourceGroupClassAction,
+	"api_call":        SourceGroupClassAction,
+	"process":         SourceGroupClassAction,
+}
+
+// ValidEvidenceSourceGroup reports whether source_group is part of the
+// canonical vocabulary.
+func ValidEvidenceSourceGroup(sg string) bool {
+	_, ok := evidenceSourceGroupRegistry[sg]
+	return ok
+}
+
+// EvidenceSourceGroupOfClass returns all source_group values in a class.
+func EvidenceSourceGroupOfClass(class EvidenceSourceGroupClass) []string {
+	var out []string
+	for sg, c := range evidenceSourceGroupRegistry {
+		if c == class {
+			out = append(out, sg)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// classifySourceGroup maps a source_group to its verifier class.
+// Unregistered values return "" — but they cannot reach the verifier,
+// because AddEvidence rejects them at the acceptance boundary.
+func classifySourceGroup(sg string) EvidenceSourceGroupClass {
+	return evidenceSourceGroupRegistry[sg]
+}
+
 // AddEvidence inserts an evidence row and triggers a confidence recompute.
 //
 // The evidence table intentionally has no AFTER INSERT/UPDATE/DELETE
@@ -51,6 +115,12 @@ type EvidenceInput struct {
 // recompute is invoked synchronously here so every confidence change still
 // flows through RecomputeConfidence, matching the "single authoritative
 // entry point" design.
+//
+// F6: source_group is validated against the canonical registry BEFORE any
+// persistence. An unrecognized value used to be accepted, stored, and then
+// silently ignored by DeriveWorkVerification — permanently capping work
+// verification at whatever the remaining evidence supported. It is now a
+// precise, actionable rejection with zero partial state.
 func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if !IsValidEvidenceType(in.Type) {
 		return fmt.Errorf("invalid evidence type: %q", in.Type)
@@ -69,6 +139,8 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// `SourceGroup` and `CreatedBy` can also smuggle content (the prior
 	// comment claimed this was checked but only notes was). The
 	// 20-pattern scanner is the same one used by MemoryStore.AddMemory.
+	// Scanner runs before the vocabulary check so a hostile value gets
+	// the security rejection, not a syntax complaint.
 	if isSensitive, reason := isSensitiveContent(in.Notes); isSensitive {
 		return fmt.Errorf("sensitive content in evidence notes: %s", reason)
 	}
@@ -86,6 +158,15 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	}
 	if isPoisoned, reason := isPoisoned(in.CreatedBy); isPoisoned {
 		return fmt.Errorf("poison content in evidence created_by: %s", reason)
+	}
+	if !ValidEvidenceSourceGroup(in.SourceGroup) {
+		return fmt.Errorf(
+			"invalid source_group %q: must be one of outcome=%v, audit=%v, action=%v "+
+				"(run `mpm call mpm_evidence --payload '{\"action\":\"source_groups\"}'` to list them)",
+			in.SourceGroup,
+			EvidenceSourceGroupOfClass(SourceGroupClassOutcome),
+			EvidenceSourceGroupOfClass(SourceGroupClassAudit),
+			EvidenceSourceGroupOfClass(SourceGroupClassAction))
 	}
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
@@ -122,7 +203,7 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// rolls back the evidence row. Without this, an orphan evidence row would
 	// remain if the process dies between the INSERT and the recompute, or if
 	// the recompute itself fails (e.g., CHECK constraint violation).
-	return dm.WithTx(func(node DBNode) error {
+	if err := dm.WithTx(func(node DBNode) error {
 		if _, err := node.ExecTracked(`
 			INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
 			                     strength, independence_factor, created_by, created_at, expires_at, notes)
@@ -135,7 +216,32 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 			return fmt.Errorf("recompute confidence: %w", err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// F7/F12: derived work verification must track evidence changes.
+	// Post-completion or post-hoc evidence on a work previously left
+	// works.verification stale until someone re-ran complete/cancel — a
+	// verified claim could masquerade as current truth after contradictory
+	// evidence arrived, and vice versa. Re-derive synchronously here so
+	// EVERY evidence write path (MCP tool, mpm call, CLI `mpm evidence add`)
+	// keeps the derived state current. The evidence_observed event uses the
+	// otherwise-dormant ledger vocabulary so the recompute is inspectable.
+	if in.ArtifactType == "work" {
+		if _, err := dm.AppendWorkEvent(in.ArtifactID, WorkEvent{
+			EventType: WorkEventTypeEvidenceObserved,
+			Note:      fmt.Sprintf("%s/%s strength=%.2f", in.Type, in.SourceGroup, in.Strength),
+		}, nil, nil); err != nil {
+			// Non-fatal: the evidence row is committed; the event is
+			// observability. Log and continue to derivation.
+			slog.Warn("AddEvidence: evidence_observed event failed", "work", in.ArtifactID, "error", err.Error())
+		}
+		if _, err := dm.DeriveWorkVerification(in.ArtifactID); err != nil {
+			return fmt.Errorf("derive work verification: %w", err)
+		}
+	}
+	return nil
 }
 
 // RecomputeConfidence is the single authoritative entry point. It loads the
