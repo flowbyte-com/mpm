@@ -72,8 +72,8 @@ ok()   { printf "   \033[32m\u2713 %s\033[0m\n" "$*"; }
 fail() { printf "   \033[31m\u2717 %s\033[0m\n" "$*"; }
 
 echo "=== [1/6] Bootstrap: trigger DatabaseManager attach + schema migration ==="
-"$MPM_BIN" call save_to_memory \
-    --payload '{"fact":"smoke-test bootstrap (will be shredded)","tags":"test:bootstrap-debug,2026-07-07","ttl":"24h"}' \
+"$MPM_BIN" call mpm_memory \
+    --payload '{"action":"save","params":{"fact":"smoke-test bootstrap (will be shredded)","tags":["test:bootstrap-debug","2026-07-07"],"ttl":"24h"}}' \
     > /dev/null 2>&1
 SHARED_SIZE=$(du -h "$TMPDIR/shared.db" | cut -f1)
 ok "DM initialized (shared.db $SHARED_SIZE)"
@@ -101,12 +101,12 @@ SENTINELS=(
 )
 SEEDED=0
 for content in "${SENTINELS[@]}"; do
-    # record_global_rule takes `fact` (not `content`) and a
-    # comma-separated `tags` STRING (not an array). The handler also
-    # requires `confirm=true` at the operator boundary — see
-    # internal/core/tools/handlers.go handleRecordGlobalRule.
-    PAYLOAD=$(python3 -c "import json,sys; print(json.dumps({'fact': sys.argv[1], 'tags': 'test:sentinel,smoke-test,2026-07-07', 'confirm': True}))" "$content")
-    if "$MPM_BIN" call record_global_rule --payload "$PAYLOAD" > /dev/null 2>&1; then
+    # record_global_rule lives under mpm_context (action dispatch) — see
+    # internal/core/tools/handlers.go handleRecordGlobalRule. It takes
+    # `fact` (not `content`) and a comma-separated `tags` STRING (not an
+    # array), and requires `confirm=true` at the operator boundary.
+    PAYLOAD=$(python3 -c "import json,sys; print(json.dumps({'action': 'record_global_rule', 'params': {'fact': sys.argv[1], 'tags': 'test:sentinel,smoke-test,2026-07-07', 'confirm': True}}))" "$content")
+    if "$MPM_BIN" call mpm_context --payload "$PAYLOAD" > /dev/null 2>&1; then
         SEEDED=$((SEEDED + 1))
     else
         note "  failed to seed: $content"
@@ -139,8 +139,8 @@ echo "=== [5/6] Federated query scope=all — should return hits organically ===
 # compete and the Shared Premium multiplier doesn't lift them above
 # the retrieval threshold. "rule" appears in every sentinel; the
 # exact match is the test.
-Q='{"query":"rule","scope":"all","limit":10}'
-RESPONSE=$("$MPM_BIN" call query_long_term_memory --payload "$Q" 2>/dev/null)
+Q='{"action":"query","params":{"query":"rule","scope":"all","limit":10}}'
+RESPONSE=$("$MPM_BIN" call mpm_memory --payload "$Q" 2>/dev/null)
 COUNT=$(echo "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin)["count"])' 2>/dev/null || echo "0")
 if [ "$COUNT" -ge 5 ]; then
     ok "scope=all returned $COUNT rows (5 sentinels expected)"

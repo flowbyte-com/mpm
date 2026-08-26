@@ -364,12 +364,12 @@ func handleGC(args []string) int {
 	// Also catches existing zombies (weight <= 0 from previous GC runs that were never cleaned).
 	if review && !dryRun {
 		for _, m := range deadMemories {
-			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ?`, m["id"]); err != nil {
+			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, m["id"]); err != nil {
 				slog.Warn("gc soft-delete failed", "id", m["id"], "error", err)
 			}
 		}
 		// Clean any lingering zombies not caught by this pass
-		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
+		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
 			slog.Warn("gc zombie cleanup failed", "error", err)
 		}
 		if len(deadMemories) > 0 {

@@ -330,6 +330,16 @@ func rebuildOneMemoriesTable(ctx context.Context, tx *sql.Tx, table, newTable, f
 	if !rebuildMemoriesTableAllowlist[table] {
 		return fmt.Errorf("rebuildOneMemoriesTable: refusing to operate on %q (not in allowlist)", table)
 	}
+	// Step 0: clear a leftover shadow table from an interrupted rebuild.
+	// The rebuild itself is atomic (single tx), so mpm can never leave
+	// new_<table> behind — but an externally-constructed or ancient
+	// non-atomic state would wedge every subsequent boot on
+	// "table new_<table> already exists" with no self-recovery. The
+	// authoritative data lives in <table>; dropping the half-built copy
+	// is always safe.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", newTable)); err != nil {
+		return fmt.Errorf("drop stale %s: %w", newTable, err)
+	}
 	// Step 1: enumerate columns + their declared types via
 	// pragma_table_info, so the rebuild survives any future
 	// ALTER TABLE ADD COLUMN that has accumulated since the
@@ -407,29 +417,46 @@ func rebuildOneMemoriesTable(ctx context.Context, tx *sql.Tx, table, newTable, f
 	// Step 7: bulk INSERT INTO new_<table> SELECT … FROM <table>.
 	// For timestamp columns, the CASE+strftime guard mirrors the
 	// existing timestamps_unified_v1 migration: only convert TEXT
-	// rows that strftime can parse, leave the rest NULL (NULL is
-	// legal because every timestamp column is nullable on the
-	// canonical schema). Integer and real values pass through.
+	// rows that strftime can parse. NULL passes through as NULL —
+	// the canonical schema declares every timestamp column nullable,
+	// and fabricating a value here would corrupt semantics:
 	//
-	// The COALESCE(CAST(NULL AS INTEGER), 0) is a no-op safety
-	// net — if the column has NOT NULL semantics on some legacy
-	// install, NULL→0 keeps the row alive at the cost of losing
-	// the unparseable timestamp. Logged via slog so the operator
-	// can see it post-migration.
+	//   D2 regression (2026-08-25): the previous expression
+	//   COALESCEd unparseable/NULL values to 0. A legacy row with
+	//   deleted_at = NULL came out of the rebuild with deleted_at = 0,
+	//   which every `deleted_at IS NULL` reader treats as soft-deleted
+	//   — silently hiding live memories after upgrade. The zero→NULL
+	//   normalizers cannot repair this because they run earlier in
+	//   initUnifiedSchema (and are sentinel-gated one-shots), so the
+	//   fabricated zeros persisted across boots.
+	//
+	// Only columns that are genuinely NOT NULL on the legacy install
+	// fall back to 0 (a row must survive or NOT NULL rejects the
+	// insert); the slog line makes any such fallback visible.
 	selectExprs := make([]string, 0, len(cols))
 	rowidExpr := "rowid"
+	notNullTimestampFallbacks := 0
 	for _, c := range cols {
 		if isTimestampColumn(c.Name) {
-			selectExprs = append(selectExprs, fmt.Sprintf(
-				"COALESCE(CAST(CASE WHEN typeof(%s)='text' AND strftime('%%s', %s) IS NOT NULL "+
-					"THEN strftime('%%s', %s) ELSE %s END AS INTEGER), 0)",
+			expr := fmt.Sprintf(
+				"CAST(CASE WHEN typeof(%s)='text' AND strftime('%%s', %s) IS NOT NULL "+
+					"THEN strftime('%%s', %s) ELSE %s END AS INTEGER)",
 				c.Name, c.Name, c.Name, c.Name,
-			))
+			)
+			if c.NotNull {
+				expr = fmt.Sprintf("COALESCE(%s, 0)", expr)
+				notNullTimestampFallbacks++
+			}
+			selectExprs = append(selectExprs, expr)
 		} else if c.Name == "rowid" {
 			selectExprs = append(selectExprs, "rowid")
 		} else {
 			selectExprs = append(selectExprs, c.Name)
 		}
+	}
+	if notNullTimestampFallbacks > 0 {
+		slog.Warn("affinity rebuild: NOT NULL timestamp columns keep the 0 fallback",
+			"table", table, "columns", notNullTimestampFallbacks)
 	}
 	insertSQL := fmt.Sprintf(
 		"INSERT INTO %s SELECT %s FROM %s",
@@ -670,8 +697,19 @@ func buildCreateColumnDecl(c columnShape) string {
 	parts := []string{c.Name}
 	if isTimestampColumn(c.Name) {
 		parts = append(parts, "INTEGER")
-		// No DEFAULT — bulk-loaded, and a TEXT default would
-		// re-introduce the drift class this rebuild removes.
+		// Restore the canonical BaseTables default for the two
+		// creation-time columns ONLY (INTEGER-typed expression — cannot
+		// reintroduce the TEXT drift this rebuild removes). deleted_at /
+		// last_accessed_at / expires_at have NO canonical default: NULL
+		// means live / never-accessed / never-expires. Defaulting those
+		// would self-soft-delete every future insert (D2 follow-up,
+		// 2026-08-25). Without any default, post-rebuild writers that
+		// omit created_at/updated_at (e.g. seed.insertSeedRow at every
+		// boot) produced NULL timestamps on upgraded databases while
+		// fresh installs got integers — a fresh-vs-upgraded divergence.
+		if c.Name == "created_at" || c.Name == "updated_at" {
+			parts = append(parts, "DEFAULT", `(CAST(strftime('%s','now') AS INTEGER))`)
+		}
 	} else {
 		parts = append(parts, c.DeclType)
 		if c.Default.Valid {

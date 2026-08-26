@@ -26,7 +26,38 @@ var Registry = []Tool{
 		Description: `Persistent memory for facts, learnings, and context the agent needs to carry across sessions.
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},"params":{"type":"object","properties":{"projection":{"type":"boolean","description":"Phase 2B: return summary+pointer+retrieval_metadata instead of full content"}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"fact":             {"type": "string"},
+						"collection":       {"type": "string"},
+						"tags":            {"type": "array", "items": {"type": "string"}},
+						"weight":          {"type": "number"},
+						"ttl":             {"type": "string"},
+						"query":           {"type": "string"},
+						"limit":           {"type": "number"},
+						"scope":           {"type": "string", "enum": ["all","local","shared"]},
+						"projection":       {"type": "boolean"},
+						"memory_id":       {"type": "string"},
+						"memoryId":        {"type": "string"},
+						"delta":           {"type": "number"},
+						"days":            {"type": "number"},
+						"patch":           {"type": "object"},
+						"evidence":         {"type": "string"},
+						"summary":         {"type": "string"},
+						"flavor":          {"type": "string", "enum": ["shipped","insight"]},
+						"_confidence_band": {"type": "string"},
+						"_reasoning_depth": {"type": "string"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmMemory,
 	},
 	{
@@ -34,7 +65,38 @@ Do not use when: the information is ephemeral working context (use mpm_scratchpa
 		Description: `Hypothesis management with explicit validation criteria and resolution.
 Use when: you form a hypothesis about causality ("I think the FTS tokenizer is producing different results on this OS") and can define a concrete test that would confirm or disprove it. Theories are not guesses — they are testable claims with defined success conditions.
 Do not use when: you just want to remember something (mpm_memory); you have a confirmed decision (mpm_decisions).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["propose","resolve"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["propose","resolve"]},
+				"params": {
+					"type": "object",
+					"oneOf": [
+						{
+							"properties": {
+								"hypothesis":        {"type": "string"},
+								"validation_criteria": {"type": "string"},
+								"tags":             {"type": "array", "items": {"type": "string"}},
+								"dependencies":     {"type": "array", "items": {"type": "string"}},
+								"source_ids":       {"type": "array", "items": {"type": "string"}}
+							},
+							"required": ["hypothesis"]
+						},
+						{
+							"properties": {
+								"theoryId":   {"type": "string"},
+								"conclusion": {"type": "string"},
+								"winnerId":  {"type": "string"},
+								"newStatus": {"type": "string", "enum": ["proven","disproven"]}
+							},
+							"required": ["theoryId", "conclusion"]
+						}
+					],
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmTheories,
 	},
 	{
@@ -42,7 +104,26 @@ Do not use when: you just want to remember something (mpm_memory); you have a co
 		Description: `Immutable record of architectural choices and the reasoning behind them.
 Use when: you make a choice between approaches ("we chose SQLite WAL mode over DELETE journal for concurrent access") and want to preserve the rationale so future-you understands why, even when the alternative is no longer fresh in context.
 Do not use when: the choice is trivial or easily reversible; you just want to store a fact (mpm_memory).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["record"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["record","supersede","invalidate"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"choice":    {"type": "string"},
+						"context":   {"type": "string"},
+						"rationale": {"type": "string"},
+						"outcome":   {"type": "string"},
+						"tags":     {"type": "array", "items": {"type": "string"}},
+						"source_ids": {"type": "array", "items": {"type": "string"}}
+					},
+					"required": ["choice"],
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmDecisions,
 	},
 	{
@@ -50,7 +131,24 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 		Description: `Durable lessons from failures, anti-patterns, and hard-won insights.
 Use when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a "warning" or "practice" so it surfaces in future relevant contexts.
 Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","search","list"]},"params":{"type":"object","properties":{"projection":{"type":"boolean","description":"Phase 2D: return summary+pointer+retrieval_metadata instead of full content"}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["save","search","list"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"fact":       {"type": "string"},
+						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
+						"tags":      {"type": "array", "items": {"type": "string"}},
+						"query":     {"type": "string"},
+						"projection": {"type": "boolean"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmLessons,
 	},
 	{
@@ -58,7 +156,25 @@ Do not use when: you are documenting a decision (mpm_decisions) or forming a tes
 		Description: `Topic labels for clustering related memories and organizing knowledge.
 Use when: you want to link multiple memories under a shared theme ("UN-system", "Qatar-Mission", "eCryptfs-boot-order") so future queries can surface the full cluster with a single term.
 Do not use when: you just want to store a single fact (mpm_memory save); you need to track work (mpm_work).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["create","search","link"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["create","search","link"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"name":        {"type": "string"},
+						"description": {"type": "string"},
+						"query":      {"type": "string"},
+						"limit":     {"type": "number"},
+						"memory_id": {"type": "string"},
+						"topic_id":  {"type": "string"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmTopics,
 	},
 	{
@@ -66,7 +182,24 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 		Description: `Ingested external documents: PDFs, specs, whitepapers, books.
 Use when: you read an external document and want to make its contents searchable via the MPM query surface. References are indexed and queryable but not automatically retrieved — you search them explicitly.
 Do not use when: the document is ephemeral or you just want to save a URL to visit later (mpm_memory save).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["add","search","list"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["add","search","list"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"filepath": {"type": "string"},
+						"title":   {"type": "string"},
+						"query":   {"type": "string"},
+						"limit":   {"type": "number"},
+						"offset":  {"type": "number"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmReferences,
 	},
 	{
@@ -74,7 +207,28 @@ Do not use when: the document is ephemeral or you just want to save a URL to vis
 		Description: `Attach observations, test results, or external references as evidence to any artifact.
 Use when: you want to substantiate a memory, theory, or decision with a concrete observation ("tested on 3 machines, same result"), a test output, a reproduction case, or an external source.
 Do not use when: you are storing raw facts without evidentiary context (mpm_memory save). Evidence gives artifacts weight — use it when the truth of something is important enough to require proof.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["add","list"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["add","list"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"artifact_id":         {"type": "string"},
+						"artifact_type":        {"type": "string", "enum": ["memory","theory","decision","lesson","skill","work"]},
+						"type":               {"type": "string"},
+						"source_group":        {"type": "string", "enum": ["filesystem","test","api_response","manual_review","git","ci","external","tool_invocation","api_call","process"],
+							"description": "outcome=filesystem,test,api_response,manual_review; audit=git,ci,external; action=tool_invocation,api_call,process. Unknown values are rejected (F6)."},
+						"strength":           {"type": "number"},
+						"independence_factor": {"type": "number"},
+						"created_by":         {"type": "string"},
+						"notes":              {"type": "string"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmEvidence,
 	},
 	{
@@ -108,14 +262,59 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 		Description: `Agent session state, mode routing, and directive management.
 Use when: you need to understand the current agent mode/persona; you want to trigger a mode or persona switch based on task context; you need to read active behavioral directives governing the current session; you want to query the proactive recall hint for conversation-relevant memories.
 Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},"params":{"type":"object","properties":{"format":{"type":"string","enum":["system-prompt"],"description":"For read_wake_context: return human-readable text instead of JSON"}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"format":              {"type": "string", "enum": ["system-prompt"]},
+						"conversation_text":   {"type": "string"},
+						"max_hints":          {"type": "number"},
+						"min_score":          {"type": "number"},
+						"query":              {"type": "string"},
+						"limit":             {"type": "number"},
+						"fact":              {"type": "string"},
+						"confirm":           {"type": "boolean"},
+						"tags":              {"type": "string"},
+						"weight":            {"type": "number"},
+						"provenance":        {"type": "string"},
+						"memory_id":         {"type": "string"},
+						"prompt":            {"type": "string"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmContext,
 	},
 	{
 		Name: "mpm_skills",
 		Description: `Reusable procedural knowledge stored as markdown with YAML frontmatter.
 Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["save","read","list","delete","promote_to_global"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["save","read","list","delete","promote_to_global"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"name":    {"type": "string"},
+						"version": {"type": "string"},
+						"content": {"type": "string"},
+						"author": {"type": "string"},
+						"force":  {"type": "boolean"},
+						"scope":  {"type": "string", "enum": ["all","local","shared"]},
+						"skill_id": {"type": "string"},
+						"confirm":   {"type": "boolean"}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmSkills,
 	},
 	{
@@ -123,7 +322,35 @@ Use when: you develop a workflow that works well and want to固化 it as a persi
 		Description: `Deferred work triggers scheduled for future execution.
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
 Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["schedule","check","check_pending_event","list","digest","upsert_task","list_tasks","delete_task"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["schedule","check","check_pending_event","list","digest","upsert_task","list_tasks","delete_task"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"reason":         {"type": "string"},
+						"target_time":   {"type": "string"},
+						"theory_id":     {"type": "string"},
+						"recurring_rule": {"type": "string"},
+						"metadata":      {"type": "object"},
+						"kinds":        {"type": "array", "items": {"type": "string"}},
+						"session_id":    {"type": "string"},
+						"include_fired":  {"type": "boolean"},
+						"overdue_only":   {"type": "boolean"},
+						"limit":         {"type": "number"},
+						"top_n":         {"type": "number"},
+						"id":           {"type": "string"},
+						"name":         {"type": "string"},
+						"cron_expr":    {"type": "string"},
+						"directive_id": {"type": "string"},
+						"status":      {"type": "string", "enum": ["active","paused"]}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
 		Handler: handleMpmWakes,
 	},
 
@@ -133,8 +360,8 @@ Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule)
 		Name: "mpm_handoff",
 		Description: `Inter-session communication: write, read, and audit handoff records.
 Use when: you are ending a session and need to leave a summary for the next session to pick up. The handoff record is the bridge between two distinct agent shifts — it carries the session summary, not the work itself.
-Note: intentions must be expressed as Work items (mpm_work create) and open questions as Theories (mpm_theories propose). The handoff carries only a prose summary. Hard schema rejection enforces this boundary — if you try to pass commitments or open_questions here, the call fails with a validation error.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["write","read","list","shred"]},"params":{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"state":{"type":"string","enum":["clean","crashed","interrupted","force_end"]},"note":{"type":"string"},"unread":{"type":"boolean"},"mark_read":{"type":"boolean"},"limit":{"type":"number"},"handoff_id":{"type":"string"},"confirm":{"type":"boolean"}},"additionalProperties":false}},"required":["action"]}`),
+Optional commitments and open_questions are persisted and round-tripped: open_questions surface in the next session's wake context. Keep them short — the handoff is a bridge, not a work log (use mpm_work for tasks, mpm_theories for testable questions).`,
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["write","read","list","shred"]},"params":{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"state":{"type":"string","enum":["clean","crashed","interrupted","force_end"]},"commitments":{"type":"array","items":{"type":"string"}},"open_questions":{"type":"array","items":{"type":"string"}},"note":{"type":"string"},"unread":{"type":"boolean"},"mark_read":{"type":"boolean"},"limit":{"type":"number"},"handoff_id":{"type":"string"},"confirm":{"type":"boolean"}},"additionalProperties":false}},"required":["action"]}`),
 		Handler: handleMpmHandoff,
 	},
 

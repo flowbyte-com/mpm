@@ -377,7 +377,27 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		}, nil
 	}
 
-	// Default: full-content output (Phase 1 behavior, unchanged).
+	// F5: default mode bounds each hit's inline content. The full payload
+	// is always retrievable by id (mpm_blob_read / pointer) or via the
+	// explicit full_content=true opt-out for callers that deliberately
+	// want unbounded output. Truncation is always flagged per item so a
+	// bounded echo can never be mistaken for complete content.
+	fullContent, _ := p["full_content"].(bool)
+	if !fullContent {
+		for _, mem := range items {
+			content, _ := mem["content"].(string)
+			bounded, truncated := internal.BoundInlineContent(content)
+			mem["content"] = bounded
+			id, _ := mem["id"].(string)
+			mem["pointer"] = "mpm://memory/" + id
+			if truncated {
+				mem["content_truncated"] = true
+				mem["content_bytes"] = len(content)
+			}
+		}
+	}
+
+	// Default: bounded-content output (Phase 1 shape, content bounded per F5).
 	return map[string]interface{}{
 		"success":  true,
 		"memories": items,
@@ -547,6 +567,47 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		sourceIDs,
 		ac,
 	)
+}
+
+// handleSupersedeDecision implements the F9 invalidation path: a corrected
+// or superseding decision that is distinguishable from stale knowledge.
+func handleSupersedeDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	originalID, _ := p["original_id"].(string)
+	if originalID == "" {
+		return nil, fmt.Errorf("original_id is required")
+	}
+	choice, _ := p["choice"].(string)
+	if choice == "" {
+		return nil, fmt.Errorf("choice is required (the replacement decision)")
+	}
+	tags := internal.ParseStringSliceOr(p["tags"])
+	if tags == nil {
+		tags = []string{}
+	}
+	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
+	if sourceIDs == nil {
+		sourceIDs = []string{}
+	}
+	return dm.SupersedeDecision(
+		originalID,
+		internal.ParseStringOr(p["context"], ""),
+		choice,
+		internal.ParseStringOr(p["rationale"], ""),
+		internal.ParseStringOr(p["outcome"], ""),
+		tags,
+		sourceIDs,
+		ac,
+	)
+}
+
+// handleInvalidateDecision retires a decision without a replacement.
+func handleInvalidateDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["decision_id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("decision_id is required")
+	}
+	reason, _ := p["reason"].(string)
+	return dm.InvalidateDecision(id, reason)
 }
 
 // ── Memory feedback / mutation tools ─────────────────────────────────────────
@@ -1889,12 +1950,11 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 }
 
 // handleHandoffWrite writes a handoff record for inter-session communication.
-// Intentions must be expressed as Work items; open questions as Theories.
-// The handoff record itself carries only the session summary and state.
-//
-// Option B (hard schema rejection): commitments and open_questions are not
-// accepted. If the agent passes them, the tool schema validation error fires.
-// This trains the agent to use Work and Theories instead.
+// The summary is the bridge; tasks belong in mpm_work and testable
+// questions in mpm_theories. Optional `commitments` / `open_questions`
+// string arrays ARE persisted (F13) so the next session's wake context
+// carries the full continuity picture — accepted fields are never
+// silently dropped.
 func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
@@ -1909,18 +1969,25 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		state = internal.HandoffClean
 	}
 
-	// Option B: do NOT accept commitments/open_questions.
-	// EndSession still accepts them for DB back-compat but they are always empty
-	// from this handler onward. The discipline is enforced by the tool schema.
-	h, err := dm.EndSession(sessionID, summary, state, nil, nil)
+	// F13: commitments/open_questions are PERSISTED, not dropped. The
+	// previous "Option B" silently ignored them on this surface while the
+	// plugins still advertised them — an accepted-then-discarded field,
+	// exactly the data-loss class the audit flags. EndSession already
+	// persists both columns and read-backs the row; the wake context
+	// renders open_questions for the next session.
+	commitments := internal.ParseStringSliceOr(p["commitments"])
+	openQuestions := internal.ParseStringSliceOr(p["open_questions"])
+
+	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":    true,
-		"handoff":    h,
-		"handoff_id": h.ID,
-		"message":    "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
+		"success":        true,
+		"handoff":        h,
+		"handoff_id":     h.ID,
+		"message":        "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
+		"open_questions": h.OpenQuestions,
 	}, nil
 }
 
@@ -3480,6 +3547,20 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	}
 	action, _ := payload["action"].(string)
 
+	// D6 fix (2026-08-25): the registry schema documents BOTH `memory_id`
+	// and `memoryId`, but each id-taking action accepted exactly one
+	// spelling. Canonical wire format is snake_case `memory_id` (see the
+	// wire-format block above handleShredMemory); challenge is the lone
+	// camelCase consumer. Accept both everywhere: alias camelCase onto
+	// snake_case for every action EXCEPT challenge (which aliases the
+	// other way). Existing callers are unaffected; schema-guided callers
+	// can no longer pick a rejected spelling.
+	if action == "challenge" {
+		normalizeCamelCaseKeys(params, map[string]string{"memory_id": "memoryId"})
+	} else {
+		normalizeCamelCaseKeys(params, map[string]string{"memoryId": "memory_id"})
+	}
+
 	switch action {
 	case "save":
 		return handleSaveToMemory(dm, ac, params)
@@ -3642,8 +3723,12 @@ func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pay
 	switch action {
 	case "record":
 		return handleRecordDecision(dm, ac, params)
+	case "supersede":
+		return handleSupersedeDecision(dm, ac, params)
+	case "invalidate":
+		return handleInvalidateDecision(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_decisions. Valid actions include record", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_decisions. Valid actions include record, supersede, invalidate", action)
 	}
 }
 
@@ -3694,8 +3779,17 @@ func handleMpmEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 		return handleAddEvidence(dm, ac, params)
 	case "list":
 		return handleListEvidence(dm, ac, params)
+	case "source_groups":
+		// Discovery surface backing the F6 rejection message: agents can
+		// enumerate the accepted vocabulary instead of guessing.
+		return map[string]interface{}{
+			"success": true,
+			"outcome": mpminternal.EvidenceSourceGroupOfClass(mpminternal.SourceGroupClassOutcome),
+			"audit":   mpminternal.EvidenceSourceGroupOfClass(mpminternal.SourceGroupClassAudit),
+			"action":  mpminternal.EvidenceSourceGroupOfClass(mpminternal.SourceGroupClassAction),
+		}, nil
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_evidence. Valid actions include add, list", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_evidence. Valid actions include add, list, source_groups", action)
 	}
 }
 
@@ -3918,7 +4012,20 @@ func handleMpmBlobRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 	const serverMax = 256 * 1024
 	effectiveMax := int64(maxBytes)
 	if effectiveMax <= 0 {
-		effectiveMax = 50 * 1024 // sensible default
+		// D4 fix (2026-08-25): default page size now cooperates with the
+		// MCP output boundary. The previous 50 KB default exceeded the
+		// boundary (default 10 KB), so every unbounded read of a mid-size
+		// blob self-spilled — the client received a spill envelope
+		// pointing at ANOTHER blob (the read-result itself) instead of
+		// content, with no in-band hint. Reserve ~1 KB for the response
+		// envelope's own keys and JSON escaping headroom; has_more /
+		// next_offset paginate the rest. An explicit max_bytes is honored
+		// up to serverMax (a caller explicitly asking beyond the boundary
+		// accepts the spill envelope as the honest bounded answer).
+		effectiveMax = int64(DefaultOutputThresholdBytes() - 1024)
+		if effectiveMax < 512 {
+			effectiveMax = 512
+		}
 	}
 	if effectiveMax > serverMax {
 		effectiveMax = serverMax

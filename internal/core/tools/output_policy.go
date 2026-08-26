@@ -57,3 +57,20 @@ func (p *defaultOutputPolicy) Apply(ctx context.Context, serialized []byte) (Dec
 	}
 	return DecisionPass, n, nil
 }
+
+// DefaultOutputThresholdBytes exposes the configured MCP output boundary
+// (same env var and fallback as DefaultOutputPolicy) so handlers with their
+// own pagination can choose default page sizes that cooperate with the
+// transport boundary instead of deterministically tripping it.
+// D4 fix (2026-08-25): mpm_blob_read's 50 KB default page exceeded this
+// boundary (default 10240), so every unbounded read of a mid-size blob
+// self-spilled into a recursive pointer envelope. This helper does NOT
+// weaken the boundary — Apply remains the enforcement point.
+func DefaultOutputThresholdBytes() int {
+	p := DefaultOutputPolicy()
+	dp, ok := p.(*defaultOutputPolicy)
+	if !ok {
+		return 10240
+	}
+	return dp.threshold
+}

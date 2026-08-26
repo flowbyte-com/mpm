@@ -35,22 +35,51 @@ func openCallDM() (mpminternal.CoreDB, func(), error) {
 //  3. stdin                pipe or redirect (`echo ... | mpm call ...` or `< file`)
 //
 // If none are present, returns an empty payload (some tools need no input).
+//
+// Error contract (F1): every failure that occurs before or during handler
+// dispatch emits a parseable {"success":false,"error":...} envelope on
+// STDOUT. `mpm call` is a machine interface; agent adapters read stdout
+// only, so an error that writes nothing to stdout manifests downstream as
+// "no parseable JSON" instead of a precise message.
 func handleCall(args []string) int {
 	if len(args) < 1 {
+		writeEnvelope(os.Stdout, map[string]interface{}{
+			"success": false,
+			"error":   "usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)",
+		})
 		printError("usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)")
 		return 1
 	}
 
 	toolName := args[0]
-	tool, ok := tools.ByName(toolName)
-	if !ok {
-		printError("unknown tool: %s. available: %s", toolName, strings.Join(tools.Names(), ", "))
-		return 1
-	}
 
 	payload, err := parsePayload(args[1:])
 	if err != nil {
-		printError("failed to parse payload: %v", err)
+		writeEnvelope(os.Stdout, map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("failed to parse payload: %v", err),
+		})
+		return 1
+	}
+
+	// Legacy tool-name aliasing (F1): the retired `mpm_session` surface is
+	// still registered by agent plugins (opencode-mpm, pi-mpm). Routing it
+	// here keeps those callers working against the split
+	// mpm_handoff/mpm_scratchpad tools instead of failing with empty stdout.
+	resolvedName := toolName
+	if action, target, params, ok := resolveLegacySessionAlias(toolName, payload); ok {
+		resolvedName = target
+		// Rebuild the canonical {action, params} envelope the registry
+		// handlers expect.
+		payload = map[string]interface{}{"action": action, "params": params}
+	}
+
+	tool, ok := tools.ByName(resolvedName)
+	if !ok {
+		writeEnvelope(os.Stdout, map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("unknown tool: %s. available: %s", toolName, strings.Join(tools.Names(), ", ")),
+		})
 		return 1
 	}
 
@@ -109,7 +138,7 @@ func handleCall(args []string) int {
 	// Audit insert is best-effort and panic-isolated; failure here does
 	// NOT affect the call's exit code or downstream error handling. See
 	// audit_hook.go for the isolation guarantees.
-	recordToolInvocation(dm.SQLDB(), ac, tool.Name, payload,
+	recordToolInvocation(dm.SQLDB(), ac, resolvedName, payload,
 		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
 	if err != nil {
 		// Structured error envelope. Both success and error envelopes route
@@ -151,6 +180,56 @@ func handleCall(args []string) int {
 
 	writeEnvelope(os.Stdout, result)
 	return 0
+}
+
+// resolveLegacySessionAlias maps the retired `mpm_session` tool onto its
+// current registry equivalents. The session surface was split into
+// mpm_handoff (cross-session) and mpm_scratchpad (intra-session), but the
+// agent plugins still register `mpm_session` with the old action names —
+// every such call used to die as "no parseable JSON" (F1).
+//
+// Accepts both wire shapes: {action, params:{...}} and legacy top-level
+// {action, ...fields}. Returns (mapped action, target tool, params, ok).
+func resolveLegacySessionAlias(toolName string, payload map[string]interface{}) (string, string, map[string]interface{}, bool) {
+	if toolName != "mpm_session" {
+		return "", "", nil, false
+	}
+	action, _ := payload["action"].(string)
+	params, _ := payload["params"].(map[string]interface{})
+	if params == nil {
+		// Legacy shape: fields at top level alongside action.
+		params = make(map[string]interface{}, len(payload))
+		for k, v := range payload {
+			if k != "action" {
+				params[k] = v
+			}
+		}
+	} else {
+		// Copy so we never mutate a map shared with the caller.
+		cp := make(map[string]interface{}, len(params))
+		for k, v := range params {
+			cp[k] = v
+		}
+		params = cp
+	}
+	switch action {
+	case "end":
+		return "write", "mpm_handoff", params, true
+	case "handoff":
+		return "read", "mpm_handoff", params, true
+	case "list_handoffs":
+		return "list", "mpm_handoff", params, true
+	case "flush":
+		return "flush", "mpm_scratchpad", params, true
+	case "read":
+		return "read", "mpm_scratchpad", params, true
+	case "discard":
+		return "discard", "mpm_scratchpad", params, true
+	case "promote_scratchpad":
+		return "promote", "mpm_scratchpad", params, true
+	default:
+		return "", "", nil, false
+	}
 }
 
 // writeEnvelope serializes v as JSON and writes it as a single line to w,

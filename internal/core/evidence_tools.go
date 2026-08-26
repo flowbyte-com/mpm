@@ -71,9 +71,20 @@ func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}
 
 	// Works don't have a confidence column — verification is handled via
 	// DeriveWorkVerification, not the confidence model. Skip the confidence
-	// read to avoid a "no such column" error on the works table.
+	// read to avoid a "no such column" error on the works table. The
+	// derivation itself already ran inside AddEvidence (F7/F12); read back
+	// the persisted value so the response proves what was stored.
 	if in.ArtifactType == "work" {
-		return map[string]interface{}{"success": true}, nil
+		var verification string
+		if err := dm.QueryRowTracked(
+			`SELECT verification FROM works WHERE id = ?`, in.ArtifactID,
+		).Scan(&verification); err != nil {
+			return nil, fmt.Errorf("read back work verification: %w", err)
+		}
+		return map[string]interface{}{
+			"success":      true,
+			"verification": verification,
+		}, nil
 	}
 
 	var conf float64

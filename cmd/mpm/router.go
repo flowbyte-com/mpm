@@ -19,6 +19,12 @@ type Command struct {
 // CommandRouter routes commands to handlers
 type CommandRouter struct {
 	Commands map[string]*Command
+	// helpRequested records that an ORIGINAL "-h"/"--help" token appeared
+	// anywhere in argv, captured by the caller BEFORE any parseFlags pass
+	// rewrote it to the literal token "help". Set in main.go (which runs
+	// its own parseFlags pass) and honored in Execute. See the D5 comment
+	// at the interception site below.
+	helpRequested bool
 }
 
 // NewRouter creates a new command router
@@ -163,6 +169,11 @@ func (r *CommandRouter) Execute(args []string) int {
 	}
 
 	// Parse global flags first
+	// D5 (Stage 7): the caller (main.go) captures explicit help requests in
+	// r.helpRequested BEFORE its own parseFlags pass rewrites -h/--help into
+	// the literal token "help". Exact-token match on raw argv only — a JSON
+	// payload or quoted content is never exactly "-h"/"--help".
+	helpRequested := r.helpRequested
 	args = r.parseFlags(args)
 
 	if len(args) < 1 {
@@ -191,6 +202,32 @@ func (r *CommandRouter) Execute(args []string) int {
 	if cmd == nil {
 		r.unknownCommand(cmdName)
 		return 1
+	}
+
+	// Centralized help interception (D5 fix, 2026-08-25).
+	//
+	// parseFlags rewrites -h/--help into the literal argument "help", so
+	// before this guard the token fell through as DATA: `mpm prune --help`
+	// performed a real prune, `mpm show --help` looked up memory "help",
+	// `mpm recall --help` searched for the word. A help request must never
+	// mutate state nor fail.
+	//
+	// Two interception layers:
+	//   1. helpRequested — an ORIGINAL -h/--help token anywhere in argv,
+	//      captured before the rewrite above (Stage 7 fix). Position-1-only
+	//      interception left `mpm rm <id> --help` deleting the memory,
+	//      `mpm lesson shred <id> --help` hard-deleting the lesson, and
+	//      `mpm challenge/snooze <id> --help` mutating — handlers ignore
+	//      trailing tokens they don't understand, so the rewritten "help"
+	//      silently became handler data.
+	//   2. A literal "help" as the first post-command argument (the
+	//      rewrite artifact) keeps its help meaning; a literal
+	//      "help" elsewhere remains data (`mpm recall help` searches).
+	if cmdName != "help" && helpRequested {
+		return r.handleCommandHelp(cmdName, cmd)
+	}
+	if len(args) > 1 && args[1] == "help" && cmdName != "help" {
+		return r.handleCommandHelp(cmdName, cmd)
 	}
 
 	// Validate arguments
@@ -259,7 +296,11 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "add":
 		return handleAdd(args)
 	case "remember":
-		return handleRemember(args[1:])
+		// D1 fix: pass FULL args (command name included). handleRemember
+		// delegates to handleAdd, which strips args[0] itself; pre-stripping
+		// here caused a double-strip that silently dropped the first word
+		// of multi-word content and rejected single-word content.
+		return handleRemember(args)
 	case "learn":
 		return handleLearn(args[1:])
 	case "decide":
@@ -528,6 +569,60 @@ func (r *CommandRouter) handleHelp(args []string) int {
 
 func (r *CommandRouter) handleSwitch() int {
 	return handleSwitch([]string{})
+}
+
+// handleCommandHelp serves `mpm <command> --help` (see the interception in
+// Execute). It prints a dedicated help page when one exists — the same page
+// `mpm help <command>` would print — and falls back to registry metadata
+// (usage line + description) otherwise. Always exits 0: asking for help is
+// never an error, and never a mutation.
+func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
+	// 1. Section help (knowledge, work, ops, …).
+	if printSectionHelp(name) {
+		return 0
+	}
+
+	// 2. Dedicated per-command help pages (same dispatch as handleHelp).
+	var helpFunc func() int
+	switch name {
+	case "mode":
+		helpFunc = handleModeHelp
+	case "persona":
+		helpFunc = handlePersonaHelp
+	case "topic":
+		helpFunc = handleTopicHelp
+	case "session":
+		helpFunc = handleSessionHelp
+	case "lesson":
+		helpFunc = handleLessonHelp
+	case "reference":
+		helpFunc = printRefHelp
+	case "memory":
+		helpFunc = handleMemoryHelp
+	case "gateway":
+		helpFunc = printGatewayHelp
+	case "challenge":
+		fmt.Println("Usage: mpm challenge <id> <evidence>")
+		fmt.Println("       mpm challenge restore <id>")
+		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
+		return 0
+	case "ops":
+		printOpsHelp()
+		return 0
+	case "work":
+		printWorkHelp()
+		return 0
+	}
+	if helpFunc != nil {
+		helpFunc()
+		return 0
+	}
+
+	// 3. Generic fallback from registry metadata.
+	fmt.Printf("Usage: mpm %s\n", name)
+	fmt.Printf("  %s\n", cmd.Description)
+	fmt.Println("\nRun 'mpm help' for the full interface or 'mpm help --all' for every command.")
+	return 0
 }
 
 // ============================================================================

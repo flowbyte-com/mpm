@@ -91,6 +91,7 @@ install: build
 	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) || true; \
 	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) || true; \
 	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) || true; \
+	    install -m755 $(BUILD_DIR)/$(TELEMETRY_BINARY) $(PREFIX)/bin/$(TELEMETRY_BINARY) || true; \
 	    echo "    (synced bin/ to $(PREFIX)/bin/)"; \
 	else \
 	    echo "    (bin/ is the canonical location; no copy needed)"; \

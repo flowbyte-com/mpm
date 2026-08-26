@@ -28,9 +28,11 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"strconv"
 	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -194,8 +196,9 @@ func (s *WhyService) explainMemoryLike(id string, report *WhyReport) (*WhyReport
 }
 
 // detectKind probes the memories table for the id across the
-// canonical substrate collections. Returns the first match. Returns
-// (kind, map, nil) on hit; ("", nil, error) on miss.
+// canonical substrate collections, then falls back to first-class
+// non-memory tables (works). Returns the first match.
+// Returns (kind, map, nil) on hit; ("", nil, error) on miss.
 //
 // The collection set mirrors what an operator might plausibly want to
 // introspect (per RFC §'mpm why' the intent is "any artifact in the
@@ -241,7 +244,60 @@ func (s *WhyService) detectKind(id string) (string, map[string]interface{}, erro
 			}
 		}
 	}
-	return "", nil, fmt.Errorf("no artifact found for id %q (probed %d standard collections)", id, len(collections))
+	// F15: works are first-class artifacts with their own table — probe it
+	// so `mpm why <work-id>` resolves instead of reporting "(unknown)".
+	row, werr := s.fetchWork(id)
+	if werr == nil && row != nil {
+		return "work", row, nil
+	}
+	return "", nil, fmt.Errorf("no artifact found for id %q (probed %d standard collections + works)", id, len(collections))
+}
+
+// fetchWork reads a works row by id for `mpm why`. Timestamps are INTEGER
+// Unix-epoch seconds; they are emitted under the same map keys the memory
+// path uses so provenanceFromMap handles both uniformly. Returns nil when
+// not found or on query failure (probe semantics).
+func (s *WhyService) fetchWork(id string) (map[string]interface{}, error) {
+	row := s.dm.QueryRowTracked(`
+		SELECT id, title, content, status, verification, session_id, created_at, updated_at
+		FROM works WHERE id = ? LIMIT 1
+	`, id)
+	var outID, title, status, verification string
+	var content sql.NullString
+	var sessID sql.NullString
+	var createdAt, updatedAt sql.NullInt64
+	if err := row.Scan(&outID, &title, &content, &status, &verification, &sessID, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // id is not a work artifact — expected miss
+		}
+		return nil, fmt.Errorf("work probe scan: %w", err)
+	}
+	out := map[string]interface{}{
+		"id":           outID,
+		"collection":   "works",
+		"title":        title,
+		"status":       status,
+		"verification": verification,
+	}
+	if content.Valid && content.String != "" {
+		out["content"] = content.String
+	} else {
+		// Title is the work's identifying text; use it for the identity
+		// preview rather than rendering an empty artifact.
+		out["content"] = title
+	}
+	if sessID.Valid {
+		out["session_id"] = sessID.String
+	}
+	if createdAt.Valid && createdAt.Int64 > 0 {
+		out["created_at_unix"] = createdAt.Int64
+		out["created_at"] = strconv.FormatInt(createdAt.Int64, 10)
+	}
+	if updatedAt.Valid && updatedAt.Int64 > 0 {
+		out["updated_at_unix"] = updatedAt.Int64
+		out["updated_at"] = strconv.FormatInt(updatedAt.Int64, 10)
+	}
+	return out, nil
 }
 
 // fetchFromCollection reads a single row from the memories table by
@@ -435,30 +491,65 @@ func identityFromMap(m map[string]interface{}, kind string) *WhyIdentity {
 }
 
 // provenanceFromMap extracts the Provenance panel from a raw memory row.
+//
+// F15: timestamp columns hold INTEGER Unix-epoch seconds since the
+// timestamps_unified_v1 migration. The driver surfaces those as int64
+// (scanned here through NullString as decimal strings) — so both the
+// numeric form and legacy text forms are parsed. An unparseable or absent
+// timestamp stays zero and the renderer reports it explicitly instead of
+// printing a misleading "(unknown)" for data that exists.
 func provenanceFromMap(m map[string]interface{}) *WhyProvenance {
 	if m == nil {
 		return nil
 	}
 	out := &WhyProvenance{}
-	if v, ok := m["created_at"].(string); ok {
-		if t, err := parseSQLiteTime(v); err == nil {
-			out.CreatedAt = t
-		}
+	if t, ok := sqliteTimeFromMap(m, "created_at"); ok {
+		out.CreatedAt = t
 	}
-	if v, ok := m["updated_at"].(string); ok {
-		if t, err := parseSQLiteTime(v); err == nil {
-			out.UpdatedAt = t
-		}
+	if t, ok := sqliteTimeFromMap(m, "updated_at"); ok {
+		out.UpdatedAt = t
 	}
-	if v, ok := m["last_accessed_at"].(string); ok && v != "" {
-		if t, err := parseSQLiteTime(v); err == nil {
-			out.LastAccessed = &t
-		}
+	if t, ok := sqliteTimeFromMap(m, "last_accessed_at"); ok && !t.IsZero() {
+		tt := t
+		out.LastAccessed = &tt
 	}
 	if v, ok := m["session_id"].(string); ok {
 		out.SessionID = v
 	}
 	return out
+}
+
+// sqliteTimeFromMap resolves a timestamp field that may be stored as an
+// integer unix-epoch (post-migration), a numeric string, or legacy
+// CURRENT_TIMESTAMP / RFC3339 text.
+func sqliteTimeFromMap(m map[string]interface{}, key string) (time.Time, bool) {
+	switch v := m[key].(type) {
+	case int64:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(v, 0).UTC(), true
+	case float64:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(v), 0).UTC(), true
+	case string:
+		if v == "" {
+			return time.Time{}, false
+		}
+		// Integer-epoch decimal string?
+		if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
+			if sec <= 0 {
+				return time.Time{}, false
+			}
+			return time.Unix(sec, 0).UTC(), true
+		}
+		if t, err := parseSQLiteTime(v); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // stripJSONArrayEnvelope parses a JSON array envelope like

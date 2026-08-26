@@ -531,7 +531,7 @@ func (dm *DatabaseManager) ShredSkill(skillID string) error {
 	}
 	_, err := db.Exec(`
 		UPDATE memories
-		SET deleted_at = strftime('%s','now')
+		SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL
 	`, skillID)
 	if err != nil {
