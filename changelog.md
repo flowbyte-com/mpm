@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-08-26 — HybridSearch Vector-Only Merge Fix
+
+`internal/core/hybrid_search.go` previously discarded every FTS5-absent row in the merge step (`continue` at the old line 186), even when VectorMatch had a high-similarity candidate. The bug surfaced during Test 17-Semantic measurement: paraphrased natural-language queries produced zero FTS5 hits (BM25 implicit-AND with porter unicode61 requires all tokens to match) and the vector signal — though computed — never reached results.
+
+**Fix.** The merge step now preserves vector-only candidates. Each is reported with `Source="vector"`, `VectorSimilarity` populated from `VectorMatch`, and `CombinedScore = VectorSimilarity * VectorWeight`. Display fields (Content, CreatedAt) are populated from the VectorMatch row when FTS5 didn't return the row. Sort order ranks hybrid > fts5 > vector; within each source, FTS5 sorts by ascending BM25 (most negative = best), vector sorts by descending cosine similarity, hybrid sorts by descending combined score.
+
+**Validation.**
+
+- 5 new regression tests in `internal/core/hybrid_search_vector_only_test.go` (vector-only preserved, vector-only at VW=1.0, BM25-strong-still-wins-at-VW0, both-channels-merge as Source=hybrid, threshold filter applies to vector-only).
+- Test 17-Semantic (19 paraphrased queries, real Ollama embeddings): Recall@1 lifted from 0.0% → 94.7% on Hybrid mode; 100% Recall@3 and Recall@5.
+- Existing core test suite (831 tests): no regressions.
+- CLI integration tests: no regressions.
+
 ## 2026-08-26 — F7.1 Challenge-Restoration & F8.1 Cancel-Verification Coupling (P1 Blockers Closed)
 
 The two remaining alpha-blocker forks of "lifecycle state and verification/confidence state were written and read independently". Both fixes make the coupling structural rather than call-site-dependent, so the bugs cannot regress without breaking load-bearing gates.
