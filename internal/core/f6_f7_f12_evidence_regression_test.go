@@ -147,12 +147,28 @@ func TestF12_ReopenEvidenceChangeRecomputeIdempotent(t *testing.T) {
 	addWorkEvidence(t, dm, workID, "api_response", 0.85)
 	assert.Equal(t, string(WorkVerificationVerified), workVerification(t, dm, workID))
 
-	// Reopen → cancel → evidence changes still keep derivation current.
+	// Cancel → evidence changes keep derivation current. F8.1 invariant:
+	// a cancelled work MUST NOT be verified regardless of evidence
+	// pattern. Cancellation locks verification BELOW verified.
 	_, err := dm.CancelWork(workID)
 	require.NoError(t, err)
-	addWorkEvidence(t, dm, workID, "tool_invocation", 0.5) // action-only: cannot verify
+	assert.Equal(t, string(WorkVerificationUnverified), workVerification(t, dm, workID),
+		"cancelled work with prior verified evidence must downgrade to unverified (F8.1)")
+
+	// Reopen → evidence-based derivation applies because status is 'open' again.
+	_, err = dm.ReopenWorkWithContext(workID, ActiveContext{})
+	require.NoError(t, err)
 	assert.Equal(t, string(WorkVerificationVerified), workVerification(t, dm, workID),
-		"action evidence must not DEMOTE an already-verified work below what full evidence supports")
+		"reopened work with outcome evidence must re-derive to verified")
+
+	// Cancel again, then add action evidence. Action evidence on a
+	// cancelled work cannot promote verification above unverified — the
+	// lifecycle gate keeps it locked.
+	_, err = dm.CancelWork(workID)
+	require.NoError(t, err)
+	addWorkEvidence(t, dm, workID, "tool_invocation", 0.5) // action-only
+	assert.Equal(t, string(WorkVerificationUnverified), workVerification(t, dm, workID),
+		"cancelled work must stay unverified under any non-contradictory evidence (F8.1)")
 
 	// Contradiction still wins over everything (lifecycle consistency).
 	addWorkEvidence(t, dm, workID, "external", -0.9)
