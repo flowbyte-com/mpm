@@ -13,6 +13,28 @@
 - Existing core test suite (831 tests): no regressions.
 - CLI integration tests: no regressions.
 
+## 2026-08-26 — HybridSearch Vector-Only Field Population + Scan Safety (Audit Follow-Up)
+
+The 2026-08-26 retrieval correctness audit (full report at `docs/RETRIEVAL_CORRECTNESS_AUDIT_2026-08-26.md`) found two silent-failure modes downstream of the merge fix above. Both were discovered by re-introducing the original `continue` bug and tracing where vector-only rows ended up zeroed.
+
+**1. Vector-only display fields were zeroed.** The merge step preserved vector-only candidates but downstream consumers (`mpm recall --semantic`, `mpm call search_memories`) saw `Weight=0`, `Collection=""`, no `Tags`, no `Metadata`, `CreatedAt=0`, no `IsChallenged`/`IsConceptDrift`/`ChallengedTheoryID`. The FTS5 row is the metadata source for hybrid/fts5-only paths; for vector-only rows that source is absent.
+
+**Fix.** `internal/core/hybrid_search.go` now issues a single batched `SELECT ... FROM memories WHERE id IN (...)` via `loadVectorOnlyMeta` whenever `vecResults` is non-empty. The map is keyed by ID and consulted in the merge step's metadata-extraction branch — same `json.Unmarshal` path, same `concept_drift` / `status=challenged` / `challenged_theory_id` extraction that hybrid and fts5-only rows already used.
+
+**2. NULL JSON-column scan panic silently dropped rows.** The original `loadVectorOnlyMeta` did `var tags, metadata string; rows.Scan(&tags, &metadata, ...)`. When `tags` or `metadata` is SQL `NULL` (the common case for rows inserted without those columns), the CGO driver returns `converting NULL to string is unsupported`. The inner `continue` swallowed the error, the map was never populated, and the merge step fell through to zero-valued fields — exactly the bug above.
+
+**Fix.** The scan now binds `tags` and `metadata` to `sql.NullString` and `weight` to `sql.NullFloat64`. The `Valid` checks convert SQL `NULL` to empty string / `0.0`, and the row lands in the map. Aligns with the 2026-08-17 Substrate Defense Triad pattern for nullable scalars.
+
+**3. Recall rationale string was mislabeled.** `cmd/mpm/recall.go` hardcoded `"hybrid fts5+vec weight=..."` for every result regardless of `Source`. Vector-only results reported themselves as hybrid. Replaced with `rationaleForSource(source, combined, vecSim)` returning `"vector-only similarity=X.XXX"` / `"fts5-only bm25-weighted=X.XX"` / `"hybrid fts5+vec weight=X.XX"`.
+
+**Validation.**
+
+- 2 new regression tests: `TestHybridSearch_VectorOnlyFieldsPopulated` (Weight=7, Collection=memories, Tags, Metadata, CreatedAt, ReinforcementCount=4 all populated) and `TestHybridSearch_VectorOnlyChallengeSignalPopulated` (`IsChallenged=true`, `ChallengedTheoryID="abc123"` extracted from batched metadata).
+- All 7 vector-only + hybrid tests pass with the fix; all 5 of those fail with the original `continue` bug reintroduced (proved the regression net detects the bug).
+- Full core test suite (`internal/core/...`): 11 packages, 0 failures.
+- Full main-module test suite (`./...`): 10 packages, 0 failures.
+- Test 17-Semantic benchmark: 94.7% Recall@1, 100% Recall@3/5 — unchanged.
+
 ## 2026-08-26 — F7.1 Challenge-Restoration & F8.1 Cancel-Verification Coupling (P1 Blockers Closed)
 
 The two remaining alpha-blocker forks of "lifecycle state and verification/confidence state were written and read independently". Both fixes make the coupling structural rather than call-site-dependent, so the bugs cannot regress without breaking load-bearing gates.
