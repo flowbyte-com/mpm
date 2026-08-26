@@ -930,7 +930,7 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 				Source:             r.Source,
 				FTS5Score:          r.FTS5Score,
 				VectorSimilarity:   r.VectorSimilarity,
-				Rationale:          fmt.Sprintf("hybrid fts5+vec weight=%.2f", r.CombinedScore),
+				Rationale:          rationaleForSource(r.Source, r.CombinedScore, r.VectorSimilarity),
 				IsStale:            isMemoryStale(r.CreatedAt, nil, staleDays),
 			})
 		}
@@ -955,6 +955,22 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 		fmt.Printf("%d. [%.2f] [%s] %s\n   %s\n\n", i+1, score, source, createdAt.Format("2006-01-02"), content)
 	}
 	return 0
+}
+
+// rationaleForSource returns a human-readable explanation of why a row was
+// retrieved, scoped to the retrieval channel that produced it. Replaces the
+// pre-fix hardcoded "hybrid fts5+vec" string that was misleading for
+// vector-only results (which are produced by the vector channel when
+// paraphrased queries have zero FTS5 token overlap).
+func rationaleForSource(source string, combinedScore, vectorSim float64) string {
+	switch source {
+	case "vector":
+		return fmt.Sprintf("vector-only similarity=%.3f", vectorSim)
+	case "fts5":
+		return fmt.Sprintf("fts5-only bm25-weighted=%.2f", combinedScore)
+	default: // "hybrid" or unset
+		return fmt.Sprintf("hybrid fts5+vec weight=%.2f", combinedScore)
+	}
 }
 
 // printProvenance prints the "why was this retrieved?" breakdown for a
