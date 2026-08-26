@@ -26,14 +26,16 @@ func TestBuildFTS5Query_TokenizationMatchesIndexer(t *testing.T) {
 		{"three-word hyphenated", "lazy-start-mount", "lazy* start* mount*"},
 		{"underscore compound", "lazy_start", "lazy* start*"},
 		{"dot compound", "foo.bar", "foo* bar*"},
+		{"technical identifier with slash+digits", "HTTP/1.1", "HTTP* 1* 1*"},
+		{"comma separated terms", "alpha, beta", "alpha* beta*"},
+		{"in-word apostrophe kept", "don't panic", "don't* panic*"},
 		{"extra whitespace", "  hello   world  ", "hello* world*"},
 		{"mixed separators", "lazy-start_mix.dot", "lazy* start* mix* dot*"},
 		{"empty", "", ""},
 		{"whitespace only", "   \t\n  ", ""},
-		// Single-quote is harmless to FTS5; we keep it as a token so the
-		// caller can still match a literal apostrophe. The function
-		// strips only FTS5-syntactic specials (^ " ( ) : *).
-		{"only FTS5-syntactic specials", "\"'^()*:", "'*"},
+		// unicode61 keeps in-word apostrophes as token characters; every
+		// other FTS5-syntactic special (^ " ( ) : *) is now a separator.
+		{"only FTS5-syntactic specials", "\"'^()*:", ""},
 		// Substring inside a word is fine; FTS5 prefix-matches via the *.
 		{"prefix wildcard applies", "ecrypt", "ecrypt*"},
 	}
@@ -174,7 +176,7 @@ func TestBuildFTS5Query_SpecialCharactersStripped(t *testing.T) {
 	// Syntactic specials that would cause FTS5 to error or silently
 	// no-op if they reach MATCH as literal characters (the trailing `*`
 	// is the per-token prefix wildcard so it is allowed).
-	syntacticSpecials := "\"'^():"
+	syntacticSpecials := "\"^():"
 	cases := []struct {
 		in   string
 		want string
@@ -185,6 +187,9 @@ func TestBuildFTS5Query_SpecialCharactersStripped(t *testing.T) {
 		{"hello:world", "hello* world*"},
 		{"hello*world", "hello* world*"}, // mid-string * stripped
 		{"^hello^", "hello*"},
+		{"path/segment", "path* segment*"},   // slash separates like unicode61
+		{"v1.2.3-rc4", "v1* 2* 3* rc4*"},     // mixed separators
+		{"don't", "don't*"},                  // in-word apostrophe preserved
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

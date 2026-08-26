@@ -23,16 +23,249 @@
 // Cost: one subprocess per memory_search (~50ms cold). The MCP
 // aggregator path (mcp.servers.mpm) is the long-term fast-path — see
 // README.
+//
+// --------------------------------------------------------------------------
+// WAKE CONTEXT INJECTION (OpenClaw parity with Claude Code SessionStart)
+// --------------------------------------------------------------------------
+//
+// OpenClaw fires `session_start` before the first agent turn in every session
+// (new or resumed). The `agent_turn_prepare` hook runs after prompt prep and
+// receives queued injections from that session. We chain them:
+//
+//   session_start
+//       │
+//       ▼ (async, non-blocking)
+//   fetch wake context via `mpm call mpm_context --format=system-prompt`
+//   store pending promise keyed by sessionKey
+//       │
+//       ▼ (next agent turn)
+//   agent_turn_prepare
+//       │
+//       ├── await the pending promise
+//       │   (may already be resolved if session_start finished fast enough)
+//       │
+//       ▼
+//   prependContext ← wake context injected into agent prompt
+//
+// Heartbeat turns use `heartbeat_prompt_contribution` instead, which fires only
+// for background monitor/lifecycle turns and does not interfere with user turns.
+//
+// session_end does NOT emit work completion. Session ended ≠ work verified.
+// Work completion requires an explicit agent action (mpm call mpm_work --complete).
+//
+// --------------------------------------------------------------------------
+// PROVENANCE
+// --------------------------------------------------------------------------
+//
+// `resolve_exec_env` contributes MPM_PROVENANCE_* env vars to every exec tool
+// call, providing framework attribution for MPM's audit trail:
+//
+//   MPM_PROVENANCE_FRAMEWORK=openclaw
+//   MPM_PROVENANCE_SESSION_KEY=<current sessionKey, if available>
+//
+// OpenClaw does not expose model name or invocation ID in the hook context,
+// so those fields are left unset (never fabricated).
+//
+// --------------------------------------------------------------------------
 
 import { spawn, spawnSync } from "node:child_process";
 import { definePluginEntry } from "@openclaw/plugin-sdk/plugin-entry";
 import { jsonResult } from "@openclaw/plugin-sdk/tool-results";
 
 const MP_MEMORY_PATH_PREFIX = "mpm://memory/";
+const PLUGIN_ID = "openclaw-mpm-memory";
+const MPM_FRAMEWORK_ID = "openclaw";
 
-// OpenClaw plugin tool parameters are plain JSON Schema (see memory-core's
-// MemorySearchSchema for the reference shape). TypeBox-style helpers are not
-// re-exported from @openclaw/plugin-sdk.
+// --------------------------------------------------------------------------
+// Per-session wake context cache
+// --------------------------------------------------------------------------
+// Map<sessionKey, Promise<string>> — keyed by OpenClaw sessionKey.
+// The promise resolves to the formatted wake context string (or "" on failure).
+// agent_turn_prepare awaits it; session_end clears it.
+
+/** @type {Map<string, Promise<string>>} */
+const wakeContextCache = new Map();
+
+function sessionKeyFor(event) {
+  return event?.sessionKey || event?.session?.sessionKey || "default";
+}
+
+// --------------------------------------------------------------------------
+// Subprocess adapter
+// --------------------------------------------------------------------------
+
+function findJsonInOutput(s) {
+  if (!s) return null;
+  // mpm logs to stderr in zap format, prints JSON envelope to stdout on success.
+  // On failure, stdout may be a human-readable error line — find the last line
+  // that parses as a JSON object.
+  const lines = s.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t.startsWith("{") && t.endsWith("}")) return t;
+  }
+  return null;
+}
+
+/**
+ * Call an MPM tool subprocess.
+ * @param {string} tool
+ * @param {object} payload  — mpm call envelope {action, params}
+ * @param {object} opts
+ * @param {string} opts.mpmBin
+ * @param {number} opts.timeoutMs
+ * @returns {Promise<object>}
+ */
+async function callMpmTool(tool, payload, opts) {
+  const bin = opts.mpmBin;
+  const timeoutMs = opts.timeoutMs;
+  return new Promise((resolve) => {
+    let child;
+    try {
+      const envelope =
+        payload && typeof payload === "object" && payload.params && typeof payload.params === "object"
+          ? payload
+          : { ...(payload || {}), params: {} };
+      child = spawn(bin, ["call", tool, "--payload", JSON.stringify(envelope)], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, MPM_LOG_FORMAT: "json" },
+      });
+    } catch (e) {
+      resolve({ success: false, error: `spawn failed: ${e.message}` });
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      resolve({ success: false, error: `mpm ${tool} timed out after ${timeoutMs}ms`, _timedOut: true });
+    }, timeoutMs);
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ success: false, error: `mpm ${tool} failed: ${e.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const jsonLine = findJsonInOutput(stdout);
+      if (jsonLine) {
+        try {
+          const parsed = JSON.parse(jsonLine);
+          resolve(parsed);
+          return;
+        } catch {
+          // fall through to error envelope
+        }
+      }
+      const hint =
+        code === null ? "(no exit — likely signal)" :
+        code !== 0 ? `(exit ${code})` :
+        "";
+      const tail =
+        (stderr || stdout || "").trim().split("\n").slice(-3).join(" | ").slice(0, 500);
+      resolve({
+        success: false,
+        error: `mpm ${tool} ${hint} — ${tail || "no output"}`.trim(),
+      });
+    });
+  });
+}
+
+/**
+ * Fetch MPM wake context formatted for system-prompt injection.
+ * Returns "" on failure so the plugin never blocks an agent turn.
+ *
+ * @param {object} opts
+ * @param {string} opts.mpmBin
+ * @param {number} opts.timeoutMs
+ * @param {string} opts.frameworkId  — provenance framework identifier
+ * @param {string} [opts.sessionKey] — OpenClaw sessionKey for provenance
+ * @returns {Promise<string>}
+ */
+async function fetchWakeContext(opts) {
+  const { mpmBin, timeoutMs, frameworkId, sessionKey } = opts;
+  const env = {
+    ...process.env,
+    MPM_LOG_FORMAT: "json",
+    MPM_PROVENANCE_FRAMEWORK: frameworkId,
+  };
+  if (sessionKey) env.MPM_PROVENANCE_SESSION_KEY = sessionKey;
+
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(mpmBin, [
+        "call", "mpm_context",
+        "--payload", JSON.stringify({
+          action: "read_wake_context",
+          params: { format: "system-prompt" },
+        }),
+      ], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+      });
+    } catch (e) {
+      resolve("");
+      return;
+    }
+    let stdout = "";
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      resolve("");
+    }, timeoutMs);
+    child.stdout.on("data", (d) => (stdout += d));
+    child.on("error", () => { clearTimeout(timer); resolve(""); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      const jsonLine = findJsonInOutput(stdout);
+      if (jsonLine) {
+        try {
+          const parsed = JSON.parse(jsonLine);
+          // MPM returns {success: true, content: "..."} or {success: false, error: "..."}
+          if (parsed && parsed.success && typeof parsed.content === "string") {
+            resolve(parsed.content);
+            return;
+          }
+        } catch { /* fall through */ }
+      }
+      resolve("");
+    });
+  });
+}
+
+// --------------------------------------------------------------------------
+// Result adapter — MPM memories → OpenClaw memory_search hits
+// --------------------------------------------------------------------------
+
+function adaptMemoryHit(memory, idx) {
+  const id = memory.id || `unknown-${idx}`;
+  const content = memory.content || memory.text || memory.snippet || "";
+  const lines = content ? content.split("\n").length : 1;
+  // MPM weights are 0–100 (legacy float scale × 10). Map to 0–1 for score.
+  const score =
+    typeof memory.weight === "number"
+      ? Math.max(0, Math.min(1, memory.weight / 100))
+      : 0.5;
+  return {
+    path: `${MP_MEMORY_PATH_PREFIX}${id}`,
+    startLine: 1,
+    endLine: Math.max(1, lines),
+    score,
+    snippet: content.slice(0, 1200),
+    source: "mpm",
+    collection: memory.collection || "memories",
+    tags: memory.tags || [],
+    weight: memory.weight,
+    reinforcementCount: memory.reinforcement_count,
+    createdAt: memory.created_at,
+    rank: idx + 1,
+  };
+}
+
+// --------------------------------------------------------------------------
+// OpenClaw plugin tool parameter schemas
+// --------------------------------------------------------------------------
 
 const MemorySearchSchema = {
   type: "object",
@@ -88,143 +321,21 @@ const MemoryGetSchema = {
 };
 
 // --------------------------------------------------------------------------
-// Subprocess adapter
-// --------------------------------------------------------------------------
-
-function findJsonInOutput(s) {
-  if (!s) return null;
-  // mpm logs to stderr in zap format, prints JSON envelope to stdout on success.
-  // On failure, stdout may be a human-readable error line — find the last line
-  // that parses as a JSON object.
-  const lines = s.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim();
-    if (t.startsWith("{") && t.endsWith("}")) return t;
-  }
-  return null;
-}
-
-async function callMpmTool(tool, payload, opts) {
-  const bin = opts.mpmBin;
-  const timeoutMs = opts.timeoutMs;
-  return new Promise((resolve) => {
-    let child;
-    try {
-      // 2026-08-13 dispatcher contract: mpm call requires an explicit
-      // {action, params:{}} envelope. `extractParamsOrFail` rejects any
-      // payload missing `params` — so callers passing `{action: "..."}`
-      // (e.g. health_check) must be normalized here, at the subprocess
-      // boundary, before they hit the CLI.
-      const envelope =
-        payload && typeof payload === "object" && payload.params && typeof payload.params === "object"
-          ? payload
-          : { ...(payload || {}), params: {} };
-      child = spawn(bin, ["call", tool, "--payload", JSON.stringify(envelope)], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, MPM_LOG_FORMAT: "json" },
-      });
-    } catch (e) {
-      resolve({ success: false, error: `spawn failed: ${e.message}` });
-      return;
-    }
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch {}
-      resolve({ success: false, error: `mpm ${tool} timed out after ${timeoutMs}ms`, _timedOut: true });
-    }, timeoutMs);
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ success: false, error: `mpm ${tool} failed: ${e.message}` });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const jsonLine = findJsonInOutput(stdout);
-      if (jsonLine) {
-        try {
-          const parsed = JSON.parse(jsonLine);
-          resolve(parsed);
-          return;
-        } catch {
-          // fall through to error envelope
-        }
-      }
-      const hint =
-        code === null ? "(no exit — likely signal)" :
-        code !== 0 ? `(exit ${code})` :
-        "";
-      const tail =
-        (stderr || stdout || "").trim().split("\n").slice(-3).join(" | ").slice(0, 500);
-      resolve({
-        success: false,
-        error: `mpm ${tool} ${hint} — ${tail || "no output"}`.trim(),
-      });
-    });
-  });
-}
-
-function ensureMpmAvailable(bin) {
-  return new Promise((resolve) => {
-    let which;
-    try {
-      which = spawn("which", [bin], { stdio: ["ignore", "pipe", "ignore"] });
-    } catch {
-      resolve(false);
-      return;
-    }
-    let out = "";
-    which.stdout.on("data", (d) => (out += d));
-    which.on("close", (code) => resolve(code === 0 && out.trim().length > 0));
-  });
-}
-
-// --------------------------------------------------------------------------
-// Result adapter — MPM memories → OpenClaw memory_search hits
-// --------------------------------------------------------------------------
-
-function adaptMemoryHit(memory, idx) {
-  const id = memory.id || `unknown-${idx}`;
-  const content = memory.content || memory.text || memory.snippet || "";
-  const lines = content ? content.split("\n").length : 1;
-  // MPM weights are 0–100 (legacy float scale × 10). Map to 0–1 for score.
-  const score =
-    typeof memory.weight === "number"
-      ? Math.max(0, Math.min(1, memory.weight / 100))
-      : 0.5;
-  return {
-    path: `${MP_MEMORY_PATH_PREFIX}${id}`,
-    startLine: 1,
-    endLine: Math.max(1, lines),
-    score,
-    snippet: content.slice(0, 1200),
-    source: "mpm",
-    collection: memory.collection || "memories",
-    tags: memory.tags || [],
-    weight: memory.weight,
-    reinforcementCount: memory.reinforcement_count,
-    createdAt: memory.created_at,
-    rank: idx + 1,
-  };
-}
-
-// --------------------------------------------------------------------------
 // Plugin entry
 // --------------------------------------------------------------------------
 
 export default definePluginEntry({
-  id: "openclaw-mpm-memory",
+  id: PLUGIN_ID,
   name: "MPM Memory",
   description:
-    "Memory slot backed by MPM. Routes memory_search/memory_get through `mpm call mpm_memory` (aggregator tool, action:query). FTS5 lexical + reinforcement-weighted recall. Replaces the default memory-core plugin (semantic vector recall is not provided by MPM in this adapter).",
+    "Memory slot backed by MPM. Routes memory_search/memory_get through `mpm call mpm_memory` (aggregator tool, action:query). Injects MPM wake context at session start via OpenClaw hooks. FTS5 lexical + reinforcement-weighted recall. Replaces the default memory-core plugin (semantic vector recall is not provided by MPM in this adapter).",
   kind: "memory",
   enabledByDefault: false,
 
   register(api) {
     const log = api.logger ?? console;
     const entryConfig =
-      api?.config?.plugins?.entries?.["openclaw-mpm-memory"]?.config ?? {};
+      api?.config?.plugins?.entries?.[PLUGIN_ID]?.config ?? {};
     const mpmBin = typeof entryConfig.mpmBin === "string" ? entryConfig.mpmBin : "mpm";
     const timeoutMs =
       typeof entryConfig.timeoutMs === "number" ? entryConfig.timeoutMs : 5000;
@@ -232,49 +343,32 @@ export default definePluginEntry({
     const limitDefault =
       typeof entryConfig.limitDefault === "number" ? entryConfig.limitDefault : 6;
 
-    // Synchronous PATH probe via spawnSync would block briefly; instead we
-    // register the tools unconditionally and let per-call guard handle
-    // missing-binary cases (returns {disabled:true, error: "ENOENT..."}).
-    // Operators who want boot-time validation can run install.sh first.
     if (typeof log.info === "function") {
-      log.info(`openclaw-mpm-memory: registered (mpmBin=${mpmBin}, scope=${scope}, timeout=${timeoutMs}ms, limit=${limitDefault})`);
+      log.info(
+        `openclaw-mpm-memory: registered ` +
+        `(mpmBin=${mpmBin}, scope=${scope}, timeout=${timeoutMs}ms, limit=${limitDefault})`
+      );
     }
 
-    // Boot-time health check — fail loud at OpenClaw startup rather than
-    // silently returning disabled:true during reasoning turns. We don't
-    // *throw* here (that would crash the gateway boot for a transient
-    // mpm blip); we log loudly with action items, then continue. Operator
-    // sees this on every OpenClaw restart and can act on it.
-    //
-    // Wrapped in an async IIFE so we don't make register() async (the
-    // plugin SDK contract is sync). The check runs to completion in the
-    // background; on a healthy box it finishes in ~50ms, well before the
-    // agent's first memory_search turn.
-    //
-    // Action: ping `mpm call mpm_system` with action:health_check, which
-    // returns SQLite integrity + domain counts. ok:true means the mpm
-    // binary exists, the mcp server is reachable, and the DB is healthy.
+    // ------------------------------------------------------------------
+    // Boot-time health check
+    // ------------------------------------------------------------------
     (async () => {
       try {
         const hc = await callMpmTool("mpm_system", { action: "health_check" }, {
           mpmBin,
-          // Health check should be cheap; cap tightly so a stuck mpm
-          // doesn't block boot for 5s.
           timeoutMs: 2000,
         });
         if (hc && hc.ok === true) {
-          // ----- 2026-08-13 hardening: DB path invariant -----
-          // Catch the silent-orphan-db failure mode by refusing to
-          // boot against an unexpected db_path. Set
-          // MPM_REQUIRED_DB_PATH to a canonical absolute path to
-          // activate the gate; when unset the check is skipped so
-          // ad-hoc dev environments still work.
           const required = process.env.MPM_REQUIRED_DB_PATH;
           if (required && typeof required === "string" && required.length > 0) {
             const live = (hc && typeof hc.db_path === "string") ? hc.db_path : null;
             if (!live) {
               if (typeof log.error === "function") {
-                log.error("openclaw-mpm-memory: refusing to boot — MPM_REQUIRED_DB_PATH is set but health_check did not surface db_path. The mpm server is too old to be gated.");
+                log.error(
+                  "openclaw-mpm-memory: refusing to boot — MPM_REQUIRED_DB_PATH is set " +
+                  "but health_check did not surface db_path. The mpm server is too old to be gated."
+                );
               }
               throw new Error("openclaw-mpm-memory: mpm db_path invariant — health_check missing db_path");
             }
@@ -282,10 +376,8 @@ export default definePluginEntry({
               if (typeof log.error === "function") {
                 log.error(
                   "openclaw-mpm-memory: refusing to boot — DB path invariant violated.\n" +
-                  "  expected: " + required + "\n" +
-                  "  actual:   " + live + "\n" +
-                  "This usually means two mpm installs on the same host, or a stale scratch db.\n" +
-                  "Run `mpm status` to see which workspace is current."
+                  `  expected: ${required}\n  actual:   ${live}\n` +
+                  "This usually means two mpm installs on the same host, or a stale scratch db."
                 );
               }
               throw new Error("openclaw-mpm-memory: db_path invariant violated");
@@ -297,8 +389,9 @@ export default definePluginEntry({
           if (typeof log.info === "function") {
             log.info(
               `openclaw-mpm-memory: health_check ok ` +
-              `(memories=${hc.memories_active ?? "?"} pending_theories=${hc.theories_pending ?? "?"} ` +
-              `wakes_overdue=${hc.wakes_overdue ?? "?"})`,
+              `(memories=${hc.memories_active ?? "?"} ` +
+              `pending_theories=${hc.theories_pending ?? "?"} ` +
+              `wakes_overdue=${hc.wakes_overdue ?? "?"})`
             );
           }
         } else {
@@ -307,8 +400,7 @@ export default definePluginEntry({
             log.warn(
               `openclaw-mpm-memory: health_check failed — ${err}. ` +
               `Recall will return disabled:true until mpm is reachable. ` +
-              `Check that /home/v/.mpm/bin/mpm exists and mcp.servers.mpm ` +
-              `is registered.`,
+              `Check that ${mpmBin} exists and mcp.servers.mpm is registered.`
             );
           }
         }
@@ -319,11 +411,194 @@ export default definePluginEntry({
       }
     })();
 
-    // Cached manager per agent id. The manager is what the gateway uses to
-    // probe embedding readiness for `doctor.memory.status`. Recall itself
-    // happens through the registered tools (memory_search/memory_get), not
-    // through this handle — but the doctor check requires a non-null manager
-    // with `status()` and (optionally) `probeEmbeddingAvailability()`.
+    // ------------------------------------------------------------------
+    // Session extension: per-session wake context cache
+    // ------------------------------------------------------------------
+    // Stored as JSON string in OpenClaw's session extension state.
+    // This is the durable projection; the in-memory Map (wakeContextCache)
+    // is the fast read path for the hook handlers.
+    let sessionExtRegistered = false;
+    function registerSessionExtension() {
+      if (sessionExtRegistered) return;
+      sessionExtRegistered = true;
+      try {
+        api.session?.state?.registerSessionExtension?.({
+          id: `${PLUGIN_ID}:wake-context`,
+          init: () => ({}),
+          onLoad: () => ({}),
+        });
+      } catch (e) {
+        if (typeof log.debug === "function") {
+          log.debug(`openclaw-mpm-memory: session extension registration failed — ${e.message}`);
+        }
+      }
+    }
+    registerSessionExtension();
+
+    // ------------------------------------------------------------------
+    // Hook: session_start
+    //
+    // Fires before the first agent turn in every session (new or resumed).
+    // Non-blocking async fetch: starts the MPM wake context fetch but does
+    // NOT await it here — the promise is stored in wakeContextCache and
+    // awaited by agent_turn_prepare on the next hook call.
+    //
+    // OpenClaw hook type: PluginHookSessionStartEvent
+    // Fields: sessionId, sessionKey?, resumedFrom?
+    // ------------------------------------------------------------------
+    api.on("session_start", (event) => {
+      const sessionKey = event?.sessionKey || "default";
+      // Avoid duplicate fetches for the same sessionKey
+      if (wakeContextCache.has(sessionKey)) return;
+
+      // Start async fetch (non-blocking — don't await here)
+      const promise = fetchWakeContext({
+        mpmBin,
+        timeoutMs,
+        frameworkId: MPM_FRAMEWORK_ID,
+        sessionKey,
+      });
+      wakeContextCache.set(sessionKey, promise);
+
+      if (typeof log.debug === "function") {
+        log.debug(`openclaw-mpm-memory: session_start for ${sessionKey}${event?.resumedFrom ? ` (resumedFrom=${event.resumedFrom})` : ""}`);
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // Hook: session_end
+    //
+    // Fires when a session terminates.
+    //
+    // IMPORTANT: session ended ≠ work completed ≠ work verified.
+    // No mpm work --complete is emitted here. The agent must explicitly
+    // call mpm call mpm_work --action complete to claim work done.
+    //
+    // OpenClaw hook type: PluginHookSessionEndEvent
+    // Fields: sessionId, sessionKey?, reason?, messageCount, durationMs?,
+    //         transcriptArchived?, nextSessionId?, nextSessionKey?
+    // ------------------------------------------------------------------
+    api.on("session_end", (event) => {
+      const sessionKey = event?.sessionKey || "default";
+      wakeContextCache.delete(sessionKey);
+
+      if (typeof log.debug === "function") {
+        log.debug(
+          `openclaw-mpm-memory: session_end for ${sessionKey} ` +
+          `(reason=${event?.reason ?? "?"}, messages=${event?.messageCount ?? "?"})`
+        );
+      }
+      // DO NOT emit work completion here. Session ended ≠ work verified.
+      // The semantic contract is: agent explicitly calls mpm_work --complete
+      // when it decides work is done, not when the session terminates.
+    });
+
+    // ------------------------------------------------------------------
+    // Hook: agent_turn_prepare
+    //
+    // Runs after prompt prep, before the model call, for every agent turn.
+    // Receives queued injections from session_start fetch.
+    //
+    // We await the cached wake context promise and inject it as
+    // prependContext so it appears at the top of the agent prompt.
+    //
+    // OpenClaw hook type: PluginAgentTurnPrepareEvent
+    // Returns: {prependContext?, appendContext?}
+    // ------------------------------------------------------------------
+    api.on("agent_turn_prepare", async (event) => {
+      const sessionKey = event?.sessionKey || "default";
+      const cached = wakeContextCache.get(sessionKey);
+
+      if (!cached) return; // No fetch was started for this session
+
+      // Await even if already resolved (safe for already-resolved promises)
+      let wakeContext = "";
+      try {
+        wakeContext = await Promise.race([
+          cached,
+          new Promise((resolve) => setTimeout(() => resolve(""), timeoutMs)),
+        ]);
+      } catch {
+        // On any error, inject nothing — never block the agent turn
+        return;
+      }
+
+      if (wakeContext && wakeContext.length > 0) {
+        return { prependContext: wakeContext };
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // Hook: heartbeat_prompt_contribution
+    //
+    // Fires only for background monitor / lifecycle heartbeat turns.
+    // Injects a minimal MPM status note — lightweight, non-blocking.
+    // Does NOT inject the full wake context (heartbeats are for monitors,
+    // not for re-establishing session context).
+    //
+    // OpenClaw hook type: PluginHeartbeatPromptContributionEvent
+    // Fields: sessionKey?, agentId?, heartbeatName?
+    // Returns: {prependContext?, appendContext?}
+    // ------------------------------------------------------------------
+    api.on("heartbeat_prompt_contribution", async (event) => {
+      // Fetch a lightweight MPM status for heartbeat context
+      const sessionKey = event?.sessionKey || "default";
+      let statusText = "";
+
+      try {
+        const result = await callMpmTool("mpm_context", {
+          action: "read_wake_context",
+          params: { format: "system-prompt" },
+        }, {
+          mpmBin,
+          timeoutMs: Math.min(timeoutMs, 2000), // tighter budget for heartbeats
+        });
+        // Only take the first 300 chars — heartbeat context must be minimal
+        statusText = (result?.content || "").slice(0, 300);
+      } catch {
+        // Fail silently — heartbeat context is optional
+      }
+
+      if (statusText) {
+        return { prependContext: `[MPM heartbeat] ${statusText}` };
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // Hook: resolve_exec_env
+    //
+    // Contributes MPM_PROVENANCE_* environment variables to every exec
+    // tool call, populating MPM's audit trail with OpenClaw framework
+    // attribution.
+    //
+    // OpenClaw does not expose model name or invocation ID in the hook
+    // context, so those fields are intentionally left unset (never
+    // fabricated).
+    //
+    // OpenClaw hook type: PluginHookResolveExecEnvEvent
+    // Fields: sessionKey?, toolName?, host?
+    // Returns: Record<string, string> — env vars to merge
+    // ------------------------------------------------------------------
+    api.on("resolve_exec_env", (event) => {
+      const env = {
+        MPM_PROVENANCE_FRAMEWORK: MPM_FRAMEWORK_ID,
+      };
+      // OpenClaw sessionKey is the closest equivalent to Claude Code's
+      // CLAUDE_SESSION_ID. Pass it when available.
+      if (event?.sessionKey) {
+        env.MPM_PROVENANCE_SESSION_KEY = event.sessionKey;
+      }
+      // Model name is not available in the OpenClaw hook context.
+      // MPM_PROVENANCE_MODEL is intentionally omitted rather than
+      // fabricated.
+      return env;
+    });
+
+    // ------------------------------------------------------------------
+    // Memory capability: promptBuilder + flushPlanResolver + runtime
+    // ------------------------------------------------------------------
+
+    // Cached manager per agent id for doctor.memory.status
     const managersByAgent = new Map();
     function getOrCreateManager(agentId) {
       let m = managersByAgent.get(agentId);
@@ -342,9 +617,6 @@ export default definePluginEntry({
           };
         },
         async probeEmbeddingAvailability() {
-          // Doctor's default call uses `probe: false`, which short-circuits
-          // to the SKIPPED sentinel and never lands here. If `probe: true`
-          // is ever requested, do a real mpm round-trip via `mpm --version`.
           try {
             const r = spawnSync(mpmBin, ["--version"], {
               stdio: ["ignore", "pipe", "pipe"],
@@ -367,8 +639,6 @@ export default definePluginEntry({
           }
         },
         async search() {
-          // Not used by the doctor. Recall is handled by the registered
-          // memory_search tool, which has the canonical parameter schema.
           return { results: [], total: 0 };
         },
         async close() {},
@@ -377,36 +647,14 @@ export default definePluginEntry({
       return m;
     }
 
-    // Register the memory capability.
-    //
-    // flushPlanResolver returns OpenClaw's compaction-shape instructions
-    // for the memory plugin. The dist contract (verified against
-    // agent-runner.runtime runMemoryFlushIfNeeded, 2026-08-13) consumes:
-    //   - reserveTokensFloor, softThresholdTokens, forceFlushTranscriptBytes
-    //     → token-budget gating
-    //   - relativePath  → workspaceDir-relative target the flush writes to
-    //   - systemPrompt  → joined into the flush-run's system prompt
-    //   - model         → optional override for the flush follow-up run
-    //
-    // Architectural decision (2026-08-13): NEUTER THE EMITTER. We don't
-    // ingest the flush output. MPM has its own native epistemic source —
-    // the agent-curated scratchpad (Working Context) and explicitly-written
-    // memories in SQLite. Capturing OpenClaw's auto-generated transcript
-    // summary would be redundant low-signal noise: lower-fidelity copies
-    // of data we already hold at higher fidelity. The integration boundary
-    // is deleted at the sink, not the source. See decision log for full
-    // rationale; see AGENTS.md "Truth once. Views everywhere." for the
-    // doctrine this implements.
-    //
-    // relativePath is RELATIVE to workspaceDir (OpenClaw passes the
-    // calling agent's workspaceDir at flush time — typically the agent's
-    // session root, which for the main session is /home/v/). The path
-    // is a throwaway — OpenClaw writes a file, we ignore it.
-    // local_flush_trash.md lands under workspaceDir as the discard bin.
-    // mpm-scheduler's openclaw_ingest handler (internal/scheduler/ingest.go)
-    // stays DORMANT — safe and idempotent, never wired to this path.
     api.registerMemoryCapability({
+      // promptBuilder is NOT used for wake context injection — we use
+      // session_start + agent_turn_prepare hooks instead, which gives us
+      // per-session lifecycle control and proper async fetch + inject.
+      // promptBuilder can only return static text; agent_turn_prepare lets
+      // us await the MPM call before the turn starts.
       promptBuilder: () => "",
+
       flushPlanResolver: () => {
         return {
           kind: "compaction_flush",
@@ -441,6 +689,10 @@ export default definePluginEntry({
       publicArtifacts: { async listArtifacts() { return []; } },
     });
 
+    // ------------------------------------------------------------------
+    // Tools: memory_search + memory_get
+    // ------------------------------------------------------------------
+
     const callMpm = (tool, payload) => callMpmTool(tool, payload, { mpmBin, timeoutMs });
 
     api.registerTool(
@@ -456,9 +708,9 @@ export default definePluginEntry({
           const limit = params.maxResults ?? limitDefault;
           const params_ = { query: params.query, limit, scope };
           if (typeof params.minScore === "number") params_.min_score = params.minScore;
-          const payload = { action: "query", params: params_ };
+          const payload_ = { action: "query", params: params_ };
           try {
-            const result = await callMpm("mpm_memory", payload);
+            const result = await callMpm("mpm_memory", payload_);
             if (!result || result.success === false) {
               const err =
                 (result && result.error) ||
@@ -516,16 +768,9 @@ export default definePluginEntry({
             return jsonResult({ error: "empty memory id", notFound: true });
           }
           try {
-            // MPM has no direct id-get; re-query with the id as the search term
-            // and take the top hit. The FTS5 match on id (if present in content)
-            // plus the lexical match on the id string are usually sufficient.
             const result = await callMpm("mpm_memory", {
               action: "query",
-              params: {
-                query: id,
-                limit: 1,
-                scope,
-              },
+              params: { query: id, limit: 1, scope },
             });
             if (!result || result.success === false) {
               return jsonResult({

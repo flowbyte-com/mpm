@@ -100,7 +100,7 @@ func TestInvalidation_DisproveTheoryEnqueuesIntents(t *testing.T) {
 		"if M is shredded, T should be re-evaluated",
 		[]string{memID},
 		[]string{memID}, // source_ids also references M
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
@@ -112,7 +112,7 @@ func TestInvalidation_DisproveTheoryEnqueuesIntents(t *testing.T) {
 		"decision choice",
 		"rationale",
 		"",
-		[]string{"cascade-test"},
+		[]string{"git"},
 		[]string{theoryID}, // source_ids cites the theory
 		ActiveContext{},
 	)
@@ -167,7 +167,7 @@ func TestInvalidation_ProvenTheoryDoesNotEnqueue(t *testing.T) {
 		"validation",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
@@ -175,7 +175,7 @@ func TestInvalidation_ProvenTheoryDoesNotEnqueue(t *testing.T) {
 	// Downstream decision cites T.
 	decResult, err := dm.RecordDecision(
 		"ctx", "choice", "rationale", "",
-		[]string{"cascade-test"},
+		[]string{"git"},
 		[]string{theoryID},
 		ActiveContext{},
 	)
@@ -202,13 +202,13 @@ func TestInvalidation_RepeatedDisproveDoesNotReEnqueue(t *testing.T) {
 	require.NoError(t, err)
 
 	res, err := dm.ProposeTheory(
-		"T", "v", []string{memID}, []string{memID}, []string{"cascade-test"},
+		"T", "v", []string{memID}, []string{memID}, []string{"git"},
 	)
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
 
 	_, err = dm.RecordDecision("ctx", "choice", "rationale", "",
-		[]string{"cascade-test"}, []string{theoryID}, ActiveContext{})
+		[]string{"git"}, []string{theoryID}, ActiveContext{})
 	require.NoError(t, err)
 
 	// First disprove: enqueues one intent.
@@ -264,7 +264,7 @@ func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 		"validation",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	_, _ = res["id"]
@@ -273,7 +273,7 @@ func TestInvalidation_ShredMemoryEnqueuesIntents(t *testing.T) {
 	// JSON edge — a different downstream reasoning artifact than
 	// T, surfaced via a different discovery path).
 	_, err = dm.RecordDecision("ctx", "choice", "rationale", "",
-		[]string{"cascade-test"}, []string{memID}, ActiveContext{})
+		[]string{"git"}, []string{memID}, ActiveContext{})
 	require.NoError(t, err)
 
 	// Sanity: no intents yet.
@@ -325,7 +325,7 @@ func TestInvalidation_ShredMemoryLessonDoesNotEnqueue(t *testing.T) {
 	lesson, err := dm.AddLesson(
 		"cascade-test lesson",
 		LessonTypeInsight,
-		[]string{"cascade-test"},
+		[]string{"git"},
 		"test",
 	)
 	require.NoError(t, err)
@@ -354,7 +354,7 @@ func TestInvalidation_ShredMemoryStandaloneWrapperEnqueues(t *testing.T) {
 		"v",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	_, _ = res["id"]
@@ -391,7 +391,7 @@ func TestInvalidation_HardConfidenceCrossingEnqueues(t *testing.T) {
 		"v",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	_, _ = res["id"]
@@ -416,7 +416,7 @@ func TestInvalidation_HardConfidenceCrossingEnqueues(t *testing.T) {
 			ArtifactID:         memID,
 			ArtifactType:       "memory",
 			Type:               "challenge",
-			SourceGroup:        "cascade-test",
+			SourceGroup:        "git",
 			Strength:           -1.0,
 			IndependenceFactor: 1.0,
 			CreatedBy:          "test",
@@ -461,7 +461,7 @@ func TestInvalidation_OrdinaryConfidenceDecreaseDoesNotEnqueue(t *testing.T) {
 		"v",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 
@@ -471,7 +471,7 @@ func TestInvalidation_OrdinaryConfidenceDecreaseDoesNotEnqueue(t *testing.T) {
 		ArtifactID:         memID,
 		ArtifactType:       "memory",
 		Type:               "observation",
-		SourceGroup:        "cascade-test",
+		SourceGroup:        "git",
 		Strength:           -0.3, // small negative (not strong enough to cross threshold)
 		IndependenceFactor: 1.0,
 		CreatedBy:          "test",
@@ -520,7 +520,7 @@ func TestInvalidation_NoCrossingOnRepeatedRecomputeBelowThreshold(t *testing.T) 
 		"v",
 		[]string{memID},
 		[]string{memID},
-		[]string{"cascade-test"},
+		[]string{"git"},
 	)
 	require.NoError(t, err)
 	_, _ = res["id"]
@@ -532,7 +532,7 @@ func TestInvalidation_NoCrossingOnRepeatedRecomputeBelowThreshold(t *testing.T) 
 			ArtifactID:         memID,
 			ArtifactType:       "memory",
 			Type:               "challenge",
-			SourceGroup:        "cascade-test",
+			SourceGroup:        "git",
 			Strength:           -1.0,
 			IndependenceFactor: 1.0,
 			CreatedBy:          "test",
@@ -568,12 +568,12 @@ func TestInvalidation_OutboxFailureRollsBackRootMutation(t *testing.T) {
 	memID, err := dm.SaveMemory("memories", "M", "", nil, nil, nil, false, 5)
 	require.NoError(t, err)
 	res, err := dm.ProposeTheory(
-		"T", "v", []string{memID}, []string{memID}, []string{"cascade-test"},
+		"T", "v", []string{memID}, []string{memID}, []string{"git"},
 	)
 	require.NoError(t, err)
 	theoryID, _ := res["id"].(string)
 	_, err = dm.RecordDecision("ctx", "choice", "rationale", "",
-		[]string{"cascade-test"}, []string{theoryID}, ActiveContext{})
+		[]string{"git"}, []string{theoryID}, ActiveContext{})
 	require.NoError(t, err)
 
 	// Snapshot pre-state: theory is pending.

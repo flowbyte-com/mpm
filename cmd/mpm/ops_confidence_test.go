@@ -47,7 +47,7 @@ func TestGetConfidenceForArtifact_EndToEnd(t *testing.T) {
 
 	require.NoError(t, mpminternal.AddEvidence(dm, mpminternal.EvidenceInput{
 		ArtifactID: "mem-1", ArtifactType: "memory", Type: "test",
-		SourceGroup: "x", Strength: 0.7, CreatedBy: "tester", CreatedAt: time.Now(),
+		SourceGroup: "test", Strength: 0.7, CreatedBy: "tester", CreatedAt: time.Now(),
 	}))
 
 	snap, err := mpminternal.GetConfidenceForArtifact(dm, "mem-1", "memory", 10)

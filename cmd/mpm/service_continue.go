@@ -131,7 +131,7 @@ func (s *ContinueService) composeWorkingContext(sessionID string, now time.Time)
 // summary. Errors are caught and surfaced as the (none) placeholder —
 // the dashboard always shows every section.
 func (s *ContinueService) composeWakeContext(now time.Time) DashboardSection {
-	wake, err := s.dm.GatherWakeContext()
+	wake, err := s.dm.GatherWakeContextReadOnly() // pure projection — do not consume the handoff (F18)
 	if err != nil {
 		return errorSection("Wake Context", err)
 	}

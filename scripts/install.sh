@@ -313,7 +313,7 @@ phase_build() {
     if ! make build; then
         die "make build failed" 2
     fi
-    for bin in mpm mpm-mcp mpm-scheduler mpm-critic; do
+    for bin in mpm mpm-mcp mpm-scheduler mpm-critic mpm-telemetry; do
         [ -x "$PROJECT_ROOT/bin/$bin" ] || die "build did not produce bin/$bin" 2
     done
     log "build complete"
@@ -343,8 +343,8 @@ phase_binaries() {
     note "BINARIES"
     install -d -m 0755 "$PREFIX/bin"
 
-    # 3 daemon binaries (raw ELF, owned by current user in user mode)
-    for bin in mpm-scheduler mpm-critic mpm-mcp; do
+    # Daemon binaries (raw ELF, owned by current user in user mode)
+    for bin in mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
         install -m 0755 "$PROJECT_ROOT/bin/$bin" "$PREFIX/bin/$bin"
         log "  installed $PREFIX/bin/$bin"
     done
@@ -607,6 +607,7 @@ mode_dry_run() {
     log "  install -m 0755 .../bin/mpm-scheduler -> $PREFIX/bin/mpm-scheduler"
     log "  install -m 0755 .../bin/mpm-critic    -> $PREFIX/bin/mpm-critic"
     log "  install -m 0755 .../bin/mpm-mcp       -> $PREFIX/bin/mpm-mcp"
+    log "  install -m 0755 .../bin/mpm-telemetry -> $PREFIX/bin/mpm-telemetry"
     log "  install -m 0755 .../bin/mpm           -> $PREFIX/bin/mpm.real"
     log "  write wrapper $PREFIX/bin/mpm"
     log "  mkdir -p $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre"

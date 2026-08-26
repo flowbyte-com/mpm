@@ -62,7 +62,14 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 	for i, w := range works {
 		result[i] = workToMapWork(w)
 	}
-	return result, nil
+	// F14: enveloped response. The bare-array shape made error vs success
+	// indistinguishable at the wire and diverged from every sibling list
+	// (mpm_handoff list, lessons search, memory query — all envelopes).
+	return map[string]interface{}{
+		"success": true,
+		"works":   result,
+		"count":   len(result),
+	}, nil
 }
 
 func handleShowWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
@@ -95,7 +102,10 @@ func handleUpdateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
 	note, _ := p["note"].(string)
-	w, err := dm.CompleteWorkWithContext(workID, note, ac)
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for complete")
+	}
+	_, err := dm.CompleteWorkWithContext(workID, note, ac)
 	if err != nil {
 		return nil, err
 	}
@@ -105,14 +115,24 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if _, err := dm.DeriveWorkVerification(workID); err != nil {
 		// Non-fatal: verification stays at its last known value.
 	}
+	// Re-fetch so the response reflects the verification derived by THIS
+	// command rather than the pre-derivation snapshot (D3 fix,
+	// 2026-08-25). Lifecycle mutation and verification derivation remain
+	// orthogonal; only the returned payload changes.
+	w, err := dm.GetWork(workID)
+	if err != nil {
+		return nil, err
+	}
 	return workToMapWork(w), nil
 }
 
 func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
 	note, _ := p["note"].(string)
-	w, err := dm.CancelWorkWithContext(workID, note, ac)
-	if err != nil {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for cancel")
+	}
+	if _, err := dm.CancelWorkWithContext(workID, note, ac); err != nil {
 		return nil, err
 	}
 	// Explicit evidence route for cancellation as well
@@ -120,11 +140,22 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if _, err := dm.DeriveWorkVerification(workID); err != nil {
 		// Non-fatal.
 	}
+	// Re-fetch post-derivation (see handleCompleteWork).
+	w, err := dm.GetWork(workID)
+	if err != nil {
+		return nil, err
+	}
 	return workToMapWork(w), nil
 }
 
 // handleHistoryWork returns the full event history for a work item,
-// ordered by event_index ASC.
+// ordered by event_index ASC, enveloped (F14).
+//
+// F16: each event is enriched with framework/model metadata resolved from
+// the authoritative provenance records. The work's artifact_provenance row
+// is joined via invocation_id — one batched query for the whole history,
+// no per-event lookups. Missing optional metadata stays absent rather than
+// fabricated.
 func handleHistoryWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
 	workID, _ := p["work_id"].(string)
 	if workID == "" {
@@ -136,11 +167,42 @@ func handleHistoryWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfa
 		return nil, fmt.Errorf("get work events: %w", err)
 	}
 
+	// Batch-resolve framework/model per distinct invocation_id from
+	// tool_invocations (the invocation-time record). artifact_provenance
+	// is the artifact-level fallback for the create event.
+	provMeta := dm.ResolveFrameworkModelForInvocations(workID, collectInvocationIDs(events))
+
 	result := make([]map[string]interface{}, len(events))
 	for i, e := range events {
-		result[i] = workEventToMap(e)
+		m := workEventToMap(e)
+		if fm, ok := provMeta[e.InvocationID]; ok {
+			if fm.FrameworkName != "" {
+				m["framework_name"] = fm.FrameworkName
+			}
+			if fm.Model != "" {
+				m["model"] = fm.Model
+			}
+		}
+		result[i] = m
 	}
-	return result, nil
+	return map[string]interface{}{
+		"success": true,
+		"work_id": workID,
+		"events":  result,
+		"count":   len(result),
+	}, nil
+}
+
+func collectInvocationIDs(events []*mpminternal.WorkEvent) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		if e.InvocationID != "" && !seen[e.InvocationID] {
+			seen[e.InvocationID] = true
+			out = append(out, e.InvocationID)
+		}
+	}
+	return out
 }
 
 func handleNoteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {

@@ -1932,6 +1932,15 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	} else {
 		// FTS5 tables ready — backfill any existing data that predates the triggers
 		dm.backfillFTSTables()
+		// F2 repair: lessons_fts can be rowid/content-desynced from
+		// lessons_base on databases that predate the view+INSTEAD OF
+		// trigger migration. A desync makes lesson search confidently
+		// return WRONG lessons (indexed text JOINed to the wrong base
+		// row). Verify + rebuild once, gated by a schema_migrations
+		// sentinel so steady-state boot cost is one indexed lookup.
+		if err := dm.EnsureLessonsFTSInSync(); err != nil {
+			slog.Warn("lessons_fts sync verification failed; search may fall back to LIKE", "error", err.Error())
+		}
 	}
 
 	// NOTE: The `evidence` table intentionally lacks AFTER INSERT/UPDATE/DELETE
@@ -2054,18 +2063,30 @@ func (dm *DatabaseManager) dropFTS5Triggers() {
 // roll back, leaving orphaned lessons_fts entries on failed save_lesson calls.
 // Idempotent — safe to call on every startup.
 func (dm *DatabaseManager) migrateLessonsToView() {
+	// Probe object types up front so recovery can distinguish the three
+	// historical states:
+	//   A. lessons table, no lessons_base      → fresh legacy install
+	//   B. lessons_base + lessons VIEW          → migration already done
+	//   B'.lessons_base + lessons view, triggers missing → interrupted after
+	//      Step 3 of an older non-atomic run (lesson writes fail with
+	//      "cannot modify lessons because it is a view" until repaired)
+	//   C. lessons_base + lessons TABLE         → interrupted between rename
+	//      and view creation; a later boot's BaseTables re-created an empty
+	//      `lessons` table, orphaning the operator's data in lessons_base
+	//
+	// States C/B' were reachable because this migration historically ran as
+	// independent auto-commit statements — a crash mid-sequence left a
+	// permanently wedged lesson surface. The whole sequence now runs inside
+	// one transaction (SQLite DDL is transactional), and the recovery path
+	// below repairs databases already sitting in C or B'.
 	var baseExists int
 	if err := dm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists); err != nil {
 		slog.Warn("migrateLessonsToView: probe lessons_base, treating as absent", "error", err)
 	}
 
-	// If lessons_base exists, the rename already happened. Still need to drop any
-	// leftover AFTER triggers on lessons_base (from a prior partial migration) so
-	// they don't fire alongside the INSTEAD OF triggers and cause duplicate FTS inserts.
+	// If lessons_base exists, the rename already happened.
 	if baseExists != 0 {
-		for _, old := range []string{"lessons_ai", "lessons_ad", "lessons_au"} {
-			dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old))
-		}
+		dm.finishOrRepairLessonsView()
 		return
 	}
 
@@ -2084,12 +2105,66 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		dm.db.Exec(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def))
 	}
 
+	// Steps 2–5 run inside ONE transaction. SQLite DDL is transactional,
+	// so any crash mid-sequence rolls back to the pre-migration state and
+	// the next boot retries cleanly. (The historical auto-commit sequence
+	// here is what produced the permanently-wedged interrupted states that
+	// finishOrRepairLessonsView now also heals.)
+	tx, err := dm.db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: begin tx failed: %v\n", err)
+		return
+	}
+	defer tx.Rollback()
+
 	// Step 2: rename lessons → lessons_base
-	if _, err := dm.db.Exec(`ALTER TABLE lessons RENAME TO lessons_base`); err != nil {
+	if _, err := tx.Exec(`ALTER TABLE lessons RENAME TO lessons_base`); err != nil {
 		fmt.Fprintf(os.Stderr, "migrateLessonsToView: rename lessons→lessons_base failed: %v\n", err)
 		return
 	}
 
+	// Step 2.5: ensure lessons_fts exists BEFORE creating the INSTEAD OF
+	// triggers below (D2 fix, 2026-08-25).
+	//
+	// The trigger bodies reference lessons_fts. Historically lessons_fts was
+	// only created later by initFTSTables — which runs AFTER
+	// RebuildMemoriesColumnAffinity in initUnifiedSchema's boot sequence.
+	// SQLite tolerates triggers referencing missing tables at CREATE time,
+	// but any later ALTER TABLE ... RENAME forces a full schema re-parse and
+	// fails hard with "error in trigger lessons_instead_of_insert: no such
+	// table: main.lessons_fts". On a legacy database (the exact population
+	// the affinity rebuild exists to migrate) this wedged every subsequent
+	// invocation behind "failed to initialize schema".
+	//
+	// Same DDL as initFTSTables so the later statement is a pure no-op.
+	// Best-effort: on builds without FTS5 the CREATE fails and we proceed —
+	// initFTSTables owns the LIKE-fallback degradation path.
+	if _, err := tx.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`); err != nil {
+		slog.Warn("migrateLessonsToView: early lessons_fts creation failed (non-FTS5 build?)", "error", err.Error())
+	}
+
+	if err := createLessonsViewAndTriggers(tx); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: %v\n", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "migrateLessonsToView: commit failed: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "migrateLessonsToView: lessons→lessons_base+migrated\n")
+}
+
+// execQuerier is satisfied by both *sql.DB and *sql.Tx; the trigger DDL is
+// shared between the fresh-migration tx and the repair path below.
+type execQuerier interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// createLessonsViewAndTriggers emits the lessons view + the three INSTEAD OF
+// triggers. Called from migrateLessonsToView's tx and from the repair path.
+func createLessonsViewAndTriggers(q execQuerier) error {
 	// Step 2: create lessons view that exposes all columns
 	viewSQL := `
 	CREATE VIEW IF NOT EXISTS lessons AS
@@ -2097,13 +2172,12 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 	       source_session_id, created, content_hash,
 	       retrieval_priority, importance, confidence
 	FROM lessons_base`
-	if _, err := dm.db.Exec(viewSQL); err != nil {
-		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create lessons view failed: %v\n", err)
-		return
+	if _, err := q.Exec(viewSQL); err != nil {
+		return fmt.Errorf("create lessons view failed: %w", err)
 	}
 
 	// Step 3: INSTEAD OF INSERT — atomically writes to base table + lessons_fts
-	// The trigger body is a single transaction; if lessons_fts insert fails, the
+	// The trigger body is a single statement-pair; if lessons_fts insert fails, the
 	// entire INSERT is rolled back — no orphan possible.
 	//
 	// COALESCE on retrieval_priority/importance/confidence: the lessons_base
@@ -2112,7 +2186,7 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 	// COALESCE, an INSERT that doesn't supply every column fails with a
 	// NOT NULL constraint violation. COALESCE matches the table default so
 	// partial inserts work the same as full inserts.
-	if _, err := dm.db.Exec(`
+	if _, err := q.Exec(`
 		CREATE TRIGGER lessons_instead_of_insert
 		INSTEAD OF INSERT ON lessons
 		BEGIN
@@ -2128,13 +2202,13 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 			INSERT INTO lessons_fts(rowid, content, tags)
 			VALUES (NEW.rowid, NEW.content, NEW.tags);
 		END`); err != nil {
-		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF INSERT trigger failed: %v\n", err)
+		return fmt.Errorf("create INSTEAD OF INSERT trigger failed: %w", err)
 	}
 
 	// Step 4: INSTEAD OF UPDATE — same COALESCE treatment so partial
 	// UPDATEs that don't touch retrieval_priority/importance/confidence
 	// don't accidentally NULL those columns out and violate NOT NULL.
-	if _, err := dm.db.Exec(`
+	if _, err := q.Exec(`
 		CREATE TRIGGER lessons_instead_of_update
 		INSTEAD OF UPDATE ON lessons
 		BEGIN
@@ -2151,21 +2225,139 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 			INSERT INTO lessons_fts(rowid, content, tags)
 			VALUES (NEW.rowid, NEW.content, NEW.tags);
 		END`); err != nil {
-		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF UPDATE trigger failed: %v\n", err)
+		return fmt.Errorf("create INSTEAD OF UPDATE trigger failed: %w", err)
 	}
 
 	// Step 5: INSTEAD OF DELETE
-	if _, err := dm.db.Exec(`
+	if _, err := q.Exec(`
 		CREATE TRIGGER lessons_instead_of_delete
 		INSTEAD OF DELETE ON lessons
 		BEGIN
 			DELETE FROM lessons_base WHERE rowid=OLD.rowid;
 			DELETE FROM lessons_fts WHERE rowid=OLD.rowid;
 		END`); err != nil {
-		fmt.Fprintf(os.Stderr, "migrateLessonsToView: create INSTEAD OF DELETE trigger failed: %v\n", err)
+		return fmt.Errorf("create INSTEAD OF DELETE trigger failed: %w", err)
+	}
+	return nil
+}
+
+// finishOrRepairLessonsView completes or heals a database whose
+// lessons→lessons_base rename already happened:
+//
+//   - healthy state (lessons is a view + all three triggers): drop any leftover
+//     legacy AFTER triggers and return.
+//   - interrupted state B' (view exists, INSTEAD OF triggers missing — reachable
+//     via a crash in a pre-transactional boot between CREATE VIEW and CREATE
+//     TRIGGER): lesson writes fail with "cannot modify lessons because it is a
+//     view" until the triggers are re-created. Create the missing ones.
+//   - interrupted state C (lessons is a plain TABLE again because a later
+//     boot's BaseTables re-created it after a crash between rename and view
+//     creation): salvage any rows that landed in the recreated table into
+//     lessons_base, drop the shadow table, and build the real view + triggers.
+func (dm *DatabaseManager) finishOrRepairLessonsView() {
+	for _, old := range []string{"lessons_ai", "lessons_ad", "lessons_au"} {
+		dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old))
 	}
 
-	fmt.Fprintf(os.Stderr, "migrateLessonsToView: lessons→lessons_base+migrated\n")
+	// What object is `lessons` today?
+	var objType string
+	err := dm.db.QueryRow(`SELECT type FROM sqlite_master WHERE name='lessons'`).Scan(&objType)
+	if err != nil {
+		// View/table entirely absent (crash after rename, before anything else
+		// ran AND before BaseTables re-created the table): just finish the job.
+		if ferr := dm.ensureLessonsFTS(); ferr != nil {
+			slog.Warn("migrateLessonsToView: repair lessons_fts creation failed", "error", ferr.Error())
+		}
+		tx, terr := dm.db.Begin()
+		if terr != nil {
+			fmt.Fprintf(os.Stderr, "migrateLessonsToView: repair begin failed: %v\n", terr)
+			return
+		}
+		defer tx.Rollback()
+		if cerr := createLessonsViewAndTriggers(tx); cerr != nil {
+			fmt.Fprintf(os.Stderr, "migrateLessonsToView: repair (missing view) failed: %v\n", cerr)
+			return
+		}
+		if cerr := tx.Commit(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "migrateLessonsToView: repair commit failed: %v\n", cerr)
+			return
+		}
+		slog.Warn("migrateLessonsToView: repaired interrupted migration (lessons view was missing)")
+		return
+	}
+
+	switch objType {
+	case "view":
+		// Healthy or B'. Ensure all three INSTEAD OF triggers exist.
+		var missing int
+		if scanErr := dm.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN
+			('lessons_instead_of_insert','lessons_instead_of_update','lessons_instead_of_delete')`).Scan(&missing); scanErr != nil {
+			// Probe failed — force the repair path rather than trusting an
+			// unknown trigger state.
+			slog.Warn("migrateLessonsToView: trigger-count probe failed; forcing repair", "error", scanErr.Error())
+			missing = -1
+		}
+		if missing == 3 {
+			return // healthy — nothing to do
+		}
+		if err := dm.ensureLessonsFTS(); err != nil {
+			slog.Warn("migrateLessonsToView: repair lessons_fts creation failed", "error", err.Error())
+		}
+		for _, trig := range []string{"lessons_instead_of_insert", "lessons_instead_of_update", "lessons_instead_of_delete"} {
+			dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, trig))
+		}
+		if err := createLessonsViewAndTriggers(dm.db); err != nil {
+			fmt.Fprintf(os.Stderr, "migrateLessonsToView: trigger repair failed: %v\n", err)
+			return
+		}
+		slog.Warn("migrateLessonsToView: repaired interrupted migration (INSTEAD OF triggers were missing)")
+	case "table":
+		// Interrupted state C: BaseTables re-created an empty (or partially
+		// written) lessons TABLE after the real data was renamed to
+		// lessons_base. Salvage rows, drop the shadow table, rebuild the
+		// view — one atomic WithTx (canonical transaction shape).
+		salvageErr := dm.WithTx(func(node DBNode) error {
+			// The shadow table may pre-date the retrieval-metadata columns;
+			// map explicitly and let lessons_base defaults cover the rest.
+			if _, err := node.Tx().Exec(`
+				INSERT OR IGNORE INTO lessons_base
+					(id, type, content, tags, reinforcement_count, source_session_id, created, content_hash)
+				SELECT id, type, content, tags,
+				       COALESCE(reinforcement_count, 1), source_session_id, created, content_hash
+				FROM lessons`); err != nil {
+				return fmt.Errorf("salvage copy: %w", err)
+			}
+			if _, err := node.Tx().Exec(`DELETE FROM lessons`); err != nil {
+				return fmt.Errorf("salvage clear: %w", err)
+			}
+			if _, err := node.Tx().Exec(`DROP TABLE lessons`); err != nil {
+				return fmt.Errorf("salvage drop: %w", err)
+			}
+			if err := dm.ensureLessonsFTS(); err != nil {
+				slog.Warn("migrateLessonsToView: repair lessons_fts creation failed", "error", err.Error())
+			}
+			if err := createLessonsViewAndTriggers(node.Tx()); err != nil {
+				return fmt.Errorf("salvage rebuild: %w", err)
+			}
+			return nil
+		})
+		if salvageErr != nil {
+			fmt.Fprintf(os.Stderr, "migrateLessonsToView: salvage failed: %v\n", salvageErr)
+			return
+		}
+		slog.Warn("migrateLessonsToView: repaired interrupted migration (shadow lessons table removed)")
+	default:
+		slog.Warn("migrateLessonsToView: unexpected lessons object type", "type", objType)
+	}
+}
+
+// ensureLessonsFTS creates lessons_fts if absent. Same DDL as initFTSTables;
+// best-effort so non-FTS5 builds degrade to initFTSTables' LIKE fallback.
+func (dm *DatabaseManager) ensureLessonsFTS() error {
+	if _, err := dm.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (dm *DatabaseManager) initFTSTables() error {
@@ -2295,8 +2487,29 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts' AND sql LIKE '%tags UNINDEXED%'`,
 	).Scan(&ftsNeedsMigration); err != nil {
 		slog.Warn("mpm: FTS5 schema probe failed, skipping migration detection", "error", err.Error())
+		ftsNeedsMigration = false
 	} else if ftsNeedsMigration {
 		slog.Info("mpm: FTS5 migration detected (memories_fts with tags UNINDEXED); rebuilding with tags indexed")
+	} else {
+		// Shape-mismatch detection (Stage 7): a memories_fts whose declared
+		// columns don't include `collection` cannot accept the new-style sync
+		// triggers' INSERT(rowid, content, collection, session_id, tags).
+		// Every INSERT would fail at trigger time — on boot-critical paths
+		// that wedges the database ("table memories_fts has no column named
+		// collection"). Drop and recreate with the canonical shape so the
+		// generic backfill below reindexes existing content.
+		var shapeMismatch int
+		if err := dm.db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'
+			 AND (sql NOT LIKE '%collection%' OR sql IS NULL)`,
+		).Scan(&shapeMismatch); err != nil {
+			slog.Warn("mpm: FTS5 shape probe failed, skipping mismatch detection", "error", err.Error())
+		} else if shapeMismatch > 0 {
+			slog.Info("mpm: FTS5 shape mismatch detected (memories_fts without collection column); rebuilding")
+			ftsNeedsMigration = true
+		}
+	}
+	if ftsNeedsMigration {
 		// Drop the old FTS table. Triggers reference it and will
 		// re-fire on subsequent writes; backfill below catches
 		// existing rows.
@@ -2311,9 +2524,13 @@ func (dm *DatabaseManager) initFTSTables() error {
 			} else {
 				// Backfill: insert every non-deleted memory into the new FTS table.
 				// Triggers already cover new writes; this catches existing rows.
+				// rowid (not id): memories_fts is standalone FTS5 keyed by the
+				// memories table's rowid so the sync triggers' DELETE-by-rowid
+				// works. The previous `SELECT id` put a TEXT hex id into rowid,
+				// which coerced to 0 and aborted the statement on the second row.
 				if _, err := dm.db.Exec(
 					`INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
-					 SELECT id, content, collection, session_id, tags FROM memories WHERE deleted_at IS NULL`,
+					 SELECT rowid, content, collection, session_id, tags FROM memories WHERE deleted_at IS NULL`,
 				); err != nil {
 					slog.Warn("mpm: FTS5 migration backfill failed", "error", err.Error())
 				} else {
@@ -2620,9 +2837,27 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	contentHashBytes := sha256.Sum256([]byte(content))
 	contentHash := hex.EncodeToString(contentHashBytes[:])
 
-	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash)
+	// F19 idempotency: an identical live save (same collection + content +
+	// tags + stable metadata) returns the EXISTING row's id instead of
+	// writing a second indistinguishable one. Same content under different
+	// provenance/metadata remains a legitimately distinct artifact — that
+	// distinction is load-bearing for the contradiction workflows.
+	wantIdentity := MemoryIdentityHash(contentHash, tags, metadata)
+	if dupID := findLiveDuplicateNode(node, collection, contentHash, wantIdentity); dupID != "" {
+		return dupID, nil
+	}
+
+	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity)
 	if err != nil {
+		if isIdentityConstraintViolation(err) {
+			// A concurrent writer inserted the same identity between our
+			// probe and this INSERT; the partial unique index serialized
+			// us. Return the winner's id — deterministic idempotency.
+			if dupID := findLiveDuplicateNode(node, collection, contentHash, wantIdentity); dupID != "" {
+				return dupID, nil
+			}
+		}
 		return id, err
 	}
 
@@ -3827,7 +4062,8 @@ func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {
 	var lesson Lesson
 	var tagsJSON string
 	err := dm.db.QueryRow(`
-		SELECT id, type, content, tags, reinforcement_count, source_session_id, created
+		SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
+		       source_session_id, created
 		FROM lessons WHERE id = ?
 	`, id).Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
 	if err != nil {
@@ -3841,7 +4077,11 @@ func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {
 
 // ListLessons returns all lessons, optionally filtered by type
 func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
-	query := `SELECT id, type, content, tags, reinforcement_count, source_session_id, created FROM lessons`
+	// COALESCE at the SQL boundary: legacy lessons rows commonly carry
+	// NULL tags / source_session_id; scanning a database NULL into string
+	// aborts the whole listing (Stage 8 RC audit, same class as F3).
+	query := `SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
+	          source_session_id, created FROM lessons`
 	var args []interface{}
 	if lessonType != "" {
 		query += ` WHERE type = ?`
@@ -3886,6 +4126,12 @@ func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
 // FTS5 virtual table, not a column of the `lessons` view, so the match raised
 // "no such column" and the call fell through to the LIKE fallback. The FTS5
 // path was effectively dead code on production until 2026-07-23.
+//
+// Ranking: bm25(lessons_fts) first (lower = better FTS5 relevance), so an
+// exact content-term match materially outranks a weaker/partial match
+// instead of being buried under high-reinforcement unrelated rows. The old
+// reinforcement-first ordering could put a loosely related lesson ahead of
+// the exact one; reinforcement and age now act only as tiebreakers.
 func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, error) {
 	if limit <= 0 {
 		limit = 20
@@ -3899,11 +4145,12 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 	}
 
 	rows, err := dm.db.Query(`
-		SELECT l.id, l.type, l.content, l.tags, l.reinforcement_count, l.source_session_id, l.created
-		FROM lessons l
-		JOIN lessons_fts fts ON l.rowid = fts.rowid
+		SELECT l.id, l.type, l.content, COALESCE(l.tags,'[]'), l.reinforcement_count,
+		       COALESCE(l.source_session_id,''), l.created
+		FROM lessons_fts fts
+		JOIN lessons l ON l.rowid = fts.rowid
 		WHERE lessons_fts MATCH ?
-		ORDER BY l.reinforcement_count DESC, l.created DESC
+		ORDER BY bm25(lessons_fts), l.reinforcement_count DESC, l.created DESC
 		LIMIT ?
 	`, ftsQuery, limit)
 	if err != nil {
@@ -3937,7 +4184,8 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson, error) {
 	q := "%" + strings.ToLower(query) + "%"
 	rows, err := dm.db.Query(`
-		SELECT id, type, content, tags, reinforcement_count, source_session_id, created
+		SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
+		       source_session_id, created
 		FROM lessons
 		WHERE LOWER(content) LIKE ? OR LOWER(tags) LIKE ?
 		ORDER BY reinforcement_count DESC
@@ -4111,13 +4359,22 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 
 // ChallengeMemory applies provenance-based contradiction resolution:
 // slashes the loser's weight and sets challenged status in the DB.
-// The slashAmount is the weight reduction (positive integer).
+// The slashAmount is the weight reduction (positive integer; a negative
+// value is rejected rather than silently inverted into a weight boost).
+//
+// The memory's pre-challenge weight is recorded in metadata as
+// `challenged_prior_weight` so `mpm challenge restore` can return the
+// memory to its exact prior epistemic standing once the challenge
+// theory is disproven, instead of leaving the weakened value behind.
 //
 // All four operations (pre-check, metadata patch with FTS sync, weight update,
 // async log) are wrapped in a single transaction. A concurrent ReinforceMemory
 // cannot interleave between the metadata patch and the weight decrement, so
 // the challenged memory is always observed in a consistent state.
 func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evidence string) error {
+	if slashAmount < 0 {
+		return fmt.Errorf("ChallengeMemory: slashAmount must be >= 0 (got %d); a negative reduction would silently increase the disputed memory's weight", slashAmount)
+	}
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return fmt.Errorf("ChallengeMemory: begin: %w", err)
@@ -4144,6 +4401,19 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
 		return err
 	}
+
+	// Record the pre-challenge weight AFTER the status patch so restore sees
+	// both atomically. Read through the same tx for a consistent snapshot.
+	var priorWeight int
+	if err := tx.QueryRow(`SELECT COALESCE(weight, 1) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight); err != nil {
+		return fmt.Errorf("ChallengeMemory: read prior weight: %w", err)
+	}
+	priorPatch := map[string]interface{}{"challenged_prior_weight": priorWeight}
+	priorJSON, _ := json.Marshal(priorPatch)
+	if err := updateMemoryMetadataTx(tx, memoryID, string(priorJSON)); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
 		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
 	}
@@ -4286,6 +4556,194 @@ func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 		w.SessionID = sessionID.String
 	}
 	return &w, nil
+}
+
+// MemoryIdentityHash computes the F19 duplicate-identity key over the
+// semantically meaningful fields of a memory: the SHA-256 content hash,
+// tags, and STABLE metadata. Collection equality is enforced by the SQL
+// prefilter. Volatile write-path instrumentation is excluded from the
+// hash (_epistemic_snapshot observation telemetry, weight_intent,
+// created/timestamp/source/tags save-layer stamps) so an identical
+// re-save still matches; but
+// meaningful metadata like provenance participates — two saves that
+// differ in provenance (human vs model) are legitimately distinct
+// artifacts, which is the contract the contradiction-collision workflows
+// rely on.
+func MemoryIdentityHash(contentHashHex string, tags []string, metadata map[string]interface{}) string {
+	metaCopy := make(map[string]interface{}, len(metadata))
+	for k, v := range metadata {
+		switch k {
+		case "_epistemic_snapshot", "weight_intent",
+			// Volatile write-path stamps added by the save layer itself:
+			// they differ between two calls of the SAME logical save.
+			"created", "timestamp", "source",
+			// Tag mirror of the tags column (already hashed directly).
+			"tags":
+			continue
+		}
+		metaCopy[k] = v
+	}
+	tj, _ := json.Marshal(tags)
+	mj, _ := json.Marshal(metaCopy)
+	h := sha256.Sum256([]byte(contentHashHex + "\x00" + string(tj) + "\x00" + string(mj)))
+	return hex.EncodeToString(h[:])
+}
+
+// isIdentityConstraintViolation reports whether err is the F19 partial
+// unique-index rejection (a concurrent identical save won the race).
+func isIdentityConstraintViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "idx_memories_identity_live") ||
+		strings.Contains(msg, "memories.identity_hash")
+}
+
+// identityFromStoredJSON recomputes the full identity hash from a stored
+// row's tags/metadata JSON. Rows are prefiltered on content_hash, so the
+// stored content itself need not be rehashed — the hash binds identity.
+func identityFromStoredJSON(contentHashHex, tagsJSON, metaJSON string) string {
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	var meta map[string]interface{}
+	_ = json.Unmarshal([]byte(metaJSON), &meta)
+	return MemoryIdentityHash(contentHashHex, tags, meta)
+}
+
+// findLiveDuplicateNode is the DBNode variant used inside saveMemoryRow's
+// transaction. wantIdentity is the precomputed expected identity hash.
+//
+// Matching order: the persisted identity_hash column first (frozen at
+// insert time — tags/metadata may legitimately mutate afterwards, e.g.
+// a challenge patch), falling back to a recomputation from tags/metadata
+// for legacy rows written before the column existed.
+func findLiveDuplicateNode(node DBNode, collection, contentHashHex, wantIdentity string) string {
+	rows, err := node.QueryTracked(`
+		SELECT id, COALESCE(identity_hash,''), COALESCE(tags,'[]'), COALESCE(metadata,'{}')
+		FROM memories
+		WHERE collection = ? AND content_hash = ? AND deleted_at IS NULL
+	`, collection, contentHashHex)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, ih, tagsJSON, metaJSON string
+		if err := rows.Scan(&id, &ih, &tagsJSON, &metaJSON); err != nil {
+			slog.Warn("findLiveDuplicateNode: candidate row scan failed; skipping", "error", err.Error())
+			continue
+		}
+		if ih == wantIdentity {
+			return id
+		}
+		if ih == "" && identityFromStoredJSON(contentHashHex, tagsJSON, metaJSON) == wantIdentity {
+			return id
+		}
+	}
+	return ""
+}
+
+// FindLiveDuplicateMemory returns the id of a live memory with identical
+// F19 identity (collection + content + tags + stable metadata), or "".
+func (dm *DatabaseManager) FindLiveDuplicateMemory(collection, content string, tags []string, metadata map[string]interface{}) string {
+	chBytes := sha256.Sum256([]byte(content))
+	ch := hex.EncodeToString(chBytes[:])
+	want := MemoryIdentityHash(ch, tags, metadata)
+	rows, err := dm.QueryTracked(`
+		SELECT id, COALESCE(identity_hash,''), COALESCE(tags,'[]'), COALESCE(metadata,'{}')
+		FROM memories
+		WHERE collection = ? AND content_hash = ? AND deleted_at IS NULL
+	`, collection, ch)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, ih, tagsJSON, metaJSON string
+		if err := rows.Scan(&id, &ih, &tagsJSON, &metaJSON); err != nil {
+			slog.Warn("FindLiveDuplicateMemory: candidate row scan failed; skipping", "error", err.Error())
+			continue
+		}
+		if ih == want {
+			return id
+		}
+		if ih == "" && identityFromStoredJSON(ch, tagsJSON, metaJSON) == want {
+			return id
+		}
+	}
+	return ""
+}
+
+// WorkFrameworkModel is the user-facing projection of framework/model
+// provenance for a work event (audit finding F16). Values stay empty when
+// the authoritative records carry none — absence is represented as
+// missing, never fabricated.
+type WorkFrameworkModel struct {
+	FrameworkName string
+	Model         string
+}
+
+// ResolveFrameworkModelForInvocations batch-loads framework/model metadata
+// for work-event invocation IDs. Two authoritative sources, one query each:
+//
+//  1. tool_invocations — the invocation-time record (framework_name).
+//  2. artifact_provenance — the artifact-level record (provider/model),
+//     matched via the work's own artifact row so the create event is
+//     covered even when tool_invocations rows have aged out.
+func (dm *DatabaseManager) ResolveFrameworkModelForInvocations(workID string, invocationIDs []string) map[string]WorkFrameworkModel {
+	out := make(map[string]WorkFrameworkModel, len(invocationIDs))
+	if len(invocationIDs) == 0 {
+		return out
+	}
+	placeholders := strings.Repeat("?,", len(invocationIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, 0, len(invocationIDs)+1)
+	for _, id := range invocationIDs {
+		args = append(args, id)
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT invocation_id, COALESCE(framework_name,''), ''
+		FROM tool_invocations WHERE invocation_id IN (`+placeholders+`)
+	`, args...)
+	if err == nil {
+		for rows.Next() {
+			var invID, fw, model string
+			if err := rows.Scan(&invID, &fw, &model); err == nil {
+				out[invID] = WorkFrameworkModel{FrameworkName: fw, Model: model}
+			}
+		}
+		rows.Close()
+	} else {
+		slog.Warn("ResolveFrameworkModelForInvocations: tool_invocations probe failed", "error", err.Error())
+	}
+
+	// Artifact-level fallback: fills model (and framework if absent) from
+	// the work's own provenance row. Also seeds entries for invocation ids
+	// that had no tool_invocations row (direct DM callers never write that
+	// table — it belongs to the CLI/MCP dispatchers).
+	var apFW, apModel string
+	err = dm.db.QueryRow(`
+		SELECT COALESCE(framework_name,''), COALESCE(model_name,'')
+		FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'work'
+	`, workID).Scan(&apFW, &apModel)
+	if err == nil && (apFW != "" || apModel != "") {
+		for _, invID := range invocationIDs {
+			fm, ok := out[invID]
+			if !ok {
+				fm = WorkFrameworkModel{}
+			}
+			if fm.FrameworkName == "" {
+				fm.FrameworkName = apFW
+			}
+			if fm.Model == "" {
+				fm.Model = apModel
+			}
+			out[invID] = fm
+		}
+	}
+	return out
 }
 
 func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
@@ -4457,6 +4915,13 @@ func (dm *DatabaseManager) CreateWorkWithContext(title, content, sessionID strin
 	if title == "" {
 		return nil, fmt.Errorf("title is required for create")
 	}
+	// F16: works.session_id is semantically required — it binds the work
+	// to the agent shift that created it. When the caller omits it, the
+	// ActiveContext session is authoritative; an empty BOTH means the
+	// row legitimately has no session (NULL), not a fabricated one.
+	if sessionID == "" {
+		sessionID = ac.SessionID
+	}
 	prov := dm.provenanceFromContext(ac)
 	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
 	var workID string
@@ -4561,15 +5026,17 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 
 	verification := WorkVerificationUnverified
 	if len(evidence) > 0 {
-		// Classify evidence by source group.
+		// Classify evidence by source group via the shared registry —
+		// the same vocabulary AddEvidence validates against (F6), so a
+		// value can never reach this switch unclassified.
 		var hasOutcome, hasAudit, hasAction, hasContradiction bool
 		for _, e := range evidence {
-			switch e.SourceGroup {
-			case "filesystem", "test", "api_response", "manual_review":
+			switch classifySourceGroup(e.SourceGroup) {
+			case SourceGroupClassOutcome:
 				hasOutcome = true
-			case "git", "ci", "external":
+			case SourceGroupClassAudit:
 				hasAudit = true
-			case "tool_invocation", "api_call", "process":
+			case SourceGroupClassAction:
 				hasAction = true
 			}
 			// Strength near -1 indicates contradiction.
@@ -4798,7 +5265,7 @@ func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weigh
 		    (id, collection, content, tags, metadata, weight,
 		     is_global, created_at, updated_at, deleted_at)
 		VALUES
-		    (?, 'rules', ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
+		    (?, 'rules', ?, ?, ?, ?, 1, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), NULL)
 	`, id, content, string(tagsJSON), string(metaJSON), weight)
 	if err != nil {
 		return "", fmt.Errorf("insert shared rule: %w", err)
@@ -4854,7 +5321,7 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 		    (id, collection, content, tags, metadata, weight,
 		     reinforcement_count, is_global, created_at, updated_at, deleted_at)
 		VALUES
-		    (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
+		    (?, ?, ?, ?, ?, ?, ?, 1, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), NULL)
 	`, newID, collection, content, tagsNS.String, string(metaJSON), weight, reinforcement)
 	if err != nil {
 		return "", fmt.Errorf("insert shared copy: %w", err)

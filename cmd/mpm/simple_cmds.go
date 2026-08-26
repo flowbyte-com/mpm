@@ -237,13 +237,16 @@ func handleShow(args []string) int {
 		return 1
 	}
 
-	id := args[1]
-
 	dm := getDB()
 	if dm == nil {
 		return 1
 	}
+	return runShow(dm, args[1])
+}
 
+// runShow is the injectable core of `mpm show` so tests can drive it
+// against a hermetic database.
+func runShow(dm mpminternal.CoreDB, id string) int {
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
 		usererror.Error("Memory not found: %s", id)
@@ -259,8 +262,17 @@ func handleShow(args []string) int {
 		fmt.Printf("Session:      %s\n", sess)
 	}
 
+	// GetMemory builds its map with Go `int` for weight (web_db.go), so an
+	// int64 assertion here silently fell back to the hardcoded 1 and
+	// `mpm debug show` printed Weight: 1 regardless of stored value.
+	// Accept every numeric shape the driver may hand us instead of defaulting.
 	w := 1
-	if we, ok := mem["weight"].(int64); ok {
+	switch we := mem["weight"].(type) {
+	case int:
+		w = we
+	case int64:
+		w = int(we)
+	case float64:
 		w = int(we)
 	}
 	fmt.Printf("Weight:       %d\n", w)
@@ -302,7 +314,7 @@ func handleRm(args []string) int {
 	// Guard on deleted_at IS NULL so re-deleting a deleted row is a
 	// no-op (idempotent) AND so we can detect a missing id via the
 	// rows-affected check.
-	res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = strftime('%s','now') WHERE id = ? AND deleted_at IS NULL`, id)
+	res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, id)
 	if err != nil {
 		usererror.Error("%v", err)
 		return 1

@@ -59,7 +59,7 @@ func TestEvidenceAdd_SerializesToJSON(t *testing.T) {
 		"artifact_id":   "mem-1",
 		"artifact_type": "memory",
 		"type":          "test",
-		"source_group":  "x",
+		"source_group":  "test",
 		"strength":      0.7,
 		"created_by":    "test",
 	}

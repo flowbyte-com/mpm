@@ -90,7 +90,7 @@ func TestCascadingDecay_TheoryConfidenceUnchangedWhenUnderlyingMemoryDeleted(t *
 		ArtifactID:         theoryID,
 		ArtifactType:       "theory",
 		Type:               "observation",
-		SourceGroup:        "test-cascading-decay",
+		SourceGroup:        "test",
 		Strength:           0.8,
 		IndependenceFactor: 1.0,
 		CreatedBy:          "808",

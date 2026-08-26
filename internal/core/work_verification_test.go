@@ -102,14 +102,22 @@ func TestWork_ExternalGitCommit_WithoutMPMAction(t *testing.T) {
 		}
 	}
 
-	// No work_events for the git commit (it wasn't MPM's action).
+	// No LIFECYCLE work_events for the git commit (it wasn't MPM's action).
+	// F7/F12 note: an evidence_observed ledger event IS expected — it is
+	// observability of the evidence write (which the audit requires be
+	// inspectable), not a fabricated lifecycle transition.
 	events, err := dm.GetWorkEvents(w.ID)
 	if err != nil {
 		t.Fatalf("GetWorkEvents: %v", err)
 	}
+	lifecycleTypes := map[WorkEventType]bool{
+		WorkEventTypeCreated: true, WorkEventTypeCompleted: true,
+		WorkEventTypeCancelled: true, WorkEventTypeReopened: true,
+		WorkEventTypeClaimedComplete: true,
+	}
 	for _, e := range events {
-		if e.EventType == "evidence_observed" {
-			t.Error("Should not have evidence_observed event from git-only observation")
+		if lifecycleTypes[e.EventType] {
+			t.Errorf("fabricated lifecycle event %q from git-only observation", e.EventType)
 		}
 	}
 }

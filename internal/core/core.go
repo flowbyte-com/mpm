@@ -192,6 +192,11 @@ type CoreDB interface {
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
+	// SupersedeDecision records a replacement decision and marks the
+	// original superseded (F9). InvalidateDecision retires a decision
+	// without a replacement.
+	SupersedeDecision(originalID, contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
+	InvalidateDecision(decisionID, reason string) (map[string]interface{}, error)
 	ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error)
 
 	// ─── Cascade provenance (Task 2) ──────────────────────────────────
@@ -272,6 +277,9 @@ type CoreDB interface {
 
 	// ─── Wake Context ────────────────────────────────────────────────
 	GatherWakeContext() (WakeContextData, error)
+	// GatherWakeContextReadOnly assembles wake context without consuming
+	// the unread handoff — for presentation-only callers.
+	GatherWakeContextReadOnly() (WakeContextData, error)
 	ReadWakeContext() (string, error)
 	ScratchpadOrphansSummary() (string, error)
 
@@ -308,6 +316,9 @@ type CoreDB interface {
 	AddWork(title, content, sessionID string) (*Work, error)
 	GetWork(id string) (*Work, error)
 	ListWorks() ([]*Work, error)
+	// ResolveFrameworkModelForInvocations batch-loads framework/model
+	// provenance for work history display (F16).
+	ResolveFrameworkModelForInvocations(workID string, invocationIDs []string) map[string]WorkFrameworkModel
 	UpdateWork(id string, status WorkStatus) (*Work, error)
 	CompleteWork(id string) (*Work, error)
 	CancelWork(id string) (*Work, error)

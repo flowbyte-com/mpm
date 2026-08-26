@@ -20,7 +20,7 @@ func TestCallHelpers_AddEvidence_HappyPath(t *testing.T) {
 		ArtifactID:   "mem-1",
 		ArtifactType: "memory",
 		Type:         "reproduction",
-		SourceGroup:  "test-rig-1",
+		SourceGroup:  "test",
 		Strength:     0.85,
 		CreatedBy:    "test",
 		CreatedAt:    time.Now(),
@@ -87,8 +87,8 @@ func TestCallHelpers_ListEvidence_FiltersByType(t *testing.T) {
 	require.NoError(t, err)
 	_, err = dm.ExecTracked(`INSERT INTO lessons (id, type, content, created) VALUES (?, 'insight', 'y', STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))`, 0, "les-1")
 	require.NoError(t, err)
-	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "observation", SourceGroup: "g", Strength: 0.4, CreatedBy: "t", CreatedAt: time.Now()}))
-	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "les-1", ArtifactType: "lesson", Type: "observation", SourceGroup: "g", Strength: 0.4, CreatedBy: "t", CreatedAt: time.Now()}))
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "observation", SourceGroup: "test", Strength: 0.4, CreatedBy: "t", CreatedAt: time.Now()}))
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "les-1", ArtifactType: "lesson", Type: "observation", SourceGroup: "test", Strength: 0.4, CreatedBy: "t", CreatedAt: time.Now()}))
 
 	memItems, err := dm.ListEvidence("mem-1", "memory")
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestCallHelpers_RecomputeConfidence_TriggersRecompute(t *testing.T) {
 	dm := newTestDM(t)
 	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
 	require.NoError(t, err)
-	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "g", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "test", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
 
 	out, err := dm.RecomputeConfidence("mem-1", "memory")
 	require.NoError(t, err)
@@ -255,7 +255,7 @@ func TestCallHelpers_ExplainConfidence_ComponentBreakdown(t *testing.T) {
 	dm := newTestDM(t)
 	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")
 	require.NoError(t, err)
-	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "g", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
+	require.NoError(t, AddEvidence(dm, EvidenceInput{ArtifactID: "mem-1", ArtifactType: "memory", Type: "reproduction", SourceGroup: "test", Strength: 0.85, CreatedBy: "t", CreatedAt: time.Now()}))
 
 	out, err := dm.ExplainConfidence("mem-1", "memory")
 	require.NoError(t, err)
