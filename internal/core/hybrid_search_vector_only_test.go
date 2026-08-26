@@ -245,3 +245,91 @@ func idsOfHybrid(rs []HybridResult) []string {
 	}
 	return out
 }
+
+// TestHybridSearch_VectorOnlyFieldsPopulated confirms that the batched
+// metadata lookup fills Weight/Collection/IsChallenged/IsConceptDrift for
+// vector-only candidates. Without this enrichment, vector-only rows would
+// surface in `mpm recall --semantic` and `mpm call search_memories` with
+// Weight=0, Collection="", CreatedAt=0, and no challenge visibility —
+// silently misrepresenting the memory's state.
+func TestHybridSearch_VectorOnlyFieldsPopulated(t *testing.T) {
+	dm := newTestDM(t)
+	defer dm.Close()
+
+	provider := DefaultEmbeddingConfig().Provider
+	if provider.Name() == "null" {
+		t.Skip("requires a real embedding provider (set OLLAMA_ENDPOINT)")
+	}
+
+	const target = "vonly-fields"
+	const targetContent = "challenge restoration evidence neutralization confidence floor"
+	_, err := dm.ExecTracked(
+		`INSERT INTO memories (id, collection, content, tags, metadata, weight, reinforcement_count, created_at) VALUES (?, 'memories', ?, '["audit"]', '{"status":"open"}', 7, 4, strftime('%s','now'))`,
+		0, target, targetContent)
+	require.NoError(t, err)
+	vec, err := provider.Embed(targetContent)
+	require.NoError(t, err)
+	embJSON, _ := json.Marshal(vec)
+	_, err = dm.ExecTracked(
+		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
+	require.NoError(t, err)
+
+	// Paraphrased query — zero FTS5 overlap.
+	cfg := DefaultHybridConfig()
+	cfg.VectorWeight = 0.5
+	cfg.Limit = 10
+	results, err := HybridSearch(dm, "abandoned task should not be marked verified",
+		"memories", cfg)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, target, results[0].ID)
+	require.Equal(t, "vector", results[0].Source)
+
+	// Display fields must be populated from the batched lookup, not
+	// left at their zero values.
+	require.Equal(t, targetContent, results[0].Content, "Content populated from batched lookup")
+	require.Equal(t, "memories", results[0].Collection, "Collection populated from batched lookup")
+	require.Equal(t, float64(7), results[0].Weight, "Weight populated from batched lookup")
+	require.Equal(t, 4, results[0].ReinforcementCount, "ReinforcementCount populated from batched lookup")
+	require.NotZero(t, results[0].CreatedAt, "CreatedAt populated from batched lookup")
+	require.NotEmpty(t, results[0].Tags, "Tags populated from batched lookup")
+	require.NotEmpty(t, results[0].Metadata, "Metadata populated from batched lookup")
+}
+
+// TestHybridSearch_VectorOnlyChallengeSignalPopulated confirms the
+// challenge/concept-drift status from metadata is read for vector-only
+// candidates. Without the batched lookup this signal would be invisible.
+func TestHybridSearch_VectorOnlyChallengeSignalPopulated(t *testing.T) {
+	dm := newTestDM(t)
+	defer dm.Close()
+
+	provider := DefaultEmbeddingConfig().Provider
+	if provider.Name() == "null" {
+		t.Skip("requires a real embedding provider (set OLLAMA_ENDPOINT)")
+	}
+
+	const target = "vonly-challenged"
+	const targetContent = "challenge restoration evidence neutralization confidence floor"
+	_, err := dm.ExecTracked(
+		`INSERT INTO memories (id, collection, content, metadata, weight, created_at) VALUES (?, 'memories', ?, '{"status":"challenged","challenged_theory_id":"abc123"}', 5, strftime('%s','now'))`,
+		0, target, targetContent)
+	require.NoError(t, err)
+	vec, err := provider.Embed(targetContent)
+	require.NoError(t, err)
+	embJSON, _ := json.Marshal(vec)
+	_, err = dm.ExecTracked(
+		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
+	require.NoError(t, err)
+
+	cfg := DefaultHybridConfig()
+	cfg.VectorWeight = 0.5
+	cfg.Limit = 10
+	results, err := HybridSearch(dm, "abandoned task should not be marked verified",
+		"memories", cfg)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.True(t, results[0].IsChallenged,
+		"IsChallenged MUST be true when metadata status=challenged (got false)")
+	require.Equal(t, "abc123", results[0].ChallengedTheoryID,
+		"ChallengedTheoryID must be extracted from metadata")
+}

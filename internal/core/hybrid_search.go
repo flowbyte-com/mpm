@@ -152,6 +152,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		vecMap[r.ID] = vecEntry{similarity: r.Similarity}
 	}
 
+	// For vector-only candidates, the FTS5 row is absent so the merge
+	// can't populate Weight/Collection/Tags/Metadata/IsChallenged/etc.
+	// from the lexical entry. Batched SELECT fills the gap with one
+	// query. Skipped entirely when there are no vector candidates.
+	vectorOnlyMeta := loadVectorOnlyMeta(dm, vecResults, cfg.SchemaPrefix)
+
 	// Union of all IDs
 	allIDs := make(map[string]bool)
 	for _, r := range ftsResults {
@@ -218,9 +224,17 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		isChallenged := false
 		isConceptDrift := false
 		challengedTheoryID := ""
-		if ftsOK && fts.Metadata != "" {
+		// Use whichever metadata source is available: FTS5 (full row)
+		// or vectorOnlyMeta (batched fill for vector-only candidates).
+		var metaJSON string
+		if ftsOK {
+			metaJSON = fts.Metadata
+		} else if meta, ok := vectorOnlyMeta[id]; ok {
+			metaJSON = meta.metadata
+		}
+		if metaJSON != "" {
 			var meta map[string]interface{}
-			if json.Unmarshal([]byte(fts.Metadata), &meta) == nil {
+			if json.Unmarshal([]byte(metaJSON), &meta) == nil {
 				// concept_drift: true from the idle-dream drift detector
 				if cd, _ := meta["concept_drift"].(bool); cd {
 					isConceptDrift = true
@@ -260,13 +274,25 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			lastAccessedAt = fts.LastAccessedAt
 			referenceID = fts.ReferenceID
 		} else {
-			// Vector-only: pull Content/CreatedAt from the VectorMatch row.
-			// Other fields stay at their zero values; metadata is refetched
-			// downstream if needed.
-			if v, ok := vecRowFor(id, vecResults); ok {
-				content = v.Content
-				createdAt = v.CreatedAt
+			// Vector-only: pull all display fields from the batched
+			// metadata lookup. This populates Weight, Collection, Tags,
+			// ReinforcementCount, IsChallenged/IsConceptDrift signals —
+			// none of which are returned by VectorMatch. Without this
+			// enrichment, vector-only rows surface in callers like
+			// `mpm recall --semantic` with Weight=0, Collection="",
+			// CreatedAt=0, and no challenge/concept-drift visibility,
+			// which silently misrepresents the memory's state.
+			if meta, ok := vectorOnlyMeta[id]; ok {
+				content = meta.content
+				collection = meta.collection
+				tags = meta.tags
+				metadata = meta.metadata
+				createdAt = meta.createdAt
+				reinforcementCount = meta.reinforcementCount
+				weight = meta.weight
 			}
+			// Vector-only doesn't carry VectorMatch's CreatedAt — the
+			// batched lookup above is authoritative.
 		}
 
 		combined = append(combined, HybridResult{
@@ -577,6 +603,93 @@ func vecRowFor(id string, rows []VectorMatch) (VectorMatch, bool) {
 		}
 	}
 	return VectorMatch{}, false
+}
+
+// vectorOnlyMeta carries the metadata fields VectorMatch does not return.
+// Populated by loadVectorOnlyMeta so the merge step can fully populate
+// HybridResult fields for vector-only candidates without per-row queries.
+type vectorOnlyMetaRow struct {
+	content            string
+	collection         string
+	tags               string
+	metadata           string
+	createdAt          int64
+	reinforcementCount int
+	weight             float64
+}
+
+// loadVectorOnlyMeta issues a single batched SELECT for any vector-result
+// IDs not covered by the FTS5 path. Returns an empty map when there are
+// no vector candidates (the common NullProvider case) — the merge loop
+// skips the lookup entirely in that case via the if ftsOK short-circuit.
+//
+// Cost: one indexed IN-list query against `memories`. Runs only when
+// VectorMatch produced results, so NullProvider configurations pay zero.
+func loadVectorOnlyMeta(dm *DatabaseManager, vecResults []VectorMatch, schemaPrefix string) map[string]vectorOnlyMetaRow {
+	out := make(map[string]vectorOnlyMetaRow)
+	if len(vecResults) == 0 {
+		return out
+	}
+	placeholders := make([]string, len(vecResults))
+	args := make([]interface{}, len(vecResults))
+	for i, r := range vecResults {
+		placeholders[i] = "?"
+		args[i] = r.ID
+	}
+	memTable := schemaPrefix + "memories"
+	query := `SELECT id, content, collection, tags, COALESCE(metadata, '{}'), created_at, reinforcement_count, weight FROM ` + memTable +
+		` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND deleted_at IS NULL` + MemoryExpireClause
+	rows, err := dm.SQLDB().Query(query, args...)
+	if err != nil {
+		slog.Warn("loadVectorOnlyMeta: query failed", "err", err, "ids", args)
+		// Defensive: if the batched lookup fails, vector-only rows get
+		// zero-valued fields. The merge still completes; callers see
+		// empty strings instead of an error. Better than swallowing
+		// the whole search.
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		// tags and metadata are nullable JSON columns. Direct string
+		// scanning panics on NULL rows with
+		// "converting NULL to string is unsupported". The 2026-08-17
+		// Substrate Defense Triad mandates NullString for any
+		// nullable scalar — including JSON columns, which are TEXT
+		// under the hood.
+		var (
+			id, content, collection       string
+			tags, metadata                sql.NullString
+			createdAt                     int64
+			reinforcementCount            int
+			weight                        sql.NullFloat64
+		)
+		if err := rows.Scan(&id, &content, &collection, &tags, &metadata, &createdAt, &reinforcementCount, &weight); err != nil {
+			slog.Warn("loadVectorOnlyMeta: scan failed", "err", err)
+			continue
+		}
+		tagsStr := ""
+		if tags.Valid {
+			tagsStr = tags.String
+		}
+		metaStr := ""
+		if metadata.Valid {
+			metaStr = metadata.String
+		}
+		weightVal := 0.0
+		if weight.Valid {
+			weightVal = weight.Float64
+		}
+		out[id] = vectorOnlyMetaRow{
+			content:            content,
+			collection:         collection,
+			tags:               tagsStr,
+			metadata:           metaStr,
+			createdAt:          createdAt,
+			reinforcementCount: reinforcementCount,
+			weight:             weightVal,
+		}
+	}
+	return out
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
