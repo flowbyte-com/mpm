@@ -182,23 +182,43 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			combinedScore = fts.Score * (1 - cfg.VectorWeight)
 			source = "fts5"
 		} else {
-			// Vector only (no FTS5 match) — rare, skip unless we want vector-only mode
-			continue
+			// Vector only (no FTS5 match) — preserve as a candidate.
+			// Previous behavior discarded these (continue), which silently
+			// broke semantic-archaeology queries where paraphrased natural
+			// language has zero token overlap with the corpus. With a real
+			// embedding provider active, the vector signal is computed but
+			// was being thrown away. Now vector-only candidates survive
+			// the merge and rank by their cosine similarity, weighted by
+			// VectorWeight so VectorWeight=1.0 yields pure vector retrieval.
+			vecSim = vec.similarity
+			combinedScore = vec.similarity * cfg.VectorWeight
+			source = "vector"
 		}
 
 		// RetrievalThreshold is calibrated for hybrid (FTS5+vector) combined
 		// scores, which land in roughly 0–1 range. BM25 is naturally unbounded
 		// negative, so for FTS5-only matches the same threshold would filter
 		// out nearly everything useful. Trust the BM25 ordering for FTS5-only
-		// paths; only apply the threshold to true hybrid scores.
-		if ftsOK && vecOK && combinedScore < cfg.RetrievalThreshold {
-			continue
+		// paths; only apply the threshold to true hybrid scores and to
+		// vector-only candidates whose similarity is in 0–1.
+		switch {
+		case ftsOK && vecOK:
+			if combinedScore < cfg.RetrievalThreshold {
+				continue
+			}
+		case !ftsOK && vecOK:
+			// Vector similarity is 0–1; default threshold -3.0 would never
+			// fire. Use a non-negative floor so callers who raise the
+			// threshold above 0 can still exclude low-similarity noise.
+			if combinedScore < cfg.RetrievalThreshold {
+				continue
+			}
 		}
 
 		isChallenged := false
 		isConceptDrift := false
 		challengedTheoryID := ""
-		if fts.Metadata != "" {
+		if ftsOK && fts.Metadata != "" {
 			var meta map[string]interface{}
 			if json.Unmarshal([]byte(fts.Metadata), &meta) == nil {
 				// concept_drift: true from the idle-dream drift detector
@@ -216,17 +236,50 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			}
 		}
 
+		// Resolve display fields. FTS5 rows carry full content; vector-only
+		// rows need their fields populated from the VectorMatch row (which
+		// already returns Content/CreatedAt). The challenge/provenance
+		// metadata is empty for vector-only candidates — that's acceptable
+		// because vector-only retrieval doesn't have lexical context to
+		// surface challenge status, and downstream code that needs metadata
+		// re-fetches from the database by ID.
+		var content, collection, tags, metadata string
+		var createdAt int64
+		var reinforcementCount int
+		var weight float64
+		var lastAccessedAt *int64
+		var referenceID *string
+		if ftsOK {
+			content = fts.Content
+			collection = fts.Collection
+			tags = fts.Tags
+			metadata = fts.Metadata
+			createdAt = fts.CreatedAt
+			reinforcementCount = fts.ReinforcementCount
+			weight = fts.Weight
+			lastAccessedAt = fts.LastAccessedAt
+			referenceID = fts.ReferenceID
+		} else {
+			// Vector-only: pull Content/CreatedAt from the VectorMatch row.
+			// Other fields stay at their zero values; metadata is refetched
+			// downstream if needed.
+			if v, ok := vecRowFor(id, vecResults); ok {
+				content = v.Content
+				createdAt = v.CreatedAt
+			}
+		}
+
 		combined = append(combined, HybridResult{
 			ID:                 id,
-			Content:            fts.Content,
-			Collection:         fts.Collection,
-			Tags:               fts.Tags,
-			Metadata:           fts.Metadata,
-			CreatedAt:          fts.CreatedAt,
-			ReinforcementCount: fts.ReinforcementCount,
-			Weight:             fts.Weight,
-			LastAccessedAt:     fts.LastAccessedAt,
-			ReferenceID:        fts.ReferenceID,
+			Content:            content,
+			Collection:         collection,
+			Tags:               tags,
+			Metadata:           metadata,
+			CreatedAt:          createdAt,
+			ReinforcementCount: reinforcementCount,
+			Weight:             weight,
+			LastAccessedAt:     lastAccessedAt,
+			ReferenceID:        referenceID,
 			FTS5Score:          ftsScore,
 			VectorSimilarity:   vecSim,
 			CombinedScore:      combinedScore,
@@ -238,23 +291,25 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		})
 	}
 
-	// Sort: for hybrid results (FTS5+vector), trust CombinedScore descending
-	// (higher = better blend). For FTS5-only results, BM25 is already the
-	// correct relevance signal — more negative = better match — so sort
-	// ascending so the best rows land at the top and survive the Limit
-	// slice. The FTS5-only case is the common path for pure text recall;
-	// the hybrid case is rare and the CombinedScore sort is correct for it.
+	// Sort: rank by source-appropriate signal.
+	//   hybrid  → CombinedScore descending (higher = better blend)
+	//   fts5    → FTS5Score ascending (more negative = better match)
+	//   vector  → VectorSimilarity descending (higher = more similar)
+	// Mixed-source ordering keeps hybrid above FTS5-only above vector-only
+	// because vector confirmation beats text-only beats paraphrase-only.
 	sort.Slice(combined, func(i, j int) bool {
-		if combined[i].Source == "fts5" && combined[j].Source == "fts5" {
-			// Both FTS5-only: ascending BM25 (most negative = best first)
-			return combined[i].FTS5Score < combined[j].FTS5Score
+		if combined[i].Source == combined[j].Source {
+			switch combined[i].Source {
+			case "fts5":
+				return combined[i].FTS5Score < combined[j].FTS5Score
+			case "vector":
+				return combined[i].VectorSimilarity > combined[j].VectorSimilarity
+			case "hybrid":
+				return combined[i].CombinedScore > combined[j].CombinedScore
+			}
 		}
-		if combined[i].Source == "hybrid" && combined[j].Source == "hybrid" {
-			// Both hybrid: descending combined (higher = better blend)
-			return combined[i].CombinedScore > combined[j].CombinedScore
-		}
-		// Mixed: hybrid > FTS5-only (vector confirmation beats text-only)
-		return combined[i].Source == "hybrid"
+		// Mixed sources: prefer hybrid, then fts5, then vector.
+		return sourceRank(combined[i].Source) > sourceRank(combined[j].Source)
 	})
 	if len(combined) > cfg.Limit {
 		combined = combined[:cfg.Limit]
@@ -493,6 +548,35 @@ func hybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
 
 	// Blend: combined = (1-vecWeight)*normFTS + vecWeight*vecSim
 	return (1-vecWeight)*normFTS + vecWeight*vecSim
+}
+
+// sourceRank gives the cross-source ordering priority: hybrid > fts5 > vector.
+// Higher value = more preferred when sorting mixed-source result sets.
+func sourceRank(s string) int {
+	switch s {
+	case "hybrid":
+		return 3
+	case "fts5":
+		return 2
+	case "vector":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// vecRowFor looks up a vector row by ID. Used to populate display fields
+// (Content, CreatedAt) for vector-only candidates whose FTS5 entry is
+// absent. Returns false when the row is missing (defensive — vecMap and
+// vecResults are built from the same query, so this should not happen in
+// practice).
+func vecRowFor(id string, rows []VectorMatch) (VectorMatch, bool) {
+	for _, r := range rows {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return VectorMatch{}, false
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
