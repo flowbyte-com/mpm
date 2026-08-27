@@ -223,8 +223,23 @@ func (r *CommandRouter) Execute(args []string) int {
 	//   2. A literal "help" as the first post-command argument (the
 	//      rewrite artifact) keeps its help meaning; a literal
 	//      "help" elsewhere remains data (`mpm recall help` searches).
+	//
+	// REGRESSION FIX (RECOMMENDED 12): `mpm work item --help` was
+	// intercepted here on cmdName="work" and routed to handleCommandHelp,
+	// which printed the "work" section page rather than dispatching
+	// through handleWork → handleWorkItem. When --help was the LAST
+	// original token AND the command dispatches subcommands (so the
+	// positional token at args[1] is a subcommand name rather than
+	// data), the help is for the SUBCOMMAND. Skip interception and
+	// let the handler dispatch. The Stage 7 guarantee is preserved
+	// for commands without subcommand dispatch — `mpm rm <id> --help`
+	// still hits the interception path because "rm" is not in
+	// commandsWithSubcommandDispatch.
 	if cmdName != "help" && helpRequested {
-		return r.handleCommandHelp(cmdName, cmd)
+		if !isSubcommandHelp(args, cmdName) {
+			return r.handleCommandHelp(cmdName, cmd)
+		}
+		// fall through — let the handler dispatch the subcommand help.
 	}
 	if len(args) > 1 && args[1] == "help" && cmdName != "help" {
 		return r.handleCommandHelp(cmdName, cmd)
@@ -583,12 +598,18 @@ func (r *CommandRouter) handleSwitch() int {
 // (usage line + description) otherwise. Always exits 0: asking for help is
 // never an error, and never a mutation.
 func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
-	// 1. Section help (knowledge, work, ops, …).
-	if printSectionHelp(name) {
-		return 0
-	}
-
-	// 2. Dedicated per-command help pages (same dispatch as handleHelp).
+	// 1. Dedicated per-command help pages (same dispatch as handleHelp).
+	// Checked FIRST so `mpm <cmd> --help` routes to the command's own
+	// help function rather than to section help. Previously `mpm work
+	// --help` printed the "work" section page (cognitive-verb summary)
+	// because printSectionHelp("work") matched before the dedicated
+	// case "work": printWorkHelp() branch could run. The two paths are
+	// conceptually distinct: section help is for `mpm help <section>`,
+	// per-command help is for `mpm <cmd> --help`.
+	//
+	// `mpm help work` still prints section help because handleHelp
+	// (which `mpm help` dispatches to) calls printSectionHelp directly,
+	// not handleCommandHelp.
 	var helpFunc func() int
 	switch name {
 	case "mode":
@@ -630,11 +651,61 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		return 0
 	}
 
+	// 2. Section help (knowledge, runtime, maintenance, reflection,
+	// explain) — fallback for commands without a dedicated help page.
+	if printSectionHelp(name) {
+		return 0
+	}
+
 	// 3. Generic fallback from registry metadata.
 	fmt.Printf("Usage: mpm %s\n", name)
 	fmt.Printf("  %s\n", cmd.Description)
 	fmt.Println("\nRun 'mpm help' for the full interface or 'mpm help --all' for every command.")
 	return 0
+}
+
+// commandsWithSubcommandDispatch lists top-level commands whose first
+// positional argument is a subcommand name (rather than data). Used by
+// the help-interception guard in Execute to distinguish subcommand
+// help (route to handler) from data-positional help (intercept for
+// Stage 7 mutation safety).
+//
+// Kept inline (not in the registry) because the dispatch topology is
+// handler-level concern: it reflects what each handler's switch does
+// with args[0], not what the registry declares. Add a command here
+// when its handler treats args[0] as a subcommand name.
+var commandsWithSubcommandDispatch = map[string]bool{
+	"work":        true, // status|show|clear|promote|item
+	"session":     true, // add|search|show|shred|list
+	"lesson":      true, // add|show|list|search|shred
+	"ops":         true, // doctor|gc|synthesize|...
+	"call":        true, // <tool> --payload
+	"kb":          true, // memory|lesson|skill|topic|...
+	"topic":       true, // add|list|show
+	"reference":   true, // add|list|show|search|shred
+	"memory":      true, // add|list|show|...
+	"mode":        true, // list|show|set|active
+	"persona":     true, // list|show|set|active
+	"integration": true, // export-mcp
+	"self-heal":   true, // (ops subcommand pattern)
+	"why":         true, // (uses subcommand-style args)
+}
+
+// isSubcommandHelp reports whether the given args (post-parseFlags, with
+// cmdName still at index 0) indicate that --help was meant for a
+// SUBCOMMAND rather than for the top-level command. The signal is:
+// parseFlags rewrites -h/--help to the literal token "help"; if that
+// rewrite appears at the LAST position AND the command dispatches
+// subcommands (so args[1] is a subcommand name rather than a data
+// positional), the help belongs to the subcommand.
+func isSubcommandHelp(args []string, cmdName string) bool {
+	if !commandsWithSubcommandDispatch[cmdName] {
+		return false
+	}
+	if len(args) < 2 {
+		return false
+	}
+	return args[len(args)-1] == "help"
 }
 
 // ============================================================================
