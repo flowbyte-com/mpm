@@ -104,6 +104,14 @@ func TestF5_QueryResultsBoundedWithExplicitOptOut(t *testing.T) {
 		if len(raw) > 40*1024 {
 			t.Errorf("%s mode: response %d bytes exceeds sane bound", mode, len(raw))
 		}
+		if mode == "summary" {
+			if !strings.Contains(raw, "... [truncated, resolve pointer for full text]") {
+				t.Errorf("summary mode must carry the truncation suffix; payload=%s", raw)
+			}
+			if !strings.Contains(raw, "mpm://memory/") {
+				t.Errorf("summary mode must carry pointer; payload=%s", raw)
+			}
+		}
 	}
 
 	// Explicit opt-out returns full content deliberately.
