@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -21,11 +20,13 @@ func TestSetMemoryTTL_ExpiresAtColumn(t *testing.T) {
 		t.Fatalf("SetMemoryTTL: %v", err)
 	}
 
-	// GetMemory must NOT return an expired memory. sql.ErrNoRows is the
-	// expected "not found" signal — both deleted and expired rows.
+	// GetMemory must NOT return an expired memory. The "memory not found"
+	// domain error (mapped from sql.ErrNoRows at the DB layer — see
+	// F7 regression test) is the expected "not found" signal — both
+	// deleted and expired rows.
 	mem, err := dm.GetMemory(id)
-	if err != sql.ErrNoRows {
-		t.Fatalf("expected sql.ErrNoRows for expired memory, got err=%v mem=%+v", err, mem)
+	if err == nil || err.Error() != "memory not found: "+id {
+		t.Fatalf("expected 'memory not found: %s', got err=%v mem=%+v", id, err, mem)
 	}
 
 	// SearchMemories must NOT return it either.

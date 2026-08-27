@@ -4089,6 +4089,9 @@ func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {
 		       source_session_id, created
 		FROM lessons WHERE id = ?
 	`, id).Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("lesson not found: %s", id)
+	}
 	if err != nil {
 		return nil, err
 	}

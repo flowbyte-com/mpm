@@ -262,6 +262,9 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 		SELECT collection, content, session_id, tags, metadata, created_at, weight, confidence, source_db, source_id, promoted_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL`+MemoryExpireClause+`
 	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &confidence, &sourceDB, &sourceID, &promotedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("memory not found: %s", id)
+	}
 	if err != nil {
 		return nil, err
 	}
