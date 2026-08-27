@@ -104,13 +104,17 @@ func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}
 // Returns the rows under the "evidence" key — same shape as the
 // previous callListEvidence.
 //
-// Required: artifact_id. Optional: artifact_type (default "memory").
+// Required: artifact_id, artifact_type. The artifact_type field is now
+// strictly required — previously ListEvidence defaulted empty values to
+// "memory", which was arbitrary and statistically wrong for the five
+// other artifact types (theory / lesson / decision / skill / work).
+// MPM-BUG-LIST-EVIDENCE-DEAF-2026-08-27.
 func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[string]interface{}, error) {
 	if artifactID == "" {
 		return nil, fmt.Errorf("artifact_id is required")
 	}
 	if artifactType == "" {
-		artifactType = "memory"
+		return nil, fmt.Errorf("artifact_type is required")
 	}
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group, strength,

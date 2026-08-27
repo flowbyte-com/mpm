@@ -1917,3 +1917,55 @@ func TestHandleReadWakeContext_NoChallengeMetadataLeak(t *testing.T) {
 		t.Errorf("ORIGINAL_CONTENT lost during scrub: %s", payload)
 	}
 }
+
+// TestHandleListEvidence_RejectsEmptyArtifactID pins the handler-layer
+// validation: missing artifact_id must error at the delivery layer, not
+// silently return an empty array. Without this, agents cannot distinguish
+// "no evidence exists" from "I forgot to pass the id."
+func TestHandleListEvidence_RejectsEmptyArtifactID(t *testing.T) {
+	dm := newTestSharedDM(t)
+	_, err := handleListEvidence(dm, internal.ActiveContext{}, map[string]interface{}{
+		"artifact_type": "memory",
+	})
+	if err == nil {
+		t.Fatal("expected error when artifact_id is empty")
+	}
+	if !strings.Contains(err.Error(), "artifact_id is required") {
+		t.Errorf("error must mention artifact_id, got: %v", err)
+	}
+}
+
+// TestHandleListEvidence_RejectsEmptyArtifactType pins strict validation
+// on artifact_type: silently defaulting to "memory" was arbitrary and
+// statistically wrong for the majority of artifact types (theory, lesson,
+// decision, skill, work). The schema defines artifact_type as an enum of
+// six distinct values — masking a missing value with "memory" destroys
+// contract integrity. MPM-BUG-LIST-EVIDENCE-DEAF-2026-08-27.
+func TestHandleListEvidence_RejectsEmptyArtifactType(t *testing.T) {
+	dm := newTestSharedDM(t)
+	_, err := handleListEvidence(dm, internal.ActiveContext{}, map[string]interface{}{
+		"artifact_id": "mem-1",
+	})
+	if err == nil {
+		t.Fatal("expected error when artifact_type is empty")
+	}
+	if !strings.Contains(err.Error(), "artifact_type is required") {
+		t.Errorf("error must mention artifact_type, got: %v", err)
+	}
+}
+
+// TestHandleListEvidence_HappyPath verifies the handler still returns
+// the evidence map when both required fields are supplied. Regression
+// guard against the validation change accidentally breaking the
+// supported call shape.
+func TestHandleListEvidence_HappyPath(t *testing.T) {
+	dm := newTestSharedDM(t)
+	_, _ = dm.SQLDB().Exec(`INSERT INTO memories (id, collection, content) VALUES ('mem-hp', 'memories', 'x')`)
+	_, err := handleListEvidence(dm, internal.ActiveContext{}, map[string]interface{}{
+		"artifact_id":   "mem-hp",
+		"artifact_type": "memory",
+	})
+	if err != nil {
+		t.Fatalf("expected success with valid payload, got: %v", err)
+	}
+}
