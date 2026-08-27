@@ -79,7 +79,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 		"action": "query",
 		"params": map[string]interface{}{
 			"query":      "SQLite WAL",
-			"projection": true,
+			"projection": "summary",
 		},
 	})
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	var queryMap map[string]interface{}
 	require.NoError(t, json.Unmarshal(queryJSON, &queryMap))
 
-	require.Equal(t, "projected", queryMap["mode"], "projection=true should return mode=projected")
+	require.Equal(t, "summary", queryMap["mode"], "projection=summary should return mode=summary")
 	require.NotNil(t, queryMap["memories"], "projected output should have memories key")
 
 	var memories []interface{}
@@ -142,7 +142,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 		"action": "search",
 		"params": map[string]interface{}{
 			"query":      "shell variables",
-			"projection": true,
+			"projection": "summary",
 		},
 	})
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	require.NoError(t, err)
 	var lessonQueryMap map[string]interface{}
 	require.NoError(t, json.Unmarshal(lessonQueryJSON, &lessonQueryMap))
-	require.Equal(t, "projected", lessonQueryMap["mode"])
+	require.Equal(t, "summary", lessonQueryMap["mode"])
 	var lessons []interface{}
 	lessonsRaw := lessonQueryMap["lessons"]
 	require.IsType(t, []interface{}{}, lessonsRaw)
@@ -188,7 +188,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	lessonListResult, err := runHandler(dm, "mpm_lessons", map[string]interface{}{
 		"action": "list",
 		"params": map[string]interface{}{
-			"projection": true,
+			"projection": "summary",
 		},
 	})
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	require.NoError(t, err)
 	var lessonListMap map[string]interface{}
 	require.NoError(t, json.Unmarshal(lessonListJSON, &lessonListMap))
-	require.Equal(t, "projected", lessonListMap["mode"])
+	require.Equal(t, "summary", lessonListMap["mode"])
 	var lessonList []interface{}
 	lessonListRaw := lessonListMap["lessons"]
 	require.IsType(t, []interface{}{}, lessonListRaw)
