@@ -2,6 +2,7 @@ package tools
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -1059,6 +1060,100 @@ func TestHandleReadWakeContext_IncludesOpenWorks(t *testing.T) {
 	}
 }
 
+// TestHandleReadWakeContext_IncludesCompletedWorks pins the wire-format
+// contract: works with status=done must surface in the read_wake_context
+// response under the completed_works key. RECOMMENDED 10 had populated
+// WakeContextData.CompletedWorks but no public surface (CLI or MCP)
+// actually rendered it — making this the "dead projection" regression
+// fix. The pattern mirrors TestHandleReadWakeContext_IncludesOpenWorks:
+// prove the empty case still emits the key (so callers can branch on
+// presence, not absence) and prove the populated case emits each item
+// with the right id and pointer.
+func TestHandleReadWakeContext_IncludesCompletedWorks(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	// Case 1: empty — completed_works key must be present (not omitted)
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context: %v", err)
+	}
+	m, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out)
+	}
+	rawWorks, exists := m["completed_works"]
+	if !exists {
+		t.Fatal("completed_works key missing from read_wake_context response — handler copy drifted from WakeContextData struct")
+	}
+	if _, ok := rawWorks.([]internal.WakeContextWork); !ok {
+		t.Fatalf("completed_works should be []WakeContextWork, got %T", rawWorks)
+	}
+
+	// Case 2: populated — create a work, complete it, verify it surfaces
+	w, err := dm.AddWork("RECOMMENDED 10 dead data fix", "Completed work must reach wake-context consumers", "completed-works-test")
+	if err != nil {
+		t.Fatalf("AddWork: %v", err)
+	}
+	if _, err := dm.CompleteWork(w.ID); err != nil {
+		t.Fatalf("CompleteWork: %v", err)
+	}
+
+	out2, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context after CompleteWork: %v", err)
+	}
+	m2, ok := out2.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map output, got %T", out2)
+	}
+	rawWorks2, exists2 := m2["completed_works"]
+	if !exists2 {
+		t.Fatal("completed_works key missing from response after CompleteWork")
+	}
+	works2, ok := rawWorks2.([]internal.WakeContextWork)
+	if !ok {
+		t.Fatalf("expected []WakeContextWork, got %T", rawWorks2)
+	}
+	if len(works2) != 1 {
+		t.Fatalf("expected 1 completed work, got %d", len(works2))
+	}
+	if works2[0].ID != w.ID {
+		t.Errorf("completed_works[0].ID: got %s, want %s", works2[0].ID, w.ID)
+	}
+	if works2[0].Pointer != "mpm://work/"+w.ID {
+		t.Errorf("completed_works[0].Pointer: got %s, want mpm://work/%s", works2[0].Pointer, w.ID)
+	}
+	if works2[0].Title == "" {
+		t.Error("completed_works[0].Title: empty")
+	}
+
+	// Case 3: active vs completed are distinct — a work in 'open' status
+	// must not appear in completed_works.
+	wOpen, err := dm.AddWork("Still open", "Should not appear in completed_works", "completed-works-test")
+	if err != nil {
+		t.Fatalf("AddWork (open): %v", err)
+	}
+	out3, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context after AddWork (open): %v", err)
+	}
+	m3 := out3.(map[string]interface{})
+	rawWorks3 := m3["completed_works"].([]internal.WakeContextWork)
+	for _, item := range rawWorks3 {
+		if item.ID == wOpen.ID {
+			t.Errorf("open work %s leaked into completed_works", wOpen.ID)
+		}
+	}
+}
+
 // ── health_check tool ──────────────────────────────────────────────────
 
 // TestHandleHealthCheck_PassesThrough verifies the tool-layer wrapper
@@ -1671,5 +1766,154 @@ func TestShredHandoff_ByIdempotentBySessionID(t *testing.T) {
 
 	if _, err := dm.GetHandoffByID(seed.ID); err != sql.ErrNoRows {
 		t.Errorf("handoff %s still readable after shred, err=%v", seed.ID, err)
+	}
+}
+
+// TestScrubChallengeIdentifier_PublicSurfaces covers the RECOMMENDED 11
+// fix: the scrubber must remove CHALLENGED_MEMORY_ID and
+// CHALLENGED_AT_NANO regardless of where they appear in the stored
+// challenge content. The previous implementation assumed a specific
+// ordering (CHALLENGED_AT_NANO immediately after CHALLENGED_MEMORY_ID)
+// and silently leaked the timestamp when the real stored layout placed
+// it between EVIDENCE and ORIGINAL_CONTENT.
+//
+// The test exercises three layouts that all exist in practice:
+//
+//	Layout A: id, nano, evidence, original   (legacy / what old scrubber assumed)
+//	Layout B: id, evidence, nano, original   (current stored layout)
+//	Layout C: evidence, nano, original       (id missing edge)
+//
+// plus regressions:
+//   - non-challenge content is returned verbatim
+//   - benign content mentioning CHALLENGED_MEMORY_ID inside an EVIDENCE
+//     line is NOT destroyed
+//   - the full public wake projection (handleReadWakeContext) shows no
+//     forbidden internal field — this is the user-visible contract.
+func TestScrubChallengeIdentifier_PublicSurfaces(t *testing.T) {
+	// Layout B is the actual stored layout per
+	// internal/core/epistemology_tools.go theoryContent template.
+	const layoutB = "CHALLENGED_MEMORY_ID: abc-123\nEVIDENCE: counterexample\nCHALLENGED_AT_NANO: 1787816542845373355\nORIGINAL_CONTENT: theory text"
+
+	tests := []struct {
+		name         string
+		input        string
+		wantContains []string
+		wantOmit     []string
+	}{
+		{
+			name:         "LayoutA_id_nano_evidence_original",
+			input:        "CHALLENGED_MEMORY_ID: a-1\nCHALLENGED_AT_NANO: 42\nEVIDENCE: e\nORIGINAL_CONTENT: c",
+			wantContains: []string{"(atomic challenge)", "EVIDENCE", "ORIGINAL_CONTENT"},
+			wantOmit:     []string{"CHALLENGED_MEMORY_ID", "CHALLENGED_AT_NANO"},
+		},
+		{
+			name:         "LayoutB_id_evidence_nano_original_current_stored",
+			input:        layoutB,
+			wantContains: []string{"(atomic challenge)", "EVIDENCE", "ORIGINAL_CONTENT", "counterexample", "theory text"},
+			wantOmit:     []string{"CHALLENGED_MEMORY_ID", "CHALLENGED_AT_NANO", "abc-123", "1787816542845373355"},
+		},
+		{
+			name:         "LayoutC_nano_only_no_id",
+			input:        "EVIDENCE: e\nCHALLENGED_AT_NANO: 42\nORIGINAL_CONTENT: c",
+			wantContains: []string{"EVIDENCE", "ORIGINAL_CONTENT"},
+			wantOmit:     []string{"CHALLENGED_AT_NANO", "42"},
+		},
+		{
+			name:         "non_challenge_passthrough",
+			input:        "This is just a regular memory about caching strategies.",
+			wantContains: []string{"caching strategies"},
+			wantOmit:     []string{"(atomic challenge)"},
+		},
+		{
+			name:         "benign_prose_mentioning_CHALLENGED_MEMORY_ID_inside_EVIDENCE_line",
+			input:        "EVIDENCE: the user pointed out that CHALLENGED_MEMORY_ID was leaked in the previous version",
+			wantContains: []string{"CHALLENGED_MEMORY_ID was leaked"}, // inside EVIDENCE — must be preserved
+			wantOmit:     []string{},
+		},
+		{
+			name:         "id_at_end",
+			input:        "EVIDENCE: e\nORIGINAL_CONTENT: c\nCHALLENGED_MEMORY_ID: a-1",
+			wantContains: []string{"EVIDENCE", "ORIGINAL_CONTENT"},
+			wantOmit:     []string{"CHALLENGED_MEMORY_ID", "a-1"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scrubChallengeIdentifier(tc.input)
+			for _, want := range tc.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q\ninput:  %q\noutput: %q", want, tc.input, got)
+				}
+			}
+			for _, forbidden := range tc.wantOmit {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("output leaked forbidden %q\ninput:  %q\noutput: %q", forbidden, tc.input, got)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleReadWakeContext_NoChallengeMetadataLeak is the public-
+// surface integration test for the scrubber fix. It writes a memory
+// whose content matches the actual stored challenge layout and
+// confirms that the JSON wire payload returned by read_wake_context
+// contains neither CHALLENGED_MEMORY_ID nor CHALLENGED_AT_NANO. This
+// is the contract the agent sees — the helper-level test above proves
+// the algorithm; this one proves the wire.
+func TestHandleReadWakeContext_NoChallengeMetadataLeak(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dm := internal.NewDatabaseManagerForDB(db)
+	if err := dm.InitSchema(); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+
+	// Mirror the actual stored layout from
+	// internal/core/epistemology_tools.go: theoryContent template.
+	challengeContent := "CHALLENGED_MEMORY_ID: deadbeef-1234\n" +
+		"EVIDENCE: counterexample finding\n" +
+		"CHALLENGED_AT_NANO: 1787816542845373355\n" +
+		"ORIGINAL_CONTENT: the contested claim"
+	if _, err := dm.SQLDB().Exec(
+		`INSERT INTO memories (id, collection, content, tags, created_at) VALUES (?, 'theories', ?, '[]', ?)`,
+		"theory-challenge-leak", challengeContent, time.Now().Unix(),
+	); err != nil {
+		t.Fatalf("insert challenge theory: %v", err)
+	}
+
+	out, err := handleReadWakeContext(dm, internal.ActiveContext{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("read_wake_context: %v", err)
+	}
+	// Marshal the full result to JSON to mirror what an MCP client
+	// actually receives on the wire.
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	payload := string(raw)
+	if strings.Contains(payload, "CHALLENGED_MEMORY_ID") {
+		t.Errorf("CHALLENGED_MEMORY_ID leaked into wake payload: %s", payload)
+	}
+	if strings.Contains(payload, "CHALLENGED_AT_NANO") {
+		t.Errorf("CHALLENGED_AT_NANO leaked into wake payload: %s", payload)
+	}
+	if strings.Contains(payload, "1787816542845373355") {
+		t.Errorf("internal timestamp leaked into wake payload: %s", payload)
+	}
+	if strings.Contains(payload, "deadbeef-1234") {
+		t.Errorf("internal memory id leaked into wake payload: %s", payload)
+	}
+	// EVIDENCE / ORIGINAL_CONTENT should still be visible.
+	if !strings.Contains(payload, "counterexample") {
+		t.Errorf("EVIDENCE content lost during scrub: %s", payload)
+	}
+	if !strings.Contains(payload, "contested claim") {
+		t.Errorf("ORIGINAL_CONTENT lost during scrub: %s", payload)
 	}
 }

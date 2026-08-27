@@ -1399,6 +1399,12 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		// Attention & pending work.
 		"overdue_wakes":       overdueRefs,
 		"open_works":          data.OpenWorks,
+		// completed_works: RECOMMENDED 10. Pairs with open_works so the
+		// agent sees both "what's waiting on me" and "what I just shipped"
+		// without a separate tool call. Same WakeContextWork shape as
+		// open_works for symmetric parsing. Always emitted (empty list,
+		// not omitempty) so callers can branch on field presence.
+		"completed_works":     data.CompletedWorks,
 		"scratchpad_orphans":  data.ScratchpadOrphans,
 		"last_handoff":        data.LastHandoff,
 		// Constraints & capabilities.
@@ -1511,43 +1517,80 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 	return out
 }
 
-// scrubChallengeIdentifier removes the leading
-// `CHALLENGED_MEMORY_ID: <id>` line from a theory's content. Returns
-// the original string when the line is absent (the common case for
-// non-challenge theories and for decisions). RECOMMENDED 11.
+// scrubChallengeIdentifier removes internal challenge metadata lines
+// from a theory's content. Returns the original string when none of
+// the known internal fields are present (the common case for non-
+// challenge theories and for decisions). RECOMMENDED 11.
 //
-// The internal identifier is replaced with a stable pointer so the
-// agent can still navigate to the challenged memory via the wake-
-// context tool surface (`mpm challenge restore`, `mpm challenge show`)
-// without the bare id appearing in the wake payload. The remaining
-// EVIDENCE / ORIGINAL_CONTENT lines are kept verbatim.
+// The internal fields stripped are:
+//   - CHALLENGED_MEMORY_ID: <id>    (internal cross-reference id)
+//   - CHALLENGED_AT_NANO: <number>  (internal epoch-ns timestamp)
+//
+// Both fields are explicitly internal — they exist to support atomic
+// challenge operations and have no semantic value to a downstream agent.
+// The user-meaningful fields kept verbatim are EVIDENCE and
+// ORIGINAL_CONTENT. Other "CHALLENGED_*" fields, if added in the future,
+// must be appended to the strip set — the filter is line-prefix based
+// and intentionally NOT regex on free-form text so legitimate user
+// content mentioning these words is not destroyed.
+//
+// The previous implementation assumed a specific field ordering
+// (`CHALLENGED_MEMORY_ID` first, `CHALLENGED_AT_NANO` immediately
+// after). The actual stored layout (see
+// internal/core/epistemology_tools.go: theoryContent template) puts
+// `CHALLENGED_AT_NANO` between EVIDENCE and ORIGINAL_CONTENT. That
+// ordering assumption silently leaked the timestamp into the wake
+// payload. This implementation is line-based and ordering-agnostic —
+// each internal field is filtered wherever it appears in the input.
+//
+// The line-prefix boundary is "starts with `<FIELD>:`" — the colon
+// anchor prevents accidental matches against lines like
+// "EVIDENCE: the user said CHALLENGED_MEMORY_ID was leaked" (the
+// latter would not match because the line starts with "EVIDENCE:",
+// not "CHALLENGED_MEMORY_ID:").
 func scrubChallengeIdentifier(content string) string {
-	const prefix = "CHALLENGED_MEMORY_ID:"
-	if !strings.HasPrefix(content, prefix) {
+	// Fast path: none of the internal prefixes appear at all.
+	if !strings.Contains(content, "CHALLENGED_MEMORY_ID:") &&
+		!strings.Contains(content, "CHALLENGED_AT_NANO:") {
 		return content
 	}
-	// Find end of the first line. The line is `CHALLENGED_MEMORY_ID: <id>`.
-	rest := content[len(prefix):]
-	nl := strings.IndexByte(rest, '\n')
-	if nl < 0 {
-		// Whole content was just the prefix + id; surface a minimal
-		// placeholder so the agent still sees the theory exists.
-		return "(atomic challenge — see theory id for details)"
-	}
-	after := rest[nl+1:]
-	// Drop the CHALLENGED_AT_NANO line too: it's an internal timestamp
-	// with no semantic value to the agent. Anything past it (EVIDENCE,
-	// ORIGINAL_CONTENT) is preserved.
-	const nanoPrefix = "CHALLENGED_AT_NANO:"
-	if strings.HasPrefix(after, nanoPrefix) {
-		nl2 := strings.IndexByte(after, '\n')
-		if nl2 >= 0 {
-			after = after[nl2+1:]
-		} else {
-			after = ""
+	var b strings.Builder
+	b.Grow(len(content))
+	first := true
+	isAtomic := false
+	// Scan line-by-line, dropping lines whose prefix matches an
+	// internal field. Empty lines and non-internal lines are passed
+	// through verbatim. The first internal line encountered
+	// (`CHALLENGED_MEMORY_ID:`) flips the atomic flag so the
+	// surrounding prose can be tagged for the agent.
+	droppedAny := false
+	for _, line := range strings.Split(content, "\n") {
+		switch {
+		case strings.HasPrefix(line, "CHALLENGED_MEMORY_ID:"):
+			isAtomic = true
+			droppedAny = true
+			continue
+		case strings.HasPrefix(line, "CHALLENGED_AT_NANO:"):
+			droppedAny = true
+			continue
 		}
+		if !first {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+		first = false
 	}
-	return "(atomic challenge) " + after
+	// Only inject the "(atomic challenge)" marker if we actually
+	// stripped something. Otherwise the function is a no-op and the
+	// caller's pre-check path is faster (avoids the split).
+	if !droppedAny {
+		return content
+	}
+	out := b.String()
+	if isAtomic {
+		return "(atomic challenge) " + out
+	}
+	return out
 }
 
 // fetchRecentLessonsForWake returns up to limit recent lessons for wake context.

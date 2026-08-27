@@ -253,12 +253,20 @@ func handleWake(args []string) int {
 		Content   string `json:"content"`
 		CreatedAt string `json:"created_at"`
 	}
+	type workRef struct {
+		ID           string `json:"id"`
+		Title        string `json:"title"`
+		Status       string `json:"status"`
+		Verification string `json:"verification,omitempty"`
+		Pointer      string `json:"pointer"`
+	}
 	type wakeResult struct {
 		SessionID      string               `json:"session_id"`
 		ActiveMode     string               `json:"active_mode"`
 		ActivePersona  string               `json:"active_persona"`
 		RecentTopics   []string             `json:"recent_topics"`
 		RecentMemories []memoryRef          `json:"recent_memories"`
+		CompletedWorks []workRef            `json:"completed_works"`
 		LastHandoff    *mpminternal.Handoff `json:"last_handoff,omitempty"`
 	}
 
@@ -293,13 +301,50 @@ func handleWake(args []string) int {
 		return 1
 	}
 
+	// Query recently completed work — mirrors gatherCompletedWorks in
+	// internal/core/wake_context.go so the CLI projection is consistent
+	// with `mpm call mpm_context read_wake_context`. RECOMMENDED 10 fix:
+	// the field had been populated on WakeContextData but no public
+	// surface actually rendered it, leaving it as dead projection data.
+	// The query is bounded to 5 and ordered completed_at DESC for
+	// deterministic, stable output. Title truncated to 120 chars to match
+	// the MCP path.
+	var completedRefs []workRef
+	crows, cErr := dm.SQLDB().Query(`
+		SELECT id, title, status, COALESCE(verification, '')
+		FROM works
+		WHERE status = 'done'
+		ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
+		LIMIT 5
+	`)
+	if cErr == nil {
+		for crows.Next() {
+			var w workRef
+			if scanErr := crows.Scan(&w.ID, &w.Title, &w.Status, &w.Verification); scanErr == nil {
+				if len(w.Title) > 120 {
+					w.Title = w.Title[:120]
+				}
+				w.Pointer = "mpm://work/" + w.ID
+				completedRefs = append(completedRefs, w)
+			}
+		}
+		crows.Close()
+	} else {
+		usererror.Warn("handleWake: completed works query: %v", cErr)
+	}
+	// Always emit non-nil slice for predictable JSON shape.
+	if completedRefs == nil {
+		completedRefs = []workRef{}
+	}
+
 	result := wakeResult{
-		SessionID:      sessionID,
-		ActiveMode:     activeMode,
-		ActivePersona:  activePersona,
-		RecentTopics:   topics,
-		RecentMemories: memRefs,
-		LastHandoff:    handoff,
+		SessionID:       sessionID,
+		ActiveMode:      activeMode,
+		ActivePersona:   activePersona,
+		RecentTopics:    topics,
+		RecentMemories:  memRefs,
+		LastHandoff:     handoff,
+		CompletedWorks:  completedRefs,
 	}
 
 	if jsonOutput {
@@ -308,8 +353,10 @@ func handleWake(args []string) int {
 		return 0
 	}
 
-	// No context at all — human-readable empty state
-	if len(memRefs) == 0 && activeMode == "" && activePersona == "" {
+	// No context at all — human-readable empty state. Completed works
+// counts toward context so a fresh session that has just shipped
+// something does not see "No previous session found".
+	if len(memRefs) == 0 && len(completedRefs) == 0 && activeMode == "" && activePersona == "" {
 		fmt.Println("No previous session found.")
 		return 0
 	}
@@ -343,6 +390,17 @@ func handleWake(args []string) int {
 				content = content[:54] + "…"
 			}
 			fmt.Printf("│   • %-53s │\n", content)
+		}
+	}
+	if len(completedRefs) > 0 {
+		fmt.Println("│                                                             │")
+		fmt.Println("│ Recently completed work:                                    │")
+		for _, w := range completedRefs {
+			title := w.Title
+			if len(title) > 54 {
+				title = title[:54] + "…"
+			}
+			fmt.Printf("│   ✓ %-51s │\n", title)
 		}
 	}
 	if handoff != nil {
