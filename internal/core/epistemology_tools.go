@@ -20,7 +20,10 @@ import (
 func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error) {
 	mem, err := dm.GetMemory(memoryID)
 	if err != nil {
-		return nil, fmt.Errorf("memory not found: %w", err)
+		// GetMemory already returns the canonical "memory not found: <id>"
+		// error (F7 fix). Wrapping again would produce a doubled prefix
+		// visible to the agent caller: "memory not found: memory not found: <id>".
+		return nil, err
 	}
 	// slashAmount is a POSITIVE weight reduction (see ChallengeMemory). The
 	// historic caller passed -2 here; ChallengeMemory computes
