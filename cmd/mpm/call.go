@@ -92,6 +92,18 @@ func handleCall(args []string) int {
 	}
 	defer closeDM()
 
+	// F8 fix (2026-08-27): wire the blob store + pointer resolver before
+	// dispatch. The MCP server does this once at boot in
+	// cmd/mpm-mcp/tools.go RegisterAllTools; the CLI did not, which
+	// meant `mpm call mpm_blob_read` returned "blob store not initialized"
+	// even though the user's intent was supported. Wiring is per-call:
+	// cheap, idempotent (SetBlobStore overwrites the previous global),
+	// and survives closeDM via the close of any resources the wiring
+	// opened. If wiring fails (e.g., blob dir not writable), we log and
+	// continue — the handler will surface the canonical "blob store not
+	// initialized" error rather than crashing the call.
+	wireToolsGlobals(dm)
+
 	// Build the ActiveContext from CLI-detected mode/persona.
 	// The MCP server constructs this once at boot and passes it directly;
 	// the CLI derives it from the active.json file on disk.
