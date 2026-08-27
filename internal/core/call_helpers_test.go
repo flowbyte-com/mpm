@@ -104,6 +104,17 @@ func TestCallHelpers_ListEvidence_RequiresArtifactID(t *testing.T) {
 	assert.Contains(t, err.Error(), "artifact_id")
 }
 
+// TestCallHelpers_ListEvidence_RequiresArtifactType pins strict validation:
+// artifact_type is now mandatory. Previously ListEvidence defaulted empty
+// artifact_type to "memory", which was arbitrary and statistically wrong
+// for theory/lesson/decision/skill/work. MPM-BUG-LIST-EVIDENCE-DEAF-2026-08-27.
+func TestCallHelpers_ListEvidence_RequiresArtifactType(t *testing.T) {
+	dm := newTestDM(t)
+	_, err := dm.ListEvidence("mem-1", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "artifact_type")
+}
+
 func TestCallHelpers_QueryConfidenceHistory_DefaultLimit(t *testing.T) {
 	dm := newTestDM(t)
 	_, err := dm.ExecTracked(`INSERT INTO memories (id, collection, content) VALUES (?, 'memories', 'x')`, 0, "mem-1")

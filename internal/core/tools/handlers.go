@@ -1742,8 +1742,26 @@ func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 
 // callListEvidence returns all evidence rows for an artifact. Thin shim
 // over dm.ListEvidence.
+//
+// Both artifact_id and artifact_type are REQUIRED at the delivery layer.
+// artifact_type is not defaulted — it is an enum of six distinct values
+// (memory / theory / decision / lesson / skill / work) and silently
+// coercing a missing value to "memory" hides a schema violation that
+// trains agents to believe their work was never verified.
+//
+// MPM-BUG-LIST-EVIDENCE-DEAF-2026-08-27.
 func handleListEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
-	return dm.ListEvidence(getString(payload, "artifact_id"), getString(payload, "artifact_type"))
+	artifactID := getString(payload, "artifact_id")
+	artifactType := getString(payload, "artifact_type")
+
+	if artifactID == "" {
+		return nil, fmt.Errorf("artifact_id is required")
+	}
+	if artifactType == "" {
+		return nil, fmt.Errorf("artifact_type is required")
+	}
+
+	return dm.ListEvidence(artifactID, artifactType)
 }
 
 // callQueryConfidenceHistory returns the confidence timeline for an artifact.
