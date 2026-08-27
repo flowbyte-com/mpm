@@ -359,13 +359,21 @@ func (s *WhyService) loadEvidence(id, kind string) ([]EvidenceRow, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	rawList, _ := res["evidence"].([]interface{})
-	rows := make([]EvidenceRow, 0, len(rawList))
-	for _, raw := range rawList {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
+	// ListEvidence returns []map[string]interface{} not []interface{},
+	// so we need to handle both cases for type safety.
+	var rawList []map[string]interface{}
+	switch v := res["evidence"].(type) {
+	case []map[string]interface{}:
+		rawList = v
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				rawList = append(rawList, m)
+			}
 		}
+	}
+	rows := make([]EvidenceRow, 0, len(rawList))
+	for _, m := range rawList {
 		row := EvidenceRow{
 			Type:        stringOf(m["type"]),
 			Strength:    floatOf(m["strength"]),

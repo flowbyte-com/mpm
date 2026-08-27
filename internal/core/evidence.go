@@ -1,5 +1,7 @@
 package internal
 
+import "fmt"
+
 // evidenceType is the shape of a single v1 evidence type entry.
 type evidenceType struct {
 	Name     string
@@ -51,4 +53,38 @@ func lookupEvidenceType(name string) (evidenceType, bool) {
 		}
 	}
 	return evidenceType{}, false
+}
+
+// AllEvidenceTypes returns a snapshot of the v1 evidence-type registry,
+// including the default strength for each entry. Callers — chiefly CLI
+// help printers — use this to render discoverable documentation so the
+// registry remains the single source of truth (RECOMMENDED 7).
+func AllEvidenceTypes() []evidenceType {
+	out := make([]evidenceType, len(evidenceTypeRegistry))
+	copy(out, evidenceTypeRegistry)
+	return out
+}
+
+// EvidenceTypeHelp renders a human-readable summary of the v1 evidence
+// types, including their default strength and a short semantic gloss.
+// The string is suitable for `mpm help evidence` / `mpm evidence --help`
+// / CLI usage strings without further formatting.
+func EvidenceTypeHelp() string {
+	glosses := map[string]string{
+		"observation":        "agent observation (default strength too low to verify alone; needs corroboration)",
+		"test":               "designated verifier — passing test result (sufficient to verify on its own)",
+		"reproduction":       "designated verifier — independent reproduction of the outcome",
+		"challenge":          "negative evidence — flags the artifact as contradicted; moves verified → contradicted",
+		"decision_outcome":   "designated verifier — observed downstream outcome of a decision",
+		"external_reference": "pointer to an external document / API response (moderate weight)",
+	}
+	out := "v1 evidence types (single source of truth: internal/core/evidence.go):\n"
+	for _, e := range AllEvidenceTypes() {
+		gloss, ok := glosses[e.Name]
+		if !ok {
+			gloss = "(no description)"
+		}
+		out += fmt.Sprintf("  %-20s default strength %+.2f   %s\n", e.Name, e.Strength, gloss)
+	}
+	return out
 }

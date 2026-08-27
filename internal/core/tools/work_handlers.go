@@ -54,9 +54,39 @@ func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 }
 
 func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
-	works, err := dm.ListWorks()
+	// Support status filtering: "open" (default), "done", "cancelled", "all".
+	// The legacy ListWorks only returned open, which prevented reliable
+	// listing of completed work (validation suite P2).
+	status, _ := p["status"].(string)
+	if status == "" {
+		// Maintain backward compatibility: default to open when no status supplied.
+		// Callers that want all should pass status="all".
+		status = "open"
+	}
+	var works []*mpminternal.Work
+	var err error
+	if status == "all" {
+		works, err = dm.ListAllWorks()
+	} else {
+		works, err = dm.ListWorksByStatus(status)
+	}
 	if err != nil {
 		return nil, err
+	}
+	// Optional limit param.
+	if limVal, ok := p["limit"]; ok {
+		var limit int
+		switch v := limVal.(type) {
+		case float64:
+			limit = int(v)
+		case int:
+			limit = v
+		case int64:
+			limit = int(v)
+		}
+		if limit > 0 && limit < len(works) {
+			works = works[:limit]
+		}
 	}
 	result := make([]map[string]interface{}, len(works))
 	for i, w := range works {
@@ -109,9 +139,11 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	// Record git state as audit evidence, then derive verification.
-	// Git is one evidence source among equals; it never auto-verifies.
-	dm.RecordGitEvidenceForWork(workID)
+	// P3 fix: do not auto-record git evidence on complete — it inflated
+	// verification to 'partial' for false completions (claim without outcome).
+	// Git evidence is still recorded via explicit observation paths and via
+	// external git commit detection; auto-inflation on every lifecycle
+	// transition is removed so verification reflects only outcome evidence.
 	if _, err := dm.DeriveWorkVerification(workID); err != nil {
 		// Non-fatal: verification stays at its last known value.
 	}
@@ -135,8 +167,10 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if _, err := dm.CancelWorkWithContext(workID, note, ac); err != nil {
 		return nil, err
 	}
-	// Explicit evidence route for cancellation as well
-	dm.RecordGitEvidenceForWork(workID)
+	// P3 fix: same as complete — do not auto-inflate verification via git
+	// on cancel. Cancellation already locks verification below verified via
+	// DeriveWorkVerification's lifecycle gate; audit evidence remains in
+	// history but does not promote verification.
 	if _, err := dm.DeriveWorkVerification(workID); err != nil {
 		// Non-fatal.
 	}
