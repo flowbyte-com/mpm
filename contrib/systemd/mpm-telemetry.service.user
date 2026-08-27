@@ -38,8 +38,15 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# run/ dir must exist; mkdir is done by the install step.
-# telemetry.db is created by the process on first boot.
+# Ensure the runtime directory exists before ExecStart. install.sh creates
+# %h/.mpm and %h/.mpm/src/db but not %h/.mpm/run; this guards against
+# fresh-machine cold start (no %h/.mpm at all), partial installs where the
+# data root exists but run/ was wiped, and first-boot races where the unit
+# fires before the operator has run install.sh. -p is idempotent so this is
+# safe on every restart.
+# telemetry.db itself is created by SQLite once its parent dir exists; do
+# not pre-create it here.
+ExecStartPre=/usr/bin/mkdir -p %h/.mpm/run
 ReadWritePaths=%h/.mpm %h/.mpm/run
 Restart=on-failure
 RestartSec=5s
