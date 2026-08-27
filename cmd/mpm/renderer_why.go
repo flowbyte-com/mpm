@@ -139,6 +139,19 @@ func (r *WhyRenderer) renderProvenance(p *WhyProvenance) {
 	if p.SessionID != "" {
 		fmt.Fprintf(r.out, "  session_id : %s\n", p.SessionID)
 	}
+	fmt.Fprintf(r.out, "  framework  : %s\n", orUnknown(p.FrameworkName))
+	fmt.Fprintf(r.out, "  adapter    : %s\n", orUnknown(p.FrameworkAdapter))
+	fmt.Fprintf(r.out, "  model      : %s\n", orUnknown(p.ModelName))
+}
+
+// orUnknown returns v when non-empty, "(unknown)" otherwise. Used so the
+// provenance panel always reads as "complete with NULL fallbacks" rather
+// than disappearing entirely when a legacy artifact predates the column.
+func orUnknown(v string) string {
+	if v == "" {
+		return "(unknown)"
+	}
+	return v
 }
 
 func (r *WhyRenderer) renderEvidence(rows []EvidenceRow) {

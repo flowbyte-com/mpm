@@ -76,11 +76,14 @@ type WhyIdentity struct {
 // WhyProvenance is the time + agency shape. Rendered as the second
 // section.
 type WhyProvenance struct {
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	LastAccessed *time.Time
-	CreatedBy    string
-	SessionID    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	LastAccessed    *time.Time
+	CreatedBy       string
+	SessionID       string
+	FrameworkName    string // from artifact_provenance.framework_name
+	FrameworkAdapter string // from artifact_provenance.framework_adapter (e.g., "opencode-mcp")
+	ModelName        string // from artifact_provenance.model_name
 }
 
 // EvidenceRow is one observation attached to this artifact. Source-
@@ -159,6 +162,17 @@ func (s *WhyService) Explain(id string) (*WhyReport, error) {
 		report.Provenance = provenanceFromMap(artifactMap)
 	}
 
+	// Overlay framework/model provenance from artifact_provenance when available.
+	if prov := s.loadArtifactProvenance(id, report.ArtifactKind); prov != nil {
+		if report.Provenance == nil {
+			report.Provenance = prov
+		} else {
+			report.Provenance.FrameworkName    = prov.FrameworkName
+			report.Provenance.FrameworkAdapter = prov.FrameworkAdapter
+			report.Provenance.ModelName        = prov.ModelName
+		}
+	}
+
 	// Skill ids still use the standard fetch path now (skills live in
 	// the memories collection too) — keep the skill-prefix branch
 	// for backward compatibility but route through the same loader.
@@ -172,6 +186,33 @@ func (s *WhyService) Explain(id string) (*WhyReport, error) {
 // where the divergent loader would go.
 func (s *WhyService) explainSkill(id string, report *WhyReport) (*WhyReport, error) {
 	return s.explainMemoryLike(id, report)
+}
+
+// loadArtifactProvenance fetches framework_name / framework_adapter /
+// model_name from artifact_provenance for the given artifact. Returns
+// an empty struct (NOT an error) when no provenance row exists — that
+// is the common case for legacy rows pre-dating the schema migration.
+// Errors are non-fatal: a transient SQL hiccup must not blank the
+// rest of the why report.
+func (s *WhyService) loadArtifactProvenance(id, kind string) *WhyProvenance {
+	if s.dm == nil {
+		return &WhyProvenance{}
+	}
+	var fw, adapter, model sql.NullString
+	err := s.dm.QueryRowTracked(`
+		SELECT framework_name, framework_adapter, model_name
+		FROM artifact_provenance
+		WHERE artifact_id = ? AND artifact_type = ?
+		LIMIT 1
+	`, id, kind).Scan(&fw, &adapter, &model)
+	if err != nil {
+		return &WhyProvenance{} // no row OR transient error — both surface as "(unknown)"
+	}
+	return &WhyProvenance{
+		FrameworkName:    fw.String,
+		FrameworkAdapter: adapter.String,
+		ModelName:        model.String,
+	}
 }
 
 // explainMemoryLike handles memory/decision/theory (all live in the
