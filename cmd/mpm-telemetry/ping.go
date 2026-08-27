@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -16,9 +15,9 @@ func runPing(args []string) error {
 	if workspace == "" {
 		return fmt.Errorf("MPM_WORKSPACE is required")
 	}
-	socketPath := os.Getenv("MPM_TELEMETRY_SOCKET")
+	socketPath := defaultTelemetrySocketPath()
 	if socketPath == "" {
-		socketPath = filepath.Join(workspace, "runtime", "mpm-telemetry.sock")
+		return fmt.Errorf("could not derive telemetry socket path (set MPM_TELEMETRY_SOCKET or MPM_WORKSPACE)")
 	}
 
 	dialer := net.Dialer{Timeout: 2 * time.Second}
