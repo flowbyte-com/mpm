@@ -2774,6 +2774,21 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 // other insert-time invariants live here so future fields added to
 // the memories schema automatically reach every caller.
 func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+	// Alpha remediation (2026-08-27): reject empty / whitespace-only content.
+	// The validation run found that `mpm remember ""` and `mpm add "   "`
+	// both create memories. A persisted memory must contain meaningful
+	// non-whitespace content; this invariant is enforced here, the single
+	// canonical INSERT primitive, so every caller is protected
+	// structurally rather than by call-site discipline. The audit row is
+	// emitted before the sensitive / poison scanners so the validation
+	// message is distinct from a security block.
+	if reason := validateMemoryContent(content); reason != "" {
+		dm.LogAudit(AuditWarn, "validation", "empty or whitespace-only memory content rejected", "", AuditContext{
+			"reason":    reason,
+			"len_chars": len(content),
+		})
+		return "", fmt.Errorf("memory content is empty or whitespace-only (%s) — provide non-whitespace text", reason)
+	}
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
 			"reason":    reason,
