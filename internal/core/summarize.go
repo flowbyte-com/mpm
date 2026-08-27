@@ -24,3 +24,19 @@ func SummarizeMemory(content string, maxChars int) string {
 func SummarizeWork(title string, maxChars int) string {
 	return SummarizeBounded(title, maxChars)
 }
+
+// SummarizeMemoryWithEllipsis truncates content to maxChars runes and appends
+// a fixed suffix when truncation occurred, so callers can flag bounded echoes
+// without an external boolean round-trip. Empty input never gets the suffix.
+// Multibyte-safe: cut point lands on a rune boundary.
+func SummarizeMemoryWithEllipsis(content string, maxChars int) (string, bool) {
+	if maxChars <= 0 {
+		return "", false
+	}
+	runes := []rune(content)
+	if len(runes) <= maxChars {
+		return content, false
+	}
+	const suffix = "... [truncated, resolve pointer for full text]"
+	return string(runes[:maxChars]) + suffix, true
+}
