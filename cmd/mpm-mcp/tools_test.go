@@ -26,17 +26,25 @@ import (
 )
 
 // mockBlobStore records calls to Put and generates unique IDs for each Put.
+//
+// Concurrency: Put is called from many goroutines in
+// TestMultiMCP_NoSilentInconsistency. mu protects the slice and putErr;
+// putCount uses sync/atomic for lock-free increment. The race detector
+// flagged the unsynchronised append on putCalls.
 type mockBlobStore struct {
+	mu       sync.Mutex
 	putCalls []struct {
 		ctx    context.Context
 		reader io.Reader
 		meta   blobstore.Metadata
 	}
-	putErr  error
+	putErr   error
 	putCount uint64 // atomic counter for unique IDs
 }
 
 func (m *mockBlobStore) Put(ctx context.Context, r io.Reader, meta blobstore.Metadata) (blobstore.Pointer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.putErr != nil {
 		return blobstore.Pointer{}, m.putErr
 	}
