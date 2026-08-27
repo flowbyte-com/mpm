@@ -2,6 +2,18 @@
 
 OpenCode plugin that wires MPM's cognitive substrate in as 16 typed tools.
 
+## Parity with Claude Code Integration
+
+This plugin achieves functional parity with the [Claude Code integration](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md) through OpenCode's hook system:
+
+| Claude Code Mechanism | OpenCode Equivalent |
+|---|---|
+| `SessionStart` hook → `mpm-wake.sh` | `experimental.chat.system.transform` hook → injects wake context into system prompt |
+| `MPM_PROVENANCE_*` env vars from `CLAUDE_*` runtime vars | `shell.env` hook + per-call provenance in `callMpmWithProvenance` |
+| Session End ≠ Claimed Complete (semantic contract) | Same contract applies — use `mpm_work complete` explicitly |
+
+The OpenCode plugin provides **automatic wake context injection** at session start (via `experimental.chat.system.transform`) and **provenance tracking** for all MPM calls (via `shell.env` hook and per-call env vars), matching the Claude Code integration's behavior.
+
 ## Coverage
 
 **16 OpenCode tools registered**, in two layers:
@@ -88,6 +100,60 @@ Triggers DEGRADED on:
 - `payload.ok === false`
 - `payload.scheduler.state !== "ok"`
 - `payload.scheduler.last_status === "error"`
+
+## Hooks: Wake Context & Provenance
+
+### `experimental.chat.system.transform` — Wake Context Injection
+
+This hook runs at the start of each chat session and injects the MPM wake context into the system prompt. It calls `mpm_context.read_wake_context` with `format: "system-prompt"` and adds the returned context to the system prompt array.
+
+- Only injects once per session (cached by `sessionID`)
+- Mirrors the Claude Code `SessionStart` hook that runs `mpm-wake.sh`
+- The wake context includes: active mode, persona, pending work, and recent memories
+
+### `shell.env` — Provenance Environment Variables
+
+This hook sets `MPM_PROVENANCE_*` environment variables for shell commands, ensuring that any `mpm call` invoked directly from the shell (e.g., user typing commands) has proper provenance tracking.
+
+Variables set:
+| Variable | Value |
+|---|---|
+| `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
+| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
+
+Additionally, **every programmatic tool call** (via the 16 registered tools) includes provenance env vars via `callMpmWithProvenance`:
+| Variable | Value |
+|---|---|
+| `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
+| `MPM_PROVENANCE_MODEL` | Current model ID (e.g., `deepseek-v4-flash-free`) |
+| `MPM_PROVENANCE_INVOCATION_ID` | Unique per-call UUID (`inv_...`) |
+| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
+
+These match the [Claude Code integration's provenance variables](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md#12-provenance-environment-variables).
+
+### Semantic Contract: Session End ≠ Claimed Complete
+
+> **An OpenCode session ending does not automatically emit `claimed_complete`.**
+> Only emit it when the agent explicitly closes work via `mpm call mpm_work` with `{"action":"complete","params":{"work_id":"..."}}`.
+
+This is the same semantic contract as the [Claude Code integration](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md#33-semantic-contract-session-end--claimed-complete). A session ending is a lifecycle event, not an epistemic one — the agent may have been interrupted, hit a timeout, or simply run out of context. Emitting `claimed_complete` on session end would silently undo the verification model.
+
+The correct pattern:
+```
+OpenCode starts
+    ↓
+MPM wake context injected into session (via system.transform hook)
+    ↓
+OpenCode works; may record evidence via mpm call tools
+    ↓
+OpenCode explicitly calls: mpm call mpm_work --payload '{"action":"complete","params":{"work_id":"xyz"}}'
+    ↓
+MPM emits WorkEventTypeClaimedComplete
+    ↓
+Evidence accumulates in background
+    ↓
+MPM DeriveWorkVerification derives verification status
+```
 
 ## What replaces
 

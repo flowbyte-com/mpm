@@ -33,6 +33,7 @@
 import { spawn } from "node:child_process";
 import { tool } from "@opencode-ai/plugin";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
+import type { Model } from "@opencode-ai/sdk";
 
 // --------------------------------------------------------------------------
 // Subprocess adapter
@@ -41,6 +42,9 @@ import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const HEALTH_CHECK_TIMEOUT_MS = 2_000;
 const MP_MEMORY_PATH_PREFIX = "mpm://"; // reserved for any future virtual-path use
+
+// Session wake context cache — only inject once per session
+const wakeContextCache = new Map<string, string>();
 
 interface MpmCallResult {
 	success: boolean;
@@ -61,7 +65,7 @@ function callMpm(
 	bin: string,
 	toolName: string,
 	payload: Record<string, unknown>,
-	opts: { timeoutMs?: number } = {},
+	opts: { timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<MpmCallResult> {
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const json = JSON.stringify(payload);
@@ -81,6 +85,7 @@ function callMpm(
 		try {
 			child = spawn(bin, ["call", toolName, "--payload", json], {
 				stdio: ["ignore", "pipe", "pipe"],
+				env: opts.env,
 			});
 		} catch (err) {
 			finish({
@@ -174,6 +179,75 @@ function jsonToText(payload: unknown): string {
 	const obj = payload as Record<string, unknown>;
 	const text = JSON.stringify(obj, null, 2);
 	return text.length > 8000 ? text.slice(0, 8000) + "\n…(truncated)" : text;
+}
+
+// --------------------------------------------------------------------------
+// Wake context injection (OpenCode equivalent of Claude Code SessionStart hook)
+// --------------------------------------------------------------------------
+
+/**
+ * Fetch wake context from MPM for system prompt injection.
+ * Mirrors the Claude Code `mpm-wake.sh` script behavior.
+ * Returns the human-readable context string, or empty string on failure.
+ */
+async function fetchWakeContext(bin: string): Promise<string> {
+	const r = await callMpm(
+		bin,
+		"mpm_context",
+		{ action: "read_wake_context", params: { format: "system-prompt" } },
+		{ timeoutMs: 5_000 },
+	);
+	if (!r.success || r.payload === null) {
+		return "";
+	}
+	// The mpm_context read_wake_context returns the context directly as a string
+	// (not wrapped in an envelope). Extract the text content.
+	const payload = r.payload as { context?: string; text?: string };
+	return payload?.context ?? payload?.text ?? "";
+}
+
+/**
+ * Build provenance environment variables for MPM calls.
+ * Mirrors the Claude Code integration's MPM_PROVENANCE_* variables.
+ * OpenCode doesn't have direct equivalents to CLAUDE_* runtime vars,
+ * so we derive what we can from the plugin context and model info.
+ */
+function buildProvenanceEnv(model?: Model, sessionID?: string): Record<string, string> {
+	const env: Record<string, string> = {
+		MPM_PROVENANCE_FRAMEWORK: "opencode",
+	};
+	if (model?.id) {
+		env.MPM_PROVENANCE_MODEL = model.id;
+	}
+	if (sessionID) {
+		env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionID;
+	}
+	// Generate a unique invocation ID for this call
+	env.MPM_PROVENANCE_INVOCATION_ID = `inv_${crypto.randomUUID()}`;
+	return env;
+}
+
+/**
+ * Create a callMpm variant that includes provenance environment variables.
+ */
+function callMpmWithProvenance(
+	bin: string,
+	toolName: string,
+	payload: Record<string, unknown>,
+	opts: { timeoutMs?: number; model?: Model; sessionID?: string } = {},
+): Promise<MpmCallResult> {
+	const { model, sessionID, timeoutMs } = opts;
+	const provenanceEnv = buildProvenanceEnv(model, sessionID);
+	// process.env has string | undefined values; we need Record<string, string>
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	Object.assign(env, provenanceEnv);
+	return callMpm(bin, toolName, payload, {
+		timeoutMs,
+		env,
+	});
 }
 
 // --------------------------------------------------------------------------
@@ -280,9 +354,12 @@ function registerDomainTool(
 	tools[spec.name] = tool({
 		description: spec.description,
 		args: domainToolSchema(),
-		async execute(args, _ctx) {
+		async execute(args, ctx) {
 			const { action, params: body } = args as { action: string; params?: Record<string, unknown> };
-			const r = await callMpm(bin, spec.name, { action, params: body ?? {} });
+			// Pass model and sessionID for provenance tracking
+			const model = (ctx as { model?: Model }).model;
+			const sessionID = (ctx as { sessionID?: string }).sessionID;
+			const r = await callMpmWithProvenance(bin, spec.name, { action, params: body ?? {} }, { model, sessionID });
 			if (!r.success) {
 				return formatFailure(spec.name, r);
 			}
@@ -488,8 +565,10 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 			scope: tool.schema.enum(["all", "local", "shared"]).optional().describe("Optional scope filter."),
 			trace: tool.schema.boolean().optional().describe("When true, returns the 3-stage pipeline diagnostic."),
 		},
-		async execute(args, _ctx) {
-			const r = await callMpm(bin, "explain_retrieval", (args as Record<string, unknown>) ?? {});
+		async execute(args, ctx) {
+			const model = (ctx as { model?: Model }).model;
+			const sessionID = (ctx as { sessionID?: string }).sessionID;
+			const r = await callMpmWithProvenance(bin, "explain_retrieval", (args as Record<string, unknown>) ?? {}, { model, sessionID });
 			if (!r.success) return formatFailure("explain_retrieval", r);
 			return jsonToText(r.payload);
 		},
@@ -502,8 +581,10 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 			commit_hash: tool.schema.string().describe("Git commit SHA to associate."),
 			tags: tool.schema.union([tool.schema.string(), tool.schema.array(tool.schema.string())]).optional().describe("Tags as comma-separated string OR a JSON array of strings."),
 		},
-		async execute(args, _ctx) {
-			const r = await callMpm(bin, "log_to_changelog", (args as Record<string, unknown>) ?? {});
+		async execute(args, ctx) {
+			const model = (ctx as { model?: Model }).model;
+			const sessionID = (ctx as { sessionID?: string }).sessionID;
+			const r = await callMpmWithProvenance(bin, "log_to_changelog", (args as Record<string, unknown>) ?? {}, { model, sessionID });
 			if (!r.success) return formatFailure("log_to_changelog", r);
 			return jsonToText(r.payload);
 		},
@@ -519,16 +600,59 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 			strategy: tool.schema.literal("parallel").optional().describe("Must be 'parallel' (v0.1)."),
 			timeout_secs: tool.schema.number().optional().describe("Optional total timeout in seconds."),
 		},
-		async execute(args, _ctx) {
-			const r = await callMpm(bin, "request_review", (args as Record<string, unknown>) ?? {});
+		async execute(args, ctx) {
+			const model = (ctx as { model?: Model }).model;
+			const sessionID = (ctx as { sessionID?: string }).sessionID;
+			const r = await callMpmWithProvenance(bin, "request_review", (args as Record<string, unknown>) ?? {}, { model, sessionID });
 			if (!r.success) return formatFailure("request_review", r);
 			return jsonToText(r.payload);
 		},
 	});
 
-	return { tool: tools };
+	// ---------- Hooks: Wake context injection & Provenance ------------------
+
+	/**
+	 * Hook: experimental.chat.system.transform
+	 * Injects MPM wake context into the system prompt at session start.
+	 * This is the OpenCode equivalent of Claude Code's SessionStart hook
+	 * that runs `mpm-wake.sh` to inject wake context.
+	 *
+	 * Only injects once per session (cached by sessionID).
+	 */
+	async function systemTransform(input: { sessionID?: string; model: Model }, output: { system: string[] }) {
+		if (!input.sessionID) return;
+		if (wakeContextCache.has(input.sessionID)) return;
+
+		const context = await fetchWakeContext(bin);
+		if (context) {
+			wakeContextCache.set(input.sessionID, context);
+			output.system.push(context);
+		}
+	}
+
+	/**
+	 * Hook: shell.env
+	 * Sets MPM_PROVENANCE_* environment variables for shell commands.
+	 * Mirrors the Claude Code integration's provenance env vars.
+	 * This ensures that any mpm calls made via shell (e.g., user typing
+	 * `mpm call ...` directly) have proper provenance tracking.
+	 */
+	async function shellEnv(input: { cwd: string; sessionID?: string; callID?: string }, output: { env: Record<string, string> }) {
+		// We don't have model info here, but we can at least set the framework
+		// and session ID. The model-specific vars are set in callMpmWithProvenance
+		// for programmatic tool calls.
+		const provenanceEnv = buildProvenanceEnv(undefined, input.sessionID);
+		Object.assign(output.env, provenanceEnv);
+	}
+
+	return {
+		tool: tools,
+		"experimental.chat.system.transform": systemTransform,
+		"shell.env": shellEnv,
+	};
 };
 
 export default {
+	id: "opencode-mpm",
 	server: OpenCodeMpmPlugin,
 } satisfies PluginModule;
