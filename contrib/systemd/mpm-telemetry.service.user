@@ -29,7 +29,7 @@ ExecStart=%h/.mpm/bin/mpm-telemetry serve
 # Runtime paths
 Environment=MPM_WORKSPACE=%h/.mpm
 Environment=MPM_DB_PATH=%h/.mpm/src/db/mpm.db
-Environment=MPM_TELEMETRY_SOCKET=%h/.mpm/run/mpm-telemetry.sock
+Environment=MPM_TELEMETRY_SOCKET=%h/.mpm/runtime/mpm-telemetry.sock
 Environment=MPM_TELEMETRY_DB=%h/.mpm/telemetry.db
 
 EnvironmentFile=-%h/.config/mpm/mpm.env
@@ -39,15 +39,15 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 # Ensure the runtime directory exists before ExecStart. install.sh creates
-# %h/.mpm and %h/.mpm/src/db but not %h/.mpm/run; this guards against
+# %h/.mpm and %h/.mpm/src/db but not %h/.mpm/runtime; this guards against
 # fresh-machine cold start (no %h/.mpm at all), partial installs where the
-# data root exists but run/ was wiped, and first-boot races where the unit
+# data root exists but runtime/ was wiped, and first-boot races where the unit
 # fires before the operator has run install.sh. -p is idempotent so this is
 # safe on every restart.
 # telemetry.db itself is created by SQLite once its parent dir exists; do
 # not pre-create it here.
-ExecStartPre=/usr/bin/mkdir -p %h/.mpm/run
-ReadWritePaths=%h/.mpm %h/.mpm/run
+ExecStartPre=/usr/bin/mkdir -p %h/.mpm/runtime
+ReadWritePaths=%h/.mpm %h/.mpm/runtime
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
