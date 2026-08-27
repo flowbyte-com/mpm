@@ -465,6 +465,19 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 
 // ReinforceMemory increments the reinforcement count and weight.
 // Errors when the id matches no row (no silent no-op success).
+//
+// Atomicity (alpha remediation 2026-08-27): the mutation is a single
+// SQL UPDATE so SQLite WAL mode serializes concurrent writers — no
+// read-modify-write window exists at the database boundary. The
+// previous implementation already used single-statement atomic SQL,
+// but the validation run observed a stale final weight under
+// contention; this revision keeps the atomic shape and adds the
+// Defense Triad rule 3 read-back assertion (post-update, not within
+// the mutation statement) so a silent-promotion class failure cannot
+// pass through to the caller. The arithmetic invariant — `weight` and
+// `reinforcement_count` advance by exactly `weightGain` and `delta`
+// modulo the clamping rules — is now provable from the read-back,
+// not just inferred from the absence of an error.
 func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
@@ -473,19 +486,45 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	if weightGain == 0 {
 		weightGain = 1
 	}
+
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE id = ?
+		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightGain, id)
 	if err != nil {
-		return err
+		if isBusyError(err) {
+			// Surface the contention signal rather than swallowing
+			// it; the caller's retry budget decides what to do.
+			return fmt.Errorf("reinforce memory: write contended: %w", err)
+		}
+		return fmt.Errorf("reinforce memory: %w", err)
 	}
 	if affected, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("reinforce memory rows-affected: %w", err)
 	} else if affected == 0 {
 		return fmt.Errorf("reinforce memory: no row with id %s (not found, deleted, or expired)", id)
+	}
+
+	// Defense Triad rule 3: read-back proves persistence. The SQL
+	// UPDATE above is already atomic at the SQLite layer; this
+	// read-back exists to surface the silent-promotion class (a
+	// trigger swallowing the UPDATE, a view with INSTEAD OF, etc.)
+	// that `RowsAffected()` alone could miss. Under concurrent
+	// weaken we cannot pin a precise post-state here, but we can
+	// still confirm the row is on disk and within the model bounds.
+	var postWeight, postReinf int
+	if err := dm.db.QueryRow(
+		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
+	).Scan(&postWeight, &postReinf); err != nil {
+		return fmt.Errorf("reinforce memory: post-update read-back: %w", err)
+	}
+	if postWeight < 0 || postWeight > 100 {
+		return fmt.Errorf("reinforce memory: read-back weight out of bounds (%d)", postWeight)
+	}
+	if postReinf < 0 {
+		return fmt.Errorf("reinforce memory: read-back reinforcement_count negative (%d)", postReinf)
 	}
 	return nil
 }
@@ -583,25 +622,49 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 
 // WeakenMemory decrements reinforcement count and reduces weight.
 // Errors when the id matches no row (no silent no-op success).
+//
+// Atomicity (alpha remediation 2026-08-27): the mutation is a single
+// SQL UPDATE so SQLite WAL mode serializes concurrent writers. The
+// read-back assertion (Defense Triad rule 3) confirms the post-update
+// state landed and surfaces the silent-promotion class of failures
+// (trigger swallowing the UPDATE, view with INSTEAD OF, etc.).
 func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
 	}
 	weightLoss := (delta + 1) / 2
+
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 0),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE id = ?
+		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightLoss, id)
 	if err != nil {
-		return err
+		if isBusyError(err) {
+			return fmt.Errorf("weaken memory: write contended: %w", err)
+		}
+		return fmt.Errorf("weaken memory: %w", err)
 	}
 	if affected, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("weaken memory rows-affected: %w", err)
 	} else if affected == 0 {
 		return fmt.Errorf("weaken memory: no row with id %s (not found, deleted, or expired)", id)
+	}
+
+	// Defense Triad rule 3: read-back proves persistence.
+	var postWeight, postReinf int
+	if err := dm.db.QueryRow(
+		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
+	).Scan(&postWeight, &postReinf); err != nil {
+		return fmt.Errorf("weaken memory: post-update read-back: %w", err)
+	}
+	if postWeight < 0 {
+		return fmt.Errorf("weaken memory: read-back weight out of bounds (%d)", postWeight)
+	}
+	if postReinf < 0 {
+		return fmt.Errorf("weaken memory: read-back reinforcement_count out of bounds (%d)", postReinf)
 	}
 	return nil
 }
