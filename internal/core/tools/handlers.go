@@ -410,11 +410,15 @@ func defaultScope(s string) string {
 	}
 }
 
-// callChallengeMemory weakens a memory and creates a pending theory.
+// handleChallengeMemory weakens a memory and creates a pending theory.
+// Canonical wire param is `memory_id` (snake_case); see the wire-format
+// block above handleShredMemory. The dispatcher normalizes the legacy
+// `memoryId` alias onto `memory_id`, so this handler only reads the
+// canonical form.
 func handleChallengeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	memoryID, _ := p["memoryId"].(string)
+	memoryID, _ := p["memory_id"].(string)
 	if memoryID == "" {
-		return nil, fmt.Errorf("memoryId is required")
+		return nil, fmt.Errorf("memory_id is required")
 	}
 	evidence, _ := p["evidence"].(string)
 
@@ -3774,19 +3778,13 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	}
 	action, _ := payload["action"].(string)
 
-	// D6 fix (2026-08-25): the registry schema documents BOTH `memory_id`
-	// and `memoryId`, but each id-taking action accepted exactly one
-	// spelling. Canonical wire format is snake_case `memory_id` (see the
-	// wire-format block above handleShredMemory); challenge is the lone
-	// camelCase consumer. Accept both everywhere: alias camelCase onto
-	// snake_case for every action EXCEPT challenge (which aliases the
-	// other way). Existing callers are unaffected; schema-guided callers
-	// can no longer pick a rejected spelling.
-	if action == "challenge" {
-		normalizeCamelCaseKeys(params, map[string]string{"memory_id": "memoryId"})
-	} else {
-		normalizeCamelCaseKeys(params, map[string]string{"memoryId": "memory_id"})
-	}
+	// Wire-format (2026-08-25 D6 + 2026-08-27 F4 convergence): canonical
+	// input field name is snake_case `memory_id`. Legacy camelCase
+	// `memoryId` callers are normalized onto the canonical form on every
+	// action. The challenge action previously aliased the other way
+	// (snake_case → camelCase) — that asymmetry was the F4 rough edge.
+	// Now every action routes through the same single mapping below.
+	normalizeCamelCaseKeys(params, map[string]string{"memoryId": "memory_id"})
 
 	switch action {
 	case "save":
@@ -3812,11 +3810,8 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	case "synthesize":
 		return handleSynthesizeMemory(dm, ac, params)
 	case "challenge":
-		// Normalize snake_case to camelCase for the underlying handler.
-		// Routed through the named helper (rather than inline writes)
-		// so the schema-guard AST walker doesn't false-positive on
-		// dispatcher body as "unread handler payload keys".
-		normalizeCamelCaseKeys(params, map[string]string{"memory_id": "memoryId"})
+		// Dispatcher already normalized memoryId → memory_id above;
+		// handler reads the canonical snake_case key.
 		return handleChallengeMemory(dm, ac, params)
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
