@@ -545,6 +545,12 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
 		return 0
+	case "evidence":
+		// RECOMMENDED 7: surface the canonical evidence-type
+		// documentation under `mpm help evidence` so the vocabulary
+		// is discoverable without grepping source.
+		fmt.Println(mpminternal.EvidenceTypeHelp())
+		return 0
 	case "ops":
 		printOpsHelp()
 		return 0
@@ -605,6 +611,12 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		fmt.Println("Usage: mpm challenge <id> <evidence>")
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
+		return 0
+	case "evidence":
+		// RECOMMENDED 7: surface the canonical evidence-type
+		// documentation under `mpm help evidence` so the vocabulary
+		// is discoverable without grepping source.
+		fmt.Println(mpminternal.EvidenceTypeHelp())
 		return 0
 	case "ops":
 		printOpsHelp()

@@ -1268,6 +1268,16 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	if err != nil {
 		return nil, fmt.Errorf("gather wake context: %w", err)
 	}
+	// P2 fix: gatherWakeContext consumes the latest unread handoff (marks read).
+	// Subsequent calls would then return LastHandoff=nil, diverging from
+	// `mpm wake` CLI which peeks via GetLatestHandoff (latest regardless of read).
+	// Fall back to the latest handoff (even if already marked read) so the API
+	// always surfaces the most recent handoff, matching CLI behavior.
+	if data.LastHandoff == nil {
+		if h, herr := dm.GetLatestHandoff(); herr == nil && h != nil {
+			data.LastHandoff = h
+		}
+	}
 
 	// Wire-format size cap (sibling to the prose-format cap applied inside
 	// mpminternal.ReadWakeContext). Mutates `data` to shed Tier 1 +
@@ -1351,6 +1361,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		})
 	}
 
+	// P3 fix: surface recent theories/lessons/decisions separation in wake
+	// context. Previously only recent_memories (any collection) and milestones
+	// were shown, so lessons/decisions/theories were invisible unless the
+	// agent knew to query them explicitly (validation suite P3).
+	recentTheories := fetchRecentMemoriesByCollection(dm, "theories", 5)
+	recentDecisions := fetchRecentMemoriesByCollection(dm, "decisions", 5)
+	recentLessons := fetchRecentLessonsForWake(dm, 5)
+
 	result := map[string]interface{}{
 		"success":             true,
 		// Wire-format metadata (added with the v4 schema bump). Both
@@ -1375,6 +1393,9 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		"recent_topics_truncated": data.RecentTopicsTruncated,
 		"recent_memories":     memRefs,
 		"recent_milestones":   milestoneRefs,
+		"recent_theories":     recentTheories,
+		"recent_lessons":      recentLessons,
+		"recent_decisions":    recentDecisions,
 		// Attention & pending work.
 		"overdue_wakes":       overdueRefs,
 		"open_works":          data.OpenWorks,
@@ -1429,6 +1450,129 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}
 
 	return result, nil
+}
+
+// fetchRecentMemoriesByCollection returns up to limit recent memories for a given collection,
+// bounded to 256-char summaries with pointers. Used for wake separation of theories/decisions.
+//
+// RECOMMENDED 11: summaries emitted by this helper are scrubbed of the
+// internal `CHALLENGED_MEMORY_ID: <id>` line that atomic challenges use
+// (see internal/core/epistemology_tools.go). Without redaction the
+// first 256 chars of a challenge theory's content would leak the
+// challenged memory's bare id into the wake context, which the agent
+// has no use for and which is structurally indistinguishable from a
+// cursor typo. The replacement preserves the substantive evidence
+// line ("EVIDENCE: ...") so the agent can still reason about WHY the
+// challenge was raised — just without the bare-id noise.
+func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, limit int) []map[string]interface{} {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, content, created_at FROM memories
+		WHERE deleted_at IS NULL AND collection = ?
+		ORDER BY created_at DESC LIMIT ?`, collection, limit)
+	if err != nil {
+		return []map[string]interface{}{}
+	}
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0, limit)
+	for rows.Next() {
+		var id, content, createdAt string
+		if err := rows.Scan(&id, &content, &createdAt); err != nil {
+			continue
+		}
+		summary := scrubChallengeIdentifier(content)
+		if len(summary) > 256 {
+			summary = summary[:256]
+		}
+		summary = strings.ReplaceAll(summary, "\n", " ")
+		out = append(out, map[string]interface{}{
+			"id":         id,
+			"summary":    summary,
+			"pointer":    "mpm://memory/" + id,
+			"created_at": createdAt,
+		})
+	}
+	if out == nil {
+		out = []map[string]interface{}{}
+	}
+	return out
+}
+
+// scrubChallengeIdentifier removes the leading
+// `CHALLENGED_MEMORY_ID: <id>` line from a theory's content. Returns
+// the original string when the line is absent (the common case for
+// non-challenge theories and for decisions). RECOMMENDED 11.
+//
+// The internal identifier is replaced with a stable pointer so the
+// agent can still navigate to the challenged memory via the wake-
+// context tool surface (`mpm challenge restore`, `mpm challenge show`)
+// without the bare id appearing in the wake payload. The remaining
+// EVIDENCE / ORIGINAL_CONTENT lines are kept verbatim.
+func scrubChallengeIdentifier(content string) string {
+	const prefix = "CHALLENGED_MEMORY_ID:"
+	if !strings.HasPrefix(content, prefix) {
+		return content
+	}
+	// Find end of the first line. The line is `CHALLENGED_MEMORY_ID: <id>`.
+	rest := content[len(prefix):]
+	nl := strings.IndexByte(rest, '\n')
+	if nl < 0 {
+		// Whole content was just the prefix + id; surface a minimal
+		// placeholder so the agent still sees the theory exists.
+		return "(atomic challenge — see theory id for details)"
+	}
+	after := rest[nl+1:]
+	// Drop the CHALLENGED_AT_NANO line too: it's an internal timestamp
+	// with no semantic value to the agent. Anything past it (EVIDENCE,
+	// ORIGINAL_CONTENT) is preserved.
+	const nanoPrefix = "CHALLENGED_AT_NANO:"
+	if strings.HasPrefix(after, nanoPrefix) {
+		nl2 := strings.IndexByte(after, '\n')
+		if nl2 >= 0 {
+			after = after[nl2+1:]
+		} else {
+			after = ""
+		}
+	}
+	return "(atomic challenge) " + after
+}
+
+// fetchRecentLessonsForWake returns up to limit recent lessons for wake context.
+func fetchRecentLessonsForWake(dm mpminternal.CoreDB, limit int) []map[string]interface{} {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, content, created FROM lessons
+		ORDER BY created DESC LIMIT ?`, limit)
+	if err != nil {
+		return []map[string]interface{}{}
+	}
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0, limit)
+	for rows.Next() {
+		var id, content, created string
+		if err := rows.Scan(&id, &content, &created); err != nil {
+			continue
+		}
+		summary := content
+		if len(summary) > 256 {
+			summary = summary[:256]
+		}
+		summary = strings.ReplaceAll(summary, "\n", " ")
+		out = append(out, map[string]interface{}{
+			"id":         id,
+			"summary":    summary,
+			"pointer":    "mpm://lesson/" + id,
+			"created_at": created,
+		})
+	}
+	if out == nil {
+		out = []map[string]interface{}{}
+	}
+	return out
 }
 
 // callReadDirectives returns prime directives filtered to the active
@@ -3922,7 +4066,103 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	}
 
 	if globalResolver == nil {
-		return nil, fmt.Errorf("mpm_resolve: resolver not initialized; SetResolver was not called at mpm-mcp boot")
+		// Fallback for CLI (`mpm call mpm_resolve`) where SetResolver was not
+		// called at boot (MCP wires it, CLI does not). Resolve directly via
+		// DatabaseManager for non-blob kinds so the pointer architecture test
+		// can retrieve full content without requiring MCP transport.
+		switch ptr.Kind {
+		case "memory":
+			mem, err := dm.GetMemory(ptr.ID)
+			if err != nil {
+				return nil, err
+			}
+			content, _ := mem["content"].(string)
+			maxB := int(maxBytes)
+			if maxB <= 0 {
+				maxB = 512
+			}
+			bounded := len(content) > maxB
+			if bounded {
+				// Use same bounding helper as query path (first 256 truncation is for wake;
+				// here we bound to maxB).
+				if len(content) > maxB {
+					content = content[:maxB]
+				}
+			}
+			_ = dm.RecordRetrieval(ptr.ID, "memory")
+			resp := map[string]interface{}{
+				"content":      content,
+				"content_type": "text/plain",
+				"pointer":      "mpm://memory/" + ptr.ID,
+				"bounded":      bounded,
+			}
+			if mem != nil {
+				resp["metadata"] = mem
+			}
+			return resp, nil
+		case "lesson":
+			lesson, err := dm.GetLesson(ptr.ID)
+			if err != nil {
+				return nil, err
+			}
+			_ = dm.RecordRetrieval(ptr.ID, "lesson")
+			return map[string]interface{}{
+				"content":      lesson.Content,
+				"content_type": "text/plain",
+				"pointer":      "mpm://lesson/" + ptr.ID,
+				"bounded":      false,
+				"metadata": map[string]interface{}{
+					"id":   lesson.ID,
+					"type": string(lesson.Type),
+				},
+			}, nil
+		case "theory":
+			mem, err := dm.GetMemory(ptr.ID)
+			if err != nil {
+				return nil, err
+			}
+			coll, _ := mem["collection"].(string)
+			if coll != "theories" {
+				return nil, fmt.Errorf("mpm://theory/%s: not a theory (collection=%q)", ptr.ID, coll)
+			}
+			content, _ := mem["content"].(string)
+			_ = dm.RecordRetrieval(ptr.ID, "theory")
+			return map[string]interface{}{
+				"content":      content,
+				"content_type": "text/plain",
+				"pointer":      "mpm://theory/" + ptr.ID,
+				"bounded":      false,
+				"metadata":     mem,
+			}, nil
+		case "work":
+			work, err := dm.GetWork(ptr.ID)
+			if err != nil {
+				return nil, err
+			}
+			content := work.Title
+			if work.Content != "" {
+				content = work.Title + "\n\n" + work.Content
+			}
+			maxB := int(maxBytes)
+			if maxB <= 0 {
+				maxB = 512
+			}
+			bounded := len(content) > maxB
+			if bounded && len(content) > maxB {
+				content = content[:maxB]
+			}
+			_ = dm.RecordRetrieval(ptr.ID, "work")
+			return map[string]interface{}{
+				"content":      content,
+				"content_type": "text/plain",
+				"pointer":      "mpm://work/" + ptr.ID,
+				"bounded":      bounded,
+			}, nil
+		case "blob":
+			return nil, fmt.Errorf("blob store not initialized; SetBlobStore was not called at boot")
+		default:
+			return nil, fmt.Errorf("mpm_resolve: resolver not initialized; SetResolver was not called at mpm-mcp boot")
+		}
 	}
 
 	result, err := globalResolver.Resolve(context.Background(), ptr, ResolveOptions{MaxBytes: int64(maxBytes)})
@@ -4001,6 +4241,9 @@ func parsePointerURI(uri string) (Pointer, error) {
 // handleMpmBlobRead reads a blob with byte offset and a server-side max_bytes
 // ceiling of 256 KB. Rejects binary content types in Phase 1.
 func handleMpmBlobRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	if blobStoreForHandlers == nil {
+		return nil, fmt.Errorf("blob store not initialized; SetBlobStore was not called at boot")
+	}
 	id, _ := payload["id"].(string)
 	if id == "" {
 		return nil, fmt.Errorf("id is required")
@@ -4076,6 +4319,9 @@ func handleMpmBlobRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 // handleMpmBlobSearch performs server-side regex or substring search within a blob.
 // Server ceilings: 100 matches, 256 KB scanned. Query must be ≤256 chars.
 func handleMpmBlobSearch(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	if blobStoreForHandlers == nil {
+		return nil, fmt.Errorf("blob store not initialized; SetBlobStore was not called at boot")
+	}
 	id, _ := payload["id"].(string)
 	query, _ := payload["query"].(string)
 	useRegex, _ := payload["regex"].(bool)

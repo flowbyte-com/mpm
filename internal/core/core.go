@@ -316,6 +316,8 @@ type CoreDB interface {
 	AddWork(title, content, sessionID string) (*Work, error)
 	GetWork(id string) (*Work, error)
 	ListWorks() ([]*Work, error)
+	ListAllWorks() ([]*Work, error)
+	ListWorksByStatus(status string) ([]*Work, error)
 	// ResolveFrameworkModelForInvocations batch-loads framework/model
 	// provenance for work history display (F16).
 	ResolveFrameworkModelForInvocations(workID string, invocationIDs []string) map[string]WorkFrameworkModel

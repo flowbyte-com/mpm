@@ -4259,11 +4259,13 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 	for rows.Next() {
 		var r MemoryRevision
 		var weight float64
+		var createdAtRaw interface{}
 		if err := rows.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
 			&weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
-			&r.ChallengedTheoryID, &r.CreatedAt); err != nil {
+			&r.ChallengedTheoryID, &createdAtRaw); err != nil {
 			return nil, fmt.Errorf("scanning memory revision row: %w", err)
 		}
+		r.CreatedAt = scanTimestampToUnix(createdAtRaw)
 		r.Weight = int(weight)
 		revisions = append(revisions, r)
 	}
@@ -4271,6 +4273,40 @@ func (dm *DatabaseManager) GetMemoryRevisions(memoryID string) ([]MemoryRevision
 		return []MemoryRevision{}, nil
 	}
 	return revisions, rows.Err()
+}
+
+// scanTimestampToUnix converts a raw database timestamp value (which may be
+// an int64 Unix epoch or a TEXT ISO8601 string) to a Unix epoch int64.
+// This handles the mixed-schema state where some memory_revisions rows have
+// TEXT created_at values and others have INTEGER.
+func scanTimestampToUnix(raw interface{}) int64 {
+	switch v := raw.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case string:
+		if v == "" {
+			return 0
+		}
+		// Try parsing as Unix timestamp first
+		if t, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return t
+		}
+		// Fall back to parsing as time string
+		if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+			return t.Unix()
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t.Unix()
+		}
+		return 0
+	case time.Time:
+		return v.Unix()
+	}
+	return 0
 }
 
 // GetMemoryRevisionAtTime returns the memory revision active at the given
@@ -4308,12 +4344,14 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 
 	var r MemoryRevision
 	var weight float64
+	var createdAtRaw interface{}
 	err = row.Scan(&r.ID, &r.MemoryID, &r.Version, &r.Content,
 		&weight, &r.Collection, &r.IsLongTerm, &r.IsChallenged,
-		&r.ChallengedTheoryID, &r.CreatedAt)
+		&r.ChallengedTheoryID, &createdAtRaw)
 	if err != nil {
 		return nil, nil // no revision found for that time
 	}
+	r.CreatedAt = scanTimestampToUnix(createdAtRaw)
 	r.Weight = int(weight)
 	return &r, nil
 }
@@ -4794,10 +4832,86 @@ func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
 	rows, err := dm.db.Query(`
 		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
 		FROM works WHERE status = 'open'
-		ORDER BY created_at DESC
+		ORDER BY updated_at DESC, created_at DESC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list works: %w", err)
+	}
+	defer rows.Close()
+
+	var works []*Work
+	for rows.Next() {
+		var w Work
+		var content, sessionID, verification sql.NullString
+		var completedAt sql.NullInt64
+		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
+			return nil, fmt.Errorf("scan work row: %w", err)
+		}
+		if content.Valid {
+			w.Content = content.String
+		}
+		if verification.Valid && verification.String != "" {
+			w.Verification = WorkVerification(verification.String)
+		} else {
+			w.Verification = WorkVerificationUnverified
+		}
+		if completedAt.Valid {
+			w.CompletedAt = &completedAt.Int64
+		}
+		if sessionID.Valid {
+			w.SessionID = sessionID.String
+		}
+		works = append(works, &w)
+	}
+	return works, nil
+}
+
+func (dm *DatabaseManager) ListAllWorks() ([]*Work, error) {
+	rows, err := dm.db.Query(`
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
+		FROM works
+		ORDER BY updated_at DESC, created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list all works: %w", err)
+	}
+	defer rows.Close()
+
+	var works []*Work
+	for rows.Next() {
+		var w Work
+		var content, sessionID, verification sql.NullString
+		var completedAt sql.NullInt64
+		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
+			return nil, fmt.Errorf("scan work row: %w", err)
+		}
+		if content.Valid {
+			w.Content = content.String
+		}
+		if verification.Valid && verification.String != "" {
+			w.Verification = WorkVerification(verification.String)
+		} else {
+			w.Verification = WorkVerificationUnverified
+		}
+		if completedAt.Valid {
+			w.CompletedAt = &completedAt.Int64
+		}
+		if sessionID.Valid {
+			w.SessionID = sessionID.String
+		}
+		works = append(works, &w)
+	}
+	return works, nil
+}
+
+func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
+	rows, err := dm.db.Query(`
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
+		FROM works WHERE status = ?
+		ORDER BY updated_at DESC, created_at DESC
+	`, status)
+	if err != nil {
+		return nil, fmt.Errorf("list works by status: %w", err)
 	}
 	defer rows.Close()
 
@@ -4905,8 +5019,8 @@ func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectivePro
 	// don't let that overwrite a real framework from provenance.
 	if base.FrameworkName == "" && ac.FrameworkName != "" {
 		base.FrameworkName = ac.FrameworkName
-	} else if ac.FrameworkName != "" && ac.FrameworkName != "mpm-cli" && ac.FrameworkName != "mcp" {
-		// Explicit framework from ActiveContext (e.g., MPM_FRAMEWORK=claude-code) wins
+	} else if ac.FrameworkName != "" && ac.FrameworkName != "mpm-cli" {
+		// Explicit framework from ActiveContext (e.g., MPM_FRAMEWORK=claude-code or mcp) wins
 		base.FrameworkName = ac.FrameworkName
 	}
 	if ac.InvocationID != "" {
@@ -5107,6 +5221,57 @@ func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
 //
 // This function never fabricates verification; it assesses what is actually
 // observed AND reflects the agent's explicit lifecycle intent.
+// evidenceDesignatedForVerification lists the evidence types that
+// carry sufficient epistemic weight to verify a work item on their
+// own. Mirrors snapshot.go's type-based semantics (any row with
+// type='challenge' is contradicted) and prevents BLOCKER 3
+// (a single default-strength observation promoting verified): an
+// observation's default strength (0.4) is below the corroboration
+// threshold, so observations need a corroborating row — either a
+// designated type, an explicit high-strength observation, or
+// aggregated moderate observations.
+//
+// The set is intentionally limited to the architectural "strong
+// evidence" vocabulary (test, reproduction, decision_outcome). The
+// registry at internal/evidence.go is the source of truth for type
+// validity; this set is a focused subset used for verification only.
+var evidenceDesignatedForVerification = map[string]bool{
+	"test":             true,
+	"reproduction":     true,
+	"decision_outcome": true,
+}
+
+// observationVerifyThreshold is the strength an observation must
+// individually exceed (or collectively sum past — see corroborationSum)
+// to count as verification-grade. Set above the observation registry
+// default (0.4) so a single default-strength observation does NOT promote,
+// but explicit high-strength observations DO.
+const observationVerifyThreshold = 0.7
+
+// corroborationSum is the cumulative observation strength at which
+// multiple weak observations corroborate verification. Three default
+// observations (0.4 × 3 = 1.2) cross this threshold; two (0.8) do not.
+// The threshold intentionally requires at least three independent
+// moderate observations rather than two — preventing "two opinions
+// against one" promotion patterns while still allowing checkpoint-style
+// work to verify.
+const corroborationSum = 1.0
+
+// evidenceIsContradiction returns true for an evidence row that
+// represents an active contradiction. Type-based detection (BLOCKER 2
+// fix) is the canonical path: a row with type='challenge' carries
+// an explicit -0.6 default strength that is sufficient to signal "this
+// artifact is disputed" even though it falls below the strength-only
+// threshold (-0.7) used previously. We also retain the strength-only
+// path so that ad-hoc negative-strength rows still register as
+// contradictions.
+func evidenceIsContradiction(e Evidence) bool {
+	if e.Type == "challenge" {
+		return true
+	}
+	return e.Strength <= -0.7
+}
+
 func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerification, error) {
 	evidence, err := ListEvidenceForArtifact(dm, workID, "work")
 	if err != nil {
@@ -5137,7 +5302,7 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 		// work is neither a verified success nor a partial confidence.
 		var hasContradiction bool
 		for _, e := range evidence {
-			if e.Strength <= -0.7 {
+			if evidenceIsContradiction(e) {
 				hasContradiction = true
 				break
 			}
@@ -5148,11 +5313,40 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 			verification = WorkVerificationUnverified
 		}
 	} else if len(evidence) > 0 {
-		// Classify evidence by source group via the shared registry —
-		// the same vocabulary AddEvidence validates against (F6), so a
-		// value can never reach this switch unclassified.
-		var hasOutcome, hasAudit, hasAction, hasContradiction bool
+		// Walk the evidence set, classifying each row. We track four
+		// orthogonal properties:
+		//   hasContradiction — any challenge row or strongly negative row
+		//   hasDesignated    — any test/reproduction/decision_outcome row
+		//   hasHighObs       — any observation row with strength ≥ 0.7
+		//   observationSum   — cumulative strength of observation rows
+		//   hasOutcome / hasAudit / hasAction — source-group classification
+		// The combination of (hasDesignated || hasHighObs || observationSum ≥ 1.0)
+		// is the verification condition (BLOCKER 3): an observation alone
+		// at default strength cannot verify, but corroboration does.
+		var (
+			hasContradiction bool
+			hasDesignated    bool
+			hasHighObs       bool
+			observationSum   float64
+			hasOutcome       bool
+			hasAudit         bool
+			hasAction        bool
+		)
 		for _, e := range evidence {
+			if evidenceIsContradiction(e) {
+				hasContradiction = true
+			}
+			if evidenceDesignatedForVerification[e.Type] && e.Strength > 0 {
+				hasDesignated = true
+			}
+			if e.Type == "observation" {
+				if e.Strength >= observationVerifyThreshold {
+					hasHighObs = true
+				}
+				if e.Strength > 0 {
+					observationSum += e.Strength
+				}
+			}
 			switch classifySourceGroup(e.SourceGroup) {
 			case SourceGroupClassOutcome:
 				hasOutcome = true
@@ -5161,18 +5355,34 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 			case SourceGroupClassAction:
 				hasAction = true
 			}
-			// Strength near -1 indicates contradiction.
-			if e.Strength <= -0.7 {
-				hasContradiction = true
-			}
 		}
 
 		switch {
 		case hasContradiction:
+			// BLOCKER 2 fix: contradiction takes priority over verification.
+			// A challenge row at default strength (-0.6) was previously
+			// ignored because the verifier used a strength-only check
+			// (-0.7 threshold). The new evidenceIsContradiction helper
+			// recognises both type='challenge' rows and strongly negative
+			// rows, so verification correctly downgrades the moment a
+			// challenge row arrives.
 			verification = WorkVerificationContradicted
-		case hasOutcome:
-			// Outcome observed — sufficient for verified, regardless of audit.
+		case hasOutcome && (hasDesignated || hasHighObs || observationSum >= corroborationSum):
+			// Outcome evidence + corroboration → verified.
+			//
+			// BLOCKER 3 fix: a default-strength observation (0.4) alone
+			// is NOT sufficient. The verification condition requires:
+			//   (a) a designated evidence type (test/reproduction/decision_outcome), OR
+			//   (b) an observation carrying explicit high strength (≥ 0.7), OR
+			//   (c) aggregated observation strength ≥ corroborationSum (1.0)
 			verification = WorkVerificationVerified
+		case hasOutcome && !hasDesignated && !hasHighObs && observationSum < corroborationSum:
+			// Outcome evidence exists but lacks sufficient corroboration.
+			// The audit-trail evidence is preserved (no rows deleted) —
+			// it's just insufficient to assert verified. Report partial so
+			// the operator sees that observation has occurred but does
+			// not yet trust verification.
+			verification = WorkVerificationPartial
 		case hasAudit && !hasOutcome:
 			// Audit evidence exists but no outcome evidence.
 			verification = WorkVerificationPartial

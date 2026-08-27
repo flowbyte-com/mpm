@@ -94,11 +94,16 @@ func handleDecision(args []string) int {
 	case "resolve":
 		usererror.Warn("decision resolution is not yet a substrate primitive — for now, record the alternative as another `mpm decide` call rather than superseding")
 		return 0
+	case "list", "ls", "all":
+		// Singular `mpm decision list` ≡ plural `mpm decisions`. The
+		// list-style verbs route through the plural handler so the
+		// ledger surface has one implementation and one help string.
+		return handleDecisions(rest)
 	case "help", "-h", "--help":
 		printDecisionHelp()
 		return 0
 	default:
-		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, resolve (reserved)", sub)
+		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, resolve (reserved), list", sub)
 		return 1
 	}
 }
@@ -119,11 +124,16 @@ func handleTheory(args []string) int {
 		return handleProposeTheory(rest)
 	case "resolve":
 		return handleResolveTheory(rest)
+	case "list", "ls", "all", "pending", "resolved", "proven", "disproven":
+		// Singular `mpm theory list` ≡ plural `mpm theories [filter]`.
+		// Routes through the plural handler so filter vocabulary is
+		// shared and the listing surface has one implementation.
+		return handleTheories(args)
 	case "help", "-h", "--help":
 		printTheoryHelp()
 		return 0
 	default:
-		usererror.Error("mpm theory: unknown subcommand %q\n  available subcommands: add, resolve", sub)
+		usererror.Error("mpm theory: unknown subcommand %q\n  available subcommands: add, resolve, list, pending, resolved, proven, disproven", sub)
 		return 1
 	}
 }
@@ -179,9 +189,11 @@ func printDecisionHelp() {
 Subcommands:
   add      Record a new decision (alias for record_decision / mpm decide)
   resolve  Reserved for future decision-resolution primitive
+  list     List all decisions (alias for "mpm decisions")
 
 Examples:
   mpm decision add context="..." choice="..." rationale="..."
+  mpm decision list
   mpm decide context="..." choice="..." rationale="..."
   mpm call mpm_decisions --payload '{"action":"save","params":{"context":"...","choice":"...","rationale":"..."}}'`)
 }
@@ -193,10 +205,17 @@ func printTheoryHelp() {
 Subcommands:
   add      Propose a new theory (alias for propose_theory / mpm theorize)
   resolve  Resolve an existing theory (alias for resolve_theory)
+  list     List theories (alias for "mpm theories [filter]")
+  pending  List pending theories only
+  resolved List resolved theories (proven + disproven)
+  proven   List proven theories only
+  disproven List disproven theories only
 
 Examples:
   mpm theory add hypothesis_id=... validation="..."
   mpm theory resolve <hypothesis_id> confirmed
+  mpm theory list
+  mpm theory pending
   mpm theorize hypothesis_id=... validation="..."`)
 }
 

@@ -157,11 +157,13 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 
 // checkWorkingContextOrphans counts scratchpads past decay_at.
 // OK if 0, WARN if 1-2, FAIL if many.
+// P3 fix: use integer epoch comparison (decay_at is INTEGER Unix seconds),
+// not string comparison against 'YYYY-MM-DD HH:MM:SS' which misclassifies.
 func (s *DoctorService) checkWorkingContextOrphans() DoctorCheck {
 	check := DoctorCheck{Name: "Working Context"}
 	var n int
 	err := s.dm.QueryRowTracked(
-		`SELECT COUNT(*) FROM ephemeral_scratchpad WHERE decay_at < strftime('%Y-%m-%d %H:%M:%S', 'now')`,
+		`SELECT COUNT(*) FROM ephemeral_scratchpad WHERE decay_at IS NOT NULL AND decay_at < CAST(strftime('%s','now') AS INTEGER)`,
 	).Scan(&n)
 	if err != nil {
 		check.Status = "WARN"

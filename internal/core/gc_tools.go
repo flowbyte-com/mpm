@@ -255,6 +255,15 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		}
 	}
 
+	// P3 fix: prune expired scratchpads that have lingered past decay_at.
+	// Previously RunGC never touched ephemeral_scratchpad, so the 8
+	// orphaned rows flagged by `mpm doctor` accumulated forever.
+	if !opts.DryRun {
+		if _, err := dm.db.Exec(`DELETE FROM ephemeral_scratchpad WHERE decay_at IS NOT NULL AND decay_at < CAST(strftime('%s','now') AS INTEGER)`); err == nil {
+			// Count is not surfaced in GCRunResult; the doctor check will verify.
+		}
+	}
+
 	// Batch-apply weight updates in a single transaction. Skip entirely
 	// on dry-run — the whole point of dry-run is "show me what would
 	// happen without changing anything."

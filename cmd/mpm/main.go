@@ -110,9 +110,30 @@ const schedulerHealthStaleAfterSecs = 300
 // not_running for the nudge — same operator action either way
 // (`systemctl --user status mpm-scheduler`).
 //
+// RECOMMENDED 13: when the operator has explicitly opted out of the
+// scheduler (e.g. MPM_SCHEDULER_DISABLED=1 in their environment, or
+// the alpha-3 build where the scheduler is intentionally absent), the
+// stalled warning would otherwise fire on every CLI invocation
+// because last_tick is either stale (daemon stopped) or has never
+// been written. The MPM_SCHEDULER_DISABLED gate short-circuits the
+// entire nudge path so the CLI stays quiet for operators who have
+// made a deliberate choice. The env var is read once at nudge-time
+// (not in package init) so test harnesses can flip it between cases
+// without rebuilding.
+//
 // Errors reading the file are swallowed: a passive nudge must NEVER
 // turn a successful CLI invocation into a failure or noise-storm.
 func emitSchedulerHealthWarning(w io.Writer) {
+	// RECOMMENDED 13: explicit opt-out gate. Operators who have
+	// decided not to run the scheduler (alpha-3 build, ephemeral
+	// CI runner, workstation without systemd --user) set
+	// MPM_SCHEDULER_DISABLED=1 and get a clean CLI. Without this
+	// gate, the warning fires on every invocation and trains the
+	// operator to ignore it — which is the exact failure mode the
+	// health nudge exists to prevent.
+	if os.Getenv("MPM_SCHEDULER_DISABLED") == "1" {
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return

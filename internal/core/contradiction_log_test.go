@@ -40,6 +40,12 @@ func newTestDMWithShared(t *testing.T) *DatabaseManager {
 	if _, err := dm.db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS shared", dsn)); err != nil {
 		t.Fatalf("attach shared: %v", err)
 	}
+	// Mirror the production attachShared path: set sharedPath AND
+	// sharedAttached so SharedAttached() reports the attachment. Code
+	// paths that gate on SharedAttached() (e.g., ResolveArbitrationTheory)
+	// need both flags to behave consistently with the production runtime.
+	dm.sharedPath = dsn
+	dm.sharedAttached = true
 	if _, err := dm.db.Exec(SharedContradictionLogDDL); err != nil {
 		t.Fatalf("install contradiction_log: %v", err)
 	}
@@ -586,6 +592,29 @@ func TestResolveArbitrationTheory_RejectsNonTheory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "is not a theory") {
 		t.Errorf("expected 'is not a theory' error, got %v", err)
+	}
+}
+
+// TestResolveArbitrationTheory_RefusesWithoutSharedDB: when the shared
+// DB is not attached (single-instance / local-only mode), the resolver
+// must return a clear "shared DB not attached" message rather than leaking
+// a cryptic "no such table: shared.memories" SQLite error. The arbitration
+// theories live exclusively in the shared substrate; local-only mode is
+// not a valid context for resolving them.
+func TestResolveArbitrationTheory_RefusesWithoutSharedDB(t *testing.T) {
+	dm := newTestDM(t) // no shared attach
+	_, err := dm.ResolveArbitrationTheory("any-theory", "mem-A", "winner is mem-A")
+	if err == nil {
+		t.Fatalf("expected error when shared DB is not attached, got nil")
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("got cryptic SQLite error instead of clear message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shared DB not attached") {
+		t.Errorf("expected 'shared DB not attached' message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "MPM_SHARED_DB") {
+		t.Errorf("expected hint to set MPM_SHARED_DB, got: %v", err)
 	}
 }
 

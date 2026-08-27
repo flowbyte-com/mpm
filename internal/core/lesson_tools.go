@@ -46,6 +46,17 @@ func (dm *DatabaseManager) SearchLessonsLimited(query string) ([]map[string]inte
 }
 
 // ListLessonsFiltered returns lessons of a given type, or all lessons if empty.
+//
+// RECOMMENDED 12: the lesson struct carries structured fact fields
+// (reinforcement_count, source_session_id, retrieval_priority,
+// importance, confidence) that were being silently dropped by the
+// minimal id/type/content/tags/created_at projection. Agents relying
+// on `mpm_lessons list` to triage which lessons are "high confidence
+// practice-grade" vs. "single observation warning" had no way to see
+// those signal fields — they had to query each lesson by id. This
+// projection now exposes the full fact surface, with NULL source_session_id
+// carried as a sql.NullString then unwrapped to a nullable JSON
+// string (matching the Lesson struct's own JSON contract).
 func (dm *DatabaseManager) ListLessonsFiltered(lessonType string) ([]map[string]interface{}, error) {
 	lessons, err := dm.ListLessons(lessonType)
 	if err != nil {
@@ -53,12 +64,23 @@ func (dm *DatabaseManager) ListLessonsFiltered(lessonType string) ([]map[string]
 	}
 	items := make([]map[string]interface{}, 0, len(lessons))
 	for _, l := range lessons {
+		var sourceSession interface{}
+		if l.SourceSessionID.Valid {
+			sourceSession = l.SourceSessionID.String
+		} else {
+			sourceSession = nil
+		}
 		items = append(items, map[string]interface{}{
-			"id":         l.ID,
-			"type":       string(l.Type),
-			"content":    l.Content,
-			"tags":       l.Tags,
-			"created_at": l.Created,
+			"id":                  l.ID,
+			"type":                string(l.Type),
+			"content":             l.Content,
+			"tags":                l.Tags,
+			"created_at":          l.Created,
+			"reinforcement_count": l.ReinforcementCount,
+			"source_session_id":   sourceSession,
+			"retrieval_priority":  l.RetrievalPriority,
+			"importance":          l.Importance,
+			"confidence":          l.Confidence,
 		})
 	}
 	return items, nil

@@ -99,6 +99,14 @@ type WakeContextData struct {
 	// tiebreak is created_at DESC for deterministic ordering. Non-nil
 	// empty slice always emitted per WakeContextData invariant 3.
 	OpenWorks []WakeContextWork `json:"open_works"`
+	// CompletedWorks are work items with status='done', bounded to 5
+	// items, ordered by completed_at DESC (most recently completed
+	// first). RECOMMENDED 10: gives the agent a "what did I just ship"
+	// surface so a fresh session can re-orient against recent
+	// completions without opening the full work history. Cancelled
+	// items are excluded — those belong to a different cognitive
+	// channel ("what got rejected and why").
+	CompletedWorks []WakeContextWork `json:"completed_works"`
 
 	// Constraints & Capabilities — the "what rules apply, what tools".
 	// GlobalRules only populated when MPM_SHARED_DB is attached.
@@ -355,6 +363,7 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	data.GlobalRules = make([]WakeContextRule, 0)
 	data.AvailableSkills = make([]SkillSummary, 0)
 	data.OpenWorks = make([]WakeContextWork, 0)
+	data.CompletedWorks = make([]WakeContextWork, 0)
 
 	// Pull the latest unread handoff. In consume mode the mark-read happens
 	// here so re-reading wake context (e.g. in the same session) doesn't
@@ -403,6 +412,7 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	data.RecentTopics = topics
 	data.AuditSummary = dm.AuditSummary()
 	data.OpenWorks = dm.gatherOpenWorks()
+	data.CompletedWorks = dm.gatherCompletedWorks()
 
 	// Epistemic pressure — single COUNT query against the view plus
 	// the system_config threshold lookup, folded into one sub-millisecond
@@ -574,10 +584,24 @@ func (dm *DatabaseManager) gatherOverdueWakes() []OverdueWake {
 }
 
 // recentMemories returns up to `limit` non-deleted memories ordered newest first.
+//
+// RECOMMENDED 9: structural epistemology collections ('decisions',
+// 'theories') are excluded here because the wake-context render layer
+// surfaces them in their own dedicated sections (audit_summary lists
+// pending/resolved theories and recent decisions inline). Including
+// them in recent_memories would duplicate the same row across two
+// sections of the wake payload, inflating the byte budget and
+// confusing the agent into thinking they were independent entries.
+// The allowlist here MUST stay in lockstep with the structural-topic
+// filter in GetRecentUserTopics (which excludes the 'decisions' /
+// 'theories' anchors from the topics surface) — both filters target
+// the same architectural invariant: structural artifacts get their own
+// section, not mixed into the general-purpose recent stream.
 func (dm *DatabaseManager) recentMemories(limit int) ([]WakeContextMemory, error) {
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
+		  AND collection NOT IN ('decisions', 'theories')
 		ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -806,6 +830,20 @@ func formatWakeContext(d WakeContextData) string {
 	if len(d.OpenWorks) > 0 {
 		lines = append(lines, fmt.Sprintf("**Pending Work (%d):**", len(d.OpenWorks)))
 		for _, w := range d.OpenWorks {
+			verif := ""
+			if w.Verification != "" {
+				verif = " [" + string(w.Verification) + "]"
+			}
+			lines = append(lines, fmt.Sprintf("  - %s%s [%s]", w.Title, verif, w.Pointer))
+		}
+	}
+	if len(d.CompletedWorks) > 0 {
+		// RECOMMENDED 10: completed-work section complements pending
+		// work so the wake context is orientation-balanced. The agent
+		// sees both "what's waiting on me" and "what I just shipped"
+		// without having to query the work-item surface separately.
+		lines = append(lines, fmt.Sprintf("**Recently Completed Work (%d):**", len(d.CompletedWorks)))
+		for _, w := range d.CompletedWorks {
 			verif := ""
 			if w.Verification != "" {
 				verif = " [" + string(w.Verification) + "]"
@@ -1247,6 +1285,61 @@ func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 		var verification sql.NullString
 		if err := rows.Scan(&w.ID, &w.Title, &w.Status, &verification, &w.CreatedAt); err != nil {
 			dm.LogAudit(AuditWarn, "wake_context", "gatherOpenWorks scan: "+err.Error(), "", AuditContext{})
+			continue
+		}
+		if verification.Valid {
+			w.Verification = WorkVerification(verification.String)
+		}
+		w.Pointer = "mpm://work/" + w.ID
+		if len(w.Title) > 120 {
+			w.Title = w.Title[:120]
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// gatherCompletedWorks returns up to 5 done-status work items for wake
+// context, most-recently-completed first: ORDER BY completed_at DESC,
+// updated_at DESC as the determinism tiebreak.
+//
+// RECOMMENDED 10: completed work complements the open_works surface.
+// Without it, a freshly-started session can see "5 things waiting on
+// me" but cannot easily see "5 things I just shipped" — the orientation
+// bias is asymmetric. completed_at is preferred over updated_at
+// because a work item can be re-noted (and thus re-updated) without
+// being re-completed; the completion event timestamp is the
+// architecturally meaningful one.
+//
+// Cancelled items are excluded on purpose — they belong to a separate
+// cognitive channel ("what got rejected and why") that the v1 wake
+// context doesn't surface. Adding them here would conflate two
+// distinct outcomes (shipped vs. abandoned). Titles truncated to 120
+// chars to match gatherOpenWorks.
+//
+// Audit pattern: errors are logged but non-fatal (matches
+// gatherOpenWorks). Wake context must always emit a non-nil slice
+// (invariant 3) even on query failure, so the slice is initialized
+// with make at the top.
+func (dm *DatabaseManager) gatherCompletedWorks() []WakeContextWork {
+	out := make([]WakeContextWork, 0, 5)
+	rows, err := dm.db.Query(`
+		SELECT id, title, status, verification, created_at
+		FROM works WHERE status = 'done'
+		ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
+		LIMIT 5
+	`)
+	if err != nil {
+		dm.LogAudit(AuditWarn, "wake_context", "gatherCompletedWorks: "+err.Error(), "", AuditContext{})
+		return out
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var w WakeContextWork
+		var verification sql.NullString
+		if err := rows.Scan(&w.ID, &w.Title, &w.Status, &verification, &w.CreatedAt); err != nil {
+			dm.LogAudit(AuditWarn, "wake_context", "gatherCompletedWorks scan: "+err.Error(), "", AuditContext{})
 			continue
 		}
 		if verification.Valid {

@@ -106,7 +106,11 @@ func handleEvidenceAdd(args []string) int {
 // the `list` subcommand.
 func handleEvidence(args []string) int {
 	if len(args) < 1 {
-		printError("usage: mpm evidence <add|list> ...")
+		// RECOMMENDED 7: when invoked with no subcommand, surface the
+		// evidence-type documentation so operators can see the v1
+		// vocabulary without grepping the source. Source of truth
+		// remains internal/core/evidence.go.
+		printError("usage: mpm evidence <add|list|types> ...\n\n%s", mpminternal.EvidenceTypeHelp())
 		return 1
 	}
 	switch args[0] {
@@ -114,6 +118,12 @@ func handleEvidence(args []string) int {
 		return handleEvidenceAdd(args[1:])
 	case "list":
 		return handleEvidenceList(args[1:])
+	case "types", "help", "-h", "--help":
+		// The `types` subcommand prints the same canonical
+		// evidence-type documentation as the empty-args path,
+		// exposed as a first-class verb so scripts can pipe it.
+		fmt.Println(mpminternal.EvidenceTypeHelp())
+		return 0
 	default:
 		printError("unknown evidence subcommand: %s", args[0])
 		return 1
