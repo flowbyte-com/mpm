@@ -118,3 +118,76 @@ func TestProjection_MemoryQuery_ExplicitSummaryMatchesDefault(t *testing.T) {
 		t.Errorf("projection=summary must carry truncation suffix; payload=%s", raw)
 	}
 }
+
+func TestProjection_LessonSearch_DefaultsToSummary(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	// Seed a lesson via the lessons tool.
+	big := strings.Repeat("L", 4096)
+	if _, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact":  big,
+			"type":  "practice",
+			"tags":  []interface{}{"proj-lesson"},
+		},
+	}); err != nil {
+		t.Fatalf("seed lesson: %v", err)
+	}
+
+	res, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "search",
+		"params": map[string]interface{}{"query": "proj-lesson"},
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	var wire struct {
+		Mode    string                   `json:"mode"`
+		Lessons []map[string]interface{} `json:"lessons"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire.Mode != "summary" {
+		t.Errorf("mode = %q, want \"summary\"", wire.Mode)
+	}
+	if len(wire.Lessons) == 0 {
+		t.Fatalf("want ≥1 lesson, got 0")
+	}
+	first := wire.Lessons[0]
+	if _, has := first["content"]; has {
+		t.Errorf("summary mode must NOT inline content field")
+	}
+	summary, _ := first["summary"].(string)
+	if !strings.Contains(summary, truncationSuffix) {
+		t.Errorf("summary %q must end with %q", summary, truncationSuffix)
+	}
+	ptr, _ := first["pointer"].(string)
+	if !strings.HasPrefix(ptr, "mpm://lesson/") {
+		t.Errorf("summary mode must carry mpm://lesson/ pointer, got %v", ptr)
+	}
+}
+
+func TestProjection_LessonList_FullReturnsUnbounded(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	big := strings.Repeat("M", 4096)
+	if _, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{"fact": big, "type": "insight"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "list",
+		"params": map[string]interface{}{"projection": "full"},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	if !strings.Contains(raw, strings.Repeat("M", 3000)) {
+		t.Errorf("projection=full must return unbounded content; payload=%s", raw)
+	}
+}

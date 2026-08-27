@@ -987,8 +987,8 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	}
 
 	// Phase 2D: pointer-native projection.
-	projection, _ := p["projection"].(bool)
-	if projection {
+	projection, _ := p["projection"].(string)
+	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedLessonEntry, 0, len(items))
 		for _, item := range items {
 			id, _ := item["id"].(string)
@@ -997,7 +997,7 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			tags, _ := item["tags"].([]string)
 			created, _ := item["created_at"].(string)
 
-			summary := internal.SummarizeMemory(content, 256)
+			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
 
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
@@ -1033,15 +1033,21 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		}
 		return map[string]interface{}{
 			"success": true,
-			"mode":    "projected",
+			"mode":    "summary",
 			"query":   query,
 			"lessons": projected,
 			"count":   len(projected),
 		}, nil
 	}
 
+	// projection == "full": unbounded content with pointer.
+	for _, item := range items {
+		id, _ := item["id"].(string)
+		item["pointer"] = "mpm://lesson/" + id
+	}
 	return map[string]interface{}{
 		"success": true,
+		"mode":    "full",
 		"results": items,
 		"count":   len(items),
 	}, nil
@@ -1057,8 +1063,8 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	}
 
 	// Phase 2D: pointer-native projection.
-	projection, _ := p["projection"].(bool)
-	if projection {
+	projection, _ := p["projection"].(string)
+	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedLessonEntry, 0, len(items))
 		for _, item := range items {
 			id, _ := item["id"].(string)
@@ -1067,7 +1073,7 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 			tags, _ := item["tags"].([]string)
 			created, _ := item["created_at"].(string)
 
-			summary := internal.SummarizeMemory(content, 256)
+			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
 
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
@@ -1103,14 +1109,20 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 		}
 		return map[string]interface{}{
 			"success": true,
-			"mode":    "projected",
+			"mode":    "summary",
 			"lessons": projected,
 			"count":   len(projected),
 		}, nil
 	}
 
+	// projection == "full": unbounded content with pointer.
+	for _, item := range items {
+		id, _ := item["id"].(string)
+		item["pointer"] = "mpm://lesson/" + id
+	}
 	return map[string]interface{}{
 		"success": true,
+		"mode":    "full",
 		"lessons": items,
 		"count":   len(items),
 	}, nil
