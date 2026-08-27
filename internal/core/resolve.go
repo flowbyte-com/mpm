@@ -199,6 +199,17 @@ func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, a
 // three land or none do. The queue row stays "unresolved" if any
 // step fails; the next operator run picks it up.
 func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision) error {
+	// Invariant: resolution memories live in shared.memories. Refuse
+	// early with a clear error rather than failing with a raw
+	// "no such table" SQLite error deep in the transaction. Mirrors
+	// the gate applyArbitrationResolution and applyArbitration use;
+	// all three shared-memory write paths share the same precondition
+	// so a single fix at the unified ResolveOneContradiction entry
+	// would suffice, but the per-function gate is defensive against
+	// future callers that bypass the unified path.
+	if dm.SharedAttached() == "" {
+		return fmt.Errorf("applyResolution: shared DB not attached (set MPM_SHARED_DB); resolutions require multi-agent shared epistemology mode")
+	}
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return fmt.Errorf("applyResolution: begin: %w", err)
@@ -343,6 +354,19 @@ func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision
 // close call is not a resolution; it's a triage flag that requires
 // human input.
 func (dm *DatabaseManager) applyArbitration(queueID int64, memoryA, memoryB string, scoreA, scoreB ProvenanceScore, margin float64) error {
+	// Invariant: arbitration theories live in shared.memories. Refuse
+	// early rather than failing deep in the transaction with a
+	// confusing "no such table: shared.memories" error — the same
+	// gate applyArbitrationResolution uses (see internal/core/
+	// arbitration.go). This closes the BLOCKER 4 audit asymmetry
+	// where the resolution path required shared DB but the queue-
+	// consumer creation path did not. Stale queue rows from a prior
+	// shared-enabled state remain in shared.contradiction_log with
+	// resolved_at IS NULL and get processed when shared DB is
+	// reattached — no silent loss.
+	if dm.SharedAttached() == "" {
+		return fmt.Errorf("applyArbitration: shared DB not attached (set MPM_SHARED_DB); close-call proposals require multi-agent shared epistemology mode")
+	}
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return fmt.Errorf("applyArbitration: begin: %w", err)
