@@ -514,6 +514,12 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 // using NewMemoryStore directly). It inlines the scanner so tests still
 // catch unsanned writes via TestScannerCoverage.
 func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, weight int, createdAt string) (string, error) {
+	// Alpha remediation (2026-08-27): mirror the canonical saveMemoryRow
+	// validation on this fallback path. Empty / whitespace-only content
+	// is rejected before the scanner and the INSERT fire.
+	if reason := validateMemoryContent(content); reason != "" {
+		return "", fmt.Errorf("memory content is empty or whitespace-only (%s) — provide non-whitespace text", reason)
+	}
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
@@ -739,6 +745,29 @@ func isSensitiveContent(content string) (bool, string) {
 		}
 	}
 	return false, ""
+}
+
+// validateMemoryContent enforces the empty-content invariant at the
+// canonical INSERT primitive. Returns a non-empty reason string when
+// content is rejected, "" when accepted. The check uses Unicode-aware
+// whitespace so tabs / newlines / non-breaking spaces are all stripped
+// before the meaningful-character test fires.
+//
+// Alpha remediation (2026-08-27): the validation run found that
+// `mpm remember ""` and `mpm add "   "` silently created memories.
+// A persisted memory must contain meaningful non-whitespace content.
+//
+// The return is a reason string rather than a bool so the caller can
+// surface a precise message ("empty", "all whitespace") in the structured
+// error returned to the CLI / MCP / agent caller.
+func validateMemoryContent(content string) string {
+	if content == "" {
+		return "empty content"
+	}
+	if strings.TrimSpace(content) == "" {
+		return "whitespace-only content"
+	}
+	return ""
 }
 
 // logSensitiveAttempt logs an attempt to store sensitive content
