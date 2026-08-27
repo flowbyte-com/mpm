@@ -25,7 +25,8 @@ var Registry = []Tool{
 		Name: "mpm_memory",
 		Description: `Persistent memory for facts, learnings, and context the agent needs to carry across sessions.
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
-Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).`,
+Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -41,7 +42,7 @@ Do not use when: the information is ephemeral working context (use mpm_scratchpa
 						"query":           {"type": "string"},
 						"limit":           {"type": "number"},
 						"scope":           {"type": "string", "enum": ["all","local","shared"]},
-						"projection":      {"type": "string", "enum": ["summary","full"], "description": "summary = bounded 256-char summary + pointer (default); full = unbounded content. Required for broad queries to avoid context bloat."},
+						"projection":      {"type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Output detail level. Defaults to summary."},
 						"memory_id":       {"type": "string"},
 						"memoryId":        {"type": "string"},
 						"delta":           {"type": "number"},
@@ -130,7 +131,8 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 		Name: "mpm_lessons",
 		Description: `Durable lessons from failures, anti-patterns, and hard-won insights.
 Use when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a "warning" or "practice" so it surfaces in future relevant contexts.
-Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).`,
+Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -142,7 +144,7 @@ Do not use when: you are documenting a decision (mpm_decisions) or forming a tes
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},
-						"projection": {"type": "string", "enum": ["summary","full"], "description": "summary = bounded 256-char summary + pointer (default); full = unbounded content."}
+						"projection": {"type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Output detail level. Defaults to summary."}
 					},
 					"additionalProperties": true
 				}
