@@ -41,7 +41,7 @@ Do not use when: the information is ephemeral working context (use mpm_scratchpa
 						"query":           {"type": "string"},
 						"limit":           {"type": "number"},
 						"scope":           {"type": "string", "enum": ["all","local","shared"]},
-						"projection":       {"type": "boolean"},
+						"projection":      {"type": "string", "enum": ["summary","full"], "description": "summary = bounded 256-char summary + pointer (default); full = unbounded content. Required for broad queries to avoid context bloat."},
 						"memory_id":       {"type": "string"},
 						"memoryId":        {"type": "string"},
 						"delta":           {"type": "number"},
@@ -142,7 +142,7 @@ Do not use when: you are documenting a decision (mpm_decisions) or forming a tes
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},
-						"projection": {"type": "boolean"}
+						"projection": {"type": "string", "enum": ["summary","full"], "description": "summary = bounded 256-char summary + pointer (default); full = unbounded content."}
 					},
 					"additionalProperties": true
 				}
