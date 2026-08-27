@@ -2,9 +2,32 @@ package tools
 
 import (
 	"fmt"
+	"strings"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
+
+// workNotFoundHint wraps the canonical "work not found: <id>" error with a
+// hint that explains the work-item lookup contract: titles are not a valid
+// lookup key (they are intentionally not unique), the discovery surface is
+// `mpm work item list`. Without this hint, a user typing
+// `mpm work item complete "ship parser fix"` (passing the title) gets back
+// `work not found: ship parser fix` and cannot tell whether the work item
+// genuinely doesn't exist or whether they addressed it incorrectly.
+//
+// F5 (2026-08-27): work completion contract is ID-only. The hint makes
+// that contract visible at the user-facing error boundary. The internal
+// GetWork error is unchanged — non-UI callers (audit, scheduler) get the
+// raw form.
+func workNotFoundHint(err error, id string) error {
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "work not found") {
+		return err
+	}
+	return fmt.Errorf("%w\nhint: mpm_work addresses work items by id, not by title; titles are not unique. Run `mpm work item list` to find the id for a given title", err)
+}
 
 // handleMpmWork dispatches work actions: create, list, show, update, complete, cancel,
 // and the new v2 event-sourced actions: history, note, reopen.
@@ -109,7 +132,7 @@ func handleShowWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{
 	}
 	w, err := dm.GetWork(workID)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	return workToMapWork(w), nil
 }
@@ -124,7 +147,7 @@ func handleUpdateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	content, _ := p["content"].(string)
 	w, err := dm.UpdateWorkWithContext(workID, title, content, statusStr, ac)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	return workToMapWork(w), nil
 }
@@ -137,7 +160,7 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	}
 	_, err := dm.CompleteWorkWithContext(workID, note, ac)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	// P3 fix: do not auto-record git evidence on complete — it inflated
 	// verification to 'partial' for false completions (claim without outcome).
@@ -153,7 +176,7 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// orthogonal; only the returned payload changes.
 	w, err := dm.GetWork(workID)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	return workToMapWork(w), nil
 }
@@ -165,7 +188,7 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		return nil, fmt.Errorf("work_id is required for cancel")
 	}
 	if _, err := dm.CancelWorkWithContext(workID, note, ac); err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	// P3 fix: same as complete — do not auto-inflate verification via git
 	// on cancel. Cancellation already locks verification below verified via
@@ -177,7 +200,7 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	// Re-fetch post-derivation (see handleCompleteWork).
 	w, err := dm.GetWork(workID)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	return workToMapWork(w), nil
 }
@@ -253,7 +276,7 @@ func handleReopenWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	workID, _ := p["work_id"].(string)
 	w, err := dm.ReopenWorkWithContext(workID, ac)
 	if err != nil {
-		return nil, err
+		return nil, workNotFoundHint(err, workID)
 	}
 	return workToMapWork(w), nil
 }
