@@ -648,3 +648,59 @@ func TestResolveArbitrationTheory_IdempotentOnAlreadyResolvedQueue(t *testing.T)
 		t.Errorf("expected theory status=resolved, got %q", theoryStatus)
 	}
 }
+
+// TestApplyArbitration_RefusesWithoutSharedDB pins the invariant that
+// applyArbitration (the close-call proposal path) requires the shared
+// DB to be attached, just like the resolution paths do. Before this
+// fix the queue consumer would call applyArbitration without the gate;
+// the SQL inside the transaction would fail with a raw "no such
+// table: shared.memories" error — confusing for operators and a
+// release-blocking asymmetry between create and resolve.
+//
+// Stale queue rows that survived a shared-detach/re-attach cycle
+// must NOT be silently lost. This test only covers the refusal
+// semantics; the "row stays pending across detach" property is
+// exercised by the shared-DB lifecycle tests in wake_context_test.go.
+func TestApplyArbitration_RefusesWithoutSharedDB(t *testing.T) {
+	dm := newTestDM(t) // no shared attach
+	score := ProvenanceScore{Score: 0.5, Confidence: 0.5}
+	err := dm.applyArbitration(42, "mem-A", "mem-B", score, score, 0.01)
+	if err == nil {
+		t.Fatalf("expected error when shared DB is not attached, got nil")
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("got cryptic SQLite error instead of clear message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shared DB not attached") {
+		t.Errorf("expected 'shared DB not attached' message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "MPM_SHARED_DB") {
+		t.Errorf("expected hint to set MPM_SHARED_DB, got: %v", err)
+	}
+}
+
+// TestApplyResolution_RefusesWithoutSharedDB is the symmetric test
+// for the decisive path. applyResolution writes resolution memories
+// into shared.memories just like applyArbitration writes arbitration
+// theories; both must require the shared DB. Together with
+// TestResolveArbitrationTheory_RefusesWithoutSharedDB and
+// TestApplyArbitration_RefusesWithoutSharedDB this closes the audit's
+// "shared-DB requirement consistency" invariant.
+func TestApplyResolution_RefusesWithoutSharedDB(t *testing.T) {
+	dm := newTestDM(t) // no shared attach
+	dec := ResolutionDecision{
+		LoserID:       "loser",
+		WinnerID:      "winner",
+		ResolutionTag: "test",
+	}
+	err := dm.applyResolution(99, dec)
+	if err == nil {
+		t.Fatalf("expected error when shared DB is not attached, got nil")
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("got cryptic SQLite error instead of clear message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shared DB not attached") {
+		t.Errorf("expected 'shared DB not attached' message, got: %v", err)
+	}
+}
