@@ -1479,7 +1479,18 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 	out := make([]map[string]interface{}, 0, limit)
 	for rows.Next() {
 		var id, content, createdAt string
-		if err := rows.Scan(&id, &content, &createdAt); err != nil {
+		if scanErr := rows.Scan(&id, &content, &createdAt); scanErr != nil {
+			// Wake-context surfacing is best-effort: a malformed row must not
+			// abort the whole wake payload. Logged-swallow (warn to watchdog)
+			// rather than silent-continue so an operator can investigate
+			// database corruption without the lint gate tripping.
+			dm.LogAudit(
+				mpminternal.AuditWarn,
+				"tools.wake_scan",
+				fmt.Sprintf("fetchRecentMemoriesByCollection: scan failed (row=%s): %s", id, scanErr.Error()),
+				"",
+				mpminternal.AuditContext{"row_id": id, "err": scanErr.Error()},
+			)
 			continue
 		}
 		summary := scrubChallengeIdentifier(content)
@@ -1554,7 +1565,16 @@ func fetchRecentLessonsForWake(dm mpminternal.CoreDB, limit int) []map[string]in
 	out := make([]map[string]interface{}, 0, limit)
 	for rows.Next() {
 		var id, content, created string
-		if err := rows.Scan(&id, &content, &created); err != nil {
+		if scanErr := rows.Scan(&id, &content, &created); scanErr != nil {
+			// Best-effort: log via watchdog so corruption is visible
+			// without aborting the wake payload.
+			dm.LogAudit(
+				mpminternal.AuditWarn,
+				"tools.wake_scan",
+				fmt.Sprintf("fetchRecentLessonsForWake: scan failed (row=%s): %s", id, scanErr.Error()),
+				"",
+				mpminternal.AuditContext{"row_id": id, "err": scanErr.Error()},
+			)
 			continue
 		}
 		summary := content
