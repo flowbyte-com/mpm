@@ -315,12 +315,14 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		}
 	}
 
-	// Phase 2B: pointer-native projection.
-	projection, _ := p["projection"].(bool)
-	if projection {
+	// Phase 2B+: pointer-native projection with explicit "summary" | "full".
+	// Default is "summary" so broad queries never bloat the agent context.
+	// The full payload is always retrievable via mpm_resolve / mpm_blob_read
+	// against the pointer on each entry.
+	projection, _ := p["projection"].(string)
+	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedMemoryEntry, 0, len(items))
 		for _, mem := range items {
-			// Extract fields from the map.
 			id, _ := mem["id"].(string)
 			content, _ := mem["content"].(string)
 			tags, _ := mem["tags"].([]string)
@@ -329,9 +331,8 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			reinf, _ := mem["reinforcement_count"].(int)
 			weight, _ := mem["weight"].(int)
 
-			summary := internal.SummarizeMemory(content, 256)
+			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
 
-			// Retrieval metadata: key always present, null when never retrieved.
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
 				meta, err := dm.GetRetrievalMetadata(id)
@@ -368,38 +369,27 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			})
 		}
 		return map[string]interface{}{
-			"success": true,
-			"mode":    "projected",
-			"query":   query,
+			"success":  true,
+			"mode":     "summary",
+			"query":    query,
 			"memories": projected,
-			"count":   len(projected),
-			"scope":   defaultScope(scope),
+			"count":    len(projected),
+			"scope":    defaultScope(scope),
 		}, nil
 	}
 
-	// F5: default mode bounds each hit's inline content. The full payload
-	// is always retrievable by id (mpm_blob_read / pointer) or via the
-	// explicit full_content=true opt-out for callers that deliberately
-	// want unbounded output. Truncation is always flagged per item so a
-	// bounded echo can never be mistaken for complete content.
-	fullContent, _ := p["full_content"].(bool)
-	if !fullContent {
-		for _, mem := range items {
-			content, _ := mem["content"].(string)
-			bounded, truncated := internal.BoundInlineContent(content)
-			mem["content"] = bounded
-			id, _ := mem["id"].(string)
-			mem["pointer"] = "mpm://memory/" + id
-			if truncated {
-				mem["content_truncated"] = true
-				mem["content_bytes"] = len(content)
-			}
+	// projection == "full": unbounded content, opt-in only.
+	for _, mem := range items {
+		content, _ := mem["content"].(string)
+		id, _ := mem["id"].(string)
+		mem["pointer"] = "mpm://memory/" + id
+		if len(content) > 0 {
+			mem["content"] = content
 		}
 	}
-
-	// Default: bounded-content output (Phase 1 shape, content bounded per F5).
 	return map[string]interface{}{
 		"success":  true,
+		"mode":     "full",
 		"memories": items,
 		"count":    len(items),
 		"scope":    defaultScope(scope),

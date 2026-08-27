@@ -74,7 +74,7 @@ func TestF4_SaveEchoBounded(t *testing.T) {
 }
 
 // TestF5_QueryResultsBoundedWithExplicitOptOut: query hits are bounded per
-// item with flags + pointers; full_content=true restores unbounded output
+// item with flags + pointers; projection="full" restores unbounded output
 // deliberately.
 func TestF5_QueryResultsBoundedWithExplicitOptOut(t *testing.T) {
 	dm := newTestIsolatedDM(t)
@@ -88,13 +88,13 @@ func TestF5_QueryResultsBoundedWithExplicitOptOut(t *testing.T) {
 		}
 	}
 
-	for _, mode := range []string{"default", "projected"} {
+	for _, mode := range []string{"default", "summary"} {
 		payload := map[string]interface{}{
 			"action": "query",
 			"params": map[string]interface{}{"query": "f5marker", "limit": float64(3)},
 		}
-		if mode == "projected" {
-			payload["params"].(map[string]interface{})["projection"] = true
+		if mode == "summary" {
+			payload["params"].(map[string]interface{})["projection"] = "summary"
 		}
 		result, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, payload)
 		if err != nil {
@@ -109,14 +109,14 @@ func TestF5_QueryResultsBoundedWithExplicitOptOut(t *testing.T) {
 	// Explicit opt-out returns full content deliberately.
 	result, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "query",
-		"params": map[string]interface{}{"query": "f5marker", "full_content": true},
+		"params": map[string]interface{}{"query": "f5marker", "projection": "full"},
 	})
 	if err != nil {
 		t.Fatalf("opt-out query: %v", err)
 	}
 	raw := mustMarshalJSON(result)
 	if !strings.Contains(raw, strings.Repeat("x", 5000)) {
-		t.Errorf("full_content=true must return unbounded content")
+		t.Errorf("projection=full must return unbounded content")
 	}
 }
 
