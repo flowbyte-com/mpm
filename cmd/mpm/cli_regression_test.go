@@ -13,10 +13,17 @@ import (
 // These commands are exercised via the actual mpm binary to ensure the
 // CLI surface is unchanged.
 func TestCLI_UnchangedAfterPhase1(t *testing.T) {
-	// Find the mpm binary. Prefer bin/mpm in the repo root; fall back to $PATH.
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		binPath = "mpm" // hope it's in PATH
+	// Build a fresh mpm binary into a temp dir. The previous fallback
+	// (../../bin/mpm then $PATH lookup) silently failed in CI — neither
+	// path is guaranteed to exist, so every run failed with "executable
+	// file not found in $PATH" instead of exercising the CLI surface.
+	// Building on demand makes the test self-contained and CI-stable.
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mpm")
+	buildCmd := exec.Command("go", "build", "-tags", "fts5", "-o", binPath, ".")
+	buildCmd.Dir = "." // cmd/mpm is the package dir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build mpm binary: %v\n%s", err, out)
 	}
 
 	// Create a temporary workspace to avoid polluting the real one.
