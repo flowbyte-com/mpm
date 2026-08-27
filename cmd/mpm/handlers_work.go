@@ -262,8 +262,55 @@ func handleWorkItem(args []string) int {
 		printWorkItemHelp()
 		return 0
 	}
-	sub := args[0]
-	rest := args[1:]
+	// Identify subcommand before extracting flags so that
+	// `mpm work item --limit 5` is treated as `mpm work item list --limit 5`
+	// rather than an unknown subcommand "--limit". The grammar is:
+	//
+	//   mpm work item [<flags...>] <sub> [<flags...>] [<positional...>]
+	//
+	// — flags are accepted before the subcommand (the common ergonomic
+	// pattern for `mpm work item --limit 5` against the default `list`
+	// subcommand) and after it (the canonical `mpm work item list --limit 5`).
+	// If no positional subcommand token appears, default to "list".
+	//
+	// The scan must skip flag-value pairs (e.g. `--limit 5`) so the
+	// value token (5) is not picked as the subcommand. Any token that
+	// starts with `--` is a flag — the next token is its value unless
+	// it was supplied as `--key=value`.
+	valueTakingFlags := map[string]bool{
+		"--status":  true,
+		"--limit":   true,
+		"--note":    true,
+		"--content": true,
+		"--title":   true,
+	}
+	var subIdx int = -1
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") {
+			if valueTakingFlags[a] && i+1 < len(args) {
+				i++ // skip the flag's value
+			}
+			// --key=value form is self-contained, no skip
+			continue
+		}
+		subIdx = i
+		break
+	}
+	var sub string
+	var rest []string
+	if subIdx < 0 {
+		// `mpm work item --limit 5` → default to list with all args as flags.
+		sub = "list"
+		rest = append([]string{}, args...)
+	} else {
+		sub = args[subIdx]
+		// rest = (everything before subIdx) + (everything after subIdx)
+		// so per-subcommand flag extraction still sees the leading flags.
+		rest = make([]string, 0, len(args)-1)
+		rest = append(rest, args[:subIdx]...)
+		rest = append(rest, args[subIdx+1:]...)
+	}
 
 	// Parse --status / --limit / --note flags as needed. Returns the
 	// remaining positional args (work_id, title, content) and a payload
