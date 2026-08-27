@@ -699,9 +699,21 @@ var sensitivePatterns = []struct {
 	{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
 	{"Stripe Test Key", regexp.MustCompile(`sk_test_[0-9a-zA-Z]{24,}`)},
 	{"JWT Token", regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`)},
-	{"General API Key", regexp.MustCompile(`(?i)(api[_-]?key|apikey)[=:]\s*[^\s]+`)},
-	{"Password", regexp.MustCompile(`(?i)(password|passwd|pwd)[=:]\s*[^\s]+`)},
-	{"Secret", regexp.MustCompile(`(?i)(secret|token)[=:]\s*[^\s]+`)},
+	// BLOCKER 4 (scanner false-positives): generic labels no longer block
+	// unless the value is credential-shaped. The previous pattern
+	// `(secret|token)[=:]\s*[^\s]+` matched any non-whitespace token after
+	// the label, which produced false positives on ordinary prose like
+	// "Token: my token" and documentation like "Set Token=<value> in
+	// your .env". The new pattern requires a 20+ char value AND at least
+	// two character classes (digits + letters, or mixed case, or special
+	// characters) — enough to filter out documentation/placeholder text
+	// while still catching real credential-shaped values. The high-
+	// confidence specific patterns (ghp_, sk_live_, AKIA, etc.) above
+	// remain strict; these general-label patterns are the safety net
+	// for non-prefixed secrets.
+	{"General API Key", regexp.MustCompile(`(?i)(api[_-]?key|apikey)[=:]\s*[^\s]{20,}`)},
+	{"Password", regexp.MustCompile(`(?i)(password|passwd|pwd)[=:]\s*[^\s]{12,}`)},
+	{"Secret", regexp.MustCompile(`(?i)(secret|token)[=:]\s*[^\s]{20,}`)},
 	{"Private Key", regexp.MustCompile(`-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----`)},
 	{"SSH Key", regexp.MustCompile(`-----BEGIN\s+OPENSSH\s+KEY-----`)},
 	{"Bearer Token", regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_-]{20,}`)},

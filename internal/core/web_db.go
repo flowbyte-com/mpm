@@ -245,6 +245,7 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	var sessionID, sourceDB, sourceID *string
 	var promotedAt *float64
 	var weight float64
+	var confidence sql.NullFloat64
 
 	// BEGIN IMMEDIATE ensures a consistent read snapshot. Without a transaction,
 	// a concurrent GC batch UPDATE commit can cause GetMemory to observe a
@@ -258,9 +259,9 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 	defer tx.Rollback()
 
 	err = tx.QueryRow(`
-		SELECT collection, content, session_id, tags, metadata, created_at, weight, source_db, source_id, promoted_at
+		SELECT collection, content, session_id, tags, metadata, created_at, weight, confidence, source_db, source_id, promoted_at
 		FROM memories WHERE id = ? AND deleted_at IS NULL`+MemoryExpireClause+`
-	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &sourceDB, &sourceID, &promotedAt)
+	    `, id).Scan(&collection, &content, &sessionID, &tagsNS, &metadataNS, &createdAt, &weight, &confidence, &sourceDB, &sourceID, &promotedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +286,9 @@ func (dm *DatabaseManager) GetMemory(id string) (map[string]interface{}, error) 
 		"metadata":   metadata,
 		"created_at": createdAt,
 		"weight":     int(weight),
+	}
+	if confidence.Valid {
+		m["confidence"] = confidence.Float64
 	}
 	if sessionID != nil {
 		m["session_id"] = *sessionID

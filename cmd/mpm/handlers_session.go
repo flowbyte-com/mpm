@@ -140,12 +140,19 @@ func handleWake(args []string) int {
 		return 1
 	}
 
-	// Query all recent memories (any collection, not just 'session')
+	// Query all recent memories (any collection, not just 'session').
+	// RECOMMENDED 9: structural epistemology collections (decisions,
+	// theories) are excluded here because the wake-context render
+	// surfaces them in their own sections. Including them in the
+	// general recent_memories stream would duplicate the same row
+	// across two sections. See internal/core/wake_context.go
+	// recentMemories for the matching filter.
 	var memories []map[string]interface{}
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, collection, content, tags, metadata, created_at
 		FROM memories
 		WHERE deleted_at IS NULL
+		  AND collection NOT IN ('decisions', 'theories')
 		ORDER BY created_at DESC
 		LIMIT 10
 	`)

@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,12 +70,19 @@ func handleWork(args []string) int {
 		return handleWorkClear(rest)
 	case "promote":
 		return handleWorkPromote(rest)
+	case "item":
+		// RECOMMENDED 8: `mpm work item <sub>` is a thin discoverable
+		// facade over `mpm call mpm_work --payload '{"action":...}'`
+		// for the durable work-item family (create/list/show/complete/
+		// cancel/history/note/reopen/update). The `item` namespace
+		// avoids collision with the scratchpad subcommands above.
+		return handleWorkItem(rest)
 	case "help", "-h", "--help":
 		printWorkHelp()
 		return 0
 	default:
 		usererror.Error("mpm work: unknown subcommand %q\n"+
-			"available subcommands: status, show, clear, promote", sub)
+			"available subcommands: status, show, clear, promote, item", sub)
 		return 1
 	}
 }
@@ -242,6 +250,194 @@ func buildWorkingContextService(dm *mpminternal.DatabaseManager) *WorkingContext
 
 
 
+// handleWorkItem dispatches the durable work-item sub-namespace under
+// `mpm work item <sub>`. Each subcommand is a thin facade that builds
+// the canonical mpm_work payload and delegates to handleCall so audit
+// recording, error envelopes, and ActiveContext propagation stay in
+// one chokepoint. RECOMMENDED 8 surfaces the durable work-item family
+// (previously only reachable via `mpm call mpm_work`) without
+// duplicating the handler logic.
+func handleWorkItem(args []string) int {
+	if len(args) == 0 {
+		printWorkItemHelp()
+		return 0
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	// Parse --status / --limit / --note flags as needed. Returns the
+	// remaining positional args (work_id, title, content) and a payload
+	// map of extracted key=value pairs plus flag values.
+	params, positional, err := parseWorkItemArgs(rest)
+	if err != nil {
+		usererror.Error("mpm work item %s: %v", sub, err)
+		return 1
+	}
+
+	var action string
+	switch sub {
+	case "create":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item create requires a title positional arg")
+			return 1
+		}
+		action = "create"
+		params["title"] = positional[0]
+		if len(positional) > 1 {
+			params["content"] = strings.Join(positional[1:], " ")
+		}
+	case "list":
+		action = "list"
+	case "show":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item show requires a work_id positional arg")
+			return 1
+		}
+		action = "show"
+		params["work_id"] = positional[0]
+	case "complete":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item complete requires a work_id positional arg")
+			return 1
+		}
+		action = "complete"
+		params["work_id"] = positional[0]
+	case "cancel":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item cancel requires a work_id positional arg")
+			return 1
+		}
+		action = "cancel"
+		params["work_id"] = positional[0]
+	case "history":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item history requires a work_id positional arg")
+			return 1
+		}
+		action = "history"
+		params["work_id"] = positional[0]
+	case "note":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item note requires a work_id positional arg")
+			return 1
+		}
+		action = "note"
+		params["work_id"] = positional[0]
+	case "reopen":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item reopen requires a work_id positional arg")
+			return 1
+		}
+		action = "reopen"
+		params["work_id"] = positional[0]
+	case "update":
+		if len(positional) < 1 {
+			usererror.Error("mpm work item update requires a work_id positional arg")
+			return 1
+		}
+		action = "update"
+		params["work_id"] = positional[0]
+	case "help", "-h", "--help":
+		printWorkItemHelp()
+		return 0
+	default:
+		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, update", sub)
+		return 1
+	}
+
+	payload := map[string]interface{}{"action": action, "params": params}
+	enc, _ := json.Marshal(payload)
+	return handleCall([]string{"mpm_work", "--payload", string(enc)})
+}
+
+// parseWorkItemArgs extracts --status / --limit / --note / --content flags
+// from rest and returns the remaining positional args. --note and --content
+// can be supplied as --key=value or --key value.
+func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) {
+	params := map[string]interface{}{}
+	positional := []string{}
+	i := 0
+	for i < len(rest) {
+		a := rest[i]
+		switch {
+		case a == "--status" && i+1 < len(rest):
+			params["status"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--status="):
+			params["status"] = strings.TrimPrefix(a, "--status=")
+			i++
+		case a == "--limit" && i+1 < len(rest):
+			if n, err := strconv.Atoi(rest[i+1]); err == nil {
+				params["limit"] = n
+			}
+			i += 2
+		case strings.HasPrefix(a, "--limit="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil {
+				params["limit"] = n
+			}
+			i++
+		case a == "--note" && i+1 < len(rest):
+			params["note"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--note="):
+			params["note"] = strings.TrimPrefix(a, "--note=")
+			i++
+		case a == "--content" && i+1 < len(rest):
+			params["content"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--content="):
+			params["content"] = strings.TrimPrefix(a, "--content=")
+			i++
+		case a == "--title" && i+1 < len(rest):
+			params["title"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--title="):
+			params["title"] = strings.TrimPrefix(a, "--title=")
+			i++
+		case strings.HasPrefix(a, "--"):
+			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title)", a)
+		default:
+			positional = append(positional, a)
+			i++
+		}
+	}
+	return params, positional, nil
+}
+
+// printWorkItemHelp prints the `mpm work item` subcommand help. RECOMMENDED 8.
+func printWorkItemHelp() {
+	fmt.Print(`mpm work item — Durable work-item CRUD (multi-session commitments)
+
+Usage:
+  mpm work item <subcommand> [args]
+
+Subcommands:
+  create <title> [content]   Create a new work item
+  list [--status <s>] [--limit <n>]
+                              List work items (status: open|done|cancelled|all; default open)
+  show <work_id>              Show a single work item by id
+  complete <work_id> [--note <text>]
+                              Mark a work item complete (records a completion event)
+  cancel <work_id> [--note <text>]
+                              Cancel a work item (locks verification below verified)
+  history <work_id>           Show the full event ledger for a work item
+  note <work_id> --note <text>
+                              Append a free-form note to a work item's event ledger
+  reopen <work_id>            Reopen a cancelled work item
+  update <work_id> [--title <t>] [--content <c>] [--status <s>]
+                              Update a work item's title/content/status
+
+Examples:
+  mpm work item create "ship parser fix" "introduce new lexer"
+  mpm work item list --status open --limit 10
+  mpm work item complete work-abc123 --note "shipped in commit def456"
+  mpm work item history work-abc123
+
+This is a discoverable facade over "mpm call mpm_work --payload '{"action":...}'".
+`)
+}
+
+
 // printWorkHelp prints the `mpm work` subcommand help.
 func printWorkHelp() {
 	fmt.Print(`mpm work — Expose the current Working Context (ephemeral execution state)
@@ -254,6 +450,7 @@ Subcommands:
   show       Show the raw working context, exactly as stored
   clear      Discard the current working context
   promote    Promote the working context to a permanent memory
+  item       Durable work-item CRUD (create/list/show/complete/cancel/history/note/reopen/update)
 
 Flags:
   --session-id <id>   Override the per-process session id (default: getOrMakeSessionID)
@@ -262,8 +459,8 @@ Flags:
 The 'work' command never exposes the implementation name 'scratchpad';
 internally the substrate's existing scratchpad APIs are used.
 
-Note: additional work actions (create, complete, cancel, reopen, history,
-note) are available via the machine interface: mpm call mpm_work.
+The 'item' subcommand is a discoverable facade over "mpm call mpm_work";
+see "mpm work item help" for the durable work-item vocabulary.
 `)
 }
 

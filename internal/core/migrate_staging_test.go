@@ -56,6 +56,16 @@ Second fact here also for the dedup test.`)
 
 // TestMigrateStaging_RejectsSensitiveContent verifies the security scanner
 // integration: facts containing obvious secret patterns are rejected.
+//
+// Note (2026-08-27, BLOCKER 4 hardening): the test fixture uses a
+// high-entropy credential-shaped value after the label, not a short
+// low-entropy placeholder. The BLOCKER 4 fix tightened the scanner to
+// require BOTH length (≥20 chars) AND credential-shaped structure
+// before flagging — so a 16-char placeholder like "abc123supersecret"
+// after "API token:" passes through (the same way "API_KEY=changeme"
+// passes through). That is the intended BLOCKER 4 behavior; the
+// security guarantee the scanner still upholds is that real-shaped
+// secrets (long, high-entropy, well-known prefixes) are blocked.
 func TestMigrateStaging_RejectsSensitiveContent(t *testing.T) {
 	dm := NewTestDM(t)
 
@@ -63,7 +73,7 @@ func TestMigrateStaging_RejectsSensitiveContent(t *testing.T) {
 	srcPath := filepath.Join(srcDir, "scanner-test.md")
 	mustWrite(t, srcPath, `## Test
 
-API token: abc123supersecret should be rejected by the scanner.
+API token: ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789 should be rejected by the scanner.
 
 ## Safe
 

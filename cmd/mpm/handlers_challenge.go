@@ -119,6 +119,15 @@ func runChallenge(dm internal.CoreDB, id, evidence string) int {
 		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
 	}
 
+	// 1b. Weaken the memory's weight by 2 (same as ChallengeMemory).
+	//     The prior weight is already captured in metadata at step 1.
+	if _, err := tx.Exec(
+		`UPDATE memories SET weight = MAX(1, weight - 2), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`,
+		id,
+	); err != nil {
+		return respond("", fmt.Sprintf("Error weakening memory: %v\n", err), 1)
+	}
+
 	// 2. F7.1: neutralize existing evidence rows for this memory by setting
 	//    expires_at = now. The evidence is preserved in the table (audit
 	//    trail intact) but cannot contribute to a confidence recompute.

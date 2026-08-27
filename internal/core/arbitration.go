@@ -72,6 +72,14 @@ func (dm *DatabaseManager) ResolveArbitrationTheory(theoryID, winnerID, conclusi
 	if theoryID == "" || winnerID == "" {
 		return nil, fmt.Errorf("ResolveArbitrationTheory: theoryID and winnerID are required")
 	}
+	// Arbitration theories live in the shared substrate (shared.memories).
+	// Refuse with a clear message if the shared DB isn't attached, rather
+	// than letting the QueryRow below surface a cryptic "no such table:
+	// shared.memories" error. The shared DB is opt-in via MPM_SHARED_DB;
+	// single-instance users never see this surface.
+	if dm.SharedAttached() == "" {
+		return nil, fmt.Errorf("ResolveArbitrationTheory: shared DB not attached (set MPM_SHARED_DB); arbitration theories require multi-agent shared epistemology mode")
+	}
 
 	// Read the theory. Must be collection='theories' and have
 	// arbitration metadata. The metadata is a JSON column; we use
@@ -196,6 +204,13 @@ func (dm *DatabaseManager) ResolveArbitrationTheory(theoryID, winnerID, conclusi
 // Returns a map with the resolution_id, slash_amount, and evidence_id
 // for the caller's audit.
 func (dm *DatabaseManager) applyArbitrationResolution(theoryID string, queueID int64, winnerID, loserID, conclusion string) (map[string]interface{}, error) {
+	// Defensive: shared must be attached — the caller (ResolveArbitrationTheory)
+	// checks this, but applyArbitrationResolution is exported via ApplyArbitration
+	// in contradiction_log.go too. Refuse early rather than failing deep in the
+	// transaction with a confusing "no such table: shared.memories" error.
+	if dm.SharedAttached() == "" {
+		return nil, fmt.Errorf("applyArbitrationResolution: shared DB not attached (set MPM_SHARED_DB)")
+	}
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("applyArbitrationResolution: begin: %w", err)
