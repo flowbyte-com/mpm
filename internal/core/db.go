@@ -2862,8 +2862,16 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 		return dupID, nil
 	}
 
+	// 2026-08-27: retries=5 (matching the documented ExecTracked convention
+	// at db.go:859) so concurrent writers transparently back off and retry
+	// on SQLITE_BUSY instead of surfacing the lock error to the caller. The
+	// cascade materializer runs materializeTheory concurrently under
+	// BEGIN IMMEDIATE; without retry, transient WAL contention on the
+	// FTS5-triggered secondary inserts escalated to a hard failure that
+	// rolled back the enclosing transaction and silently dropped the
+	// theory row. See TestMaterializer_ConcurrentClaim for the regression.
 	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		0, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity)
+		5, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity)
 	if err != nil {
 		if isIdentityConstraintViolation(err) {
 			// A concurrent writer inserted the same identity between our
