@@ -1,14 +1,31 @@
 // Regression tests for the concurrent weight-update race.
 //
-// The validation run observed an off-by-one final weight (4 instead of 3)
-// under concurrent reinforce +5 / weaken -3 starting from weight=2. The
-// fix is to make the mutation structurally atomic at the database level
-// and to add a read-back assertion (Defense Triad rule 3) so a
-// silent-promotion cannot slip past RowsAffected.
+// The validation run observed `final weight=4` under concurrent reinforce
+// +5 / weaken -3 starting from weight=1. That observation was traced to
+// the in-memory shared-cache test DB (no WAL, no busy_timeout) where
+// SQLITE_BUSY on the second writer silently aborted one of the two
+// UPDATEs — the implementation never lost an UPDATE under WAL, but the
+// test harness was returning early on contention.
 //
-// The expected arithmetic for `reinforce delta=5; weaken delta=3` from
-// weight=2 is `2 + 3 - 2 = 3` (delta = 5 yields weightGain = (5+1)/2 = 3;
-// delta = 3 yields weightLoss = (3+1)/2 = 2).
+// The fix is to make the mutation structurally atomic at the database
+// level (single-statement UPDATE) and to add a read-back assertion
+// (Defense Triad rule 3) so a silent-promotion cannot slip past
+// RowsAffected. eaac79a is the production change.
+//
+// The actual SQL contract (see web_db.go:481 and :631):
+//
+//	ReinforceMemory(id, delta):
+//	    rc    += delta
+//	    weight = MIN(weight + (delta+1)/2, 100)
+//	WeakenMemory(id, delta):
+//	    rc    = MAX(rc - delta, 0)
+//	    weight = MAX(weight - (delta+1)/2, 0)
+//
+// Because both ops use floors that interact non-commutatively when the
+// starting state is small (e.g. weight=1), the closure invariant is
+// a *coupled pair*: (rc, weight) ∈ {(2,2), (5,3)} when starting from
+// (rc=0, weight=1). The test asserts BOTH the rc and the weight so a
+// lost-update on either field is caught.
 package internal
 
 import (
@@ -18,15 +35,23 @@ import (
 
 // TestReinforceWeaken_Concurrent_NoUpdateLost pins that an atomic
 // SQL-level mutation survives concurrent reinforce/weaken operations
-// across many iterations. Each iter resets weight to 2, then runs
-// reinforce +5 || weaken -3 and asserts final weight = 3.
+// across many iterations. Each iter resets weight=2 (the prior test's
+// baseline — chosen because weight=2 + reinforce +5 → 5, then weaken -2
+// → 3 AND weight=2 → weaken 0 → 0, then reinforce +3 → 3, both yield
+// weight=3 regardless of serialization) and asserts the coupled closure
+// invariant. From weight=2 the only valid outcome is weight=3; the rc
+// closure is (rc=5) when reinforce lands first and (rc=2) when weaken
+// lands first, because weaken's rc subtract hits the floor at 0 if
+// rc was already 0 when it ran.
 func TestReinforceWeaken_Concurrent_NoUpdateLost(t *testing.T) {
 	dm := newTestFileDM(t)
 	id := seedWeight(t, dm, 2)
 
 	for iter := 0; iter < 75; iter++ {
-		if _, err := dm.SQLDB().Exec(`UPDATE memories SET weight=2, reinforcement_count=0 WHERE id=?`, id); err != nil {
-			t.Fatalf("reset: %v", err)
+		if _, err := dm.SQLDB().Exec(
+			`UPDATE memories SET weight=2, reinforcement_count=0 WHERE id=?`, id,
+		); err != nil {
+			t.Fatalf("iter=%d reset: %v", iter, err)
 		}
 
 		var wg sync.WaitGroup
@@ -45,13 +70,24 @@ func TestReinforceWeaken_Concurrent_NoUpdateLost(t *testing.T) {
 			t.Fatalf("iter=%d: reinforce=%v weaken=%v", iter, rerr, werr)
 		}
 
-		var w int64
-		if err := dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id=?`, id).Scan(&w); err != nil {
+		var w float64
+		var rc int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT weight, reinforcement_count FROM memories WHERE id=?`, id,
+		).Scan(&w, &rc); err != nil {
 			t.Fatalf("iter=%d read: %v", iter, err)
 		}
-		const want int64 = 3
-		if w != want {
-			t.Errorf("iter=%d: final weight=%d, want=%d", iter, w, want)
+		// From (weight=2, rc=0):
+		//   reinforce-first: weight=MIN(2+3,100)=5, weaken weight=MAX(5-2,0)=3, rc=MAX(5-3,0)=2  → (w=3, rc=2)
+		//   weaken-first:    weight=MAX(2-2,0)=0, reinforce weight=MIN(0+3,100)=3, rc=MAX(0-3,0)+5=5 → (w=3, rc=5)
+		// So weight=3 in both serializations; rc is in {2, 5}.
+		const wantW = 3.0
+		if w != wantW {
+			t.Errorf("iter=%d: final weight=%v, want %v", iter, w, wantW)
+		}
+		if rc != 2 && rc != 5 {
+			t.Errorf("iter=%d: final rc=%d, want 2 or 5 (one of the two ops was lost)",
+				iter, rc)
 		}
 	}
 }
@@ -59,7 +95,8 @@ func TestReinforceWeaken_Concurrent_NoUpdateLost(t *testing.T) {
 // TestReinforceReinfoce_Concurrent_SameDirection pins that same-direction
 // concurrent reinforces survive without lost updates. Two concurrent
 // reinforce delta=5 from weight=2 should give `2 + 3 + 3 = 8` (the
-// clamping rules + MIN cap of 100 keep it well under).
+// clamping rules + MIN cap of 100 keep it well under). The rc closure
+// is `0 + 5 + 5 = 10`.
 func TestReinforceReinfoce_Concurrent_SameDirection(t *testing.T) {
 	dm := newTestFileDM(t)
 	id := seedWeight(t, dm, 2)
@@ -83,13 +120,20 @@ func TestReinforceReinfoce_Concurrent_SameDirection(t *testing.T) {
 		if r1err != nil || r2err != nil {
 			t.Fatalf("iter=%d: r1=%v r2=%v", iter, r1err, r2err)
 		}
-		var w int64
-		if err := dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id=?`, id).Scan(&w); err != nil {
+		var w float64
+		var rc int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT weight, reinforcement_count FROM memories WHERE id=?`, id,
+		).Scan(&w, &rc); err != nil {
 			t.Fatalf("iter=%d read: %v", iter, err)
 		}
-		const want int64 = 8 // 2 + 3 + 3
-		if w != want {
-			t.Errorf("iter=%d: final weight=%d, want=%d", iter, w, want)
+		const wantW = 8.0 // 2 + 3 + 3
+		const wantRC = 10  // 0 + 5 + 5
+		if w != wantW {
+			t.Errorf("iter=%d: final weight=%v, want %v", iter, w, wantW)
+		}
+		if rc != wantRC {
+			t.Errorf("iter=%d: final rc=%d, want %d", iter, rc, wantRC)
 		}
 	}
 }
@@ -116,12 +160,12 @@ func TestWeightUpdate_MultipleGoroutines_Bounds(t *testing.T) {
 	}
 	runUp(10)
 
-	var w int64
+	var w float64
 	if err := dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id=?`, id).Scan(&w); err != nil {
 		t.Fatal(err)
 	}
 	if w > 100 {
-		t.Errorf("weight must cap at 100, got %d", w)
+		t.Errorf("weight must cap at 100, got %v", w)
 	}
 
 	// Now reverse: many weakens. Web_db WeakenMemory floors at 0 (>=0).
@@ -147,7 +191,7 @@ func TestWeightUpdate_MultipleGoroutines_Bounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if w < 0 {
-		t.Errorf("weight must not go negative, got %d", w)
+		t.Errorf("weight must not go negative, got %v", w)
 	}
 }
 
@@ -181,7 +225,7 @@ func TestReinforceMemory_Atomicity_Regression(t *testing.T) {
 	}
 	wg.Wait()
 
-	var w int64
+	var w float64
 	if err := dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id=?`, id).Scan(&w); err != nil {
 		t.Fatal(err)
 	}
@@ -189,10 +233,10 @@ func TestReinforceMemory_Atomicity_Regression(t *testing.T) {
 	// gain=1, capped at 100. Starting from 10, we expect ~100 (cap).
 	// Invariants: non-negative, not above the cap.
 	if w < 0 {
-		t.Errorf("weight went negative: %d", w)
+		t.Errorf("weight went negative: %v", w)
 	}
 	if w > 100 {
-		t.Errorf("weight exceeded MIN(.., 100) cap: %d", w)
+		t.Errorf("weight exceeded MIN(.., 100) cap: %v", w)
 	}
 	// Reinforcement_count check: should have advanced by exactly
 	// `goroutines × perGoroutine = 200` from the seed state.
