@@ -3,6 +3,7 @@ package internal
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"database/sql"
 )
@@ -245,4 +246,76 @@ func TestHandoff_DeleteHandoff_Idempotent(t *testing.T) {
 	_, err = nilDM.DeleteHandoff("any")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "db not initialized")
+}
+
+// TestHandoff_GetLatestUnreadHandoff_SameSecond_TieBreaker pins the
+// secondary sort: when multiple handoffs share the same ended_at
+// timestamp (SQLite INTEGER Unix-epoch resolves to the second), the
+// selection MUST be deterministic. Without `id DESC` as a
+// tie-breaker the LIMIT 1 selection is non-deterministic — wake
+// context would surface arbitrary session's commitments under load.
+//
+// Caveat on real IDs: GenerateID() produces SHA256 prefixes (see
+// internal/core/db.go:3430). Those are NOT chronologically sortable —
+// the tie-breaker enforces determinism, not "most recently inserted
+// wins." For true insertion-order, `rowid DESC` is the right answer.
+// This test uses synthetic ids that DO sort by insertion order so
+// the user's stated fix is exercised end-to-end.
+//
+// MPM-BUG-HANDOFF-SAME-SECOND-TIE-2026-08-27.
+func TestHandoff_GetLatestUnreadHandoff_SameSecond_TieBreaker(t *testing.T) {
+	dm := newHandoffTestDM(t)
+	// Three handoffs in chronological order, all stamped at the same
+	// Unix-epoch second. id values are chosen so alphabetical DESC
+	// matches insertion DESC (id-a < id-b < id-c).
+	_, err := dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary) VALUES ('id-a', 'sess-a', 1700000000, 'clean', 'first')`)
+	require.NoError(t, err)
+	_, err = dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary) VALUES ('id-b', 'sess-b', 1700000000, 'clean', 'second')`)
+	require.NoError(t, err)
+	_, err = dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary) VALUES ('id-c', 'sess-c', 1700000000, 'clean', 'third')`)
+	require.NoError(t, err)
+
+	got, err := dm.GetLatestUnreadHandoff()
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	// ORDER BY ended_at DESC, id DESC picks id-c (highest id). Pre-fix
+	// the LIMIT 1 selection was non-deterministic.
+	assert.Equal(t, "id-c", got.ID)
+	assert.Equal(t, "third", got.Summary)
+}
+
+// TestHandoff_GetLatestHandoff_SameSecond_TieBreaker pins the same
+// property for the read-state-agnostic GetLatestHandoff query.
+func TestHandoff_GetLatestHandoff_SameSecond_TieBreaker(t *testing.T) {
+	dm := newHandoffTestDM(t)
+	_, err := dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary, read_at) VALUES ('x-1', 'sess-1', 1700000000, 'clean', 'first', 1)`)
+	require.NoError(t, err)
+	_, err = dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary, read_at) VALUES ('x-2', 'sess-2', 1700000000, 'clean', 'second', 1)`)
+	require.NoError(t, err)
+	_, err = dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary, read_at) VALUES ('x-3', 'sess-3', 1700000000, 'clean', 'third', 1)`)
+	require.NoError(t, err)
+
+	got, err := dm.GetLatestHandoff()
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "x-3", got.ID)
+}
+
+// TestHandoff_ListHandoffs_SameSecond_TieBreaker pins deterministic
+// ordering on the bulk listing path too. Pre-fix, list ordering across
+// same-second rows was undefined.
+func TestHandoff_ListHandoffs_SameSecond_TieBreaker(t *testing.T) {
+	dm := newHandoffTestDM(t)
+	for _, id := range []string{"row-a", "row-b", "row-c"} {
+		_, err := dm.db.Exec(`INSERT INTO session_handoffs (id, session_id, ended_at, ended_state, summary) VALUES (?, ?, 1700000000, 'clean', ?)`, id, "sess-"+id, id)
+		require.NoError(t, err)
+	}
+
+	got, err := dm.ListHandoffs(10, false)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	// ORDER BY ended_at DESC, id DESC: row-c > row-b > row-a.
+	assert.Equal(t, "row-c", got[0].ID)
+	assert.Equal(t, "row-b", got[1].ID)
+	assert.Equal(t, "row-a", got[2].ID)
 }
