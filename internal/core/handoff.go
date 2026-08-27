@@ -199,6 +199,14 @@ func (dm *DatabaseManager) GetHandoffBySessionID(sessionID string) (*Handoff, er
 // GetLatestUnreadHandoff returns the most recent handoff that has not been
 // marked as read. Returns sql.ErrNoRows if no unread handoffs exist. Used
 // by wake context to surface the previous session's handoff.
+//
+// Tie-breaker: ORDER BY ended_at DESC, rowid DESC — SQLite INTEGER
+// Unix-epoch resolves to the second, so multiple handoffs inserted in
+// the same second need a secondary sort. rowid DESC is strictly
+// monotonic on INSERT and captures true chronological insertion order;
+// id DESC would NOT suffice because GenerateID() produces SHA256
+// prefixes which are not chronologically sortable.
+// MPM-BUG-HANDOFF-SAME-SECOND-TIE-2026-08-27.
 func (dm *DatabaseManager) GetLatestUnreadHandoff() (*Handoff, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("GetLatestUnreadHandoff: db not initialized")
@@ -207,14 +215,14 @@ func (dm *DatabaseManager) GetLatestUnreadHandoff() (*Handoff, error) {
 		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs
 		WHERE read_at IS NULL
-		ORDER BY ended_at DESC
+		ORDER BY ended_at DESC, rowid DESC
 		LIMIT 1`)
 	return scanHandoff(row)
 }
 
 // GetLatestHandoff returns the most recent handoff regardless of read state.
 // Used by `mpm call session_handoff` when the agent wants to see the latest
-// even if it was already read.
+// even if it was already read. Same tie-breaker as GetLatestUnreadHandoff.
 func (dm *DatabaseManager) GetLatestHandoff() (*Handoff, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("GetLatestHandoff: db not initialized")
@@ -222,7 +230,7 @@ func (dm *DatabaseManager) GetLatestHandoff() (*Handoff, error) {
 	row := dm.db.QueryRow(`
 		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs
-		ORDER BY ended_at DESC
+		ORDER BY ended_at DESC, rowid DESC
 		LIMIT 1`)
 	return scanHandoff(row)
 }
@@ -290,7 +298,7 @@ func (dm *DatabaseManager) ListHandoffs(limit int, unreadOnly bool) ([]*Handoff,
 	if unreadOnly {
 		query += ` WHERE read_at IS NULL`
 	}
-	query += ` ORDER BY ended_at DESC LIMIT ?`
+	query += ` ORDER BY ended_at DESC, rowid DESC LIMIT ?`
 
 	rows, err := dm.db.Query(query, limit)
 	if err != nil {
