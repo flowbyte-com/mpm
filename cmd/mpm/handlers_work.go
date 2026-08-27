@@ -262,6 +262,24 @@ func handleWorkItem(args []string) int {
 		printWorkItemHelp()
 		return 0
 	}
+	// Help-flag short-circuit: --help / -h (and the parseFlags rewrite
+	// "help") at any position triggers help. Without this, the
+	// leading-flag pre-scan below picks --help as a flag and routes
+	// to parseWorkItemArgs, which rejects it as "unknown flag --help"
+	// because help is not in the item subcommand's flag set. The
+	// "help" form is also matched because parseFlags rewrites --help
+	// to the literal token "help" BEFORE this handler runs; without
+	// matching "help", `mpm work item --help` would fall through to
+	// the pre-scan and error. Help is the universal convention; treat
+	// it that way uniformly here so callers do not have to learn
+	// which subcommands accept which flags before they can ask for
+	// documentation.
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			printWorkItemHelp()
+			return 0
+		}
+	}
 	// Identify subcommand before extracting flags so that
 	// `mpm work item --limit 5` is treated as `mpm work item list --limit 5`
 	// rather than an unknown subcommand "--limit". The grammar is:

@@ -108,6 +108,8 @@ func TestWorkItemCLI_GrammarContract(t *testing.T) {
 		{},                                 // bare work item → help
 		{"help"},                           // explicit help
 		{"-h"},                             // short help
+		{"--help"},                         // long help (RECOMMENDED 12)
+		{"list", "--help"},                 // help-after-subcommand
 		{"create", "My Title", "content"},  // create with positional content
 		{"create", "Just Title"},           // create title-only
 	}
