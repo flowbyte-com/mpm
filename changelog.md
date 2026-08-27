@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-08-27 — Pointer-Native Projection on Retrieval APIs (Context-Bloat Fix)
+
+The `mpm_memory query` and `mpm_lessons search|list` surfaces previously returned full content inline (bounded to 2048 bytes by `BoundInlineContent`), destroying agent context windows when a broad query matched many rows. Callers that explicitly opted out via `full_content: true` got unbounded content. The opt-in path was correct; the default was the bug.
+
+**Fix.** The `projection` parameter is now a string enum (`"summary" | "full"`) rather than a boolean.
+
+- **Default (`projection` absent or `"summary"`)**: response is `{mode: "summary", memories|lessons: [{summary, pointer, ...}], ...}`. `summary` is the first 256 runes of content + the ellipsis suffix `"... [truncated, resolve pointer for full text]"` when truncation fired. `pointer` is `mpm://memory/<id>` or `mpm://lesson/<id>`. The `content` field is absent. This is the bounded-by-default contract; full text is retrieved on demand via `mpm_resolve` / `mpm_blob_read` against the pointer.
+- **Opt-in (`projection: "full"`)**: response is `{mode: "full", ...}` with unbounded `content` plus the `pointer` field on each entry.
+
+**Helper.** New `internal/core.SummarizeMemoryWithEllipsis(content string, maxChars int) (string, bool)` truncates on rune boundaries (multibyte-safe) and returns `(summary, truncated)`. The boolean is discarded at call sites; the suffix is unconditional when truncation fired.
+
+**Provenance traceability.** The plan also closes three OpenClaw-traceability gaps surfaced during the context-bloat investigation: (1) `getEffectiveProvenance` already supported a per-call override, but the memory-save path didn't actually wire `ActiveContext.FrameworkName` into it — `saveMemoryWithContextImpl` now sets `dm.perCallProvenanceOverride = dm.provenanceFromContext(ac)` (deferred-reset) so OpenCode MCP and other framework-tagged callers populate `artifact_provenance.framework_name`. (2) `cmd/mpm/mpm why <id>` now reads from `artifact_provenance` and renders `framework  :`, `adapter    :`, `model      :` lines with `(unknown)` fallbacks for legacy artifacts. (3) The OpenCode MCP plugin (`agent_plugins/opencode-mpm/src/index.ts`) was verified to set `MPM_PROVENANCE_FRAMEWORK=opencode`, `MPM_PROVENANCE_MODEL=<id>`, `MPM_PROVENANCE_INVOCATION_ID=inv_<uuid>` unconditionally on every `callMpm` invocation.
+
+**Validation.**
+
+- 7 new regression tests: `TestSummarizeMemoryWithEllipsis` (6 cases — empty, short, exact-length, truncated, rune-boundary, multi-byte), `TestProjection_MemoryQuery_DefaultsToSummary`, `TestProjection_MemoryQuery_FullReturnsUnbounded`, `TestProjection_MemoryQuery_ExplicitSummaryMatchesDefault`, `TestProjection_LessonSearch_DefaultsToSummary`, `TestProjection_LessonList_FullReturnsUnbounded`, `TestSaveMemory_PersistsFrameworkNameFromActiveContext`, `TestMpmWhy_UnknownFallbackForLegacyArtifact`, `TestMpmWhy_ProvenanceFieldsPopulated`, `TestMpmWhy_OrUnknown`. Plus `TestF5_QueryResultsBoundedWithExplicitOptOut` and `TestPhase2_ProjectionPointerResolveChain` updated for the new string enum.
+- `TestSchemaSupersetOfHandlerPayloadReads` passes (schema ↔ handler parity intact).
+- All 44 `TestProvenance*` tests pass (no regression in work-event provenance path).
+- Full core test suite: 0 failures.
+- Full main-module test suite: 0 failures.
+
+**Wire-format change for downstream callers.** Callers that did not pass `projection` previously received `{"content": "<bounded 2048-byte string>", "content_truncated": true|false, ...}`; they now receive `{"mode": "summary", "memories": [{"summary": "<256 chars + suffix>", "pointer": "mpm://memory/<id>", ...}], ...}` with no `content` field. The pointer is the recovery path: `mpm_resolve <pointer>` returns the full text unchanged. Migrate by either (a) passing `projection: "full"` to preserve the previous shape, or (b) reading the new `summary` + `pointer` pair and resolving pointers on demand.
+
 ## 2026-08-26 — HybridSearch Vector-Only Merge Fix
 
 `internal/core/hybrid_search.go` previously discarded every FTS5-absent row in the merge step (`continue` at the old line 186), even when VectorMatch had a high-similarity candidate. The bug surfaced during Test 17-Semantic measurement: paraphrased natural-language queries produced zero FTS5 hits (BM25 implicit-AND with porter unicode61 requires all tokens to match) and the vector signal — though computed — never reached results.
