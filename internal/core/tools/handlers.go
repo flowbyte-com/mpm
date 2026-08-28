@@ -2534,6 +2534,38 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}, nil
 }
 
+// handleWorkshopSkill runs the Skill Workshop pipeline (form or
+// refine mode). The full contract is in
+// docs/archive/2026-08-28-mpm-skill-workshop-design.md §4 and
+// §5. The handler is a thin shim: parse the payload map into
+// internal.WorkshopRequest and call internal.RunWorkshop.
+func handleWorkshopSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// Resolve the underlying *internal.DatabaseManager (the
+	// CoreDB interface doesn't expose RunWorkshop directly — it's
+	// defined as a concrete method).
+	concrete, ok := dm.(*internal.DatabaseManager)
+	if !ok {
+		return nil, fmt.Errorf("workshop: underlying DB is not *internal.DatabaseManager (got %T)", dm)
+	}
+
+	// Decode params into a WorkshopRequest. JSON round-trip keeps
+	// the shape strict; unknown fields are dropped silently.
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("workshop: marshal params: %w", err)
+	}
+	var req internal.WorkshopRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("workshop: parse params: %w", err)
+	}
+
+	resp, err := internal.RunWorkshop(concrete, &req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // handlePromoteSkillToGlobal marks a skill row as shared (is_global=1)
 // and stamps metadata.derived_from_skill_id so the promoted row is
 // traceable. The third operator-gated shared-DB promotion path
@@ -4058,8 +4090,10 @@ func handleMpmSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleDeleteSkill(dm, ac, params)
 	case "promote_to_global":
 		return handlePromoteSkillToGlobal(dm, ac, params)
+	case "workshop":
+		return handleWorkshopSkill(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_skills. Valid actions include save, read, list, delete, promote_to_global", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_skills. Valid actions include save, read, list, delete, promote_to_global, workshop", action)
 	}
 }
 
