@@ -243,3 +243,55 @@ func TestDetectDuplicates_RefineExcludesSelf(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentityCheck_NoExisting(t *testing.T) {
+	dm := NewTestDM(t)
+	proposal := SkillProposal{Name: "foo", Version: "1.0.0"}
+	content := "---\nname: foo\nversion: 1.0.0\n---\nbody"
+	outcome, existing, err := identityCheck(dm, proposal, content)
+	if err != nil {
+		t.Fatalf("identityCheck: %v", err)
+	}
+	if outcome != IdentityNone {
+		t.Errorf("outcome = %v, want none", outcome)
+	}
+	if existing != nil {
+		t.Errorf("existing should be nil for new skill")
+	}
+}
+
+func TestIdentityCheck_SameContent(t *testing.T) {
+	dm := NewTestDM(t)
+	content := "---\nname: foo\nversion: 1.0.0\nwhen_to_use: doing, another\n---\nbody"
+	if _, err := dm.SaveSkill("foo", "1.0.0", content, "test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	proposal := SkillProposal{Name: "foo", Version: "1.0.0"}
+	outcome, existing, err := identityCheck(dm, proposal, content)
+	if err != nil {
+		t.Fatalf("identityCheck: %v", err)
+	}
+	if outcome != IdentitySame {
+		t.Errorf("outcome = %v, want same", outcome)
+	}
+	if existing == nil || existing.ID != "skill:foo-v1.0.0" {
+		t.Errorf("existing = %v, want skill:foo-v1.0.0", existing)
+	}
+}
+
+func TestIdentityCheck_DifferentContent(t *testing.T) {
+	dm := NewTestDM(t)
+	if _, err := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\n---\nbody v1", "test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	proposal := SkillProposal{Name: "foo", Version: "1.0.0"}
+	contentV2 := "---\nname: foo\nversion: 1.0.0\n---\nbody v2 — different"
+	outcome, _, err := identityCheck(dm, proposal, contentV2)
+	if err != nil {
+		t.Fatalf("identityCheck: %v", err)
+	}
+	if outcome != IdentityDifferent {
+		t.Errorf("outcome = %v, want different", outcome)
+	}
+}

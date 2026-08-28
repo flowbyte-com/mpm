@@ -381,3 +381,40 @@ func jaccard(a, b map[string]bool) float64 {
 	}
 	return float64(inter) / float64(union)
 }
+
+// IdentityCheckOutcome is the disposition from the durable (name, version)
+// idempotence check.
+type IdentityCheckOutcome string
+
+const (
+	IdentityNone      IdentityCheckOutcome = "none"     // no existing row
+	IdentitySame     IdentityCheckOutcome = "same"     // same content, return existing
+	IdentityDifferent IdentityCheckOutcome = "different" // version collision
+)
+
+// identityCheck performs spec §5.1 stage 5: look up (name, version)
+// before validation/publish. If the row exists with identical
+// content_hash, return IdentitySame so the workshop returns the
+// existing skill_id without re-writing (cache-loss-safe idempotence).
+// If the row exists with a different hash, return IdentityDifferent
+// so the workshop surfaces version_collision to the agent.
+func identityCheck(dm *DatabaseManager, proposal SkillProposal, content string) (IdentityCheckOutcome, *Skill, error) {
+	id, err := SkillIDForNameAndVersion(proposal.Name, proposal.Version)
+	if err != nil {
+		return IdentityNone, nil, fmt.Errorf("identityCheck: %w", err)
+	}
+	existing, err := dm.ReadSkill(id, "")
+	if err != nil {
+		// Not found is fine — new skill path.
+		if strings.Contains(err.Error(), "not found") {
+			return IdentityNone, nil, nil
+		}
+		return IdentityNone, nil, fmt.Errorf("identityCheck: read: %w", err)
+	}
+	// Compare content hashes.
+	newHash := contentHash(content)
+	if existing.ContentHash == newHash {
+		return IdentitySame, existing, nil
+	}
+	return IdentityDifferent, existing, nil
+}
