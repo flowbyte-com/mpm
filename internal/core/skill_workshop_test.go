@@ -713,3 +713,56 @@ func TestRunWorkshop_PriorVersionReadability(t *testing.T) {
 	}
 }
 
+func TestRunWorkshop_ConcurrencyFirstWriterWins(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode:        "form",
+		WorkshopKey: "concurrent-key-" + fmt.Sprint(time.Now().UnixNano()),
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal:     SkillProposal{Name: "concurrent-skill", Version: "1.0.0", WhenToUse: "doing, another, plus a third", Description: "concurrent"},
+	}
+	// Spawn 5 goroutines with the same key.
+	type result struct {
+		resp WorkshopResponse
+		err  error
+	}
+	results := make(chan result, 5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			r, err := RunWorkshop(dm, req)
+			results <- result{r, err}
+		}()
+	}
+	// Collect all 5.
+	var responses []WorkshopResponse
+	for i := 0; i < 5; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("goroutine %d: %v", i, r.err)
+			continue
+		}
+		responses = append(responses, r.resp)
+	}
+	// All 5 should report the same skill_id.
+	var firstID string
+	for i, r := range responses {
+		if r.Outcome != OutcomePublished {
+			t.Errorf("response %d: outcome=%v", i, r.Outcome)
+			continue
+		}
+		if firstID == "" {
+			firstID = r.SkillID
+			continue
+		}
+		if r.SkillID != firstID {
+			t.Errorf("response %d skill_id=%q, want %q (concurrent callers must dedupe)", i, r.SkillID, firstID)
+		}
+	}
+	// DB must have exactly one row.
+	var count int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ?`, firstID).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row for %s, got %d (concurrent writers must not duplicate)", firstID, count)
+	}
+}
+
