@@ -3,7 +3,7 @@
 **Status:** DRAFT
 **Date:** 2026-08-05
 **Precedent:** `docs/architecture/epistemic-cascades.md`
-**Companion:** `agent_plugins/mpm-auto-route/` (context injection transport)
+**Companion:** `agent_installation/mpm-auto-route/` (context injection transport)
 
 ---
 
@@ -944,7 +944,7 @@ output remains diff-friendly at any scale.
 
 ### 6.3 Context injection via `mpm-auto-route`
 
-The `agent_plugins/mpm-auto-route/` plugin builds the agent's bootstrap
+The `agent_installation/mpm-auto-route/` plugin builds the agent's bootstrap
 context. Extend it to append a `<capability-updates>` block when state
 transitions have occurred since the agent's last seen cursor:
 

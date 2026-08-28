@@ -185,7 +185,7 @@ func readFromEnv() *CreationProvenance {
 
 	c := &CreationProvenance{}
 	// Framework name: canonical MPM_PROVENANCE_FRAMEWORK, with fallback to
-	// legacy MPM_FRAMEWORK (used by all five agent_plugins) for backward
+	// legacy MPM_FRAMEWORK (used by all five agent_installation) for backward
 	// compat. See forensic audit §9 — two envs for same concept.
 	c.FrameworkName = os.Getenv("MPM_PROVENANCE_FRAMEWORK")
 	if c.FrameworkName == "" {

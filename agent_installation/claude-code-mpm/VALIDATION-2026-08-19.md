@@ -13,7 +13,7 @@ validation (see `../opencode-mpm/VALIDATION-2026-08-19.md`).
 | Item | Value |
 |---|---|
 | Agent / framework | Claude Code (current session — `MiniMax-M3[1m]`) |
-| Integration path | `~/.mpm/agent_plugins/claude-code-mpm/` |
+| Integration path | `~/.mpm/agent_installation/claude-code-mpm/` |
 | Native mechanism | Claude Code MCP server (`mcpServers` block in `~/.claude/.mcp.json`) |
 | MPM interface used | `~/.mpm/bin/mpm-mcp` (canonical JSON-RPC stdio server, 16 tools: 13 domain + 3 standalone) |
 | Auto-load mechanism | `~/.claude/.mcp.json` — loads on Claude Code session start (no in-session hot-reload) |
@@ -47,7 +47,7 @@ following tools appear in the agent's tool list:
 1. **No Claude Code integration existed.** Only the `mpm route --apply` hook
    in `~/.claude/settings.json` (a bootstrap router, not a memory surface).
    The agent had no native tool access to MPM's cognitive substrate. Created
-   `~/.mpm/agent_plugins/claude-code-mpm/` with `.mcp.json.template`,
+   `~/.mpm/agent_installation/claude-code-mpm/` with `.mcp.json.template`,
    `install.sh`, `verify.py`, and `README.md`.
 2. **Canonical MCP server choice.** Selected `~/.mpm/bin/mpm-mcp` (the
    canonical JSON-RPC stdio server) over a TypeScript adapter (opencode-mpm
@@ -203,8 +203,8 @@ Remaining test artifacts that could not be removed via the supported
 interface: **None**.
 
 No MPM core files modified. `git status --short` shows only the new
-`agent_plugins/claude-code-mpm/` directory and the (pre-existing,
-unmodified) `agent_plugins/opencode-mpm/` and `agent_plugins/pi-mpm/`
+`agent_installation/claude-code-mpm/` directory and the (pre-existing,
+unmodified) `agent_installation/opencode-mpm/` and `agent_installation/pi-mpm/`
 entries. No commits made. `mpm_config.json` and other credentials not
 touched. Test artifacts do not leak into the persistent substrate.
 

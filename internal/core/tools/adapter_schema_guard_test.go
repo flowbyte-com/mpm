@@ -38,7 +38,7 @@ type callSite struct {
 // the wrong layer (after merge, not at compile time).
 //
 // This test parses every TypeScript/JavaScript adapter under
-// `agent_plugins/*/index.{ts,js}` for the mpm-callSite pattern
+// `agent_installation/*/index.{ts,js}` for the mpm-callSite pattern
 // `callMpm(<tool>, <payload>)` (or `callMpmTool(...)`), extracts
 // the tool name + literal payload keys, and verifies against
 // the live Registry:
@@ -107,11 +107,11 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 		}{actions, requiredAction, props}
 	}
 
-	// Find the agent_plugins directory. Tests run from the core
+	// Find the agent_installation directory. Tests run from the core
 	// package directory, so the workspace root is ../../
 	root, err := findAgentPluginsRoot()
 	if err != nil {
-		t.Skipf("agent_plugins not found at expected location: %v", err)
+		t.Skipf("agent_installation not found at expected location: %v", err)
 	}
 
 	// Walk every adapter file and extract callMpm(...) callSites.
@@ -139,7 +139,7 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk agent_plugins: %v", err)
+		t.Fatalf("walk agent_installation: %v", err)
 	}
 	if len(sites) == 0 {
 		t.Skipf("no callMpm(...) callSites found under %s — no adapters to guard", root)
@@ -214,7 +214,7 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 	}
 }
 
-// findAgentPluginsRoot returns the absolute path to the agent_plugins
+// findAgentPluginsRoot returns the absolute path to the agent_installation
 // directory adjacent to the workspace containing the tools package.
 // The package is at internal/core/tools, so the workspace root is ../../.
 func findAgentPluginsRoot() (string, error) {
@@ -223,10 +223,10 @@ func findAgentPluginsRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Walk upward looking for a directory containing `agent_plugins/`.
+	// Walk upward looking for a directory containing `agent_installation/`.
 	dir := cwd
 	for i := 0; i < 6; i++ {
-		candidate := filepath.Join(dir, "agent_plugins")
+		candidate := filepath.Join(dir, "agent_installation")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate, nil
 		}
@@ -236,7 +236,7 @@ func findAgentPluginsRoot() (string, error) {
 		}
 		dir = parent
 	}
-	return "", fmt.Errorf("agent_plugins/ not found within %d levels of %s", 6, cwd)
+	return "", fmt.Errorf("agent_installation/ not found within %d levels of %s", 6, cwd)
 }
 
 // callSitePattern recognises `callMpm("X", <arg>)` and
