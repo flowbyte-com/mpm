@@ -32,6 +32,9 @@ src/db/mpm.db
 src/db/mpm.db.old
 src/db/mirror.jsonl
 src/db/watchdog.jsonl
+src/db/telemetry.db
+src/db/telemetry.db-shm
+src/db/telemetry.db-wal
 # Internal/core path was never covered by the src/db/ rule above — same
 # runtime files live at internal/core/src/db/ when MPM is consumed as
 # a library. Added 2026-08-08 after both files slipped through.
@@ -91,7 +94,10 @@ mpm_config.json.bak
 /toxicphrases.txt
 src/db/mirror.jsonl
 src/db/mpm.db
+src/db/telemetry.db
 src/db/*.jsonl
+src/db/*-shm
+src/db/*-wal
 # Compressed rotated logs (log-rotation feature ships them next to jsonl).
 src/db/*.gz
 cmd/mpm/src/db/
@@ -201,10 +207,14 @@ CLAUDE.md
 # fix milestones). The backup-* pattern was already covered; pre-* was
 # missed until the 2026-08-12 symlink restore.
 src/db/mpm.db.pre-*
+src/db/telemetry.db.pre-*
 src/db/watchdog.jsonl.pre-*
 
 # Runtime state created by the symlink restore. /run/ holds the
 # scheduler.state file. /mpm.db is a stray top-level symlink/file from
 # an old test sweep.
 /mpm.db
+/telemetry.db
+/telemetry.db-shm
+/telemetry.db-wal
 /run/
