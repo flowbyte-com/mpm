@@ -298,7 +298,7 @@ Use when: you develop a workflow that works well and want to固化 it as a persi
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","read","list","delete","promote_to_global"]},
+				"action": {"type": "string", "enum": ["save","read","list","delete","promote_to_global","workshop"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -309,7 +309,18 @@ Use when: you develop a workflow that works well and want to固化 it as a persi
 						"force":  {"type": "boolean"},
 						"scope":  {"type": "string", "enum": ["all","local","shared"]},
 						"skill_id": {"type": "string"},
-						"confirm":   {"type": "boolean"}
+						"confirm":   {"type": "boolean"},
+						"mode":             {"type": "string", "enum": ["form","refine"]},
+						"intent":           {"type": "string"},
+						"change_type":      {"type": "string", "enum": ["correction","extension","restructuring","purpose_change"]},
+						"decision_model":   {"type": "object"},
+						"proposal":         {"type": "object"},
+						"task_context":     {"type": "string"},
+						"workflow_description": {"type": "string"},
+						"failure_recovery": {"type": "string"},
+						"recent_actions":   {"type": "array", "items": {"type": "string"}},
+						"evidence":         {"type": "object"},
+						"workshop_key":     {"type": "string"}
 					},
 					"additionalProperties": true
 				}
