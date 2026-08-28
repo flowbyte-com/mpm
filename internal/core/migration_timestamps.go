@@ -23,7 +23,7 @@ type timestampColumn struct {
 // the shared.facts column coercion pattern is the same and a shared-side
 // sweep would belong to a separate task.
 //
-// Mirrors the table in docs/superpowers/specs/2026-07-30-unix-epoch-timestamps-design.md.
+// Mirrors the table in docs/archive/2026-07-30-unix-epoch-timestamps-design.md.
 var allTimestampsToMigrate = []timestampColumn{
 	{"sessions", "created_at"},
 	{"topics", "created_at"},

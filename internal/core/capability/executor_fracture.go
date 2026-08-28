@@ -18,7 +18,7 @@ import (
 // spec's failure-cluster detector:
 //
 //     "3 failures in 60s ⇒ state transitions to 'fractured'"
-//     (docs/architecture/capability-lifecycle.md §1.3 row 9)
+//     (docs/archive/capability-lifecycle.md §1.3 row 9)
 //
 // The detector reads capability_invocations (the load-bearing
 // telemetry ledger), counts failures whose invoked_at falls
@@ -38,7 +38,7 @@ import (
 //   enforcement in one place. Splitting the file gives EX-7 its
 //   own testable surface without bloating store_lifecycle.go.
 //
-// Spec: docs/architecture/capability-lifecycle.md §1.3 (state matrix row 9),
+// Spec: docs/archive/capability-lifecycle.md §1.3 (state matrix row 9),
 //      §2.4.1 (fracture wake).
 // =============================================================================
 

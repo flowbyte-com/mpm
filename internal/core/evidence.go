@@ -12,7 +12,7 @@ type evidenceType struct {
 // and their default strengths. The order of entries in this slice defines
 // the order returned by AllEvidenceTypes().
 //
-// Spec: docs/superpowers/specs/2026-06-16-confidence-evidence-foundation-design.md
+// Spec: docs/archive/2026-06-16-confidence-evidence-foundation-design.md
 //
 // Strengths are starting points; callers can override per-evidence.
 // The signs are critical: `challenge` has negative strength, modeling

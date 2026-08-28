@@ -263,7 +263,7 @@ func (dm *DatabaseManager) applyTheoryResolutions(content string, tags []string)
 // HybridSearchMemories runs hybrid (BM25 + semantic) search with FTS fallback.
 // Named to avoid collision with dm.SearchMemories in web_db.go.
 //
-// scope (Phase 2d, docs/architecture/shared-epistemology.md multi-agent shared epistemology):
+// scope (Phase 2d, docs/archive/shared-epistemology.md multi-agent shared epistemology):
 //
 //	"all"    (default) — federated local + shared. Shared rows get
 //	                       the "Shared Premium" multiplier

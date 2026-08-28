@@ -38,7 +38,7 @@ import (
 //               still be at the cap). The caller's cmd.Wait
 //               surfaces the actual error.
 //
-// Spec: docs/architecture/capability-lifecycle.md §4.3 (Output size:
+// Spec: docs/archive/capability-lifecycle.md §4.3 (Output size:
 //      16 MB hard cap).
 // =============================================================================
 

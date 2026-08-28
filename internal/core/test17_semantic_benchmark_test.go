@@ -616,11 +616,11 @@ func TestSemanticBenchmark_DebugSanityCheck(t *testing.T) {
 //
 // This is the only test that touches the authored vocabulary files. If
 // the vocab files are missing (e.g. the test is running on a checkout
-// without docs/concept-vocabularies/), the test is skipped.
+// without docs/archive/), the test is skipped.
 func TestSemanticBenchmark_VocabularyEffect(t *testing.T) {
-	vocabDir := findRepoDocsDir(t, "concept-vocabularies")
+	vocabDir := findRepoDocsDir(t, "archive")
 	if vocabDir == "" {
-		t.Skip("docs/concept-vocabularies/ not found — vocabulary-effect scenario skipped")
+		t.Skip("docs/archive/ not found — vocabulary-effect scenario skipped")
 	}
 
 	dm := newTestDM(t)
@@ -632,9 +632,10 @@ func TestSemanticBenchmark_VocabularyEffect(t *testing.T) {
 	// Augment with concept-vocabulary content extracted from the docs.
 	// These represent the "improved authoring" scenario — vocabulary
 	// tokens would help if they were indexed as additional content.
+	// Concept vocabularies live at the root of docs/archive/ (flat
+	// layout); they're historical artifacts authored per
+	// docs/concept-vocabulary-authoring.md.
 	for _, slug := range []string{"f71-challenge-restoration.md", "f81-cancel-verification.md"} {
-		// vocabDir is resolved to docs/archive/concept-vocabularies/ when
-		// the files live there (historical concept vocabularies).
 		path := filepath.Join(vocabDir, slug)
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -682,8 +683,7 @@ func TestSemanticBenchmark_VocabularyEffect(t *testing.T) {
 }
 
 // findRepoDocsDir walks up from the current test working directory to
-// find the project root containing docs/<leaf> (or docs/archive/<leaf>
-// for archived vocabularies). Returns "" if not found.
+// find the project root containing docs/<leaf>. Returns "" if not found.
 func findRepoDocsDir(t *testing.T, leaf string) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -691,13 +691,9 @@ func findRepoDocsDir(t *testing.T, leaf string) string {
 		return ""
 	}
 	for dir := wd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		// Prefer live docs/<leaf>; fall back to docs/archive/<leaf> for
-		// archived content (concept vocabularies, audit reports, etc.).
-		for _, prefix := range []string{"docs", filepath.Join("docs", "archive")} {
-			candidate := filepath.Join(dir, prefix, leaf)
-			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-				return candidate
-			}
+		candidate := filepath.Join(dir, "docs", leaf)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
 		}
 	}
 	return ""

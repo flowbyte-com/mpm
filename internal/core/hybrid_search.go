@@ -35,7 +35,7 @@ type HybridConfig struct {
 	// equivalents via ATTACH. Set Origin at the same time so downstream
 	// consumers can render results distinctly.
 	//
-	// Used by Phase 2d of docs/architecture/shared-epistemology.md (Multi-Agent Shared Epistemology)
+	// Used by Phase 2d of docs/archive/shared-epistemology.md (Multi-Agent Shared Epistemology)
 	// to fuse local and shared-memory recall into one ranked stream.
 	// threading the prefix through searchFTS5/searchLike/VectorMatch
 	// keeps the search primitives schema-agnostic so the same code path

@@ -350,7 +350,7 @@ var _ = sort.Strings
 //
 // This is the regression net for the 2026-07-07 VectorMatch refactor
 // — the un-indexed O(n) cosine scan can OOM at scale; the cap buys
-// time until the ANN index (HNSW/IVF) lands in docs/architecture/shared-epistemology.md.
+// time until the ANN index (HNSW/IVF) lands in docs/archive/shared-epistemology.md.
 func TestVectorMatch_MaxScanCap_Default(t *testing.T) {
 	dm := NewTestDM(t)
 	// No env var set: default cap (5000) is well above any test

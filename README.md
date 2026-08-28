@@ -622,7 +622,7 @@ mpm cascade materialize --once     # process one batch and exit
 mpm cascade list-dead-letters      # show failed intents and outbox summary
 ```
 
-The outbox is durable; a crash mid-materialize leaves the row with `status='processing'` and the next materialization reclaims it via stale-recovery (`updated_at` filter). Every operation is in `docs/architecture/epistemic-cascades.md` (operator-facing schema, queries, knob reference).
+The outbox is durable; a crash mid-materialize leaves the row with `status='processing'` and the next materialization reclaims it via stale-recovery (`updated_at` filter). Every operation is in `docs/archive/epistemic-cascades.md` (operator-facing schema, queries, knob reference).
 
 ---
 
@@ -864,7 +864,7 @@ The execution-profile abstraction is the substrate's primitive for this routing:
 
 The CLI surface (`mpm config profile|component|capability`) lets operators configure the routing without writing code. The MCP surface (`mpm call request_review ...`) lets agents invoke multi-component reviews against the same routing — the substrate's first orchestration primitive.
 
-For the full design — including the substrate-side primitives, the `Daily` / `Create` / `Knowledge` taxonomy, and the no-hardcoded-component-names discipline — see `docs/architecture/cli-design.md`.
+For the full design — including the substrate-side primitives, the `Daily` / `Create` / `Knowledge` taxonomy, and the no-hardcoded-component-names discipline — see `docs/archive/cli-design.md`.
 
 ### 6.2 Confidence Engine
 
@@ -1863,7 +1863,7 @@ mpm call mpm_context --payload '{"action":"read_directives","params":{}}'
 # → response: { "success":true, "directives":[...], "count":N, "framework":"openclaw" }
 ```
 
-**Full contract:** `docs/architecture/directives.md` — grammar, evaluation pipeline, precedence rules, conflict boundaries, authoring rules for operators.
+**Full contract:** `docs/archive/directives.md` — grammar, evaluation pipeline, precedence rules, conflict boundaries, authoring rules for operators.
 
 #### Skills (Procedural Memory)
 
@@ -1945,7 +1945,7 @@ Idempotent. Local edits to a seeded skill are preserved and surfaced as drift in
 
 *Stateful, executable artifacts with a lifecycle (draft → linted → validated → probation → active → degraded → fractured) — discoverable via `mpm capability <subcommand>`, sealed at the storage-layer CHECK constraint.*
 
-Capabilities are MPM's answer to "how does an agent actually *do* something with the substrate, not just remember about it?" Where a skill says *how* (a procedure the agent interprets), a capability is the artifact that gets *invoked* — a typed source-code payload (bash / python / jq), a declared execution domain (sandbox / restricted / trusted / operator), and a telemetry trail that feeds the fracture detector. The full lifecycle is specified in `docs/architecture/capability-lifecycle.md`; this section is the operator-facing surface.
+Capabilities are MPM's answer to "how does an agent actually *do* something with the substrate, not just remember about it?" Where a skill says *how* (a procedure the agent interprets), a capability is the artifact that gets *invoked* — a typed source-code payload (bash / python / jq), a declared execution domain (sandbox / restricted / trusted / operator), and a telemetry trail that feeds the fracture detector. The full lifecycle is specified in `docs/archive/capability-lifecycle.md`; this section is the operator-facing surface.
 
 ##### Bootstrapping the Tier 1 primitive set
 
