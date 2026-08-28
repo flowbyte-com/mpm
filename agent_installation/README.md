@@ -121,3 +121,9 @@ One-line entry points (full procedure in INSTALL.md):
 | 2026-08-19 | Claude Code | **READY** | 9/10 tests PASS, 1/10 INSPECTED via direct JSON-RPC against `mpm-mcp`. Integration uses canonical `mpm-mcp` server. See [`claude-code-mpm/VALIDATION-2026-08-19.md`](./claude-code-mpm/VALIDATION-2026-08-19.md). |
 | 2026-08-21 | Hermes | **READY** | Tests A–E live-verified via MCP. MCP wiring was already active and functional. Phantom FTS5 corruption bug fixed (WAL timing race in HealthCheck). Legacy dead code excised. See [`hermes-mpm/SKILL.md`](./hermes-mpm/SKILL.md). |
 | 2026-08-28 | Pi | **READY (code-inspected)** | `pi-mpm` extension registered 16 typed tools; AGENTS.md behavioral installer tests green (19/19). Live agent-session validation not run in this environment — see INSTALL.md verification section for the post-install checks. |
+
+## Skill formation
+
+The MPM Skill Workshop (canonical protocol §3.1 "SKILL FORMATION")
+provides a guided workflow for authoring skills. Invoke it via
+`mpm call mpm_skills '{"action":"workshop","params":{...}}'`.

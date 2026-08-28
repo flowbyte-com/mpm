@@ -105,6 +105,24 @@ Most hosts have an installer that materializes the protocol into the
 host's persistent-instruction surface (CLAUDE.md / AGENTS.md /
 .hermes.md). The host-specific sections below cover this.
 
+### Workshop invocation per host
+
+All hosts invoke the workshop via the universal machine interface:
+
+```
+mpm call mpm_skills '{"action":"workshop","params":{...}}'
+```
+
+Hosts with native MCP integration (Claude Code, etc.) may invoke
+directly:
+
+```
+mpm__mpm_skills(action="workshop", params={...})
+```
+
+The workshop's three outcomes (`published` / `candidate` / `rejected`)
+and the `save_payload` hand-off pattern are host-agnostic.
+
 ---
 
 ## OpenClaw
