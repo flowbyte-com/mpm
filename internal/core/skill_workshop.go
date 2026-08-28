@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -417,4 +419,55 @@ func identityCheck(dm *DatabaseManager, proposal SkillProposal, content string) 
 		return IdentitySame, existing, nil
 	}
 	return IdentityDifferent, existing, nil
+}
+
+// bumpVersion applies the deterministic spec §9 mapping:
+//   correction     → patch
+//   extension      → minor
+//   restructuring  → minor
+//   purpose_change → major
+func bumpVersion(currentVersion, changeType string) (string, error) {
+	base := "v" + currentVersion
+	if !semver.IsValid(base) {
+		return "", fmt.Errorf("bumpVersion: invalid current version %q", currentVersion)
+	}
+	// Strip the leading 'v' for parsing.
+	ver := strings.TrimPrefix(base, "v")
+	parts := strings.Split(ver, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("bumpVersion: invalid version format %q", currentVersion)
+	}
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(ver, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		return "", fmt.Errorf("bumpVersion: cannot parse version %q: %w", currentVersion, err)
+	}
+	switch changeType {
+	case "correction":
+		patch++
+	case "extension":
+		minor++
+	case "restructuring":
+		minor++
+	case "purpose_change":
+		major++
+	default:
+		return "", fmt.Errorf("bumpVersion: unknown change_type %q", changeType)
+	}
+	return fmt.Sprintf("%d.%d.%d", major, minor, patch), nil
+}
+
+// checkVersionBump verifies proposedVersion matches the deterministic
+// bump from changeType applied to currentVersion. Returns nil on
+// match; non-nil error on mismatch (caller surfaces
+// version_bump_mismatch to the agent).
+func checkVersionBump(proposedVersion, currentVersion, changeType string) error {
+	expected, err := bumpVersion(currentVersion, changeType)
+	if err != nil {
+		return err
+	}
+	if proposedVersion != expected {
+		return fmt.Errorf("version_bump_mismatch: proposed %q, expected %q for change_type %q",
+			proposedVersion, expected, changeType)
+	}
+	return nil
 }
