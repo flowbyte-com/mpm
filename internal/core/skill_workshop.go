@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -89,4 +90,101 @@ func publishResult(entry *workshopCacheEntry, response json.RawMessage, err erro
 	entry.response = response
 	entry.err = err
 	close(entry.done)
+}
+
+// WorkshopRequest is the parsed workshop invocation payload. The MCP
+// handler unmarshals the raw payload map into this struct before
+// pipeline stages run.
+type WorkshopRequest struct {
+	Mode            string           `json:"mode"`
+	Intent          string           `json:"intent"`
+	ChangeType      string           `json:"change_type"`
+	DecisionModel   DecisionModel    `json:"decision_model"`
+	Proposal        SkillProposal    `json:"proposal"`
+	TaskContext     string           `json:"task_context"`
+	WorkflowDesc    string           `json:"workflow_description"`
+	FailureRecovery string           `json:"failure_recovery"`
+	RecentActions   []string         `json:"recent_actions"`
+	Evidence        WorkshopEvidence `json:"evidence"`
+	WorkshopKey     string           `json:"workshop_key"`
+}
+
+type DecisionModel struct {
+	Reusability    int    `json:"reusability"`
+	NonObviousness int    `json:"non_obviousness"`
+	Stability      int    `json:"stability"`
+	Leverage       int    `json:"leverage"`
+	Boundary       string `json:"boundary"`
+}
+
+type SkillProposal struct {
+	Name        string      `json:"name"`
+	Version     string      `json:"version"`
+	Domain      string      `json:"domain"`
+	Description string      `json:"description"`
+	WhenToUse   string      `json:"when_to_use"`
+	Steps       []SkillStep `json:"steps"`
+	Constraints []string    `json:"constraints"`
+}
+
+type WorkshopEvidence struct {
+	MemoryIDs    []string `json:"memory_ids"`
+	LessonIDs    []string `json:"lesson_ids"`
+	ReferenceIDs []string `json:"reference_ids"`
+}
+
+// size caps from spec §4.1 and §5.1.
+const (
+	maxTotalRequest     = 256 * 1024
+	maxTaskContext      = 50 * 1024
+	maxWorkflowDesc     = 50 * 1024
+	maxFailureRecovery  = 20 * 1024
+	maxRecentActions    = 20
+	maxEvidenceMemory   = 10
+	maxEvidenceLesson   = 5
+	maxEvidenceRef      = 5
+)
+
+// validateInput enforces size caps and shape checks. Returns
+// (warnings, errors, err). On hard limit violation (size cap
+// exceeded), err is non-nil; soft warnings are returned separately.
+func validateInput(req *WorkshopRequest) (warnings []string, errors []string, err error) {
+	if req == nil {
+		return nil, nil, fmt.Errorf("validateInput: nil request")
+	}
+	if req.Mode != "form" && req.Mode != "refine" {
+		return nil, nil, fmt.Errorf("validateInput: mode must be 'form' or 'refine', got %q", req.Mode)
+	}
+	if req.Mode == "refine" && req.ChangeType == "" {
+		return nil, nil, fmt.Errorf("validateInput: refine mode requires change_type")
+	}
+	if len(req.TaskContext) > maxTaskContext {
+		return nil, nil, fmt.Errorf("validateInput: task_context exceeds %d bytes", maxTaskContext)
+	}
+	if len(req.WorkflowDesc) > maxWorkflowDesc {
+		return nil, nil, fmt.Errorf("validateInput: workflow_description exceeds %d bytes", maxWorkflowDesc)
+	}
+	if len(req.FailureRecovery) > maxFailureRecovery {
+		return nil, nil, fmt.Errorf("validateInput: failure_recovery exceeds %d bytes", maxFailureRecovery)
+	}
+	if len(req.RecentActions) > maxRecentActions {
+		return nil, nil, fmt.Errorf("validateInput: recent_actions has %d entries, max %d", len(req.RecentActions), maxRecentActions)
+	}
+	if len(req.Evidence.MemoryIDs) > maxEvidenceMemory {
+		return nil, nil, fmt.Errorf("validateInput: evidence.memory_ids has %d entries, max %d", len(req.Evidence.MemoryIDs), maxEvidenceMemory)
+	}
+	if len(req.Evidence.LessonIDs) > maxEvidenceLesson {
+		return nil, nil, fmt.Errorf("validateInput: evidence.lesson_ids has %d entries, max %d", len(req.Evidence.LessonIDs), maxEvidenceLesson)
+	}
+	if len(req.Evidence.ReferenceIDs) > maxEvidenceRef {
+		return nil, nil, fmt.Errorf("validateInput: evidence.reference_ids has %d entries, max %d", len(req.Evidence.ReferenceIDs), maxEvidenceRef)
+	}
+	// Soft warnings (don't block).
+	if req.Proposal.Name == "" {
+		warnings = append(warnings, "missing_proposal_name")
+	}
+	if req.Proposal.Version == "" {
+		warnings = append(warnings, "missing_proposal_version")
+	}
+	return warnings, errors, nil
 }
