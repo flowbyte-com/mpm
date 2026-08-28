@@ -46,7 +46,7 @@ func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string
 	// Secret/poison scanner — same call SaveSkill used to perform
 	// inline before persisting. Run on the whole content.
 	if sensitive, reason := isSensitiveContent(content); sensitive {
-		errors = append(errors, "scanner_secret:"+reason)
+		errors = append(errors, "scanner_secret:sensitive content blocked - "+reason)
 	}
 	if poisoned, reason := isPoisoned(content); poisoned {
 		errors = append(errors, "scanner_poison:"+reason)
