@@ -9,7 +9,14 @@
 
 ## 1. Overview
 
-The **MPM Skill Workshop** is a guided workflow that helps an agent turn a repeated, non-obvious experience into a reusable skill. It extends — does not replace — the existing `mpm__mpm_skills` MCP tool with a single `workshop` action. The action runs synchronously and returns one of three outcomes. No in-flight proposal state is exposed to agents or operators.
+The **MPM Skill Workshop** is a structured **skill-formation and validation** workflow that helps an agent turn a repeated, non-obvious experience into a durable, reusable skill. The workflow has two halves:
+
+- **Formation** (host-side, lives in the canonical agent protocol and the §11.2 prompt template): the agent reasons about the experience, fills in the prompt template, and produces a candidate proposal.
+- **Validation** (server-side, lives in the workshop action): the workshop enforces the contract — decision-model thresholds, `when_to_use` quality, duplicate detection, frontmatter and scanner checks, idempotence, and durable skill identity.
+
+The seam between formation and validation is the workshop's `save_payload`: the protocol helps the agent formulate; the workshop validates and (when criteria pass) publishes. This split avoids a server-side LLM dependency for content generation while still giving the agent a controlled path from "I keep doing this" to "future-me now has a reusable procedure for it."
+
+The workshop extends — does not replace — the existing `mpm__mpm_skills` MCP tool with a single `workshop` action. The action runs synchronously and returns one of three outcomes. No in-flight proposal state is exposed to agents or operators.
 
 The workshop addresses a gap surfaced during the alpha-3 release (2026-08-27): the MPM substrate persists skills but offers no authoring workflow. Skills today flow through `SaveSkill` with only frontmatter validation — no proposal stage, no lint, no duplicate check, no decision model. The capability subsystem has a 6-step forge pipeline with a 10-state lifecycle (`internal/core/capability/forge.go`), but it is not wired for skills. The workshop brings similar structure to the skill surface without introducing a parallel registry or new persistence tables.
 
@@ -39,7 +46,7 @@ The workshop addresses a gap surfaced during the alpha-3 release (2026-08-27): t
 3. Add a dedicated `deprecate` or `supersede` MCP action.
 4. Persist a `workshop_key` cache across daemon restarts.
 5. Auto-create skills on every session, task, or successful action.
-6. Replace or destabilize OpenClaw's host-specific skill behavior (none currently exists; see §5.5).
+6. Replace, destabilize, or codify OpenClaw's host-specific skill behavior — none currently exists in the repo (see §11.3).
 7. Add cron, watchdog, or network services to the workshop path.
 8. Modify the wake-context `<available_skills>` catalog (it already surfaces published skills automatically).
 
@@ -47,35 +54,37 @@ The workshop addresses a gap surfaced during the alpha-3 release (2026-08-27): t
 
 ## 3. Architectural Commitment
 
-The workshop extends the existing `mpm__mpm_skills` MCP tool. The action enum grows from `[save, read, list, delete, promote_to_global]` to `[..., workshop]`. Internally, the workshop runs a synchronous pipeline (input validation → decision model → duplicate check → validation → publish-or-return). Agents see only the outcome; pipeline stages are implementation detail.
+The workshop extends the existing `mpm__mpm_skills` MCP tool. The action enum grows from `[save, read, list, delete, promote_to_global]` to `[..., workshop]`. Internally, the workshop runs a synchronous pipeline (input validation → decision model → `when_to_use` validation → duplicate check → identity check → non-mutating validation → publish-or-return). Agents see only the outcome; pipeline stages are implementation detail.
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ mpm__mpm_skills (extended)                                   │
-│                                                               │
-│  save                   (existing — direct write)             │
-│  read                   (existing — exact id or latest)       │
-│  list                   (existing — dedup by name)            │
-│  delete                 (existing — soft-delete via ShredSkill)│
-│  promote_to_global      (existing — separate lifecycle op)    │
-│  workshop               (NEW — see §4–§10)                    │
-└───────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
+│ FORMATION (host-side)                                         │
+│   Canonical protocol §11.2 prompt template                    │
+│   → agent reasons, fills in proposal + decision_model         │
+└────────────────────────┬──────────────────────────────────────┘
+                         │  save_payload + decision_model
+                         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│ Internal workshop pipeline (synchronous, single-flight)       │
+│ mpm__mpm_skills workshop (single new action)                 │
+└────────────────────────┬──────────────────────────────────────┘
+                         ▼
+┌───────────────────────────────────────────────────────────────┐
+│ VALIDATION (server-side, single-flight sync.Map)             │
 │                                                               │
 │  1. Input validation     — size limits, schema check          │
 │  2. Decision model       — 4-axis scoring + boundary check    │
-│  3. Duplicate check      — substring + FTS5 against skills    │
-│  4. Validation           — frontmatter, when_to_use, scanner  │
-│  5. Publication          — dm.SaveSkill (existing path)       │
-│  6. Audit + idempotence  — LogAudit + sync.Map cache          │
-└───────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                  src/db/mpm.db (memories, collection='skills')
+│  3. when_to_use check    — length / verb / conjunction quality│
+│  4. Duplicate check      — substring + FTS5 (refine excludes) │
+│  5. Identity check       — durable (name,version) idempotence │
+│  6. Validation           — dm.ValidateSkill (NON-MUTATING)    │
+│  7. Publication          — dm.SaveSkill / SaveSkillAndDeprecate│
+│  8. Audit + idempotence  — LogAudit + sync.Map cache          │
+└────────────────────────┬──────────────────────────────────────┘
+                         ▼
+            src/db/mpm.db (memories, collection='skills')
 ```
+
+**Critical safety property:** stage 6 (`Validation`) calls a non-mutating helper `dm.ValidateSkill(...)` that reuses `SaveSkill`'s parser/scanner internals but does **no DB writes**. Only stage 7 (`Publication`) is allowed to persist. A `candidate` outcome can never accidentally appear in `memories` because the validation stage never touched the database.
 
 Three outcomes (`published`, `candidate`, `rejected`) map directly to the spec's SKILL-WORTHY / CANDIDATE / NOT-SKILL-WORTHY categories. `published` writes through the existing `SaveSkill` path and returns the new `skill_id`. `candidate` returns a complete `save_payload` so the agent can decide via the existing `save` action. `rejected` returns a concise reason and writes nothing.
 
@@ -92,6 +101,7 @@ Global promotion remains a separate, existing lifecycle operation (`promote_to_g
   "action": "workshop",
   "mode": "form" | "refine",
   "intent": "<skill name>",
+  "change_type": "correction" | "extension" | "restructuring" | "purpose_change",
   "decision_model": {
     "reusability":     <0|1|2>,
     "non_obviousness": <0|1|2>,
@@ -120,6 +130,8 @@ Global promotion remains a separate, existing lifecycle operation (`promote_to_g
   "workshop_key":         "<optional opaque string for idempotence>"
 }
 ```
+
+**`change_type`** (required for `mode: "refine"`; ignored for `mode: "form"`): classifies the nature of the refinement and drives a deterministic version bump (see §9). Eliminates the agent's ability to choose a version that doesn't match the change's nature.
 
 **`intent` semantics:**
 - `mode: "form"` — `intent` is the proposed new skill name. The workshop validates that no skill with that exact name already exists at the proposed version.
@@ -240,7 +252,20 @@ duplicate check  (§8)
    ├─ top match overlap_score > 0.6  → return candidate with duplicate_check populated
    │
    ▼
-validation  — frontmatter parse, scanner (existing SaveSkill path)
+identity check  (§5.1, §10)  ──── durable idempotence at (name, version) level
+   │
+   ├─ (name, version) exists with identical content  → return published with existing skill_id
+   ├─ (name, version) exists with different content   → return candidate with version_collision
+   ├─ (name, version) does not exist                  → continue
+   │
+   ▼
+[refine mode] change_type → version-bump check
+   │
+   ├─ proposal.version doesn't match deterministic bump from change_type
+   │     → return candidate with version_bump_mismatch
+   │
+   ▼
+validation  — dm.ValidateSkill (§9.2, NON-MUTATING)
    │
    ├─ errors present   → return candidate with validation.errors
    ├─ warnings only    → return candidate with validation.warnings
@@ -259,6 +284,8 @@ publication  ──── single-flight sync.Map claim (§10)
 return published response
 ```
 
+**Critical safety property:** the `validation` stage runs `dm.ValidateSkill(...)` — a non-mutating helper that performs the parse + scanner + `when_to_use` checks with **no DB writes**. Only the `publication` stage is allowed to write. A `candidate` or `rejected` outcome can never accidentally appear in `memories`, because the workshop's validation path never touches the database.
+
 ### 5.1 Stage details
 
 **Input validation** — request size ≤ 256KB; `task_context` ≤ 50KB; `workflow_description` ≤ 50KB; `failure_recovery` ≤ 20KB; `recent_actions` ≤ 20 entries; `evidence.memory_ids` ≤ 10; `evidence.lesson_ids` ≤ 5; `evidence.reference_ids` ≤ 5. Out-of-bounds returns `rejected` with `reason: "low_confidence"`.
@@ -271,9 +298,11 @@ return published response
 
 **Duplicate check** — see §8.
 
-**Validation** — delegates to the existing `dm.SaveSkill` frontmatter parser and the 19-pattern secret/poison scanner. Failures are accumulated (not fail-fast) and returned in `validation.errors`. The scanner is invoked on the proposal body and `when_to_use` text.
+**Identity check (durable idempotence)** — before validation/publish, look up `dm.ReadSkill(proposal.name, proposal.version)`. If a row exists with the **identical** `content` (compared by stable content hash), the workshop returns `published` immediately with the existing `skill_id`. This makes the operation safely idempotent at the durable skill-identity level — even if the `workshop_key` cache is lost across a daemon restart, re-executing with the same `(name, version)` and identical content produces the same `published` result, never a `UNIQUE(id)` constraint error. If the row exists with **different** content, the workshop returns `candidate` with `validation.errors: ["version_collision"]` (the agent must bump the version).
 
-**Publication** — calls `dm.SaveSkill` (form mode) or `dm.SaveSkillAndDeprecatePrior` (refine mode). Both methods perform a read-back assertion before returning. The read-back is the load-bearing persistence guarantee (substrate defense triad §3).
+**Validation** — calls `dm.ValidateSkill(proposal)`, a **non-mutating** helper extracted from `SaveSkill`'s parser/scanner internals (see §9.2). The helper runs the frontmatter parser, the 19-pattern secret/poison scanner, and `when_to_use` rule checks against the proposal; it returns `(warnings []string, errors []string)` with no DB writes. Failures are accumulated (not fail-fast) and surfaced in `validation.errors`. The scanner is invoked on the proposal body and `when_to_use` text.
+
+**Publication** — calls `dm.SaveSkill` (form mode) or `dm.SaveSkillAndDeprecatePrior` (refine mode). Both methods perform a read-back assertion before returning. The read-back is the load-bearing persistence guarantee (substrate defense triad §3). Only this stage is allowed to write to the `memories` table.
 
 **Idempotence cache** — see §10.
 
@@ -370,7 +399,16 @@ The detection is best-effort and runs in O(N) over the skill catalog. The catalo
 
 4. **Generate new version**:
    - Same `name` as the existing skill.
-   - Version bump rule: patch (`1.0.0` → `1.0.1`) for extension/correction; minor (`1.0.0` → `1.1.0`) for restructuring steps; major (`1.0.0` → `2.0.0`) for purpose change. The agent's `intent` field can hint the bump magnitude (e.g., "fix step 4" → patch; "restructure" → minor).
+   - Version bump rule (deterministic, derived from the `change_type` field supplied in the workshop request — the agent must not pick the version directly):
+
+     | `change_type` | Semver bump | Example |
+     |---|---|---|
+     | `correction` | patch | `1.0.0` → `1.0.1` |
+     | `extension` | minor | `1.0.0` → `1.1.0` |
+     | `restructuring` | minor | `1.0.0` → `1.1.0` |
+     | `purpose_change` | major | `1.0.0` → `2.0.0` |
+
+     If the `proposal.version` in the request doesn't match the deterministic bump from `change_type`, the workshop returns `candidate` with `validation.errors: ["version_bump_mismatch"]` and a suggested version.
    - New `when_to_use` extends (does not replace) the prior phrasing, plus any new task phrases surfaced by the failure mode.
    - Body preserves prior knowledge; adds new steps or correction notes.
 
@@ -406,11 +444,36 @@ func (dm *DatabaseManager) SaveSkillAndDeprecatePrior(newSkill *Skill, priorSkil
 - Uses the existing `*sql.DB` from `DatabaseManager`. Per H-5 in CLAUDE.md, transactions are passed `*sql.Tx` through helpers — never use bare `*sql.DB` inside a transaction.
 - Read-back assertion pattern follows `AddLesson` (`internal/core/db.go`).
 
+### 9.2 `dm.ValidateSkill` contract (non-mutating)
+
+```go
+// ValidateSkill is a non-mutating helper extracted from SaveSkill's parser
+// and scanner internals. It runs the frontmatter parser, the 19-pattern
+// secret/poison scanner, the when_to_use rule checks, and returns the
+// accumulated warnings and errors WITHOUT writing to the database.
+//
+// This is the safety seam between the workshop's validation stage and
+// its publication stage: a `candidate` outcome from the workshop has
+// never touched the database, because validation goes through this
+// helper rather than the write API.
+func (dm *DatabaseManager) ValidateSkill(skill *Skill) (warnings []string, errors []string, err error)
+```
+
+**Touchpoints for implementation:**
+- New method on `DatabaseManager`. Refactors existing `SaveSkill` internals so that the parse + scan + validate pass runs against an in-memory `*Skill` value without performing any `INSERT`/`UPDATE`. The write step in `SaveSkill` is split out and reused by both `ValidateSkill` (skipped) and the publication stage (invoked).
+- The scanner runs against the proposal body and `when_to_use` text, exactly as it would in `SaveSkill`. Coverage is structurally identical (the same scanner function is called).
+- Returns `(warnings, errors, err)`: `err` is for unexpected failures (e.g., DB already unreachable); `errors` is for content-validation failures that surface to the agent; `warnings` is for soft issues.
+
 ---
 
 ## 10. Idempotence & Concurrency
 
-The workshop uses an in-memory `sync.Map` keyed on `workshop_key` (if provided) to provide first-writer-wins semantics within a single daemon lifetime. The cache is a deduplication convenience, not part of skill correctness; underlying identity/version rules remain the source of truth.
+The workshop provides idempotence at two levels:
+
+1. **Cache level (ephemeral)** — in-memory `sync.Map` keyed on `workshop_key` provides first-writer-wins deduplication within a single daemon lifetime. Cleared on restart.
+2. **Identity level (durable)** — every `published` outcome is checked against `dm.ReadSkill(name, version)`. If a row with the identical content hash already exists, the workshop returns the existing `skill_id` as `published` without re-writing. This makes the operation safely idempotent at the durable skill-identity level: even if the cache is lost across a daemon restart, re-executing with the same `(name, version)` and identical content produces the same `published` result. See §5.1 ("Identity check" stage) and §10.3 for the full correctness boundary.
+
+The cache is a deduplication convenience, not part of skill correctness. The identity check is the durable idempotence guarantee.
 
 ### 10.1 First-writer-wins claim pattern (single-flight)
 
@@ -466,18 +529,22 @@ func publishResult(entry *workshopCacheEntry, response json.RawMessage, err erro
 | Two concurrent calls with same `workshop_key` | One runs the pipeline; the other blocks on `entry.done` and returns the same response. Neither performs duplicate publication. |
 | Same `workshop_key` called twice serially within TTL | Second call returns cached response. No DB write. |
 | Same `workshop_key` called twice serially after TTL | First call expires (via `CompareAndDelete`); second call proceeds as a fresh execution. May produce a different outcome (e.g., if the underlying skills catalog changed). |
-| Daemon restart | Cache is empty. A subsequent call with the same `workshop_key` may execute the pipeline again. Underlying `SaveSkill` versioning rules (semver + `is_latest` flip) ensure no corruption: the new version would either replace an existing version (if names collide) or coexist as a different row. |
-| No `workshop_key` provided | Each call proceeds independently. No caching. |
+| Daemon restart, then call with same `(name, version)` and identical content | Identity check (§5.1) finds existing row with same content hash; returns `published` with the existing `skill_id`. No `UNIQUE(id)` constraint error. |
+| Daemon restart, same `workshop_key`, then call with same `(name, version)` but different content | Identity check finds existing row with different content; returns `candidate` with `validation.errors: ["version_collision"]`. Agent must bump version. |
+| Daemon restart, same `workshop_key`, completely fresh skill | Pipeline runs end-to-end. `published` outcome follows normal path. |
+| No `workshop_key` provided | Each call proceeds independently. No caching. Identity check still provides durable idempotence. |
 
 ### 10.3 Correctness boundary
 
-The idempotence cache is a **deduplication convenience**, not a correctness mechanism. The source of truth for skill identity is the `(name, version)` pair on the `memories` row; the source of truth for "latest" is the `is_latest` flag. A daemon restart that drops the cache may cause re-execution; it must not cause:
+The idempotence cache is a **deduplication convenience**, not a correctness mechanism. The durable identity-level idempotence is provided by the §5.1 "Identity check" stage: every `published` outcome first checks whether `(name, version)` already exists with identical content, and if so returns the existing `skill_id` without re-writing. The source of truth for skill identity is the `(name, version)` pair on the `memories` row; the source of truth for "latest" is the `is_latest` flag. A daemon restart that drops the cache may cause re-execution; the workshop guarantees that:
 
-- Duplicate skill rows for the same `(name, version)` — prevented by `SaveSkill`'s existing unique-id semantics (`skill:<name>-v<semver>`).
+- Re-execution of a successful `published` with identical content produces the same `published` outcome with the same `skill_id` (no `UNIQUE(id)` constraint error, no duplicate row).
+- Re-execution with the same `(name, version)` but **different** content surfaces a `version_collision` candidate (agent must bump version).
+- Re-execution of a `SaveSkillAndDeprecatePrior` is naturally safe: the prior version is already deprecated, the new version is already published; the identity check at the new version's `(name, version)` is what matters.
 - Corrupted `is_latest` flags — prevented by `SaveSkill`'s transactional version-flip.
 - Skipped deprecation — prevented by `SaveSkillAndDeprecatePrior`'s transactional coherence.
 
-If the workshop is called twice with the same `workshop_key` across a daemon restart, the second call may publish a duplicate `skill:<name>-v<semver>` row, which `SaveSkill` would reject at the constraint level. This is an acceptable failure mode (agent receives an error and can retry).
+The contract is: **cache loss may cause re-execution, but never an ugly duplicate-publication failure for the same logical skill.**
 
 ### 10.4 TTL
 
@@ -583,9 +650,13 @@ Per the spec's §16 and the substrate defense triad (§3, read-back assertions):
 | `TestWorkshop_DuplicateDetection` | Existing skill with overlapping `when_to_use` → `duplicate_check.close_matches` populated with the existing skill; outcome is `candidate` when overlap > 0.6 |
 | `TestWorkshop_ValidationFailure` | Malformed frontmatter → `candidate` with `validation.errors` populated |
 | `TestWorkshop_RefineExistingSkill` | Refine mode + `failure_recovery` → new version published, prior version's `metadata.deprecated=true` and `metadata.superseded_by=<new_id>`; transactional coherence verified by injecting a failure in the deprecation step and asserting rollback |
+| `TestWorkshop_RefineChangeTypeVersionBump` | Refine mode with each `change_type` (`correction`/`extension`/`restructuring`/`purpose_change`) → version bump matches the deterministic mapping; mismatch in request's `proposal.version` → `candidate` with `version_bump_mismatch` error |
 | `TestWorkshop_Idempotence` | Same `workshop_key` twice within TTL → same response; second call observes the cached entry (no second `SaveSkill` invocation) |
+| `TestWorkshop_IdentityCheckSameContent` | After a `published` outcome, calling workshop again with same `(name, version)` and identical content → returns `published` with the original `skill_id`; no `UNIQUE(id)` constraint error; no duplicate row |
+| `TestWorkshop_IdentityCheckDifferentContent` | After a `published` outcome, calling workshop again with same `(name, version)` but **different** content → returns `candidate` with `validation.errors: ["version_collision"]`; no row written |
 | `TestWorkshop_ConcurrencyFirstWriterWins` | Two goroutines call workshop simultaneously with same `workshop_key` → only one performs publication; the other returns the cached response; no duplicate rows in DB |
 | `TestWorkshop_WhenToUseValidation` | Too short / no verb / equals name → `weak_when_to_use` warning; outcome downgraded |
+| `TestWorkshop_ValidateSkillNonMutating` | `dm.ValidateSkill(...)` returns warnings/errors with no DB writes (verified by row count delta) — proves the safety seam between validation and publication stages |
 | `TestWorkshop_NoNewTables` | Feature-freeze audit: schema unchanged after workshop run (compared via SQLite `sqlite_master` snapshot before/after) |
 | `TestWorkshop_ScannerRuns` | Secret/poison scanner invoked through workshop path (matches existing `TestScannerCoverage_AllMemoriesWritersScanContent` contract) |
 | `TestWorkshop_BoundedContext` | Inputs exceeding size limits → `rejected` with `reason: "low_confidence"`; no DB writes |
@@ -611,6 +682,7 @@ Plus a **dogfood** test (spec §17): a real MPM workflow with a non-obvious repe
 | New MCP tools | **0** (extends `mpm__mpm_skills` action enum by 1: `workshop`) |
 | New CLI commands | **1** (`mpm skill workshop` subcommand under existing `mpm skill`) |
 | New schema migrations | **0** |
+| New `DatabaseManager` methods | **2** — `SaveSkillAndDeprecatePrior(...)` (§9.1, transactional) and `ValidateSkill(...)` (§9.2, non-mutating helper). Both are pure-Go refactors of existing `SaveSkill` internals; no schema impact, no contract changes to `SaveSkill` itself. |
 
 The only persistence changes are:
 - New `metadata.deprecated` and `metadata.superseded_by` keys on existing skill rows (set via the existing JSON metadata column; no schema migration)
@@ -653,7 +725,7 @@ Deferred per the user's directive ("do not expose separate `publish_proposal` or
 | Context/token overhead remains bounded | §4.1 (size caps, pointer-only evidence) |
 | Canonical agent protocol documents the formation rule | §11.1, §12 |
 | Host-specific details remain host-specific | §11.3 |
-| OpenClaw existing workshop behavior is preserved | §3 (no existing OpenClaw workshop to displace) |
+| OpenClaw host-specific skill behavior remains outside the canonical MPM workshop contract | §3, §11.3 |
 | Feature freeze remains intact | §14 |
 | No cron/watchdog/network service added | §14 |
 | Full tests/build/lint pass | §13 (regression tests + spec §20 verification) |
