@@ -173,11 +173,13 @@ func handleSkill(args []string) int {
 		// search_skills or wire one here.
 		usererror.Notice("skill search by keyword not yet wired — use `mpm call search_references` (skill refs live alongside) or `mpm skill list` to enumerate")
 		return 0
+	case "workshop":
+		return handleSkillWorkshop(rest)
 	case "help", "-h", "--help":
 		printSkillHelp()
 		return 0
 	default:
-		usererror.Error("mpm skill: unknown subcommand %q\n  available subcommands: add, list, show, search", sub)
+		usererror.Error("mpm skill: unknown subcommand %q\n  available subcommands: add, list, show, search, workshop", sub)
 		return 1
 	}
 }
@@ -224,13 +226,15 @@ func printSkillHelp() {
 	usererror.Notice(`mpm skill — Skill library
 
 Subcommands:
-  add    Save a skill from a markdown file (alias for save-skill --file <path>)
-  list   List skills (alias for list-skills)
-  show   Read a skill by name (alias for read-skill)
-  search Skill search (reserved — use mpm call search_references today)
+  add       Save a skill from a markdown file (alias for save-skill --file <path>)
+  list      List skills (alias for list-skills)
+  show      Read a skill by name (alias for read-skill)
+  search    Skill search (reserved — use mpm call search_references today)
+  workshop  Run the skill workshop (form | refine) — guided skill-formation workflow
 
 Examples:
   mpm skill add --file path/to/SKILL.md
   mpm skill list
-  mpm skill show agentshell`)
+  mpm skill show agentshell
+  mpm skill workshop --file request.json`)
 }
