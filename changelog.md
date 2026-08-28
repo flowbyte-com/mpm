@@ -38,7 +38,7 @@ The `mpm_memory query` and `mpm_lessons search|list` surfaces previously returne
 
 ## 2026-08-26 — HybridSearch Vector-Only Field Population + Scan Safety (Audit Follow-Up)
 
-The 2026-08-26 retrieval correctness audit (full report at `docs/RETRIEVAL_CORRECTNESS_AUDIT_2026-08-26.md`) found two silent-failure modes downstream of the merge fix above. Both were discovered by re-introducing the original `continue` bug and tracing where vector-only rows ended up zeroed.
+The 2026-08-26 retrieval correctness audit (full report at `docs/archive/RETRIEVAL_CORRECTNESS_AUDIT_2026-08-26.md`) found two silent-failure modes downstream of the merge fix above. Both were discovered by re-introducing the original `continue` bug and tracing where vector-only rows ended up zeroed.
 
 **1. Vector-only display fields were zeroed.** The merge step preserved vector-only candidates but downstream consumers (`mpm recall --semantic`, `mpm call search_memories`) saw `Weight=0`, `Collection=""`, no `Tags`, no `Metadata`, `CreatedAt=0`, no `IsChallenged`/`IsConceptDrift`/`ChallengedTheoryID`. The FTS5 row is the metadata source for hybrid/fts5-only paths; for vector-only rows that source is absent.
 

@@ -4,7 +4,7 @@ OpenCode plugin that wires MPM's cognitive substrate in as 16 typed tools.
 
 ## Parity with Claude Code Integration
 
-This plugin achieves functional parity with the [Claude Code integration](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md) through OpenCode's hook system:
+This plugin achieves functional parity with the [Claude Code integration](agent_installation/claude-code-mpm/CLAUDE_CODE_INTEGRATION.md) through OpenCode's hook system:
 
 | Claude Code Mechanism | OpenCode Equivalent |
 |---|---|
@@ -129,14 +129,14 @@ Additionally, **every programmatic tool call** (via the 16 registered tools) inc
 | `MPM_PROVENANCE_INVOCATION_ID` | Unique per-call UUID (`inv_...`) |
 | `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
 
-These match the [Claude Code integration's provenance variables](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md#12-provenance-environment-variables).
+These match the [Claude Code integration's provenance variables](agent_installation/claude-code-mpm/CLAUDE_CODE_INTEGRATION.md#12-provenance-environment-variables).
 
 ### Semantic Contract: Session End ≠ Claimed Complete
 
 > **An OpenCode session ending does not automatically emit `claimed_complete`.**
 > Only emit it when the agent explicitly closes work via `mpm call mpm_work` with `{"action":"complete","params":{"work_id":"..."}}`.
 
-This is the same semantic contract as the [Claude Code integration](https://github.com/flowbyte-com/mpm/blob/main/docs/CLAUDE_CODE_INTEGRATION.md#33-semantic-contract-session-end--claimed-complete). A session ending is a lifecycle event, not an epistemic one — the agent may have been interrupted, hit a timeout, or simply run out of context. Emitting `claimed_complete` on session end would silently undo the verification model.
+This is the same semantic contract as the [Claude Code integration](agent_installation/claude-code-mpm/CLAUDE_CODE_INTEGRATION.md#33-semantic-contract-session-end--claimed-complete). A session ending is a lifecycle event, not an epistemic one — the agent may have been interrupted, hit a timeout, or simply run out of context. Emitting `claimed_complete` on session end would silently undo the verification model.
 
 The correct pattern:
 ```

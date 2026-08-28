@@ -952,7 +952,7 @@ MPM integrates directly with AI agents as a **single MCP server**. The Go binary
 
 The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders and their associated TypeScript sources are gone. The MCP server is the only integration surface for MCP-aware clients.
 
-For a step-by-step recipe for connecting Claude Code to MPM — including the SessionStart hook, `MPM_PROVENANCE_*` environment variables, and the `read_wake_context --format=system-prompt` injection path — see `docs/CLAUDE_CODE_INTEGRATION.md`.
+For a step-by-step recipe for connecting Claude Code to MPM — including the SessionStart hook, `MPM_PROVENANCE_*` environment variables, and the `read_wake_context --format=system-prompt` injection path — see `agent_installation/claude-code-mpm/CLAUDE_CODE_INTEGRATION.md`.
 
 #### MCP tool surface
 
