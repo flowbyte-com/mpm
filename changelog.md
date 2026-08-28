@@ -11,7 +11,7 @@ The `mpm_memory query` and `mpm_lessons search|list` surfaces previously returne
 
 **Helper.** New `internal/core.SummarizeMemoryWithEllipsis(content string, maxChars int) (string, bool)` truncates on rune boundaries (multibyte-safe) and returns `(summary, truncated)`. The boolean is discarded at call sites; the suffix is unconditional when truncation fired.
 
-**Provenance traceability.** The plan also closes three OpenClaw-traceability gaps surfaced during the context-bloat investigation: (1) `getEffectiveProvenance` already supported a per-call override, but the memory-save path didn't actually wire `ActiveContext.FrameworkName` into it — `saveMemoryWithContextImpl` now sets `dm.perCallProvenanceOverride = dm.provenanceFromContext(ac)` (deferred-reset) so OpenCode MCP and other framework-tagged callers populate `artifact_provenance.framework_name`. (2) `cmd/mpm/mpm why <id>` now reads from `artifact_provenance` and renders `framework  :`, `adapter    :`, `model      :` lines with `(unknown)` fallbacks for legacy artifacts. (3) The OpenCode MCP plugin (`agent_plugins/opencode-mpm/src/index.ts`) was verified to set `MPM_PROVENANCE_FRAMEWORK=opencode`, `MPM_PROVENANCE_MODEL=<id>`, `MPM_PROVENANCE_INVOCATION_ID=inv_<uuid>` unconditionally on every `callMpm` invocation.
+**Provenance traceability.** The plan also closes three OpenClaw-traceability gaps surfaced during the context-bloat investigation: (1) `getEffectiveProvenance` already supported a per-call override, but the memory-save path didn't actually wire `ActiveContext.FrameworkName` into it — `saveMemoryWithContextImpl` now sets `dm.perCallProvenanceOverride = dm.provenanceFromContext(ac)` (deferred-reset) so OpenCode MCP and other framework-tagged callers populate `artifact_provenance.framework_name`. (2) `cmd/mpm/mpm why <id>` now reads from `artifact_provenance` and renders `framework  :`, `adapter    :`, `model      :` lines with `(unknown)` fallbacks for legacy artifacts. (3) The OpenCode MCP plugin (`agent_installation/opencode-mpm/src/index.ts`) was verified to set `MPM_PROVENANCE_FRAMEWORK=opencode`, `MPM_PROVENANCE_MODEL=<id>`, `MPM_PROVENANCE_INVOCATION_ID=inv_<uuid>` unconditionally on every `callMpm` invocation.
 
 **Validation.**
 
@@ -1189,7 +1189,7 @@ defect was a stale `./bin/mpm-mcp` + `MPM_WORKSPACE=.` pair that
 silently broke the MCP stdio bundle whenever the gateway's cwd wasn't
 `~/.mpm`. Replaced with absolute paths
 (`/home/v/.mpm/bin/mpm-mcp` + `MPM_WORKSPACE=/home/v/.mpm`) matching
-the canonical `agent_plugins/openclaw-mpm-memory/.mcp.json` snapshot.
+the canonical `agent_installation/openclaw-mpm-memory/.mcp.json` snapshot.
 
 ### Tag: `v0.1.0-prealpha.2`
 
@@ -1213,7 +1213,7 @@ working-tree hygiene that the dogfooding window tolerated but the
   `cmd/mpm/handlers_backup_singleton_test.go` (previously untracked
   regression test for the backup subsystem).
 - **`docs(plugin): pin 2026-08-19 alpha integration validation receipt`** —
-  commits `agent_plugins/openclaw-mpm-memory/VALIDATION-2026-08-19.md`
+  commits `agent_installation/openclaw-mpm-memory/VALIDATION-2026-08-19.md`
   (audit record of the four-surface validation that drove this cut).
 
 ### `mpm-lint` gate restore

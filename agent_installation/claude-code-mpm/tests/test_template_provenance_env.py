@@ -31,7 +31,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path("/home/v/.mpm/agent_plugins/claude-code-mpm")
+PLUGIN_DIR = Path("/home/v/.mpm/agent_installation/claude-code-mpm")
 TEMPLATE = PLUGIN_DIR / ".mcp.json.template"
 MATERIALIZED = Path.home() / ".claude" / ".mcp.json"
 HOME_RESOLVED = "/home/v"

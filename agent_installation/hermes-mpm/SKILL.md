@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Agent / framework | Hermes (minimax-oauth provider, hermes-agent CLI) |
-| Integration path | `~/.mpm/agent_plugins/hermes-mpm/` |
+| Integration path | `~/.mpm/agent_installation/hermes-mpm/` |
 | Native mechanism | Hermes MCP client (`mcp_servers` in `config.yaml`) + Hermes Skill (`mpm` skill at `~/.hermes/skills/mpm/SKILL.md`) |
 | MPM interface used | `mpm-mcp` stdio server (16 MCP tools via JSON-RPC over stdio) |
 | Auto-load mechanism | MCP server auto-discovered via `mcp_servers` config; skill auto-loaded when task involves MPM |

@@ -190,7 +190,7 @@ The suite covers:
 
 ## See also
 
-- `~/.mpm/agent_plugins/opencode-mpm/` — same MCP server, TypeScript plugin mechanism
-- `~/.mpm/agent_plugins/openclaw-mpm-memory/` — same MCP server, OpenClaw plugin mechanism
-- `~/.mpm/agent_plugins/pi-mpm/` — same MCP server, Pi subprocess bridge (no MCP support in Pi)
-- `~/.mpm/agent_plugins/README.md` — index of all integrations
+- `~/.mpm/agent_installation/opencode-mpm/` — same MCP server, TypeScript plugin mechanism
+- `~/.mpm/agent_installation/openclaw-mpm-memory/` — same MCP server, OpenClaw plugin mechanism
+- `~/.mpm/agent_installation/pi-mpm/` — same MCP server, Pi subprocess bridge (no MCP support in Pi)
+- `~/.mpm/agent_installation/README.md` — index of all integrations

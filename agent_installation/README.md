@@ -1,11 +1,11 @@
-# `~/.mpm/agent_plugins/` — Agent Integration Surfaces
+# `~/.mpm/agent_installation/` — Agent Integration Surfaces
 
 This directory holds the canonical agent-facing integration code for MPM.
 Each agent (framework / CLI / harness) gets one subdirectory here.
 
 > **Invariant:** Any new integration code, scripts, manifests, skills,
 > extensions, plugins, adapters, or onboarding helpers for an MPM-aware
-> agent lives under `~/.mpm/agent_plugins/<agent>/`. MPM core (`internal/`,
+> agent lives under `~/.mpm/agent_installation/<agent>/`. MPM core (`internal/`,
 > `cmd/`, `src/`) is intentionally untouched by these adapters.
 >
 > The MPM machine-facing interface (`mpm call <tool> --payload '{"action":"…","params":{…}}'`
@@ -183,7 +183,7 @@ markers and snippets are *not* duplicated text — they **reference**
   start in three locations per pi docs: `~/.pi/agent/AGENTS.md`
   (global), `AGENTS.md` in any parent of cwd, `AGENTS.md` in cwd.
   Same managed-block convention as Claude Code and OpenCode. The
-  `pi-mpm` extension at `~/.mpm/agent_plugins/pi-mpm/` registers all
+  `pi-mpm` extension at `~/.mpm/agent_installation/pi-mpm/` registers all
   16 MPM tools with full coverage; AGENTS.md adds the behavioral
   layer (wake, persist, handoff, recovery) the typed tools do not
   enforce — capability does not equal adoption. Disable AGENTS.md

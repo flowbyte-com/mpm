@@ -69,9 +69,9 @@ def now_iso() -> str:
 def banner() -> str:
     return f"""<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->
 <!-- generated: {now_iso()} -->
-<!-- source: ~/.mpm/agent_plugins/claude-code-mpm/templates/CLAUDE.md.snippet -->
+<!-- source: ~/.mpm/agent_installation/claude-code-mpm/templates/CLAUDE.md.snippet -->
 <!-- do not edit between the BEGIN/END markers; edit the snippet or the -->
-<!-- canonical protocol at ~/.mpm/agent_plugins/mpm-agent-protocol.md. -->"""
+<!-- canonical protocol at ~/.mpm/agent_installation/mpm-agent-protocol.md. -->"""
 
 
 def footer() -> str:

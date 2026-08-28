@@ -49,7 +49,7 @@ def now_iso() -> str:
 def banner() -> str:
     return f"""<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->
 <!-- generated: {now_iso()} -->
-<!-- source: ~/.mpm/agent_plugins/opencode-mpm/templates/AGENTS.md.snippet -->"""
+<!-- source: ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet -->"""
 
 
 def footer() -> str:

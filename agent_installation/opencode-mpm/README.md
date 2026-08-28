@@ -93,7 +93,7 @@ On plugin initialization, the plugin pings `mpm call mpm_system action:health_ch
   tools will fail-open on each call until mpm is reachable.
 ```
 
-This is the same defensive boot hook we added to `@openclaw/mpm-memory` (see `agent_plugins/openclaw-mpm-memory/index.js`). The check fires loud on every OpenCode restart so the operator sees it. Per-call failures still fail-open (each tool returns a soft error envelope) so a transient mpm blip doesn't kill the turn.
+This is the same defensive boot hook we added to `@openclaw/mpm-memory` (see `agent_installation/openclaw-mpm-memory/index.js`). The check fires loud on every OpenCode restart so the operator sees it. Per-call failures still fail-open (each tool returns a soft error envelope) so a transient mpm blip doesn't kill the turn.
 
 Triggers DEGRADED on:
 - spawn / timeout / parse failure
@@ -169,7 +169,7 @@ The lightweight adapter:
 
 ```bash
 # 1. install the plugin into opencode's plugin dir
-ln -s /path/to/agent_plugins/opencode-mpm ~/.config/opencode/plugin/opencode-mpm
+ln -s /path/to/agent_installation/opencode-mpm ~/.config/opencode/plugin/opencode-mpm
 
 # 2. make sure ~/.mpm/bin/mpm is on PATH (or set MPM_BINARY)
 export PATH=$HOME/.mpm/bin:$PATH

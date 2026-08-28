@@ -12,10 +12,10 @@ the OpenClaw canary earlier the same day (see
 | Item | Value |
 |---|---|
 | Agent / framework | OpenCode 1.18.18 (`/home/v/.opencode/bin/opencode`) |
-| Integration path | `~/.mpm/agent_plugins/opencode-mpm/` |
+| Integration path | `~/.mpm/agent_installation/opencode-mpm/` |
 | Native mechanism | OpenCode plugin (TypeScript, `plugin` config array) |
 | MPM interface used | `mpm call <tool> --payload '<json>'` (16 tools: 13 domain + 3 standalone) |
-| Auto-load mechanism | Global config `~/.config/opencode/opencode.jsonc` → `"plugin": ["file:///home/v/.mpm/agent_plugins/opencode-mpm/dist/index.js"]` |
+| Auto-load mechanism | Global config `~/.config/opencode/opencode.jsonc` → `"plugin": ["file:///home/v/.mpm/agent_installation/opencode-mpm/dist/index.js"]` |
 | MPM binary actually resolved | `/home/v/.mpm/bin/mpm` (canonical; PATH-independent fallback) |
 | Database actually used | `/home/v/workspace/projects/mpm/src/db/mpm.db` (via `MPM_WORKSPACE=/home/v/.mpm`) |
 
