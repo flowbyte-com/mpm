@@ -166,7 +166,11 @@ PY
 # Sanity probe — boot the MCP server and confirm it responds to a real
 # JSON-RPC request. This proves the wired config will actually work after
 # the next Claude Code restart, not just that the JSON parses.
-PROBE=$(echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mpm_system","arguments":{"action":"health_check","params":{}}}}' \
+# mpm-mcp needs to read resource files (./mode, etc.) relative to its install
+# root, so we cd there before launching it. Without this, the probe fails
+# with `open ./mode: no such file or directory` whenever the script is
+# invoked from a different cwd.
+PROBE=$(cd "$MPM_CANONICAL_WS" && echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mpm_system","arguments":{"action":"health_check","params":{}}}}' \
   | /usr/bin/timeout 3 "$MPM_CANONICAL_BIN" 2>/dev/null \
   | python3 -c '
 import json, sys
@@ -195,11 +199,35 @@ fi
 
 echo "✅ mpm-mcp probe ok:true"
 echo "   db_path: $DB_PATH"
+
+# ---------------------------------------------------------------------------
+# Install CLAUDE.md with the MPM behavioral protocol (host-independent)
+# ---------------------------------------------------------------------------
+CLAUDE_MD_TARGET="${HOME_DIR}/.claude/CLAUDE.md"
+CLAUDE_MD_SNIPPET="${SCRIPT_DIR}/templates/CLAUDE.md.snippet"
+if [ -f "$CLAUDE_MD_SNIPPET" ]; then
+  echo ""
+  echo "📝 installing Claude Code persistent instructions (CLAUDE.md)..."
+  if python3 "${SCRIPT_DIR}/scripts/install_claude_instructions.py" \
+       --scope user \
+       --home "$HOME_DIR" \
+       --target "$CLAUDE_MD_TARGET" \
+       --snippet "$CLAUDE_MD_SNIPPET"; then
+    echo "✅ CLAUDE.md managed section in place"
+  else
+    echo "⚠️  CLAUDE.md installation skipped/failed; mcp is wired but the agent"
+    echo "   has no behavioral instructions. Run install.sh --help if you need"
+    echo "   to install them manually."
+  fi
+else
+  echo "ℹ️  CLAUDE.md snippet not found at $CLAUDE_MD_SNIPPET — skipping host-instruction install"
+fi
+
 echo ""
 echo "Next steps:"
-echo "  1. Restart Claude Code (mcpServers are loaded at session start)."
+echo "  1. Restart Claude Code (mcpServers + CLAUDE.md are loaded at session start)."
 echo "  2. Run ${SCRIPT_DIR}/verify.sh to run the full integration test suite."
 echo "  3. Inspect the ${BACKUP_DIR} backup if you need to revert."
 echo ""
-echo "Uninstall: $0 --uninstall"
+echo "Uninstall: $0 --uninstall (removes both mcp config and managed CLAUDE.md section)"
 echo "Verify:    $0 --verify"

@@ -111,6 +111,65 @@ To enforce "this agent MUST run against this specific DB", set
 plugin's boot-time health check will refuse to register if the live
 `db_path` doesn't match.
 
+## MPM Agent Protocol — host-independent behavioral layer
+
+> "MPM tools provide capability. Host instructions provide behavioral
+> adoption." — see [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) for
+> the canonical host-independent protocol, which is the **single source of
+> truth** that all host adapters reference.
+
+**Capability alone does not make an agent use MPM consistently.** An agent
+needs persistent instructions telling it:
+
+1. To call `read_wake_context` at session start (or have the host hook
+   auto-inject wake context)
+2. To persist meaningful state during work, not only at the end
+3. To write a handoff before genuine session closure
+4. To use MPM as the source of truth for cross-session continuity
+5. To fall back to `mpm call <tool> --payload ...` when the host's
+   preferred integration breaks
+
+OpenClaw inherits these rules from `~/.openclaw/workspace/SOUL.md` and
+`AGENTS.md`, which already encode the protocols above (predating this
+canonical document). The host-independent protocol extracts the
+behavioral layer so other agents — Claude Code, OpenCode, Hermes, Pi,
+and any future host — can adopt the same operating contract without
+re-deriving it from scattered documentation.
+
+### Host adapters
+
+| Host | Adapter file | Installer |
+|---|---|---|
+| OpenClaw | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (existing) | OpenClaw runtime reads these directly |
+| Claude Code | `~/.claude/CLAUDE.md` | run `claude-code-mpm/install.sh` |
+| OpenCode | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` | run `opencode-mpm/scripts/install_agents_instructions.py` |
+| Hermes / Pi / others | (none yet — copy snippet from one of the above) | manual |
+
+The canonical protocol must remain coherent across hosts. Edit it
+additively, and update every host adapter that consumes it. The
+markers and snippets are *not* duplicated text — they **reference**
+[`mpm-agent-protocol.md`](./mpm-agent-protocol.md).
+
+### What changes vs. what stays put
+
+- **Canonical (`mpm-agent-protocol.md`)** — host-independent principles,
+  wake/persist/handoff/recovery vocabulary, MCP-vs-CLI fallback shape.
+- **OpenClaw** — `SOUL.md` already encodes this; do not duplicate. Add
+  a one-line reference in the existing MPM section linking to
+  `mpm-agent-protocol.md`. Host-specific recovery details (gateway
+  restart, bundle-mcp disposal) remain where they are.
+- **Claude Code** — `~/.claude/CLAUDE.md` is the host's persistent
+  instruction surface. The installer's managed block uses
+  `<!-- BEGIN/END MPM-MANAGED SECTION:claude-code-instructions -->` so
+  user-written content above and below the markers is preserved across
+  reinstalls.
+- **OpenCode** — `AGENTS.md` is the host's persistent instruction
+  surface. Same managed-block convention as Claude Code. The
+  `opencode-mpm` plugin already injects wake context automatically via
+  the `experimental.chat.system.transform` hook; AGENTS.md adds the
+  behavioral layer (handoff discipline, persist-during-work) the hook
+  cannot reasonably inject.
+
 ## Validation record
 
 | Date | Agent | Verdict | Notes |

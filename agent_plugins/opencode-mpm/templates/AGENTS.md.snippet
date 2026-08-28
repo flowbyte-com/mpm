@@ -1,0 +1,61 @@
+> The opencode-mpm plugin handles session-start wake-context injection
+> automatically via the `experimental.chat.system.transform` hook. This
+> AGENTS.md section adds the **behavioral** layer that the hook can't
+> reasonably inject (handoff discipline, persist-during-work, recovery).
+> Edit the canonical protocol at
+> `~/.mpm/agent_plugins/mpm-agent-protocol.md` rather than this section
+> for behavioral changes.
+
+## MPM behavioral contract — host-independent
+
+MPM is the persistent agent substrate for cross-session continuity on
+this machine. The full behavioral contract is canonical at
+`~/.mpm/agent_plugins/mpm-agent-protocol.md`. The non-negotiable invariants
+that this host adapter inherits:
+
+1. **Wake on session start.** Already handled automatically by the
+   opencode-mpm plugin (`fetchWakeContext` in
+   `src/index.ts`). You do not need to call `read_wake_context` manually
+   at session start.
+
+2. **Persist during work, not only at the end.** Use the appropriate MPM
+   tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`,
+   `mpm_references`) for any durable knowledge a future session would
+   otherwise have to rediscover. The plugin proxies these calls through
+   `mpm call` via the `buildProvenanceEnv` shim so provenance is captured.
+
+3. **Handoff before genuine session closure.** Before sending a turn
+   that closes the session, run the handoff check. If substantial work
+   has occurred since the last handoff, write it via
+   `mpm_session(action: "end", params: {summary, state, commitments,
+   open_questions})`. Wake is how future-me starts; handoff is how
+   future-me receives the previous session.
+
+   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
+   session-closing. Do not write a handoff on every chat ack — write one
+   when substantial work has happened or a session-closing trigger fires.
+
+4. **MPM is the source of truth for cross-session continuity.** Anything
+   that should survive across sessions goes to MPM, not just transient
+   conversation context.
+
+5. **Recovery / fallback.** If the plugin is disabled or unavailable
+   (e.g., the underlying `mpm` binary fails or the plugin is removed),
+   fall back to the CLI path:
+   `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
+   Do not abandon persistence when the preferred integration breaks.
+
+## OpenCode-specific notes
+
+The opencode-mpm plugin's `experimental.chat.system.transform` hook
+handles session-start wake-context injection automatically — you do not
+need to call `read_wake_context` manually at the start of sessions.
+
+The plugin stamps provenance for every MPM call:
+`framework_name=opencode`, with `model_name` and `invocation_id` set per
+call. No further action is required for attribution.
+
+Host-specific recovery details (OpenCode plugin lifecycle, system-prompt
+transformation quirks, etc.) are documented in the plugin's README.
+Refer there before assuming a generic MPM recovery pattern will work
+under OpenCode.
