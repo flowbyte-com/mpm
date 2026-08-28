@@ -145,6 +145,57 @@ const (
 	maxEvidenceRef      = 5
 )
 
+// DecisionOutcome is the disposition from the decision-model stage.
+type DecisionOutcome string
+
+const (
+	DecisionPublished DecisionOutcome = "published"
+	DecisionCandidate DecisionOutcome = "candidate"
+	DecisionRejected  DecisionOutcome = "rejected"
+)
+
+// evaluateDecisionModel applies the 4-axis scoring + boundary check
+// (spec §6). For refine mode, it bumps reusability/non_obviousness
+// when failure_recovery is supplied (spec §9 step 3). Returns the
+// disposition + a populated DecisionModel with high/medium/low labels
+// + the total (used in the response payload).
+func evaluateDecisionModel(req *WorkshopRequest) (DecisionOutcome, DecisionModel, string) {
+	dm := req.DecisionModel
+
+	if req.Mode == "refine" && req.FailureRecovery != "" {
+		// Bumps per spec §9 step 3: reusability +=1 if recurring
+		// failure mode (proxy: any non-empty failure_recovery),
+		// non_obviousness +=1 if non-obvious gap. We treat the
+		// presence of failure_recovery as both signals — the
+		// operator wouldn't have supplied it otherwise.
+		if dm.Reusability < 2 {
+			dm.Reusability++
+		}
+		if dm.NonObviousness < 2 {
+			dm.NonObviousness++
+		}
+	}
+
+	total := dm.Reusability + dm.NonObviousness + dm.Stability + dm.Leverage
+
+	// Boundary gate (spec §6).
+	if dm.Boundary != "procedure" {
+		return DecisionRejected, dm, fmt.Sprintf("non-procedure boundary: %s", dm.Boundary)
+	}
+	// Total threshold.
+	if total <= 3 {
+		return DecisionRejected, dm, "decision_total_below_threshold"
+	}
+	if total >= 4 && total <= 5 {
+		return DecisionCandidate, dm, "decision_total_medium"
+	}
+	// total >= 6 and boundary = procedure → publish candidate.
+	// Downgrades from later stages (when_to_use warnings, duplicate
+	// detection, validation) will convert this to candidate before
+	// the publication stage.
+	return DecisionPublished, dm, "decision_total_high"
+}
+
 // validateInput enforces size caps and shape checks. Returns
 // (warnings, errors, err). On hard limit violation (size cap
 // exceeded), err is non-nil; soft warnings are returned separately.
