@@ -148,3 +148,49 @@ func TestEvaluateDecisionModel_RefineBumpsScores(t *testing.T) {
 		t.Errorf("refine did not bump reusability: %d", dm.Reusability)
 	}
 }
+
+func TestCheckWhenToUse_Short(t *testing.T) {
+	result := checkWhenToUse("foo", "form")
+	if len(result.Warnings) == 0 {
+		t.Error("expected warning for short when_to_use")
+	}
+}
+
+func TestCheckWhenToUse_NoVerb(t *testing.T) {
+	result := checkWhenToUse("a long phrase with nouns but no verb here at all", "form")
+	found := false
+	for _, w := range result.Warnings {
+		if w == "when_to_use_no_verb" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected when_to_use_no_verb warning, got %v", result.Warnings)
+	}
+}
+
+// TestCheckWhenToUse_EqualsName is replaced per brief bug note:
+// The brief's TestCheckWhenToUse_EqualsName expects checkWhenToUse to
+// produce a when_to_use_equals_name error, but checkWhenToUse has no
+// name parameter. The orchestrator calls whenToUseEqualsName separately.
+// This test verifies the actual helper function instead.
+func TestWhenToUseEqualsName(t *testing.T) {
+	if !whenToUseEqualsName("agentshell", "agentshell") {
+		t.Error("expected whenToUseEqualsName to return true for equal strings")
+	}
+	if whenToUseEqualsName("agentshell", "different") {
+		t.Error("expected whenToUseEqualsName to return false for different strings")
+	}
+	if whenToUseEqualsName("", "agentshell") {
+		t.Error("expected whenToUseEqualsName to return false when proposed is empty")
+	}
+}
+
+func TestCheckWhenToUse_Rich(t *testing.T) {
+	// Comma-separated noun phrases, verb present, longer than 30 chars.
+	rich := "reorganizing documentation, moving cross-references, updating READMEs"
+	result := checkWhenToUse(rich, "form")
+	if len(result.Warnings) != 0 || len(result.Errors) != 0 {
+		t.Errorf("expected clean result, got warnings=%v errors=%v", result.Warnings, result.Errors)
+	}
+}

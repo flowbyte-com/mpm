@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -238,4 +239,42 @@ func validateInput(req *WorkshopRequest) (warnings []string, errors []string, er
 		warnings = append(warnings, "missing_proposal_version")
 	}
 	return warnings, errors, nil
+}
+
+var (
+	verbIngRE  = regexp.MustCompile(`\b\w+ing\b`)
+	verbToRE   = regexp.MustCompile(`\bto\s+\w+`)
+	commaSplit = regexp.MustCompile(`[,;]| and | or `)
+)
+
+// WhenToUseCheck holds validation findings for a skill's when_to_use field.
+type WhenToUseCheck struct {
+	Warnings []string
+	Errors   []string
+}
+
+// checkWhenToUse applies the spec §7 validation rules.
+func checkWhenToUse(proposed string, mode string) WhenToUseCheck {
+	var result WhenToUseCheck
+	if proposed == "" {
+		result.Errors = append(result.Errors, "when_to_use_empty")
+		return result
+	}
+	if len(proposed) < 30 {
+		result.Warnings = append(result.Warnings, "when_to_use_short")
+	}
+	if !verbIngRE.MatchString(proposed) && !verbToRE.MatchString(proposed) {
+		result.Warnings = append(result.Warnings, "when_to_use_no_verb")
+	}
+	parts := commaSplit.Split(proposed, -1)
+	if len(parts) < 2 {
+		result.Warnings = append(result.Warnings, "when_to_use_single_phrase")
+	}
+	return result
+}
+
+// whenToUseEqualsName is called separately by the orchestrator with
+// the proposed name (since checkWhenToUse doesn't have it).
+func whenToUseEqualsName(proposed, name string) bool {
+	return proposed != "" && proposed == name
 }
