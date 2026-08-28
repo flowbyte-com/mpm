@@ -16,6 +16,53 @@ import (
 	"golang.org/x/mod/semver"
 )
 
+// validateSkillFrontmatterAndScan parses frontmatter and runs the
+// secret/poison scanner against the Skill content. NO DB writes.
+// This helper is shared by SaveSkill (after validation succeeds, the
+// caller persists) and ValidateSkill (the workshop's non-mutating
+// stage). Splitting it out is the structural fix for the workshop
+// safety seam: the validation stage must never call the write API.
+func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string, error) {
+	fm, body, err := ParseSkillFrontmatter(content)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse frontmatter: %w", err)
+	}
+	var warnings, errors []string
+
+	// Missing description is a soft warning.
+	if fm.Description == "" {
+		warnings = append(warnings, "missing_description")
+	}
+	// when_to_use validation: weak rules applied here for parity
+	// with the workshop pipeline; SaveSkill's caller surfaces them
+	// but the workshop's ValidateSkill is the canonical reader.
+	if fm.WhenToUse == "" {
+		warnings = append(warnings, "missing_when_to_use")
+	} else if len(fm.WhenToUse) < 30 {
+		warnings = append(warnings, "weak_when_to_use_short")
+	}
+
+	// Secret/poison scanner — same call SaveSkill used to perform
+	// inline before persisting. Run on the whole content.
+	if sensitive, reason := isSensitiveContent(content); sensitive {
+		errors = append(errors, "scanner_secret:"+reason)
+	}
+	if poisoned, reason := isPoisoned(content); poisoned {
+		errors = append(errors, "scanner_poison:"+reason)
+	}
+
+	return &Skill{
+		Frontmatter: fm,
+		Body:        body,
+		Name:        fm.Name,
+		Version:     fm.Version,
+		WhenToUse:   fm.WhenToUse,
+		Domain:      fm.Domain,
+		Constraints: fm.Constraints,
+		Steps:       fm.Steps,
+	}, warnings, errors, nil
+}
+
 // ReadSkill fetches a skill by id (exact) or name (latest version).
 // version is ignored when name is given; pass exact id (skill:<name>-v<ver>)
 // to bypass version resolution.
@@ -216,10 +263,14 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// Parse frontmatter first so a malformed content string never reaches
 	// the DB layer. The contract here is that any rejected frontmatter
 	// is a 400, not a write-conflict.
-	fm, _, err := ParseSkillFrontmatter(content)
+	skill, _, scanErrs, err := validateSkillFrontmatterAndScan(content)
 	if err != nil {
 		return "", fmt.Errorf("save skill: %w", err)
 	}
+	if len(scanErrs) > 0 {
+		return "", fmt.Errorf("save skill: scanner blocked content: %v", scanErrs)
+	}
+	fm := skill.Frontmatter
 	if fm.Name != name {
 		return "", fmt.Errorf("frontmatter name %q does not match arg %q", fm.Name, name)
 	}
