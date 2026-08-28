@@ -85,3 +85,66 @@ func TestValidateInput_CleanRequest(t *testing.T) {
 		t.Fatalf("clean request: %v", err)
 	}
 }
+
+func TestEvaluateDecisionModel_RejectsNonProcedure(t *testing.T) {
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "fact"},
+	}
+	outcome, _, reason := evaluateDecisionModel(req)
+	if outcome != DecisionRejected {
+		t.Errorf("outcome = %v, want rejected", outcome)
+	}
+	if reason == "" {
+		t.Errorf("reason empty")
+	}
+}
+
+func TestEvaluateDecisionModel_RejectsLowScore(t *testing.T) {
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 1, NonObviousness: 1, Stability: 1, Leverage: 0, Boundary: "procedure"},
+	}
+	outcome, _, _ := evaluateDecisionModel(req)
+	if outcome != DecisionRejected {
+		t.Errorf("total=3 should reject, got %v", outcome)
+	}
+}
+
+func TestEvaluateDecisionModel_CandidateMediumScore(t *testing.T) {
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 1, NonObviousness: 2, Stability: 1, Leverage: 1, Boundary: "procedure"},
+	}
+	outcome, _, _ := evaluateDecisionModel(req)
+	if outcome != DecisionCandidate {
+		t.Errorf("total=5 should candidate, got %v", outcome)
+	}
+}
+
+func TestEvaluateDecisionModel_PublishedHighScore(t *testing.T) {
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+	}
+	outcome, _, _ := evaluateDecisionModel(req)
+	if outcome != DecisionPublished {
+		t.Errorf("total=8 procedure should publish, got %v", outcome)
+	}
+}
+
+func TestEvaluateDecisionModel_RefineBumpsScores(t *testing.T) {
+	// Spec §9 step 3: failure_recovery bumps reusability & non_obviousness.
+	req := &WorkshopRequest{
+		Mode:            "refine",
+		FailureRecovery: "a recurring failure mode surfaced",
+		DecisionModel:   DecisionModel{Reusability: 1, NonObviousness: 1, Stability: 2, Leverage: 2, Boundary: "procedure"},
+	}
+	outcome, dm, _ := evaluateDecisionModel(req)
+	if outcome != DecisionPublished {
+		t.Errorf("refine with bumped scores should publish, got %v", outcome)
+	}
+	if dm.Reusability < 2 {
+		t.Errorf("refine did not bump reusability: %d", dm.Reusability)
+	}
+}
