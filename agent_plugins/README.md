@@ -143,7 +143,9 @@ re-deriving it from scattered documentation.
 | OpenClaw | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (existing) | OpenClaw runtime reads these directly |
 | Claude Code | `~/.claude/CLAUDE.md` | run `claude-code-mpm/install.sh` |
 | OpenCode | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` | run `opencode-mpm/scripts/install_agents_instructions.py` |
-| Hermes / Pi / others | (none yet — copy snippet from one of the above) | manual |
+| Hermes | `<project>/.hermes.md` (or `HERMES.md`) | run `hermes-mpm/scripts/install_hermes_instructions.py` |
+| Pi | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` | run `pi-mpm/scripts/install_agents_instructions.py` |
+| Other hosts | copy snippet from one of the above; adapt `--target` | manual |
 
 The canonical protocol must remain coherent across hosts. Edit it
 additively, and update every host adapter that consumes it. The
@@ -169,6 +171,24 @@ markers and snippets are *not* duplicated text — they **reference**
   the `experimental.chat.system.transform` hook; AGENTS.md adds the
   behavioral layer (handoff discipline, persist-during-work) the hook
   cannot reasonably inject.
+- **Hermes** — `.hermes.md` (or `HERMES.md`) at the project root is
+  walked from cwd up to git root and concatenated into the system
+  prompt alongside the user-level `~/.hermes/SOUL.md` persona (per
+  `hermes-agent/agent/prompt_builder.py:load_soul_md`). The persona
+  stays in SOUL.md (loaded raw, no managed-block convention); the
+  behavioral protocol goes in `.hermes.md` via the installer, which
+  uses leading HTML-comment markers since Hermes has no built-in
+  managed-block convention.
+- **Pi** — Pi searches for `AGENTS.md` (or `CLAUDE.md`) at session
+  start in three locations per pi docs: `~/.pi/agent/AGENTS.md`
+  (global), `AGENTS.md` in any parent of cwd, `AGENTS.md` in cwd.
+  Same managed-block convention as Claude Code and OpenCode. The
+  `pi-mpm` extension at `~/.mpm/agent_plugins/pi-mpm/` registers all
+  16 MPM tools with full coverage; AGENTS.md adds the behavioral
+  layer (wake, persist, handoff, recovery) the typed tools do not
+  enforce — capability does not equal adoption. Disable AGENTS.md
+  loading with `--no-context-files` / `-nc` for sessions that should
+  bypass the MPM behavioral contract.
 
 ## Validation record
 
