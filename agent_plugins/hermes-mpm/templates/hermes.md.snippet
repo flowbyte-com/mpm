@@ -1,0 +1,70 @@
+> Hermes uses `.hermes.md` (or `HERMES.md`) at the project root as the
+> persistent behavioral instruction surface — it is concatenated into
+> the system prompt at session start alongside `~/.hermes/SOUL.md`.
+> The persona stays in SOUL.md; this file adds the MPM behavioral layer.
+> Edit the canonical protocol at
+> `~/.mpm/agent_plugins/mpm-agent-protocol.md` rather than this file for
+> behavioral changes.
+
+## MPM behavioral contract — host-independent
+
+MPM is the persistent agent substrate for cross-session continuity on
+this machine. The full behavioral contract is canonical at
+`~/.mpm/agent_plugins/mpm-agent-protocol.md`. The non-negotiable invariants
+that this host adapter inherits:
+
+1. **Wake on session start.** Read MPM wake context (`mode`, `persona`,
+   active `topics`, recent memories, open work, last handoff) before
+   answering substantive questions. Hermes surfaces this through
+   `mcp__mpm__mpm_context` action `read_wake_context`. Calling it is
+   mandatory, not optional, at the start of every session. The persona
+   stays in `~/.hermes/SOUL.md` — wake protocol and persona are
+   distinct slots.
+
+2. **Persist during work, not only at the end.** Use the appropriate
+   MPM tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`,
+   `mpm_topics`, `mpm_references`) for any durable knowledge a future
+   session would otherwise have to rediscover. The `mpm-mcp` server
+   stamps provenance automatically via the env vars wired in
+   `~/.hermes/config.yaml` (`MPM_WORKSPACE` resolves the canonical
+   binary and DB).
+
+3. **Handoff before genuine session closure.** Before sending a turn
+   that closes the session, run the handoff check. If substantial work
+   has occurred since the last handoff, write it via
+   `mcp__mpm__mpm_session` action `end` (params: `summary`, `state`,
+   `commitments`, `open_questions`). Wake is how future-me starts;
+   handoff is how future-me receives the previous session.
+
+   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
+   session-closing. Do not write a handoff on every chat ack — write
+   one when substantial work has happened or a session-closing
+   trigger fires.
+
+4. **MPM is the source of truth for cross-session continuity.**
+   Anything that should survive across sessions goes to MPM, not just
+   transient conversation context.
+
+5. **Recovery / fallback.** If the MCP server is unavailable or
+   `mcp__mpm__*` tools are missing (e.g., the `mpm-mcp` process is
+   killed or the env var resolution failed), fall back to the CLI
+   path: `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`.
+   Do not abandon persistence when the preferred integration breaks.
+
+## Hermes-specific notes
+
+The `mpm` skill at `~/.hermes/skills/mpm/SKILL.md` (auto-loaded when
+MPM is in scope) covers operational surface — wiring, registry, prime
+directives. This `.hermes.md` covers the **behavioral** layer (wake,
+persist during work, handoff discipline, recovery) the skill does not
+own, because the skill is loaded on task relevance, not at session
+start unconditionally.
+
+Hermes's `load_soul_md` reads the entire `SOUL.md` file with no
+managed-block convention; do not duplicate the canonical protocol
+into SOUL.md. Persona stays in SOUL.md; protocol lives here.
+
+Hermes does NOT have a managed-block convention (unlike Claude Code's
+`<!-- BEGIN/END MPM-MANAGED SECTION -->` markers). This installer uses
+a header comment block as a stable anchor for detection and re-install;
+the file remains plain markdown between the header markers.

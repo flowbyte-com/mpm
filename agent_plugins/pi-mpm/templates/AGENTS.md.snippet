@@ -1,0 +1,72 @@
+> Pi loads AGENTS.md (or CLAUDE.md) at session start and concatenates
+> them into the system prompt (per pi docs: "What the model is told →
+> AGENTS.md / CLAUDE.md / SYSTEM.md"). This file is the persistent
+> behavioral instruction surface for the Pi agent.
+> Edit the canonical protocol at
+> `~/.mpm/agent_plugins/mpm-agent-protocol.md` rather than this file
+> for behavioral changes.
+
+## MPM behavioral contract — host-independent
+
+MPM is the persistent agent substrate for cross-session continuity on
+this machine. The full behavioral contract is canonical at
+`~/.mpm/agent_plugins/mpm-agent-protocol.md`. The non-negotiable invariants
+that this host adapter inherits:
+
+1. **Wake on session start.** Read MPM wake context (`mode`, `persona`,
+   active `topics`, recent memories, open work, last handoff) before
+   answering substantive questions. With the `pi-mpm` extension
+   installed, the wake payload is exposed as the
+   `mpm_context` tool's `read_wake_context` action. Calling it is
+   mandatory, not optional, at the start of every session.
+
+2. **Persist during work, not only at the end.** Use the appropriate
+   MPM tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`,
+   `mpm_topics`, `mpm_references`) for any durable knowledge a future
+   session would otherwise have to rediscover. The `pi-mpm` extension
+   registers all 16 MPM tools as typed Pi tools; calling them writes
+   provenance automatically via the same `mpm call` subprocess
+   path that other host plugins use.
+
+3. **Handoff before genuine session closure.** Before sending a turn
+   that closes the session, run the handoff check. If substantial work
+   has occurred since the last handoff, write it via
+   `mpm_session` action `end` (params: `summary`, `state`,
+   `commitments`, `open_questions`). Wake is how future-me starts;
+   handoff is how future-me receives the previous session.
+
+   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
+   session-closing. Do not write a handoff on every chat ack — write
+   one when substantial work has happened or a session-closing
+   trigger fires.
+
+4. **MPM is the source of truth for cross-session continuity.**
+   Anything that should survive across sessions goes to MPM, not just
+   transient conversation context.
+
+5. **Recovery / fallback.** If the `pi-mpm` extension fails to load
+   or one of the `mpm_*` tools returns an unavailable result, fall
+   back to the CLI path:
+   `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
+   Do not abandon persistence when the preferred integration breaks.
+
+## Pi-specific notes
+
+Pi searches for AGENTS.md in this order at session start (per Pi docs):
+
+  1. `~/.pi/agent/AGENTS.md` (global, all projects)
+  2. AGENTS.md in any parent directory of cwd (walking up)
+  3. AGENTS.md in cwd (current project)
+
+This file may exist at any of those locations. The installer writes
+to the global location (`~/.pi/agent/AGENTS.md`) by default for
+host-wide behavioral adoption, but accepts `--target` for
+project-scoped installation.
+
+The `pi-mpm` extension at `~/.mpm/agent_plugins/pi-mpm/` registers
+all MPM tools with full coverage. AGENTS.md adds the behavioral
+layer (wake, persist, handoff, recovery) that the typed tools alone
+do not enforce — capability does not equal adoption.
+
+Disable AGENTS.md loading with `--no-context-files` / `-nc` if you
+want to bypass the MPM behavioral contract for a specific session.
