@@ -67,7 +67,7 @@ func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 // mpm-mcp startup (see internal/core/mpmcli.ActiveContextFromEnv) and is
 // passed to this function by handleReadDirectives.
 //
-// Selection rule (additive union, see docs/architecture/directives.md §4):
+// Selection rule (additive union, see docs/archive/directives.md §4):
 //
 //	directives where scope IS NULL  (legacy rows pre-scope)
 //	OR scope = "global"

@@ -1283,7 +1283,7 @@ env var on the MCP launch config (same pattern as the existing
 `MPM_ACTIVE_MODE` / `MPM_ACTIVE_PERSONA` reads). The plugin declares
 framework identity; MPM filters. Plugins stay thin transport shims.
 
-### Key Properties (full contract at `docs/architecture/directives.md`)
+### Key Properties (full contract at `docs/archive/directives.md`)
 
 - **Additive, not replacement.** Global directives always apply;
   matching scoped directives are added on top. A framework-specific
@@ -1313,7 +1313,7 @@ framework identity; MPM filters. Plugins stay thin transport shims.
 
 ### Files Changed (10)
 
-- `docs/architecture/directives.md` — NEW — the canonical contract (108 lines)
+- `docs/archive/directives.md` — NEW — the canonical contract (108 lines)
 - `internal/core/seed/directives.go` — `+Scope` field on `SeedDirective`; all four baseline directives explicitly set `Scope="global"`
 - `internal/core/seed/engine.go` — `insertSeedRow` materialises scope into metadata JSON, defaulting empty to `"global"`
 - `internal/core/directive_tools.go` — `+ReadDirectivesForFramework(fw string)`; `ReadDirectives()` unchanged

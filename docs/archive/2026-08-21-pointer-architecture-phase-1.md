@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.21+, `mattn/go-sqlite3` (CGO with FTS5), standard `io`/`os`/`io/fs`, `golang.org/x/net/re2` for regex
 
-**Spec:** `docs/superpowers/specs/2026-08-21-pointer-architecture-design.md`
+**Spec:** `docs/archive/2026-08-21-pointer-architecture-design.md`
 
 ---
 

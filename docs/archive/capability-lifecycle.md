@@ -2,7 +2,7 @@
 
 **Status:** DRAFT
 **Date:** 2026-08-05
-**Precedent:** `docs/architecture/epistemic-cascades.md`
+**Precedent:** `docs/archive/epistemic-cascades.md`
 **Companion:** `agent_installation/mpm-auto-route/` (context injection transport)
 
 ---
@@ -29,7 +29,7 @@ It is a focused capability manager, not a general-purpose plugin system; the
 substrate owns the lifecycle and the agent merely proposes capabilities.
 
 The implementation MUST follow the architectural philosophy established by
-`docs/architecture/epistemic-cascades.md`: every state transition is an observable row in
+`docs/archive/epistemic-cascades.md`: every state transition is an observable row in
 the events table, every cascade is an idempotent intent in an outbox, every
 escalation is a wake to a human or agent. Failure is a state transition, not
 an exception. There is no silent recovery, no "magic" constants, no
@@ -643,7 +643,7 @@ A timeout emits `event_type='fracture'` with
 ## 5. Cascade
 
 Two cascade patterns. Both are symmetric to the existing epistemic
-cascade (`docs/architecture/epistemic-cascades.md`): the upstream event fires an
+cascade (`docs/archive/epistemic-cascades.md`): the upstream event fires an
 outbox intent, the materializer (running as `mpm cascade materialize` or
 the skill-specific tick) drains the outbox and applies the effect.
 
@@ -1169,7 +1169,7 @@ are rough (S=hours, M=day, L=multi-day).
 | ID | Task | Estimate | Acceptance |
 |---|---|---|---|
 | D-1 | Operator runbook entry in `docs/` | S | Mirrors `cascade_drain` runbook format |
-| D-2 | Update `docs/architecture/shared-epistemology.md` — mark "self-evolving skills" as shipped | S | One-line update |
+| D-2 | Update `docs/archive/shared-epistemology.md` — mark "self-evolving skills" as shipped | S | One-line update |
 | D-3 | Update top-level `CLAUDE.md` — add capability subsystem to architecture diagram | S | Brief; defers detail to this spec |
 
 ---
@@ -1219,7 +1219,7 @@ If the operator prefers a different name (e.g., `trust_watch`,
 
 | Subsystem | Relationship |
 |---|---|
-| `epistemic_cascade_outbox` (`docs/architecture/epistemic-cascades.md`) | Capability fracture writes to this outbox when `author_theory_id` is set. The existing `mpm cascade materialize` drains it. |
+| `epistemic_cascade_outbox` (`docs/archive/epistemic-cascades.md`) | Capability fracture writes to this outbox when `author_theory_id` is set. The existing `mpm cascade materialize` drains it. |
 | `mpm-scheduler` (recent commits) | New tick handlers: `skill_forge_tick`, `skill_observation_tick`, `skill_gc_tick`. All follow the same isolated-handler pattern as `cascade_drain`. |
 | `mpm-auto-route` plugin | Extends context injection to surface `<capability-updates>` (§6.3). |
 | Scanner in `SaveMemoryNode` | Extended with `isPoisonedCode` patterns (§7.1). Coverage enforced by extending `TestScannerCoverage_AllMemoriesWritersScanContent`. |

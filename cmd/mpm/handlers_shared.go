@@ -1,6 +1,6 @@
 // mpm ops shared — multi-agent shared epistemology status & management.
 //
-// Phase 1 of the docs/architecture/shared-epistemology.md arc. Reads MPM_SHARED_DB / MPM_SHARED_READONLY
+// Phase 1 of the docs/archive/shared-epistemology.md arc. Reads MPM_SHARED_DB / MPM_SHARED_READONLY
 // env vars and reports whether the shared DB is attached, where, and how
 // many rows it currently holds. Future phases add query_global_rules,
 // record_global_rule, and promote_to_global here.
@@ -77,7 +77,7 @@ func handleOpsShared(args []string) int {
 
 	fmt.Println()
 	fmt.Println("Next: Phase 2 (read tools) and Phase 3 (operator-gated writes) are")
-	fmt.Println("tracked in docs/architecture/shared-epistemology.md. For now the shared DB exists but no")
+	fmt.Println("tracked in docs/archive/shared-epistemology.md. For now the shared DB exists but no")
 	fmt.Println("application code reads or writes to it.")
 	return 0
 }

@@ -22,7 +22,7 @@ func newTestSharedDM(t *testing.T) *internal.DatabaseManager {
 // TestHandleRecordGlobalRule_RejectsMissingConfirm verifies the
 // operator gate: the handler refuses the call when confirm=true is
 // not present. Without this gate, agents could autonomously write
-// house rules — the original concern from docs/architecture/shared-epistemology.md Phase 3.
+// house rules — the original concern from docs/archive/shared-epistemology.md Phase 3.
 func TestHandleRecordGlobalRule_RejectsMissingConfirm(t *testing.T) {
 	dm := newTestSharedDM(t)
 

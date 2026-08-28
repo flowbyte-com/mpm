@@ -57,8 +57,8 @@ The vocabulary MUST NOT include:
 
 The first artifacts to use this convention are the F7.1 and F8.1 alpha-p1 fixes. See:
 
-- `docs/archive/concept-vocabularies/f71-challenge-restoration.md`
-- `docs/archive/concept-vocabularies/f81-cancel-verification.md`
+- `docs/archive/f71-challenge-restoration.md`
+- `docs/archive/f81-cancel-verification.md`
 
 Each applies the convention by listing problem-side terms, solution-side terms, and cross-domain synonyms — all distinct from the canonical identifiers and code paths already recorded elsewhere.
 

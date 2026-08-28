@@ -20,5 +20,5 @@
 // so handler code reads and writes Go-native types without any byte-slice
 // marshaling boilerplate.
 //
-// Spec: docs/architecture/capability-lifecycle.md
+// Spec: docs/archive/capability-lifecycle.md
 package capability
