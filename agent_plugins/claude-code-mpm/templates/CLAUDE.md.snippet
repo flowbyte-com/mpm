@@ -1,0 +1,70 @@
+# MPM (Memory Persistence Module) — Claude Code integration.
+
+> **Managed by the claude-code-mpm plugin.** Edit the canonical protocol,
+> not this file, unless you specifically want a per-project override of
+> the protocol block. The plugin's installer regenerates this section on
+> install; manual changes outside the markers will be preserved.
+
+MPM is the persistent agent substrate for cross-session continuity on this
+machine. It exposes 16 native MCP tools (`mpm__mpm_memory`,
+`mpm__mpm_session`, `mpm__mpm_wakes`, `mpm__mpm_theories`,
+`mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`,
+`mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`,
+`mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_system`) plus 3
+standalones (`mpm__explain_retrieval`, `mpm__log_to_changelog`,
+`mpm__request_review`).
+
+<BEGIN MPM-CANONICAL-BLOCK>
+The MPM behavioral contract is the host-independent agent protocol at
+`~/.mpm/agent_plugins/mpm-agent-protocol.md`. Read that file for the full
+text. The non-negotiable behavioral invariants:
+
+1. **Wake on session start.** Before any substantive work, call
+   `mpm__mpm_context(action: "read_wake_context", params: {})` to recover
+   prior work, decisions, lessons, and pointers. Skipping wake means
+   arriving amnesic and forcing the user to re-explain.
+
+2. **Persist during work, not only at the end.** Use the appropriate
+   MPM tool (`mpm__mpm_memory`, `mpm__mpm_decisions`, `mpm__mpm_lessons`,
+   `mpm__mpm_topics`, `mpm__mpm_references`) for any durable knowledge a
+   future session would otherwise have to rediscover.
+
+3. **Handoff before genuine session closure.** Before sending any turn
+   that closes the session, run the handoff check. If substantial work
+   has occurred since the last handoff, write it via
+   `mpm__mpm_session(action: "end", params: {summary, state,
+   commitments, open_questions})`. Wake is how future-me starts; handoff
+   is how future-me receives the previous session.
+
+   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
+   session-closing. Do not write a handoff on every chat ack — write one
+   when substantial work has happened or a session-closing trigger fires.
+
+4. **MPM is the source of truth for cross-session continuity.** Anything
+   that should survive across sessions goes to MPM, not just transient
+   conversation context.
+
+5. **Recovery / fallback.** If the mpm MCP tool group becomes unavailable
+   mid-session (any tool calls returning errors about session/connection
+   state or runtime disposal), fall back to the CLI path:
+   `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
+   Do not abandon persistence when the preferred integration breaks.
+   Runtime-recovery details specific to OpenClaw (gateway restart, bundle
+   disposal) are documented in that host's adapter, not here.
+
+The full canonical protocol is in `~/.mpm/agent_plugins/mpm-agent-protocol.md`.
+Host-specific rules (subprocess paths, MCP runtime quirks) belong there,
+not in this block.
+<END MPM-CANONICAL-BLOCK>
+
+## Session-start hook (assumed)
+
+Claude Code sessions that use this integration should be configured with a
+session-start hook that invokes wake-context ingestion. If the hook is not
+installed, run wake manually at the start of every substantive turn.
+
+## Framework identification
+
+If MCP tools are unavailable for any reason, the CLI path also writes
+artifacts with provenance attribution matching the MCP path. Both paths
+go through `mpm call` and stamp identical `artifact_provenance` rows.
