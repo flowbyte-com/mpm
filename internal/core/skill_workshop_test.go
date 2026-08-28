@@ -194,3 +194,52 @@ func TestCheckWhenToUse_Rich(t *testing.T) {
 		t.Errorf("expected clean result, got warnings=%v errors=%v", result.Warnings, result.Errors)
 	}
 }
+
+func TestDetectDuplicates_OverlapTriggersCandidate(t *testing.T) {
+	dm := NewTestDM(t)
+	// Seed an existing skill whose when_to_use overlaps heavily.
+	existing := "---\nname: docs-cleanup\nversion: 1.0.0\nwhen_to_use: reorganizing documentation, moving cross-references, updating READMEs\n---\nbody"
+	if _, err := dm.SaveSkill("docs-cleanup", "1.0.0", existing, "test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Propose a new skill with high overlap.
+	proposal := SkillProposal{
+		Name:      "docs-pass-2",
+		Version:   "1.0.0",
+		WhenToUse: "reorganizing documentation, moving cross-references, syncing READMEs and ARCHIVE",
+	}
+	result, err := detectDuplicates(dm, proposal, "")
+	if err != nil {
+		t.Fatalf("detectDuplicates: %v", err)
+	}
+	if len(result.CloseMatches) == 0 {
+		t.Fatal("expected close match, got none")
+	}
+	if result.CloseMatches[0].OverlapScore < 0.6 {
+		t.Errorf("overlap = %f, want >= 0.6", result.CloseMatches[0].OverlapScore)
+	}
+}
+
+func TestDetectDuplicates_RefineExcludesSelf(t *testing.T) {
+	dm := NewTestDM(t)
+	if _, err := dm.SaveSkill("docs-cleanup", "1.0.0",
+		"---\nname: docs-cleanup\nversion: 1.0.0\nwhen_to_use: reorganizing documentation, moving cross-references\n---\nbody",
+		"test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Refining docs-cleanup — must NOT flag itself.
+	proposal := SkillProposal{
+		Name:      "docs-cleanup",
+		Version:   "1.1.0",
+		WhenToUse: "reorganizing documentation, moving cross-references, plus new task",
+	}
+	result, err := detectDuplicates(dm, proposal, "docs-cleanup")
+	if err != nil {
+		t.Fatalf("detectDuplicates: %v", err)
+	}
+	for _, m := range result.CloseMatches {
+		if m.Name == "docs-cleanup" {
+			t.Errorf("refine must exclude self, but got match: %+v", m)
+		}
+	}
+}
