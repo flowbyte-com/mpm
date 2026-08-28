@@ -553,3 +553,45 @@ func TestSaveSkill_ForceOverwriteHighestKeepsIsLatestTrue(t *testing.T) {
 		t.Errorf("force-overwrite of only version: IsLatest = false, want true")
 	}
 }
+
+// TestValidateSkillFrontmatterAndScan_CleanInput verifies the helper parses
+// valid frontmatter and returns no errors for clean content.
+func TestValidateSkillFrontmatterAndScan_CleanInput(t *testing.T) {
+	content := "---\nname: foo\nversion: 1.0.0\nwhen_to_use: doing, bar\n---\nbody"
+	skill, warnings, errors, err := validateSkillFrontmatterAndScan(content)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(errors) != 0 {
+		t.Errorf("errors = %v, want empty", errors)
+	}
+	if skill.Name != "foo" || skill.Version != "1.0.0" {
+		t.Errorf("parsed skill = %+v", skill)
+	}
+	// Warnings may be empty for clean input — we don't assert here.
+	_ = warnings
+}
+
+// TestValidateSkillFrontmatterAndScan_ScannerBlocks verifies the helper
+// returns a scanner error when content contains a secret pattern.
+func TestValidateSkillFrontmatterAndScan_ScannerBlocks(t *testing.T) {
+	// OpenAI-style key triggers the secret scanner.
+	content := "---\nname: foo\nversion: 1.0.0\n---\nbody with sk-abc123def456ghi789jkl012mno345pqr here"
+	_, _, errs, err := validateSkillFrontmatterAndScan(content)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected scanner error for sk- pattern, got none")
+	}
+}
+
+// TestValidateSkillFrontmatterAndScan_BadFrontmatter verifies the helper
+// returns an error when frontmatter is missing.
+func TestValidateSkillFrontmatterAndScan_BadFrontmatter(t *testing.T) {
+	content := "no frontmatter here"
+	_, _, _, err := validateSkillFrontmatterAndScan(content)
+	if err == nil {
+		t.Fatal("expected error for missing frontmatter, got nil")
+	}
+}
