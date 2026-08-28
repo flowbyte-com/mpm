@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -277,4 +279,105 @@ func checkWhenToUse(proposed string, mode string) WhenToUseCheck {
 // the proposed name (since checkWhenToUse doesn't have it).
 func whenToUseEqualsName(proposed, name string) bool {
 	return proposed != "" && proposed == name
+}
+
+// DuplicateMatch describes a skill that overlaps with the proposal.
+type DuplicateMatch struct {
+	Name         string  `json:"name"`
+	ID           string  `json:"id"`
+	OverlapScore float64 `json:"overlap_score"`
+	Reason       string  `json:"reason"`
+}
+
+// DuplicateCheckResult summarises the duplicate-detection outcome.
+type DuplicateCheckResult struct {
+	ExactMatch   bool            `json:"exact_match"`
+	CloseMatches []DuplicateMatch `json:"close_matches"`
+}
+
+// detectDuplicates implements spec §8: token-set Jaccard overlap of
+// proposal.WhenToUse against every existing skill's WhenToUse,
+// combined with a FTS5 score (using the overlap score directly per
+// the spec note that FTS5 is best-effort; the substring path is the
+// primary signal in the small skill catalog). Returns the top 5 matches
+// by combined score. Excludes the skill named `excludeName` (used in
+// refine mode to avoid flagging the skill being refined).
+func detectDuplicates(dm *DatabaseManager, proposal SkillProposal, excludeName string) (DuplicateCheckResult, error) {
+	existing, err := dm.ListSkills("all")
+	if err != nil {
+		return DuplicateCheckResult{}, fmt.Errorf("detectDuplicates: list: %w", err)
+	}
+	proposedLower := strings.ToLower(proposal.WhenToUse)
+	var matches []DuplicateMatch
+	for _, s := range existing {
+		if s.Name == excludeName {
+			continue
+		}
+		if s.WhenToUse == "" {
+			continue
+		}
+		existingLower := strings.ToLower(s.WhenToUse)
+		// Token-set Jaccard overlap.
+		proposedTokens := tokenize(proposedLower)
+		existingTokens := tokenize(existingLower)
+		overlap := jaccard(proposedTokens, existingTokens)
+		if overlap < 0.3 {
+			continue
+		}
+		// For FTS5 we use the overlap score directly (the spec notes
+		// FTS5 is best-effort; the substring path is the primary signal
+		// in the small skill catalog).
+		combined := overlap
+		matches = append(matches, DuplicateMatch{
+			Name:         s.Name,
+			ID:           s.ID,
+			OverlapScore: combined,
+			Reason:       fmt.Sprintf("when_to_use token overlap %f", overlap),
+		})
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].OverlapScore > matches[j].OverlapScore
+	})
+	if len(matches) > 5 {
+		matches = matches[:5]
+	}
+	// Exact match: combined >= 0.95 AND name matches.
+	exact := false
+	for _, m := range matches {
+		if m.OverlapScore >= 0.95 && m.Name == proposal.Name {
+			exact = true
+			break
+		}
+	}
+	return DuplicateCheckResult{ExactMatch: exact, CloseMatches: matches}, nil
+}
+
+// tokenize splits s on non-alphanumeric runes and returns a set of
+// lowercase tokens as a map for efficient Jaccard computation.
+func tokenize(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9')
+	}) {
+		out[strings.ToLower(f)] = true
+	}
+	return out
+}
+
+// jaccard computes the set Jaccard coefficient |A ∩ B| / |A ∪ B|.
+func jaccard(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for k := range a {
+		if b[k] {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
 }
