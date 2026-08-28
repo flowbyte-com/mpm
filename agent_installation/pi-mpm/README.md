@@ -79,12 +79,12 @@ enough that code generation would be an anti-pattern.
 
 ## Install
 
-The canonical source lives at `~/.mpm/agent_plugins/pi-mpm/index.ts`.
+The canonical source lives at `~/.mpm/agent_installation/pi-mpm/index.ts`.
 Auto-loading is enabled by adding the path to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "extensions": ["~/.mpm/agent_plugins/pi-mpm"]
+  "extensions": ["~/.mpm/agent_installation/pi-mpm"]
 }
 ```
 
@@ -134,8 +134,8 @@ If mpm changes its CLI surface:
 
 ## Related mpm integrations in this repo
 
-- `agent_plugins/openclaw-mpm-memory/` — OpenClaw memory slot plugin (2 tools).
-- `agent_plugins/mpm-auto-route/`     — OpenClaw per-turn persona auto-routing.
+- `agent_installation/openclaw-mpm-memory/` — OpenClaw memory slot plugin (2 tools).
+- `agent_installation/mpm-auto-route/`     — OpenClaw per-turn persona auto-routing.
 
 Both follow the same `mpm call` subprocess pattern; pi-mpm is the Pi-shaped
 adaptation with **full coverage** instead of the narrow OpenClaw slot.

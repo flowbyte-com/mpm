@@ -3,14 +3,14 @@
 > AGENTS.md / CLAUDE.md / SYSTEM.md"). This file is the persistent
 > behavioral instruction surface for the Pi agent.
 > Edit the canonical protocol at
-> `~/.mpm/agent_plugins/mpm-agent-protocol.md` rather than this file
+> `~/.mpm/agent_installation/mpm-agent-protocol.md` rather than this file
 > for behavioral changes.
 
 ## MPM behavioral contract — host-independent
 
 MPM is the persistent agent substrate for cross-session continuity on
 this machine. The full behavioral contract is canonical at
-`~/.mpm/agent_plugins/mpm-agent-protocol.md`. The non-negotiable invariants
+`~/.mpm/agent_installation/mpm-agent-protocol.md`. The non-negotiable invariants
 that this host adapter inherits:
 
 1. **Wake on session start.** Read MPM wake context (`mode`, `persona`,
@@ -63,7 +63,7 @@ to the global location (`~/.pi/agent/AGENTS.md`) by default for
 host-wide behavioral adoption, but accepts `--target` for
 project-scoped installation.
 
-The `pi-mpm` extension at `~/.mpm/agent_plugins/pi-mpm/` registers
+The `pi-mpm` extension at `~/.mpm/agent_installation/pi-mpm/` registers
 all MPM tools with full coverage. AGENTS.md adds the behavioral
 layer (wake, persist, handoff, recovery) that the typed tools alone
 do not enforce — capability does not equal adoption.

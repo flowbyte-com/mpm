@@ -3,7 +3,7 @@ test_claude_instructions_installer.py — Regression coverage for the
 claude-code-mpm CLAUDE.md installer.
 
 Pins the contract for:
-  - canonical protocol file exists at ~/.mpm/agent_plugins/mpm-agent-protocol.md
+  - canonical protocol file exists at ~/.mpm/agent_installation/mpm-agent-protocol.md
   - snippet exists and is host-independent
   - install_claude_instructions.py honors idempotence
   - existing user content above the markers is preserved across reinstall
@@ -22,10 +22,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT_DIR = Path("/home/v/.mpm/agent_plugins/claude-code-mpm")
+SCRIPT_DIR = Path("/home/v/.mpm/agent_installation/claude-code-mpm")
 INSTALLER = SCRIPT_DIR / "scripts" / "install_claude_instructions.py"
 SNIPPET = SCRIPT_DIR / "templates" / "CLAUDE.md.snippet"
-CANONICAL_PROTOCOL = Path("/home/v/.mpm/agent_plugins/mpm-agent-protocol.md")
+CANONICAL_PROTOCOL = Path("/home/v/.mpm/agent_installation/mpm-agent-protocol.md")
 
 
 class CanonicalProtocol(unittest.TestCase):

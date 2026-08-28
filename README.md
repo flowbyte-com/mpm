@@ -1161,7 +1161,7 @@ For the DDL, fan-out algorithm, auto-broadcast hooks, tests, and smoke behind th
 
 **Wire format.** Frame bodies are newline-delimited JSON over a Unix socket (`$MPM_WORKSPACE/run/mpm-telemetry.sock`, override via `MPM_TELEMETRY_SOCKET`). The wire schema is versioned (`"schema_version":"v1"`). Unknown schema versions are rejected at the protocol boundary. Idempotent retries (same `invocation_id`, same payload) return `{"status":"ACCEPTED","inserted":false,...}`; conflicting duplicates (same id, different payload) return `{"status":"REJECTED","reason":"invocation_id_payload_conflict"}`. SQLite is the canonical store with WAL mode + 5s `busy_timeout` — the same single-connection-via-discipline that the MPM core uses.
 
-**Client-side push, non-blocking.** Agents emit frames via the `telemetry_adapter.py` library (`agent_plugins/claude-code-mpm/src/telemetry_adapter.py`). The adapter returns immediately; a background daemon thread drains a per-process ring buffer (capacity 1000) over the socket with a 100ms connect timeout. If the collector is absent, frames are evicted oldest-first on overflow and the agent is never blocked. Spec invariant: collector availability MUST NOT affect agent correctness.
+**Client-side push, non-blocking.** Agents emit frames via the `telemetry_adapter.py` library (`agent_installation/claude-code-mpm/src/telemetry_adapter.py`). The adapter returns immediately; a background daemon thread drains a per-process ring buffer (capacity 1000) over the socket with a 100ms connect timeout. If the collector is absent, frames are evicted oldest-first on overflow and the agent is never blocked. Spec invariant: collector availability MUST NOT affect agent correctness.
 
 **Subcommands.**
 

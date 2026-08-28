@@ -19,7 +19,7 @@ passed live.
 | Field | Value |
 |---|---|
 | **Agent / framework** | OpenClaw (`minimax-portal/MiniMax-M3` model, webchat channel, session `agent:main:main:2026-08-19`) |
-| **Integration path(s)** | `~/.mpm/agent_plugins/openclaw-mpm-memory/` (memory slot plugin) + `~/.mpm/bin/mpm-mcp` (MCP stdio server) + `~/.mpm/agent_plugins/mpm-auto-route/` (mode/persona injection) |
+| **Integration path(s)** | `~/.mpm/agent_installation/openclaw-mpm-memory/` (memory slot plugin) + `~/.mpm/bin/mpm-mcp` (MCP stdio server) + `~/.mpm/agent_installation/mpm-auto-route/` (mode/persona injection) |
 | **Native mechanism(s)** | (a) OpenClaw plugin SDK (`@openclaw/plugin-sdk`) for the memory slot; (b) MCP stdio server (`mcpServers.mpm` block in `openclaw config get mcp`) for full surface; (c) OpenClaw plugin SDK for the auto-router |
 | **MPM interface used** | CLI: `mpm call <tool> --payload '{"action":"…","params":{…}}'` ; MCP: `mpm__*` native tool surface (the 33-tool aggregator exposed via `mpm-mcp`) |
 | **Auto-load mechanism** | OpenClaw gateway auto-loads the MCP server from runtime config; the memory plugin loads via `plugins.slots.memory` and `plugins.entries["openclaw-mpm-memory"].enabled=true` |
@@ -30,16 +30,16 @@ passed live.
 
 | Path | Why |
 |---|---|
-| `~/.mpm/agent_plugins/README.md` | Top-level index. Documents the multi-surface architecture (MCP + memory plugin + auto-route) so future agents/operators see the full integration picture rather than just one plugin. |
-| `~/.mpm/agent_plugins/openclaw-mpm-memory/.mcp.json` | Canonical MCP wiring (absolute path, env vars) — replaces the stale relative-path entry at `~/.mpm/.mcp.json`. NOT applied directly; the OpenClaw runtime config already uses these values (see Open Questions). |
-| `~/.mpm/agent_plugins/openclaw-mpm-memory/VALIDATION-2026-08-19.md` | This file. Reproducible record of the validation run + findings. |
+| `~/.mpm/agent_installation/README.md` | Top-level index. Documents the multi-surface architecture (MCP + memory plugin + auto-route) so future agents/operators see the full integration picture rather than just one plugin. |
+| `~/.mpm/agent_installation/openclaw-mpm-memory/.mcp.json` | Canonical MCP wiring (absolute path, env vars) — replaces the stale relative-path entry at `~/.mpm/.mcp.json`. NOT applied directly; the OpenClaw runtime config already uses these values (see Open Questions). |
+| `~/.mpm/agent_installation/openclaw-mpm-memory/VALIDATION-2026-08-19.md` | This file. Reproducible record of the validation run + findings. |
 
 ## Changes — files NOT modified (defects flagged instead)
 
 | Path | Why not touched |
 |---|---|
 | `~/.mpm/.mcp.json` | Tracked in the MPM repo (commit `36ff9c6 feat(mcp): complete plugin→MCP migration`). The entry uses `./bin/mpm-mcp` (relative path) which is broken from any cwd other than `~/.mpm/`. **Reported as MPM defect MPM-DEFECT-MCP-PATH-RELATIVE-2026-08-19.** |
-| `~/.mpm/agent_plugins/openclaw-mpm-memory/{index.js,README.md,install.sh,openclaw.plugin.json,package.json}` | Already correct and well-architected (decision `40544f5a04a2aac7` neutered the flush emitter by design — DO NOT "fix" that path back). The existing README documents the failure modes. |
+| `~/.mpm/agent_installation/openclaw-mpm-memory/{index.js,README.md,install.sh,openclaw.plugin.json,package.json}` | Already correct and well-architected (decision `40544f5a04a2aac7` neutered the flush emitter by design — DO NOT "fix" that path back). The existing README documents the failure modes. |
 | `~/.openclaw/openclaw.json` (runtime MCP config) | Already correct: uses `/home/v/.mpm/bin/mpm-mcp` (absolute) with `MPM_WORKSPACE`, `MPM_ACTIVE_MODE`, `MPM_ACTIVE_PERSONA` env vars. Backed up implicitly via `openclaw config get` snapshot taken during discovery. |
 | Anything under `~/.mpm/internal/`, `~/.mpm/cmd/`, `~/.mpm/src/` | Forbidden by the prompt's hard boundary. Not touched. |
 
@@ -64,17 +64,17 @@ passed live.
 ### Integration defects fixed
 - **None.** The existing integration was already well-architected and
   live. The only repair-shaped action was the **canonical artifact**
-  under `~/.mpm/agent_plugins/` — a documentation/reproducibility fix,
+  under `~/.mpm/agent_installation/` — a documentation/reproducibility fix,
   not a code repair.
 
 ### Integration documentation gaps closed
-- Top-level `~/.mpm/agent_plugins/README.md` — explains the multi-surface
+- Top-level `~/.mpm/agent_installation/README.md` — explains the multi-surface
   architecture (was missing; previously an operator had to discover the
   three integration surfaces independently).
-- `~/.mpm/agent_plugins/openclaw-mpm-memory/.mcp.json` — canonical,
+- `~/.mpm/agent_installation/openclaw-mpm-memory/.mcp.json` — canonical,
   absolute-path MCP wiring (was only present in stale relative form
   at the install root).
-- `~/.mpm/agent_plugins/openclaw-mpm-memory/VALIDATION-2026-08-19.md` —
+- `~/.mpm/agent_installation/openclaw-mpm-memory/VALIDATION-2026-08-19.md` —
   this reproducible record.
 
 ### MPM defects discovered
@@ -142,7 +142,7 @@ object), so this is a robustness-of-others observation, not an MPM bug.
 ## Pre-existing observations (NOT introduced by this validation)
 
 `git status` from `~/.mpm` at validation time showed 13 modified files
-across `Makefile`, `SECURITY.md`, `agent_plugins/openclaw-mpm-memory/index.js`,
+across `Makefile`, `SECURITY.md`, `agent_installation/openclaw-mpm-memory/index.js`,
 `cmd/mpm-mcp/main.go`, `cmd/mpm/handlers_backup.go`, `internal/core/…`,
 `scripts/…` — **all with mtime `2026-08-18 17:57:16`** (yesterday's
 pre-alpha hardening cycle). **None of these were edited in this
@@ -152,8 +152,8 @@ appear under "Untracked files" only.
 The relevant pre-existing change for this integration:
 
 ```diff
---- a/agent_plugins/openclaw-mpm-memory/index.js
-+++ b/agent_plugins/openclaw-mpm-memory/index.js  (working tree)
+--- a/agent_installation/openclaw-mpm-memory/index.js
++++ b/agent_installation/openclaw-mpm-memory/index.js  (working tree)
 @@ -110,7 +110,16 @@ async function callMpmTool(tool, payload, opts) {
    return new Promise((resolve) => {
      let child;
