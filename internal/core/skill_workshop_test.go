@@ -295,3 +295,56 @@ func TestIdentityCheck_DifferentContent(t *testing.T) {
 		t.Errorf("outcome = %v, want different", outcome)
 	}
 }
+
+func TestBumpVersion_CorrectionPatch(t *testing.T) {
+	got, err := bumpVersion("1.0.0", "correction")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "1.0.1" {
+		t.Errorf("got %q, want 1.0.1", got)
+	}
+}
+
+func TestBumpVersion_ExtensionMinor(t *testing.T) {
+	got, err := bumpVersion("1.0.0", "extension")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "1.1.0" {
+		t.Errorf("got %q, want 1.1.0", got)
+	}
+}
+
+func TestBumpVersion_RestructuringMinor(t *testing.T) {
+	got, err := bumpVersion("1.0.0", "restructuring")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "1.1.0" {
+		t.Errorf("got %q, want 1.1.0", got)
+	}
+}
+
+func TestBumpVersion_PurposeChangeMajor(t *testing.T) {
+	got, err := bumpVersion("1.0.0", "purpose_change")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != "2.0.0" {
+		t.Errorf("got %q, want 2.0.0", got)
+	}
+}
+
+func TestCheckVersionBump_MismatchReturnsError(t *testing.T) {
+	err := checkVersionBump("2.0.0", "1.0.0", "correction")
+	if err == nil {
+		t.Fatal("expected version_bump_mismatch error")
+	}
+}
+
+func TestCheckVersionBump_MatchPasses(t *testing.T) {
+	if err := checkVersionBump("1.0.1", "1.0.0", "correction"); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
