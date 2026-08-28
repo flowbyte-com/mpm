@@ -94,6 +94,81 @@ field in the wake payload is the same data source. Discovery adds a
 context-driven filter on top of that inventory; it does not invent
 new skills.
 
+### 3.1 SKILL FORMATION
+
+The Skill Workshop is the structured workflow for turning a repeated,
+non-obvious experience into a durable, reusable skill. The workshop
+extends `mpm__mpm_skills` with a single `workshop` action; the
+underlying persistence and validation architecture is unchanged.
+
+**When to invoke the workshop** — four trigger categories:
+
+1. Repeated manual procedure (you've executed the same steps ≥ 3 times across sessions)
+2. Non-obvious debugging sequence (the resolution path is not documented anywhere)
+3. Successful recovery pattern (you fixed a failure that would recur)
+4. Recurring operational process (setup, integration, or maintenance that recurs)
+
+**When NOT to invoke:**
+
+- Trivial commands or one-line fixes
+- One-off events or single observations
+- Procedures already covered by an existing skill (use proactive discovery first)
+- Facts or preferences (use `mpm memory save` instead)
+
+**Decision-model template** (fill in before calling the workshop):
+
+```markdown
+## Skill Formation Assessment
+
+**Intent:** <skill name candidate>
+**Mode:** form | refine (existing skill: <name>)
+
+### Decision Model
+
+- **Reusability** (0–2): <score> — <one-line reasoning>
+- **Non-obviousness** (0–2): <score> — <one-line reasoning>
+- **Stability** (0–2): <score> — <one-line reasoning>
+- **Leverage** (0–2): <score> — <one-line reasoning>
+- **Boundary**: procedure | fact | preference | one_off
+
+**Total**: <0–8>
+**Decision**: publish if total ≥ 6 AND boundary = procedure; else candidate / rejected
+
+### Skill Proposal (if publishing or returning candidate)
+
+- **Name**: <kebab-case>
+- **Version**: <semver>
+- **Domain**: <area, e.g., "docs", "release", "telemetry">
+- **Description**: <one-line purpose, ≤120 chars>
+- **When to use**: <comma-separated task phrases, ≥30 chars>
+- **Steps**: <numbered procedure>
+- **Constraints**: <edge cases, gotchas>
+- **Evidence**: <memory/lesson/reference ids that informed the proposal>
+```
+
+**The 3 outcomes and what to do with each:**
+
+- `published`: skill is live and surfaced in `<available_skills>`. Read it via `mpm_skills read` and add to your procedural memory.
+- `candidate`: workshop generated a proposal but did not publish. Inspect `decision_model`, `duplicate_check`, `validation`, and `proposal`. If acceptable, call `mpm_skills save` with the `save_payload`. If not, discard and optionally save a memory or lesson.
+- `rejected`: not skill-worthy. Optionally save a memory or lesson capturing the insight.
+
+**The `save_payload` hand-off pattern** — when you accept a candidate, dispatch:
+
+```
+mpm_skills(action="save", params=<save_payload>)
+```
+
+The `save_payload` is the exact `params` dict the workshop returned under `validation.status == "passed_with_warnings"` or `"failed"`. No transformation needed.
+
+**Prefer refinement over creation** — when `duplicate_check.close_matches` is non-empty (combined score > 0.6), prefer `mode: "refine"` with the matching skill name. The workshop's change_type → version bump mapping makes refinement deterministic:
+
+- `correction` → patch (`1.0.0` → `1.0.1`)
+- `extension` → minor (`1.0.0` → `1.1.0`)
+- `restructuring` → minor (`1.0.0` → `1.1.0`)
+- `purpose_change` → major (`1.0.0` → `2.0.0`)
+
+Do not choose the version directly — supply `change_type` and let the workshop derive the bump.
+
 ---
 
 ## 4. SESSION END — Handoff
