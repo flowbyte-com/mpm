@@ -91,21 +91,43 @@ Global promotion remains a separate, existing lifecycle operation (`promote_to_g
 {
   "action": "workshop",
   "mode": "form" | "refine",
-  "intent": "<skill name candidate or refinement target>",
-  "task_context": "<string, ≤50KB>",
-  "workflow_description": "<string, ≤50KB>",
-  "failure_recovery": "<optional string, ≤20KB, refine mode only>",
-  "recent_actions": ["<string, ≤20 entries>"],
-  "evidence": {
-    "memory_ids":   ["<≤10 mpm memory ids>"],
-    "lesson_ids":   ["<≤5 mpm lesson ids>"],
-    "reference_ids":["<≤5 mpm reference ids>"]
+  "intent": "<skill name>",
+  "decision_model": {
+    "reusability":     <0|1|2>,
+    "non_obviousness": <0|1|2>,
+    "stability":       <0|1|2>,
+    "leverage":        <0|1|2>,
+    "boundary":        "procedure" | "fact" | "preference" | "one_off"
   },
-  "workshop_key": "<optional opaque string for idempotence>"
+  "proposal": {
+    "name":         "<kebab-case skill name>",
+    "version":      "<semver>",
+    "domain":       "<area>",
+    "description":  "<one-line purpose, ≤120 chars>",
+    "when_to_use":  "<comma-separated task phrases, ≥30 chars>",
+    "steps":        [{"title": "...", "body": "..."}],
+    "constraints":  ["..."]
+  },
+  "task_context":         "<string, ≤50KB>",
+  "workflow_description": "<string, ≤50KB>",
+  "failure_recovery":     "<optional string, ≤20KB, refine mode only>",
+  "recent_actions":       ["<string, ≤20 entries>"],
+  "evidence": {
+    "memory_ids":    ["<≤10 mpm memory ids>"],
+    "lesson_ids":    ["<≤5 mpm lesson ids>"],
+    "reference_ids": ["<≤5 mpm reference ids>"]
+  },
+  "workshop_key":         "<optional opaque string for idempotence>"
 }
 ```
 
-Pointers (`memory_ids`, `lesson_ids`, `reference_ids`) carry IDs only. The workshop server-side dereferences to current content via the existing pointer/resolve machinery. The workshop payload never carries raw conversation transcripts. Total request size cap: 256KB.
+**`intent` semantics:**
+- `mode: "form"` — `intent` is the proposed new skill name. The workshop validates that no skill with that exact name already exists at the proposed version.
+- `mode: "refine"` — `intent` is the existing skill name to look up. The workshop fetches the latest version via `dm.ReadSkill(intent, "")` and uses its `id` as the prior-version ID for `SaveSkillAndDeprecatePrior`.
+
+**Pointers** (`memory_ids`, `lesson_ids`, `reference_ids`) carry IDs only. The workshop server-side dereferences to current content via the existing pointer/resolve machinery. The workshop payload never carries raw conversation transcripts. Total request size cap: 256KB.
+
+The `decision_model` block is required: the workshop validates the agent-supplied scores against §6 thresholds. The `proposal` block is required and must be a complete skill frontmatter + steps payload; the workshop does not generate proposal content from context (per §6, the integers are agent-assigned and the proposal content is too — no LLM call server-side).
 
 ### 4.2 Response — `published`
 
@@ -150,30 +172,20 @@ The skill row exists in `memories WHERE collection='skills' AND id='<skill_id>'`
     "warnings": ["weak_when_to_use", "missing_description"],
     "errors":   []
   },
-  "proposal": {
-    "name":         "...",
-    "version":      "1.0.0",
-    "purpose":      "...",
-    "when_to_use":  "...",
-    "domain":       "...",
-    "steps":        [{"title":"...","body":"..."}],
-    "constraints":  ["..."],
-    "evidence_pointers": ["mpm://memory/...", "mpm://lesson/..."]
-  },
   "save_payload": {
-    "action":      "save",
-    "name":        "...",
-    "version":     "1.0.0",
-    "domain":      "...",
-    "description": "...",
-    "when_to_use": "...",
-    "steps":       [...],
-    "constraints": [...]
+    "action":       "save",
+    "name":         "<as supplied or workshop-adjusted>",
+    "version":      "<semver>",
+    "domain":       "<area>",
+    "description":  "<one-line purpose, ≤120 chars>",
+    "when_to_use":  "<comma-separated task phrases, ≥30 chars>",
+    "steps":        [{"title":"...","body":"..."}],
+    "constraints":  ["..."]
   }
 }
 ```
 
-The `save_payload` is the wire shape the agent passes straight to `mpm_skills save` if it accepts the candidate. The candidate persists only in the agent's conversation context; the workshop does not write it to the database.
+The `save_payload` is the wire shape the agent passes straight to `mpm_skills save` if it accepts the candidate. The workshop may adjust fields in the payload based on validation (e.g., a `weak_when_to_use` warning may be addressed by adding suggested phrasing). The workshop surfaces such adjustments under `validation.adjustments[]` when applicable. The candidate persists only in the agent's conversation context; the workshop does not write it to the database.
 
 ### 4.4 Response — `rejected`
 
@@ -334,6 +346,8 @@ The workshop detects duplicates before publication. The detection runs against `
 5. Threshold: combined score > 0.6 on the top match → return `candidate` (not `published`) with `duplicate_check` populated. The agent sees the close match and decides whether to refine the existing skill via `mode: "refine"` instead of creating a new one.
 
 6. Exact match (combined score ≥ 0.95 AND `name` matches existing skill name) → return `candidate` with `reason: "already_covered"` semantics in the decision model (the workshop treats an exact match as a strong signal to refine rather than re-publish).
+
+**Refine-mode exclusion:** when `mode: "refine"` is active, the skill being refined (matched by `intent`) is **excluded** from both substring and FTS5 candidate sets. Otherwise the prior version would always flag as a top match and the workshop would refuse to publish the refinement. Other versions of the same logical skill (e.g., the prior-to-prior version) are still scanned — if a much older version surfaces as the top match (overlap > 0.6), the workshop returns `candidate` with that finding for review.
 
 The detection is best-effort and runs in O(N) over the skill catalog. The catalog is small (typically < 50 skills per scope) so a full scan is acceptable. FTS5 lookup uses the existing `memories_fts` index.
 
