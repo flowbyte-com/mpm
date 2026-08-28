@@ -29,7 +29,18 @@ that this host adapter inherits:
    `~/.hermes/config.yaml` (`MPM_WORKSPACE` resolves the canonical
    binary and DB).
 
-3. **Handoff before genuine session closure.** Before sending a turn
+3. **Skill discovery before reinventing.** When the current task
+   context suggests a previously learned procedure would apply, query
+   `mcp__mpm__mpm_context` action `proactive_recall_hint` (params:
+   `conversation_text`) and read each surfaced skill via
+   `mcp__mpm__mpm_skills` action `read` (params: `name`). The wake
+   payload already includes a bounded `<available_skills>`
+   catalogue — discovery adds a context-driven filter on top. Don't
+   auto-scan every turn; invoke when context suggests a remembered
+   procedure would apply. Reactive catalog fallback via
+   `mcp__mpm__mpm_skills` action `list` (params: `scope`).
+
+4. **Handoff before genuine session closure.** Before sending a turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
    `mcp__mpm__mpm_session` action `end` (params: `summary`, `state`,
@@ -41,11 +52,11 @@ that this host adapter inherits:
    one when substantial work has happened or a session-closing
    trigger fires.
 
-4. **MPM is the source of truth for cross-session continuity.**
+5. **MPM is the source of truth for cross-session continuity.**
    Anything that should survive across sessions goes to MPM, not just
    transient conversation context.
 
-5. **Recovery / fallback.** If the MCP server is unavailable or
+6. **Recovery / fallback.** If the MCP server is unavailable or
    `mcp__mpm__*` tools are missing (e.g., the `mpm-mcp` process is
    killed or the env var resolution failed), fall back to the CLI
    path: `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`.
