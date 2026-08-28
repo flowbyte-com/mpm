@@ -20,7 +20,7 @@ that "work" locally and corrupt invariants globally.
    invariant, foreign-key posture, the stranger test as a release gate).
 3. Read [`docs/architecture.md`](docs/architecture.md) for the
    Projection Principle and the Projection Test. Both are short.
-4. Read [`docs/RELEASE-NOTES-mpm-alpha.md`](docs/RELEASE-NOTES-mpm-alpha.md)
+4. Read [`docs/archive/RELEASE-NOTES-mpm-alpha.md`](docs/archive/RELEASE-NOTES-mpm-alpha.md)
    for what is and is not part of the current alpha.
 5. Read the code you are about to change. The substrate has structural
    tests that enforce invariants — if your change breaks one, it is
@@ -162,7 +162,7 @@ PRs that change behaviour should explain:
 5. **Whether anything in `docs/` needs updating.** Architecture
    shifts go in `docs/architecture.md` (or a sibling). Behaviour
    shifts go in `README.md`. Cross-cutting shifts go in
-   `docs/RELEASE-NOTES-*.md`.
+   `docs/archive/RELEASE-NOTES-*.md`.
 
 PRs that claim to add functionality should demonstrate the
 functionality working. "I added this and the tests pass" is not
