@@ -106,11 +106,12 @@ func (c *ExecCLI) Call(ctx context.Context, tool, action string, payload map[str
 // Audit is the orchestrator. It owns the DB connection, the hunt
 // registry, the cycle counter, and the CLI runner.
 type Audit struct {
-	db    *sql.DB
-	log   *slog.Logger
-	cycle int
-	hunts []Hunt
-	cli   CLIRunner
+	db         *sql.DB
+	log        *slog.Logger
+	cycle      int
+	cycleStart time.Time // captured at the start of each Run(); hunts read this for settling-period comparisons
+	hunts      []Hunt
+	cli        CLIRunner
 }
 
 // New returns an Audit bound to the given *sql.DB. The caller owns the
@@ -154,8 +155,8 @@ func (a *Audit) Close() error {
 // The cycle counter is incremented at the end.
 func (a *Audit) Run(ctx context.Context) error {
 	a.cycle++
-	cycleStart := time.Now()
-	a.log.Info("critic audit cycle starting", "cycle", a.cycle)
+	a.cycleStart = time.Now()
+	a.log.Info("critic audit cycle starting", "cycle", a.cycle, "cycle_start", a.cycleStart)
 
 	var allFindings []Finding
 	for _, h := range a.hunts {
@@ -198,7 +199,7 @@ func (a *Audit) Run(ctx context.Context) error {
 		"findings_total", len(allFindings),
 		"findings_emitted", emitted,
 		"findings_failed", len(allFindings)-emitted,
-		"duration_ms", time.Since(cycleStart).Milliseconds())
+		"duration_ms", time.Since(a.cycleStart).Milliseconds())
 	return nil
 }
 
@@ -210,3 +211,9 @@ func (a *Audit) DB() *sql.DB { return a.db }
 // Cycle returns the current cycle number. Useful in test assertions and
 // for hunts that need to be cycle-aware.
 func (a *Audit) Cycle() int { return a.cycle }
+
+// CycleStart returns the wall-clock at which the current (or most recent)
+// audit cycle began. Hunts use this as the reference for settling-period
+// calculations so the period doesn't tick against absolute time during a
+// daemon outage — it ticks only when a cycle is actively running.
+func (a *Audit) CycleStart() time.Time { return a.cycleStart }

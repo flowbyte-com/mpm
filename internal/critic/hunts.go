@@ -123,7 +123,8 @@ func (h *SurvivalAsymmetryHunt) Run(ctx context.Context, a *Audit) ([]Finding, e
 // memory has been silent for longer than MaxAge, the Critic emits a
 // challenge_memory finding. The user (808) arbitrates.
 type StaleMemoryHunt struct {
-	MaxAge time.Duration // default: 30 days
+	MaxAge         time.Duration // default: 30 days
+	SettlingPeriod time.Duration // default: 12h; refuse to challenge memories fresher than this when measured from the current audit cycle start
 }
 
 func (h *StaleMemoryHunt) Name() string { return "stale_memory" }
@@ -133,7 +134,22 @@ func (h *StaleMemoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) 
 	if maxAge == 0 {
 		maxAge = 30 * 24 * time.Hour
 	}
+	settling := h.SettlingPeriod
+	if settling == 0 {
+		settling = 12 * time.Hour
+	}
 	cutoff := time.Now().Add(-maxAge).Unix()
+	// Settling cutoff is anchored to the cycle start, not absolute time.
+	// This way a 13h daemon outage does NOT accumulate against the settling
+	// period — when the daemon wakes, only time elapsed within active cycles
+	// counts. (Strict cumulative-uptime-per-memory is a follow-up; see TODO.)
+	// Fallback to time.Now() if the cycle start has not been initialized
+	// (e.g., when a hunt is invoked directly outside of Audit.Run()).
+	cycleStart := a.CycleStart()
+	if cycleStart.IsZero() {
+		cycleStart = time.Now()
+	}
+	settleCutoff := cycleStart.Add(-settling).Unix()
 
 	// Pull memories that have no reinforcement row newer than cutoff.
 	// Heuristic: rely on updated_at; if a memory hasn't been updated in
@@ -146,9 +162,20 @@ func (h *StaleMemoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) 
 		WHERE deleted_at IS NULL
 		  AND updated_at IS NOT NULL
 		  AND updated_at < ?
+		  -- symmetry with MemoryStore.AutoPrunePolicy (memory.go:1400)
+		  AND is_long_term = 0
+		  -- shield persistent fixtures by tag. Use instr() (substring search) instead of
+		  -- LIKE '%"seed"%' — double-quoted seed markers in a LIKE pattern collide with
+		  -- SQLite's identifier-quoting rules and break the parser.
+		  -- COALESCE because instr(NULL, ...) returns NULL, and NULL = 0 is FALSE.
+		  AND COALESCE(instr(tags, '"seed"'), 0) = 0
+		  AND COALESCE(instr(tags, '"alpha-fixture"'), 0) = 0
+		  -- settling period anchored to current cycle start (see StaleMemoryHunt docstring).
+		  -- COALESCE handles memories that pre-date the created_at column or have NULL set.
+		  AND COALESCE(created_at, updated_at) < ?
 		ORDER BY updated_at ASC
 		LIMIT 20
-	`, cutoff)
+	`, cutoff, settleCutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query stale: %w", err)
 	}
