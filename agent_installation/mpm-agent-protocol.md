@@ -52,7 +52,51 @@ bypass the substrate.
 
 ---
 
-## 3. SESSION END — Handoff
+## 3. SKILL DISCOVERY
+
+When the task appears likely to benefit from a previously learned
+procedure or workflow, query MPM's proactive skill discovery surface
+**before reinventing an established procedure**.
+
+The wake payload already includes a bounded catalogue of available
+skills (top 20 by weight, each with `name`, `version`, and a
+`when_to_use` hint). Use that as the inventory.
+
+When the current task context suggests a specialized procedure, invoke
+the discovery surface explicitly:
+
+```bash
+mpm call mpm_context '{"action":"proactive_recall_hint","params":{"conversation_text":"<recent task summary>"}}'
+```
+
+The surface returns a list of skill hints. For each hint, read the
+skill with `mpm call mpm_skills '{"action":"read","params":{"name":"<skill-name>"}}'`
+and follow its procedure.
+
+**What `when_to_use` means.** The field is a case-insensitive keyword
+taxonomy; the discovery surface matches keywords from your conversation
+text against it. It is not semantic understanding — write `when_to_use`
+to enumerate the contexts where a human would say "this looks like
+the kind of thing I've handled before." A skill with no `when_to_use`
+hint can still be invoked explicitly via `mpm_skills read`.
+
+**Catalog fallback.** Discovery is proactive; the full catalog is
+reactive. When the agent already knows the skill name (or wants to
+inventory everything available), use `mpm call mpm_skills
+'{"action":"list","params":{"scope":"all"}}'`.
+
+**No per-turn auto-scan.** Discovery is **context-triggered**, not
+mechanically repeated. Each call costs context; only invoke when the
+task context suggests a remembered procedure would apply.
+
+**Wake context already includes skills.** The `<available_skills>`
+field in the wake payload is the same data source. Discovery adds a
+context-driven filter on top of that inventory; it does not invent
+new skills.
+
+---
+
+## 4. SESSION END — Handoff
 
 Before genuine session closure, write a useful handoff to MPM capturing:
 
@@ -82,7 +126,7 @@ conversational acks within an ongoing exchange.
 
 ---
 
-## 4. MPM AS SOURCE OF TRUTH
+## 5. MPM AS SOURCE OF TRUTH
 
 MPM is the **source of truth for cross-session continuity**. Durable state
 should live in MPM rather than only in transient conversation context.
@@ -97,7 +141,7 @@ block or poison a write.
 
 ---
 
-## 5. RECOVERY / FALLBACK
+## 6. RECOVERY / FALLBACK
 
 If the preferred MPM integration becomes unavailable mid-session, fall
 back to the **documented CLI path**:

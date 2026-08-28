@@ -28,7 +28,18 @@ that this host adapter inherits:
    provenance automatically via the same `mpm call` subprocess
    path that other host plugins use.
 
-3. **Handoff before genuine session closure.** Before sending a turn
+3. **Skill discovery before reinventing.** When the current task
+   context suggests a previously learned procedure would apply, query
+   `mpm_context` action `proactive_recall_hint` (params:
+   `conversation_text`) and read each surfaced skill via
+   `mpm_skills` action `read` (params: `name`). The wake payload
+   already includes a bounded `<available_skills>` catalogue —
+   discovery adds a context-driven filter on top. Don't auto-scan
+   every turn; invoke when context suggests a remembered procedure
+   would apply. Reactive catalog fallback via `mpm_skills` action
+   `list` (params: `scope`).
+
+4. **Handoff before genuine session closure.** Before sending a turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
    `mpm_session` action `end` (params: `summary`, `state`,
@@ -40,11 +51,11 @@ that this host adapter inherits:
    one when substantial work has happened or a session-closing
    trigger fires.
 
-4. **MPM is the source of truth for cross-session continuity.**
+5. **MPM is the source of truth for cross-session continuity.**
    Anything that should survive across sessions goes to MPM, not just
    transient conversation context.
 
-5. **Recovery / fallback.** If the `pi-mpm` extension fails to load
+6. **Recovery / fallback.** If the `pi-mpm` extension fails to load
    or one of the `mpm_*` tools returns an unavailable result, fall
    back to the CLI path:
    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
