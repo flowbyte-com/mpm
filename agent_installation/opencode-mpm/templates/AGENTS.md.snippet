@@ -24,7 +24,18 @@ that this host adapter inherits:
    otherwise have to rediscover. The plugin proxies these calls through
    `mpm call` via the `buildProvenanceEnv` shim so provenance is captured.
 
-3. **Handoff before genuine session closure.** Before sending a turn
+3. **Skill discovery before reinventing.** When the current task
+   context suggests a previously learned procedure would apply, query
+   `mpm_context(action: "proactive_recall_hint", params: {
+   conversation_text: "<recent task summary>" })` and read each
+   surfaced skill via `mpm_skills(action: "read", params: {name})`.
+   The wake payload already includes a bounded `<available_skills>`
+   catalogue — discovery adds a context-driven filter on top. Don't
+   auto-scan every turn; invoke when context suggests a remembered
+   procedure would apply. Reactive catalog fallback via
+   `mpm_skills(action: "list", params: {scope: "all"})`.
+
+4. **Handoff before genuine session closure.** Before sending a turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
    `mpm_session(action: "end", params: {summary, state, commitments,
@@ -35,11 +46,11 @@ that this host adapter inherits:
    session-closing. Do not write a handoff on every chat ack — write one
    when substantial work has happened or a session-closing trigger fires.
 
-4. **MPM is the source of truth for cross-session continuity.** Anything
+5. **MPM is the source of truth for cross-session continuity.** Anything
    that should survive across sessions goes to MPM, not just transient
    conversation context.
 
-5. **Recovery / fallback.** If the plugin is disabled or unavailable
+6. **Recovery / fallback.** If the plugin is disabled or unavailable
    (e.g., the underlying `mpm` binary fails or the plugin is removed),
    fall back to the CLI path:
    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`

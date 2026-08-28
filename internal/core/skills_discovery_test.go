@@ -166,3 +166,41 @@ func TestKeywordOverlap(t *testing.T) {
 // does not exist in this codebase. Documenting the omission here so a
 // future reader does not re-add a brittle test that exercises the
 // wrong path.
+
+// TestProactiveRecallHint_EmptyWhenToUseDoesNotMatch pins the negative
+// contract: a skill whose when_to_use field is empty (no discovery hints)
+// must not be surfaced by proactive_recall_hint, regardless of
+// conversation content. Empty when_to_use means the skill author chose
+// not to enumerate discovery keywords — the skill still exists in
+// the catalog and can be read explicitly via mpm_skills read, but it
+// must not pollute the proactive hint stream.
+//
+// A naive implementation that substring-matches conversation_text
+// against an empty string would falsely match every conversation.
+// The keywordOverlap guard handles this: len(keywords)==0 returns
+// false. This test pins that contract.
+func TestProactiveRecallHint_EmptyWhenToUseDoesNotMatch(t *testing.T) {
+	dm := NewTestDM(t)
+	// Skill with empty when_to_use — author opted out of discovery.
+	insertRawSkill(t, dm, "skill:undiscovered-v1.0.0", "undiscovered", "1.0.0",
+		"---\nname: undiscovered\nversion: 1.0.0\nwhen_to_use: \"\"\n---\nbody")
+
+	// Try several conversation contexts that WOULD falsely match if the
+	// gate were broken (because every keyword would substring-match an
+	// empty haystack).
+	for _, conv := range []string{
+		"weather is sunny today",
+		"summarize this paragraph",
+		"hello world",
+	} {
+		hints, err := dm.ProactiveRecallHint(conv, 3, -3.0)
+		if err != nil {
+			t.Fatalf("ProactiveRecallHint(%q): %v", conv, err)
+		}
+		for _, h := range hints {
+			if name, ok := h["name"].(string); ok && name == "undiscovered" {
+				t.Fatalf("empty-when_to_use skill surfaced for conv=%q (hint=%+v)", conv, h)
+			}
+		}
+	}
+}
