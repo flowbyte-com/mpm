@@ -30,7 +30,7 @@ ExecStart=%h/.mpm/bin/mpm-telemetry serve
 Environment=MPM_WORKSPACE=%h/.mpm
 Environment=MPM_DB_PATH=%h/.mpm/src/db/mpm.db
 Environment=MPM_TELEMETRY_SOCKET=%h/.mpm/runtime/mpm-telemetry.sock
-Environment=MPM_TELEMETRY_DB=%h/.mpm/telemetry.db
+Environment=MPM_TELEMETRY_DB=%h/.mpm/src/db/telemetry.db
 
 EnvironmentFile=-%h/.config/mpm/mpm.env
 
