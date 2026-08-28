@@ -7,7 +7,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/flowbyte-com/mpm-core"
@@ -154,4 +156,103 @@ func handleReadSkill(args []string) int {
 	}
 	fmt.Printf("\n%s\n", skill.Body)
 	return 0
+}
+
+// handleSkillWorkshop runs the Skill Workshop pipeline via the CLI.
+// Reads a WorkshopRequest payload (JSON) from --file or stdin, then
+// invokes internal.RunWorkshop directly. The CLI is a thin shim —
+// all validation lives in the workshop itself.
+//
+// Usage:
+//
+//	mpm skill workshop --file request.json
+//	echo '{"mode":"form",...}' | mpm skill workshop
+//
+// The payload may be a bare WorkshopRequest, or already wrapped in
+// {action:"workshop", params:{...}}. Bare payloads are wrapped
+// automatically so the user does not need to know the MCP envelope.
+func handleSkillWorkshop(args []string) int {
+	var path string
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--file", "-f":
+			if i+1 >= len(args) {
+				printError("--file requires a path")
+				return 1
+			}
+			i++
+			path = args[i]
+		default:
+			printError("unknown flag: %s", args[i])
+			return 1
+		}
+		i++
+	}
+
+	var payload []byte
+	var err error
+	if path != "" {
+		payload, err = os.ReadFile(path)
+		if err != nil {
+			printError("read file: %v", err)
+			return 1
+		}
+	} else {
+		payload, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			printError("read stdin: %v", err)
+			return 1
+		}
+	}
+
+	// Bare payload → map to WorkshopRequest. The MCP path uses
+	// {action:"workshop",params:{...}}, but for ergonomics the CLI
+	// accepts a bare WorkshopRequest too.
+	var probe map[string]interface{}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		printError("parse JSON payload: %v", err)
+		return 1
+	}
+	var req internal.WorkshopRequest
+	if _, hasParams := probe["params"]; hasParams {
+		// Already wrapped; extract params into WorkshopRequest.
+		if err := mapToWorkshopRequest(probe["params"], &req); err != nil {
+			printError("parse params: %v", err)
+			return 1
+		}
+	} else {
+		if err := mapToWorkshopRequest(probe, &req); err != nil {
+			printError("parse payload: %v", err)
+			return 1
+		}
+	}
+
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
+	}
+	resp, err := internal.RunWorkshop(dm, &req)
+	if err != nil {
+		printError("workshop: %v", err)
+		return 1
+	}
+	out, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		printError("marshal response: %v", err)
+		return 1
+	}
+	fmt.Println(string(out))
+	return 0
+}
+
+// mapToWorkshopRequest round-trips a generic JSON map into a strongly
+// typed internal.WorkshopRequest. Unknown fields are dropped silently
+// (matches the MCP handler's behavior in internal/core/tools/handlers.go).
+func mapToWorkshopRequest(src interface{}, dst *internal.WorkshopRequest) error {
+	b, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, dst)
 }
