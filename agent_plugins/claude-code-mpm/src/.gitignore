@@ -1,0 +1,7 @@
+# Runtime artifacts that must not be committed.
+db/
+__pycache__/
+*.db
+*.db-shm
+*.db-wal
+*.pyc
