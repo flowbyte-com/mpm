@@ -679,3 +679,115 @@ func buildSkillContent(skill *Skill) string {
 	buf.WriteString(skill.Body)
 	return buf.String()
 }
+
+// SaveSkillAndDeprecatePrior publishes a new skill version and marks
+// the specific prior version (by id) as deprecated in a single
+// transaction. Both writes succeed or both roll back. This is the
+// structural fix for the workshop's transactional coherence
+// requirement (spec §9.1): the failure mode where v1 was deprecated
+// but v2 publication failed is now impossible.
+//
+// priorSkillID is identified by id (not by name) so older versions
+// sharing the logical skill name remain readable and unmodified.
+//
+// Read-back assertions confirm persistence of both rows before
+// returning. Pattern follows AddLesson in internal/core/db.go.
+func (dm *DatabaseManager) SaveSkillAndDeprecatePrior(newSkill *Skill, priorSkillID string) (*Skill, error) {
+	if newSkill == nil {
+		return nil, fmt.Errorf("SaveSkillAndDeprecatePrior: newSkill is nil")
+	}
+	db := dm.SQLDB()
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+
+	newID, err := SkillIDForNameAndVersion(newSkill.Name, newSkill.Version)
+	if err != nil {
+		return nil, fmt.Errorf("SaveSkillAndDeprecatePrior: %w", err)
+	}
+
+	// Verify prior exists (any failure here aborts before opening tx).
+	var existing string
+	err = db.QueryRow(`SELECT id FROM memories WHERE id = ? AND collection='skills' AND deleted_at IS NULL`, priorSkillID).Scan(&existing)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("SaveSkillAndDeprecatePrior: prior skill %s not found", priorSkillID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("SaveSkillAndDeprecatePrior: lookup prior: %w", err)
+	}
+
+	// Reconstruct content for the new row.
+	content := buildSkillContent(newSkill)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Mark prior as deprecated + superseded_by in the same tx.
+	// Use json('true')/json('false') so json_set produces proper JSON
+	// booleans that parse back as Go bool (not float64).
+	_, err = tx.Exec(`
+		UPDATE memories
+		SET metadata = json_set(COALESCE(metadata, '{}'),
+								'$.deprecated', json('true'),
+								'$.superseded_by', ?,
+								'$.is_latest', json('false')),
+			updated_at = CAST(strftime('%s','now') AS INTEGER)
+		WHERE id = ? AND collection='skills' AND deleted_at IS NULL
+	`, newID, priorSkillID)
+	if err != nil {
+		return nil, fmt.Errorf("deprecate prior: %w", err)
+	}
+
+	// Insert new skill row in the same tx via the shared
+	// scanner+INSERT primitive (preserves the central scanner
+	// coverage guarantee).
+	metadata := map[string]interface{}{
+		"is_latest":        true,
+		"author":           "workshop",
+		"promoted_at":      nil,
+		"decay_floor_days": 90,
+		"content_hash":     contentHash(content),
+		"version":          newSkill.Version,
+	}
+	tags := []string{"skill"}
+	if newSkill.Domain != "" {
+		tags = append(tags, newSkill.Domain)
+	}
+
+	txDBNode := &txNode{tx: tx, dm: dm}
+	_, err = saveMemoryRow(txDBNode, dm, newID, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "")
+	if err != nil {
+		return nil, fmt.Errorf("insert new skill: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	// Read-back assertion on both rows (substrate defense triad §3).
+	// The new row must exist with is_latest=true.
+	newRow, err := dm.ReadSkill(newID, "")
+	if err != nil {
+		return nil, fmt.Errorf("read-back new skill: %w", err)
+	}
+	if !newRow.IsLatest {
+		return nil, fmt.Errorf("read-back new skill: is_latest=false after commit")
+	}
+	// The prior row must have deprecated=true and superseded_by=newID.
+	priorRow, err := dm.ReadSkill(priorSkillID, "")
+	if err != nil {
+		return nil, fmt.Errorf("read-back prior skill: %w", err)
+	}
+	dep, _ := priorRow.Metadata["deprecated"].(bool)
+	if !dep {
+		return nil, fmt.Errorf("read-back prior skill: deprecated=false after commit")
+	}
+	sup, _ := priorRow.Metadata["superseded_by"].(string)
+	if sup != newID {
+		return nil, fmt.Errorf("read-back prior skill: superseded_by=%q want %q", sup, newID)
+	}
+	return newRow, nil
+}

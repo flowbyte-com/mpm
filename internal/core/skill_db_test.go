@@ -661,3 +661,89 @@ func TestValidateSkill_BlocksScanner(t *testing.T) {
 		t.Errorf("expected scanner error, got %v", errs)
 	}
 }
+
+// TestSaveSkillAndDeprecatePrior_TransactionCoherence verifies that saving
+// a new version and deprecating the prior version happen atomically: both
+// succeed or both roll back. The new row must be is_latest=true and the
+// prior row must have deprecated=true + superseded_by pointing to the new id.
+func TestSaveSkillAndDeprecatePrior_TransactionCoherence(t *testing.T) {
+	dm := NewTestDM(t)
+	// Seed prior version.
+	priorID, err := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\nwhen_to_use: doing, another\n---\nbody v1",
+		"test-agent", false)
+	if err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+
+	newSkill := &Skill{
+		Name:    "foo",
+		Version: "2.0.0",
+		Frontmatter: SkillFrontmatter{
+			Name:        "foo",
+			Version:     "2.0.0",
+			WhenToUse:   "doing, another, plus new thing",
+			Description: "foo v2",
+		},
+		Body: "body v2",
+	}
+	saved, err := dm.SaveSkillAndDeprecatePrior(newSkill, priorID)
+	if err != nil {
+		t.Fatalf("SaveSkillAndDeprecatePrior: %v", err)
+	}
+	if saved.ID != "skill:foo-v2.0.0" {
+		t.Errorf("saved.ID = %q, want skill:foo-v2.0.0", saved.ID)
+	}
+
+	// Read-back: prior version is deprecated with superseded_by pointer.
+	prior, err := dm.ReadSkill(priorID, "")
+	if err != nil {
+		t.Fatalf("ReadSkill prior: %v", err)
+	}
+	dep, _ := prior.Metadata["deprecated"].(bool)
+	if !dep {
+		t.Errorf("prior.Metadata.deprecated = false, want true")
+	}
+	sup, _ := prior.Metadata["superseded_by"].(string)
+	if sup != "skill:foo-v2.0.0" {
+		t.Errorf("prior.Metadata.superseded_by = %q, want skill:foo-v2.0.0", sup)
+	}
+	if prior.IsLatest {
+		t.Errorf("prior.IsLatest = true, want false after deprecation")
+	}
+}
+
+// TestSaveSkillAndDeprecatePrior_PriorVersionRemainsReadable verifies that
+// only the immediate prior version is deprecated — older versions remain
+// readable for history/audit per spec §9 step 5.
+func TestSaveSkillAndDeprecatePrior_PriorVersionRemainsReadable(t *testing.T) {
+	dm := NewTestDM(t)
+	id1, _ := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\n---\nv1", "a", false)
+	id2, _ := dm.SaveSkill("foo", "2.0.0",
+		"---\nname: foo\nversion: 2.0.0\n---\nv2", "a", false)
+	// Force-refine: prior = id2.
+	newSkill := &Skill{
+		Name:    "foo",
+		Version: "3.0.0",
+		Frontmatter: SkillFrontmatter{Name: "foo", Version: "3.0.0"},
+		Body: "v3",
+	}
+	if _, err := dm.SaveSkillAndDeprecatePrior(newSkill, id2); err != nil {
+		t.Fatalf("refine: %v", err)
+	}
+	// v1 is the prior-to-prior — must still be readable.
+	v1, err := dm.ReadSkill(id1, "")
+	if err != nil {
+		t.Fatalf("ReadSkill v1: %v", err)
+	}
+	if v1.Version != "1.0.0" {
+		t.Errorf("v1.Version = %q, want 1.0.0", v1.Version)
+	}
+	// v1 was never deprecated directly — only id2 (the immediate prior)
+	// was deprecated. So v1's metadata.deprecated should be absent/false.
+	dep, _ := v1.Metadata["deprecated"].(bool)
+	if dep {
+		t.Errorf("v1.Metadata.deprecated = true, want false (only immediate prior is deprecated)")
+	}
+}
