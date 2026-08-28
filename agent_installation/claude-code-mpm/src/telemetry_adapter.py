@@ -22,7 +22,7 @@ Public surface:
     TelemetryEmitter(socket_path=...).record_invocation(...)
     TelemetryEmitter.shutdown()
 
-See docs/superpowers/specs/2026-08-21-telemetry-binary-design.md §3, §4.
+See docs/archive/2026-08-21-telemetry-binary-design.md §3, §4.
 """
 
 import json

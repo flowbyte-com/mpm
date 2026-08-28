@@ -1648,7 +1648,7 @@ func fetchRecentLessonsForWake(dm mpminternal.CoreDB, limit int) []map[string]in
 // framework. Scope resolution lives in the substrate, not in the agent
 // plugin — MPM_FRAMEWORK env (read by mpmcli.ActiveContextFromEnv at
 // mpm-mcp boot) populates ac.FrameworkName here. See
-// docs/architecture/directives.md §4-§5.
+// docs/archive/directives.md §4-§5.
 func handleReadDirectives(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
 
 	directives, err := dm.ReadDirectivesForFramework(ac.FrameworkName)
@@ -2420,7 +2420,7 @@ func handleQueryGlobalRules(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 }
 
 // handleRecordGlobalRule writes a memory to the shared DB with
-// is_global=1. Phase 3 of docs/architecture/shared-epistemology.md: operator-only. The caller must
+// is_global=1. Phase 3 of docs/archive/shared-epistemology.md: operator-only. The caller must
 // pass confirm=true — without it the call is rejected. This is
 // defense-in-depth against agents writing house rules autonomously.
 //
@@ -2515,7 +2515,7 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		return nil, err
 	}
 	// Forensic log — local→shared promotion. The local copy stays
-	// (per docs/architecture/shared-epistemology.md Phase 3); this row records the lineage edge
+	// (per docs/archive/shared-epistemology.md Phase 3); this row records the lineage edge
 	// so other agents can see which local IDs have been elevated.
 	dm.LogAudit(
 		mpminternal.AuditInfo, "shared_db",

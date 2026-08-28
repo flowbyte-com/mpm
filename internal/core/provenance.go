@@ -3,7 +3,7 @@
 // reads env vars once per process. The PER-CALL effective provenance
 // is computed by Resolve() with overrides.
 //
-// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
 //
 // Invariants this file preserves:
 //

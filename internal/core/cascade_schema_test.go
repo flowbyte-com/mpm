@@ -69,7 +69,7 @@ func hermeticDatabaseManager(t *testing.T) *DatabaseManager {
 
 // TestSchema_EpistemicCascadeOutboxTable asserts that the canonical schema
 // creates the cascade outbox table with the columns required by the design
-// spec (see docs/superpowers/specs/2026-08-04-epistemic-cascades-design.md).
+// spec (see docs/archive/2026-08-04-epistemic-cascades-design.md).
 //
 // Failure mode the test is designed to catch: someone removes the table
 // from BaseTables, renames a column, or forgets to ship the migration. All

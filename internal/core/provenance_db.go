@@ -1,6 +1,6 @@
 // provenance_db.go — DB-writing half of artifact provenance.
 //
-// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
 //
 // Critical invariants this file preserves:
 //

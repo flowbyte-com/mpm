@@ -43,7 +43,7 @@ func ResolveWorkspace() string {
 // global-only when framework is the empty string, so the hardcoded
 // default never accidentally surfaces a framework-scoped directive.
 //
-// See docs/architecture/directives.md §5 for the runtime transport
+// See docs/archive/directives.md §5 for the runtime transport
 // contract.
 func ActiveContextFromEnv() internal.ActiveContext {
 	framework := os.Getenv("MPM_FRAMEWORK")

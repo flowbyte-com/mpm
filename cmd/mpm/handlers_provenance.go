@@ -6,7 +6,7 @@
 //   mpm provenance inspect --invocation <id>  show all artifacts under one invocation
 //   mpm provenance model-yield [--days N]   show model lifecycle analytics
 //
-// Spec: docs/superpowers/specs/2026-08-08-artifact-provenance-design.md
+// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
 package main
 
 import (
