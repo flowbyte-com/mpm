@@ -142,6 +142,31 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 	}
 }
 
+// LogSkillWorkshopAudit writes a deliberate state-mutation audit row for
+// workshop outcomes. Never blocks the caller on insert failure — the
+// workshop outcome has already been decided and returned; the audit is
+// best-effort forensic trail only.
+//
+// Returns the generated audit row id (or "" if the insert failed).
+func (dm *DatabaseManager) LogSkillWorkshopAudit(skillID, outcome string) string {
+	if dm == nil || dm.db == nil {
+		return ""
+	}
+	auditID := GenerateID()
+	_, err := dm.SQLDB().Exec(
+		`INSERT INTO system_audit_log (id, level, component, message, stack_trace, context, created_at)
+		 VALUES (?, 'info', 'skill_workshop', ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))`,
+		auditID, outcome,
+		sql.NullString{Valid: false},
+		sql.NullString{Valid: false},
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "LogSkillWorkshopAudit: insert failed: %v\n", err)
+		return ""
+	}
+	return auditID
+}
+
 // QueryAuditLog returns recent audit rows filtered by the given criteria.
 // Defaults: days=1, limit=20, level=any, component=any.
 //

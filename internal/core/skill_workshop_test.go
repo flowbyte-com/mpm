@@ -348,3 +348,368 @@ func TestCheckVersionBump_MatchPasses(t *testing.T) {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
+
+func TestRunWorkshop_PublishedWorthyWorkflow(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:        "new-skill",
+			Version:     "1.0.0",
+			Domain:      "test",
+			Description: "a brand new skill",
+			WhenToUse:   "doing a thing, doing another thing, plus a third",
+			Steps:       []SkillStep{{Call: "step1"}, {Call: "step2"}},
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomePublished {
+		t.Errorf("outcome = %v, want published", resp.Outcome)
+	}
+	if resp.SkillID != "skill:new-skill-v1.0.0" {
+		t.Errorf("skill_id = %q, want skill:new-skill-v1.0.0", resp.SkillID)
+	}
+	// Read-back assertion: row exists in DB.
+	if _, err := dm.ReadSkill("skill:new-skill-v1.0.0", ""); err != nil {
+		t.Errorf("read-back failed: %v", err)
+	}
+}
+
+func TestRunWorkshop_RejectsTrivialAction(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 0, NonObviousness: 0, Stability: 0, Leverage: 0, Boundary: "one_off"},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeRejected {
+		t.Errorf("outcome = %v, want rejected", resp.Outcome)
+	}
+	// No DB writes.
+	var count int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE collection='skills'`).Scan(&count)
+	if count != 0 {
+		t.Errorf("rejected workshop wrote to DB: count=%d", count)
+	}
+}
+
+func TestRunWorkshop_CandidateSoftWarning(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 1, NonObviousness: 1, Stability: 1, Leverage: 1, Boundary: "procedure"},
+		Proposal:      SkillProposal{Name: "soft-skill", Version: "1.0.0", WhenToUse: "doing a thing"},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeCandidate {
+		t.Errorf("outcome = %v, want candidate", resp.Outcome)
+	}
+	if resp.SavePayload == nil {
+		t.Error("candidate must include save_payload")
+	}
+}
+
+func TestRunWorkshop_DuplicateDetection(t *testing.T) {
+	dm := NewTestDM(t)
+	if _, err := dm.SaveSkill("existing", "1.0.0",
+		"---\nname: existing\nversion: 1.0.0\nwhen_to_use: reorganizing documentation, moving cross-references\n---\nbody",
+		"test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:      "dup-skill",
+			Version:   "1.0.0",
+			WhenToUse: "reorganizing documentation, moving cross-references, with extra stuff",
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeCandidate {
+		t.Errorf("outcome = %v, want candidate", resp.Outcome)
+	}
+	if len(resp.DuplicateCheck.CloseMatches) == 0 {
+		t.Error("expected duplicate close_matches")
+	}
+}
+
+func TestRunWorkshop_ValidationFailure(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:        "scan-block",
+			Version:     "1.0.0",
+			WhenToUse:   "doing a thing, doing another, plus a third",
+			Description: "AKIA1234567890123456",
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeCandidate {
+		t.Errorf("outcome = %v, want candidate (validation failure downgrades)", resp.Outcome)
+	}
+	if len(resp.Validation.Errors) == 0 {
+		t.Error("expected validation.errors populated")
+	}
+}
+
+func TestRunWorkshop_RefineExistingSkill(t *testing.T) {
+	dm := NewTestDM(t)
+	priorID, err := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\nwhen_to_use: doing, another, plus a third\n---\nv1",
+		"test", false)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	req := &WorkshopRequest{
+		Mode:            "refine",
+		Intent:          "foo",
+		ChangeType:      "extension",
+		FailureRecovery: "recurring failure mode",
+		DecisionModel:   DecisionModel{Reusability: 1, NonObviousness: 1, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:        "foo",
+			Version:     "1.1.0",
+			WhenToUse:   "doing, another, plus a third, plus new task",
+			Description: "foo extended",
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomePublished {
+		t.Errorf("outcome = %v, want published", resp.Outcome)
+	}
+	// Prior version must be deprecated.
+	prior, err := dm.ReadSkill(priorID, "")
+	if err != nil {
+		t.Fatalf("read prior: %v", err)
+	}
+	dep, _ := prior.Metadata["deprecated"].(bool)
+	if !dep {
+		t.Error("prior.Metadata.deprecated should be true")
+	}
+}
+
+func TestRunWorkshop_Idempotence(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode:        "form",
+		WorkshopKey: "stable-key-123",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal:     SkillProposal{Name: "idem-skill", Version: "1.0.0", WhenToUse: "doing, another, plus a third", Description: "idempotent"},
+	}
+	resp1, _ := RunWorkshop(dm, req)
+	if resp1.Outcome != OutcomePublished {
+		t.Fatalf("first call: outcome=%v", resp1.Outcome)
+	}
+	resp2, _ := RunWorkshop(dm, req)
+	if resp2.Outcome != OutcomePublished {
+		t.Errorf("second call: outcome=%v (cache should dedupe)", resp2.Outcome)
+	}
+	if resp1.SkillID != resp2.SkillID {
+		t.Errorf("cache must return same skill_id: %q vs %q", resp1.SkillID, resp2.SkillID)
+	}
+}
+
+func TestRunWorkshop_IdentityCheckSameContent(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal:     SkillProposal{Name: "resilient-skill", Version: "1.0.0", WhenToUse: "doing, another, plus a third", Description: "x"},
+	}
+	resp1, _ := RunWorkshop(dm, req)
+	if resp1.Outcome != OutcomePublished {
+		t.Fatalf("first: %v", resp1.Outcome)
+	}
+	// Simulate cache loss: fresh workshop key.
+	req.WorkshopKey = "different-key-after-restart"
+	resp2, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if resp2.Outcome != OutcomePublished {
+		t.Errorf("post-restart same content: outcome=%v", resp2.Outcome)
+	}
+	if resp2.SkillID != resp1.SkillID {
+		t.Errorf("identity check must return existing skill_id: %q vs %q", resp1.SkillID, resp2.SkillID)
+	}
+	// Only one row exists.
+	var count int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ?`, resp1.SkillID).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row for %s, got %d", resp1.SkillID, count)
+	}
+}
+
+func TestRunWorkshop_IdentityCheckDifferentContent(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode: "form",
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal:     SkillProposal{Name: "v-collide", Version: "1.0.0", WhenToUse: "doing, another, plus a third", Description: "first"},
+	}
+	resp1, _ := RunWorkshop(dm, req)
+	if resp1.Outcome != OutcomePublished {
+		t.Fatalf("first: %v", resp1.Outcome)
+	}
+	// Same (name, version) but different content.
+	req.Proposal.Description = "second-different-content"
+	resp2, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if resp2.Outcome != OutcomeCandidate {
+		t.Errorf("version_collision should return candidate, got %v", resp2.Outcome)
+	}
+	// No second row written.
+	var count int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE id LIKE 'skill:v-collide%'`).Scan(&count)
+	if count != 1 {
+		t.Errorf("expected 1 row for v-collide, got %d", count)
+	}
+}
+
+func TestRunWorkshop_ValidateSkillNonMutating(t *testing.T) {
+	dm := NewTestDM(t)
+	// Count rows before.
+	var before int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE collection='skills'`).Scan(&before)
+	skill := &Skill{
+		Name:    "pure-validate",
+		Version: "1.0.0",
+		Frontmatter: SkillFrontmatter{
+			Name:        "pure-validate",
+			Version:     "1.0.0",
+			WhenToUse:   "doing, another, plus a third",
+			Description: "test",
+		},
+	}
+	_, errs, err := dm.ValidateSkill(skill)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("unexpected errs: %v", errs)
+	}
+	var after int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE collection='skills'`).Scan(&after)
+	if after != before {
+		t.Errorf("ValidateSkill wrote %d rows", after-before)
+	}
+}
+
+func TestRunWorkshop_BoundedContext(t *testing.T) {
+	dm := NewTestDM(t)
+	req := &WorkshopRequest{
+		Mode:        "form",
+		TaskContext: strings.Repeat("x", 50*1024+1), // exceeds limit
+		DecisionModel: DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal:     SkillProposal{Name: "bounded", Version: "1.0.0"},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeRejected {
+		t.Errorf("oversized input must reject, got %v", resp.Outcome)
+	}
+	if resp.Reason != "input_validation_failed" {
+		t.Errorf("reason = %q, want input_validation_failed", resp.Reason)
+	}
+}
+
+func TestRunWorkshop_RefineChangeTypeVersionBump(t *testing.T) {
+	dm := NewTestDM(t)
+	// Seed v1.0.0.
+	if _, err := dm.SaveSkill("bumpy", "1.0.0",
+		"---\nname: bumpy\nversion: 1.0.0\nwhen_to_use: doing, another, plus a third\n---\nv1",
+		"test", false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Try a refine with change_type=correction but proposal.version=2.0.0.
+	req := &WorkshopRequest{
+		Mode:            "refine",
+		Intent:          "bumpy",
+		ChangeType:      "correction",
+		FailureRecovery: "minor fix needed",
+		DecisionModel:   DecisionModel{Reusability: 2, NonObviousness: 2, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:        "bumpy",
+			Version:     "2.0.0", // wrong — correction should yield 1.0.1
+			WhenToUse:   "doing, another, plus a third, fixed",
+			Description: "bumpy v2",
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomeCandidate {
+		t.Errorf("version_bump_mismatch should downgrade to candidate, got %v", resp.Outcome)
+	}
+	found := false
+	for _, e := range resp.Validation.Errors {
+		if e == "version_bump_mismatch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected version_bump_mismatch error, got %v", resp.Validation.Errors)
+	}
+}
+
+func TestRunWorkshop_PriorVersionReadability(t *testing.T) {
+	dm := NewTestDM(t)
+	priorID, _ := dm.SaveSkill("audit", "1.0.0",
+		"---\nname: audit\nversion: 1.0.0\nwhen_to_use: doing, another, plus a third\n---\nv1 body",
+		"test", false)
+	req := &WorkshopRequest{
+		Mode:       "refine",
+		Intent:     "audit",
+		ChangeType: "extension",
+		DecisionModel: DecisionModel{Reusability: 1, NonObviousness: 1, Stability: 2, Leverage: 2, Boundary: "procedure"},
+		Proposal: SkillProposal{
+			Name:        "audit",
+			Version:     "1.1.0",
+			WhenToUse:   "doing, another, plus a third, plus extension",
+			Description: "audit v1.1",
+		},
+	}
+	resp, err := RunWorkshop(dm, req)
+	if err != nil {
+		t.Fatalf("RunWorkshop: %v", err)
+	}
+	if resp.Outcome != OutcomePublished {
+		t.Errorf("outcome = %v, want published", resp.Outcome)
+	}
+	// Prior version must still be readable.
+	prior, err := dm.ReadSkill(priorID, "")
+	if err != nil {
+		t.Fatalf("read prior: %v", err)
+	}
+	if prior.Version != "1.0.0" {
+		t.Errorf("prior.Version = %q, want 1.0.0", prior.Version)
+	}
+}
+

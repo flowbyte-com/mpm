@@ -471,3 +471,293 @@ func checkVersionBump(proposedVersion, currentVersion, changeType string) error 
 	}
 	return nil
 }
+
+// WorkshopOutcome is the final disposition of a workshop run.
+type WorkshopOutcome string
+
+const (
+	OutcomePublished WorkshopOutcome = "published"
+	OutcomeCandidate WorkshopOutcome = "candidate"
+	OutcomeRejected  WorkshopOutcome = "rejected"
+)
+
+// WorkshopResponse is the result of a workshop pipeline run.
+type WorkshopResponse struct {
+	Outcome        WorkshopOutcome             `json:"outcome"`
+	SkillID        string                      `json:"skill_id,omitempty"`
+	Version        string                      `json:"version,omitempty"`
+	DecisionModel  map[string]string           `json:"decision_model,omitempty"`
+	DuplicateCheck DuplicateCheckResult         `json:"duplicate_check,omitempty"`
+	Validation     struct {
+		Status   string   `json:"status"`
+		Warnings []string `json:"warnings"`
+		Errors   []string `json:"errors"`
+	} `json:"validation,omitempty"`
+	SavePayload map[string]interface{} `json:"save_payload,omitempty"`
+	Reason      string                `json:"reason,omitempty"`
+	AuditID     string                `json:"audit_id,omitempty"`
+}
+
+// RunWorkshop is the pipeline orchestrator. Stages run in order, returning
+// at the first terminal disposition. The single-flight cache wraps the
+// whole pipeline.
+func RunWorkshop(dm *DatabaseManager, req *WorkshopRequest) (WorkshopResponse, error) {
+	resp := WorkshopResponse{}
+
+	// Single-flight: if a workshop_key is supplied, dedupe concurrent calls.
+	if req.WorkshopKey != "" {
+		entry, isWriter, err := claimOrWait(context.Background(), req.WorkshopKey)
+		if err != nil {
+			return resp, fmt.Errorf("workshop cache: %w", err)
+		}
+		if !isWriter {
+			// Waiter: return the cached response.
+			if entry.err != nil {
+				return resp, entry.err
+			}
+			var cached WorkshopResponse
+			if err := json.Unmarshal(entry.response, &cached); err != nil {
+				return resp, fmt.Errorf("cache unmarshal: %w", err)
+			}
+			return cached, nil
+		}
+		// Writer path: publish result when done.
+		defer func() {
+			data, _ := json.Marshal(resp)
+			publishResult(entry, data, nil)
+		}()
+	}
+
+	// Stage 1: input validation.
+	_, _, err := validateInput(req)
+	if err != nil {
+		resp.Outcome = OutcomeRejected
+		resp.Reason = "input_validation_failed"
+		return resp, nil
+	}
+
+	// Stage 2: refine mode — fetch existing skill.
+	var priorSkill *Skill
+	if req.Mode == "refine" {
+		priorSkill, err = dm.ReadSkill(req.Intent, "")
+		if err != nil {
+			resp.Outcome = OutcomeRejected
+			resp.Reason = "refine_target_not_found"
+			return resp, nil
+		}
+		// Already superseded — short-circuit to candidate.
+		if sup, _ := priorSkill.Metadata["superseded_by"].(string); sup != "" {
+			resp.Outcome = OutcomeCandidate
+			resp.Reason = "already_superseded"
+			return resp, nil
+		}
+	}
+
+	// Stage 3: decision model.
+	decisionOutcome, populatedDM, decisionReason := evaluateDecisionModel(req)
+	resp.DecisionModel = map[string]string{
+		"reusability":     scoreLabel(populatedDM.Reusability),
+		"non_obviousness": scoreLabel(populatedDM.NonObviousness),
+		"stability":       scoreLabel(populatedDM.Stability),
+		"leverage":        scoreLabel(populatedDM.Leverage),
+		"boundary":        populatedDM.Boundary,
+		"total":           fmt.Sprintf("%d", populatedDM.Reusability+populatedDM.NonObviousness+populatedDM.Stability+populatedDM.Leverage),
+	}
+	if decisionOutcome == DecisionRejected {
+		resp.Outcome = OutcomeRejected
+		resp.Reason = decisionReason
+		return resp, nil
+	}
+	effectivePublish := decisionOutcome == DecisionPublished
+
+	// Stage 4: when_to_use validation.
+	wtuCheck := checkWhenToUse(req.Proposal.WhenToUse, req.Mode)
+	if whenToUseEqualsName(req.Proposal.WhenToUse, req.Proposal.Name) {
+		wtuCheck.Errors = append(wtuCheck.Errors, "when_to_use_equals_name")
+	}
+
+	// Stage 5: duplicate detection.
+	excludeName := ""
+	if req.Mode == "refine" {
+		excludeName = req.Intent
+	}
+	dupCheck, err := detectDuplicates(dm, req.Proposal, excludeName)
+	if err != nil {
+		return resp, fmt.Errorf("duplicate check: %w", err)
+	}
+	resp.DuplicateCheck = dupCheck
+
+	// Stage 6: identity check (durable idempotence).
+	content := buildSkillContent(&Skill{Frontmatter: SkillFrontmatter{
+		Name:        req.Proposal.Name,
+		Version:     req.Proposal.Version,
+		Description: req.Proposal.Description,
+		WhenToUse:   req.Proposal.WhenToUse,
+		Domain:      req.Proposal.Domain,
+		Constraints: req.Proposal.Constraints,
+		Steps:       req.Proposal.Steps,
+	}, Body: ""})
+	idOutcome, idExisting, err := identityCheck(dm, req.Proposal, content)
+	if err != nil {
+		return resp, fmt.Errorf("identity check: %w", err)
+	}
+	if idOutcome == IdentitySame {
+		resp.Outcome = OutcomePublished
+		resp.SkillID = idExisting.ID
+		resp.Version = idExisting.Version
+		return resp, nil
+	}
+	if idOutcome == IdentityDifferent {
+		resp.Outcome = OutcomeCandidate
+		resp.Validation.Status = "failed"
+		resp.Validation.Errors = []string{"version_collision"}
+		resp.SavePayload = buildSavePayload(req.Proposal)
+		return resp, nil
+	}
+
+	// Stage 7: refine-mode version-bump check.
+	if req.Mode == "refine" && priorSkill != nil {
+		if err := checkVersionBump(req.Proposal.Version, priorSkill.Version, req.ChangeType); err != nil {
+			resp.Outcome = OutcomeCandidate
+			resp.Validation.Status = "failed"
+			resp.Validation.Errors = []string{"version_bump_mismatch"}
+			resp.SavePayload = buildSavePayload(req.Proposal)
+			return resp, nil
+		}
+	}
+
+	// Stage 8: validate (non-mutating).
+	validateSkill := &Skill{
+		Name:    req.Proposal.Name,
+		Version: req.Proposal.Version,
+		Frontmatter: SkillFrontmatter{
+			Name:        req.Proposal.Name,
+			Version:     req.Proposal.Version,
+			Description: req.Proposal.Description,
+			WhenToUse:   req.Proposal.WhenToUse,
+			Domain:      req.Proposal.Domain,
+			Constraints: req.Proposal.Constraints,
+			Steps:       req.Proposal.Steps,
+		},
+	}
+	valWarnings, valErrors, err := dm.ValidateSkill(validateSkill)
+	if err != nil {
+		return resp, fmt.Errorf("validate: %w", err)
+	}
+	resp.Validation.Warnings = valWarnings
+	resp.Validation.Errors = valErrors
+
+	// Stage 9: aggregate downgrades to candidate.
+	if effectivePublish {
+		if wtuWarnings := len(wtuCheck.Warnings); wtuWarnings >= 2 {
+			effectivePublish = false
+		}
+		if len(wtuCheck.Errors) > 0 {
+			effectivePublish = false
+		}
+		if len(valErrors) > 0 {
+			effectivePublish = false
+		}
+		if len(dupCheck.CloseMatches) > 0 && dupCheck.CloseMatches[0].OverlapScore > 0.6 {
+			effectivePublish = false
+		}
+	}
+
+	if !effectivePublish {
+		resp.Outcome = OutcomeCandidate
+		if len(valErrors) > 0 || len(wtuCheck.Errors) > 0 {
+			resp.Validation.Status = "failed"
+		} else {
+			resp.Validation.Status = "passed_with_warnings"
+		}
+		resp.SavePayload = buildSavePayload(req.Proposal)
+		return resp, nil
+	}
+
+	// Stage 10: publish.
+	if req.Mode == "refine" && priorSkill != nil {
+		newSkill := &Skill{
+			Name:    req.Proposal.Name,
+			Version: req.Proposal.Version,
+			Frontmatter: SkillFrontmatter{
+				Name:        req.Proposal.Name,
+				Version:     req.Proposal.Version,
+				Description: req.Proposal.Description,
+				WhenToUse:   req.Proposal.WhenToUse,
+				Domain:      req.Proposal.Domain,
+				Constraints: req.Proposal.Constraints,
+				Steps:       req.Proposal.Steps,
+			},
+			Body: contentBody(req.Proposal),
+		}
+		saved, err := dm.SaveSkillAndDeprecatePrior(newSkill, priorSkill.ID)
+		if err != nil {
+			return resp, fmt.Errorf("publish (refine): %w", err)
+		}
+		resp.Outcome = OutcomePublished
+		resp.SkillID = saved.ID
+		resp.Version = saved.Version
+		return resp, nil
+	}
+
+	// form mode publish.
+	newContent := buildSkillContent(&Skill{
+		Name: req.Proposal.Name,
+		Frontmatter: SkillFrontmatter{
+			Name:        req.Proposal.Name,
+			Version:     req.Proposal.Version,
+			Description: req.Proposal.Description,
+			WhenToUse:   req.Proposal.WhenToUse,
+			Domain:      req.Proposal.Domain,
+			Constraints: req.Proposal.Constraints,
+			Steps:       req.Proposal.Steps,
+		},
+		Body: contentBody(req.Proposal),
+	})
+	id, err := dm.SaveSkill(req.Proposal.Name, req.Proposal.Version, newContent, "workshop", false)
+	if err != nil {
+		return resp, fmt.Errorf("publish (form): %w", err)
+	}
+	resp.Outcome = OutcomePublished
+	resp.SkillID = id
+	resp.Version = req.Proposal.Version
+	// Audit log (substrate defense triad).
+	resp.AuditID = dm.LogSkillWorkshopAudit(id, "published")
+	return resp, nil
+}
+
+// scoreLabel converts a 0-2 integer to a high/medium/low label.
+func scoreLabel(s int) string {
+	switch s {
+	case 2:
+		return "high"
+	case 1:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// buildSavePayload constructs the mpm_skills save action payload for
+// candidate outcomes.
+func buildSavePayload(p SkillProposal) map[string]interface{} {
+	return map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"name":        p.Name,
+			"version":     p.Version,
+			"domain":      p.Domain,
+			"description": p.Description,
+			"when_to_use": p.WhenToUse,
+			"steps":       p.Steps,
+			"constraints": p.Constraints,
+		},
+	}
+}
+
+// contentBody returns the body text for a proposal (empty in the current
+// implementation; future schema may add a body field).
+func contentBody(p SkillProposal) string {
+	return ""
+}
+
