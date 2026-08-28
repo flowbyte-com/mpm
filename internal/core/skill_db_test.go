@@ -595,3 +595,69 @@ func TestValidateSkillFrontmatterAndScan_BadFrontmatter(t *testing.T) {
 		t.Fatal("expected error for missing frontmatter, got nil")
 	}
 }
+
+// TestValidateSkill_CleanInput verifies ValidateSkill returns no errors for
+// valid input and does NOT write to the database. The row-count snapshot
+// before/after is the structural assertion that pins the non-mutating contract.
+func TestValidateSkill_CleanInput(t *testing.T) {
+	dm := NewTestDM(t)
+	// Snapshot row count before — proves no DB writes.
+	var countBefore int
+	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE collection='skills'`).Scan(&countBefore)
+
+	skill := &Skill{
+		Name:    "foo",
+		Version: "1.0.0",
+		Frontmatter: SkillFrontmatter{
+			Name:        "foo",
+			Version:     "1.0.0",
+			WhenToUse:   "doing a thing, doing another thing",
+			Description: "test skill",
+		},
+	}
+	_, errs, err := dm.ValidateSkill(skill)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errs = %v, want empty", errs)
+	}
+
+	var countAfter int
+	dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE collection='skills'`).Scan(&countAfter)
+	if countAfter != countBefore {
+		t.Errorf("ValidateSkill wrote to DB: before=%d after=%d", countBefore, countAfter)
+	}
+}
+
+// TestValidateSkill_BlocksScanner verifies ValidateSkill surfaces a scanner
+// error when the skill body contains blocked content (AWS access key pattern).
+func TestValidateSkill_BlocksScanner(t *testing.T) {
+	dm := NewTestDM(t)
+	skill := &Skill{
+		Name:    "bar",
+		Version: "1.0.0",
+		Frontmatter: SkillFrontmatter{
+			Name:        "bar",
+			Version:     "1.0.0",
+			Description: "bar",
+		},
+	}
+	// Inject scanner-blocked content via Body — ValidateSkill
+	// composes the content from frontmatter + body for the scanner.
+	// AWS Access Key ID: AKIA prefix + exactly 16 uppercase alphanumeric chars.
+	skill.Body = "AKIAIOSFODNN7EXAMPLE"
+	_, errs, err := dm.ValidateSkill(skill)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	found := false
+	for _, e := range errs {
+		if strings.HasPrefix(e, "scanner_") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected scanner error, got %v", errs)
+	}
+}

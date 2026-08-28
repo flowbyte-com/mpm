@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"golang.org/x/mod/semver"
 )
@@ -610,4 +611,71 @@ func parseJSONMeta(raw string) map[string]interface{} {
 	}
 	_ = json.Unmarshal([]byte(raw), &out)
 	return out
+}
+
+// ValidateSkill is the non-mutating validation stage used by the
+// workshop pipeline. It re-runs validateSkillFrontmatterAndScan
+// against the Skill's reconstructed content (frontmatter + body) and
+// returns accumulated warnings/errors with NO DB writes.
+//
+// This is the safety seam between the workshop's validation stage
+// and its publication stage: a `candidate` outcome has never touched
+// the database because validation goes through this helper rather
+// than the write API. The row-count test in TestValidateSkill_CleanInput
+// pins that contract.
+func (dm *DatabaseManager) ValidateSkill(skill *Skill) (warnings []string, errors []string, err error) {
+	if skill == nil {
+		return nil, nil, fmt.Errorf("ValidateSkill: skill is nil")
+	}
+	// Reconstruct the markdown content the scanner would see if this
+	// skill were saved. The YAML frontmatter is regenerated from the
+	// struct fields, then the body is appended. This matches what
+	// SaveSkill would persist.
+	content := buildSkillContent(skill)
+	_, warnings, errors, err = validateSkillFrontmatterAndScan(content)
+	if err != nil {
+		return nil, nil, err
+	}
+	return warnings, errors, nil
+}
+
+// buildSkillContent reconstructs the markdown content from a Skill
+// struct. Format matches what SaveSkill accepts on input — YAML
+// frontmatter block + body. Used by ValidateSkill to feed the
+// scanner the same bytes the writer would.
+func buildSkillContent(skill *Skill) string {
+	fm := skill.Frontmatter
+	// Minimal round-trip serialization. SaveSkill doesn't care about
+	// field order; we mirror what ParseSkillFrontmatter reads.
+	var buf strings.Builder
+	buf.WriteString("---\n")
+	buf.WriteString(fmt.Sprintf("name: %s\n", fm.Name))
+	buf.WriteString(fmt.Sprintf("version: %s\n", fm.Version))
+	if fm.Description != "" {
+		buf.WriteString(fmt.Sprintf("description: %s\n", fm.Description))
+	}
+	if fm.WhenToUse != "" {
+		buf.WriteString(fmt.Sprintf("when_to_use: %s\n", fm.WhenToUse))
+	}
+	if fm.Domain != "" {
+		buf.WriteString(fmt.Sprintf("domain: %s\n", fm.Domain))
+	}
+	if len(fm.Constraints) > 0 {
+		buf.WriteString("constraints:\n")
+		for _, c := range fm.Constraints {
+			buf.WriteString(fmt.Sprintf("  - %s\n", c))
+		}
+	}
+	if len(fm.Steps) > 0 {
+		buf.WriteString("steps:\n")
+		for _, s := range fm.Steps {
+			buf.WriteString(fmt.Sprintf("  - call: %s\n", s.Call))
+			if s.ArgsFrom != "" {
+				buf.WriteString(fmt.Sprintf("    args_from: %s\n", s.ArgsFrom))
+			}
+		}
+	}
+	buf.WriteString("---\n")
+	buf.WriteString(skill.Body)
+	return buf.String()
 }
