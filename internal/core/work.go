@@ -9,6 +9,29 @@ const (
 	WorkStatusCancelled  WorkStatus = "cancelled"
 )
 
+// isValidWorkTransition enforces the F-B1 state machine:
+//
+//	open       → done | cancelled
+//	done       → open   (reopen)
+//	cancelled  → open   (reopen)
+//
+// Same-state transitions (e.g. open → open) and out-of-order
+// transitions (done → cancelled) are rejected. The hostile test
+// surfaced that the substrate silently accepted these, which masked
+// operator error and broke the verification lifecycle.
+func isValidWorkTransition(from, to WorkStatus) bool {
+	if from == to {
+		return false
+	}
+	switch from {
+	case WorkStatusOpen:
+		return to == WorkStatusDone || to == WorkStatusCancelled
+	case WorkStatusDone, WorkStatusCancelled:
+		return to == WorkStatusOpen
+	}
+	return false
+}
+
 // WorkVerification represents the epistemic verification state of a work item.
 // Distinguishes agent assertion from observable evidence from persisted state.
 type WorkVerification string

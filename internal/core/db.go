@@ -3017,7 +3017,7 @@ func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
 	result, err := tx.Exec(`
 		UPDATE memories
 		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
-			last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+			last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, patchJSON, id)
 	if err != nil {
@@ -4989,6 +4989,26 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 	// NULL completed_at when moving out of done/cancelled
 	if status == WorkStatusOpen {
 		completedAt = nil
+	}
+
+	// F-B1: enforce the work state machine. The hostile test surfaced
+	// that cancelling an already-cancelled work or completing an
+	// already-completed work was accepted as a no-op transition; this
+	// masks operator error and breaks downstream verification logic.
+	// Allowed transitions:
+	//   open       → done | cancelled
+	//   done       → open (reopen)
+	//   cancelled  → open (reopen)
+	// Disallowed: any other source/target pair.
+	var current WorkStatus
+	if err := dm.db.QueryRow(`SELECT status FROM works WHERE id = ?`, id).Scan(&current); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("work not found: %s", id)
+		}
+		return nil, fmt.Errorf("update work status: read current: %w", err)
+	}
+	if !isValidWorkTransition(current, status) {
+		return nil, fmt.Errorf("work state machine: invalid transition %s → %s for work %s", current, status, id)
 	}
 
 	res, err := dm.db.Exec(`

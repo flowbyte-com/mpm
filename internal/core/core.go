@@ -169,7 +169,7 @@ type CoreDB interface {
 
 	// ─── Audit ───────────────────────────────────────────────────────
 	LogAudit(level AuditLevel, component, message, stack string, ctx AuditContext)
-	QueryAuditLog(level AuditLevel, component string, days, limit int) ([]map[string]interface{}, error)
+	QueryAuditLog(level AuditLevel, component, artifactID string, days, limit int) ([]map[string]interface{}, error)
 	AuditSummary() string
 	PruneAuditLog(retentionDays int) (int64, error)
 

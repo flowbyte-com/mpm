@@ -472,7 +472,7 @@ func (dm *DatabaseManager) ReinforceSharedMemory(id string, delta int) error {
 		UPDATE shared.memories
 		SET reinforcement_count = COALESCE(reinforcement_count, 0) + ?,
 		    weight = COALESCE(weight, 1) + ?,
-		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightGain, id)
 	if err != nil {
