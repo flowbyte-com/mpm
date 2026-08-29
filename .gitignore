@@ -41,6 +41,11 @@ src/db/telemetry.db-wal
 # Wildcards cover .jsonl + rotated/compressed siblings (.gz, .old, .1, etc.)
 internal/core/src/db/mirror.jsonl*
 internal/core/src/db/watchdog.jsonl*
+# cmd/mpm/ is a build target, not a runtime location, but a watchdog
+# log landed there during the alpha-final cut (2026-08-29) when the
+# runtime path resolver returned an unexpected subdir. Treated as a
+# runtime artifact; same exclusion class as src/db/watchdog.jsonl.
+cmd/mpm/watchdog.jsonl
 # Vestigial dev-state path (was tracked via git add in early history;
 # removed 2026-07-07 — see MPM lesson on vestigial cleanup).
 internal/src/db/
