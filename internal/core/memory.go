@@ -868,7 +868,7 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		var id, coll, content, tagsJSON, metadataJSON, createdAt string
 		var sessionID sql.NullString
 		var embeddingJSON []byte
-		var rank int
+		var rank float64
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt, &rank)
 		if err != nil {
 			return nil, fmt.Errorf("scanning query memory row: %w", err)

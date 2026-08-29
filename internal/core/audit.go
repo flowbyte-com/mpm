@@ -168,11 +168,18 @@ func (dm *DatabaseManager) LogSkillWorkshopAudit(skillID, outcome string) string
 }
 
 // QueryAuditLog returns recent audit rows filtered by the given criteria.
-// Defaults: days=1, limit=20, level=any, component=any.
+// Defaults: days=1, limit=20, level=any, component=any, artifact_id=any.
 //
 // The result is a slice of maps with stable keys so the agent can iterate
 // over it via the JSON boundary. Order: newest first.
-func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component string, days, limit int) ([]map[string]interface{}, error) {
+//
+// F-A1: the artifactID filter is the documented mechanism by which an
+// operator can recover the provenance trail for a memory that was
+// dedup'd under F19 idempotency. The F14-1 audit row written on every
+// dedup carries the second-actor's actor_id/session_id/framework_name/
+// model_name/invocation_id; querying for the canonical memory's id
+// surfaces every distinct actor who has ever saved it.
+func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component, artifactID string, days, limit int) ([]map[string]interface{}, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
@@ -196,6 +203,14 @@ func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component string, day
 	if component != "" {
 		q += " AND component = ?"
 		args = append(args, component)
+	}
+	if artifactID != "" {
+		// The artifact_id lives in the context JSON. Use json_extract
+		// so the filter is index-friendly via the level/created_at
+		// composite index — the JSON predicate is evaluated per row
+		// inside the date range.
+		q += " AND json_extract(context, '$.artifact_id') = ?"
+		args = append(args, artifactID)
 	}
 	q += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
