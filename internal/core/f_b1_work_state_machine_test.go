@@ -162,3 +162,61 @@ func createF_B1Work(t *testing.T, dm *DatabaseManager, title string) *Work {
 	}
 	return w
 }
+
+// TestF_B1_EventSourcedPathRejected pins the gate-2026-08-29 fix: the
+// event-sourced path (UpdateWorkWithContext → AppendWorkEvent) MUST also
+// enforce the state machine. Previously the legacy updateWorkStatus path
+// had the check and the event-sourced path silently bypassed it, so
+// `mpm_work action=update status=cancelled` on a `done` work succeeded.
+// This is the regression the gate adversarial exploration surfaced.
+func TestF_B1_EventSourcedPathRejected(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	w := createF_B1Work(t, dm, "test work event-sourced gate")
+
+	// Move to done via the event-sourced path (CompleteWorkWithContext).
+	if _, err := dm.CompleteWorkWithContext(w.ID, "", ActiveContext{}); err != nil {
+		t.Fatalf("complete via event path: %v", err)
+	}
+
+	// Now attempt done → cancelled via UpdateWorkWithContext. This is the
+	// exact path the gate surfaced: mpm_work action=update status=cancelled.
+	_, err := dm.UpdateWorkWithContext(w.ID, "", "", string(WorkStatusCancelled), ActiveContext{})
+	if err == nil {
+		t.Fatalf("event-sourced done → cancelled should be rejected (gate regression)")
+	}
+	if !strings.Contains(err.Error(), "invalid transition") {
+		t.Fatalf("error should mention invalid transition, got: %v", err)
+	}
+
+	// Also exercise done → done via the same path (same-state, also denied).
+	_, err = dm.UpdateWorkWithContext(w.ID, "", "", string(WorkStatusDone), ActiveContext{})
+	if err == nil {
+		t.Fatalf("event-sourced done → done should be rejected")
+	}
+}
+
+// TestF_B1_EventSourcedReopenAllowed pins the happy path on the
+// event-sourced side: done → open must be permitted (it's a reopen).
+func TestF_B1_EventSourcedReopenAllowed(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	w := createF_B1Work(t, dm, "test work event-sourced reopen")
+
+	if _, err := dm.CompleteWorkWithContext(w.ID, "", ActiveContext{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if _, err := dm.UpdateWorkWithContext(w.ID, "", "", string(WorkStatusOpen), ActiveContext{}); err != nil {
+		t.Fatalf("event-sourced done → open (reopen) should be allowed, got: %v", err)
+	}
+
+	// And cancelled → open via the event-sourced path.
+	if _, err := dm.CancelWorkWithContext(w.ID, "", ActiveContext{}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := dm.UpdateWorkWithContext(w.ID, "", "", string(WorkStatusOpen), ActiveContext{}); err != nil {
+		t.Fatalf("event-sourced cancelled → open (reopen) should be allowed, got: %v", err)
+	}
+}
