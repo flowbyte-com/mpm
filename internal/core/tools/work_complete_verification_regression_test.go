@@ -240,18 +240,25 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 		}
 		workID := res.(map[string]interface{})["id"].(string)
 
-		// Attach a challenge evidence row BEFORE cancel — type='challenge'
-		// carries the -0.6 default that evidenceIsContradiction recognises.
-		if err := internal.AddEvidence(typeAssertDBM(dm), internal.EvidenceInput{
-			ArtifactID:         workID,
-			ArtifactType:       "work",
-			Type:               "challenge",
-			SourceGroup:        "test",
-			Strength:           -0.6,
-			IndependenceFactor: 1.0,
-			CreatedBy:          "f81-challenge-test",
-		}); err != nil {
-			t.Fatalf("AddEvidence(challenge): %v", err)
+		// T20-1: a single challenge row is unsubstantiated dispute, NOT
+		// substantiated contradiction. evidenceSetHasContradiction
+		// requires corroboration (cumulative strength ≤ -1.0). To make
+		// this test express the F8.1 contract — "contradiction surfaces
+		// even on cancelled work" — the dispute must be corroborated:
+		// attach TWO challenge rows at the default -0.6 strength, totaling
+		// -1.2, which crosses negativeCorroborationSum.
+		for i := 0; i < 2; i++ {
+			if err := internal.AddEvidence(typeAssertDBM(dm), internal.EvidenceInput{
+				ArtifactID:         workID,
+				ArtifactType:       "work",
+				Type:               "challenge",
+				SourceGroup:        "test",
+				Strength:           -0.6,
+				IndependenceFactor: 1.0,
+				CreatedBy:          "f81-challenge-test",
+			}); err != nil {
+				t.Fatalf("AddEvidence(challenge %d): %v", i, err)
+			}
 		}
 
 		cancelRes, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
@@ -267,7 +274,7 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 		}
 		respVerification, _ := m["verification"].(internal.WorkVerification)
 		if !strings.EqualFold(string(respVerification), "contradicted") {
-			t.Errorf("challenged + cancelled: verification = %q, want %q (contradiction must surface even on cancelled work)",
+			t.Errorf("challenged + cancelled: verification = %q, want %q (corroborated contradiction must surface even on cancelled work)",
 				string(respVerification), "contradicted")
 		}
 	})
@@ -309,6 +316,72 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 		}
 		if len(evidence) != 2 {
 			t.Errorf("evidence count after cancel = %d, want 2 (cancel must not purge history)", len(evidence))
+		}
+	})
+
+	// T20-1 (alpha-final): single unsubstantiated challenge is DISPUTE,
+	// not contradiction. On a cancelled work, the F8.1 lifecycle gate
+	// locks verification at "unverified" — the challenge row remains in
+	// the audit ledger (visible via ListEvidenceForArtifact) but does
+	// NOT promote verification to "contradicted" without corroboration.
+	// This pins the alpha-final architecture: corroborated dispute
+	// surfaces as contradicted (test above); uncorroborated dispute
+	// surfaces as unverified (this test). The same single row would
+	// also yield "unverified" on an OPEN work — the corroboration gate
+	// is lifecycle-independent.
+	t.Run("single_unsubstantiated_challenge_on_cancelled_yields_unverified", func(t *testing.T) {
+		dm := newTestSharedDM(t)
+
+		res, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "create",
+			"params": map[string]interface{}{"title": "T20-1 single-challenge-cancel"},
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		workID := res.(map[string]interface{})["id"].(string)
+
+		// ONE challenge row at default strength — substantiation fails
+		// (-0.6 > negativeCorroborationSum of -1.0). This is the case
+		// the alpha audit specifically flagged as "unsubstantiated
+		// challenge permanently corrupting verified work" — it must NOT
+		// promote verification on a cancelled work either.
+		if err := internal.AddEvidence(typeAssertDBM(dm), internal.EvidenceInput{
+			ArtifactID:         workID,
+			ArtifactType:       "work",
+			Type:               "challenge",
+			SourceGroup:        "test",
+			Strength:           -0.6,
+			IndependenceFactor: 1.0,
+			CreatedBy:          "t201-single-challenge",
+		}); err != nil {
+			t.Fatalf("AddEvidence(challenge): %v", err)
+		}
+
+		cancelRes, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "cancel",
+			"params": map[string]interface{}{"work_id": workID},
+		})
+		if err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		m := cancelRes.(map[string]interface{})
+		if workStatus(m, "status") != "cancelled" {
+			t.Errorf("status = %q, want cancelled", workStatus(m, "status"))
+		}
+		respVerification, _ := m["verification"].(internal.WorkVerification)
+		if strings.EqualFold(string(respVerification), "contradicted") {
+			t.Errorf("single unsubstantiated challenge on cancelled work: verification = %q, want NOT contradicted (T20-1: substantiation required; one -0.6 challenge alone must not flip cancelled work to contradicted)",
+				string(respVerification))
+		}
+		// Evidence must remain visible — the dispute is recorded as audit
+		// history; the lifecycle gate is what blocks the state transition.
+		evidence, err := internal.ListEvidenceForArtifact(dm, workID, "work")
+		if err != nil {
+			t.Fatalf("ListEvidenceForArtifact: %v", err)
+		}
+		if len(evidence) != 1 {
+			t.Errorf("challenge row must persist in evidence ledger after cancel, got count=%d", len(evidence))
 		}
 	})
 }

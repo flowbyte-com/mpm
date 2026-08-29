@@ -53,6 +53,18 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, fmt.Errorf("fact is required")
 	}
 
+	// F12-1: explicit type guard on `weight` at the agent boundary.
+	// ParseFloatOr silently coerces strings ("5" -> 5.0), which the
+	// alpha audit flagged as silent type coercion. The contract at this
+	// boundary is:
+	//   - absent    → use default (0.5)
+	//   - wrong type → return a clear error (NOT silent default)
+	//   - right type → use the value
+	weight, weightErr := parseWeightStrict(p["weight"], 0.5)
+	if weightErr != nil {
+		return nil, weightErr
+	}
+
 	// Build the WrapperContext for snapshot injection. RecentTool is
 	// pulled from the process-local buffer that the registry
 	// interceptor populates; if no tool preceded this save, RecentTool
@@ -74,7 +86,7 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		fact,
 		internal.ParseStringOr(p["collection"], "memories"),
 		internal.ParseStringSliceOr(p["tags"]),
-		internal.ParseFloatOr(p["weight"], 0.5),
+		weight,
 		internal.ParseStringOr(p["ttl"], ""),
 		ac,
 		wc,
@@ -423,6 +435,17 @@ func handleChallengeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	evidence, _ := p["evidence"].(string)
 
 	return dm.ChallengeMemoryWithTheory(memoryID, evidence)
+}
+
+// handleRestoreChallengeMemory is the F7-1 agent-facing surface for
+// `mpm challenge restore <id>`. The CLI handler is a thin wrapper around
+// the same DatabaseManager method, so the agent path is canonical.
+func handleRestoreChallengeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	memoryID, _ := p["memory_id"].(string)
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	return dm.RestoreMemoryFromChallenge(memoryID)
 }
 
 // callProposeTheory logs a hypothesis with validation criteria.
@@ -3845,10 +3868,16 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// Dispatcher already normalized memoryId → memory_id above;
 		// handler reads the canonical snake_case key.
 		return handleChallengeMemory(dm, ac, params)
+	case "restore_challenge":
+		// F7-1 (alpha-final): restore_challenge is the agent-facing
+		// counterpart to "mpm challenge restore <id>". Previously the
+		// restore operation was CLI-only; this action exposes the same
+		// canonical DatabaseManager method via the agent surface.
+		return handleRestoreChallengeMemory(dm, ac, params)
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
 	}
 }
 
@@ -4508,4 +4537,34 @@ func handleMpmBlobSearch(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 		"truncated":      truncated,
 		"bytes_returned": bytesReturned,
 	}, nil
+}
+
+// parseWeightStrict is the F12-1 strict-type guard for the `weight`
+// field at the mpm_memory save boundary. The contract:
+//   - nil (absent)          → use def
+//   - float64 / int / int64 → use the numeric value
+//   - anything else         → error (NEVER silently coerce)
+//
+// internal.ParseFloatOr is intentionally permissive (silent coercion
+// for limit/offset/timeout where wrong-type-→-default is harmless)
+// but the alpha audit flagged that a memory weight passed as a string
+// silently defaulted to the documented 0.5 with no error. That
+// contract is wrong for save: an agent that sent weight="5" would
+// believe it was requesting a high-priority memory when it was
+// actually getting the default. We fail loudly here instead.
+func parseWeightStrict(v interface{}, def float64) (float64, error) {
+	if v == nil {
+		return def, nil
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, nil
+	case float32:
+		return float64(n), nil
+	case int:
+		return float64(n), nil
+	case int64:
+		return float64(n), nil
+	}
+	return 0, fmt.Errorf("field `weight` must be a number (float64/int), got %T", v)
 }

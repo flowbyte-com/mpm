@@ -1,15 +1,22 @@
 // blocker_2_3_test.go — Regression tests for BLOCKER 2 (verification
 // monotonicity) and BLOCKER 3 (weak observation verification).
 //
-// BLOCKER 2: A work item previously derived as 'verified' must drop to
-// 'contradicted' the moment a challenge-type evidence row arrives. The
-// challenge type has a default strength of -0.6, which previously fell
-// below the verifier's strength threshold (-0.7) — so a fresh challenge
-// row was silently ignored by DeriveWorkVerification while the works.verification
-// column still read 'verified'. A fresh agent reading the work item
-// would see verified + an active challenge in evidence history, which
-// is the exact "stale verification masquerading as authoritative" bug
-// the architecture is supposed to prevent.
+// BLOCKER 2 (legacy framing — pre-T20-1): A work item previously
+// derived as 'verified' was supposed to drop to 'contradicted' the
+// moment a challenge-type evidence row arrived. The original BLOCKER 2
+// failure mode was that -0.6 fell below the verifier's -0.7 strength
+// threshold, so a fresh challenge row was silently ignored and the
+// work stayed verified. That framing has been SUPERSEDED by T20-1
+// (alpha-final): the corrected architecture requires corroboration
+// before contradiction fires. A single unsubstantiated challenge row
+// on otherwise-verified work downgrades to PARTIAL, not contradicted.
+// This file's two BLOCKER 2 tests have been updated to assert the
+// corrected contract: the contradiction surface is now properly
+// substantiation-gated, and the verifier responds to a single
+// challenge by re-deriving as 'partial'. The substantiated path
+// (corroborated dispute, strong-negative observation, designated
+// negative evidence) is covered by the third test below and by the
+// dedicated t20_1_contradiction_test.go.
 //
 // BLOCKER 3: A single weak observation (strength 0.4) is not sufficient
 // to verify a work item. The default observation strength is 0.4, and
@@ -27,17 +34,17 @@ import (
 	"time"
 )
 
-// TestBlocker2_ChallengeEvidenceMovesVerifiedToContradicted reproduces
-// the BLOCKER 2 failure mode: a work derives verified, then a challenge
-// evidence row is appended (which has default strength -0.6). The
-// verifier must immediately re-derive contradicted — otherwise a fresh
-// agent sees verified + an active challenge, which is the exact
-// "verification hidden contradiction" failure mode.
-//
-// Pre-fix behaviour: challenge default strength (-0.6) fell below the
-// verifier's threshold (-0.7), so the verifier ignored the challenge
-// row and the work stayed verified.
-func TestBlocker2_ChallengeEvidenceMovesVerifiedToContradicted(t *testing.T) {
+// TestBlocker2_ChallengeEvidenceDowngradesVerifiedToPartial reproduces
+// the original BLOCKER 2 failure mode but reflects the corrected T20-1
+// architecture: a work derives verified, then a single unsubstantiated
+// challenge evidence row is appended. Pre-fix, -0.6 fell below the
+// verifier's -0.7 threshold so the challenge row was silently ignored.
+// Post-fix, the verifier recognises the challenge but the T20-1
+// substantiation gate classifies a single challenge as DISPUTE (not
+// contradiction), so verified work downgrades to PARTIAL — the
+// challenge is visible in the audit trail but does not permanently
+// convert the work to contradicted.
+func TestBlocker2_ChallengeEvidenceDowngradesVerifiedToPartial(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
 
@@ -65,9 +72,11 @@ func TestBlocker2_ChallengeEvidenceMovesVerifiedToContradicted(t *testing.T) {
 		t.Fatalf("sanity: stage 1 should derive verified, got %v", v)
 	}
 
-	// Stage 2: a challenge evidence row arrives. AddEvidence routes
-	// through DeriveWorkVerification synchronously (F7/F12); the new
-	// evidence must immediately downgrade verification to contradicted.
+	// Stage 2: a single challenge evidence row arrives. T20-1: this is
+	// dispute, not contradiction. The verifier MUST respond by
+	// downgrading from 'verified' to 'partial' (visible downgrade +
+	// preserved audit trail). AddEvidence routes through
+	// DeriveWorkVerification synchronously.
 	AddEvidence(dm, EvidenceInput{
 		ArtifactID:   w.ID,
 		ArtifactType: "work",
@@ -83,19 +92,36 @@ func TestBlocker2_ChallengeEvidenceMovesVerifiedToContradicted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWork: %v", err)
 	}
-	if reloaded.Verification != WorkVerificationContradicted {
-		t.Errorf("after challenge evidence, verification = %v, want contradicted",
+	if reloaded.Verification != WorkVerificationPartial {
+		t.Errorf("after single unsubstantiated challenge, verification = %v, want partial (T20-1: substantiation gate; single challenge is dispute, not contradiction)",
 			reloaded.Verification)
+	}
+
+	// Audit trail invariant: the challenge row MUST remain visible —
+	// T20-1 records the dispute in evidence history without deleting it.
+	evidenceList, err := ListEvidenceForArtifact(dm, w.ID, "work")
+	if err != nil {
+		t.Fatalf("ListEvidenceForArtifact: %v", err)
+	}
+	var foundChallenge bool
+	for _, e := range evidenceList {
+		if e.Type == "challenge" {
+			foundChallenge = true
+			break
+		}
+	}
+	if !foundChallenge {
+		t.Errorf("challenge row must remain in evidence ledger (T20-1: dispute is audit-visible, not deleted)")
 	}
 }
 
-// TestBlocker2_DefaultChallengeStrengthTriggersContradicted confirms that
-// a challenge row inserted WITHOUT explicit strength (so the registry
-// default of -0.6 applies) still moves verification out of verified.
-// This is the regression surface the audit exposed: pre-fix, -0.6 was
-// below the verifier's -0.7 strength threshold, so the default challenge
-// was silently ignored.
-func TestBlocker2_DefaultChallengeStrengthTriggersContradicted(t *testing.T) {
+// TestBlocker2_DefaultChallengeStrengthDowngradesVerifiedToPartial mirrors
+// the same T20-1 contract: a challenge row inserted WITHOUT explicit
+// strength (registry default -0.6 applies) is still classified as
+// dispute. The pre-fix regression was that -0.6 was silently ignored
+// (work stayed verified); post-fix, the verifier responds correctly
+// by downgrading to partial.
+func TestBlocker2_DefaultChallengeStrengthDowngradesVerifiedToPartial(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
 
@@ -121,8 +147,8 @@ func TestBlocker2_DefaultChallengeStrengthTriggersContradicted(t *testing.T) {
 	}
 
 	// Default-strength challenge: Strength=0 → AddEvidence's DM wrapper
-	// fills it from the registry (-0.6). Without the BLOCKER 2 fix this
-	// would NOT trigger contradicted because -0.6 < -0.7.
+	// fills it from the registry (-0.6). T20-1: a single default-strength
+	// challenge is dispute, not contradiction. Verified → partial.
 	if _, err := dm.AddEvidence(EvidenceInput{
 		ArtifactID:   w.ID,
 		ArtifactType: "work",
@@ -130,7 +156,7 @@ func TestBlocker2_DefaultChallengeStrengthTriggersContradicted(t *testing.T) {
 		SourceGroup:  "manual_review",
 		CreatedBy:    "reviewer",
 		CreatedAt:    time.Now(),
-		Notes:        "default-strength challenge — should still move verified → contradicted",
+		Notes:        "default-strength challenge — T20-1 classifies as dispute, not contradiction",
 	}); err != nil {
 		t.Fatalf("AddEvidence (challenge): %v", err)
 	}
@@ -139,26 +165,34 @@ func TestBlocker2_DefaultChallengeStrengthTriggersContradicted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWork: %v", err)
 	}
-	if reloaded.Verification != WorkVerificationContradicted {
-		t.Errorf("default-strength challenge (strength=-0.6) did not move verified → contradicted; got %v",
+	if reloaded.Verification != WorkVerificationPartial {
+		t.Errorf("default-strength challenge (strength=-0.6) did not move verified → partial; got %v (T20-1: single default-strength challenge is dispute, not contradiction)",
 			reloaded.Verification)
 	}
 }
 
 // TestBlocker2_ChallengeResolvesToVerifiedWhenChallengeExpires confirms
-// the bidirectional recovery path: once a challenge row is marked as
-// expired (the architectural mechanism for declaring a challenge
-// resolved), fresh designated evidence re-promotes verification to
-// verified. Contradiction is not a permanent demotion — explicit
-// challenge resolution restores the verification surface.
+// the bidirectional recovery path: once a substantiated contradiction
+// is resolved (the architectural mechanism for declaring a dispute
+// resolved is expires_at on the contradicting row), fresh designated
+// evidence re-promotes verification to verified. Contradiction is not
+// a permanent demotion — explicit resolution restores the verification
+// surface.
 //
 // Pre-fix behaviour: the verifier never recognized the expires_at
-// column on challenge rows, so a contradicted work stayed contradicted
-// forever even after the challenge was administratively resolved.
+// column on dispute rows, so a contradicted work stayed contradicted
+// forever even after the dispute was administratively resolved.
 // Post-fix behaviour: ListEvidenceForArtifact (which the verifier
-// walks) already filters expired rows, so an expired challenge row no
-// longer contributes to the contradiction count, and a fresh
+// walks) already filters expired rows, so an expired contradicting
+// row no longer contributes to the contradiction count, and a fresh
 // designated evidence row can re-promote.
+//
+// T20-1 alignment: a single 'challenge' row alone does NOT establish
+// contradiction (substantiation is required). To make this test
+// express the contradicted state, the contradicting row must be a
+// strong-negative observation (strength ≤ -0.7), which is the one row
+// type that single-handedly establishes substantiated contradiction
+// per evidenceSetHasContradiction.
 func TestBlocker2_ChallengeResolvesToVerifiedWhenChallengeExpires(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
@@ -179,52 +213,55 @@ func TestBlocker2_ChallengeResolvesToVerifiedWhenChallengeExpires(t *testing.T) 
 		CreatedAt:    time.Now(),
 	})
 
-	// Stage 2: challenge → contradicted. Capture the challenge row's
-	// id so we can mark it resolved.
-	challengeID := "ev-challenge-test-" + w.ID
+	// Stage 2: substantiated contradiction via strong-negative
+	// observation (T20-1: type='observation' at strength ≤ -0.7 is the
+	// single-source substantiation escape). Capture the row's id so
+	// we can mark it resolved.
+	contradictingID := "ev-strong-neg-" + w.ID
 	AddEvidence(dm, EvidenceInput{
 		ArtifactID:         w.ID,
 		ArtifactType:       "work",
-		Type:               "challenge",
+		Type:               "observation",
 		SourceGroup:        "manual_review",
 		Strength:           -0.85,
 		CreatedBy:          "reviewer",
 		CreatedAt:          time.Now(),
 		IndependenceFactor: 1.0,
-		Notes:              "initial false-positive challenge",
+		Notes:              "initial false-positive reproduction",
 	})
 	if v, err := dm.DeriveWorkVerification(w.ID); err != nil {
-		t.Fatalf("DeriveWorkVerification (post-challenge): %v", err)
+		t.Fatalf("DeriveWorkVerification (post-strong-negative): %v", err)
 	} else if v != WorkVerificationContradicted {
-		t.Fatalf("sanity: post-challenge must be contradicted, got %v", v)
+		t.Fatalf("sanity: post-strong-negative must be contradicted, got %v", v)
 	}
 
-	// Sanity: find the challenge row we just inserted so we can expire
-	// it. ListEvidenceForArtifact returns them newest-first.
+	// Sanity: find the contradicting row we just inserted so we can
+	// expire it. ListEvidenceForArtifact returns them newest-first.
 	evidenceList, err := ListEvidenceForArtifact(dm, w.ID, "work")
 	if err != nil {
 		t.Fatalf("ListEvidenceForArtifact: %v", err)
 	}
-	var foundChallenge string
+	var foundContradicting string
 	for _, e := range evidenceList {
-		if e.Type == "challenge" {
-			foundChallenge = e.ID
+		if e.Type == "observation" && e.Strength < 0 {
+			foundContradicting = e.ID
 			break
 		}
 	}
-	if foundChallenge == "" {
-		t.Fatalf("could not find inserted challenge row in evidence list")
+	if foundContradicting == "" {
+		t.Fatalf("could not find inserted strong-negative observation in evidence list")
 	}
-	_ = challengeID // marker for symmetry with the explicit-id variant below
+	_ = contradictingID // marker for symmetry with the explicit-id variant below
 
-	// Stage 3: the operator marks the challenge as resolved (expires_at
-	// in the past). This is the architectural mechanism for declaring
-	// a challenge resolved without deleting the row (F7.1 invariant).
+	// Stage 3: the operator marks the contradicting row as resolved
+	// (expires_at in the past). This is the architectural mechanism
+	// for declaring a dispute resolved without deleting the row
+	// (F7.1 invariant — the audit trail is preserved).
 	if _, err := dm.db.Exec(
 		`UPDATE evidence SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE id = ?`,
-		foundChallenge,
+		foundContradicting,
 	); err != nil {
-		t.Fatalf("expire challenge row: %v", err)
+		t.Fatalf("expire contradicting row: %v", err)
 	}
 
 	// Stage 4: fresh designated evidence arrives. With the challenge
