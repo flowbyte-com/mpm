@@ -137,8 +137,11 @@ func TestF81_CancelledWorkContradictedStillContradicted(t *testing.T) {
 }
 
 // TestF81_CancelIsIdempotentForVerification confirms that calling cancel
-// repeatedly yields the same verification state — there is no race
-// between successive cancel calls.
+// twice does not silently re-execute: the first cancel succeeds, the
+// second is rejected by the F-B1 state machine (cancelled → cancelled is
+// forbidden). The verification state at the end is whatever the FIRST
+// cancel derived — there is no "second cancel" to race against because
+// the state machine blocks it.
 func TestF81_CancelIsIdempotentForVerification(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
@@ -156,13 +159,20 @@ func TestF81_CancelIsIdempotentForVerification(t *testing.T) {
 		CreatedAt:    time.Now(),
 	})
 
-	for i := 0; i < 3; i++ {
-		_, err := dm.CancelWorkWithContext(w.ID, "no", ActiveContext{})
-		require.NoError(t, err)
-	}
+	// First cancel: succeeds.
+	_, err = dm.CancelWorkWithContext(w.ID, "first", ActiveContext{})
+	require.NoError(t, err)
+
+	// Second cancel: rejected by F-B1. The state machine forbids
+	// cancelled → cancelled; the test now pins that the substrate
+	// surfaces this rather than silently no-op'ing.
+	_, err = dm.CancelWorkWithContext(w.ID, "second", ActiveContext{})
+	require.Error(t, err, "second cancel must be rejected per F-B1 state machine")
+	assert.Contains(t, err.Error(), "invalid transition")
+
 	v := workVerification(t, dm, w.ID)
 	assert.Equal(t, string(WorkVerificationUnverified), v,
-		"repeated cancels must produce the same verification result")
+		"verification reflects the FIRST cancel; no second cancel ran")
 }
 
 // TestF81_OpenWorkReachesVerifiedAfterCancelThenReopen verifies the
@@ -291,12 +301,24 @@ func TestF81_CancelAfterCompleteDowngrades(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(WorkVerificationVerified), workVerification(t, dm, w.ID))
 
-	// Now cancel the completed work (e.g., rollback in prod).
-	_, err = dm.CancelWorkWithContext(w.ID, "rolled back", ActiveContext{})
+	// F-B1: done → cancelled is FORBIDDEN. Operators must explicitly
+	// reopen the work before cancelling it. The two-step pattern is the
+	// rollback-in-prod workflow: complete → reopen → cancel. The state
+	// machine prevents silent cancel-after-complete, which F8.1 had
+	// silently allowed as a no-op (the bypass this commit fixes).
+	_, err = dm.CancelWorkWithContext(w.ID, "skip reopen", ActiveContext{})
+	require.Error(t, err, "done → cancelled must be rejected; reopen first")
+	assert.Contains(t, err.Error(), "invalid transition")
+
+	// Reopen (done → open is allowed), then cancel.
+	_, err = dm.UpdateWorkWithContext(w.ID, "", "", string(WorkStatusOpen), ActiveContext{})
+	require.NoError(t, err)
+
+	_, err = dm.CancelWorkWithContext(w.ID, "rolled back after reopen", ActiveContext{})
 	require.NoError(t, err)
 
 	assert.NotEqual(t, string(WorkVerificationVerified), workVerification(t, dm, w.ID),
-		"cancel after complete must downgrade verification (F8.1)")
+		"cancel after complete-then-reopen must downgrade verification (F8.1)")
 }
 
 // ── F7.1 — Challenge/Restoration ───────────────────────────────────────

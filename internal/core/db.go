@@ -6157,6 +6157,32 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		return nil, fmt.Errorf("get next event_index: %w", err)
 	}
 
+	// F-B1 (gate fix 2026-08-29): the event-sourced path here was the
+	// structural bypass — `updateWorkStatus` enforced the state machine,
+	// but every caller that goes through AppendWorkEvent (CompleteWorkWithContext,
+	// CancelWorkWithContext, UpdateWorkWithContext status=…, ReopenWorkWithContext)
+	// landed here and bypassed isValidWorkTransition entirely. The hostile
+	// gate re-run surfaced this: `mpm_work action=update status=cancelled` on
+	// a `done` work succeeded with `"status":"cancelled"`. Enforce the matrix
+	// here for any event whose target status is one of the terminal pair.
+	var currentStatus string
+	if node != nil {
+		if err := node.QueryRowTracked(`SELECT status FROM works WHERE id = ?`, workID).Scan(&currentStatus); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("work not found: %s", workID)
+			}
+			return nil, fmt.Errorf("read current work status: %w", err)
+		}
+	} else {
+		if err := dm.db.QueryRow(`SELECT status FROM works WHERE id = ?`, workID).Scan(&currentStatus); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("work not found: %s", workID)
+			}
+			return nil, fmt.Errorf("read current work status: %w", err)
+		}
+	}
+	// Defer the transition check until we've computed newStatus below.
+
 	// 4. Derive works-row projection values before the event INSERT.
 	now := time.Now().Unix()
 	var newStatus string
@@ -6164,6 +6190,21 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	var newTitle *string
 	var newContent *string
 	switch event.EventType {
+	case WorkEventTypeCreated:
+		// The works row was just INSERTed with status='open' by AddWork.
+		// The Created event is the event-sourced mirror of that initial
+		// state — NOT a state transition. newStatus stays empty so the
+		// F-B1 state machine check below does not reject 'open → open'
+		// for first-time creation.
+		newStatus = ""
+		if event.Title != "" {
+			t := event.Title
+			newTitle = &t
+		}
+		if event.Content != "" {
+			c := event.Content
+			newContent = &c
+		}
 	case WorkEventTypeCompleted, WorkEventTypeClaimedComplete:
 		newStatus = "done"
 		newCompletedAt = &now
@@ -6188,6 +6229,20 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		newStatus = ""
 	default:
 		newStatus = "open"
+	}
+
+	// F-B1 (gate fix 2026-08-29): enforce the state machine for any event
+	// whose target status is one of the canonical trio (open/done/cancelled).
+	// isValidWorkTransition rejects same-state transitions itself, so we
+	// don't gate on newStatus != currentStatus here. Note events, title
+	// updates, content updates, and evidence observations leave newStatus
+	// empty and pass through without a check. The read of currentStatus
+	// above happened inside the WithTx, so the read+write pair is atomic
+	// against concurrent AppendWorkEvent callers.
+	if newStatus != "" {
+		if !isValidWorkTransition(WorkStatus(currentStatus), WorkStatus(newStatus)) {
+			return nil, fmt.Errorf("work state machine: invalid transition %s → %s for work %s", currentStatus, newStatus, workID)
+		}
 	}
 
 	// 5. Insert the event row. Domain-neutral: only invocation linkage + directive provenance.
