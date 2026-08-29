@@ -827,15 +827,24 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 	useFTS := query != "" && query != "*"
 
 	if useFTS {
-		// Strategy 1: FTS5 MATCH with JOIN to get full rows + rank score
-		// FTS5 stores rowid, not id — join back to memories for full record
+		// Strategy 1: FTS5 MATCH with JOIN to get full rows + rank score.
+		// FTS5 stores rowid, not id — join back to memories for full record.
+		//
+		// F-A2/F-F1 hardening (gate 2026-08-29): wrap the user query in
+		// double-quotes so FTS5 treats it as a literal phrase rather than
+		// parsing hyphens, colons, or other operators as FTS5 syntax.
+		// Without this, queries like "use-B" failed with
+		// "no such column: B" (FTS5 reads `-B` as NOT-column-B). The
+		// LIKE fallback below used to handle this; the quote makes the
+		// FTS path succeed first and the fallback only catches true
+		// syntax errors.
 		ftsQuery := `SELECT m.id, m.collection, m.content, m.session_id, m.tags, m.metadata, m.embedding, m.created_at, fts.rank
 			FROM memories m
 			JOIN memories_fts fts ON m.rowid = fts.rowid
 			WHERE memories_fts MATCH ? AND m.collection = ? AND m.deleted_at IS NULL` + MemoryExpireClauseM + `
 			ORDER BY fts.rank
 			LIMIT ?`
-		rows, err = s.DB.Query(ftsQuery, query, collection, n)
+		rows, err = s.DB.Query(ftsQuery, `"`+query+`"`, collection, n)
 
 		if err != nil {
 			// Strategy 2: FTS failed (malformed query?) — fall back to LIKE
