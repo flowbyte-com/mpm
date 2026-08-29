@@ -99,11 +99,15 @@ func handleDecision(args []string) int {
 		// list-style verbs route through the plural handler so the
 		// ledger surface has one implementation and one help string.
 		return handleDecisions(rest)
+	case "search":
+		// F-A2: discoverability. Search decisions by keyword via FTS5
+		// against the decisions collection.
+		return handleDecisionSearch(rest)
 	case "help", "-h", "--help":
 		printDecisionHelp()
 		return 0
 	default:
-		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, resolve (reserved), list", sub)
+		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, resolve (reserved), list, search", sub)
 		return 1
 	}
 }
@@ -129,11 +133,15 @@ func handleTheory(args []string) int {
 		// Routes through the plural handler so filter vocabulary is
 		// shared and the listing surface has one implementation.
 		return handleTheories(args)
+	case "search":
+		// F-A2 parity: theory search by keyword, matching the
+		// decision/skill/lesson search surfaces.
+		return handleTheorySearch(rest)
 	case "help", "-h", "--help":
 		printTheoryHelp()
 		return 0
 	default:
-		usererror.Error("mpm theory: unknown subcommand %q\n  available subcommands: add, resolve, list, pending, resolved, proven, disproven", sub)
+		usererror.Error("mpm theory: unknown subcommand %q\n  available subcommands: add, resolve, list, pending, resolved, proven, disproven, search", sub)
 		return 1
 	}
 }
@@ -167,12 +175,10 @@ func handleSkill(args []string) int {
 	case "show":
 		return handleReadSkill(rest)
 	case "search":
-		// Best-effort: substrate doesn't have a dedicated skill
-		// search. For Wave 3 we surface guidance so operators see
-		// the right verb. A future commit can add mpm call
-		// search_skills or wire one here.
-		usererror.Notice("skill search by keyword not yet wired — use `mpm call search_references` (skill refs live alongside) or `mpm skill list` to enumerate")
-		return 0
+		// F-F1: skill search by keyword. Replaces the Wave-3
+		// "not yet wired" guidance with a real QueryMemory path
+		// against collection='skills'.
+		return handleSkillSearch(rest)
 	case "workshop":
 		return handleSkillWorkshop(rest)
 	case "help", "-h", "--help":

@@ -46,10 +46,37 @@ func handleChallenge(args []string) int {
 //      is required to re-establish trust.
 func runChallenge(dm internal.CoreDB, id, evidence string) int {
 
-	// Verify memory exists
+	// F-C3: refuse empty evidence. The hostile test surfaced that
+	// `mpm challenge <id> ""` silently produced a "challenge" with
+	// zero rationale, leaving the audit trail without any explanation
+	// for the weight demotion. Evidence is the load-bearing
+	// justification for the challenge; an empty string is operationally
+	// equivalent to "no reason given", which is rejected.
+	if strings.TrimSpace(evidence) == "" {
+		return respond("", "Error: challenge requires non-empty evidence\n  Usage: mpm challenge <id> \"<evidence>\"\n", 1)
+	}
+
+	// F-C4: refuse to challenge an already-challenged memory. The
+	// hostile test surfaced that re-challenging a memory that was
+	// already in status="challenged" stacked weight demotions (-2 per
+	// call) and left the prior challenged_theory_id overwritten in
+	// metadata, destroying the audit trail. A second challenge against
+	// the same memory must either be: (a) treated as a no-op with a
+	// clear message, or (b) explicitly supersede the prior challenge.
+	// We choose (a) — silent re-challenge was the bug; an explicit
+	// "restore then re-challenge" workflow gives the operator a
+	// moment to reconsider.
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
 		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
+	}
+	if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {
+		var status map[string]interface{}
+		if err := json.Unmarshal([]byte(metaStr), &status); err == nil {
+			if s, _ := status["status"].(string); s == "challenged" {
+				return respond("", fmt.Sprintf("Memory %s is already challenged. Restore it first with `mpm challenge restore %s` if you want to re-challenge.\n", id, id), 1)
+			}
+		}
 	}
 
 	// Generate theory ID BEFORE saving theory (forward link needed in memory metadata)

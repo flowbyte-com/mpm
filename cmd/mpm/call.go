@@ -136,6 +136,32 @@ func handleCall(args []string) int {
 		ParentInvocationID: os.Getenv("MPM_PROVENANCE_PARENT_INVOCATION_ID"),
 	}
 
+	// F-D2: explicit per-call provenance override. When the payload
+	// carries framework / model / session_id / agent, those values
+	// take precedence over the env-derived defaults. This is the
+	// documented mechanism for MCP / agent-runtime callers to identify
+	// themselves when MPM_PROVENANCE_FRAMEWORK is unset or set to the
+	// generic "mpm-cli" default. Precedence:
+	//   1. explicit trusted runtime provenance (env-supplied host ID)
+	//   2. payload-supplied provenance (this block)
+	//   3. surface-derived provenance (mpm-cli fallback)
+	// An empty payload value is ignored — the env var wins.
+	if v, ok := payloadStringField(payload, "framework"); ok && v != "" {
+		ac.FrameworkName = v
+	}
+	if v, ok := payloadStringField(payload, "model"); ok && v != "" {
+		ac.Model = v
+	}
+	if v, ok := payloadStringField(payload, "session_id"); ok && v != "" {
+		ac.SessionID = v
+	}
+	if v, ok := payloadStringField(payload, "agent"); ok && v != "" {
+		ac.Agent = v
+	}
+	if v, ok := payloadStringField(payload, "invocation_id"); ok && v != "" {
+		ac.InvocationID = v
+	}
+
 	// Passive heartbeat (Arc 2): every MPM call that touches the
 	// shared DB silently bumps shared.sessions. Non-fatal: a
 	// heartbeat failure must NOT block the call. The DB call is
@@ -340,6 +366,28 @@ func parsePayload(args []string) (map[string]interface{}, error) {
 		}
 	}
 	return map[string]interface{}{}, nil
+}
+
+// payloadStringField reads a top-level string field from a payload. It
+// accepts both the canonical {action, params} envelope (looking in
+// params) and a flat payload (looking at top level). Returns ok=false
+// if the field is absent or not a string; ok=true with empty string if
+// the field is present but empty — caller decides whether empty
+// overrides.
+func payloadStringField(payload map[string]interface{}, key string) (string, bool) {
+	if v, ok := payload[key]; ok {
+		if s, ok := v.(string); ok {
+			return s, true
+		}
+	}
+	if params, ok := payload["params"].(map[string]interface{}); ok {
+		if v, ok := params[key]; ok {
+			if s, ok := v.(string); ok {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 // must is a tiny helper for JSON marshalling where marshalling errors are
