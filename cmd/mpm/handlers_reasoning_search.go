@@ -17,8 +17,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/flowbyte-com/mpm-core"
 )
 
 // handleCollectionSearch is the shared body for `mpm decision search`
@@ -41,7 +39,10 @@ func handleCollectionSearch(args []string, collection, label string) int {
 	}
 	query := strings.Join(queryArgs, " ")
 
-	store := internal.NewMemoryStore("")
+	store := getMemoryStore()
+	if store == nil {
+		return respond("", "Search failed: database unavailable\n", 1)
+	}
 
 	// F-A2/F-F1 hardening: any FTS panic (malformed query, nil DB
 	// after partial init, etc.) is recovered and surfaced as a
