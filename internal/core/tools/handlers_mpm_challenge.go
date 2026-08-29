@@ -30,11 +30,24 @@ func handleMpmChallenge(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pay
 	if payload == nil {
 		return nil, fmt.Errorf("mpm_challenge: missing payload")
 	}
+	// F7-1 (alpha-final): the mpm_challenge tool now supports both the
+	// "weaken" path (ChallengeMemoryWithTheory) and the "restore" path
+	// (RestoreMemoryFromChallenge). The action flag selects between
+	// them; default action is the historical "weaken" behaviour so
+	// existing callers see no change.
+	action, _ := payload["action"].(string)
 	memoryID, evidence := extractMemoryIDAndEvidence(payload)
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
 	}
-	return dm.ChallengeMemoryWithTheory(memoryID, evidence)
+	switch action {
+	case "restore", "restore_challenge":
+		return dm.RestoreMemoryFromChallenge(memoryID)
+	case "", "weaken", "challenge":
+		return dm.ChallengeMemoryWithTheory(memoryID, evidence)
+	default:
+		return nil, fmt.Errorf("unknown action %q for mpm_challenge (valid: challenge, restore)", action)
+	}
 }
 
 // extractMemoryIDAndEvidence accepts both flat top-level fields

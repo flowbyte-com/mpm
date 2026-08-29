@@ -206,96 +206,16 @@ func handleChallengeRestore(args []string) int {
 
 // runChallengeRestore is the injectable core of `mpm challenge restore`.
 //
-// F7.1 (challenge-restoration): Restoration must:
-//   1. Clear the "challenged" status flag (RFC 7396 null removal preserves
-//      history) AND restore the pre-challenge weight. The weight is the
-//      memory's prior retrieval-priority standing and is fully reversible.
-//   2. PRESERVE the prior confidence in metadata for forensic audit, but
-//      leave confidence at ChallengedMemoryConfidenceFloor (0.5). The memory
-//      does NOT automatically regain its pre-challenge high confidence —
-//      fresh evidence is required to re-elevate it. This is the F7.1
-//      invariant: "restoration does not silently create verification".
-//   3. Stamp the restoration event in metadata (restored_from_challenge,
-//      restored_at) so the audit trail records the cycle.
-//   4. The previously-neutralized evidence rows (expires_at=now) are NOT
-//      re-opened. They remain in the table for audit purposes but cannot
-//      contribute to a confidence recompute.
+// F7-1 (alpha-final): this is now a thin wrapper around the canonical
+// DatabaseManager.RestoreMemoryFromChallenge method, so the CLI, mpm
+// call, and MCP surfaces all share one implementation. The detailed
+// invariant commentary lives in internal/core/challenge_restore.go.
 func runChallengeRestore(dm internal.CoreDB, id string) int {
-	mem, err := dm.GetMemory(id)
-	if err != nil || mem == nil {
-		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
-	}
-
-	metaStr, _ := mem["metadata"].(string)
-	var meta map[string]interface{}
-	if metaStr != "" {
-		json.Unmarshal([]byte(metaStr), &meta)
-	}
-	theoryID, _ := meta["challenged_theory_id"].(string)
-
-	if theoryID == "" {
-		return respond("", fmt.Sprintf("Memory %s is not challenged.\n", id), 1)
-	}
-
-	// Restore the pre-challenge weight recorded at challenge time. Restore
-	// resolves the challenge theory as disproven, so the memory returns to
-	// its exact prior weight — the weakened value from the challenge must
-	// not linger (and any accidental inflation must not persist either).
-	priorWeight, hasPrior := meta["challenged_prior_weight"].(float64)
-	nowSec := time.Now().Unix()
-
-	tx, err := dm.SQLDB().Begin()
+	res, err := dm.RestoreMemoryFromChallenge(id)
 	if err != nil {
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+		return respond("", fmt.Sprintf("%v\n", err), 1)
 	}
-	defer tx.Rollback()
-
-	// 1. Resolve theory: status → disproven, memory_id → null (RFC 7396 null removal)
-	resolvePatch := map[string]interface{}{"status": "disproven", "memory_id": nil}
-	resolveJSON, _ := json.Marshal(resolvePatch)
-	_, err = tx.Exec(
-		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
-		string(resolveJSON), theoryID)
-	if err != nil {
-		return respond("", fmt.Sprintf("Error resolving theory: %v\n", err), 1)
-	}
-
-	// 2. Clear challenged status from memory, restore the pre-challenge
-	//    weight when it was recorded, leave confidence at the challenged
-	//    floor (do NOT silently re-promote to prior confidence), and stamp
-	//    audit metadata so the cycle is reconstructable.
-	//
-	//    Note: `prior_confidence` and `challenged_at` are KEPT in metadata
-	//    (not cleared) — they form the forensic trail of the challenge
-	//    cycle. Only the operational flags (status, theory_id, prior_weight)
-	//    are removed.
-	clearPatch := map[string]interface{}{
-		"status":                  nil,
-		"challenged_theory_id":    nil,
-		"challenged_prior_weight": nil,
-		"restored_from_challenge": true,
-		"restored_at":             nowSec,
-	}
-	clearJSON, _ := json.Marshal(clearPatch)
-	if hasPrior {
-		// Restore weight; leave confidence at the challenged floor so the
-		// F7.1 invariant holds (restoration ≠ verification promotion).
-		_, err = tx.Exec(
-			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?), weight = ?, confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-			string(clearJSON), int(priorWeight), ChallengedMemoryConfidenceFloor, id)
-	} else {
-		_, err = tx.Exec(
-			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?), confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-			string(clearJSON), ChallengedMemoryConfidenceFloor, id)
-	}
-	if err != nil {
-		return respond("", fmt.Sprintf("Error clearing memory status: %v\n", err), 1)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return respond("", fmt.Sprintf("Error committing transaction: %v\n", err), 1)
-	}
-
+	theoryID, _ := res["theory_id"].(string)
 	fmt.Printf("✓ Theory %s resolved as disproven. Memory %s cleared.\n", theoryID, id)
 	return 0
 }

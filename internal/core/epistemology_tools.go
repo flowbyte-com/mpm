@@ -15,6 +15,17 @@ import (
 	"time"
 )
 
+// DecisionInitialConfidence is the per-type baseline confidence value a
+// decision falls back to when its evidence is neutralized (F5-2). It
+// matches the per-type initial value used by SaveMemoryNode (0.5 for
+// decisions), and is identical in spirit to ChallengedMemoryConfidenceFloor
+// for memories: the artifact is at "no evidence" until fresh evidence
+// arrives, rather than retaining its pre-correction value.
+//
+// Exported so the regression test in internal/core can reference it
+// without duplicating the constant.
+const DecisionInitialConfidence = 0.5
+
 // ChallengeMemoryWithTheory weakens a memory and creates a pending theory.
 // Mirrors callChallengeMemory.
 func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error) {
@@ -450,6 +461,25 @@ func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, ra
 			0, "superseded,superseded-by:"+newID, "superseded,superseded-by:"+newID, originalID); err != nil {
 			return fmt.Errorf("tag superseded: %w", err)
 		}
+		// F5-2 (alpha-final): drop the original's confidence to the per-type
+		// initial baseline and append a confidence_history row tagged
+		// "supersede". Without this, the live confidence column continues
+		// to advertise the pre-correction value while HybridSearch's
+		// ×0.25 retrieval discount only affects ranking — the two views
+		// silently disagree. The recompute path can re-elevate the value
+		// if fresh corroborating evidence arrives (just like the F7.1
+		// challenged-memory path).
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
+			0, DecisionInitialConfidence, originalID); err != nil {
+			return fmt.Errorf("drop superseded confidence: %w", err)
+		}
+		if _, err := node.ExecTracked(`
+			INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
+			VALUES (?, ?, 'decision', ?, ?, 0, 'supersede')
+		`, 0, GenerateID(), originalID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
+			return fmt.Errorf("supersede confidence history: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
@@ -502,6 +532,20 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 			END WHERE id = ? AND deleted_at IS NULL AND tags NOT LIKE '%superseded%'`,
 			0, decisionID); err != nil {
 			return fmt.Errorf("tag invalidated: %w", err)
+		}
+		// F5-2 (alpha-final): mirror SupersedeDecision's confidence drop.
+		// An invalidated decision is "no evidence"; the live confidence
+		// column must reflect that, not the pre-invalidation value.
+		if _, err := node.ExecTracked(
+			`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
+			0, DecisionInitialConfidence, decisionID); err != nil {
+			return fmt.Errorf("drop invalidated confidence: %w", err)
+		}
+		if _, err := node.ExecTracked(`
+			INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
+			VALUES (?, ?, 'decision', ?, ?, 0, 'invalidate')
+		`, 0, GenerateID(), decisionID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
+			return fmt.Errorf("invalidate confidence history: %w", err)
 		}
 		return nil
 	})

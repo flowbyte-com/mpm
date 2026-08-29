@@ -772,8 +772,12 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 		}
 		e.CreatedAt = time.Unix(createdAt, 0)
 		if expiresAt.Valid {
-			if expiresAt.Int64 < now {
-				continue // skip expired
+			// expires_at <= now means the row is no longer authoritative.
+			// The row remains in the table for the audit trail but is
+			// filtered from derivation (T20-1: neutralized challenge rows
+			// must not contribute to verification).
+			if expiresAt.Int64 <= now {
+				continue // skip expired (audit trail intact, derivation clean)
 			}
 			exp := time.Unix(expiresAt.Int64, 0)
 			e.ExpiresAt = &exp

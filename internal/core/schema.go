@@ -189,7 +189,7 @@ var BaseTables = []string{
 		confidence      REAL NOT NULL,
 		computed_at     INTEGER NOT NULL,
 		evidence_count  INTEGER NOT NULL,
-		trigger         TEXT NOT NULL CHECK (trigger IN ('evidence_added','evidence_updated','evidence_deleted','evidence_expired','decay_tick','concept_drift','manual_recompute'))
+		trigger         TEXT NOT NULL CHECK (trigger IN ('evidence_added','evidence_updated','evidence_deleted','evidence_expired','decay_tick','concept_drift','manual_recompute','supersede','invalidate'))
 	);`,
 
 	`CREATE INDEX IF NOT EXISTS idx_conf_history_artifact ON confidence_history(artifact_id, artifact_type, computed_at);`,

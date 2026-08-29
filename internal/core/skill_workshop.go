@@ -235,6 +235,32 @@ func validateInput(req *WorkshopRequest) (warnings []string, errors []string, er
 	if len(req.Evidence.ReferenceIDs) > maxEvidenceRef {
 		return nil, nil, fmt.Errorf("validateInput: evidence.reference_ids has %d entries, max %d", len(req.Evidence.ReferenceIDs), maxEvidenceRef)
 	}
+	// F15-1: enforce the 0..5 axis-score range and the documented
+	// boundary enum at validation time. evaluateDecisionModel sums the
+	// four axes and the boundary decides publishable vs candidate vs
+	// reject — without range enforcement, an out-of-range value (e.g.
+	// reusability=999) sums to a misleadingly-high total and the caller
+	// has no signal that the input was structurally invalid. The
+	// "do not silently coerce invalid inputs" rule from the alpha
+	// audit applies here, just as it does for F12-1.
+	if req.DecisionModel.Reusability < 0 || req.DecisionModel.Reusability > 5 {
+		return nil, nil, fmt.Errorf("validateInput: decision_model.reusability out of range (0..5), got %d", req.DecisionModel.Reusability)
+	}
+	if req.DecisionModel.NonObviousness < 0 || req.DecisionModel.NonObviousness > 5 {
+		return nil, nil, fmt.Errorf("validateInput: decision_model.non_obviousness out of range (0..5), got %d", req.DecisionModel.NonObviousness)
+	}
+	if req.DecisionModel.Stability < 0 || req.DecisionModel.Stability > 5 {
+		return nil, nil, fmt.Errorf("validateInput: decision_model.stability out of range (0..5), got %d", req.DecisionModel.Stability)
+	}
+	if req.DecisionModel.Leverage < 0 || req.DecisionModel.Leverage > 5 {
+		return nil, nil, fmt.Errorf("validateInput: decision_model.leverage out of range (0..5), got %d", req.DecisionModel.Leverage)
+	}
+	switch req.DecisionModel.Boundary {
+	case "procedure", "judgment", "knowledge":
+		// valid
+	default:
+		return nil, nil, fmt.Errorf("validateInput: decision_model.boundary must be one of {procedure, judgment, knowledge}, got %q", req.DecisionModel.Boundary)
+	}
 	// Soft warnings (don't block).
 	if req.Proposal.Name == "" {
 		warnings = append(warnings, "missing_proposal_name")
@@ -528,12 +554,22 @@ func RunWorkshop(dm *DatabaseManager, req *WorkshopRequest) (WorkshopResponse, e
 		}()
 	}
 
-	// Stage 1: input validation.
-	_, _, err := validateInput(req)
+	// Stage 1: input validation. A hard error here means the request
+	// is structurally invalid (mode mismatch, size cap, F15-1 axis-
+	// range violation, unsupported boundary) — propagate it so the
+	// caller sees the rejection as an err, not just as Outcome=rejected
+	// inside an otherwise-successful response. The alpha audit forbids
+	// silent coercion of invalid inputs, and the F15-2 surface-parity
+	// regression test in tools/f_alpha_surface_parity_test.go pins the
+	// registry/MCP path: out-of-range axis scores must surface as
+	// err != nil from the workshop handler, not as nil err with a
+	// "rejected" Outcome that looks successful to a careless caller.
+	_, validationErrs, err := validateInput(req)
 	if err != nil {
 		resp.Outcome = OutcomeRejected
 		resp.Reason = "input_validation_failed"
-		return resp, nil
+		resp.Validation.Errors = validationErrs
+		return resp, err
 	}
 
 	// Stage 2: refine mode — fetch existing skill.
