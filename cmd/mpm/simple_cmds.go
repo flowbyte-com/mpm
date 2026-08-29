@@ -184,10 +184,10 @@ func handleLs(args []string) int {
 		return 0
 	}
 
-	fmt.Printf("\n%4s  %-20s %-10s %-6s %s\n", "ID", "CREATED", "COLLECTION", "WEIGHT", "CONTENT")
+	fmt.Printf("\n%-18s %-20s %-10s %-6s %s\n", "ID", "CREATED", "COLLECTION", "WEIGHT", "CONTENT")
 	fmt.Println(strings.Repeat("-", 80))
 
-	for i, m := range filtered {
+	for _, m := range filtered {
 		id, _ := m["id"].(string)
 		created, _ := m["created_at"].(string)
 		coll, _ := m["collection"].(string)
@@ -208,8 +208,17 @@ func handleLs(args []string) int {
 			content = content[:50] + "..."
 		}
 
-		fmt.Printf("%4d  %.20s %-10s %-6d%s %s\n", i+1, created, coll, w, chip, content)
-		_ = id
+		// F-I1: show the actual memory ID (truncated to 16 chars to
+		// fit the column) instead of the row index. The row index is
+		// useless for follow-up commands (mpm show <index> would
+		// never find anything because IDs are hex strings, not
+		// integers) and confused operators about how to address a
+		// specific memory.
+		idDisplay := id
+		if len(idDisplay) > 16 {
+			idDisplay = idDisplay[:16]
+		}
+		fmt.Printf("%-18s %.20s %-10s %-6d%s %s\n", idDisplay, created, coll, w, chip, content)
 	}
 
 	fmt.Printf("\n%d memories shown\n", len(filtered))
@@ -620,18 +629,59 @@ func handleSetWeight(args []string) int {
 	return 0
 }
 
-// mpm snooze <id> [--days N] — Bump memory relevance without promoting to LTM.
-// Increments weight by 1 (capped at 9 to avoid LTM promotion) and refreshes
-// last_accessed_at. Never sets is_long_term or inflates weight to >= 10.
+// mpm snooze <id> [--days N | --duration <n><unit>] — Bump memory relevance
+// without promoting to LTM. Increments weight by 1 (capped at 9 to avoid LTM
+// promotion) and refreshes last_accessed_at. Never sets is_long_term or
+// inflates weight to >= 10.
+//
+// F-E1: the CLI used to silently ignore --duration 1h and apply the default
+// 1-day bump. The fix accepts an explicit duration with units (m, h, d, w)
+// and rejects unknown units. --days remains supported for backwards
+// compatibility (it is identical to --duration Nd).
 func handleSnooze(args []string) int {
 	if len(args) < 2 {
-		usererror.Usage("mpm snooze <id> [--days N]")
+		usererror.Usage("mpm snooze <id> [--days N | --duration <n><unit>]")
 		return 1
 	}
 	id := args[1]
-	days := 1
+
+	// parseDurationSeconds accepts a string like "1h", "30m", "2d", "1w" and
+	// returns the equivalent seconds. Unknown units return an error so the
+	// caller can reject the input explicitly rather than silently falling
+	// back to the default.
+	parseDurationSeconds := func(raw string) (int, error) {
+		if raw == "" {
+			return 0, fmt.Errorf("empty duration")
+		}
+		// Last char is unit; everything before is the magnitude.
+		unit := raw[len(raw)-1]
+		numPart := raw[:len(raw)-1]
+		n, err := strconv.Atoi(numPart)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid duration %q (expected <n><unit>, e.g. 1h, 30m, 2d, 1w)", raw)
+		}
+		switch unit {
+		case 'm':
+			return n * 60, nil
+		case 'h':
+			return n * 3600, nil
+		case 'd':
+			return n * 86400, nil
+		case 'w':
+			return n * 7 * 86400, nil
+		default:
+			return 0, fmt.Errorf("unknown duration unit %q (use m, h, d, or w)", string(unit))
+		}
+	}
+
+	seconds := 86400 // default: 1 day
 	for i := 2; i < len(args); i++ {
-		if args[i] == "--days" && i+1 < len(args) {
+		switch args[i] {
+		case "--days":
+			if i+1 >= len(args) {
+				usererror.Error("snooze: --days requires a value")
+				return 1
+			}
 			i++
 			d, err := strconv.Atoi(args[i])
 			if err != nil {
@@ -650,7 +700,29 @@ func handleSnooze(args []string) int {
 				usererror.Error("snooze: --days capped at 365 (got %d) — use `mpm promote` for permanent durability", d)
 				return 1
 			}
-			days = d
+			seconds = d * 86400
+		case "--duration":
+			if i+1 >= len(args) {
+				usererror.Error("snooze: --duration requires a value (e.g. 1h, 30m, 2d, 1w)")
+				return 1
+			}
+			i++
+			sec, err := parseDurationSeconds(args[i])
+			if err != nil {
+				usererror.Error("snooze: %v", err)
+				return 1
+			}
+			// Cap at 1 year (31,536,000 seconds) so an accidental
+			// "1y" or "52w" can't quietly turn a memory into a
+			// "never decays" row without going through `mpm promote`.
+			if sec > 31536000 {
+				usererror.Error("snooze: --duration capped at 1 year (got %s) — use `mpm promote` for permanent durability", args[i])
+				return 1
+			}
+			seconds = sec
+		default:
+			usererror.Error("snooze: unknown flag %q (use --days N or --duration <n><unit>)", args[i])
+			return 1
 		}
 	}
 
@@ -659,17 +731,16 @@ func handleSnooze(args []string) int {
 		return 1
 	}
 
-	// `err` is reused below; declare explicitly because the singleton
-	// lookup (getDB()) doesn't introduce one.
-	var err error
-
-	// Bump weight by 1 (cap at 9 to prevent LTM promotion), refresh timestamp
+	// Bump weight by 1 (cap at 9 to prevent LTM promotion), refresh timestamp.
+	// last_accessed_at is advanced by the requested duration (in seconds);
+	// using seconds rather than days lets --duration 1h add 3600 seconds
+	// (the F-E1 fix).
 	res, err := dm.SQLDB().Exec(`
 		UPDATE memories
 		SET weight = MIN(weight + 1, 9),
-		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' seconds') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, days, id)
+	`, seconds, id)
 	if err != nil {
 		usererror.Error("%v", err)
 		return 1
@@ -682,7 +753,7 @@ func handleSnooze(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("Snoozed memory %s (+1 weight, +%d day(s) last_accessed)\n", id, days)
+	fmt.Printf("Snoozed memory %s (+1 weight, +%d second(s) last_accessed)\n", id, seconds)
 	return 0
 }
 
@@ -967,6 +1038,7 @@ func handleRefList(args []string) int {
 			Tags         string `json:"tags"`
 			ImportReason string `json:"import_reason"`
 			CreatedAt    string `json:"created_at"`
+			Freshness    string `json:"freshness"`
 		}
 		result := make([]refEntry, 0, len(refs))
 		for _, r := range refs {
@@ -991,6 +1063,7 @@ func handleRefList(args []string) int {
 			if rr, ok := r["import_reason"].(string); ok {
 				reason = rr
 			}
+			freshness, _ := r["freshness"].(string)
 			refID, _ := r["id"].(string)
 			refTitle, _ := r["title"].(string)
 			result = append(result, refEntry{
@@ -1000,6 +1073,7 @@ func handleRefList(args []string) int {
 				Tags:         tags,
 				ImportReason: reason,
 				CreatedAt:    created,
+				Freshness:    freshness,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{"references": result})
@@ -1028,6 +1102,15 @@ func handleRefList(args []string) int {
 		}
 		refID, _ := r["id"].(string)
 		refTitle, _ := r["title"].(string)
+		freshness, _ := r["freshness"].(string)
+		// F-G1/F-G2: surface the freshness classifier so operators
+		// can spot stale/historical refs at a glance. Without this,
+		// a backdated 5-year-old ref looks identical to a fresh one
+		// in the listing.
+		freshnessBadge := ""
+		if freshness != "" && freshness != "current" {
+			freshnessBadge = fmt.Sprintf(" {%s}", freshness)
+		}
 		reason := ""
 		if rr, ok := r["import_reason"].(string); ok && rr != "" {
 			r := rr
@@ -1036,11 +1119,12 @@ func handleRefList(args []string) int {
 			}
 			reason = fmt.Sprintf("\n       reason: %s", r)
 		}
-		fmt.Printf("  %s | %s | %d chunks |%s\n",
+		fmt.Printf("  %s | %s | %d chunks |%s%s\n",
 			refID[:min(len(refID), 16)],
 			refTitle,
 			chunks,
-			tags)
+			tags,
+			freshnessBadge)
 		if created != "" {
 			fmt.Printf("       created: %s%s\n", created, reason)
 		} else if reason != "" {
@@ -1113,11 +1197,17 @@ func handleRefShow(args []string) int {
 				chunkResult = append(chunkResult, chunkEntry{Index: idx, Content: content})
 			}
 		}
+		// F-G1/F-G2: include freshness in the JSON envelope so
+		// `mpm reference show <id> --json` exposes the staleness
+		// signal for downstream consumers (and is the canonical
+		// audit record).
+		freshness, _ := ref["freshness"].(string)
 		data, _ := json.Marshal(map[string]interface{}{
 			"id":         refShowID,
 			"title":      refShowTitle,
 			"tags":       tags,
 			"created_at": created,
+			"freshness":  freshness,
 			"chunks":     chunkResult,
 		})
 		fmt.Println(string(data))
@@ -1125,6 +1215,12 @@ func handleRefShow(args []string) int {
 	}
 
 	fmt.Printf("\n[%s] %s\n", refShowID, refShowTitle)
+	// F-G1/F-G2: surface freshness as a header line. Stale/historical
+	// refs are the dangerous case (operator reads them and trusts the
+	// content as current authority); make the signal loud.
+	if f, ok := ref["freshness"].(string); ok && f != "" && f != "current" {
+		fmt.Printf("⚠️  Freshness: %s\n", f)
+	}
 	if st, ok := ref["source_type"].(string); ok && st != "" {
 		fmt.Printf("Type: %s\n", st)
 	}
