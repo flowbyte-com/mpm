@@ -388,6 +388,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTheories(args[1:])
 	case "decisions":
 		return handleDecisions(args[1:])
+	case "audit":
+		return handleAudit(args[1:])
 	case "challenge":
 		sub := args[1]
 		if sub == "restore" && len(args) >= 3 {

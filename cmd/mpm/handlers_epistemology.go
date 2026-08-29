@@ -188,18 +188,34 @@ func handleResolveTheory(args []string) int {
 // handleRecordDecision parses structured decision text and saves to the decisions collection.
 func handleRecordDecision(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm record_decision <text>", 1)
+		return respond("", "Usage: mpm record_decision [--context <text>] [--choice <text>] [--rationale <text>] [--tags <csv>] [--supersedes <decision-id>]\n"+
+			"   or: mpm record_decision <text with CONTEXT:/CHOICE:/RATIONALE:/TAGS: tokens>\n"+
+			"   or: mpm decide --context <text> --choice <text> --rationale <text> [--tags <csv>]", 1)
 	}
 
-	input := strings.Join(args, " ")
+	// F-C1/C2: support both flag-style and legacy token-style inputs.
+	// Flag form takes precedence; if no flags are present, fall back
+	// to the colon-token parser for backward compatibility.
+	contextText, choice, rationale, tagsStr, freeText, leftoverArgs := parseDecisionArgs(args)
+	if choice == "" {
+		choice = freeText
+	}
 
-	contextText := extractField(input, "CONTEXT:")
-	choice := extractField(input, "CHOICE:")
-	rationale := extractField(input, "RATIONALE:")
-	tagsStr := extractField(input, "TAGS:")
+	// F-H1: --supersedes <decision-id> routes through the
+	// SupersedeDecision substrate call. The CLI flag uses the
+	// user-facing "decision-id" vocabulary; the substrate's internal
+	// parameter is "original_id". This shim reconciles the naming.
+	supersedes := extractFlagValue(args, "--supersedes")
+
+	// If the caller passed flags but no choice, refuse — silent-empty
+	// decisions were the bug F-C1 surfaced (the operator thought they
+	// had recorded a choice; the DB got an empty record).
+	if hasDecisionFlags(args) && choice == "" {
+		return respond("", "Error: --choice is required when using flag form\n", 1)
+	}
 
 	if choice == "" {
-		choice = strings.TrimSpace(input)
+		return respond("", "Error: decision requires a CHOICE (flag --choice or CHOICE: token)\n", 1)
 	}
 
 	var tags []string
@@ -233,6 +249,24 @@ func handleRecordDecision(args []string) int {
 		return respond("", "Error: memory store not available\n", 1)
 	}
 
+	// F-H1: --supersedes routes through SupersedeDecision when
+	// present; otherwise fall through to the plain AddMemory path.
+	if supersedes != "" {
+		dm := getDBConcrete()
+		if dm == nil {
+			return respond("", "Error: database not available\n", 1)
+		}
+		res, err := dm.SupersedeDecision(supersedes, contextText, choice, rationale, "", tags, nil, internal.ActiveContext{})
+		if err != nil {
+			return respond("", fmt.Sprintf("Failed to supersede decision: %v\n", err), 1)
+		}
+		newID, _ := res["id"].(string)
+		if newID == "" {
+			return respond("", fmt.Sprintf("Failed to supersede decision: no id in result %v\n", res), 1)
+		}
+		return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
+	}
+
 	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "cli")
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to record decision: %v\n", err), 1)
@@ -246,7 +280,114 @@ func handleRecordDecision(args []string) int {
 		}
 	}
 
+	_ = leftoverArgs // currently unused; reserved for future positional content
 	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
+}
+
+// parseDecisionArgs supports two input shapes:
+//
+//  1. flag form: --context <text> --choice <text> --rationale <text>
+//     --tags <csv> [--supersedes <decision-id>] [--weight N]
+//  2. legacy token form: "CHOICE: foo\nCONTEXT: bar\nRATIONALE: baz"
+//
+// Flag form takes precedence. If no flag is present, the args are
+// joined into one string and the legacy extractor runs.
+//
+// Returns: contextText, choice, rationale, tagsStr, freeText, leftoverArgs.
+func parseDecisionArgs(args []string) (string, string, string, string, string, []string) {
+	var (
+		contextText string
+		choice      string
+		rationale   string
+		tagsStr     string
+		leftovers   []string
+	)
+	flagMode := false
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--context", "-c":
+			if i+1 < len(args) {
+				contextText = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--choice":
+			if i+1 < len(args) {
+				choice = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--rationale", "-r":
+			if i+1 < len(args) {
+				rationale = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--tags", "-t":
+			if i+1 < len(args) {
+				tagsStr = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		default:
+			leftovers = append(leftovers, args[i])
+			i++
+		}
+	}
+
+	if flagMode {
+		return contextText, choice, rationale, tagsStr, "", leftovers
+	}
+
+	// Legacy token form
+	input := strings.Join(args, " ")
+	contextText = extractField(input, "CONTEXT:")
+	choice = extractField(input, "CHOICE:")
+	rationale = extractField(input, "RATIONALE:")
+	tagsStr = extractField(input, "TAGS:")
+
+	if choice == "" {
+		choice = strings.TrimSpace(input)
+	}
+	return contextText, choice, rationale, tagsStr, "", leftovers
+}
+
+// hasDecisionFlags returns true if any decision-style flag is present
+// in args. Used by the validation branch above to enforce "flag form
+// requires --choice".
+func hasDecisionFlags(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--context", "-c",
+			"--choice",
+			"--rationale", "-r",
+			"--tags", "-t",
+			"--supersedes":
+			return true
+		}
+	}
+	return false
+}
+
+// extractFlagValue scans args for `--flag value` and returns the value
+// (the arg immediately following the flag). Returns "" if absent.
+// Empty values are valid (caller decides whether to reject them).
+func extractFlagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // handleTheories lists theories with status chips.

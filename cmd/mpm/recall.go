@@ -670,7 +670,7 @@ func handleRecall(args []string) int {
 		if _, err := dm.SQLDB().Exec(fmt.Sprintf(`
 			UPDATE memories
 			SET weight = MIN(weight + 0.5, 100.0),
-			    last_accessed_at = CAST(strftime('%%s','now') AS INTEGER)
+			    last_accessed_at = CAST(strftime('%%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%%s','now') AS INTEGER)
 			WHERE id IN (%s)
 			  AND weight >= 1
 			  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%%s','now', '-1 hour') AS INTEGER))

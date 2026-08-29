@@ -224,22 +224,45 @@ func handleGC(args []string) int {
 		}
 	}
 
-	// Get all non-deleted memories
-	rows, err := dm.SQLDB().Query(`
-		SELECT id, collection, weight, last_accessed_at, created_at, is_long_term
-		FROM memories WHERE deleted_at IS NULL
-	`)
-	if err != nil {
-		usererror.Error("%v", err)
-	}
-	defer rows.Close()
-
 	// Capture monotonic clock offset once at start of GC run to prevent clock-rollback exploits.
 	// Using a captured "now" ensures all time calculations within this GC pass use the same
 	// reference point, even if the system clock goes backward mid-run.
 	monotonicNow := time.Now()
 	var deadMemories []map[string]interface{}
 	var updated, scanned int
+
+	// F-D1: accrue runtime to every live memory BEFORE reading rows for
+	// decay calculation. The accrual is bounded by min(wall_delta, process
+	// uptime) — wall-clock downtime cannot inflate runtime counters.
+	// Rows with NULL runtime_last_accrued_at are seeded with the current
+	// wall-clock and zero runtime; they don't get a free decay hit on the
+	// first gc tick.
+	if !dryRun {
+		if _, err := dm.SQLDB().Exec(`
+			UPDATE memories
+			SET runtime_seconds_since_access = CASE
+				WHEN runtime_last_accrued_at IS NULL OR runtime_last_accrued_at <= 0 THEN 0
+				ELSE runtime_seconds_since_access + MIN(
+					CAST(strftime('%s','now') AS INTEGER) - runtime_last_accrued_at,
+					CAST(? AS INTEGER)
+				)
+			END,
+			runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE deleted_at IS NULL
+		`, int64(monotonicNow.Sub(mpminternal.GCProcessStart()).Seconds())); err != nil {
+			usererror.Warn("handleGC: runtime accrual failed, continuing: %v", err)
+		}
+	}
+
+	// Get all non-deleted memories
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, collection, weight, runtime_seconds_since_access, created_at, is_long_term
+		FROM memories WHERE deleted_at IS NULL
+	`)
+	if err != nil {
+		usererror.Error("%v", err)
+	}
+	defer rows.Close()
 
 	// Collect all computed weight changes for batch application (avoids N+1 SQL pattern).
 	// Structure: []struct{ id string, oldWeight int, newWeight float64, isLTM bool }
@@ -254,13 +277,17 @@ func handleGC(args []string) int {
 	for rows.Next() {
 		scanned++
 		var id, collection string
-		var weight float64
-		var lastAccessed, createdAt *int64
+		var weight, runtimeSec float64
+		var runtimeSecNull *float64
+		var createdAt *int64
 		var isLongTerm bool
 
-		if err := rows.Scan(&id, &collection, &weight, &lastAccessed, &createdAt, &isLongTerm); err != nil {
+		if err := rows.Scan(&id, &collection, &weight, &runtimeSecNull, &createdAt, &isLongTerm); err != nil {
 			usererror.Warn("handleGC: scan failed for memory row, skipping: %v", err)
 			continue
+		}
+		if runtimeSecNull != nil {
+			runtimeSec = *runtimeSecNull
 		}
 
 		// Zero-decay collections (append-only audit trails like
@@ -270,25 +297,15 @@ func handleGC(args []string) int {
 			continue
 		}
 
-		// Compute days since access using captured monotonic time
-		lastAccessInt := lastAccessed
-		if lastAccessInt == nil {
-			lastAccessInt = createdAt
-		}
-		if lastAccessInt == nil {
-			// Both timestamps are NULL — skip this row
-			continue
-		}
-		lastAccessTime := time.Unix(*lastAccessInt, 0)
-		daysSinceAccess := monotonicNow.Sub(lastAccessTime).Hours() / 24.0
-
-		// Compute decay amount (float64 throughout)
+		// F-D1: decay is now based on accumulated runtime-since-access,
+		// not wall-clock days. Runtime accrual already happened above; we
+		// just consume the resulting counter here.
 		var createdAtTime *time.Time
 		if createdAt != nil {
 			t := time.Unix(*createdAt, 0)
 			createdAtTime = &t
 		}
-		decay := computeDecay(weight, daysSinceAccess, isLongTerm, createdAtTime, aggressive, monotonicNow)
+		decay := computeDecay(weight, runtimeSec, isLongTerm, createdAtTime, aggressive, monotonicNow)
 		newWeight := weight - decay
 
 		// Floor
@@ -419,36 +436,46 @@ func handleGC(args []string) int {
 // computeDecay returns the weight decay amount for a memory.
 // All math is float64; only the final value is truncated on DB write.
 // Uses a pre-captured "now" timestamp to prevent clock-rollback exploits.
-func computeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
+//
+// F-D1: `runtimeSecondsSinceAccess` replaces wall-clock `daysSinceAccess`.
+// Decay advances only on accumulated scheduler/CLI runtime, never on
+// calendar downtime. Wall-clock vacay cannot decay memory; active
+// runtime still does. The accrual step happens before this function is
+// called so the counter already reflects bounded runtime since last
+// access.
+func computeDecay(weight float64, runtimeSecondsSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
 	multiplier := 1.0
 	if aggressive {
 		multiplier = 2.0
 	}
+	runtimeDays := runtimeSecondsSinceAccess / 86400.0
 
 	if isLongTerm {
-		return daysSinceAccess * 0.01 * multiplier
+		return runtimeDays * 0.01 * multiplier
 	}
 	if weight >= 10 {
-		return daysSinceAccess * 0.02 * multiplier
+		return runtimeDays * 0.02 * multiplier
 	}
 	if weight >= 5 {
-		return daysSinceAccess * 0.05 * multiplier
+		return runtimeDays * 0.05 * multiplier
 	}
 
 	// Low-weight: decay scales with age (newer = faster decay)
 	ageFactor := 1.0
 	if createdAt != nil {
-		// Use the captured monotonic reference: daysSinceCreated based on the pre-captured
-		// timestamp, not wall-clock time. This prevents clock-rollback from slowing decay.
-		daysSinceCreated := now.Sub(*createdAt).Hours() / 24.0
-		if daysSinceCreated > 30.0 {
+		// Use the captured monotonic reference: runtime-days since
+		// creation. Note that createdAt is set to wall-clock insertion
+		// time, so this is effectively "process uptime + wall-clock from
+		// creation to first boot" — bounded enough for age-factor purposes.
+		runtimeDaysSinceCreated := now.Sub(*createdAt).Seconds() / 86400.0
+		if runtimeDaysSinceCreated > 30.0 {
 			ageFactor = 1.0
 		} else {
-			ageFactor = daysSinceCreated / 30.0
+			ageFactor = runtimeDaysSinceCreated / 30.0
 		}
 	}
 	baseDecay := 0.1 + 0.2*ageFactor
-	return daysSinceAccess * baseDecay * multiplier
+	return runtimeDays * baseDecay * multiplier
 }
 
 // handleRestore recovers a soft-deleted memory by clearing deleted_at and preserving
