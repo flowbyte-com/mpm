@@ -493,7 +493,7 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
-		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightGain, id)
 	if err != nil {
@@ -538,7 +538,7 @@ func (dm *DatabaseManager) AdjustMemoryWeight(id string, delta int) error {
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET weight = MAX(weight + ?, 1),
-		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, id)
 	if err != nil {
@@ -613,7 +613,7 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?,
 		    weight = MIN(weight + ?, 100),
-		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
 	`, delta, weightGain, id)
 	if err != nil {
@@ -641,7 +641,7 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 0),
-		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightLoss, id)
 	if err != nil {

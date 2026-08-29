@@ -2004,11 +2004,14 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 //	--level      (optional) one of warn|error|fatal; default: any
 //	--component (optional) subsystem name (e.g. "relay", "synthesis",
 //	             "watcher", "security"); default: any
+//	--artifact_id (optional) canonical artifact id; surfaces dedup
+//	               provenance (F-A1 / F14-1 audit rows) for a memory
 //	--days       (optional) lookback window in days; default 7
 //	--limit      (optional) max rows; default 20, max 500
 func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	levelStr := getString(p, "level")
 	component := getString(p, "component")
+	artifactID := getString(p, "artifact_id")
 	days := 7
 	if v, ok := p["days"]; ok {
 		switch t := v.(type) {
@@ -2028,7 +2031,7 @@ func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		}
 	}
 
-	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, days, limit)
+	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, artifactID, days, limit)
 	if err != nil {
 		return nil, err
 	}

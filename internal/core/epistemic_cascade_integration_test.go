@@ -501,7 +501,7 @@ func TestIntegration_Depth4SuppressedWithAudit(t *testing.T) {
 	assert.Equal(t, "failed", status, "suppressed intent must enter failed dead-letter state")
 
 	// Verify the CRITICAL audit record was written with correct context.
-	auditRows, err := dm.QueryAuditLog(AuditCritical, "cascade-materializer", 1, 10)
+	auditRows, err := dm.QueryAuditLog(AuditCritical, "cascade-materializer", "", 1, 10)
 	require.NoError(t, err)
 	found := false
 	var auditMsg string

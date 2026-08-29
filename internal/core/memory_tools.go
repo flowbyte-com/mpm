@@ -789,7 +789,7 @@ func (dm *DatabaseManager) SnoozeMemory(memoryID string, days int) (map[string]i
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET weight = MIN(weight + 1, 9),
-		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER)
+		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, days, memoryID)
 	if err != nil {

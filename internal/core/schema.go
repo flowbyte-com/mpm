@@ -1191,4 +1191,13 @@ var SafeMigrations = [][3]string{
 	// artifact_provenance instead.
 	{"works", "verification", "TEXT"},
 	{"work_events", "directive_ids", "TEXT DEFAULT '[]'"},
+
+	// F-D1: runtime-clock decay contract. Decay must advance according to
+	// accumulated scheduler/CLI runtime, not wall-clock downtime. A 14-day
+	// vacation with the scheduler down must NOT decay memory. Each row
+	// tracks accumulated runtime since its last access; gc accrues by
+	// min(now - last_accrued_at, process_uptime) so wall-clock time spent
+	// with no mpm process alive cannot leak into runtime.
+	{"memories", "runtime_seconds_since_access", "INTEGER NOT NULL DEFAULT 0"},
+	{"memories", "runtime_last_accrued_at",      "INTEGER"},
 }
