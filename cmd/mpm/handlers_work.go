@@ -395,6 +395,18 @@ func handleWorkItem(args []string) int {
 		}
 		action = "reopen"
 		params["work_id"] = positional[0]
+	case "resolve-contradiction":
+		// F6-1 / T20-1: agent-facing first-class contradiction resolution.
+		// The recovery path for unsubstantiated disputes against work
+		// items. Required: work_id positional, --reason flag (audit trail).
+		if len(positional) < 1 {
+			usererror.Error("mpm work item resolve-contradiction requires a work_id positional arg")
+			return 1
+		}
+		action = "resolve_contradiction"
+		params["work_id"] = positional[0]
+		// --reason is required; the handler validates and refuses
+		// empty/missing reasons to keep the audit trail intact.
 	case "update":
 		if len(positional) < 1 {
 			usererror.Error("mpm work item update requires a work_id positional arg")
@@ -406,7 +418,7 @@ func handleWorkItem(args []string) int {
 		printWorkItemHelp()
 		return 0
 	default:
-		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, update", sub)
+		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, resolve-contradiction, update", sub)
 		return 1
 	}
 
@@ -459,8 +471,16 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 		case strings.HasPrefix(a, "--title="):
 			params["title"] = strings.TrimPrefix(a, "--title=")
 			i++
+		case a == "--reason" && i+1 < len(rest):
+			// F6-1 / T20-1: --reason is required for resolve_contradiction
+			// so the audit trail captures why a dispute was withdrawn.
+			params["reason"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--reason="):
+			params["reason"] = strings.TrimPrefix(a, "--reason=")
+			i++
 		case strings.HasPrefix(a, "--"):
-			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title)", a)
+			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title, --reason)", a)
 		default:
 			positional = append(positional, a)
 			i++
@@ -489,6 +509,10 @@ Subcommands:
   note <work_id> --note <text>
                               Append a free-form note to a work item's event ledger
   reopen <work_id>            Reopen a cancelled work item
+  resolve-contradiction <work_id> --reason <text>
+                              F6-1 / T20-1: withdraw unsubstantiated dispute
+                              evidence from a work item and re-derive
+                              verification. Audit-trail reason required.
   update <work_id> [--title <t>] [--content <c>] [--status <s>]
                               Update a work item's title/content/status
 

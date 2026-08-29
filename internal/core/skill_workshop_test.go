@@ -386,8 +386,15 @@ func TestRunWorkshop_RejectsTrivialAction(t *testing.T) {
 		DecisionModel: DecisionModel{Reusability: 0, NonObviousness: 0, Stability: 0, Leverage: 0, Boundary: "one_off"},
 	}
 	resp, err := RunWorkshop(dm, req)
-	if err != nil {
-		t.Fatalf("RunWorkshop: %v", err)
+	// F15-2 contract: hard input-validation errors must surface as
+	// err != nil, not as Outcome=rejected inside an otherwise-
+	// successful response. The previous silent-swallow broke the
+	// alpha audit's "do not silently coerce invalid inputs" rule.
+	if err == nil {
+		t.Fatalf("expected loud failure for unsupported boundary, got nil — silent-swallow regression")
+	}
+	if !strings.Contains(err.Error(), "boundary") {
+		t.Errorf("error must name the boundary field, got: %v", err)
 	}
 	if resp.Outcome != OutcomeRejected {
 		t.Errorf("outcome = %v, want rejected", resp.Outcome)
@@ -628,8 +635,15 @@ func TestRunWorkshop_BoundedContext(t *testing.T) {
 		Proposal:     SkillProposal{Name: "bounded", Version: "1.0.0"},
 	}
 	resp, err := RunWorkshop(dm, req)
-	if err != nil {
-		t.Fatalf("RunWorkshop: %v", err)
+	// F15-2 contract: oversized input must surface as err != nil,
+	// not as a silent Outcome=rejected. The previous test codified
+	// the silent-swallow behavior — the F15-2 surface-parity audit
+	// closed that hole.
+	if err == nil {
+		t.Fatalf("expected loud failure for oversized task_context, got nil — silent-swallow regression")
+	}
+	if !strings.Contains(err.Error(), "task_context") {
+		t.Errorf("error must name the offending field, got: %v", err)
 	}
 	if resp.Outcome != OutcomeRejected {
 		t.Errorf("oversized input must reject, got %v", resp.Outcome)

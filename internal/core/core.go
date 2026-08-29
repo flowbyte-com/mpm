@@ -191,6 +191,11 @@ type CoreDB interface {
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
+	// RestoreMemoryFromChallenge resolves the challenged-theory record
+	// against memoryID and clears the memory's challenged status.
+	// F7-1 surface parity: previously CLI-only; now reachable through
+	// the canonical agent path (mpm_memory / mpm_challenge tool).
+	RestoreMemoryFromChallenge(memoryID string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	// SupersedeDecision records a replacement decision and marks the
 	// original superseded (F9). InvalidateDecision retires a decision
@@ -334,6 +339,12 @@ type CoreDB interface {
 	GetActiveDirectiveIDs(framework string) []string
 	RecordGitEvidenceForWork(workID string)
 	DeriveWorkVerification(workID string) (WorkVerification, error)
+	// ResolveWorkContradiction is the F6-1 / T20-1 agent-facing recovery
+	// path: withdraw unsubstantiated dispute evidence from a work item so
+	// the verification state can re-derive to its true value. Evidence
+	// rows are neutralized (expires_at set) but never deleted; the audit
+	// trail remains intact.
+	ResolveWorkContradiction(workID, reason string) error
 
 	// ─── Work Events (Event-Sourced History) ────────────────────
 	AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error)

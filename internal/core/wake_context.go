@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // WakeContextData is the bounded orientation surface for an agent.
@@ -790,8 +791,11 @@ func formatWakeContext(d WakeContextData) string {
 		lines = append(lines, "**Global Rules (shared across all agents on this workstation):**")
 		for _, r := range d.GlobalRules {
 			content := r.Content
-			if len(content) > 100 {
-				content = content[:100] + "…"
+			// F3-2 (alpha-final): rune-safe truncation; see the
+			// matching site in gatherOpenWorks.
+			if utf8.RuneCountInString(content) > 100 {
+				runes := []rune(content)
+				content = string(runes[:100]) + "…"
 			}
 			lines = append(lines, fmt.Sprintf("  - [w=%v] %s", r.Weight, content))
 		}
@@ -1291,8 +1295,16 @@ func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 			w.Verification = WorkVerification(verification.String)
 		}
 		w.Pointer = "mpm://work/" + w.ID
-		if len(w.Title) > 120 {
-			w.Title = w.Title[:120]
+		// F3-2 (alpha-final): rune-safe truncation. A naive `len()` and
+		// byte slice would mid-rune-slice titles containing CJK or emoji
+		// characters, producing invalid UTF-8 that downstream JSON
+		// parsers reject. Walk the string counting runes, then advance
+		// the same number of bytes so the resulting slice is on a
+		// valid boundary. Both gatherOpenWorks and gatherCompletedWorks
+		// apply this fix.
+		if utf8.RuneCountInString(w.Title) > 120 {
+			runes := []rune(w.Title)
+			w.Title = string(runes[:120])
 		}
 		out = append(out, w)
 	}
@@ -1346,8 +1358,16 @@ func (dm *DatabaseManager) gatherCompletedWorks() []WakeContextWork {
 			w.Verification = WorkVerification(verification.String)
 		}
 		w.Pointer = "mpm://work/" + w.ID
-		if len(w.Title) > 120 {
-			w.Title = w.Title[:120]
+		// F3-2 (alpha-final): rune-safe truncation. A naive `len()` and
+		// byte slice would mid-rune-slice titles containing CJK or emoji
+		// characters, producing invalid UTF-8 that downstream JSON
+		// parsers reject. Walk the string counting runes, then advance
+		// the same number of bytes so the resulting slice is on a
+		// valid boundary. Both gatherOpenWorks and gatherCompletedWorks
+		// apply this fix.
+		if utf8.RuneCountInString(w.Title) > 120 {
+			runes := []rune(w.Title)
+			w.Title = string(runes[:120])
 		}
 		out = append(out, w)
 	}

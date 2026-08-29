@@ -96,7 +96,7 @@ mpm/
 
 ## Sibling projects (not under mpm/)
 
-- **`../mpm-agent/`** — agent shell: `mini-bot` (CLI REPL), `mini-bot-telegram`, `mini-bot-mcp`. Separate Go module with its own `go.mod`, `mini-bot.db`, and `mini-bot-config.json`. Lives at github.com/flowbyte-com/mpm-agent. Build separately; it is *not* part of the main `mpm` binary, and it is *not* a plugin under `agent-plugins/`. The three agent-plugins/ entries (hermes, openclaw, opencode) are LLM/chat integrations that *call into* mpm; mpm-agent is a different kind of consumer — a self-contained agent that *uses* mpm as its memory store.
+- **`../mpm-agent/`** — agent shell: `mini-bot` (CLI REPL), `mini-bot-telegram`, `mini-bot-mcp`. Separate Go module with its own `go.mod`, `mini-bot.db`, and `mini-bot-config.json`. Lives at github.com/flowbyte-com/mpm-agent. Build separately; it is *not* part of the main `mpm` binary, and it is *not* a plugin under `agent_installation/`. The three agent_installation/ entries (hermes, openclaw, opencode) are LLM/chat integrations that *call into* mpm; mpm-agent is a different kind of consumer — a self-contained agent that *uses* mpm as its memory store.
 
 ## Core Architecture
 
@@ -148,7 +148,7 @@ FTS5 virtual tables are created in `db.go` init (not in `schema.go`) — they re
 **Open items the audit flagged but did not close (low-impact):**
 - All timestamp columns are INTEGER Unix-epoch seconds (unified by `timestamps_unified_v1` migration). The `deleted_at_unified_v1` precedent no longer applies separately — both migrations wrap in the same `DatabaseManager.init` transaction. **Operators must `mpm backup-db` before installing this release.**
 
-**Before adding a new external surface** (CLI command, MCP tool, agent-plugins entry), add it to the audit by re-running the relevant section.
+**Before adding a new external surface** (CLI command, MCP tool, agent_installation entry), add it to the audit by re-running the relevant section.
 
 ## Configuration
 
@@ -190,7 +190,7 @@ The mpm-lint --gate enforces the structural version of these (zero `ctx-in-scope
 
 ### 1. Atomic State Swap (cross-process bridges)
 
-**Invariant.** A shared state file (`scheduler.state`, lock sentinels, snapshot manifests, etc.) is read by at least two processes simultaneously: the writer (daemon / scheduler tick) and one or more readers (CLI invocations, agent plugins). A direct write to the target path creates an observable window where readers ingest a truncated or empty payload mid-write.
+**Invariant.** A shared state file (`scheduler.state`, lock sentinels, snapshot manifests, etc.) is read by at least two processes simultaneously: the writer (daemon / scheduler tick) and one or more readers (CLI invocations, agent_installation). A direct write to the target path creates an observable window where readers ingest a truncated or empty payload mid-write.
 
 **Rule.** Marshal to a sibling `<target>.tmp` file in the same filesystem directory, then commit via `os.Rename`. `rename(2)` is atomic on POSIX; readers observe either the previous valid state or the new valid state, never a partial buffer. Failures during the write or rename phase must clean up the dangling `.tmp` so the next tick doesn't inherit a stale buffer.
 
