@@ -120,6 +120,24 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 	if dupID := dm.FindLiveDuplicateMemory(collection, fact, tags, meta); dupID != "" {
 		existing, err := dm.GetMemory(dupID)
 		if err == nil && existing != nil {
+			// F14-1 (alpha-final): the second save's provenance intent
+			// (actor / session / model) must be recorded SOMEWHERE in the
+			// audit trail. artifact_provenance is keyed on (artifact_id,
+			// artifact_type) with a UNIQUE constraint, so a direct
+			// re-insert would be silently rejected — the audit log is
+			// the durable home for "who re-saved this and when." The
+			// LogAudit row is queryable via the audit ledger and
+			// surfaces in watchdog diagnostics.
+			dm.LogAudit(AuditInfo, "provenance", "idempotent save dedup (existing artifact reused)", "", AuditContext{
+				"artifact_id":    dupID,
+				"artifact_type":  collection,
+				"actor_id":       ac.Agent,
+				"session_id":     ac.SessionID,
+				"framework_name": ac.FrameworkName,
+				"model_name":     ac.Model,
+				"invocation_id":  ac.InvocationID,
+				"dedup_reason":   "F19 idempotency",
+			})
 			echoContent, truncated := BoundInlineContent(fact)
 			// GetMemory returns tags as a raw JSON string; decode so the
 			// duplicate response matches the shape of a fresh save.
