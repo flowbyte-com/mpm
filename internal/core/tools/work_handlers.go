@@ -57,8 +57,15 @@ func handleMpmWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload 
 		return handleNoteWork(dm, ac, params)
 	case "reopen":
 		return handleReopenWork(dm, ac, params)
+	case "resolve_contradiction":
+		// F6-1 (alpha-final): agent-facing first-class contradiction
+		// resolution. The recovery path for T20-1's invariant — a
+		// previously-verified work that was downgraded by an
+		// unsubstantiated dispute can be restored without deleting
+		// the dispute rows (audit trail preserved).
+		return handleResolveContradictionWork(dm, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_work. Valid actions include create, list, show, update, complete, cancel, history, note, reopen", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_work. Valid actions include create, list, show, update, complete, cancel, history, note, reopen, resolve_contradiction", action)
 	}
 }
 
@@ -277,6 +284,39 @@ func handleReopenWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	w, err := dm.ReopenWorkWithContext(workID, ac)
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
+	}
+	return workToMapWork(w), nil
+}
+
+// handleResolveContradictionWork is the F6-1 / T20-1 agent-facing recovery
+// path: withdraw unsubstantiated dispute evidence from a work item and
+// re-derive verification.
+//
+// Inputs:
+//   - work_id  : required (which work item to recover)
+//   - reason   : required (audit-trail reason — recorded into the dispute
+//                row's notes as resolved_reason)
+//
+// Returns the re-derived work row (verification reflects the cleared
+// evidence picture).
+//
+// Idempotency: works on whatever dispute rows are currently live. Already-
+// resolved rows (expires_at <= now) are not touched.
+func handleResolveContradictionWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
+	workID, _ := p["work_id"].(string)
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for resolve_contradiction")
+	}
+	reason, _ := p["reason"].(string)
+	if reason == "" {
+		return nil, fmt.Errorf("reason is required for resolve_contradiction (audit trail)")
+	}
+	if err := dm.ResolveWorkContradiction(workID, reason); err != nil {
+		return nil, err
+	}
+	w, err := dm.GetWork(workID)
+	if err != nil {
+		return nil, err
 	}
 	return workToMapWork(w), nil
 }

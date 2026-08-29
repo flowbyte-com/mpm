@@ -947,6 +947,9 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 			"total_chunks":  totalChunks,
 			"last_indexed":  lastIndexed,
 			"created_at":    createdAt,
+			// Freshness: derived from existing fields (no schema change).
+			// See internal/core/reference_freshness.go + protocol §8.
+			"freshness": string(ClassifyReferenceFreshnessFromFields(tags, importReason, lastIndexed, time.Now())),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -977,6 +980,9 @@ func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, e
 		"total_chunks":  totalChunks,
 		"last_indexed":  lastIndexed,
 		"created_at":    createdAt,
+		// Freshness: derived from existing fields (no schema change).
+		// See internal/core/reference_freshness.go + protocol §8.
+		"freshness": string(ClassifyReferenceFreshnessFromFields(tags, importReason, lastIndexed, time.Now())),
 	}
 
 	// Get chunks
@@ -1026,7 +1032,27 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 	if found {
 		escaped := strings.ReplaceAll(q, "\"", "\"\"")
 		ftsQuery := "\"" + escaped + "\"*"
-		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE id IN (SELECT rowid FROM references_fts WHERE references_fts MATCH ?) ORDER BY bm25(references_fts) LIMIT ?`, ftsQuery, limit)
+		// CTE pattern: bm25() is only in scope inside the FTS5 virtual
+		// table query, so the score subquery must wrap the FTS5 match.
+		// We join reference_docs on its implicit rowid (NOT id, which is
+		// TEXT — see schema.go:622), because the references_ai trigger
+		// (db.go:2456) populates references_fts.rowid = new.rowid from
+		// reference_docs' implicit rowid. The previous pattern of
+		// `WHERE id IN (SELECT rowid FROM references_fts)` failed
+		// because id (TEXT) could never match rowid (INTEGER). Mirrors
+		// the proven pattern from SearchReferenceChunks below.
+		rows, err = dm.db.Query(`
+			WITH scores AS (
+				SELECT rowid, bm25(references_fts) AS s
+				FROM references_fts
+				WHERE references_fts MATCH ?
+			)
+			SELECT rd.id, rd.title, rd.file_path, rd.source_type, rd.tags,
+			       rd.total_chunks, rd.last_indexed, rd.created_at
+			FROM reference_docs rd
+			JOIN scores ON rd.rowid = scores.rowid
+			ORDER BY scores.s
+			LIMIT ?`, ftsQuery, limit)
 	} else {
 		rows, err = dm.db.Query(`SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at FROM reference_docs WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?`, "%"+q+"%", "%"+q+"%", limit)
 	}
@@ -1052,6 +1078,10 @@ func (dm *DatabaseManager) SearchReferences(q string, limit int) ([]map[string]i
 			"total_chunks": totalChunks,
 			"last_indexed": lastIndexed,
 			"created_at":   createdAt,
+			// Freshness: derived from existing fields. SearchReferences
+			// doesn't query import_reason, so the signal here comes from
+			// tags + last_indexed only — that's intentional, not a bug.
+			"freshness": string(ClassifyReferenceFreshnessFromFields(tags, "", lastIndexed, time.Now())),
 		})
 	}
 	if err := rows.Err(); err != nil {

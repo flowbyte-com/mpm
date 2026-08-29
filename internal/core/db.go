@@ -5283,19 +5283,83 @@ const observationVerifyThreshold = 0.7
 // work to verify.
 const corroborationSum = 1.0
 
-// evidenceIsContradiction returns true for an evidence row that
-// represents an active contradiction. Type-based detection (BLOCKER 2
-// fix) is the canonical path: a row with type='challenge' carries
-// an explicit -0.6 default strength that is sufficient to signal "this
-// artifact is disputed" even though it falls below the strength-only
-// threshold (-0.7) used previously. We also retain the strength-only
-// path so that ad-hoc negative-strength rows still register as
-// contradictions.
-func evidenceIsContradiction(e Evidence) bool {
+// evidenceIsDispute reports whether an evidence row registers a dispute
+// against the artifact. A dispute is visible in the audit trail and
+// downgrades verified → partial, but is NOT sufficient by itself to
+// establish "contradicted" — that requires corroboration.
+//
+// T20-1 (alpha-final): distinguishing challenge from corroborated
+// contradiction is the architectural fix. A type='challenge' row at
+// default strength (-0.6) is a "someone questioned this" signal. It must
+// not, by itself, permanently convert verified work into established
+// contradiction. Substantiation requires EITHER:
+//   - two or more challenge rows (corroborating disputes),
+//   - a strong negative observation (≤ -0.7), or
+//   - cumulative negative evidence weight ≤ negativeCorroborationSum.
+//
+// A weak negative observation (-0.7 < strength < 0) is a dispute, not a
+// contradiction.
+func evidenceIsDispute(e Evidence) bool {
 	if e.Type == "challenge" {
 		return true
 	}
-	return e.Strength <= -0.7
+	if e.Type == "observation" && e.Strength < 0 && e.Strength > -0.7 {
+		return true
+	}
+	return false
+}
+
+// negativeCorroborationSum is the cumulative negative strength at which
+// multiple dispute/weak-negative observations corroborate each other into
+// established contradiction. Mirrors corroborationSum (1.0) on the
+// positive side: three default-strength challenge rows (-0.6 each,
+// -1.8 total) cross this threshold; two (-1.2) cross it too. Two weak
+// negative observations (-0.5 each, -1.0 total) also cross it. The
+// threshold intentionally requires more than one unsubstantiated voice
+// to flip the verification state — preventing "one random dispute
+// permanently converts verified work to contradicted" patterns.
+const negativeCorroborationSum = -1.0
+
+// evidenceSetHasContradiction reports whether the evidence set
+// establishes a substantiated contradiction. This is the corroboration
+// gate that protects the verified → contradicted transition from a
+// single unsubstantiated challenge row.
+//
+// The earlier per-row evidenceIsContradiction helper conflated "this row
+// is a dispute" with "this artifact is contradicted." That asymmetry let
+// one challenge evidence row permanently convert verified work into
+// established contradiction with no corroboration and no recovery path.
+// T20-1 closes that gap: a single challenge row registers a dispute
+// (visible in audit, downgrades to partial) but cannot establish
+// contradiction alone.
+func evidenceSetHasContradiction(evidence []Evidence) bool {
+	if len(evidence) == 0 {
+		return false
+	}
+	var (
+		negativeSum       float64
+		hasStrongNegative bool // single observation ≤ -0.7 — substantiated by its own weight
+		hasDesignatedNeg  bool // designated verifier (test/reproduction/decision_outcome) with negative strength
+	)
+	for _, e := range evidence {
+		// Strong negative observation: substantiated single source.
+		if e.Type == "observation" && e.Strength <= -0.7 {
+			hasStrongNegative = true
+		}
+		// Designated verifier with negative strength: a failing test is
+		// substantiated contradiction on its own.
+		if evidenceDesignatedForVerification[e.Type] && e.Strength < 0 {
+			hasDesignatedNeg = true
+		}
+		// Cumulative negative weight — challenge rows (-0.6) and weak
+		// negative observations both contribute.
+		if e.Type == "challenge" || e.Type == "observation" {
+			if e.Strength < 0 {
+				negativeSum += e.Strength
+			}
+		}
+	}
+	return hasStrongNegative || hasDesignatedNeg || negativeSum <= negativeCorroborationSum
 }
 
 func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerification, error) {
@@ -5322,26 +5386,31 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 		// F8.1: cancellation locks verification BELOW verified. Evidence
 		// attached before or after cancellation is preserved as audit
 		// history, but it cannot promote the cancelled work back to a
-		// success state. A contradictory evidence row IS still surfaced
-		// as 'contradicted' (it explicitly documents the failure); any
-		// other evidence pattern yields 'unverified' — the cancelled
-		// work is neither a verified success nor a partial confidence.
-		var hasContradiction bool
-		for _, e := range evidence {
-			if evidenceIsContradiction(e) {
-				hasContradiction = true
-				break
-			}
-		}
-		if hasContradiction {
+		// success state. A substantiated contradictory evidence set IS
+		// still surfaced as 'contradicted' (it explicitly documents the
+		// failure); any other evidence pattern yields 'unverified' — the
+		// cancelled work is neither a verified success nor a partial
+		// confidence.
+		//
+		// T20-1: the contradiction gate requires corroboration, matching
+		// the open/done paths. A single unsubstantiated challenge row
+		// against a cancelled work is recorded as audit history (visible
+		// in evidence listing) but does NOT promote verification above
+		// unverified — the cancelled work is not "verified success"
+		// regardless of disputes.
+		if evidenceSetHasContradiction(evidence) {
 			verification = WorkVerificationContradicted
 		} else {
 			verification = WorkVerificationUnverified
 		}
 	} else if len(evidence) > 0 {
-		// Walk the evidence set, classifying each row. We track four
+		// Walk the evidence set, classifying each row. We track several
 		// orthogonal properties:
-		//   hasContradiction — any challenge row or strongly negative row
+		//   hasContradiction — corroborated contradiction (T20-1: requires
+		//                     substantiation, see evidenceSetHasContradiction)
+		//   hasDispute       — unsubstantiated challenge row or weak
+		//                     negative observation (visible in audit, but
+		//                     does NOT establish contradiction)
 		//   hasDesignated    — any test/reproduction/decision_outcome row
 		//   hasHighObs       — any observation row with strength ≥ 0.7
 		//   observationSum   — cumulative strength of observation rows
@@ -5350,17 +5419,17 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 		// is the verification condition (BLOCKER 3): an observation alone
 		// at default strength cannot verify, but corroboration does.
 		var (
-			hasContradiction bool
-			hasDesignated    bool
-			hasHighObs       bool
-			observationSum   float64
-			hasOutcome       bool
-			hasAudit         bool
-			hasAction        bool
+			hasDispute     bool
+			hasDesignated  bool
+			hasHighObs     bool
+			observationSum float64
+			hasOutcome     bool
+			hasAudit       bool
+			hasAction      bool
 		)
 		for _, e := range evidence {
-			if evidenceIsContradiction(e) {
-				hasContradiction = true
+			if evidenceIsDispute(e) {
+				hasDispute = true
 			}
 			if evidenceDesignatedForVerification[e.Type] && e.Strength > 0 {
 				hasDesignated = true
@@ -5382,17 +5451,30 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 				hasAction = true
 			}
 		}
+		hasContradiction := evidenceSetHasContradiction(evidence)
 
 		switch {
 		case hasContradiction:
-			// BLOCKER 2 fix: contradiction takes priority over verification.
-			// A challenge row at default strength (-0.6) was previously
-			// ignored because the verifier used a strength-only check
-			// (-0.7 threshold). The new evidenceIsContradiction helper
-			// recognises both type='challenge' rows and strongly negative
-			// rows, so verification correctly downgrades the moment a
-			// challenge row arrives.
+			// T20-1: contradiction only fires when corroborated
+			// (≥1.0 cumulative negative, OR designated negative, OR
+			// strong negative observation ≤ -0.7). A single default-
+			// strength challenge row alone is a dispute, not a
+			// contradiction — verified work is downgraded to partial
+			// (visible in audit), not permanently flipped to contradicted.
 			verification = WorkVerificationContradicted
+		case hasDispute && hasOutcome && (hasDesignated || hasHighObs || observationSum >= corroborationSum):
+			// T20-1: an unsubstantiated dispute on otherwise-verified
+			// work downgrades to partial. The dispute is visible in the
+			// audit trail (via ListEvidenceForArtifact) so operators and
+			// agents can see "someone questioned this," but the work does
+			// not become contradicted until the dispute is corroborated
+			// or resolved.
+			verification = WorkVerificationPartial
+		case hasDispute && (hasOutcome || hasAudit || hasAction):
+			// Disputed work that lacks verification-grade corroboration
+			// anyway stays partial — the dispute doesn't drag it down
+			// further, but it doesn't promote either.
+			verification = WorkVerificationPartial
 		case hasOutcome && (hasDesignated || hasHighObs || observationSum >= corroborationSum):
 			// Outcome evidence + corroboration → verified.
 			//
@@ -5483,6 +5565,103 @@ func (dm *DatabaseManager) ReopenWorkWithContext(workID string, ac ActiveContext
 		return nil, fmt.Errorf("reopen: derive verification: %w", err)
 	}
 	return dm.GetWork(workID)
+}
+
+// ResolveWorkContradiction is the agent-facing recovery path for T20-1.
+//
+// It neutralizes dispute evidence rows on a work item by setting
+// expires_at to now. The rows remain in the `evidence` table (the audit
+// trail is intact and reconstructable), but they no longer contribute
+// to DeriveWorkVerification because loadEvidenceForRecompute filters
+// expired rows.
+//
+// After neutralization, DeriveWorkVerification re-derives from the
+// remaining evidence set, so a previously-verified work that was
+// downgraded by an unsubstantiated dispute recovers to verified.
+//
+// `reason` is recorded in the `notes` field of the most recent
+// dispute row that was neutralized, so the resolution event is
+// auditable alongside the original dispute.
+//
+// T20-1 invariant: this is the ONLY recovery path. Resolution is
+// always auditable, never silent. Evidence is never deleted.
+func (dm *DatabaseManager) ResolveWorkContradiction(workID, reason string) error {
+	if workID == "" {
+		return fmt.Errorf("work_id is required for resolve-contradiction")
+	}
+	if reason == "" {
+		return fmt.Errorf("reason is required for resolve-contradiction (audit trail)")
+	}
+
+	// Verify the work exists.
+	var exists int
+	if err := dm.db.QueryRow(
+		`SELECT COUNT(*) FROM works WHERE id = ?`, workID).Scan(&exists); err != nil {
+		return fmt.Errorf("resolve-contradiction: read work: %w", err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("work not found: %s", workID)
+	}
+
+	now := time.Now().Unix()
+
+	// Neutralize dispute rows. We target type='challenge' rows plus
+	// weak negative observations (the dispute set, NOT the substantiated
+	// contradiction set — a strong negative observation (≤ -0.7) and a
+	// designated negative row are preserved so the contradiction remains
+	// auditable even after a "resolve" attempt; if the operator wants to
+	// withdraw those, they delete the work or annotate, not via this
+	// path). T20-1: never delete evidence rows; only neutralize.
+	//
+	// The reason is stamped into the row's notes via a JSON merge so the
+	// audit trail can answer "who resolved this and why."
+	tx, err := dm.SQLDB().Begin()
+	if err != nil {
+		return fmt.Errorf("resolve-contradiction: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`
+		UPDATE evidence
+		SET expires_at = ?,
+		    notes = CASE
+		      WHEN notes IS NULL OR notes = '' THEN json_object('resolved_reason', ?, 'resolved_at', ?)
+		      ELSE json_patch(notes, json_object('resolved_reason', ?, 'resolved_at', ?))
+		    END
+		WHERE artifact_id = ?
+		  AND artifact_type = 'work'
+		  AND expires_at IS NULL
+		  AND (
+		    type = 'challenge'
+		    OR (type = 'observation' AND strength < 0 AND strength > -0.7)
+		  )
+	`, now, reason, now, reason, now, workID)
+	if err != nil {
+		return fmt.Errorf("resolve-contradiction: neutralize disputes: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("resolve-contradiction: commit: %w", err)
+	}
+
+	// Record the resolution event in the work event ledger (audit trail).
+	// Use a note_appended event so the resolution reason is inspectable
+	// alongside the original work timeline.
+	if _, err := dm.AddWorkNoteWithContext(workID,
+		fmt.Sprintf("resolve-contradiction: %s (rows neutralized: %d)", reason, affected),
+		ActiveContext{SessionID: "resolve-contradiction"}); err != nil {
+		// Resolution already persisted; the note is auxiliary.
+		// Log but don't fail.
+		dm.LogAudit(AuditWarn, "work", "resolve-contradiction: failed to append audit note",
+			"", AuditContext{"work_id": workID, "err": err.Error()})
+	}
+
+	// Re-derive verification from the now-cleaned evidence set.
+	if _, err := dm.DeriveWorkVerification(workID); err != nil {
+		return fmt.Errorf("resolve-contradiction: rederive: %w", err)
+	}
+	return nil
 }
 
 // UpdateWorkWithContext handles title/content/status updates via events.

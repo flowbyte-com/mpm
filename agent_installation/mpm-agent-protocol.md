@@ -241,6 +241,137 @@ framework's tool runtime) belong in the host adapter's own documentation,
 
 ---
 
+## 7. ARTIFACT DISCOVERY & INTERPRETATION
+
+MPM holds several kinds of durable knowledge. They are not interchangeable.
+The agent must interpret each artifact according to its type, not as a
+generic "memory item." Treating a theory as a fact, or a decision as an
+immutable truth, or a reference as current authority — silently
+corrupts downstream work.
+
+### 7.1 Interpretation contract
+
+| Artifact   | When to look                                              | How to interpret                                                                                                       |
+| ---------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| memory     | prior knowledge / observation relevant to current task    | durable observed information. Trust the content; reinforcement and weight signal reliability but do not auto-promote it to other artifact types. |
+| decision   | before making or revisiting a choice                      | prior rationale, **not** immutable truth. A decision may be superseded (`metadata.superseded_by`) or invalidated. Always check before re-deciding. |
+| theory     | investigating uncertain / unexplained behavior            | **hypothesis, not fact.** Status is `pending → proven` / `pending → disproven`. Pending theories are unresolved beliefs; do not act on them as established truth. |
+| lesson     | recurring failure / success / setup pattern               | learned constraint. Type is `warning | practice | insight`. Lessons are experience-derived; respect them, but they may be stale. |
+| skill      | repeatable non-obvious workflow                           | reusable procedure. Skills are *approved for reuse*; their `when_to_use` is the trigger taxonomy. A stale skill is still actionable. |
+| reference  | domain-specific investigation (API doc, framework manual, spec, vendor doc) | consultable external/imported material. **Verify freshness before relying** — see §8. Reference ≠ current authority. |
+| topic      | need broader retrieval across artifacts                   | organizational / retrieval context. Topics group memories, decisions, theories, lessons, skills, and references. Use topics to widen a query without knowing IDs. |
+| work       | task continuity                                            | current lifecycle state (`open / done / cancelled`) plus verification (`unverified / verified / partial / contradicted`). Work is *state*, not knowledge. |
+| handoff    | session transition                                        | previous session's continuation state. Wake reads `last_handoff`; handoff writes are how the next session starts oriented. |
+
+### 7.2 Discovery triggers (when to look)
+
+Discovery is **context-triggered**, not mechanically repeated. Each call
+costs context; only invoke when the task context suggests the artifact
+class is relevant.
+
+| Signal in task context                              | Probe first                                                  |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| "We've done this before" / "Is there a skill for..." | `proactive_recall_hint` (skills surface with `when_to_use` matching) |
+| "What did we decide about X?" / "Before I decide..." | `mpm_memory query` with `collection=decisions`              |
+| "Why does X behave this way?" / "We suspect..."     | `mpm_memory query` with `collection=theories`               |
+| "We keep hitting this same error"                   | `mpm_lessons search` (tag filter if known)                  |
+| "I need to check the WordPress / vendor / API doc"  | `mpm_references list` (then `show`/`search` for the relevant doc) |
+| "What work is outstanding / what did I just ship"   | `mpm_work` list with `status=open` (or `done`)              |
+| "Where did we leave off last session?"              | `read_wake_context` (handoff is already in the payload)     |
+
+**Do not invoke all of these every turn.** That is a discovery storm.
+Probe the one or two artifact classes the task signal points at, then
+inspect the bounded result before retrieving full content.
+
+### 7.3 Discovery is not authority
+
+Finding something relevant does not make it true, current, or safe to
+execute. The interpretation column above is the contract; the
+probing rules are convenience. If a decision is superseded, follow the
+supersede pointer — do not re-decide. If a theory is pending, treat it
+as a hypothesis — do not act on it. If a reference is stale or
+version-bound, verify against current authority before relying on it.
+
+---
+
+## 8. REFERENCE FRESHNESS CONTRACT
+
+References are external or imported material (PDFs, specs, whitepapers,
+vendor docs, framework manuals). They are not skill procedures — they
+are material to **consult**, not commands to execute.
+
+A reference can be relevant without being current. The system must make
+that distinction visible before an agent turns an old document into a
+new mistake.
+
+### 8.1 The five freshness states
+
+| State             | Meaning                                                                  | Safe to act on as authority? |
+| ----------------- | ------------------------------------------------------------------------ | ---------------------------- |
+| `current`         | Recently re-ingested or explicitly tagged verified / current              | yes — within scope of what the reference says |
+| `stale`           | Last ingested more than `FreshnessAgeThreshold` (default 90 days) ago with no override signal | no — verify against current authority first |
+| `version-bound`   | Tag or import_reason identifies a specific upstream version (e.g. `WordPress 6.7`, `v6.7`, `version-bound:WordPress 6.7`) | only for that recorded version |
+| `historical`      | Explicitly tagged or import_reason indicates past-state / as-of material | no — useful for context, not current authority |
+| `unknown`         | No freshness signals available (empty fields, unparseable, clock skew) | no — consult with caution |
+
+### 8.2 How freshness is derived (no schema changes)
+
+The freshness signal is **computed at read time** from existing fields.
+There is no new table, no new column, no migration.
+
+Inputs (already in `reference_docs`):
+
+- `last_indexed` — Unix epoch seconds of most recent ingest (auto-bumped).
+- `tags` — JSON-encoded `[]string`. Operator-supplied via `--tag` at `add`.
+- `import_reason` — operator-supplied at `add` via `--reason`.
+
+Signal precedence (first match wins):
+
+1. **Explicit tags** (case-insensitive, scanned in slice order):
+   - `stale` → `stale`
+   - `current`, `verified`, `freshness:current` → `current`
+   - `historical`, `freshness:historical` → `historical`
+   - `version-bound:<X>`, `version:<X>` → `version-bound`
+2. **import_reason patterns:**
+   - `version:`, `for <thing>`, contains ` v` → `version-bound`
+   - `historical`, contains `as-of ` → `historical`
+3. **Age fallback on `last_indexed`:**
+   - older than 90 days → `stale`
+   - within 90 days → `current`
+   - future (clock skew) or unparseable → `unknown`
+
+The classifier is the single source of truth:
+
+- `internal/core/reference_freshness.go` — `Freshness` enum and
+  `ClassifyReferenceFreshness(doc, now)` / `ClassifyReferenceFreshnessFromFields(tagsJSON, importReason, lastIndexed, now)`.
+- Surfaced in `mpm_references list`, `mpm_references show`,
+  `mpm_references search` as the `freshness` field on each row.
+
+### 8.3 How agents must apply this contract
+
+When a reference surfaces in `mpm_references list` / `show` / `search`,
+read the `freshness` field alongside the title and tags:
+
+- `current` — proceed normally; the reference is the substrate's
+  best-effort current state.
+- `stale` — useful background; verify against the upstream source
+  before relying on it for anything load-bearing.
+- `version-bound` — apply only to the recorded version. If the task
+  asks about a different version, this reference does not apply.
+- `historical` — useful for understanding past state (post-mortems,
+  archeology, prior architectures). Not current authority.
+- `unknown` — consult with caution. Default behavior is to verify
+  against current authority before treating any extracted guidance as
+  binding.
+
+**Reference is not skill.** A reference containing procedural
+instructions is **material to consult**, not a procedure to run. Do
+not auto-invoke reference contents the way you would invoke a skill
+read via `mpm_skills`. Skills are approved-for-reuse; references are
+consult-and-verify.
+
+---
+
 ## What this protocol does NOT claim
 
 - It does **not** claim MPM wakes the agent by itself. The host runtime
