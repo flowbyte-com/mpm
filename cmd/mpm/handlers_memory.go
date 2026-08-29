@@ -15,6 +15,13 @@ import (
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
+// memoryMaxFileBytes caps the --file payload size accepted by
+// `mpm memory add`. The pre-audit path either fell through as positional
+// content (length 18 stored) or silently truncated large files; F-A3
+// demands an explicit ceiling rather than silent truncation. 100 MiB
+// matches the reference-add ceiling so the two ingest paths agree.
+const memoryMaxFileBytes = 100 << 20
+
 // ============================================================================
 // Handler: prime-directives
 // ============================================================================
@@ -136,6 +143,7 @@ func handleMemoryAdd(args []string) int {
 	expiresIn := ""
 	interactive := false
 	factArg := ""    // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
+	fileArg := ""    // --file <path>: read content from file (F-A3 fix — no silent 64KB truncation)
 	tagsArg := ""    // --tags <csv>: comma-separated tags
 	weightArg := 1.0 // --weight <0-100>: weight; default 1 (matches the hardcoded value AddMemoryWithWeight substitutes)
 	weightSet := false // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
@@ -146,6 +154,18 @@ func handleMemoryAdd(args []string) int {
 			jsonOutput = true
 		case "-i", "--interactive":
 			interactive = true
+		case "--file", "-f":
+			// F-A3: --file reads content from a file in full, capped at
+			// memoryMaxFileBytes (100 MiB). The previous behaviour was
+			// either to fall through as positional content (length 18
+			// stored for `mpm memory add --file /tmp/p1g.txt`) or to
+			// silently truncate to ~64KB. We now reject oversized files
+			// explicitly and never silently truncate.
+			if i+1 >= len(args) {
+				return respond("", "--file requires a path\n", 1)
+			}
+			i++
+			fileArg = args[i]
 		case "--fact":
 			if i+1 >= len(args) {
 				return respond("", "--fact requires a value\n", 1)
@@ -170,9 +190,17 @@ func handleMemoryAdd(args []string) int {
 			weightArg = w
 			weightSet = true
 		case "--expires-in":
-			if i+1 < len(args) {
-				i++
-				expiresIn = args[i]
+			if i+1 >= len(args) {
+				return respond("", "--expires-in requires a value (e.g. 7d, 24h, 30m)\n", 1)
+			}
+			i++
+			expiresIn = args[i]
+			// F-H2: validate the duration at parse time so we don't
+			// create the memory before discovering the value is
+			// garbage (which would force a rollback row, leaving
+			// a memory with no TTL that the operator didn't expect).
+			if _, parseErr := parseDuration(expiresIn); parseErr != nil {
+				return respond("", fmt.Sprintf("--expires-in %q: invalid duration (use Nd, Nh, Nm, or Go duration like 24h)\n", expiresIn), 1)
 			}
 		default:
 			contentArgs = append(contentArgs, args[i])
@@ -190,31 +218,68 @@ func handleMemoryAdd(args []string) int {
 		}
 		content = drafted
 	} else {
-		// Content precedence: --fact > positional args. This mirrors the
-		// mpm_memory action=save contract (`params.fact`) so the CLI and
-		// the tool path agree on what "the fact" means. If both are given,
-		// --fact wins and the positional args are silently dropped — log
-		// this via warn so the operator notices, since the alternative is
-		// the same silent-failure shape this fix exists to prevent.
-		switch {
-		case factArg != "":
-			content = factArg
-			if len(contentArgs) > 0 {
-				usererror.Warn("--fact provided alongside %d positional arg(s); positional dropped (use one or the other)", len(contentArgs))
+		// Content precedence: --file > --fact > positional args. The --file
+		// branch is F-A3's headline fix: read the file in full, never
+		// silently truncate to ~64KB. A file larger than memoryMaxFileBytes
+		// (100 MiB) is rejected with an explicit error so the operator
+		// knows the memory was NOT stored.
+		if fileArg != "" {
+			// Mutual exclusion: --file alongside --fact is an operator
+			// mistake (two ways to specify content). Reject explicitly.
+			if factArg != "" {
+				return respond("", "--file and --fact are mutually exclusive (use one)\n", 1)
 			}
-		case len(contentArgs) == 0:
-			return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>\n", 1)
-		default:
-			content = strings.Join(contentArgs, " ")
+			if len(contentArgs) > 0 {
+				return respond("", "--file and positional content are mutually exclusive (use one)\n", 1)
+			}
+			info, statErr := os.Stat(fileArg)
+			if statErr != nil {
+				return respond("", fmt.Sprintf("--file: %v\n", statErr), 1)
+			}
+			if info.Size() > memoryMaxFileBytes {
+				return respond("", fmt.Sprintf("--file: %s is %d bytes (max %d = 100 MiB) — refusing to store a memory this large; chunk it or use `mpm reference add` instead\n", fileArg, info.Size(), memoryMaxFileBytes), 1)
+			}
+			data, err := os.ReadFile(fileArg)
+			if err != nil {
+				return respond("", fmt.Sprintf("--file: read %s: %v\n", fileArg, err), 1)
+			}
+			content = string(data)
+		} else {
+			// Content precedence: --fact > positional args. This mirrors the
+			// mpm_memory action=save contract (`params.fact`) so the CLI and
+			// the tool path agree on what "the fact" means. If both are given,
+			// --fact wins and the positional args are silently dropped — log
+			// this via warn so the operator notices, since the alternative is
+			// the same silent-failure shape this fix exists to prevent.
+			switch {
+			case factArg != "":
+				content = factArg
+				if len(contentArgs) > 0 {
+					usererror.Warn("--fact provided alongside %d positional arg(s); positional dropped (use one or the other)", len(contentArgs))
+				}
+			case len(contentArgs) == 0:
+				return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>\n", 1)
+			default:
+				content = strings.Join(contentArgs, " ")
+			}
 		}
 	}
 
 	// Parse tags: comma-separated, trim spaces, drop empties.
+	// F-H3: --tags accepts CSV only. A value that LOOKS LIKE JSON
+	// (starts with `{` or `[`) is rejected explicitly — the pre-audit
+	// behaviour stored the literal string as a single tag, producing
+	// a row like ["{\"a\":1}"] in the database (a nested-JSON array
+	// wrapper) which downstream consumers couldn't parse.
 	var tagsList []string
 	if tagsArg != "" {
+		trimmed := strings.TrimSpace(tagsArg)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			return respond("", fmt.Sprintf("--tags: JSON not supported (use CSV, e.g. --tags a,b,c); got %q\n", tagsArg), 1)
+		}
 		for _, t := range strings.Split(tagsArg, ",") {
-			if trimmed := strings.TrimSpace(t); trimmed != "" {
-				tagsList = append(tagsList, trimmed)
+			if tt := strings.TrimSpace(t); tt != "" {
+				tagsList = append(tagsList, tt)
 			}
 		}
 	}
@@ -254,14 +319,14 @@ func handleMemoryAdd(args []string) int {
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
 
-	// Set TTL if --expires-in was provided
+	// Set TTL if --expires-in was provided. Validation happens at
+	// parse time (see the --expires-in case above), so by the time we
+	// get here parseDuration cannot fail.
 	var suggestions []map[string]interface{}
 	if dm := getDBConcrete(); dm != nil {
 		if expiresIn != "" {
-			dur, parseErr := parseDuration(expiresIn)
-			if parseErr == nil {
-				dm.SetMemoryTTL(mem.ID, time.Now().Add(dur))
-			}
+			dur, _ := parseDuration(expiresIn)
+			dm.SetMemoryTTL(mem.ID, time.Now().Add(dur))
 		}
 
 		// Get topic suggestions (non-blocking — failures are silently ignored)
@@ -283,26 +348,44 @@ func handleMemoryAdd(args []string) int {
 	mem.SuggestedTopics = suggestions
 
 	if jsonOutput {
-		// JSON output mode
+		// JSON output mode. The envelope MUST stay parity-compatible with
+		// `mpm call mpm_memory save` (internal/core/memory_tools.go), so an
+		// agent that automates against either surface sees the same shape:
+		//   - success, id, content, tags, weight, pointer (always)
+		//   - content_truncated / content_bytes / note (only when content
+		//     exceeded the wire bound, per audit finding F4)
+		// `suggested_topics` is a CLI-only convenience hint — agents that
+		// want it should call `mpm memory suggest` explicitly.
+		echoContent, truncated := mpminternal.BoundInlineContent(mem.Content)
 		type jsonResult struct {
-			Success         bool                     `json:"success"`
-			ID              string                   `json:"id"`
-			Content         string                   `json:"content"`
+			Success           bool                     `json:"success"`
+			ID                string                   `json:"id"`
+			Content           string                   `json:"content"`
 			// Echo tags/weight so the operator can verify at the CLI that
 			// the flags were applied — not just that the call returned
 			// success. Production incident: silent-failure shape hid the
 			// fact that --tags/--weight weren't recognized; the user
 			// only saw the bug when they queried sqlite3 directly.
-			Tags            []string                 `json:"tags,omitempty"`
-			Weight          float64                  `json:"weight,omitempty"`
-			SuggestedTopics []map[string]interface{} `json:"suggested_topics,omitempty"`
+			Tags              []string                 `json:"tags,omitempty"`
+			Weight            float64                  `json:"weight,omitempty"`
+			Pointer           string                   `json:"pointer"`
+			ContentTruncated  bool                     `json:"content_truncated,omitempty"`
+			ContentBytes      int                      `json:"content_bytes,omitempty"`
+			Note              string                   `json:"note,omitempty"`
+			SuggestedTopics   []map[string]interface{} `json:"suggested_topics,omitempty"`
 		}
 		result := jsonResult{
 			Success: true,
 			ID:      mem.ID,
-			Content: mem.Content,
+			Content: echoContent,
 			Tags:    tagsList,
 			Weight:  weightArg,
+			Pointer: "mpm://memory/" + mem.ID,
+		}
+		if truncated {
+			result.ContentTruncated = true
+			result.ContentBytes = len(mem.Content)
+			result.Note = "content stored in full; inline echo bounded — retrieve via mpm memory show"
 		}
 		if len(suggestions) > 0 {
 			result.SuggestedTopics = suggestions
