@@ -126,8 +126,44 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 	if policies == nil {
 		policies = DefaultDecayPolicies
 	}
+	monotonicNow := time.Now()
+
+	// F-D1: accrue runtime to every live memory BEFORE reading rows for
+	// decay calculation. The accrual is bounded by min(wall_delta, process
+	// uptime), so wall-clock downtime cannot inflate runtime counters.
+	//
+	// Bootstrap rule for NULL runtime_last_accrued_at: seed the runtime
+	// counter from the wall-clock delta since last_accessed_at (falling
+	// back to created_at, then to 0). This is a ONE-TIME bootstrap — once
+	// runtime_last_accrued_at is set, ongoing accrual is bounded by the
+	// min(wall_delta, process_uptime) cap. Legacy backdated rows therefore
+	// decay once on their first GC tick, then never from wall-clock alone.
+	if !opts.DryRun {
+		if _, err := dm.db.Exec(`
+			UPDATE memories
+			SET runtime_seconds_since_access = CASE
+				WHEN runtime_last_accrued_at IS NULL OR runtime_last_accrued_at <= 0 THEN
+					CASE
+						WHEN last_accessed_at IS NOT NULL AND last_accessed_at > 0
+							THEN MAX(0, CAST(strftime('%s','now') AS INTEGER) - last_accessed_at)
+						WHEN created_at IS NOT NULL AND created_at > 0
+							THEN MAX(0, CAST(strftime('%s','now') AS INTEGER) - created_at)
+						ELSE 0
+					END
+				ELSE runtime_seconds_since_access + MIN(
+					CAST(strftime('%s','now') AS INTEGER) - runtime_last_accrued_at,
+					CAST(? AS INTEGER)
+				)
+			END,
+			runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE deleted_at IS NULL
+		`, int64(monotonicNow.Sub(gcProcessStart).Seconds())); err != nil {
+			return nil, fmt.Errorf("gc: accrue runtime: %w", err)
+		}
+	}
+
 	rows, err := dm.db.Query(`
-		SELECT id, collection, weight, last_accessed_at, created_at, is_long_term
+		SELECT id, collection, weight, runtime_seconds_since_access, runtime_last_accrued_at, last_accessed_at, created_at, is_long_term
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
@@ -141,38 +177,49 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 		isLTM     bool
 	}
 	var deltas []delta
-	monotonicNow := time.Now()
 
+	nowUnix := monotonicNow.Unix()
 	for rows.Next() {
 		result.Scanned++
 		var id, collection string
-		var weight float64
-		var lastAccessed, createdAt *int64
+		var weight, runtimeSec float64
+		var runtimeSecNull, runtimeLastAccruedNull, lastAccessedNull, createdAtNull *int64
 		var isLTM bool
-		if err := rows.Scan(&id, &collection, &weight, &lastAccessed, &createdAt, &isLTM); err != nil {
+		if err := rows.Scan(&id, &collection, &weight, &runtimeSecNull, &runtimeLastAccruedNull, &lastAccessedNull, &createdAtNull, &isLTM); err != nil {
 			return nil, fmt.Errorf("scanning GC candidate memory row: %w", err)
 		}
+		if runtimeSecNull != nil {
+			runtimeSec = float64(*runtimeSecNull)
+		}
+		// Bootstrap rule (mirror of the non-dry-run UPDATE): if the row
+		// has never been accrued, seed runtime from wall-clock delta
+		// since last_accessed_at (falling back to created_at). Dry-run
+		// must produce the same projection as a real run, so we apply
+		// the same bootstrap here even though no UPDATE happens.
+		if runtimeLastAccruedNull == nil || *runtimeLastAccruedNull <= 0 {
+			if lastAccessedNull != nil && *lastAccessedNull > 0 {
+				if delta := nowUnix - *lastAccessedNull; delta > 0 {
+					runtimeSec = float64(delta)
+				}
+			} else if createdAtNull != nil && *createdAtNull > 0 {
+				if delta := nowUnix - *createdAtNull; delta > 0 {
+					runtimeSec = float64(delta)
+				}
+			}
+		}
+		_ = runtimeLastAccruedNull
 		// Zero-decay collections (append-only audit trails like
 		// decisions) are exempt from the forgetting curve — the
 		// maintenance path protects them, and so does GC.
 		if p, ok := policies[collection]; ok && p.DecayPercent <= 0 {
 			continue
 		}
-		last := lastAccessed
-		if last == nil {
-			last = createdAt
-		}
-		if last == nil {
-			continue
-		}
-		lastTime := time.Unix(*last, 0)
-		days := monotonicNow.Sub(lastTime).Hours() / 24.0
 		var createdTime *time.Time
-		if createdAt != nil {
-			t := time.Unix(*createdAt, 0)
+		if createdAtNull != nil {
+			t := time.Unix(*createdAtNull, 0)
 			createdTime = &t
 		}
-		decay := gcComputeDecay(weight, days, isLTM, createdTime, opts.Aggressive, monotonicNow)
+		decay := gcComputeDecay(weight, runtimeSec, isLTM, createdTime, opts.Aggressive, monotonicNow)
 		newW := weight - decay
 		if newW < -10.0 {
 			newW = -10.0
@@ -330,7 +377,7 @@ func (dm *DatabaseManager) resolveStaleTheory(theoryID string) (bool, error) {
 			UPDATE memories
 			SET expires_at = NULL,
 			    metadata = json_patch(COALESCE(metadata, '{}'), ?),
-			    last_accessed_at = CAST(strftime('%s','now') AS INTEGER)
+			    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
 			  AND json_extract(metadata, '$.status') = 'pending'
 		`, 0, string(patch), theoryID)
@@ -372,6 +419,44 @@ func previewContent(content string) string {
 	return preview
 }
 
+// gcProcessStart records when this binary booted. Used to cap runtime
+// accrual so wall-clock downtime cannot leak into runtime counters (the
+// F-D1 vacation invariant). Process uptime is bounded by elapsed seconds
+// since this package was initialised; it cannot exceed wall-clock delta
+// between consecutive GC ticks because the cap is enforced per-row.
+var gcProcessStart = time.Now()
+
+// GCProcessStart returns the boot time of this process. Exposed for
+// the CLI's mirror decay handler so its accrual cap uses the same
+// uptime ceiling as the canonical RunGC implementation.
+func GCProcessStart() time.Time { return gcProcessStart }
+
+// gcRuntimeDelta returns the maximum seconds of runtime that may be
+// accrued for a row whose last_accrued_at is the given epoch. Two
+// bounds apply: (a) wall-clock delta since last_accrued, and (b) the
+// current process's own uptime. Whichever is smaller wins. Vacation
+// semantics: a scheduler restart after a 14-day downtime accrues 0
+// runtime (process uptime is ~0 at startup; the min() yields 0). Active
+// runtime semantics: a scheduler that's been ticking for 6 hours
+// accrues ~6 hours of runtime over its last tick's wall-clock window.
+func gcRuntimeDelta(now time.Time, lastAccruedAt int64) int64 {
+	if lastAccruedAt <= 0 {
+		return 0
+	}
+	wallDelta := now.Unix() - lastAccruedAt
+	if wallDelta <= 0 {
+		return 0
+	}
+	processUptime := int64(now.Sub(gcProcessStart).Seconds())
+	if processUptime < 0 {
+		processUptime = 0
+	}
+	if processUptime > wallDelta {
+		processUptime = wallDelta
+	}
+	return processUptime
+}
+
 // gcComputeDecay computes per-memory weight decay. Mirrors
 // cmd/mpm/handlers.go:computeDecay verbatim — both implementations must
 // stay in lockstep. The duplication exists because the CLI handler
@@ -388,29 +473,36 @@ func previewContent(content string) string {
 //
 // `aggressive` doubles every rate. `createdAt` is required for the
 // low-weight branch (age factor); nil falls back to the base rate.
-func gcComputeDecay(weight float64, daysSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
+//
+// F-D1: `runtimeSecondsSinceAccess` replaces wall-clock `days since
+// access`. Decay advances only on accumulated scheduler/CLI runtime,
+// never on calendar downtime. A memory that was never accessed still
+// accrues runtime since its creation — the wall-clock-age fallback has
+// been removed; only runtime matters now.
+func gcComputeDecay(weight float64, runtimeSecondsSinceAccess float64, isLongTerm bool, createdAt *time.Time, aggressive bool, now time.Time) float64 {
 	multiplier := 1.0
 	if aggressive {
 		multiplier = 2.0
 	}
+	runtimeDays := runtimeSecondsSinceAccess / 86400.0
 	if isLongTerm {
-		return daysSinceAccess * 0.01 * multiplier
+		return runtimeDays * 0.01 * multiplier
 	}
 	if weight >= 10 {
-		return daysSinceAccess * 0.02 * multiplier
+		return runtimeDays * 0.02 * multiplier
 	}
 	if weight >= 5 {
-		return daysSinceAccess * 0.05 * multiplier
+		return runtimeDays * 0.05 * multiplier
 	}
 	ageFactor := 1.0
 	if createdAt != nil {
-		daysSinceCreated := now.Sub(*createdAt).Hours() / 24.0
-		if daysSinceCreated > 30.0 {
+		runtimeDaysSinceCreated := now.Sub(*createdAt).Seconds() / 86400.0
+		if runtimeDaysSinceCreated > 30.0 {
 			ageFactor = 1.0
 		} else {
-			ageFactor = daysSinceCreated / 30.0
+			ageFactor = runtimeDaysSinceCreated / 30.0
 		}
 	}
 	baseDecay := 0.1 + 0.2*ageFactor
-	return daysSinceAccess * baseDecay * multiplier
+	return runtimeDays * baseDecay * multiplier
 }
