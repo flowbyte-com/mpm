@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -44,6 +45,12 @@ func TestConcurrentMcpInstances(t *testing.T) {
 			defer wg.Done()
 			cmd := exec.Command(bin)
 			cmd.Stdin = strings.NewReader("")
+			// Alpha-4.1.1 D-004 fix: mpm-mcp routes the slog default
+			// writer to io.Discard unless MPM_VERBOSE=1, so the
+			// machine interface stays clean. The startup log lines
+			// ("no pidfile singleton") that this regression asserts
+			// are diagnostic output — set MPM_VERBOSE to recover them.
+			cmd.Env = append(os.Environ(), "MPM_VERBOSE=1")
 			var out, errOut bytes.Buffer
 			cmd.Stdout = &out
 			cmd.Stderr = &errOut
@@ -102,6 +109,11 @@ func TestNoPidfileWrittenAfterStartup(t *testing.T) {
 
 	cmd := exec.Command(bin)
 	cmd.Stdin = strings.NewReader("")
+	// Alpha-4.1.1 D-004 fix: mpm-mcp routes the slog default writer
+	// to io.Discard unless MPM_VERBOSE=1. The startup log line this
+	// regression asserts is diagnostic output — set MPM_VERBOSE to
+	// recover it.
+	cmd.Env = append(os.Environ(), "MPM_VERBOSE=1")
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut

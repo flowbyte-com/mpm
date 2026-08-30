@@ -6243,6 +6243,16 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		}
 	case WorkEventTypeEvidenceObserved:
 		newStatus = ""
+	case WorkEventTypeNoteAppended:
+		// D-003 (alpha-4.1.1): a note is an annotation, not a state
+		// transition. Without this case, the default branch sets
+		// newStatus = "open" and the F-B1 state-machine check
+		// rejects "open → open" — the very transition we never meant
+		// to attempt. Notes must leave status (and verification)
+		// unchanged. The handler treats the note as pure event-log
+		// content; only title/content updates are routed to the
+		// works-row projection at the bottom of this function.
+		newStatus = ""
 	default:
 		newStatus = "open"
 	}

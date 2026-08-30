@@ -228,13 +228,26 @@ func handleRecordDecision(args []string) int {
 		}
 	}
 
-	content := "CHOICE: " + choice
+	// D-007 (alpha-4.1.1) cross-surface fix: the CLI previously prefixed
+	// each structured field with a label ("CHOICE: ", "CONTEXT: ",
+	// "RATIONALE: ") and used single "\n" separators — the same
+	// duplication the MCP path's RecordDecision was carrying. The MCP
+	// path was updated to strings.Join(parts, "\n\n") with no labels;
+	// the CLI must match so a decision recorded via the CLI surface
+	// shows up identically when read back through `mpm decisions show`
+	// (or the MCP equivalent). Metadata still carries the structured
+	// fields; content is the FTS-searchable body, with no labels.
+	var contentParts []string
+	if choice != "" {
+		contentParts = append(contentParts, choice)
+	}
 	if contextText != "" {
-		content += "\nCONTEXT: " + contextText
+		contentParts = append(contentParts, contextText)
 	}
 	if rationale != "" {
-		content += "\nRATIONALE: " + rationale
+		contentParts = append(contentParts, rationale)
 	}
+	content := strings.Join(contentParts, "\n\n")
 
 	meta := map[string]interface{}{}
 	if contextText != "" {

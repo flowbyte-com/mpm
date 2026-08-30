@@ -32,6 +32,7 @@ import (
 	mpmcore "github.com/flowbyte-com/mpm-core"
 
 	"github.com/flowbyte-com/mpm/internal/critic"
+	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -55,7 +56,12 @@ func main() {
 	defer cancel()
 
 	// Open the MPM database via the canonical DatabaseManager (F-007).
-	projectRoot := "."
+	// D-001 (alpha-4.1.1): honor MPM_WORKSPACE so a disposable test
+	// workspace cannot accidentally target production. Explicit -db
+	// still wins — an explicit DB path overrides MPM_WORKSPACE so
+	// operator overrides (e.g. running the critic against a recovered
+	// DB at a non-standard location) keep working.
+	projectRoot := mpmcli.ResolveWorkspace()
 	if *dbPath != "" {
 		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
 	}
