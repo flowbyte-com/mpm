@@ -381,7 +381,7 @@ func TestMaterializer_Depth4Suppressed(t *testing.T) {
 		"suppressed intents must not create new theories; fixture theory remains")
 
 	// CRITICAL audit record must exist for the suppression.
-	rows, err := fx.dm.QueryAuditLog(AuditCritical, "cascade-materializer", "", 1, 10)
+	rows, err := fx.dm.QueryAuditLog(AuditCritical, "cascade-materializer", "", 1, 10, false)
 	require.NoError(t, err)
 	found := false
 	for _, row := range rows {

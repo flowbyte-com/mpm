@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -266,7 +267,11 @@ type ProjectedMemoryEntry struct {
 	Collection         string                  `json:"collection"`
 	CreatedAt          int64                   `json:"created_at"`
 	ReinforcementCount int                     `json:"reinforcement_count"`
-	Weight             int                     `json:"weight"`
+	// Alpha-4.1 F-001: weight is REAL in SQLite (HybridResult.Weight is
+	// float64). Previously declared `int` which silently truncated
+	// values like 7.5 → 7 and surfaced 0 for non-default weights when
+	// the source value couldn't be coerced.
+	Weight float64 `json:"weight"`
 	// RetrievalMetadata key always present; null when never retrieved.
 	RetrievalMetadata *RetrievedEntryMetadata `json:"retrieval_metadata"`
 	Score             float64                 `json:"score"`
@@ -289,16 +294,93 @@ type ProjectedLessonEntry struct {
 	Rationale         string                  `json:"rationale"`
 }
 
+// Alpha-4.1 F-001: shared numeric coercion helpers for projection.
+//
+// HybridSearchMemories stores weight as float64, created_at as int64,
+// and reinforcement_count as int (see HybridResult in
+// internal/core/hybrid_search.go). A previous round of code asserted
+// against a single type per field with `mem["x"].(T)`, which silently
+// returned zero whenever the actual stored value differed (e.g.
+// weight=7.5 stored as float64 but asserted as int). These helpers
+// accept every numeric shape the SQL layer or json.Number decoder may
+// produce, so projection always reports the truthful value.
+//
+// Conversion failure is non-silent: callers can ask for the bool
+// "found" return to distinguish a present-but-zero scalar from a
+// missing field. We never want a missing-field zero to masquerade as a
+// truthful zero in the agent payload.
+func coerceInt64(v interface{}) (int64, bool) {
+	// Coerce every numeric shape the SQL layer or json.Number decoder
+	// may produce so projection always reports the truthful value.
+	switch n := v.(type) {
+	case nil:
+		return 0, false
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	case float32:
+		return int64(n), true
+	case json.Number:
+		i, err := n.Int64()
+		if err == nil {
+			return i, true
+		}
+		f, ferr := n.Float64()
+		if ferr == nil {
+			return int64(f), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+func coerceInt(v interface{}) (int, bool) {
+	i, ok := coerceInt64(v)
+	return int(i), ok
+}
+
+func coerceFloat64(v interface{}) (float64, bool) {
+	// Coerce every numeric shape — see asInt64 comment. Used for weight
+	// (HybridResult stores float64) and combined_score.
+	switch n := v.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		if err == nil {
+			return f, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
 // computeScore derives a scalar from a memory map for projected output.
 // Mirrors the scoring logic used in the FTS retrieval path.
 func computeScore(mem map[string]interface{}) float64 {
-	score, _ := mem["combined_score"].(float64)
-	if score == 0 {
-		weight, _ := mem["weight"].(int)
-		reinf, _ := mem["reinforcement_count"].(int)
-		score = float64(reinf*2) + float64(weight)*1.5
+	if s, ok := coerceFloat64(mem["combined_score"]); ok && s != 0 {
+		return s
 	}
-	return score
+	weight, _ := coerceInt(mem["weight"])
+	reinf, _ := coerceInt(mem["reinforcement_count"])
+	return float64(reinf*2) + float64(weight)*1.5
 }
 
 // formatRationaleForMemory produces a human-readable provenance string for
@@ -308,16 +390,25 @@ func formatRationaleForMemory(mem map[string]interface{}) string {
 	if coll, ok := mem["collection"].(string); ok && coll != "" {
 		parts = append(parts, coll)
 	}
-	if w, ok := mem["weight"].(int); ok && w > 0 {
-		parts = append(parts, fmt.Sprintf("weight %d", w))
+	if w, ok := coerceFloat64(mem["weight"]); ok && w > 0 {
+		parts = append(parts, fmt.Sprintf("weight %s", formatWeight(w)))
 	}
-	if r, ok := mem["reinforcement_count"].(int); ok && r > 0 {
+	if r, ok := coerceInt(mem["reinforcement_count"]); ok && r > 0 {
 		parts = append(parts, fmt.Sprintf("%dx ref", r))
 	}
 	if len(parts) == 0 {
 		return "memory"
 	}
 	return strings.Join(parts, " · ")
+}
+
+// formatWeight renders a weight value without trailing decimals when the
+// number is a whole integer (so "weight 5" instead of "weight 5.000000").
+func formatWeight(w float64) string {
+	if w == float64(int64(w)) {
+		return fmt.Sprintf("%d", int64(w))
+	}
+	return strconv.FormatFloat(w, 'f', -1, 64)
 }
 
 // isMemoryStaleForProjection returns true when a memory has not been accessed
@@ -397,9 +488,12 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			content, _ := mem["content"].(string)
 			tags, _ := mem["tags"].([]string)
 			coll, _ := mem["collection"].(string)
-			createdAt, _ := mem["created_at"].(float64)
-			reinf, _ := mem["reinforcement_count"].(int)
-			weight, _ := mem["weight"].(int)
+			// Alpha-4.1 F-001: use shared helpers that accept int64/float64/json.Number
+			// shapes — the previous strict assertions silently coerced non-zero
+			// values to 0.
+			createdAt, _ := coerceInt64(mem["created_at"])
+			reinf, _ := coerceInt(mem["reinforcement_count"])
+			weight, _ := coerceFloat64(mem["weight"])
 
 			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
 
@@ -2211,6 +2305,11 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 //	               provenance (F-A1 / F14-1 audit rows) for a memory
 //	--days       (optional) lookback window in days; default 7
 //	--limit      (optional) max rows; default 20, max 500
+//	--include_stack (optional, default false) when true, the result
+//	               rows carry the multi-KB stack_trace payload. Most
+//	               callers want the headline event without the stack
+//	               trace; opt in only when triaging a specific failure.
+//	               Alpha-4.1 F-007 / W-002.
 func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	levelStr := getString(p, "level")
 	component := getString(p, "component")
@@ -2233,8 +2332,21 @@ func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			limit = t
 		}
 	}
+	includeStack := false
+	if v, ok := p["include_stack"]; ok {
+		switch t := v.(type) {
+		case bool:
+			includeStack = t
+		case string:
+			includeStack = t == "true" || t == "1" || t == "yes"
+		case float64:
+			includeStack = t != 0
+		case int:
+			includeStack = t != 0
+		}
+	}
 
-	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, artifactID, days, limit)
+	items, err := dm.QueryAuditLog(internal.AuditLevel(levelStr), component, artifactID, days, limit, includeStack)
 	if err != nil {
 		return nil, err
 	}

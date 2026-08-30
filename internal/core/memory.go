@@ -891,7 +891,8 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 	// Convert results to Memory structs
 	memories := make([]*Memory, 0)
 	for rows.Next() {
-		var id, coll, content, tagsJSON, metadataJSON, createdAt string
+		var id, coll, content, tagsJSON, metadataJSON string
+		var createdAt sql.NullString
 		var sessionID sql.NullString
 		var embeddingJSON []byte
 		var rank float64
@@ -899,11 +900,15 @@ func (s *MemoryStore) QueryMemory(query string, collection string, n int, filter
 		if err != nil {
 			return nil, fmt.Errorf("scanning query memory row: %w", err)
 		}
+		var createdAtStr string
+		if createdAt.Valid {
+			createdAtStr = createdAt.String
+		}
 
 		mem := &Memory{
 			ID:         id,
 			Content:    content,
-			CreatedAt:  parseMemoryCreatedAt(createdAt),
+			CreatedAt:  parseMemoryCreatedAt(createdAtStr),
 			Collection: coll,
 			Metadata:   make(map[string]interface{}),
 		}
@@ -1297,17 +1302,22 @@ func scanMemoryRows(rows *sql.Rows, scoreFunc func(content string, query string)
 	defer rows.Close()
 	var memories []*Memory
 	for rows.Next() {
-		var id, coll, content, tagsJSON, metadataJSON, createdAt string
+		var id, coll, content, tagsJSON, metadataJSON string
+		var createdAt sql.NullString
 		var sessionID sql.NullString
 		var embeddingJSON []byte
 		err := rows.Scan(&id, &coll, &content, &sessionID, &tagsJSON, &metadataJSON, &embeddingJSON, &createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("scanning memory row in scanMemoryRows: %w", err)
 		}
+		var createdAtStr string
+		if createdAt.Valid {
+			createdAtStr = createdAt.String
+		}
 		mem := &Memory{
 			ID:         id,
 			Content:    content,
-			CreatedAt:  parseMemoryCreatedAt(createdAt),
+			CreatedAt:  parseMemoryCreatedAt(createdAtStr),
 			Collection: coll,
 			Metadata:   make(map[string]interface{}),
 		}

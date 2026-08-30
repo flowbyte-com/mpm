@@ -179,7 +179,11 @@ func (dm *DatabaseManager) LogSkillWorkshopAudit(skillID, outcome string) string
 // dedup carries the second-actor's actor_id/session_id/framework_name/
 // model_name/invocation_id; querying for the canonical memory's id
 // surfaces every distinct actor who has ever saved it.
-func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component, artifactID string, days, limit int) ([]map[string]interface{}, error) {
+//
+// F-007 / W-002 (alpha-4.1): stack traces are projected only when
+// includeStack is true. Default false — most callers want the headline
+// event without the multi-KB stack payload that bloats every row.
+func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component, artifactID string, days, limit int, includeStack bool) ([]map[string]interface{}, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
@@ -238,7 +242,7 @@ func (dm *DatabaseManager) QueryAuditLog(level AuditLevel, component, artifactID
 			"message":    msg,
 			"created_at": created,
 		}
-		if stack.Valid {
+		if stack.Valid && includeStack {
 			row["stack_trace"] = stack.String
 		}
 		if ctxRaw.Valid && ctxRaw.String != "" {

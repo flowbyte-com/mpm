@@ -312,7 +312,16 @@ func main() {
 	// degraded. Silent on the healthy path — this is observability, not
 	// noise. Runs before any command dispatch so it surfaces during
 	// every CLI invocation, including the stdin-save path below.
-	emitSchedulerHealthWarning(os.Stderr)
+	//
+	// Alpha-4.1 F-004: machine invocations (`mpm call ...`) keep
+	// stderr empty for parseable JSON consumers. The nudge uses a
+	// direct fmt.Fprintln(os.Stderr, ...) call which bypasses the
+	// slog → io.Discard switch in init(), so the gate must be applied
+	// at the call site. MPM_VERBOSE=1 re-enables the diagnostic for
+	// operators who explicitly want it on a `mpm call` invocation.
+	if !(isMachineMode(os.Args) && os.Getenv("MPM_VERBOSE") == "") {
+		emitSchedulerHealthWarning(os.Stderr)
+	}
 
 	// If MPM_SELECT=1, we're in a PTY selector subprocess — run the selector TUI
 	if os.Getenv("MPM_SELECT") == "1" {
