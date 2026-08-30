@@ -821,6 +821,200 @@ func extractDecisionStatus(meta map[string]interface{}) string {
 	return "active"
 }
 
+// =============================================================================
+// Theory read surface (alpha-4 audit D-006).
+//
+// Theories are stored as memories with collection='theories'. Status lives in
+// the metadata JSON. GetTheory / ListTheories / QueryTheories mirror the
+// GetDecision / ListDecisions / QueryDecisions shape so the agent runtime
+// has a single mental model for "read an epistemic artifact by collection".
+//
+// Status vocabulary:
+//   - "pending"   — newly proposed, not yet resolved (default filter)
+//   - "proven"    — manually validated as true
+//   - "disproven" — manually invalidated as false
+//   - "resolved"  — synthetic family containing proven + disproven
+//   - "all"       — no filter
+// =============================================================================
+
+// GetTheory returns the row for a single theory ID with metadata parsed
+// into a `metadata` sub-map. Returns a NotFound-shaped error if the id is
+// unknown or the row belongs to a different collection.
+func (dm *DatabaseManager) GetTheory(id string) (map[string]interface{}, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get theory: id is required")
+	}
+	row := dm.db.QueryRow(`
+		SELECT id, content, tags, metadata, created_at, updated_at, weight,
+		       COALESCE(reinforcement_count, 0)
+		FROM memories
+		WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL`, id)
+
+	var (
+		gotID, content, tags, metadata string
+		createdAt, updatedAt           int64
+		weight, reinforcement          int64
+	)
+	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
+		return nil, fmt.Errorf("get theory %s: %w", id, err)
+	}
+
+	parsedMeta := map[string]interface{}{}
+	if metadata != "" {
+		if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
+			parsedMeta = map[string]interface{}{"_unparsed": metadata}
+		}
+	}
+
+	// Theory content is stored as "<hypothesis>\n\nVALIDATION_CRITERIA: ..."
+	// by ProposeTheory. Split it so callers see the two fields directly
+	// rather than having to re-parse on every read.
+	hypothesis, validationCriteria := splitHypothesisAndCriteria(content)
+
+	return map[string]interface{}{
+		"id":                  gotID,
+		"hypothesis":          hypothesis,
+		"validation_criteria": validationCriteria,
+		"tags":                parseDecisionTags(tags),
+		"metadata":            parsedMeta,
+		"created_at":          createdAt,
+		"updated_at":          updatedAt,
+		"weight":              weight,
+		"reinforcement_count": reinforcement,
+		"status":              extractTheoryStatus(parsedMeta),
+	}, nil
+}
+
+// ListTheories returns theory rows matching the filter. The zero value
+// (Status="" + Tags=nil + Limit=0) defaults to pending theories only with
+// the default page size (50).
+//
+// The status filter dispatches to a JSON predicate on metadata.status:
+//   - pending  → status='pending'
+//   - proven   → status='proven'
+//   - disproven → status='disproven'
+//   - resolved → status IN ('proven','disproven') (matches CLI "resolved"
+//                semantics: anything no longer pending)
+//   - all      → no extra predicate
+func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]interface{}, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	status := filter.Status
+	if status == "" {
+		status = "pending"
+	}
+
+	var whereExtra string
+	switch status {
+	case "pending":
+		whereExtra = `AND json_extract(metadata, '$.status') = 'pending'`
+	case "proven":
+		whereExtra = `AND json_extract(metadata, '$.status') = 'proven'`
+	case "disproven":
+		whereExtra = `AND json_extract(metadata, '$.status') = 'disproven'`
+	case "resolved":
+		whereExtra = `AND json_extract(metadata, '$.status') IN ('proven','disproven')`
+	case "all":
+		// No extra filter.
+	default:
+		return nil, fmt.Errorf("list theories: unknown status filter %q (use pending|all|proven|disproven|resolved)", status)
+	}
+
+	query := `
+		SELECT id, content, tags, metadata, created_at, updated_at, weight,
+		       COALESCE(reinforcement_count, 0)
+		FROM memories
+		WHERE collection = 'theories' AND deleted_at IS NULL
+	` + whereExtra + `
+		ORDER BY created_at DESC
+		LIMIT ?
+	`
+	rows, err := dm.db.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list theories: %w", err)
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var (
+			gotID, content, tags, metadata string
+			createdAt, updatedAt           int64
+			weight, reinforcement          int64
+		)
+		if err := rows.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
+			return nil, fmt.Errorf("scan theory row: %w", err)
+		}
+		parsedMeta := map[string]interface{}{}
+		if metadata != "" {
+			if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
+				parsedMeta = map[string]interface{}{"_unparsed": metadata}
+			}
+		}
+		hypothesis, validationCriteria := splitHypothesisAndCriteria(content)
+		out = append(out, map[string]interface{}{
+			"id":                  gotID,
+			"hypothesis":          hypothesis,
+			"validation_criteria": validationCriteria,
+			"tags":                parseDecisionTags(tags),
+			"metadata":            parsedMeta,
+			"created_at":          createdAt,
+			"updated_at":          updatedAt,
+			"weight":              weight,
+			"reinforcement_count": reinforcement,
+			"status":              extractTheoryStatus(parsedMeta),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate theory rows: %w", err)
+	}
+	return out, nil
+}
+
+// QueryTheories reuses SearchMemories against the theories collection so
+// the BM25 + reinforcement weighting the runtime already implements is
+// available to the theory read path without re-implementing ranking.
+func (dm *DatabaseManager) QueryTheories(query string, limit int) ([]map[string]interface{}, error) {
+	if query == "" {
+		return nil, fmt.Errorf("query theories: query is required")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := dm.SearchMemories(query, "theories", false, limit, 0)
+	if err != nil {
+		return nil, fmt.Errorf("query theories: %w", err)
+	}
+	return rows, nil
+}
+
+// extractTheoryStatus returns the theory's lifecycle status from its
+// metadata block. Defaults to "pending" when no status key is present
+// (matches the ProposeTheory default).
+func extractTheoryStatus(meta map[string]interface{}) string {
+	if meta == nil {
+		return "pending"
+	}
+	if s, ok := meta["status"].(string); ok && s != "" {
+		return s
+	}
+	return "pending"
+}
+
+// splitHypothesisAndCriteria reverses the "\n\nVALIDATION_CRITERIA: ..."
+// concatenation done by ProposeTheory so GetTheory / ListTheories can
+// surface the two fields separately. If the content has no separator,
+// the entire content is the hypothesis and the criteria is empty.
+func splitHypothesisAndCriteria(content string) (string, string) {
+	const sep = "\n\nVALIDATION_CRITERIA: "
+	if i := strings.Index(content, sep); i >= 0 {
+		return content[:i], content[i+len(sep):]
+	}
+	return content, ""
+}
+
 // parseDecisionTags wraps a string-typed tags column in []string. If the
 // column is empty or unparseable, returns an empty slice.
 func parseDecisionTags(tags string) []string {

@@ -766,9 +766,18 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 		var e Evidence
 		var createdAt int64
 		var expiresAt sql.NullInt64
+		// notes is TEXT NULL in the schema; auto_capture rows insert NULL.
+		// Scanning NULL into a concrete Go `string` is a runtime scan
+		// failure: "converting NULL to string is unsupported". Per the
+		// substrate defense triad (rule #2), nullable scalar columns must
+		// bind to sql.NullString and be unwrapped at the Go boundary.
+		var notes sql.NullString
 		if err := rows.Scan(&e.ID, &e.ArtifactID, &e.ArtifactType, &e.Type, &e.SourceGroup,
-			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &e.Notes); err != nil {
+			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if notes.Valid {
+			e.Notes = notes.String
 		}
 		e.CreatedAt = time.Unix(createdAt, 0)
 		if expiresAt.Valid {

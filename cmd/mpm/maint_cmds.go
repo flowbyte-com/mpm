@@ -254,27 +254,21 @@ func handleExport(args []string) int {
 		csvErr := writer.Write([]string{"id", "collection", "content", "tags", "created_at", "reinforcement_count", "weight", "is_long_term"})
 		if csvErr == nil {
 			for _, m := range memories {
-				id, _ := m["id"].(string)
-				coll, _ := m["collection"].(string)
-				content, _ := m["content"].(string)
-				created, _ := m["created_at"].(string)
-				tags := ""
-				if t, ok := m["tags"].(string); ok {
-					tags = t
-				}
-				rc := 0
-				if r, ok := m["reinforcement_count"].(int64); ok {
-					rc = int(r)
-				}
-				w := 1
-				if we, ok := m["weight"].(int64); ok {
-					w = int(we)
-				}
-				lt := 0
-				if l, ok := m["is_long_term"].(int64); ok {
-					lt = int(l)
-				}
-				if err := writer.Write([]string{id, coll, content, tags, created, fmt.Sprintf("%d", rc), fmt.Sprintf("%d", w), fmt.Sprintf("%d", lt)}); err != nil {
+				id := stringFromMap(m, "id")
+				coll := stringFromMap(m, "collection")
+				content := stringFromMap(m, "content")
+				created := stringFromMap(m, "created_at")
+				tags := stringFromMap(m, "tags")
+				// Use strict helpers: per the D-001 / W-008 contract from
+				// GetMemoriesForExport, reinforcement_count and is_long_term
+				// are int64 (INTEGER columns) and weight is float64 (REAL).
+				// A type mismatch now warns instead of silently defaulting.
+				rcVal, _ := int64FromMap(m, "reinforcement_count")
+				weightVal, _ := float64FromMap(m, "weight")
+				ltVal, _ := int64FromMap(m, "is_long_term")
+				// weight is real-valued; present with 2 decimals in CSV.
+				weightStr := strconv.FormatFloat(weightVal, 'f', 2, 64)
+				if err := writer.Write([]string{id, coll, content, tags, created, fmt.Sprintf("%d", rcVal), weightStr, fmt.Sprintf("%d", ltVal)}); err != nil {
 					usererror.Error("CSV write error: %v", err)
 					break
 				}

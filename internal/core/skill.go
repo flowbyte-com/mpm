@@ -18,20 +18,55 @@ import (
 // SkillFrontmatter is the parsed YAML frontmatter of a skill. Fields
 // are populated from the frontmatter block; non-frontmatter is the
 // body markdown.
+//
+// Steps is parsed into a generic shape first so that the validation
+// layer can distinguish "step[N] was a YAML mapping with no call
+// field" from "step[N] was a YAML mapping with an empty call field"
+// from "step[N] was a non-mapping scalar". yaml.v3 silently coerces
+// the first two cases to SkillStep{Call:"", ArgsFrom:""}, which the
+// auditor (alpha-4.1.2) flagged as silent corruption. The dedicated
+// validation step in validateSkillFrontmatterAndScan (skill_db.go)
+// closes that hole.
 type SkillFrontmatter struct {
-	Name        string      `yaml:"name"`
-	Description string      `yaml:"description"`
-	WhenToUse   string      `yaml:"when_to_use"`
-	Domain      string      `yaml:"domain"`
-	Version     string      `yaml:"version"`
-	Constraints []string    `yaml:"constraints"`
-	Steps       []SkillStep `yaml:"steps"`
+	Name        string             `yaml:"name"`
+	Description string             `yaml:"description"`
+	WhenToUse   string             `yaml:"when_to_use"`
+	Domain      string             `yaml:"domain"`
+	Version     string             `yaml:"version"`
+	Constraints []string           `yaml:"constraints"`
+	Steps       []SkillStep        `yaml:"steps"`
+	StepNodes   []SkillStepNodeRaw `yaml:"-"` // populated by ParseSkillFrontmatter for validation; never persisted
 }
 
 // SkillStep is one ordered step in a skill's procedure.
 type SkillStep struct {
 	Call     string `yaml:"call"`
 	ArgsFrom string `yaml:"args_from,omitempty"`
+}
+
+// SkillStepNodeRaw preserves the raw YAML shape of each step entry
+// so the validator can detect silently-coerced shapes (empty mappings,
+// scalar entries that yaml.v3 accepts but that have no `call` field).
+//
+// Fields:
+//
+//   - Kind       — yaml.ScalarNode, yaml.MappingNode, etc.
+//   - CallRaw    — the raw call value as yaml.v3 saw it. Empty string
+//     with Kind==MappingNode means the mapping had no `call` key.
+//     Empty string with Kind==ScalarNode means the entry was a string
+//     or other scalar that yaml.v3 silently coerced.
+//   - CallSet    — true iff the YAML mapping explicitly contained a
+//     `call` key (even if the value was empty).
+//   - ArgSet     — true iff the YAML mapping explicitly contained an
+//     `args_from` key.
+//
+// SkillStep.Call is computed from CallRaw and CallSet; CallSet=false
+// forces Call="" even if CallRaw happens to be non-empty.
+type SkillStepNodeRaw struct {
+	Kind    yaml.Kind
+	CallRaw string
+	CallSet bool
+	ArgSet  bool
 }
 
 // ParseSkillFrontmatter extracts the frontmatter and body from a skill
@@ -56,6 +91,18 @@ func ParseSkillFrontmatter(content string) (SkillFrontmatter, string, error) {
 	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {
 		return SkillFrontmatter{}, "", fmt.Errorf("parse frontmatter: %w", err)
 	}
+	// Capture raw step shape for validation. See SkillStepNodeRaw
+	// for why we need the raw view: yaml.v3 silently coerces empty
+	// mappings to SkillStep{Call:"", ArgsFrom:""}, which the auditor
+	// (alpha-4.1.2) flagged as silent corruption. We replay the YAML
+	// into a generic node tree here so the validator can see whether
+	// each step was a mapping with a call key, a mapping without one,
+	// or a scalar that yaml.v3 coerced away.
+	if err := captureRawStepNodes([]byte(yamlBlock), &fm); err != nil {
+		// Non-fatal — fall through to the typed parse. The validator
+		// will catch the obvious shapes; capture errors are diagnostic.
+		_ = err
+	}
 	if fm.Name == "" {
 		return SkillFrontmatter{}, "", fmt.Errorf("frontmatter missing required field: name")
 	}
@@ -63,6 +110,63 @@ func ParseSkillFrontmatter(content string) (SkillFrontmatter, string, error) {
 		return SkillFrontmatter{}, "", fmt.Errorf("frontmatter missing required field: version")
 	}
 	return fm, body, nil
+}
+
+// captureRawStepNodes replays the YAML block into a node tree and
+// extracts the raw shape of every entry in the steps: list. Populates
+// fm.StepNodes in document order so the validator can distinguish
+// "mapping without a call key" from "mapping with empty call" from
+// "scalar entry".
+func captureRawStepNodes(yamlBlock []byte, fm *SkillFrontmatter) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(yamlBlock, &doc); err != nil {
+		return err
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil
+	}
+	// Walk the mapping at top level looking for `steps`.
+	var stepsNode *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i]
+		val := root.Content[i+1]
+		if key.Value == "steps" && val.Kind == yaml.SequenceNode {
+			stepsNode = val
+			break
+		}
+	}
+	if stepsNode == nil {
+		fm.StepNodes = nil
+		return nil
+	}
+	fm.StepNodes = make([]SkillStepNodeRaw, len(stepsNode.Content))
+	for i, entry := range stepsNode.Content {
+		raw := SkillStepNodeRaw{Kind: entry.Kind}
+		switch entry.Kind {
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(entry.Content); j += 2 {
+				k := entry.Content[j]
+				v := entry.Content[j+1]
+				switch k.Value {
+				case "call":
+					raw.CallSet = true
+					if v.Kind == yaml.ScalarNode {
+						raw.CallRaw = v.Value
+					}
+				case "args_from":
+					raw.ArgSet = true
+				}
+			}
+		case yaml.ScalarNode:
+			raw.CallRaw = entry.Value
+		}
+		fm.StepNodes[i] = raw
+	}
+	return nil
 }
 
 // SkillIDForNameAndVersion builds the canonical id for a skill row.

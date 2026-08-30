@@ -188,18 +188,17 @@ func handleLs(args []string) int {
 	fmt.Println(strings.Repeat("-", 80))
 
 	for _, m := range filtered {
-		id, _ := m["id"].(string)
-		created, _ := m["created_at"].(string)
-		coll, _ := m["collection"].(string)
-		w := 1
-		if we, ok := m["weight"].(int64); ok {
-			w = int(we)
-		}
-		if we, ok := m["weight"].(float64); ok {
-			w = int(we)
-		}
-		content, _ := m["content"].(string)
-		meta, _ := m["metadata"].(string)
+		id := stringFromMap(m, "id")
+		created := stringFromMap(m, "created_at")
+		coll := stringFromMap(m, "collection")
+		// weight is REAL in the schema → float64 from GetMemoriesForExport.
+		// Previously this asserted int64/float64 with a default of 1 that
+		// masked every actual weight (D-001). float64FromMap surfaces
+		// any future type mismatch via a usererror warning.
+		wf, _ := float64FromMap(m, "weight")
+		w := int(wf)
+		content := stringFromMap(m, "content")
+		meta := stringFromMap(m, "metadata")
 		chip := ""
 		if strings.Contains(meta, `"status":"challenged"`) {
 			chip = " [CHALLENGED]"
@@ -818,8 +817,22 @@ func handleRefAdd(args []string) int {
 	reason := fs.String("reason", "", "Import reason (why this is being added)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
+	// --url is recognised but not yet implemented. The alpha-4.1.2
+	// auditor (D-005/W-002) observed that `mpm reference add --url`
+	// silently does nothing. The surface has always been filesystem-
+	// only — there's no http fetch code in internal/core/reference_*.
+	// Per the alpha-4.1.2 spec, this is classified FUTURE FEATURE
+	// (preserving the current architecture) and we surface an explicit
+	// error so operators are not silently misled.
+	urlFlag := fs.String("url", "", "DEPRECATED stub: URL ingestion is not yet supported (alpha-4.1.2 D-005). Downloads the URL into a local file first, then re-run.")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 1
+	}
+
+	if *urlFlag != "" {
+		return usererror.Error("--url is reserved for a future release. " +
+			"In the meantime, download the document (curl/wget) and pass the local path to `mpm reference add <file>`. " +
+			"Tracked as alpha-4.1.2 D-005/W-002 FUTURE FEATURE.")
 	}
 
 	if fs.NArg() < 1 {

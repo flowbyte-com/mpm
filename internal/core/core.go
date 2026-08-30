@@ -23,6 +23,15 @@ type DecisionFilter struct {
 	Limit  int      // 0 means default (50)
 }
 
+// TheoryFilter narrows the result set for ListTheories. The zero value
+// returns all pending (un-resolved) theories up to the default page size.
+// alpha-4 audit D-006 (theory MCP read surface).
+type TheoryFilter struct {
+	Status string   // "pending" (default), "all", "proven", "disproven", "resolved"
+	Tags   []string // empty = no tag filter
+	Limit  int      // 0 means default (50)
+}
+
 // CoreDB is the persistent-storage interface that the Agent Runtime consumes.
 // DatabaseManager implements every method.
 type CoreDB interface {
@@ -200,6 +209,15 @@ type CoreDB interface {
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
+	// Theory read symmetry (alpha-4 audit D-006): expose read paths that
+	// mirror the existing decision read surface. The CLI has always been
+	// able to `mpm theories` list, but the `mpm call mpm_theories`
+	// machine surface only had propose/resolve — agents reading via MCP
+	// could not enumerate or look up theories. contract mirrors
+	// GetDecision / ListDecisions / QueryDecisions.
+	GetTheory(id string) (map[string]interface{}, error)
+	ListTheories(filter TheoryFilter) ([]map[string]interface{}, error)
+	QueryTheories(query string, limit int) ([]map[string]interface{}, error)
 	// RestoreMemoryFromChallenge resolves the challenged-theory record
 	// against memoryID and clears the memory's challenged status.
 	// F7-1 surface parity: previously CLI-only; now reachable through
