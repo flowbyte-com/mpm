@@ -5735,9 +5735,18 @@ func (dm *DatabaseManager) UpdateWorkWithContext(workID, title, content, statusS
 	if err != nil {
 		return nil, err
 	}
-	if eventType == WorkEventTypeCompleted || eventType == WorkEventTypeCancelled {
-		dm.recordGitEvidenceForWork(workID)
-	}
+	// Alpha-4.1 F-003: deprecated update status=done/cancelled path
+	// must NOT auto-record git evidence. The canonical `complete` and
+	// `cancel` paths deliberately omit the git auto-inflation (per
+	// the P3 fix comment in handleCompleteWork) because it promoted
+	// verification to "partial" for false completions. The two paths
+	// now reach equivalent verification state.
+	//
+	// Callers that genuinely want git evidence recorded alongside a
+	// status transition should call the explicit observation path
+	// (`mpm_evidence action=add source_group=git`) rather than relying
+	// on the deprecated update surface.
+	//
 	// F8.1: every terminal-lifecycle state transition must keep verification
 	// derived state in lockstep with status. Without this call, a path that
 	// moves status to 'cancelled' through the legacy update surface leaves
