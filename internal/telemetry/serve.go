@@ -39,7 +39,15 @@ func serve(ctx context.Context, store *Store, socketPath string, srv *Server) er
 	if err != nil {
 		return fmt.Errorf("listen unix %s: %w", socketPath, err)
 	}
-	defer listener.Close()
+	defer func() {
+		// Close the listener (releases the FD) AND unlink the socket
+		// file. Go's net.UnixListener.Close releases the FD but does
+		// NOT remove the socket inode from the filesystem, leaving a
+		// stale entry that confuses the next serve start. Unlinking
+		// here ensures the workspace is clean on shutdown.
+		listener.Close()
+		_ = os.Remove(socketPath)
+	}()
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		return fmt.Errorf("chmod socket: %w", err)
 	}

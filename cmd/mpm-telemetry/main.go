@@ -12,7 +12,11 @@ import (
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
-const buildVersion = "dev"
+// buildVersion is a `var` (not `const`) so the canonical ldflags
+// `-ldflags "-X main.buildVersion=$(VERSION)"` can stamp the actual build
+// identifier at link time. A `const` would be baked into the binary at
+// compile time and the linker flag would silently no-op (D-003).
+var buildVersion = "dev"
 
 func main() {
 	// Inject build version into the telemetry package before any subcommand runs.

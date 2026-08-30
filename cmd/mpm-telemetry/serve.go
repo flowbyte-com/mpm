@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
@@ -43,7 +45,25 @@ func runServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "mpm-telemetry serve: socket=%s db=%s\n", socketPath, dbPath)
 	}
 
+	// Trap SIGINT and SIGTERM so the deferred unlink in
+	// internal/telemetry/serve runs on operator shutdown. Without
+	// this, Go's default SIGTERM handler kills the process before
+	// defers fire, leaving a stale socket inode that confuses the
+	// next serve start. systemd unit stops with SIGTERM, so this
+	// path is the canonical shutdown sequence.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sigCh:
+			cancel()
+		}
+	}()
+	defer signal.Stop(sigCh)
+
 	return telemetry.Serve(ctx, store, socketPath)
 }
