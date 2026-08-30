@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"golang.org/x/mod/semver"
+	"gopkg.in/yaml.v3"
 )
 
 // validateSkillFrontmatterAndScan parses frontmatter and runs the
@@ -52,6 +53,17 @@ func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string
 		errors = append(errors, "scanner_poison:"+reason)
 	}
 
+	// Step shape validation (alpha-4.1.2 D-004). See
+	// SkillStepNodeRaw in skill.go for why we walk the raw YAML
+	// nodes: yaml.v3 silently coerces an empty mapping to
+	// SkillStep{Call:"", ArgsFrom:""}, which produces a row that
+	// looks present but is unusable. The auditor reported this as
+	// silent corruption; this validator makes the rejection explicit
+	// at the application boundary.
+	if stepErrors := validateSkillStepShape(fm); len(stepErrors) > 0 {
+		errors = append(errors, stepErrors...)
+	}
+
 	return &Skill{
 		Frontmatter: fm,
 		Body:        body,
@@ -62,6 +74,49 @@ func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string
 		Constraints: fm.Constraints,
 		Steps:       fm.Steps,
 	}, warnings, errors, nil
+}
+
+// validateSkillStepShape inspects the raw YAML shape of every step
+// in fm.StepNodes and rejects forms that yaml.v3 silently coerces to
+// unusable SkillStep{Call:"", ArgsFrom:""} values. Pinning this
+// behavior here (alpha-4.1.2 D-004) closes the silent-corruption hole
+// the auditor reported.
+//
+// Rejections:
+//
+//   - ScalarNode (non-mapping entry): "step[N] must be an object with
+//     a `call` field". This is what yaml.v3 already errors on, but the
+//     application-level message is more useful for authors.
+//
+//   - MappingNode with CallSet=false: "step[N] missing required field
+//     `call`". Catches both `- {}` and `- description: foo`.
+//
+//   - MappingNode with CallSet=true and empty/whitespace CallRaw:
+//     "step[N].call must be a non-empty invocation target".
+//
+// Each error names the offending index so the author can locate the
+// bad row in the source.
+func validateSkillStepShape(fm SkillFrontmatter) []string {
+	var out []string
+	for i, raw := range fm.StepNodes {
+		switch raw.Kind {
+		case 0, yaml.MappingNode:
+			if !raw.CallSet {
+				out = append(out, fmt.Sprintf("step[%d] missing required field `call`", i))
+				continue
+			}
+			call := strings.TrimSpace(raw.CallRaw)
+			if call == "" {
+				out = append(out, fmt.Sprintf("step[%d].call must be a non-empty invocation target", i))
+				continue
+			}
+		case yaml.ScalarNode:
+			out = append(out, fmt.Sprintf("step[%d] must be an object with a `call` field, got scalar %q", i, raw.CallRaw))
+		default:
+			out = append(out, fmt.Sprintf("step[%d] has unsupported YAML kind %d", i, raw.Kind))
+		}
+	}
+	return out
 }
 
 // ReadSkill fetches a skill by id (exact) or name (latest version).

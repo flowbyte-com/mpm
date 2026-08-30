@@ -1660,7 +1660,11 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 	var memories []map[string]interface{}
 	for rows.Next() {
 		var id, coll, content, tags, metadata, createdAt, lastAccessed, expiresAt string
-		var rc, isLongTerm int
+		// Numeric columns: SQLite INTEGER scans to int64, REAL scans to float64.
+		// Keep these types consistent with the schema and document them here
+		// so downstream consumers don't silently fall through their default
+		// values when type-asserting (See D-001 / W-008 in the alpha-4 audit).
+		var rc, isLongTerm int64
 		var weight float64
 		err := rows.Scan(&id, &coll, &content, &tags, &metadata, &createdAt, &rc, &weight, &isLongTerm, &lastAccessed, &expiresAt)
 		if err != nil {
@@ -1674,7 +1678,7 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 			"metadata":            metadata,
 			"created_at":          createdAt,
 			"reinforcement_count": rc,
-			"weight":              int(weight),
+			"weight":              weight,
 			"is_long_term":        isLongTerm,
 			"last_accessed_at":    lastAccessed,
 			"expires_at":          expiresAt,
