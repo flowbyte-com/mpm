@@ -401,6 +401,14 @@ func TestMain(m *testing.M) {
 	// Run tests with temporary home to avoid polluting real config
 	tmpDir := os.TempDir()
 	os.Setenv("HOME", tmpDir)
+
+	// Alpha-4 D-004/W-004: build the mpm binary once so the
+	// machine-clean-output tests (cmd/mpm/call_io_test.go) can exec
+	// it directly and observe the real stdout/stderr split.
+	if bin := buildMPMBinForIOTests(); bin != "" {
+		mpmBin = bin
+	}
+
 	os.Exit(m.Run())
 }
 

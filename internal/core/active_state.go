@@ -187,7 +187,15 @@ func resolveActiveComponent(dm *DatabaseManager, kind, requested, defaultName st
 		return defaultName
 	}
 	if dm != nil {
-		dm.LogAudit(AuditError, "router",
+		// Alpha-4 (D-001/W-002): demoted from AuditError to AuditInfo.
+		// The both-missing condition is expected bootstrap behavior on a
+		// fresh install — no persona/mode on disk yet — not an operational
+		// fault. The sibling "requested missing, falling back" branch
+		// (above) already uses AuditInfo; this branch must match so the
+		// audit summary headline stays accurate and cluster upserts stay
+		// silent. AuditInfo rows are excluded from the error/warning
+		// count (audit.go::upsertClusterCounter gate at line 138).
+		dm.LogAudit(AuditInfo, "router",
 			fmt.Sprintf("%s fallback %q also missing on disk; agent will boot without %s context", kind, defaultName, kind),
 			"",
 			AuditContext{"fallback": defaultName, "path": defPath})

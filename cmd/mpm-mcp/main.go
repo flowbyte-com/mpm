@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -43,7 +44,15 @@ import (
 // point, so Evaluate() is pure string matching with zero parsing overhead.
 
 func main() {
-	logging.Setup()
+	// Alpha-4 D-004/W-004: mpm-mcp is a stdio MCP server — its
+	// stdout/stderr stream is the protocol boundary. Discard operational
+	// INFO by default so the protocol stays parseable. Operators can
+	// restore diagnostics with MPM_VERBOSE=1.
+	if os.Getenv("MPM_VERBOSE") == "" {
+		logging.SetupWithWriter(io.Discard)
+	} else {
+		logging.Setup()
+	}
 
 	// No single-instance lock. mpm-mcp is a stdio MCP server — one
 	// process per MCP host (each host gets its own stdin/stdout pair).
