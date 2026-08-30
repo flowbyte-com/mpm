@@ -214,7 +214,25 @@ func toInt(v interface{}) int {
 	}
 }
 
-// toTime safely extracts a time.Time from interface{}, handling time.Time and string.
+// toTime safely extracts a time.Time from interface{}.
+//
+// Handles:
+//   - time.Time
+//   - string (RFC3339)
+//   - int / int64 / float64 (Unix-epoch seconds — the canonical
+//     INTEGER timestamp shape after the 2026-08 timestamps_unified_v1
+//     migration; see internal/core/memory.go)
+//
+// D-009 (alpha-4.1.1): the int64 branch is load-bearing. The pre-fix
+// code only handled time.Time and string — any integer timestamp fell
+// through to the zero-time default, which `time.Since` rendered as
+// "106751d ago" (≈292 years, the time from year 1 to now) for every
+// newly-created memory in the spaced review report. The fix routes the
+// integer shape through time.Unix so the relative-age display reads
+// sensibly.
+//
+// Future timestamp shapes (RFC3339Nano, fractional seconds) are out of
+// scope — the substrate standardises on INTEGER Unix-epoch seconds.
 func toTime(v interface{}) time.Time {
 	switch t := v.(type) {
 	case time.Time:
@@ -222,6 +240,21 @@ func toTime(v interface{}) time.Time {
 	case string:
 		parsed, _ := time.Parse(time.RFC3339, t)
 		return parsed
+	case int:
+		if t <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(int64(t), 0)
+	case int64:
+		if t <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(t, 0)
+	case float64:
+		if t <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(int64(t), 0)
 	default:
 		return time.Time{}
 	}

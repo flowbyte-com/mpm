@@ -1401,24 +1401,28 @@ func TestMpmMemoryChallengeNormalization(t *testing.T) {
 	}
 }
 
-// TestMpmMemoryMissingParamsContract verifies that after the 2026-08-13
-// hard-fail dispatch-contract change, the dispatcher REJECTS payloads with
-// a missing or nil params envelope with a loud, descriptive error — it no
-// longer silently coerces to an empty map. The old test in this slot
-// codified the silent-drop; this rewrite codifies the loud-fail.
+// TestMpmMemoryMissingParamsContract verifies the alpha-4.1.1 D-006
+// envelope contract: missing `params` is OPTIONAL (returns empty map so
+// actions like `mpm_decisions action=list` can be invoked without
+// `params:{}` boilerplate), but a wrong-typed `params` (e.g. nil,
+// string, number) still hard-fails with the canonical type-mismatch
+// error.
+//
+// Pre-D-006 contract (regressed, fixed): `params` was strictly required
+// and a missing key returned "missing required field `params`" with
+// a Go error. Post-D-006 contract: missing key is silently treated as
+// an empty map; only wrong types fail loudly. The test below pins both
+// halves of the new contract.
 func TestMpmMemoryMissingParamsContract(t *testing.T) {
 	dm := newTestSharedDM(t)
 
-	// Missing params key → loud failure naming the tool and the missing field.
+	// Missing params key → no error, treated as empty map. Use a safe
+	// action (review with default filter) so the call succeeds end-to-end.
 	_, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
 		"action": "review",
 	})
-	if err == nil {
-		t.Fatal("expected loud failure for missing params, got nil — silent-drop regression")
-	}
-	if !strings.Contains(err.Error(), "mpm_memory") ||
-		!strings.Contains(err.Error(), "missing required field `params`") {
-		t.Fatalf("expected schema-error naming mpm_memory + missing params, got: %v", err)
+	if err != nil {
+		t.Fatalf("missing params must be tolerated (D-006): got error %v", err)
 	}
 
 	// params=nil (present but nil-valued) → loud failure naming the type mismatch.
@@ -1557,8 +1561,17 @@ func TestAllDomainUnknownActions(t *testing.T) {
 	}
 }
 
-// TestAllDomainNilParams verifies each dispatcher handles nil/missing
-// params gracefully (treats as empty map, doesn't panic).
+// TestAllDomainNilParams verifies each dispatcher tolerates missing
+// params (alpha-4.1.1 D-006) and rejects wrong-typed params (params=nil).
+//
+// Contract split (D-006):
+//   - missing key   → tolerated, treated as empty map (no error)
+//   - params=nil    → loud "must be an object" failure
+//
+// Pre-D-006 contract (now superseded): missing key was a loud
+// "missing required field `params`" error. The 2026-08-13 hardening
+// pass codified that strict contract; D-006 relaxed it because no
+// downstream consumer actually required the explicit envelope.
 func TestAllDomainNilParams(t *testing.T) {
 	dm := newTestSharedDM(t)
 	ac := internal.ActiveContext{}
@@ -1569,15 +1582,23 @@ func TestAllDomainNilParams(t *testing.T) {
 		action  string
 	}
 
+	// Each entry picks the action most likely to tolerate an empty params
+	// map (read-only list / show / query). The D-006 contract being pinned
+	// here is the **envelope layer**: `extractParamsOrFail` must accept
+	// missing or wrong-typed params without crashing, regardless of whether
+	// the inner action then complains about its own required fields.
+	// We therefore choose actions whose dispatch does not gate on any
+	// inner required field — otherwise the test would conflate envelope
+	// tolerance (D-006) with inner-field validation (a separate contract).
 	dispatchers := []dispatcherInfo{
 		{"mpm_handoff", handleMpmHandoff, "list"},
 		{"mpm_wakes", handleMpmWakes, "list"},
-		{"mpm_theories", handleMpmTheories, "propose"},
+		{"mpm_theories", handleMpmTheories, "resolve"}, // falls through to inner validation; envelope-only check
 		{"mpm_lessons", handleMpmLessons, "list"},
-		{"mpm_decisions", handleMpmDecisions, "record"},
-		{"mpm_topics", handleMpmTopics, "search"},
+		{"mpm_decisions", handleMpmDecisions, "list"}, // list accepts empty params (status/limit are optional)
+		{"mpm_topics", handleMpmTopics, "create"},     // requires name; envelope-only check
 		{"mpm_references", handleMpmReferences, "list"},
-		{"mpm_evidence", handleMpmEvidence, "list"},
+		{"mpm_evidence", handleMpmEvidence, "source_groups"}, // no inner required field
 		{"mpm_confidence", handleMpmConfidence, "quality"},
 		{"mpm_skills", handleMpmSkills, "list"},
 		{"mpm_context", handleMpmContext, "read_wake_context"},
@@ -1586,19 +1607,21 @@ func TestAllDomainNilParams(t *testing.T) {
 
 	for _, d := range dispatchers {
 		t.Run(d.name+"_missing_params", func(t *testing.T) {
-			// Post-2026-08-13 hardening contract: missing params is a
-			// LOUD schema error, not a silent coercion. Verify the
-			// dispatcher surfaces "missing required field `params`"
-			// for every domain tool.
+			// D-006: missing `params` is tolerated (returns empty map).
+			// The handler may still error on inner required fields — that
+			// is a separate contract. What we pin here is: the error must
+			// NOT be the envelope-level "missing required field `params`"
+			// shape that pre-D-006 codepath produced.
 			_, err := d.handler(dm, ac, map[string]interface{}{
 				"action": d.action,
 			})
-			if err == nil {
-				t.Fatalf("%s: expected loud failure for missing params, got nil — silent-drop regression", d.name)
-			}
-			if !strings.Contains(err.Error(), d.name) ||
-				!strings.Contains(err.Error(), "missing required field `params`") {
-				t.Fatalf("%s: expected schema-error naming %s + missing params, got: %v", d.name, d.name, err)
+			if err != nil {
+				if strings.Contains(err.Error(), "missing required field `params`") {
+					t.Fatalf("%s: missing params must be tolerated (D-006): got envelope error %v", d.name, err)
+				}
+				// Inner-field validation errors (e.g. "name is required",
+				// "theoryId is required") are acceptable — the envelope
+				// contract is preserved.
 			}
 
 			// params=nil (present but nil-valued) → loud failure for type mismatch.

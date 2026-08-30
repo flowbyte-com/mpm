@@ -25,6 +25,7 @@ import (
 	mpmcore "github.com/flowbyte-com/mpm-core"
 	mpmcore_config "github.com/flowbyte-com/mpm-core/config"
 
+	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
@@ -80,11 +81,15 @@ func main() {
 	// fix: the scheduler does NOT own the *sql.DB handle. Construction
 	// site enforces the singleton invariant; sqlopen_owner_test will
 	// fail if any future code introduces a separate handle.
-	projectRoot := ""
+	//
+	// D-001 (alpha-4.1.1): honor MPM_WORKSPACE. Without this, a
+	// scheduler launched against a disposable workspace would
+	// silently target the production DB — exactly the failure mode
+	// the canonical mpmcli.ResolveWorkspace helper exists to prevent.
+	// Explicit -db still wins for operator overrides.
+	projectRoot := mpmcli.ResolveWorkspace()
 	if *dbPath != "" {
 		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
-	} else {
-		projectRoot = "."
 	}
 	dm, err := mpmcore.NewDatabaseManager(projectRoot)
 	if err != nil {

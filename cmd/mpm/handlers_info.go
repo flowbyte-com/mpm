@@ -22,6 +22,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,26 +33,84 @@ import (
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
+// infoOutput is the JSON shape for `mpm info --json`. The human-readable
+// rendering and the JSON payload share a single data-collection pass
+// (collectInfo / renderInfoHuman) so the two cannot drift.
+//
+// Fields mirror the section order of the human output: identity,
+// workspace, database, skills, scheduler, runtime. Stats are kept
+// as a generic map because they evolve as new counters land; the
+// `null` for "unavailable" matches the human "(unavailable)" line.
+type infoOutput struct {
+	Version    string                 `json:"version"`
+	DataDir    string                 `json:"data_directory"`
+	DBPath     string                 `json:"db_path"`
+	Workspace  infoWorkspace          `json:"workspace"`
+	Database   infoDatabase           `json:"database"`
+	Skills     infoSkills             `json:"skills"`
+	Scheduler  infoScheduler          `json:"scheduler"`
+	Runtime    infoRuntime            `json:"runtime"`
+}
+
+type infoWorkspace struct {
+	ActiveModes    string `json:"active_modes"`
+	ActivePersona  string `json:"active_persona"`
+	ActiveUpdated  string `json:"active_updated,omitempty"`
+	ActiveJSONLoad string `json:"active_json_load,omitempty"` // error string when active.json failed
+}
+
+type infoDatabase struct {
+	Path   string                 `json:"path"`
+	Health string                 `json:"health"`            // "ok" or "degraded"
+	Error  string                 `json:"error,omitempty"`
+	Stats  map[string]interface{} `json:"stats,omitempty"`   // may be nil if unavailable
+}
+
+type infoSkills struct {
+	Count int      `json:"count"`
+	Names []string `json:"names"`
+}
+
+type infoScheduler struct {
+	Running        bool                `json:"running"`
+	PID            int                 `json:"pid,omitempty"`
+	ScheduledTasks []infoScheduledTask `json:"scheduled_tasks"`
+}
+
+type infoScheduledTask struct {
+	ID      string `json:"id"`
+	NextRun string `json:"next_run"`
+}
+
+type infoRuntime struct {
+	Hostname string `json:"hostname"`
+	PID      int    `json:"pid"`
+}
+
 // handleInfo prints installation identity to stdout.
 //
-//   mpm info [--json]
+//	mpm info [--json]
 //
-// --json reserved for a follow-up RFC; the dashboard output is the
-// canonical form for human operators. The composed identity surface
-// (version, db, models, scheduler, skills, persona, counts) is
-// intentionally static — it answers "what installation am I talking
-// to?" rather than "is the substrate healthy right now?" (that is
-// what `mpm doctor` answers).
+// The JSON payload and the human-readable form share one data
+// collection pass; the two cannot drift. Unknown flags other than
+// --json / -j still hard-fail (consistent with the pre-alpha
+// behavior) so a typo doesn't silently no-op.
 func handleInfo(args []string) int {
-	for _, a := range args {
-		switch a {
-		case "--json", "-j":
-			usererror.Error("--json not yet implemented for info (planned for follow-up RFC)")
-			return 1
-		default:
-			usererror.Error("info: unknown flag %q", a)
-			return 1
+	jsonFlagSeen, preprocessed := ExtractJSONFlag(args)
+	jsonOutput := jsonFlagSeen
+	for _, a := range preprocessed {
+		if a == "--help" || a == "-h" {
+			fmt.Println("Usage: mpm info [--json]")
+			fmt.Println()
+			fmt.Println("Print installation identity (version, paths, active mode/persona,")
+			fmt.Println("database stats, registered skills, scheduler status, runtime).")
+			fmt.Println()
+			fmt.Println("Flags:")
+			fmt.Println("  --json, -j    Emit JSON to stdout for machine consumption.")
+			return 0
 		}
+		usererror.Error("info: unknown flag %q", a)
+		return 1
 	}
 
 	dm := getDBConcrete()
@@ -60,97 +119,179 @@ func handleInfo(args []string) int {
 		return 1
 	}
 
+	out := collectInfo(dm)
+
+	if jsonOutput {
+		return emitInfoJSON(out)
+	}
+	renderInfoHuman(out)
+	return 0
+}
+
+// collectInfo gathers every fact the info command renders. The
+// helper is the single source of truth for both the human and
+// JSON renderers — adding a new field happens here, once.
+func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "(unknown)"
+	}
+
+	out := infoOutput{
+		Version: buildVersion,
+		DataDir: config.GetMPMDir(),
+		DBPath:  dm.DBPath(),
+		Workspace: infoWorkspace{
+			ActiveModes:   "(none)",
+			ActivePersona: "(default)",
+		},
+		Database: infoDatabase{
+			Path:   dm.DBPath(),
+			Health: "ok",
+		},
+		Skills: infoSkills{
+			Names: []string{},
+		},
+		Scheduler: infoScheduler{
+			ScheduledTasks: []infoScheduledTask{},
+		},
+		Runtime: infoRuntime{
+			Hostname: host,
+			PID:      os.Getpid(),
+		},
+	}
+
+	// Workspace — active mode / persona from active.json.
+	if active, err := mpminternal.LoadActiveJSON(); err == nil {
+		out.Workspace.ActiveModes = "(none)"
+		if len(active.Modes) > 0 {
+			out.Workspace.ActiveModes = strings.Join(active.Modes, ", ")
+		}
+		out.Workspace.ActivePersona = "(default)"
+		if active.Persona != "" {
+			out.Workspace.ActivePersona = active.Persona
+		}
+		out.Workspace.ActiveUpdated = active.Updated
+	} else {
+		out.Workspace.ActiveJSONLoad = err.Error()
+	}
+
+	// Database shape + memory counts.
+	if _, err := dm.HealthCheck(); err != nil {
+		out.Database.Health = "degraded"
+		out.Database.Error = err.Error()
+	}
+	if stats, err := dm.GetMemoryStats(); err == nil {
+		out.Database.Stats = stats
+	}
+
+	// Skills.
+	if names := listSkillsForInfo(dm); len(names) > 0 {
+		out.Skills.Count = len(names)
+		out.Skills.Names = names
+	}
+
+	// Scheduler.
+	if pid := readSchedulerPID(); pid > 0 {
+		out.Scheduler.Running = true
+		out.Scheduler.PID = pid
+	}
+	if tasks := listScheduledTasksForInfo(dm); len(tasks) > 0 {
+		for _, t := range tasks {
+			out.Scheduler.ScheduledTasks = append(out.Scheduler.ScheduledTasks, infoScheduledTask{
+				ID:      t.id,
+				NextRun: t.nextRun,
+			})
+		}
+	}
+
+	return out
+}
+
+// renderInfoHuman prints the canonical human-readable form. It
+// intentionally mirrors the JSON section ordering one-to-one so the
+// two surfaces stay co-aligned.
+func renderInfoHuman(out infoOutput) {
 	fmt.Println("MPM · Installation identity")
 	fmt.Println()
 
-	// Identity — version + paths.
 	fmt.Println("Identity")
-	fmt.Printf("  version          : %s\n", buildVersion)
-	fmt.Printf("  data directory   : %s\n", config.GetMPMDir())
-	fmt.Printf("  database path    : %s\n", dm.DBPath())
+	fmt.Printf("  version          : %s\n", out.Version)
+	fmt.Printf("  data directory   : %s\n", out.DataDir)
+	fmt.Printf("  database path    : %s\n", out.DBPath)
 	fmt.Println()
 
-	// Workspace — active mode / persona from active.json.
 	fmt.Println("Workspace")
-	if active, err := mpminternal.LoadActiveJSON(); err == nil {
-		modes := "(none)"
-		if len(active.Modes) > 0 {
-			modes = strings.Join(active.Modes, ", ")
-		}
-		persona := "(none)"
-		if active.Persona != "" {
-			persona = active.Persona
-		}
-		fmt.Printf("  active modes     : %s\n", modes)
-		fmt.Printf("  active persona   : %s\n", persona)
-		fmt.Printf("  active updated   : %s\n", active.Updated)
-	} else {
-		fmt.Println("  active modes     : (no active.json — defaults apply)")
-		fmt.Println("  active persona   : (default)")
+	fmt.Printf("  active modes     : %s\n", out.Workspace.ActiveModes)
+	fmt.Printf("  active persona   : %s\n", out.Workspace.ActivePersona)
+	if out.Workspace.ActiveUpdated != "" {
+		fmt.Printf("  active updated   : %s\n", out.Workspace.ActiveUpdated)
+	} else if out.Workspace.ActiveJSONLoad != "" {
+		fmt.Printf("  active.json load : ⚠ %s\n", out.Workspace.ActiveJSONLoad)
 	}
 	fmt.Println()
 
-	// Database shape + memory counts.
 	fmt.Println("Database")
-	fmt.Printf("  path             : %s\n", dm.DBPath())
-	if _, err := dm.HealthCheck(); err != nil {
-		fmt.Printf("  health           : ⚠ %v\n", err)
-	} else {
+	fmt.Printf("  path             : %s\n", out.Database.Path)
+	if out.Database.Health == "ok" {
 		fmt.Printf("  health           : ✓ ok\n")
-	}
-	stats, err := dm.GetMemoryStats()
-	if err != nil {
-		fmt.Println("  stats            : (unavailable)")
 	} else {
+		fmt.Printf("  health           : ⚠ %s\n", out.Database.Error)
+	}
+	if out.Database.Stats != nil {
 		for _, k := range []string{"total", "active", "ltm", "deleted", "never_accessed", "expired"} {
-			if v, ok := stats[k]; ok && v != nil {
+			if v, ok := out.Database.Stats[k]; ok && v != nil {
 				fmt.Printf("  %-16s : %v\n", k, v)
 			}
 		}
+	} else {
+		fmt.Println("  stats            : (unavailable)")
 	}
 	fmt.Println()
 
-	// Skills.
 	fmt.Println("Skills")
-	skills := listSkillsForInfo(dm)
-	if len(skills) == 0 {
+	if out.Skills.Count == 0 {
 		fmt.Println("  registered skills: (none)")
 	} else {
-		fmt.Printf("  registered skills: %d\n", len(skills))
-		for _, s := range skills {
+		fmt.Printf("  registered skills: %d\n", out.Skills.Count)
+		for _, s := range out.Skills.Names {
 			fmt.Printf("    - %s\n", s)
 		}
 	}
 	fmt.Println()
 
-	// Scheduler.
 	fmt.Println("Scheduler")
-	pid := readSchedulerPID()
-	if pid > 0 {
-		fmt.Printf("  mpm-scheduler    : running (pid %d)\n", pid)
+	if out.Scheduler.Running {
+		fmt.Printf("  mpm-scheduler    : running (pid %d)\n", out.Scheduler.PID)
 	} else {
 		fmt.Println("  mpm-scheduler    : not running (start with 'systemctl --user start mpm-scheduler')")
 	}
-	wakes := listScheduledTasksForInfo(dm)
-	if len(wakes) == 0 {
+	if len(out.Scheduler.ScheduledTasks) == 0 {
 		fmt.Println("  scheduled tasks  : (none)")
 	} else {
-		fmt.Printf("  scheduled tasks  : %d\n", len(wakes))
-		for _, w := range wakes {
-			fmt.Printf("    - %s (next: %s)\n", w.id, w.nextRun)
+		fmt.Printf("  scheduled tasks  : %d\n", len(out.Scheduler.ScheduledTasks))
+		for _, t := range out.Scheduler.ScheduledTasks {
+			fmt.Printf("    - %s (next: %s)\n", t.ID, t.NextRun)
 		}
 	}
 	fmt.Println()
 
-	// Runtime identity.
-	host, _ := os.Hostname()
-	if host == "" {
-		host = "(unknown)"
-	}
 	fmt.Println("Runtime")
-	fmt.Printf("  hostname         : %s\n", host)
-	fmt.Printf("  pid              : %d\n", os.Getpid())
+	fmt.Printf("  hostname         : %s\n", out.Runtime.Hostname)
+	fmt.Printf("  pid              : %d\n", out.Runtime.PID)
 	fmt.Println()
+}
+
+// emitInfoJSON renders the typed payload as indented JSON on stdout.
+// Machine consumers pipe this directly; human readers see indented
+// output via `jq .` or `cat`.
+func emitInfoJSON(out infoOutput) int {
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		usererror.Error("marshal info: %v", err)
+		return 1
+	}
+	fmt.Println(string(b))
 	return 0
 }
 

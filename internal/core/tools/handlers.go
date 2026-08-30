@@ -688,6 +688,21 @@ func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	}
 
 	newStatus, _ := p["newStatus"].(string)
+	status, _ := p["status"].(string)
+	// D-008 (alpha-4.1.1): prefer the natural `status` key (the
+	// vocabulary already used for theories propose+resolve in
+	// human-facing contexts). `newStatus` retained as a backward-
+	// compatible alias. If both are supplied with conflicting
+	// values, reject explicitly so a typo doesn't silently bind.
+	if status == "" && newStatus == "" {
+		return nil, fmt.Errorf("resolve_theory: status (or newStatus) is required and must be 'proven' or 'disproven'")
+	}
+	if status != "" && newStatus != "" && status != newStatus {
+		return nil, fmt.Errorf("resolve_theory: conflicting status=%q and newStatus=%q — supply only one", status, newStatus)
+	}
+	if status != "" {
+		newStatus = status
+	}
 	if newStatus != "proven" && newStatus != "disproven" {
 		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
 	}
@@ -1990,13 +2005,20 @@ func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 	if artifactType == "" {
 		artifactType = "memory"
 	}
-	var strength float64
-	if s, ok := payload["strength"].(float64); ok {
-		strength = s
+	// Alpha-4.1.1 audit fix (silent-coercion review): strength and
+	// independence_factor were silently defaulting to 0 / 1.0 when the
+	// caller sent a string ("5") or any other wrong type. An agent
+	// passing strength="5" would get an evidence row with strength=0
+	// and no error — the audit trail records the wrong weight. The
+	// strict parser mirrors parseWeightStrict's contract: numeric
+	// shapes pass through, wrong types error with a canonical message.
+	strength, err := parseFloatStrictOr(payload["strength"], 0.5, "strength")
+	if err != nil {
+		return nil, err
 	}
-	var independence float64 = 1.0
-	if i, ok := payload["independence_factor"].(float64); ok {
-		independence = i
+	independence, err := parseFloatStrictOr(payload["independence_factor"], 1.0, "independence_factor")
+	if err != nil {
+		return nil, err
 	}
 
 	return dm.AddEvidence(internal.EvidenceInput{
@@ -2312,6 +2334,17 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 //	               Alpha-4.1 F-007 / W-002.
 func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	levelStr := getString(p, "level")
+	// D-004 (alpha-4.1.1): normalize the level enum before it
+	// hits the SQL boundary. The CLI handler already does this
+	// (handlers_audit.go uses strings.ToLower + explicit reject);
+	// the MCP path was passing the raw user string to
+	// AuditLevel(), so "ERROR" / "Error" silently returned 0 hits
+	// (the canonical stored values are lowercase). Lowercasing
+	// keeps the contract consistent across both surfaces —
+	// callers can write whichever case they prefer.
+	if levelStr != "" {
+		levelStr = strings.ToLower(levelStr)
+	}
 	component := getString(p, "component")
 	artifactID := getString(p, "artifact_id")
 	days := 7
@@ -2891,6 +2924,50 @@ func handleWorkshopSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 
 	// Decode params into a WorkshopRequest. JSON round-trip keeps
 	// the shape strict; unknown fields are dropped silently.
+	//
+	// D-010 (alpha-4.1.1): the Go json.Unmarshal error for a wrong-
+	// typed decision-model axis (e.g. caller passes "leverage":
+	// "3" instead of 3) is "json: cannot unmarshal string into
+	// Go struct field WorkshopRequest.decision_model.leverage of
+	// type int". That tells the caller the field name and type
+	// mismatch but says nothing about the legal range (0..5) or
+	// the boundary enum contract. Pre-check the integer axes with
+	// explicit type assertions so the error message identifies
+	// the field, the expected type, and the legal range — and
+	// fail fast before the generic json.Unmarshal error obscures
+	// it.
+	if dmField, ok := p["decision_model"]; ok {
+		if dmMap, ok := dmField.(map[string]interface{}); ok {
+			for _, axis := range []string{"reusability", "non_obviousness", "stability", "leverage"} {
+				if v, present := dmMap[axis]; present {
+					// Accept any JSON number (float64 from encoding/json)
+					// and reject strings / bools / null with a field-
+					// specific message.
+					if _, isNum := v.(float64); !isNum {
+						return nil, fmt.Errorf(
+							"workshop: decision_model.%s must be an integer from 0 to 5 (got %T: %v) — "+
+								"the decision-model contract is a 4-axis integer score; "+
+								"see docs/archive/2026-08-28-mpm-skill-workshop-design.md §6",
+							axis, v, v,
+						)
+					}
+				}
+			}
+			if v, present := dmMap["boundary"]; present {
+				if s, ok := v.(string); !ok {
+					return nil, fmt.Errorf(
+						"workshop: decision_model.boundary must be a string from {procedure, judgment, knowledge} "+
+							"(got %T: %v)", v, v,
+					)
+				} else if s != "procedure" && s != "judgment" && s != "knowledge" {
+					return nil, fmt.Errorf(
+						"workshop: decision_model.boundary must be one of {procedure, judgment, knowledge}, got %q",
+						s,
+					)
+				}
+			}
+		}
+	}
 	data, err := json.Marshal(p)
 	if err != nil {
 		return nil, fmt.Errorf("workshop: marshal params: %w", err)
@@ -4055,11 +4132,21 @@ func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // shape as the failure mode the always-cross-check-with-sqlite3 discipline
 // catches at the cost of a whole diagnostic.
 //
-// Contract: every domain tool (mpm_memory, mpm_session, …) takes a payload
-// whose TOP-LEVEL fields may ONLY be `action` (string) and `params`
-// (object). Anything else is a contract violation and is rejected with a
-// schema-error message that names the tool, the missing/extra fields, and
-// the correct envelope shape — so the caller knows exactly what to fix.
+// Contract (alpha-4.1.1 D-006): `params` is OPTIONAL for actions that
+// take no parameters. A payload shaped like
+//
+//	{"action":"list"}
+//
+// must succeed for actions that don't require params (e.g.
+// mpm_decisions action=list with no filters). Actions that DO require
+// parameters still fail loudly in their inner handler with the field-
+// specific error — extractParamsOrFail no longer pre-rejects for them.
+// This eliminates the boilerplate `params={}` for every no-param call
+// without weakening validation for parameterized actions.
+//
+// Top-level fields may still only be `action` and `params`. Anything
+// else remains a contract violation rejected here so the error is
+// actionable at the boundary.
 //
 // This function is the single, project-wide gate for that contract. All 13
 // domain dispatchers call it on entry; ad-hoc usage of `payload["params"]`
@@ -4116,21 +4203,19 @@ func extractParamsOrFail(toolName string, payload map[string]interface{}) (map[s
 		return nil, fmt.Errorf("%s: field `action` must be a string — got %T; expected shape {\"action\":\"<op>\",\"params\":{...}}", toolName, payload["action"])
 	}
 
-	// `params` must be present AND object-typed. Missing params is a
-	// contract violation; an empty object is fine (and meaningful for
-	// actions with no required params).
+	// `params` is OPTIONAL. If absent, return an empty map so actions
+	// with no parameters (e.g. mpm_decisions action=list with no filters)
+	// can be invoked as `{"action":"list"}` instead of `{"action":"list",
+	// "params":{}}`. Inner handlers still validate their specific required
+	// params — extractParamsOrFail no longer pre-rejects for them.
+	//
+	// If `params` IS present, it must be object-typed. A wrong-typed params
+	// is still a contract violation that surfaces at the boundary.
+	if _, present := payload["params"]; !present {
+		return map[string]interface{}{}, nil
+	}
 	params, ok := payload["params"].(map[string]interface{})
 	if !ok {
-		// Distinguish "missing" from "wrong type" so the error message
-		// tells the caller which edit they need to make.
-		if _, present := payload["params"]; !present {
-			return nil, fmt.Errorf(
-				"%s: missing required field `params` (object) — expected shape "+
-					"{\"action\":\"<op>\",\"params\":{...}}. "+
-					"Action `%v` requires an explicit params envelope, even if empty.",
-				toolName, payload["action"],
-			)
-		}
 		return nil, fmt.Errorf(
 			"%s: field `params` must be an object — got %T; expected shape "+
 				"{\"action\":\"<op>\",\"params\":{...}}",
@@ -4969,4 +5054,27 @@ func parseWeightStrict(v interface{}, def float64) (float64, error) {
 		return float64(n), nil
 	}
 	return 0, fmt.Errorf("field `weight` must be a number (float64/int), got %T", v)
+}
+
+// parseFloatStrictOr is the named-field counterpart to parseWeightStrict.
+// Used by the evidence handler where the field name appears in the error
+// message (strength, independence_factor) so the caller can pinpoint which
+// input was wrong. Same numeric-only contract: float64 / float32 / int /
+// int64 pass through, nil returns the default, anything else errors with
+// the offending type and the field name.
+func parseFloatStrictOr(v interface{}, def float64, fieldName string) (float64, error) {
+	if v == nil {
+		return def, nil
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, nil
+	case float32:
+		return float64(n), nil
+	case int:
+		return float64(n), nil
+	case int64:
+		return float64(n), nil
+	}
+	return 0, fmt.Errorf("field `%s` must be a number (float64/int), got %T", fieldName, v)
 }
