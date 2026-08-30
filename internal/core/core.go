@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+// DecisionFilter narrows the result set for ListDecisions. The zero value
+// returns all active (non-superseded, non-invalidated) decisions up to the
+// default page size. alpha-4 D-005.
+type DecisionFilter struct {
+	Status string   // "active" (default), "all", "superseded", "invalidated"
+	Tags   []string // empty = no tag filter
+	Limit  int      // 0 means default (50)
+}
+
 // CoreDB is the persistent-storage interface that the Agent Runtime consumes.
 // DatabaseManager implements every method.
 type CoreDB interface {
@@ -202,6 +211,14 @@ type CoreDB interface {
 	// without a replacement.
 	SupersedeDecision(originalID, contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	InvalidateDecision(decisionID, reason string) (map[string]interface{}, error)
+	// Decision read symmetry (alpha-4 D-005): expose read paths that
+	// mirror the write surface so an agent that wrote a decision can
+	// retrieve, list, or query it without dropping to SQL. All return
+	// generic map[string]interface{} rows so they round-trip through
+	// the existing tool/CLI JSON marshallers without struct-tag coupling.
+	GetDecision(id string) (map[string]interface{}, error)
+	ListDecisions(filter DecisionFilter) ([]map[string]interface{}, error)
+	QueryDecisions(query string, limit int) ([]map[string]interface{}, error)
 	ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error)
 
 	// ─── Cascade provenance (Task 2) ──────────────────────────────────

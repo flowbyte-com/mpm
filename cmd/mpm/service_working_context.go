@@ -92,7 +92,7 @@ func NewWorkingContextService(store *WorkingContextStore, writer MemoryWriter) *
 // schema mismatch, permission denied).
 func (s *WorkingContextService) GetCurrent(sessionID string) (*WorkingContext, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, mpminternal.ErrSessionIDRequired()
 	}
 	wc, err := s.store.Load(sessionID)
 	if err != nil {
@@ -135,7 +135,7 @@ func (s *WorkingContextService) GetCurrent(sessionID string) (*WorkingContext, e
 // behaviour that earned this service its existence.
 func (s *WorkingContextService) Promote(sessionID string) (*PromoteResult, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, mpminternal.ErrSessionIDRequired()
 	}
 	wc, err := s.store.Load(sessionID)
 	if err != nil {
@@ -178,7 +178,7 @@ func (s *WorkingContextService) Promote(sessionID string) (*PromoteResult, error
 // `mpm work promote`).
 func (s *WorkingContextService) Clear(sessionID string) error {
 	if sessionID == "" {
-		return fmt.Errorf("session_id is required")
+		return mpminternal.ErrSessionIDRequired()
 	}
 	return s.store.Delete(sessionID)
 }

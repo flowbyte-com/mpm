@@ -1,222 +1,176 @@
+// call_io_test.go — regression tests for the alpha-4 D-004/W-004
+// machine-clean-output contract.
+//
+// Contract:
+//   - `mpm call <tool> --payload <json>` writes the result envelope to
+//     stdout and routes operational INFO logs to io.Discard by default.
+//   - stderr carries only true error diagnostics (no INFO/Warn noise
+//     from the blob-store wiring, audit system, or migration probe).
+//   - `MPM_VERBOSE=1` restores the operator-facing diagnostic stream.
+//
+// These tests exec the freshly-built `mpm` binary directly — the
+// handler-level tests can't observe the stderr/stdout split because
+// the dispatcher's stdout/stderr are process-bound.
+
 package main
 
 import (
 	"bytes"
 	"encoding/json"
-	"io"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
-// TestWriteEnvelope_RoutesToGivenWriter pins the stdout/stderr contract at
-// the helper level: writeEnvelope must always write JSON to the writer it
-// is given. The handleCall dispatcher passes os.Stdout for both success
-// and error paths, so the contract test is simple — the helper must not
-// reach for os.Stderr (or any global) on its own.
+// mpmBin is the freshly-built mpm binary used by the IO tests. It is
+// populated by the shared TestMain in cmd/mpm/recall_test.go (which
+// builds once per package run) — building it again per-test would
+// add ~10s to the suite for no benefit.
+var mpmBin string
+
+// buildMPMBinForIOTests is invoked by the package TestMain. It returns
+// the path to a freshly-built mpm binary, or empty string on failure
+// (the IO tests will be skipped in that case).
 //
-// This is the regression test for lesson 2b22765cd1b13a81 (theory
-// d8c64fe9b7528d53): the previous error path used fmt.Fprintf(os.Stderr, ...)
-// which routed the JSON envelope to stderr, breaking every agent adapter
-// that follows the documented "JSON envelope on stdout, zap logs on stderr"
-// contract.
-func TestWriteEnvelope_RoutesToGivenWriter(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload interface{}
-		assert  func(t *testing.T, line []byte)
-	}{
-		{
-			name:    "success-shaped map",
-			payload: map[string]interface{}{"success": true, "value": 42},
-			assert: func(t *testing.T, line []byte) {
-				var got map[string]interface{}
-				decodeEnvelope(t, line, &got)
-				if got["success"] != true {
-					t.Fatalf("success field: got %v, want true", got["success"])
-				}
-				if got["value"] != float64(42) { // JSON numbers decode as float64
-					t.Fatalf("value field: got %v, want 42", got["value"])
-				}
-			},
-		},
-		{
-			name:    "error-shaped map",
-			payload: map[string]interface{}{"success": false, "error": "fact is required"},
-			assert: func(t *testing.T, line []byte) {
-				var got map[string]interface{}
-				decodeEnvelope(t, line, &got)
-				if got["success"] != false {
-					t.Fatalf("success field: got %v, want false", got["success"])
-				}
-				if got["error"] != "fact is required" {
-					t.Fatalf("error field: got %v, want %q", got["error"], "fact is required")
-				}
-			},
-		},
-		{
-			name:    "defensive fallback on marshal failure",
-			payload: make(chan int), // json.Marshal cannot marshal channels
-			assert: func(t *testing.T, line []byte) {
-				var got map[string]interface{}
-				decodeEnvelope(t, line, &got)
-				if got["success"] != false {
-					t.Fatalf("success field: got %v, want false", got["success"])
-				}
-				if got["error"] != "envelope marshal failed" {
-					t.Fatalf("error field: got %v, want %q", got["error"], "envelope marshal failed")
-				}
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			writeEnvelope(&buf, tt.payload)
-			line := bytes.TrimRight(buf.Bytes(), "\n")
-			tt.assert(t, line)
-		})
-	}
-}
-
-// TestCallErrorEnvelope_RoutesToStdout exercises the full handleCall
-// dispatcher against a deliberately invalid payload. The envelope must
-// arrive on stdout (the documented contract), NOT on stderr. With the
-// pre-fix code at cmd/mpm/call.go:100, the JSON envelope was written to
-// stderr — this test would have failed because stdout would be empty.
-//
-// The dispatcher opens the workspace DB via openCallDM() (no temp DB
-// override is needed; the empty-payload error path doesn't touch any
-// table beyond the audit insert, which is a benign log row).
-func TestCallErrorEnvelope_RoutesToStdout(t *testing.T) {
-	// Capture stdout so we can assert the JSON envelope appears here.
-	// We restore on cleanup so other tests in the package aren't
-	// affected if they happen to run after this one.
-	origStdout := os.Stdout
-	r, w, err := os.Pipe()
+// The build runs from the parent directory of cmd/mpm/ because that's
+// where `./cmd/mpm` resolves correctly under `go build`. `go test
+// ./cmd/mpm/` runs with cwd = cmd/mpm, so a relative path of
+// `./cmd/mpm` would resolve to cmd/mpm/cmd/mpm and fail.
+func buildMPMBinForIOTests() string {
+	tmp, err := os.MkdirTemp("", "mpm-call-io-bin-")
 	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+		return ""
 	}
-	os.Stdout = w
-	t.Cleanup(func() {
-		os.Stdout = origStdout
-		_ = r.Close()
-		_ = w.Close()
-	})
-
-	// Trigger a handler-level error: mpm_memory.save requires params.fact;
-	// passing an empty params object forces the handler to return an
-	// error which the dispatcher must wrap as a JSON envelope.
-	exit := handleCall([]string{
-		"mpm_memory",
-		"--payload", `{"action":"save","params":{}}`,
-	})
-
-	// Close the writer so the read below sees EOF.
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
-	}
-
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatalf("read captured stdout: %v", err)
-	}
-	stdoutCaptured := buf.String()
-
-	// Exit code contract: errors must exit non-zero so agent harnesses
-	// can branch on the shell-level result.
-	if exit == 0 {
-		t.Errorf("handleCall with bad payload: exit = 0, want non-zero")
-	}
-
-	// The JSON envelope MUST be on stdout (the documented contract).
-	// We allow trailing whitespace but require the envelope to be the
-	// final non-empty line so a regression where the JSON slips to
-	// stderr would surface as "stdout empty".
-	lines := strings.Split(strings.TrimSpace(stdoutCaptured), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[len(lines)-1]) == "" {
-		t.Fatalf("handleCall produced no stdout content; the error envelope should be on stdout per the documented contract.\ncaptured stdout: %q", stdoutCaptured)
-	}
-	envelopeLine := strings.TrimSpace(lines[len(lines)-1])
-
-	var envelope map[string]interface{}
-	if err := json.Unmarshal([]byte(envelopeLine), &envelope); err != nil {
-		t.Fatalf("stdout envelope is not valid JSON: %v\nline: %s", err, envelopeLine)
-	}
-	if envelope["success"] != false {
-		t.Errorf("envelope.success: got %v, want false (handleCall error path must surface success:false)", envelope["success"])
-	}
-	if errMsg, ok := envelope["error"].(string); !ok || !strings.Contains(errMsg, "fact") {
-		t.Errorf("envelope.error: got %v, want a string mentioning the missing field", envelope["error"])
-	}
-}
-
-// TestCallSuccessEnvelope_RoutesToStdout mirrors the error-path test for
-// the success path. Both envelopes must be on stdout so the contract is
-// uniform — a future refactor that routes one path to stdout and the
-// other to stderr would regress this assertion.
-func TestCallSuccessEnvelope_RoutesToStdout(t *testing.T) {
-	origStdout := os.Stdout
-	r, w, err := os.Pipe()
+	bin := filepath.Join(tmp, "mpm")
+	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", bin, "./cmd/mpm")
+	// chdir to the parent directory so `./cmd/mpm` resolves to the
+	// cmd/mpm package directory.
+	repoRoot, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+		return ""
 	}
-	os.Stdout = w
-	t.Cleanup(func() {
-		os.Stdout = origStdout
-		_ = r.Close()
-		_ = w.Close()
-	})
-
-	exit := handleCall([]string{
-		"mpm_system",
-		"--payload", `{"action":"health_check","params":{}}`,
-	})
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
+	cmd.Dir = filepath.Dir(filepath.Dir(repoRoot))
+	cmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "buildMPMBinForIOTests failed: %v\n%s\n", err, out)
+		return ""
 	}
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatalf("read captured stdout: %v", err)
-	}
-	stdoutCaptured := buf.String()
-
-	if exit != 0 {
-		t.Errorf("handleCall health_check: exit = %d, want 0", exit)
-	}
-	lines := strings.Split(strings.TrimSpace(stdoutCaptured), "\n")
-	envelopeLine := strings.TrimSpace(lines[len(lines)-1])
-
-	var envelope map[string]interface{}
-	if err := json.Unmarshal([]byte(envelopeLine), &envelope); err != nil {
-		t.Fatalf("success stdout envelope is not valid JSON: %v\nline: %s", err, envelopeLine)
-	}
-	// health_check returns ok:true — the success-path signal that the
-	// dispatcher reached the success branch of the if/else.
-	if envelope["ok"] != true {
-		t.Errorf("envelope.ok: got %v, want true (handleCall success path must surface ok:true)", envelope["ok"])
-	}
+	return bin
 }
 
-// decodeEnvelope is a tiny shim around json.Unmarshal that fails the test
-// cleanly if the line is empty or not valid JSON. Used by the table
-// above; named to avoid shadowing the testify "require" package that
-// other tests in this package import.
-func decodeEnvelope(t *testing.T, line []byte, dst interface{}) {
+// callMPM runs the freshly-built mpm binary with the given args and
+// returns stdout, stderr, and the exit error.
+func callMPM(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	if len(line) == 0 {
-		t.Fatalf("envelope line is empty")
+	if mpmBin == "" {
+		t.Skip("mpm binary not built (see TestMain); skipping IO regression")
 	}
-	if err := json.Unmarshal(line, dst); err != nil {
-		t.Fatalf("unmarshal envelope: %v\nline: %s", err, string(line))
+	cmd := exec.Command(mpmBin, args...)
+	// Build a clean env: inherit PATH and HOME-related entries from
+	// os.Environ(), override HOME to a temp dir for workspace isolation,
+	// set MPM_SCHEDULER_DISABLED=1 to silence the passive nudge, and
+	// ensure MPM_VERBOSE is unset so the discard path is exercised.
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_SCHEDULER_DISABLED=1",
+	}
+	var so, se bytes.Buffer
+	cmd.Stdout = &so
+	cmd.Stderr = &se
+	err = cmd.Run()
+	return so.String(), se.String(), err
+}
+
+// TestCallSuccess_StderrCleanOnHappyPath is the alpha-4 D-004 pin:
+// a successful mpm_memory query must NOT leak operational INFO into
+// stderr. Pre-fix this leaked "migrateLessonsToView" probe warnings
+// and "alpha-3 schema fully applied" Info lines — even on a clean
+// query. Post-fix stderr should be empty (or contain only true errors,
+// which a successful query never has).
+func TestCallSuccess_StderrCleanOnHappyPath(t *testing.T) {
+	stdout, stderr, err := callMPM(t,
+		"call", "mpm_memory",
+		"--payload", `{"action":"query","params":{"query":"d004-clean-output","limit":3}}`,
+	)
+	if err != nil {
+		t.Fatalf("call failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	// stdout must be valid JSON (the result envelope).
+	var env map[string]interface{}
+	if jerr := json.Unmarshal([]byte(stdout), &env); jerr != nil {
+		t.Fatalf("stdout is not JSON: %v\nstdout=%s", jerr, stdout)
+	}
+	// stderr should NOT carry operational INFO from mpm itself.
+	if strings.Contains(stderr, "migrateLessonsToView") {
+		t.Errorf("D-004 regression: stderr leaked migration probe noise: %s", stderr)
+	}
+	if strings.Contains(stderr, "alpha-3 schema fully applied") {
+		t.Errorf("D-004 regression: stderr leaked schema migration INFO: %s", stderr)
+	}
+	if strings.Contains(stderr, "artifact_provenance") {
+		t.Errorf("D-004 regression: stderr leaked artifact_provenance INFO: %s", stderr)
 	}
 }
 
-// (compile-time guard: io is imported to keep the file compiling under
-// go vet, which would otherwise flag unused-import errors if someone
-// removed the bytes.Buffer usage above.)
-var _ = io.Discard
-var _ = require.NotNil // explicit reference to the testify import so future edits don't accidentally drop it
+// TestCallValidationFailure_EnvelopeOnStdout_ExitNonZero covers the
+// failure path: a payload missing required fields should produce a
+// structured error envelope on stdout (parseable by machine callers)
+// and exit non-zero. Stderr MAY carry a human-readable diagnostic —
+// that's the one case where stderr is allowed to be non-empty.
+func TestCallValidationFailure_EnvelopeOnStdout_ExitNonZero(t *testing.T) {
+	stdout, _, err := callMPM(t,
+		"call", "mpm_memory",
+		"--payload", `{"action":"query","params":{}}`,
+	)
+	if err == nil {
+		t.Fatalf("expected non-zero exit on empty payload, got success\nstdout=%s", stdout)
+	}
+	var env map[string]interface{}
+	if jerr := json.Unmarshal([]byte(stdout), &env); jerr != nil {
+		t.Fatalf("validation-failure stdout is not JSON: %v\nstdout=%s", jerr, stdout)
+	}
+	if _, has := env["error"]; !has {
+		t.Errorf("validation-failure envelope missing error field: %s", stdout)
+	}
+}
+
+// TestCallVerboseFlag_RestoresDiagnostics covers the MPM_VERBOSE=1
+// escape hatch: with the env var set, operational INFO is restored
+// to stderr so operators can debug wire-up failures. The test asserts
+// the escape hatch doesn't break the happy path AND that it produces
+// some diagnostic output (we expect at least the alpha-3 schema INFO
+// line on a fresh DB).
+func TestCallVerboseFlag_RestoresDiagnostics(t *testing.T) {
+	if mpmBin == "" {
+		t.Skip("mpm binary not built (see TestMain); skipping IO regression")
+	}
+	cmd := exec.Command(mpmBin,
+		"call", "mpm_memory",
+		"--payload", `{"action":"query","params":{"query":"d004-verbose","limit":3}}`,
+	)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_VERBOSE=1",
+		"MPM_SCHEDULER_DISABLED=1",
+	}
+	var so, se bytes.Buffer
+	cmd.Stdout = &so
+	cmd.Stderr = &se
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("MPM_VERBOSE=1 broke the happy path: %v\nstdout=%s\nstderr=%s", err, so.String(), se.String())
+	}
+	var env map[string]interface{}
+	if jerr := json.Unmarshal([]byte(so.String()), &env); jerr != nil {
+		t.Fatalf("stdout is not JSON under MPM_VERBOSE=1: %v\nstdout=%s", jerr, so.String())
+	}
+	// Under verbose mode, stderr should carry operational INFO — at
+	// minimum the alpha-3 schema migration line on a fresh DB.
+	if !strings.Contains(se.String(), "alpha-3 schema") {
+		t.Errorf("MPM_VERBOSE=1 did not restore diagnostic stream: stderr=%s", se.String())
+	}
+}

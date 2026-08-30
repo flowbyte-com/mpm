@@ -297,7 +297,7 @@ func (dm *DatabaseManager) CheckPendingEventWakes(sessionID string) ([]EventWake
 		return nil, nil // shared DB not attached: nothing to do, no error
 	}
 	if sessionID == "" {
-		return nil, fmt.Errorf("CheckPendingEventWakes: sessionID is required")
+		return nil, ErrSessionIDRequired()
 	}
 
 	tx, err := dm.db.Begin()

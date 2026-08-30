@@ -30,6 +30,61 @@ import (
 //   - Use `ac` for write provenance; do NOT read global mode/persona vars.
 //   - Don't open/close the DB — the dispatcher owns that lifetime.
 
+// normalizeProjection (alpha-4 D-002/W-003) accepts both "projection"
+// (canonical) and "mode" (deprecated alias) input keys for the
+// pointer-native projection knobs on mpm_memory query, mpm_lessons
+// search, and mpm_lessons list.
+//
+// Resolution rules:
+//   - canonical values are exactly "summary" and "full".
+//   - mode == "content" → mapped to "full" (legacy equivalent).
+//   - mode == "verbose" → rejected (verbose is a render-time concept,
+//     not a projection knob; the response `mode` field would lie).
+//   - any other non-empty value on either key → rejected with the
+//     canonical-list error.
+//   - both keys set to the same value → ok.
+//   - both keys set to different values → prefer "projection", ignore "mode".
+//   - neither key set / empty → "summary" (default unchanged).
+//
+// Returning a structured error keeps the failure parseable by machine
+// callers (matches the existing tool-envelope shape used elsewhere).
+func normalizeProjection(p map[string]interface{}) (string, error) {
+	const canonicalList = `[summary, full]`
+
+	projection, _ := p["projection"].(string)
+	mode, _ := p["mode"].(string)
+
+	// Validate "projection" against the strict canonical set. Any other
+	// non-empty value (including the legacy "content" alias and the
+	// non-projection "verbose" knob) is a typo at this layer.
+	if projection != "" && projection != "summary" && projection != "full" {
+		return "", fmt.Errorf("unknown projection %q; canonical values: %s", projection, canonicalList)
+	}
+
+	// Validate "mode" against the legacy-tolerant set: "summary",
+	// "full", and the "content" alias for "full". Anything else —
+	// including "verbose" — is rejected.
+	if mode != "" && mode != "summary" && mode != "full" && mode != "content" {
+		return "", fmt.Errorf("unknown projection %q (mode alias); canonical values: %s", mode, canonicalList)
+	}
+
+	// mode == "content" is the documented legacy equivalent of "full".
+	// Remap ONLY when "projection" is empty — if both are set, the
+	// canonical key wins and "mode" is silently ignored (no error,
+	// since the caller expressed clear intent on the canonical key).
+	if mode == "content" && projection == "" {
+		mode = "full"
+	}
+
+	if projection != "" {
+		return projection, nil
+	}
+	if mode != "" {
+		return mode, nil
+	}
+	return "summary", nil
+}
+
 // handleSaveToMemory persists a memory row.
 //
 // Mirror contract (read this before debugging "why isn't my fact in
@@ -331,7 +386,10 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	// Default is "summary" so broad queries never bloat the agent context.
 	// The full payload is always retrievable via mpm_resolve / mpm_blob_read
 	// against the pointer on each entry.
-	projection, _ := p["projection"].(string)
+	projection, err := normalizeProjection(p)
+	if err != nil {
+		return nil, err
+	}
 	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedMemoryEntry, 0, len(items))
 		for _, mem := range items {
@@ -1014,7 +1072,10 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	}
 
 	// Phase 2D: pointer-native projection.
-	projection, _ := p["projection"].(string)
+	projection, err := normalizeProjection(p)
+	if err != nil {
+		return nil, err
+	}
 	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedLessonEntry, 0, len(items))
 		for _, item := range items {
@@ -1090,7 +1151,10 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	}
 
 	// Phase 2D: pointer-native projection.
-	projection, _ := p["projection"].(string)
+	projection, err := normalizeProjection(p)
+	if err != nil {
+		return nil, err
+	}
 	if projection == "" || projection == "summary" {
 		projected := make([]ProjectedLessonEntry, 0, len(items))
 		for _, item := range items {
@@ -1282,6 +1346,15 @@ func handleListReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 // delegated to internal.ReadWakeContext (single source of truth shared with
 // the Go MCP server).
 func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, params map[string]interface{}) (interface{}, error) {
+
+	// Alpha-4 W-001: compact projection. Returns a 9-field id+summary
+	// struct so an agent that only needs to know "who am I, what was
+	// the last handoff, what's open" can avoid pulling the heavy
+	// recent_memories / available_skills / global_rules / overdue_wakes
+	// surfaces into the boot prompt. Default behavior unchanged.
+	if projection, _ := params["projection"].(string); projection == "compact" {
+		return handleReadWakeContextCompact(dm)
+	}
 
 	// format=system-prompt returns the human-readable projection instead of JSON.
 	// Same WakeContextData, different presentation — per the Projection Principle.
@@ -1485,6 +1558,84 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	}
 
 	return result, nil
+}
+
+// CompactWakeContext is the alpha-4 W-001 lightweight projection of the
+// wake surface. Nine fields — enough for an agent to re-orient against
+// "who am I, what just happened, what's waiting" — without pulling the
+// heavy recent_memories / available_skills / global_rules /
+// overdue_wakes arrays into the boot prompt. The full WakeContextData
+// remains available via the default and `projection:"full"` paths.
+type CompactWakeContext struct {
+	SessionID          string   `json:"session_id"`
+	SessionCurrentID   string   `json:"session_current_id"`
+	SessionStartedAt   int64    `json:"session_started_at"`
+	ActiveMode         string   `json:"active_mode"`
+	ActivePersona      string   `json:"active_persona"`
+	LastHandoffSummary string   `json:"last_handoff_summary,omitempty"`
+	LastHandoffEndedAt int64    `json:"last_handoff_ended_at,omitempty"`
+	OpenWorkIDs        []string `json:"open_work_ids"`
+	AuditSummary       string   `json:"audit_summary"`
+	RecentArtifactIDs  []string `json:"recent_artifact_ids"`
+}
+
+// handleReadWakeContextCompact (alpha-4 W-001) returns the 9-field
+// compact projection. Gathers the full WakeContextData (cheap — the
+// heavy part is serialization, not collection), then projects to the
+// compact shape. Errors propagate so the caller can fall back to the
+// full path if the substrate is degraded.
+func handleReadWakeContextCompact(dm mpminternal.CoreDB) (interface{}, error) {
+	data, err := dm.GatherWakeContext()
+	if err != nil {
+		return nil, fmt.Errorf("gather wake context (compact): %w", err)
+	}
+	if data.LastHandoff == nil {
+		if h, herr := dm.GetLatestHandoff(); herr == nil && h != nil {
+			data.LastHandoff = h
+		}
+	}
+
+	compact := CompactWakeContext{
+		SessionID:         data.SessionID,
+		SessionCurrentID:  data.SessionCurrentID,
+		SessionStartedAt:  data.SessionStartedAt,
+		ActiveMode:        data.ActiveMode,
+		ActivePersona:     data.ActivePersona,
+		AuditSummary:      data.AuditSummary,
+		OpenWorkIDs:       []string{}, // invariant 3 — non-nil empty slice
+		RecentArtifactIDs: []string{}, // invariant 3 — non-nil empty slice
+	}
+	if data.LastHandoff != nil {
+		compact.LastHandoffSummary = data.LastHandoff.Summary
+		compact.LastHandoffEndedAt = data.LastHandoff.EndedAt
+	}
+	for _, w := range data.OpenWorks {
+		compact.OpenWorkIDs = append(compact.OpenWorkIDs, w.ID)
+		if len(compact.OpenWorkIDs) >= 5 {
+			break
+		}
+	}
+	// Recent artifact ids: union of recent memory + recent milestone ids,
+	// bounded to 10 total so the compact payload stays small.
+	maxRecent := 10
+	for _, m := range data.RecentMemories {
+		if len(compact.RecentArtifactIDs) >= maxRecent {
+			break
+		}
+		compact.RecentArtifactIDs = append(compact.RecentArtifactIDs, m.ID)
+	}
+	for _, m := range data.RecentMilestones {
+		if len(compact.RecentArtifactIDs) >= maxRecent {
+			break
+		}
+		compact.RecentArtifactIDs = append(compact.RecentArtifactIDs, m.ID)
+	}
+
+	return map[string]interface{}{
+		"success":    true,
+		"projection": "compact",
+		"context":    compact,
+	}, nil
 }
 
 // fetchRecentMemoriesByCollection returns up to limit recent memories for a given collection,
@@ -1904,28 +2055,69 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 // Args:
 //   - name (string, required)        — the skill's stable name
 //   - version (string, required)     — semver, e.g. "2.0.0"
-//   - content (string, required)     — full markdown incl. frontmatter
+//   - content (string)               — full markdown incl. frontmatter
+//                                      (preferred: explicit frontmatter)
+//   - body (string)                  — markdown body, alternative to
+//                                      content. When body is set, the
+//                                      handler synthesises frontmatter
+//                                      from name/version/author so the
+//                                      caller doesn't have to hand-roll
+//                                      YAML just to save a short skill.
 //   - author (string, optional)      — agent name for metadata
 //   - force (bool, optional)         — overwrite when name+version exists
 //
-// Validation order is deliberate: SkillIDForNameAndVersion first (cheap
-// arg-shape check) so the caller gets a precise error message before
-// the more expensive frontmatter parse. ParseSkillFrontmatter runs
-// next so the DM never sees malformed YAML — keeping rejection at the
-// boundary rather than mid-transaction. dm.SaveSkill re-runs both for
-// defence-in-depth, but a front-end rejection here saves a DB round
-// trip and produces a tighter error string.
+// Alpha-4 W-005: aggregate validation errors instead of failing on
+// the first one. An agent that supplies both a missing name AND
+// missing version now learns about both in a single response, not
+// after two round-trips. Errors are returned as a `{success:false,
+// errors:[...]}` payload rather than a Go error, so the envelope is
+// still parseable on the wire — the previous shape (`return nil,
+// fmt.Errorf(...)`) made the response look like a transport failure
+// to callers that distinguish success-payloads from error-payloads.
+//
+// The structured-args shortcut (body instead of content) skips the
+// frontmatter-parse step entirely. The synthesised frontmatter is the
+// minimum ParseSkillFrontmatter requires (name, version) plus the
+// optional author; the agent can read it back and add fields if it
+// wants a richer shape.
 func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	name := internal.ParseStringOr(p["name"], "")
 	version := internal.ParseStringOr(p["version"], "")
 	content := internal.ParseStringOr(p["content"], "")
+	body := internal.ParseStringOr(p["body"], "")
 	author := internal.ParseStringOr(p["author"], ac.Agent)
 	force := false
 	if v, ok := p["force"].(bool); ok {
 		force = v
 	}
-	if name == "" || version == "" || content == "" {
-		return nil, fmt.Errorf("name, version, and content are required")
+
+	// Aggregate ALL hard validation errors into a single payload. The
+	// aggregate path returns success:false with an errors array; the
+	// success path is the normal success envelope.
+	var errs []string
+	if name == "" {
+		errs = append(errs, "missing name")
+	}
+	if version == "" {
+		errs = append(errs, "missing version")
+	}
+	if content == "" && body == "" {
+		errs = append(errs, "missing content or body")
+	}
+	if content != "" && body != "" {
+		errs = append(errs, "either content or body, not both")
+	}
+	if len(errs) > 0 {
+		return map[string]interface{}{
+			"success": false,
+			"errors":  errs,
+		}, nil
+	}
+
+	// Structured-args shortcut: synthesise minimal frontmatter from
+	// name/version/author so the caller doesn't need to hand-roll YAML.
+	if content == "" {
+		content = synthesiseSkillFrontmatter(name, version, author) + "\n" + body
 	}
 
 	// Validate name+version shape before parsing frontmatter so the
@@ -1951,6 +2143,17 @@ func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"name":    name,
 		"version": version,
 	}, nil
+}
+
+// synthesiseSkillFrontmatter builds the minimal YAML frontmatter that
+// ParseSkillFrontmatter accepts (name, version) plus an optional
+// author comment. Used by handleSaveSkill's body-shortcut path.
+func synthesiseSkillFrontmatter(name, version, author string) string {
+	authorLine := ""
+	if author != "" {
+		authorLine = "# author: " + author + "\n"
+	}
+	return fmt.Sprintf("---\nname: %s\nversion: %s\n%s---\n", name, version, authorLine)
 }
 
 // handleReadSkill fetches a skill by name (latest version) or exact id.
@@ -2215,7 +2418,7 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, internal.ErrSessionIDRequired()
 	}
 	summary := getString(p, "summary")
 	if summary == "" {
@@ -3109,7 +3312,7 @@ func handleFlushScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 func handleReadScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, internal.ErrSessionIDRequired()
 	}
 
 	var thesis, supporting, updatedAt string
@@ -3137,7 +3340,7 @@ func handleReadScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 func handleDiscardScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, internal.ErrSessionIDRequired()
 	}
 
 	if _, err := dm.ExecTracked(`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`, 0, sessionID); err != nil {
@@ -3163,7 +3366,7 @@ func handleDiscardScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, internal.ErrSessionIDRequired()
 	}
 
 	var memoryID string
@@ -4013,9 +4216,93 @@ func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pay
 		return handleSupersedeDecision(dm, ac, params)
 	case "invalidate":
 		return handleInvalidateDecision(dm, ac, params)
+	case "show":
+		return handleShowDecision(dm, ac, params)
+	case "list":
+		return handleListDecisions(dm, ac, params)
+	case "query":
+		return handleQueryDecisions(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_decisions. Valid actions include record, supersede, invalidate", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_decisions. Valid actions include record, supersede, invalidate, show, list, query", action)
 	}
+}
+
+// handleShowDecision (alpha-4 D-005) returns a single decision by ID.
+func handleShowDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("show decision: id is required")
+	}
+	row, err := dm.GetDecision(id)
+	if err != nil {
+		return nil, fmt.Errorf("show decision: %w", err)
+	}
+	return map[string]interface{}{"success": true, "decision": row}, nil
+}
+
+// handleListDecisions (alpha-4 D-005) returns decisions matching an
+// optional status filter (active|all|superseded|invalidated) and
+// optional tag filter.
+func handleListDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	status, _ := p["status"].(string)
+	limitF, _ := p["limit"].(float64)
+	filter := mpminternal.DecisionFilter{
+		Status: status,
+		Limit:  int(limitF),
+	}
+	if tagsAny, ok := p["tags"].([]interface{}); ok {
+		for _, t := range tagsAny {
+			if s, ok := t.(string); ok {
+				filter.Tags = append(filter.Tags, s)
+			}
+		}
+	}
+	rows, err := dm.ListDecisions(filter)
+	if err != nil {
+		return nil, fmt.Errorf("list decisions: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"success": true,
+		"status":  statusOrDefault(status),
+		"count":   len(rows),
+		"decisions": rows,
+	}, nil
+}
+
+// handleQueryDecisions (alpha-4 D-005) returns decisions matching a
+// free-text FTS5 query. Reuses SearchMemories for BM25 scoring and
+// reinforcement weighting.
+func handleQueryDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	query, _ := p["query"].(string)
+	if query == "" {
+		return nil, fmt.Errorf("query decisions: query is required")
+	}
+	limitF, _ := p["limit"].(float64)
+	rows, err := dm.QueryDecisions(query, int(limitF))
+	if err != nil {
+		return nil, fmt.Errorf("query decisions: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"success": true,
+		"query":   query,
+		"count":   len(rows),
+		"decisions": rows,
+	}, nil
+}
+
+// statusOrDefault returns "active" for an empty status string so the
+// envelope carries a meaningful status even when the caller omits it.
+func statusOrDefault(s string) string {
+	if s == "" {
+		return "active"
+	}
+	return s
 }
 
 func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

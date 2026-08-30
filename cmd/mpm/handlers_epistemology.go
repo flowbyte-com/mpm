@@ -543,6 +543,20 @@ func handleDecisions(args []string) int {
 		return 1
 	}
 
+	// Alpha-4 D-005 subcommands: show / list / query.
+	// `mpm decisions` (no args) keeps the legacy listing behavior for
+	// backward compatibility with operators' muscle memory.
+	if len(args) > 0 {
+		switch args[0] {
+		case "show":
+			return handleDecisionsShow(dm, args[1:])
+		case "list":
+			return handleDecisionsList(dm, args[1:])
+		case "query":
+			return handleDecisionsQuery(dm, args[1:])
+		}
+	}
+
 	memories, err := dm.GetMemoriesForExport("decisions", "", "")
 	if err != nil {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
@@ -730,4 +744,86 @@ func handleHint(args []string) int {
 	}
 
 	return 0
+}
+
+// handleDecisionsShow (alpha-4 D-005) prints a single decision by id
+// in human-readable form. Mirrors `mpm call mpm_decisions show`.
+func handleDecisionsShow(dm mpminternal.CoreDB, args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm decisions show <id>\n", 1)
+	}
+	row, err := dm.GetDecision(args[0])
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	out, _ := json.MarshalIndent(row, "", "  ")
+	fmt.Println(string(out))
+	return 0
+}
+
+// handleDecisionsList (alpha-4 D-005) lists decisions matching an
+// optional status filter. Mirrors `mpm call mpm_decisions list`.
+func handleDecisionsList(dm mpminternal.CoreDB, args []string) int {
+	status := ""
+	limit := 0
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--status="):
+			status = strings.TrimPrefix(a, "--status=")
+		case strings.HasPrefix(a, "--limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err == nil {
+				limit = n
+			}
+		}
+	}
+	rows, err := dm.ListDecisions(mpminternal.DecisionFilter{Status: status, Limit: limit})
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	out, _ := json.MarshalIndent(map[string]interface{}{
+		"status":    statusOrDefaultAlpha4(status),
+		"count":     len(rows),
+		"decisions": rows,
+	}, "", "  ")
+	fmt.Println(string(out))
+	return 0
+}
+
+// handleDecisionsQuery (alpha-4 D-005) FTS-searches decisions. Mirrors
+// `mpm call mpm_decisions query`.
+func handleDecisionsQuery(dm mpminternal.CoreDB, args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm decisions query <text> [--limit=N]\n", 1)
+	}
+	query := args[0]
+	limit := 0
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "--limit=") {
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
+			if err == nil {
+				limit = n
+			}
+		}
+	}
+	rows, err := dm.QueryDecisions(query, limit)
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	out, _ := json.MarshalIndent(map[string]interface{}{
+		"query":     query,
+		"count":     len(rows),
+		"decisions": rows,
+	}, "", "  ")
+	fmt.Println(string(out))
+	return 0
+}
+
+// statusOrDefaultAlpha4 mirrors the tool-envelope helper so the CLI
+// shape matches what `mpm call mpm_decisions list` returns.
+func statusOrDefaultAlpha4(s string) string {
+	if s == "" {
+		return "active"
+	}
+	return s
 }

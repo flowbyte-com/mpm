@@ -105,15 +105,26 @@ func handleWake(args []string) int {
 		return 1
 	}
 
-	// Parse --strict flag
+	// Parse --strict / --compact flags
 	strictMode := false
+	compactMode := false
 	cleanArgs := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "--strict" {
+		switch a {
+		case "--strict":
 			strictMode = true
-		} else {
+		case "--compact":
+			// Alpha-4 W-001: emit a 9-field compact projection instead
+			// of the full wake payload. The compact branch bypasses
+			// the local wakeResult rendering entirely and prints JSON
+			// directly.
+			compactMode = true
+		default:
 			cleanArgs = append(cleanArgs, a)
 		}
+	}
+	if compactMode {
+		return handleWakeCompact(dm)
 	}
 
 	var sessionID string
@@ -435,6 +446,64 @@ func handleWake(args []string) int {
 		}
 	}
 	fmt.Println("╰─────────────────────────────────────────────────────────────╯")
+	return 0
+}
+
+// handleWakeCompact (alpha-4 W-001) emits the 9-field compact wake
+// projection as JSON. Mirrors `mpm call mpm_context read_wake_context
+// --payload '{"projection":"compact"}'` so the CLI and tool surface
+// stay in sync. Forces a GatherWakeContext pass — cheap, the cost is
+// in serialization, not collection.
+func handleWakeCompact(dm mpminternal.CoreDB) int {
+	data, err := dm.GatherWakeContext()
+	if err != nil {
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+	if data.LastHandoff == nil {
+		if h, herr := dm.GetLatestHandoff(); herr == nil && h != nil {
+			data.LastHandoff = h
+		}
+	}
+	compact := map[string]interface{}{
+		"session_id":         data.SessionID,
+		"session_current_id": data.SessionCurrentID,
+		"session_started_at": data.SessionStartedAt,
+		"active_mode":        data.ActiveMode,
+		"active_persona":     data.ActivePersona,
+		"open_work_ids":      []string{},
+		"recent_artifact_ids": []string{},
+		"audit_summary":      data.AuditSummary,
+	}
+	if data.LastHandoff != nil {
+		compact["last_handoff_summary"] = data.LastHandoff.Summary
+		compact["last_handoff_ended_at"] = data.LastHandoff.EndedAt
+	}
+	openWorkIDs := []string{}
+	for _, w := range data.OpenWorks {
+		openWorkIDs = append(openWorkIDs, w.ID)
+		if len(openWorkIDs) >= 5 {
+			break
+		}
+	}
+	compact["open_work_ids"] = openWorkIDs
+
+	recentIDs := []string{}
+	for _, m := range data.RecentMemories {
+		if len(recentIDs) >= 10 {
+			break
+		}
+		recentIDs = append(recentIDs, m.ID)
+	}
+	for _, m := range data.RecentMilestones {
+		if len(recentIDs) >= 10 {
+			break
+		}
+		recentIDs = append(recentIDs, m.ID)
+	}
+	compact["recent_artifact_ids"] = recentIDs
+
+	out, _ := json.MarshalIndent(compact, "", "  ")
+	fmt.Println(string(out))
 	return 0
 }
 func handleSessionSearch(args []string) int {

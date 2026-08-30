@@ -318,3 +318,22 @@ return persisted, nil
 - **Watch daemon** was deprecated in commit `6588cb8` and hard-removed in `215fd09`. File ingestion now flows through `mpm cascade materialize` (operators invoke from cron / systemd) — see `README.md` §5 for the rationale. Do not reintroduce a watch daemon without first reading the deprecation rationale and confirming the architectural intent has changed.
 - **Memory scoring uses `reinforcement_count` and `weight` independently** — bumping one doesn't bump the other. `mpm reinforce` and `mpm set-weight` are separate commands for a reason.
 - **`call.go`** is the universal machine interface. Adding a new tool? Register it in `call.go` so other processes (mpm-agent, OpenClaw, hermes, opencode) can invoke it via `mpm call <name> --payload <json>`.
+
+## Alpha-4 (2026-08-30) surface tightening
+
+The 2026-08-30 pass closed 5 defects (D-001…D-005) and 6 improvements (W-001…W-006). Key new shapes:
+
+- **`projection` parameter (D-002/W-003).** `mpm_memory query`, `mpm_lessons search`, and `mpm_lessons list` now accept either `projection` (canonical: `summary|full`) or `mode` (deprecated alias: `summary|full|content`; `content` maps to `full`). When both are set, `projection` wins; `mode` is silently ignored. Unknown values produce a canonical-list error rather than a silent coercion. **Migration:** replace `mode:"content"` with `projection:"full"`. The `mode` alias is kept for one release as a graceful-degradation path.
+- **Compact wake projection (W-001).** `mpm_context read_wake_context` accepts `projection:"compact"` (or CLI: `mpm wake --compact`). Returns a 9-field payload — `session_id`, `session_current_id`, `session_started_at`, `active_mode`, `active_persona`, `last_handoff_summary`, `last_handoff_ended_at`, `open_work_ids`, `audit_summary`, `recent_artifact_ids` — and strips `recent_memories`, `recent_milestones`, `available_skills`, `global_rules`, `overdue_wakes`. Compact payload is ~1-2 KB; full is ~10 KB.
+- **Decision read symmetry (D-005).** `mpm_decisions` now has read paths: `show <id>`, `list [--status=active|all|superseded|invalidated]`, `query <query> [--limit=N]`. CLI subcommands match: `mpm decisions show|list|query`. The previous shape forced agents to FTS5-query their own decisions to rediscover them.
+- **Machine-clean stdout (D-004/W-004).** `mpm call` and `mpm-mcp` route the slog default writer to `io.Discard` unless `MPM_VERBOSE=1`. Stderr in machine mode is now <100 bytes for a clean query; was 300-800 bytes. Direct CLI invocations keep INFO.
+- **Lower-friction skill save (W-005).** `mpm_skills save` aggregates ALL validation errors into `{success:false, errors:[...]}` (was: first error only, as a Go error). New shortcut: pass `body` instead of `content`; the handler synthesises minimal frontmatter from `name`/`version`/`author`.
+- **Session-id discovery hint (W-006).** All `session_id is required` errors route through `internal.ErrSessionIDRequired()`, which names both recovery paths (`mpm_context read_wake_context` → `session_current_id`, and `MPM_SESSION_ID` env var). 11 bare-error sites consolidated.
+
+**Validation:** full test suite passes (0 failures across `internal/core/`, `internal/core/tools/`, `cmd/mpm/`). 18 new regression tests added (4 W-001, 4 W-005, 5 W-006, 5 folded from D-002/W-003 + D-004/W-004).
+
+**Read these before touching the changed surfaces:**
+- `internal/core/tools/handlers.go` (projection, decisions, compact wake, session hint, skill save)
+- `internal/core/session_hint.go` (new helper, alpha-4 W-006)
+- `cmd/mpm/main.go` + `cmd/mpm-mcp/main.go` (machine mode + MPM_VERBOSE escape hatch)
+- `changelog.md` §2026-08-30 (full audit trail)
