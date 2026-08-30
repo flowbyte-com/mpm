@@ -818,8 +818,8 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 	backoff := 100 * time.Millisecond
 	maxBackoff := 5 * time.Second
 
+	var tx *sql.Tx
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		var tx *sql.Tx
 		tx, err = dm.db.Begin()
 		if err != nil {
 			if !IsBusyError(err) || attempt == maxAttempts {
@@ -832,29 +832,33 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 			}
 			continue
 		}
-
-		// Run the callback under this tx. Recover panics so we don't
-		// leak half-open transactions; rollback on error so the busy
-		// retry budget (if any at the caller) starts from a clean slate.
-		callbackErr := func() (rerr error) {
-			defer func() {
-				if p := recover(); p != nil {
-					_ = tx.Rollback()
-					panic(p)
-				}
-				if rerr != nil {
-					_ = tx.Rollback()
-				}
-			}()
-			rerr = fn(&txNode{tx: tx, dm: dm})
-			if rerr == nil {
-				rerr = tx.Commit()
-			}
-			return rerr
-		}()
-
-		return callbackErr
+		break
 	}
+	if tx == nil {
+		// Begin failed on every retry; loop terminated without a break.
+		// The last error is already set; return it.
+		return fmt.Errorf("begin transaction: exhausted %d retries: %w", maxAttempts, err)
+	}
+
+	// Canonical pattern: covering defer at function scope. The lint
+	// gate (internal/audit/tx.go) classifies a tx as `tx-defer-rollback`
+	// when a `defer tx.Rollback()` lives in covering position relative to
+	// the Begin statement; the covering defer here satisfies that rule
+	// and covers panic + non-commit error returns in a single construct.
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err = fn(&txNode{tx: tx, dm: dm}); err != nil {
+		return err
+	}
+	err = tx.Commit()
 	return err
 }
 
