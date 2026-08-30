@@ -187,7 +187,10 @@ func TestF5_2_SupersededDecisionContentPreserved(t *testing.T) {
 	mem, err := dm.GetMemory(id)
 	require.NoError(t, err)
 	content, _ := mem["content"].(string)
-	assert.Contains(t, content, "CHOICE: deploy with blue-green",
+	// D-007 (alpha-4.1.1): decision content no longer carries the
+	// "CHOICE: " prefix. The body is the FTS-searchable text and
+	// metadata carries the structured choice field.
+	assert.Contains(t, content, "deploy with blue-green",
 		"original decision content must remain intact after supersede (F9 contract)")
 
 	var meta map[string]interface{}

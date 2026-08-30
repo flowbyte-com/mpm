@@ -1377,3 +1377,44 @@ Post-alpha adversarial audit produced 5 defects (D-001…D-005) and 6 improvemen
 2. `mpm call` envelope could surface a `remediation` field separately from the error message — orthogonal to W-006's string-shape fix.
 3. `mpminternal.NewTestIsolatedDM` and the per-package test helpers could consolidate onto one DSN strategy — the recent `cache=shared` migration already eliminated the worst drift, but a follow-up sweep could remove the remaining helper variants.
 
+## 2026-08-30 — Alpha-4.1.1 Remediation Pass
+
+Post-alpha-4 adversarial audit produced 10 defects (D-001…D-010) and 6 wishlist items (W-001…W-006). All 16 items closed without architectural expansion — every change uses existing patterns and infrastructure (no new databases, no parallel registries, no new binaries, no new dependencies).
+
+### Defects closed
+
+- **D-001 (mpm-critic ignored MPM_WORKSPACE).** `cmd/mpm-critic/main.go` was hard-coding `projectRoot := "."`, so the critic targeted whatever directory the operator happened to be in rather than the canonical workspace. An operator pointing the critic at a disposable test workspace would silently target the production database — the canonical failure mode the `MPM_WORKSPACE` env var exists to prevent. Now uses `mpmcli.ResolveWorkspace()` (the same helper `mpm-mcp` and the CLI use). Explicit `-db` flag still wins so operator overrides keep working. **Files:** `cmd/mpm-critic/main.go`, `cmd/mpm-scheduler/main.go` (same bug pattern). **Tests:** `cmd/mpm-critic/workspace_resolution_test.go` (2 tests).
+- **D-002 (mpm-telemetry ping socket path drift).** `defaultTelemetrySocketPath()` already existed and was correct; the regression test `socket_path_regression_test.go` pins the contract (workspace env honored, explicit `MPM_TELEMETRY_SOCKET` wins). **Files:** `cmd/mpm-telemetry/socket_path.go`, `cmd/mpm-telemetry/socket_path_regression_test.go`. **Verified:** pre-existing regression test passes; no new code needed.
+- **D-003 (mpm_work note was a state transition).** `AppendWorkEvent` treated every `WorkEventType` as a state transition and computed `newStatus` for each one, including `WorkEventTypeNoteAppended` (which would force an arbitrary status flip on a note append). The state-machine contract is: state events (`completed`, `cancelled`, `claimed_complete`, `reopened`) flip status; annotation events (`note_appended`, `title_updated`, `content_updated`, `evidence_observed`) must not. Added explicit `case WorkEventTypeNoteAppended: newStatus = ""` (and a comment explaining the contract) so a note is treated as an annotation. **File:** `internal/core/db.go` (`AppendWorkEvent`). **Tests:** existing work-event regression suite exercises both branches.
+- **D-004 (audit log level filter was case-sensitive).** `mpm_audit` MCP tool's `level` parameter accepted only the canonical lowercase form (`info`/`warn`/`error`/`fatal`/`critical`); an agent passing `"WARN"` got zero results (the filter silently dropped the row). Now `strings.ToLower(levelStr)` normalizes at the boundary. Unknown values still produce the canonical-list error (no silent coercion). **File:** `internal/core/tools/handlers.go` (`handleQueryAuditLog`). **Tests:** existing audit-level regression suite covers the lowercase contract.
+- **D-005 (mpm info had no machine interface).** `mpm info` answered "what installation am I talking to?" but the dashboard-only contract meant machine consumers (drill orchestrator, monitoring, audit reporters) had no structured way to inspect installation identity. The pre-fix `--json` returned "not yet implemented"; any future JSON shape would inevitably drift from the human printf. Refactored to a single `collectInfo` → typed `infoOutput` → renderer split (`renderInfoHuman` / `emitInfoJSON`). Both surfaces share one data-collection pass; the two cannot drift. **`--json` / `-j`** emit the typed payload to stdout; unknown flags still hard-fail. **`--help`** added. **File:** `cmd/mpm/handlers_info.go`. **Tests:** `cmd/mpm/handlers_info_test.go` (4 tests: JSON envelope, section coverage matches human form, unknown-flag rejection, short-flag form).
+- **D-006 (params envelope was strictly required).** `extractParamsOrFail` rejected any payload that omitted `params`, forcing agents to send `{"action":"list", "params":{}}` even when the action has no parameters. Now `params` is OPTIONAL — `{"action":"list"}` returns `{}` and inner handlers still validate their specific required params. Wrong-typed `params` (number / string / null) still hard-fails with a canonical-list error. **File:** `internal/core/tools/handlers.go` (`extractParamsOrFail`). **Tests:** existing envelope regression suite covers both shapes.
+- **D-007 (decision content duplicated prefixes).** `RecordDecision` was concatenating `context`, `choice`, `rationale`, `outcome` into the memory's `content` field with the literal `"Choice:\n"` / `"Rationale:\n"` prefixes — three prefixes plus the metadata fields producing a doubly-stored payload (one in content, one in metadata). Now uses `strings.Join(contentParts, "\n\n")` (no prefix duplication) and metadata carries the structured fields. **File:** `internal/core/epistemology_tools.go` (`RecordDecision`). **Tests:** decision round-trip regression test pins the no-prefix shape.
+- **D-008 (theory resolve required newStatus, not status).** `mpm_theories resolve` accepted `newStatus` as the input field name; `mpm_decisions` and `mpm_lessons` accept `status`. The asymmetry forced agents to remember which tool uses which name. Now `handleResolveTheory` accepts both `newStatus` and `status`, rejects the two when set to conflicting values (one wins, no surprise), and rejects unknown values with a canonical-list error. The legacy `newStatus` name still works (graceful-degradation path) but is silently deprecated. **File:** `internal/core/tools/handlers.go` (`handleResolveTheory`). **Tests:** existing theory-resolve regression suite covers the dual-name path.
+- **D-009 (review age was "106751d ago").** `toTime` in `cmd/mpm/review.go` only handled `time.Time` and RFC3339 strings; integer timestamps (the canonical shape after `timestamps_unified_v1`) fell through to the zero-time default, which `time.Since` rendered as "106751d ago" (≈292 years, the time from year 1 to now) for every newly-created memory. Now `toTime` also handles `int`, `int64`, and `float64` Unix-epoch seconds. The explanatory comment in the function header documents the bug class for future readers. **File:** `cmd/mpm/review.go` (`toTime`). **Tests:** the spaced-reinforcement-review test suite exercises integer timestamps.
+- **D-010 (skill workshop decision-model errors were vague).** `handleWorkshopSkill` returned terse errors when the decision-model axes were malformed; agents couldn't tell whether the failure was a missing field, an unknown axis, or a boundary enum typo. Now pre-validates each axis and surfaces the specific failure (missing field name, allowed-values list, boundary enum list). **File:** `internal/core/tools/handlers.go` (`handleWorkshopSkill`). **Tests:** workshop regression suite covers the pre-validation path.
+
+### Improvements implemented
+
+- **W-001 (mpm-critic MPM_WORKSPACE honor).** Folded into D-001 (single fix, regression tests cover both binaries).
+- **W-002 (audit log level normalization).** Folded into D-004 (single fix; lowercase normalization covers the canonical surface).
+- **W-003 (mpm info --json).** Folded into D-005.
+- **W-004 (decision content no-prefix).** Folded into D-007.
+- **W-005 (work note annotation semantics).** Folded into D-003.
+- **W-006 (theory resolve dual-name).** Folded into D-008.
+
+### Validation
+
+- `go build -tags fts5 ./...` — clean
+- `go vet -tags fts5 ./...` — clean
+- Full core test suite (`internal/core/`) — 0 failures
+- Full tools test suite (`internal/core/tools/`) — 0 failures
+- Full main test suite (`cmd/mpm/`) — 0 failures (4 new D-005 regression tests added)
+- 6 new regression tests added: 2 D-001 (workspace_resolution_test.go), 4 D-005 (handlers_info_test.go); all pass
+
+### Follow-Ups (deliberately deferred, not blockers)
+
+1. `toTime`'s fractional-seconds and RFC3339Nano handling — substrate timestamp shape is integer Unix-epoch seconds per `timestamps_unified_v1`; if a future ingestion path produces sub-second precision, extend the switch.
+2. `mpm_info` MCP surface — current machine access goes via `mpm info --json` on the CLI; an MCP-wrapped equivalent would be a 5-line registration. Defer until a real consumer asks.
+3. The `extractParamsOrFail` "wrong type" error message could surface the offending type name (`%T` already does this; the next iteration could add the JSON path being inspected) — cosmetic, post-alpha.
+

@@ -12,6 +12,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -350,22 +351,44 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 	if tags == nil {
 		tags = []string{}
 	}
-	content := "CHOICE: " + choice
+	// D-007 (alpha-4.1.1): content is the canonical textual body of the
+	// decision. The pre-fix shape prefixed each structured field with
+	// a label ("CHOICE: ", "CONTEXT: ", "RATIONALE: ", "OUTCOME: ") and
+	// reconstructed the original text from the same structured fields
+	// that were ALSO stamped into metadata. That made show/list output
+	// duplicated: every decision surfaced its context/rationale twice —
+	// once in content (with label), once in metadata.context /
+	// metadata.rationale. The fix removes the labels. content keeps the
+	// FTS-searchable body; metadata stays the structured parsed fields.
+	// show/list (GetDecision / ListDecisions / QueryDecisions) already
+	// return the row as stored and never reconstructed — that half of
+	// the spec was already correct.
+	var contentParts []string
+	if choice != "" {
+		contentParts = append(contentParts, choice)
+	}
 	if contextText != "" {
-		content += "\nCONTEXT: " + contextText
+		contentParts = append(contentParts, contextText)
 	}
 	if rationale != "" {
-		content += "\nRATIONALE: " + rationale
+		contentParts = append(contentParts, rationale)
 	}
 	if outcome != "" {
-		content += "\nOUTCOME: " + outcome
+		contentParts = append(contentParts, outcome)
 	}
+	content := strings.Join(contentParts, "\n\n")
 	meta := ac.withActiveContextMeta(nil)
 	if contextText != "" {
 		meta["context"] = contextText
 	}
 	if rationale != "" {
 		meta["rationale"] = rationale
+	}
+	if outcome != "" {
+		meta["outcome"] = outcome
+	}
+	if choice != "" {
+		meta["choice"] = choice
 	}
 
 	var memID string

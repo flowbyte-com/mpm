@@ -53,7 +53,10 @@ func TestF9_SupersedeMarksOriginalAndRecordsReplacement(t *testing.T) {
 
 	// Content preserved — historical inspection intact.
 	content, _ := mem["content"].(string)
-	assert.Contains(t, content, "CHOICE: deploy with blue-green")
+	// D-007 (alpha-4.1.1): decision content no longer carries the
+	// "CHOICE: " prefix. Body is the FTS-searchable text; metadata
+	// carries the structured choice field.
+	assert.Contains(t, content, "deploy with blue-green")
 }
 
 func TestF9_SupersedeChainsAndRejectsDoubleSupersede(t *testing.T) {
