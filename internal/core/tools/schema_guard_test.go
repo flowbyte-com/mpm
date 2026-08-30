@@ -362,6 +362,15 @@ func literalFromPassthroughCall(n ast.Node) string {
 // errors: every granular handleX is still implemented as a Go
 // function, but they're internal dispatch targets rather than
 // top-level MCP tools.
+//
+// Alpha-4 W-001 update: walk the full body (not just case arms) AND
+// recursively pull in any handleX called from a target. This catches
+// helpers like handleReadWakeContextCompact (called from inside an
+// `if projection == "compact"` branch of handleReadWakeContext, which
+// itself is a case-arm dispatch target of handleMpmContext). The
+// previous shape only inspected case-arm return statements, which
+// missed the projection branches that gate payload shape on string-enum
+// params.
 func extractAggregatorDispatchTargets(fset *token.FileSet) map[string]bool {
 	f, err := parser.ParseFile(fset, "handlers.go", nil, parser.ParseComments)
 	if err != nil {
@@ -369,46 +378,57 @@ func extractAggregatorDispatchTargets(fset *token.FileSet) map[string]bool {
 	}
 	targets := map[string]bool{}
 
-	ast.Inspect(f, func(n ast.Node) bool {
-		fd, ok := n.(*ast.FuncDecl)
+	// Step 1: collect every handle* function name defined in this file.
+	// We need this so step 2 can match by name even when the body is
+	// inspected via the *ast.File instead of one FuncDecl at a time.
+	allHandlers := map[string]*ast.FuncDecl{}
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
 		if !ok {
-			return true
+			continue
 		}
-		// Only walk bodies of aggregator handlers (handleMpmX). Their
-		// switch statements contain the dispatch table — every
-		// `return handleY(dm, ...)` inside a `case "...":` is a target.
-		if !strings.HasPrefix(fd.Name.Name, "handleMpm") {
-			return true
+		if strings.HasPrefix(fd.Name.Name, "handle") {
+			allHandlers[fd.Name.Name] = fd
 		}
-		ast.Inspect(fd, func(m ast.Node) bool {
-			cs, ok := m.(*ast.CaseClause)
+	}
+
+	// Step 2: walk every handleMpm* body, recording every handleX call
+	// (case arm OR projection branch OR inline return).
+	seen := map[string]bool{}
+	var visit func(name string)
+	visit = func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		fd, ok := allHandlers[name]
+		if !ok {
+			return
+		}
+		ast.Inspect(fd, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			for _, stmt := range cs.Body {
-				ret, ok := stmt.(*ast.ReturnStmt)
-				if !ok {
-					continue
-				}
-				for _, r := range ret.Results {
-					call, ok := r.(*ast.CallExpr)
-					if !ok {
-						continue
-					}
-					id, ok := call.Fun.(*ast.Ident)
-					if !ok {
-						continue
-					}
-					// Match handleX(...) invocations inside case arms.
-					if strings.HasPrefix(id.Name, "handle") {
-						targets[id.Name] = true
-					}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if strings.HasPrefix(id.Name, "handle") && id.Name != name && allHandlers[id.Name] != nil {
+				if !targets[id.Name] {
+					targets[id.Name] = true
+					visit(id.Name)
 				}
 			}
 			return true
 		})
-		return true
-	})
+	}
+
+	for name := range allHandlers {
+		if strings.HasPrefix(name, "handleMpm") {
+			visit(name)
+		}
+	}
 	return targets
 }
 

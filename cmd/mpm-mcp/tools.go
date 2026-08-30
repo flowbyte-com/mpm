@@ -352,8 +352,12 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		}
 
 		// Phase 1 blob telemetry: log output policy decision.
+		// Alpha-4 D-004: demoted to Debug — these are operational
+		// telemetry, not operational faults. With mpm-mcp discarding
+		// logs to io.Discard by default (see main.go), they don't
+		// pollute the stdio protocol unless MPM_VERBOSE=1 is set.
 		decisionStr := map[tools.Decision]string{tools.DecisionPass: "pass", tools.DecisionSpill: "spill"}[decision]
-		slog.Info("mcp_output_policy",
+		slog.Debug("mcp_output_policy",
 			"decision", decisionStr,
 			"serialized_bytes", len(jsonBytes),
 			"threshold_bytes", threshold,
@@ -383,7 +387,9 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			}
 
 			// Phase 1 blob telemetry: log successful spill.
-			slog.Info("mcp_spill",
+			// Alpha-4 D-004: demoted to Debug — see sibling mcp_output_policy
+			// note for rationale.
+			slog.Debug("mcp_spill",
 				"blob_id", ptr.ID,
 				"size_bytes", meta.SizeBytes,
 				"content_type", meta.ContentType,

@@ -82,7 +82,7 @@ func NewWorkingContextStore(dm *mpminternal.DatabaseManager) *WorkingContextStor
 // behaviour, exactly the layering violation the RFC forbids.
 func (s *WorkingContextStore) Load(sessionID string) (*WorkingContext, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, mpminternal.ErrSessionIDRequired()
 	}
 	var wc WorkingContext
 	var updatedAt, expiresAt sql.NullInt64
@@ -114,7 +114,7 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 		return fmt.Errorf("working context is nil")
 	}
 	if wc.SessionID == "" {
-		return fmt.Errorf("session_id is required")
+		return mpminternal.ErrSessionIDRequired()
 	}
 	if wc.Thesis == "" {
 		return fmt.Errorf("thesis is required")
@@ -145,7 +145,7 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 // Idempotent: deleting a non-existent row is a no-op.
 func (s *WorkingContextStore) Delete(sessionID string) error {
 	if sessionID == "" {
-		return fmt.Errorf("session_id is required")
+		return mpminternal.ErrSessionIDRequired()
 	}
 	_, err := s.dm.ExecTracked(
 		`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`,

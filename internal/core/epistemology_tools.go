@@ -620,3 +620,193 @@ func (dm *DatabaseManager) ReviewMemories(daysSinceAccess, limit int) (map[strin
 		"limit":   limit,
 	}, nil
 }
+
+// ─── Decision read symmetry (alpha-4 D-005) ────────────────────────────────
+//
+// The decision WRITE surface (record/supersede/invalidate) has been
+// available since alpha-2, but the READ surface was CLI-only — agents
+// had to either drop to SQL or rely on the metadata.provenance
+// inclusion in wake context to recover their own decisions. These
+// three methods expose show/list/query as first-class CoreDB
+// operations so the tool surface (mpm_decisions show/list/query) and
+// the CLI subcommands (`mpm decisions show/list/query`) can share a
+// single round-trip path.
+//
+// The return shape is a generic map so callers can read metadata_json
+// (status, superseded_by, invalidated_at) directly without coupling
+// to a struct. Memory writes go through SaveMemoryNode so the
+// decision rows land in the standard `memories` table with
+// collection='decisions'.
+
+// GetDecision returns the row for a single decision ID with metadata
+// parsed into a `metadata` sub-map. Returns a NotFound-shaped error
+// (containing "no rows") if the id is unknown — callers translate to
+// their envelope shape.
+func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get decision: id is required")
+	}
+	row := dm.db.QueryRow(`
+		SELECT id, content, tags, metadata, created_at, updated_at, weight,
+		       COALESCE(reinforcement_count, 0)
+		FROM memories
+		WHERE id = ? AND collection = 'decisions' AND deleted_at IS NULL`, id)
+
+	var (
+		gotID, content, tags, metadata string
+		createdAt, updatedAt           int64
+		weight, reinforcement          int64
+	)
+	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
+		return nil, fmt.Errorf("get decision %s: %w", id, err)
+	}
+
+	// Parse metadata_json so callers see a `metadata` sub-map instead of
+	// a string blob. Defensive: an unparseable metadata becomes {}.
+	parsedMeta := map[string]interface{}{}
+	if metadata != "" {
+		if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
+			parsedMeta = map[string]interface{}{"_unparsed": metadata}
+		}
+	}
+
+	return map[string]interface{}{
+		"id":                   gotID,
+		"content":              content,
+		"tags":                 parseDecisionTags(tags),
+		"metadata":             parsedMeta,
+		"created_at":           createdAt,
+		"updated_at":           updatedAt,
+		"weight":               weight,
+		"reinforcement_count":  reinforcement,
+		"status":               extractDecisionStatus(parsedMeta),
+	}, nil
+}
+
+// ListDecisions returns decision rows matching the filter. The zero
+// value (Status="" + Tags=nil + Limit=0) defaults to active decisions
+// only with the default page size (50).
+func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]interface{}, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	status := filter.Status
+	if status == "" {
+		status = "active"
+	}
+
+	// Build the WHERE clause based on status filter. `active` is the
+	// null-superseded and null-invalidated rows; `superseded`/`invalidated`
+	// surface the corresponding metadata flag.
+	var whereExtra string
+	switch status {
+	case "active":
+		whereExtra = `AND json_extract(metadata, '$.superseded') IS NULL
+		              AND json_extract(metadata, '$.invalidated') IS NULL`
+	case "superseded":
+		whereExtra = `AND json_extract(metadata, '$.superseded') IS NOT NULL`
+	case "invalidated":
+		whereExtra = `AND json_extract(metadata, '$.invalidated') IS NOT NULL`
+	case "all":
+		// No extra filter.
+	default:
+		return nil, fmt.Errorf("list decisions: unknown status filter %q (use active|all|superseded|invalidated)", status)
+	}
+
+	// COALESCE wraps the limit so NULL from the params binding becomes 50.
+	// Defensive against a caller passing 0 explicitly (handled above, but
+	// the SQL is the load-bearing boundary).
+	query := fmt.Sprintf(`
+		SELECT id, content, tags, metadata, created_at, updated_at, weight,
+		       COALESCE(reinforcement_count, 0)
+		FROM memories
+		WHERE collection = 'decisions' AND deleted_at IS NULL
+		%s
+		ORDER BY created_at DESC
+		LIMIT COALESCE(?, 50)`, whereExtra)
+
+	rows, err := dm.db.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list decisions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []map[string]interface{}
+	for rows.Next() {
+		var (
+			id, content, tags, metadata string
+			createdAt, updatedAt        int64
+			weight, reinforcement       int64
+		)
+		if err := rows.Scan(&id, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
+			return nil, fmt.Errorf("scan decision: %w", err)
+		}
+		parsedMeta := map[string]interface{}{}
+		if metadata != "" {
+			if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
+				parsedMeta = map[string]interface{}{"_unparsed": metadata}
+			}
+		}
+		out = append(out, map[string]interface{}{
+			"id":                  id,
+			"content":             content,
+			"tags":                parseDecisionTags(tags),
+			"metadata":            parsedMeta,
+			"created_at":          createdAt,
+			"updated_at":          updatedAt,
+			"weight":              weight,
+			"reinforcement_count": reinforcement,
+			"status":              extractDecisionStatus(parsedMeta),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate decisions: %w", err)
+	}
+	return out, nil
+}
+
+// QueryDecisions reuses SearchMemories against the decisions collection
+// so we get FTS5 + BM25 + reinforcement scoring for free. Limit defaults
+// to 50 when 0 is passed.
+func (dm *DatabaseManager) QueryDecisions(query string, limit int) ([]map[string]interface{}, error) {
+	if query == "" {
+		return nil, fmt.Errorf("query decisions: query is required")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := dm.SearchMemories(query, "decisions", false, limit, 0)
+	if err != nil {
+		return nil, fmt.Errorf("query decisions: %w", err)
+	}
+	return rows, nil
+}
+
+// extractDecisionStatus returns the decision's lifecycle status from its
+// metadata block. Order: invalidated > superseded > active.
+func extractDecisionStatus(meta map[string]interface{}) string {
+	if meta == nil {
+		return "active"
+	}
+	if _, ok := meta["invalidated"]; ok {
+		return "invalidated"
+	}
+	if _, ok := meta["superseded"]; ok {
+		return "superseded"
+	}
+	return "active"
+}
+
+// parseDecisionTags wraps a string-typed tags column in []string. If the
+// column is empty or unparseable, returns an empty slice.
+func parseDecisionTags(tags string) []string {
+	if tags == "" {
+		return []string{}
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(tags), &out); err != nil {
+		return []string{}
+	}
+	return out
+}

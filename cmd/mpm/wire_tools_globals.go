@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,12 +34,16 @@ func wireToolsGlobals(dm mpminternal.CoreDB) {
 
 	blobDir := filepath.Join(workspace, "blobs")
 	if err := os.MkdirAll(blobDir, 0o755); err != nil {
-		log.Printf("wireToolsGlobals: mkdir blob dir %s: %v (continuing without blob wiring)", blobDir, err)
+		// Alpha-4 D-004: was log.Printf — downgraded to Debug so the
+		// `mpm call` stderr stream stays parseable on the wire. With
+		// the machine-mode discard (see cmd/mpm/main.go init), these
+		// messages vanish entirely unless MPM_VERBOSE=1 is set.
+		slog.Debug("wireToolsGlobals: mkdir blob dir", "dir", blobDir, "err", err)
 		return
 	}
 	bs, err := blobstorefs.NewFilesystemBackend(dm.SQLDB(), blobDir, 24*time.Hour)
 	if err != nil {
-		log.Printf("wireToolsGlobals: build blob store: %v (continuing without blob wiring)", err)
+		slog.Debug("wireToolsGlobals: build blob store", "err", err)
 		return
 	}
 

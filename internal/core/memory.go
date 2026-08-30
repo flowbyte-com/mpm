@@ -710,19 +710,36 @@ var sensitivePatterns = []struct {
 	// `(secret|token)[=:]\s*[^\s]+` matched any non-whitespace token after
 	// the label, which produced false positives on ordinary prose like
 	// "Token: my token" and documentation like "Set Token=<value> in
-	// your .env". The new pattern requires a 20+ char value AND at least
-	// two character classes (digits + letters, or mixed case, or special
-	// characters) — enough to filter out documentation/placeholder text
-	// while still catching real credential-shaped values. The high-
-	// confidence specific patterns (ghp_, sk_live_, AKIA, etc.) above
-	// remain strict; these general-label patterns are the safety net
-	// for non-prefixed secrets.
-	{"General API Key", regexp.MustCompile(`(?i)(api[_-]?key|apikey)[=:]\s*[^\s]{20,}`)},
-	{"Password", regexp.MustCompile(`(?i)(password|passwd|pwd)[=:]\s*[^\s]{12,}`)},
-	{"Secret", regexp.MustCompile(`(?i)(secret|token)[=:]\s*[^\s]{20,}`)},
+	// your .env". The length thresholds and structural patterns below
+	// (alpha-4 D-003) were calibrated against the documented adversarial
+	// inputs: `password=hunter2`, `secret=foo`, `password: hunter2`,
+	// `api_key: changeme`, `bearer abc123def456`. All threshold patterns
+	// are anchored to end-of-line (`\s*$` under `(?m)`) so multi-word prose
+	// like "password: please rotate your password tomorrow" doesn't fire
+	// on the first word. The high-confidence specific patterns (ghp_,
+	// sk_live_, AKIA, etc.) above remain strict.
+	{"General API Key", regexp.MustCompile(`(?im)(api[_-]?key|apikey)[=:]\s*[^\s]{8,}\s*$`)},
+	{"Password", regexp.MustCompile(`(?im)(password|passwd|pwd)[=:]\s*[^\s]{6,}\s*$`)},
+	{"Secret", regexp.MustCompile(`(?im)(secret|token)[=:]\s*[^\s]{8,}\s*$`)},
 	{"Private Key", regexp.MustCompile(`-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----`)},
 	{"SSH Key", regexp.MustCompile(`-----BEGIN\s+OPENSSH\s+KEY-----`)},
-	{"Bearer Token", regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_-]{20,}`)},
+	{"Bearer Token", regexp.MustCompile(`(?im)bearer\s+[a-zA-Z0-9_-]{8,}\s*$`)},
+	// Config-style assignment: catches short values the length-threshold
+	// patterns miss. Anchored to the separator + end-of-line so prose
+	// like "the password equals nothing in particular" doesn't trigger.
+	// Optional surrounding quotes are accepted (1+ char payload inside
+	// or outside quotes).
+	{"Config-Style Secret Assignment", regexp.MustCompile(
+		`(?im)\b(password|secret|token|api[_-]?key|apikey)\b\s*=\s*['"]?[^\s'"]{1,}['"]?\s*$`,
+	)},
+	// Colon-style single-word value at end-of-line: `db password: hunter2`.
+	// Anchored to $ so multi-sentence prose with mid-sentence colons doesn't
+	// trigger. Note: also catches short values (the threshold floor is
+	// intentionally low here because the operator-typed `password: foo`
+	// shape is exactly the leak class we want to flag).
+	{"Colon-Style Secret", regexp.MustCompile(
+		`(?im)\b(password|secret)\b\s*:\s*[^\s:]{1,}\s*$`,
+	)},
 	{"Database Connection", regexp.MustCompile(`(?i)(mysql|postgres|mongodb|redis)://[^\s]+`)},
 	// Generic Secret Key MUST be last — it matches any sk- prefix not caught above
 	{"Generic Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},

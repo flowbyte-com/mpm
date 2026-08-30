@@ -2153,7 +2153,14 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "migrateLessonsToView: lessons→lessons_base+migrated\n")
+	// Alpha-4 D-004: was fmt.Fprintf(os.Stderr, ...) — demoted to
+	// slog.Info so the success message is routed through the same
+	// channel as the rest of the operational telemetry. Under
+	// machine mode (mpm call, mpm-mcp), slog is set to io.Discard
+	// so the wire stays parseable. The error branches above remain
+	// on direct stderr because they represent true migration faults
+	// the operator must see.
+	slog.Info("migrateLessonsToView: lessons→lessons_base+migrated")
 }
 
 // execQuerier is satisfied by both *sql.DB and *sql.Tx; the trigger DDL is

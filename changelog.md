@@ -1338,3 +1338,42 @@ All gates pass on the implementation commit (`9704816`):
 2. OpenClaw runtime config picks up `MPM_FRAMEWORK=openclaw` — one-line `openclaw config set mcp.servers.mpm.env.MPM_FRAMEWORK openclaw` when the first framework:openclaw directive ships
 3. Seed registry gains a demonstration `framework:openclaw` directive — to prove the wiring end-to-end on a live wake, defer until operator surfaces a real OpenClaw-specific rule that diverges from LLM defaults
 
+## 2026-08-30 — Alpha-4 Surface Tightening Pass
+
+Post-alpha adversarial audit produced 5 defects (D-001…D-005) and 6 improvements (W-001…W-006). All 11 items closed without architectural expansion — every change uses existing patterns and infrastructure (no new databases, no parallel registries, no new binaries).
+
+### Defects closed
+
+- **D-001 (fresh-install persona audit).** `ResolveActivePersona` was logging `AuditError` on a fresh install (no persona row, no requested name) — the headline `N errors, M warnings` counter bumped to `1 errors, 0 warnings` on every clean wake, training agents to ignore real errors. Demoted to `AuditInfo`; the sibling "requested missing, falling back" branch already used `AuditInfo`. `AuditInfo` is gated from cluster upsert, so the headline is unchanged for genuine errors. **File:** `internal/core/active_state.go`. **Test:** `TestResolveActivePersona_FreshInstall_LogsInfoNotError` in `active_state_test.go`.
+- **D-002 (truthful query projection).** `mode:"content"` (legacy alias) was being silently coerced to `summary`, forcing agents to make a second `mpm_resolve` round-trip to recover full content. New `normalizeProjection(p)` helper accepts both `projection` (canonical) and `mode` (alias), maps `mode:"content"` → `full`, rejects `mode:"verbose"` (a render concept, not a projection knob) and any unknown value with a canonical-list error. When both are set, `projection` wins; `mode` is silently ignored. **Files:** `internal/core/tools/handlers.go` (memory query, lesson search, lesson list). **Tests:** `TestProjection_Normalize_HelperMatrix` (14 cases), `TestProjection_MemoryQuery_ModeContentMapsToFull`, `TestProjection_MemoryQuery_ModeVerboseRejected`, `TestProjection_MemoryQuery_BothSet_ProjectionWins`, `TestProjection_MemoryQuery_UnknownValueRejected` in `tools/projection_regression_test.go`.
+- **D-003 (secret scanner short-value coverage).** `isSensitiveContent` thresholds (password 12→6, secret 20→8, API key 20→8, bearer 20→8) let short credentials through. Now also blocks `password=foo` (3 chars) via two new structural patterns: `Config-Style Secret Assignment` (`key=value`, optional quotes) and `Colon-Style Secret` (`key: value`, single-word value anchored to EOL). `BLOCKER 4` benign cases updated to drop the cases now legitimately blocked. **Files:** `internal/core/memory.go`, `internal/core/blocker_4_scanner_test.go`. **Tests:** `TestBlocker4_D003MustBlock` (9 cases), `TestBlocker4_D003StillAllowsPureProse` (4 cases).
+- **D-004 (machine-clean `mpm call`).** Every `mpm call` invocation was emitting 300-800 bytes of operational INFO on stderr (synthesis status, embedder probe, scheduler warnings, migration notices), polluting agent outputs that gate on stderr being empty. Now `mpm call` and `mpm-mcp` route the slog default writer through `io.Discard` unless `MPM_VERBOSE=1`. Direct CLI invocations keep INFO. **Files:** `cmd/mpm/main.go`, `cmd/mpm-mcp/main.go`, `cmd/mpm/wire_tools_globals.go`, `cmd/mpm-mcp/tools.go`, `internal/core/db.go` (one direct stderr write converted to slog). **Tests:** `cmd/mpm/call_io_test.go` (3 tests: success envelope stderr empty, validation envelope stderr diagnostic, verbose flag restores).
+- **D-005 (decision read symmetry).** The `mpm_decisions` surface had write paths (record / supersede / invalidate) but no read paths — agents had to `query` FTS5 to rediscover a recorded decision. Added `GetDecision(id)`, `ListDecisions(DecisionFilter)`, `QueryDecisions(query, limit)`. Tool surface: `mpm_decisions show|list|query`. CLI subcommands: `mpm decisions show|list|query`. **Files:** `internal/core/core.go`, `internal/core/epistemology_tools.go`, `internal/core/tools/handlers.go`, `cmd/mpm/handlers_epistemology.go`. **Tests:** `internal/core/decisions_read_test.go` (6 tests: round-trip identity, list filters active / superseded / invalidated, query finds by choice, superseded carries `superseded_by`, invalidated carries `invalidated`, chain walk A→B→C).
+
+### Improvements implemented
+
+- **W-001 (lightweight wake projection).** Full wake context is ~10 KB — too heavy for a boot prompt that only needs "who am I, what just happened, what's waiting". Added `CompactWakeContext` (9 fields: session_id, session_current_id, session_started_at, active_mode, active_persona, last_handoff_summary, last_handoff_ended_at, open_work_ids, audit_summary, recent_artifact_ids) and `mpm_context read_wake_context` accepts `projection:"compact"`. CLI: `mpm wake --compact`. Compact payload is ~1-2 KB. **Files:** `internal/core/tools/handlers.go`, `cmd/mpm/handlers_session.go`. **Tests:** `internal/core/tools/wake_compact_test.go` (4 tests: heavy fields stripped, envelope contract, full path still works, seeded artifacts round-trip).
+- **W-002 (fresh-install audit semantics).** Folded into D-001 (single fix, one regression test).
+- **W-003 (truthful projection alias).** Folded into D-002.
+- **W-004 (machine-clean `mpm-mcp`).** Folded into D-004 (single fix, both binaries route through `io.Discard`).
+- **W-005 (lower-friction skill save).** `handleSaveSkill` was returning the first validation error it hit (`return nil, fmt.Errorf(...)`), so an agent with all three required fields missing had to make three round-trips to discover that. Now aggregates ALL hard validation errors into `{success:false, errors:[...]}` (NOT a Go error, so the wire envelope is parseable). New structured-args shortcut: pass `body` instead of `content` and the handler synthesises minimal frontmatter from `name`/`version`/`author`. **File:** `internal/core/tools/handlers.go`. **Tests:** `internal/core/tools/skill_save_regression_test.go` (4 tests: aggregate errors, both-set rejection, body shortcut round-trip, content path regression pin).
+- **W-006 (handoff/session discovery hint).** Every tool that needed `session_id` returned the bare `"session_id is required"` — the agent had no way to discover the recovery path. New `internal.ErrSessionIDRequired()` returns the canonical message naming both recovery paths: `mpm_context read_wake_context` → `session_current_id`, and `MPM_SESSION_ID` env var. All 11 bare-error sites routed through it: `internal/core/handoff.go`, `internal/core/broadcast.go`, `internal/core/tools/handlers.go` (4 sites), `cmd/mpm/store_working_context.go` (3), `cmd/mpm/service_continue.go` (1), `cmd/mpm/service_working_context.go` (3). `internal/core/snapshot.go` `ErrMissingCreatorSession` left as a sentinel (callers use `errors.Is`). **Files:** `internal/core/session_hint.go` (new helper) + 7 caller files. **Tests:** `internal/core/tools/session_hint_regression_test.go` (5 tests: hint names both paths, handoff write, scratchpad read / promote / discard).
+
+### Validation
+
+- `go build -tags fts5 ./...` — clean
+- `go vet -tags fts5 ./...` — clean
+- Full core test suite (`internal/core/`) — 0 failures
+- Full tools test suite (`internal/core/tools/`) — 0 failures
+- Full main test suite (`cmd/mpm/`) — 0 failures
+- 18 new regression tests added (4 W-001 + 4 W-005 + 5 W-006 + 5 W-002/D-001 [folded] carried over from prior pass); all pass
+- 5 BLOCKER 4 benign-case removals + 9 BLOCKER 4 must-block additions + 4 still-allows-pure-prose pins
+- Compaction byte measurement: `mpm wake` ~10 KB → `mpm wake --compact` ~1-2 KB (verified)
+- Stderr byte measurement: `mpm call mpm_memory query --payload '{...}'` stderr 300-800 B → <100 B in machine mode
+
+### Follow-Ups (deliberately deferred, not blockers)
+
+1. `ErrMissingCreatorSession` could grow a one-line suffix naming the same recovery paths (W-006) — sentinel compatibility is the reason it stayed untouched; revisit when callers stop using `errors.Is`.
+2. `mpm call` envelope could surface a `remediation` field separately from the error message — orthogonal to W-006's string-shape fix.
+3. `mpminternal.NewTestIsolatedDM` and the per-package test helpers could consolidate onto one DSN strategy — the recent `cache=shared` migration already eliminated the worst drift, but a follow-up sweep could remove the remaining helper variants.
+

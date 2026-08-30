@@ -69,7 +69,7 @@ func NewContinueService(workingCtxSvc *WorkingContextService, dm *mpminternal.Da
 // Other sections are session-agnostic (subsystem-level).
 func (s *ContinueService) Compose(sessionID string) (*DashboardModel, error) {
 	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+		return nil, mpminternal.ErrSessionIDRequired()
 	}
 	now := time.Now().UTC()
 

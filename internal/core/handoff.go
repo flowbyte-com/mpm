@@ -68,7 +68,7 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 		return nil, fmt.Errorf("EndSession: db not initialized")
 	}
 	if sessionID == "" {
-		return nil, fmt.Errorf("EndSession: session_id is required")
+		return nil, ErrSessionIDRequired()
 	}
 	if summary == "" {
 		return nil, fmt.Errorf("EndSession: summary is required")

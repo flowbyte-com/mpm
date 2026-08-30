@@ -42,12 +42,30 @@ func init() {
 
 	// Initialize the package-level slog default. See internal/logging for the
 	// MPM_LOG / MPM_LOG_FORMAT env-var policy.
-	logging.Setup()
+	//
+	// Alpha-4 D-004/W-004: when invoked as `mpm call ...` (machine mode),
+	// route slog through io.Discard so operational INFO doesn't pollute
+	// the JSON envelope on stdout's adjacent stderr stream. Operators can
+	// restore the diagnostic stream with MPM_VERBOSE=1.
+	if isMachineMode(os.Args) && os.Getenv("MPM_VERBOSE") == "" {
+		logging.SetupWithWriter(io.Discard)
+	} else {
+		logging.Setup()
+	}
 
 	// Initialize global mode manager
 	// Will be used to set default 808 mode on daemon startup
 	configPath := os.ExpandEnv("$HOME/.openclaw/workspace/projects/mpm")
 	modeManager = mpminternal.NewModeManager(configPath)
+}
+
+// isMachineMode reports whether the current invocation is a machine-facing
+// surface whose stdout/stderr must stay parseable. Today this means
+// `mpm call <tool> --payload <json>` — the universal machine interface
+// documented in cmd/mpm/call.go. Anything else (interactive TUI, debug
+// shell, batch commands) keeps the operator-facing diagnostic stream.
+func isMachineMode(args []string) bool {
+	return len(args) >= 2 && args[1] == "call"
 }
 
 // buildVersion is set at compile time via -ldflags
