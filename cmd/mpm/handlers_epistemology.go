@@ -15,8 +15,23 @@ import (
 )
 
 func handleProposeTheory(args []string) int {
+	// W-001: --json flag for machine-readable output.
+	jsonOutput := false
+	filteredArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			jsonOutput = true
+			continue
+		}
+		filteredArgs = append(filteredArgs, args[i])
+	}
+	args = filteredArgs
+
 	if len(args) == 0 {
-		return respond("", "Usage: mpm propose_theory <text>", 1)
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"Usage: mpm propose_theory [--json] <text>"}`+"\n", 1)
+		}
+		return respond("", "Usage: mpm propose_theory [--json] <text>", 1)
 	}
 
 	input := strings.Join(args, " ")
@@ -32,6 +47,9 @@ func handleProposeTheory(args []string) int {
 	// Reject empty/whitespace-only hypotheses so a stray `mpm propose_theory
 	// "   "` doesn't create an empty theories row.
 	if strings.TrimSpace(hypothesis) == "" {
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"propose_theory: hypothesis is required (non-empty)"}`+"\n", 1)
+		}
 		return respond("", "propose_theory: hypothesis is required (non-empty)\n", 1)
 	}
 	if status == "" {
@@ -62,11 +80,21 @@ func handleProposeTheory(args []string) int {
 
 	store := getMemoryStore()
 	if store == nil {
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"memory store not available"}`+"\n", 1)
+		}
 		return respond("", "Error: memory store not available\n", 1)
 	}
 
 	mem, err := store.AddMemory(content, "theories", tags, meta, "", "cli")
 	if err != nil {
+		if jsonOutput {
+			out, _ := json.Marshal(map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to save theory: %v", err),
+			})
+			return respond("", string(out)+"\n", 1)
+		}
 		return respond("", fmt.Sprintf("Failed to save theory: %v\n", err), 1)
 	}
 
@@ -78,6 +106,14 @@ func handleProposeTheory(args []string) int {
 		}
 	}
 
+	if jsonOutput {
+		out, _ := json.Marshal(map[string]interface{}{
+			"success": true,
+			"id":      mem.ID,
+			"status":  status,
+		})
+		return respond("", string(out)+"\n", 0)
+	}
 	return respond("", fmt.Sprintf("✅ Theory proposed: %s (status: %s)\n", mem.ID, status), 0)
 }
 
@@ -187,10 +223,25 @@ func handleResolveTheory(args []string) int {
 
 // handleRecordDecision parses structured decision text and saves to the decisions collection.
 func handleRecordDecision(args []string) int {
+	// W-001: --json flag for machine-readable output (parity with `mpm call`).
+	jsonOutput := false
+	filteredArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			jsonOutput = true
+			continue
+		}
+		filteredArgs = append(filteredArgs, args[i])
+	}
+	args = filteredArgs
+
 	if len(args) == 0 {
-		return respond("", "Usage: mpm record_decision [--context <text>] [--choice <text>] [--rationale <text>] [--tags <csv>] [--supersedes <decision-id>]\n"+
-			"   or: mpm record_decision <text with CONTEXT:/CHOICE:/RATIONALE:/TAGS: tokens>\n"+
-			"   or: mpm decide --context <text> --choice <text> --rationale <text> [--tags <csv>]", 1)
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"decision requires --choice or token form"}`+"\n", 1)
+		}
+		return respond("", "Usage: mpm record_decision [--json] [--context <text>] [--choice <text>] [--rationale <text>] [--tags <csv>] [--supersedes <decision-id>]\n"+
+			"   or: mpm record_decision [--json] <text with CONTEXT:/CHOICE:/RATIONALE:/TAGS: tokens>\n"+
+			"   or: mpm decide --json --context <text> --choice <text> --rationale <text> [--tags <csv>]", 1)
 	}
 
 	// F-C1/C2: support both flag-style and legacy token-style inputs.
@@ -211,10 +262,16 @@ func handleRecordDecision(args []string) int {
 	// decisions were the bug F-C1 surfaced (the operator thought they
 	// had recorded a choice; the DB got an empty record).
 	if hasDecisionFlags(args) && choice == "" {
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"--choice is required when using flag form"}`+"\n", 1)
+		}
 		return respond("", "Error: --choice is required when using flag form\n", 1)
 	}
 
 	if choice == "" {
+		if jsonOutput {
+			return respond("", `{"success":false,"error":"decision requires a CHOICE (flag --choice or CHOICE: token)"}`+"\n", 1)
+		}
 		return respond("", "Error: decision requires a CHOICE (flag --choice or CHOICE: token)\n", 1)
 	}
 
@@ -277,11 +334,27 @@ func handleRecordDecision(args []string) int {
 		if newID == "" {
 			return respond("", fmt.Sprintf("Failed to supersede decision: no id in result %v\n", res), 1)
 		}
-		return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
+		if jsonOutput {
+		out, _ := json.Marshal(map[string]interface{}{
+			"success":     true,
+			"id":          newID,
+			"supersedes":  supersedes,
+			"action":      "supersede",
+		})
+		return respond("", string(out)+"\n", 0)
+	}
+	return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
 	}
 
 	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "cli")
 	if err != nil {
+		if jsonOutput {
+			out, _ := json.Marshal(map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to record decision: %v", err),
+			})
+			return respond("", string(out)+"\n", 1)
+		}
 		return respond("", fmt.Sprintf("Failed to record decision: %v\n", err), 1)
 	}
 
@@ -294,6 +367,14 @@ func handleRecordDecision(args []string) int {
 	}
 
 	_ = leftoverArgs // currently unused; reserved for future positional content
+	if jsonOutput {
+		out, _ := json.Marshal(map[string]interface{}{
+			"success": true,
+			"id":      mem.ID,
+			"action":  "record",
+		})
+		return respond("", string(out)+"\n", 0)
+	}
 	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
 }
 
@@ -434,8 +515,21 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 	switch filter {
 	case "list", "ls":
 		filter = "all"
+	case "all", "pending", "resolved", "proven", "disproven":
+		// Accepted status filters — fall through to the listing code
+		// which uses statusMatches() to filter rows by their stored
+		// status (resolved is treated as the family containing proven +
+		// disproven rows per the help text).
 	case "help", "-h", "--help":
 		return respond("", "Usage: mpm theories [list|all|pending|resolved|proven|disproven]\n", 0)
+	default:
+		// Audit D-005: reject unknown filters explicitly. Previously an
+		// unknown filter (e.g. "bogus") silently fell through to the
+		// status-match branch, which then matched nothing and printed
+		// "no theories" — misleading for operators/agents who typoed
+		// a verb. List the valid options in the error.
+		valid := []string{"all", "pending", "resolved", "proven", "disproven", "list", "ls"}
+		return respond("", fmt.Sprintf("Unknown filter %q for `mpm theories`. Valid filters: %s.\n", filter, strings.Join(valid, ", ")), 1)
 	}
 
 	memories, err := dm.GetMemoriesForExport("theories", "", "")
@@ -567,6 +661,12 @@ func handleDecisions(args []string) int {
 			return handleDecisionsList(dm, args[1:])
 		case "query":
 			return handleDecisionsQuery(dm, args[1:])
+		default:
+			// Audit D-005: an unknown subcommand used to silently fall
+			// through to the legacy list. Agents running this in a
+			// reasoning loop would treat the list output as confirmation
+			// of their (typo'd) intent. Reject explicitly.
+			return respond("", fmt.Sprintf("Unknown subcommand %q for `mpm decisions`. Valid subcommands: show, list, query (or no args for legacy listing).\n", args[0]), 1)
 		}
 	}
 

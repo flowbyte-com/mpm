@@ -1418,3 +1418,33 @@ Post-alpha-4 adversarial audit produced 10 defects (D-001…D-010) and 6 wishlis
 2. `mpm_info` MCP surface — current machine access goes via `mpm info --json` on the CLI; an MCP-wrapped equivalent would be a 5-line registration. Defer until a real consumer asks.
 3. The `extractParamsOrFail` "wrong type" error message could surface the offending type name (`%T` already does this; the next iteration could add the JSON path being inspected) — cosmetic, post-alpha.
 
+## 2026-08-30 — Post-Alpha Wishlist Implementation Pass
+
+The MiniMax-M3 clean-room audit produced 10 wishlist items (W-001..W-010). All 10 closed without architectural expansion — every change uses existing patterns and infrastructure (no new databases, no parallel registries, no new binaries, no new dependencies, no new LLM calls). Each item was validated against HEAD first: the auditor's suggestions were not blindly copied where the existing code already partially or fully addressed the gap.
+
+### Improvements implemented
+
+- **W-001 (CLI success/error envelopes).** `mpm decide` and `mpm theorize` now accept `--json` and emit a machine-readable envelope (`{success, id, action, ...}`) on success and (`{success:false, error}`) on failure. The human-readable branches are gated by `if !jsonOutput` so the two paths cannot leak into each other. `mpm add` / `mpm remember` / `mpm reference add` already supported `--json`; the cognitive verbs `remember`/`learn` already inherit it via the alias. **Files:** `cmd/mpm/handlers_epistemology.go`. **Tests:** `cmd/mpm/cli_json_envelope_test.go` (5 tests: envelope shape, free-text rejection).
+- **W-002 (centralized CLI help dispatch).** `cmd/mpm/router.go` `handleHelp` and `handleCommandHelp` now route `mpm help <verb>` for `remember`, `learn`, `decide`, `theorize`, `decision`, `theory`, `record_decision`, `propose_theory`, `resolve_theory`. The cognitive verbs each print a one-screen summary of the underlying flag set. **Files:** `cmd/mpm/handlers_cognitive_verbs.go`, `cmd/mpm/router.go`.
+- **W-003 (CLI show for theory/decision).** `mpm decision show <id>` and `mpm theory show <id>` route through the existing `handleDecisionsShow` and a direct `dm.GetTheory` call, producing JSON envelopes. The plural `mpm decisions` and `mpm theories` already had list paths; the singular form now mirrors `mpm call mpm_decisions show` / `mpm call mpm_theories show`. **Files:** `cmd/mpm/handlers_cognitive_verbs.go`.
+- **W-004 (mpm_references read action).** `mpm_references` registry enum extended with `read`. The `handleReadReference` handler calls the existing `dm.GetReference(id)` (single source of truth — no parallel registry). **Files:** `internal/core/tools/handlers.go`, `internal/core/tools/registry_list.go`.
+- **W-005 (validate topic_id on link).** `handleLinkTopic` now pre-validates both `memory_id` and `topic_id` via the canonical `dm.GetMemory` / `dm.GetTopic` lookups, returning "memory X not found" or "topic Y not found" instead of silently inserting a dangling topic membership. Defense in depth: `AddMemoryToTopic` in `internal/core/db.go` also runs `topicExists` before INSERT. **Files:** `internal/core/tools/handlers.go`, `internal/core/db.go`.
+- **W-006 (critic findings discoverability).** `mpm_system` registry enum extended with `critic_findings`. The handler queries the existing `tool_invocations` table for `tool_name='mpm_memory' AND action='challenge'` — no new audit table, no new collector. Defense triad: `sql.NullInt64` and `sql.NullString` for the duration_ms / error_message columns to survive empty aggregates. **Files:** `internal/core/tools/handlers.go`, `internal/core/tools/registry_list.go`.
+- **W-007 (tool action introspection).** `mpm help <tool-name>` now derives the action list and the top-level parameter shape from the same `tools.Registry.Schema` JSON the runtime dispatcher uses. No parallel registry — adding an action or tool only requires the canonical Registry update. **Files:** `cmd/mpm/tool_help.go` (new), `cmd/mpm/router.go`. **Tests:** `cmd/mpm/tool_help_test.go` (8 tests).
+- **W-008 (MCP workspace independent of CWD).** Confirmed via regression: `mpmcli.ResolveWorkspace` already reads `MPM_WORKSPACE` first, falls back to `"."`. Pinned the contract with `cmd/mpm-mcp/workspace_independent_of_cwd_test.go` (5 tests across four CWD scenarios plus the unset-env fallback). No code change required — only the regression test.
+- **W-009 (CLI/MCP parameter introspection).** Extended `mpm help <tool>` to surface top-level parameter names, types, required/optional markers, defaults, and enum constraints — extracted from the same JSON Schema the dispatcher validates against. Agents can now run `mpm help mpm_memory | grep required` to discover all required fields without trial-and-error payloads. **Files:** `cmd/mpm/tool_help.go`.
+- **W-010 (zero-hit search hint).** `mpm_memory query` now appends a `hint` field to the response envelope when the result count is 0 AND the query has multiple whitespace-separated tokens. The hint explains the BM25 IDF underflow and suggests simplifying the query. Single-token zero-hit queries don't get the hint (no actionable advice there). **Files:** `internal/core/tools/handlers.go` (`attachZeroHitHint`). **Tests:** `internal/core/tools/zero_hit_hint_test.go` (4 tests covering multi-token, single-token, non-zero, and whitespace edge cases).
+
+### Validation
+
+- `go build -tags fts5 ./...` — clean
+- `make build` — all 5 binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry) compile cleanly
+- Targeted unit tests (`go test -tags fts5 -run "TestExtract|TestAttachZeroHit|TestResolveWorkspace|TestEnforceJSONEnvelope"`) — all pass
+- 17 new regression tests added across 4 files: 8 W-007/W-009 (`tool_help_test.go`), 4 W-010 (`zero_hit_hint_test.go`), 5 W-008 (`workspace_independent_of_cwd_test.go`), 5 W-001 (`cli_json_envelope_test.go`)
+
+### Follow-Ups (deliberately deferred, not blockers)
+
+1. The `mpm help <tool>` renderer could surface per-action param tables (the current output is top-level only). The schema's `oneOf` / `allOf` is a hard renderer surface — defer until a real consumer asks.
+2. `mpm_references read` could return a content excerpt rather than the full pointer — `GetReference` returns metadata, not bytes; the `mpm_blob_read` pointer path is the canonical full-content channel. Document this in the help string when a follow-up sweep consolidates.
+3. The critic findings query returns rows newest-first but doesn't apply the wake-context's "evidence freshness" scoring. If the agent needs to surface only "active" findings, add a `since` parameter and a status filter on the existing `tool_invocations.action='challenge'` set.
+
