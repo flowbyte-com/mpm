@@ -574,7 +574,45 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "work":
 		printWorkHelp()
 		return 0
+	case "remember":
+		// W-002: cognitive-verb aliases route through `mpm help <verb>`
+		// directly. Reuses the existing per-cmd help functions so
+		// there's no second source of truth.
+		printRememberHelp()
+		return 0
+	case "learn":
+		printLearnHelp()
+		return 0
+	case "decide":
+		printDecideHelp()
+		return 0
+	case "theorize":
+		printTheorizeHelp()
+		return 0
+	case "decision":
+		printDecisionHelp()
+		return 0
+	case "theory":
+		printTheoryHelp()
+		return 0
+	case "record_decision":
+		printDecideHelp()
+		return 0
+	case "propose_theory":
+		printTheorizeHelp()
+		return 0
+	case "resolve_theory":
+		printResolveTheoryHelp()
+		return 0
 	default:
+		// W-007: tool-name introspection. Before falling through to
+		// "no help available", check whether the requested name is a
+		// registered tool (e.g. `mpm help mpm_memory`). Returns the
+		// tool description + valid action list derived from the same
+		// tools.Registry the dispatch uses — no duplicate registry.
+		if handled := printToolHelp(helpCmd); handled {
+			return 0
+		}
 		// 5. Unknown: stay explicit rather than dumping the cognitive
 		// default. Operator asked for a specific help page; tell them
 		// if we don't have one. They can then run `mpm help` for the
@@ -646,6 +684,33 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		return 0
 	case "work":
 		printWorkHelp()
+		return 0
+	case "remember":
+		printRememberHelp()
+		return 0
+	case "learn":
+		printLearnHelp()
+		return 0
+	case "decide":
+		printDecideHelp()
+		return 0
+	case "theorize":
+		printTheorizeHelp()
+		return 0
+	case "decision":
+		printDecisionHelp()
+		return 0
+	case "theory":
+		printTheoryHelp()
+		return 0
+	case "record_decision":
+		printDecideHelp()
+		return 0
+	case "propose_theory":
+		printTheorizeHelp()
+		return 0
+	case "resolve_theory":
+		printResolveTheoryHelp()
 		return 0
 	}
 	if helpFunc != nil {

@@ -181,18 +181,19 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 	{
 		Name: "mpm_references",
 		Description: `Ingested external documents: PDFs, specs, whitepapers, books.
-Use when: you read an external document and want to make its contents searchable via the MPM query surface. References are indexed and queryable but not automatically retrieved — you search them explicitly.
+Use when: you read an external document and want to make its contents searchable via the MPM query surface. References are indexed and queryable; use read to retrieve a single doc by id, search to query chunks, or list to enumerate.
 Do not use when: the document is ephemeral or you just want to save a URL to visit later (mpm_memory save).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["add","search","list"]},
+				"action": {"type": "string", "enum": ["add","read","search","list"]},
 				"params": {
 					"type": "object",
 					"properties": {
 						"filepath": {"type": "string"},
 						"title":   {"type": "string"},
 						"query":   {"type": "string"},
+						"id":      {"type": "string", "description": "Reference doc id; required for the read action."},
 						"limit":   {"type": "number"},
 						"offset":  {"type": "number"}
 					},
@@ -393,9 +394,9 @@ Promote to memory when the thought is complete and worth preserving. Discard whe
 	{
 		Name: "mpm_system",
 		Description: `Maintenance, diagnostics, and housekeeping for the MPM substrate.
-Use when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters; list active audit clusters (list_clusters).
+Use when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters; list active audit clusters (list_clusters); surface critic-emitted findings (critic_findings).
 This tool is for system health — not for daily agent work. Prefer specific tools for regular operations.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},"params":{"type":"object","properties":{"limit":{"type":"number","description":"For critic_findings: max rows to return (default 50)."}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmSystem,
 	},
 	{
