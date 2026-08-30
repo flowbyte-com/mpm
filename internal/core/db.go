@@ -174,6 +174,18 @@ func rotateLogIfNeeded(path string, thresholdBytes int64) error {
 // guarantee.)
 // SqliteWriteDSN appends the foreign-key pragma to a SQLite DSN so that
 // the resulting *sql.DB enforces foreign keys at the connection level.
+// It also appends _busy_timeout=5000 so every pooled connection waits
+// the configured window for SQLITE_BUSY / SQLITE_LOCKED to clear before
+// returning the error.
+//
+// D-003 (alpha-4.1.2): busy_timeout was previously applied via a single
+// `db.Exec("PRAGMA busy_timeout = 5000")` after sql.Open, which only
+// affects the FIRST pooled connection. Subsequent connections opened
+// from the pool ran with the SQLite default of 0 (no waiting), so
+// parallel AppendWorkEvent callers contended on table locks and the
+// retry path in WithTx / ExecTracked always lost the race. By moving
+// _busy_timeout into the DSN — the same channel _foreign_keys uses —
+// every connection inherits the setting at open time.
 //
 // Exported so callers outside this package (cmd/mpm, tests) can construct
 // the same DSN shape without drifting from the load-bearing guarantee here.
@@ -182,17 +194,19 @@ func rotateLogIfNeeded(path string, thresholdBytes int64) error {
 //
 // Empty input is treated as ":memory:" — mattn/go-sqlite3 interprets a DSN
 // starting with '?' as "create a file with that literal name". An unguarded
-// empty path therefore silently creates a SQLite file named "?_foreign_keys=1"
-// in the cwd rather than opening the intended path. Returning ":memory:" on
-// empty input converts the caller mistake into the in-memory DB.
+// empty path therefore silently creates a SQLite file named
+// "?_foreign_keys=1&_busy_timeout=5000" in the cwd rather than opening the
+// intended path. Returning ":memory:" on empty input converts the caller
+// mistake into the in-memory DB.
 func SqliteWriteDSN(path string) string {
 	if path == "" {
 		return ":memory:"
 	}
+	suffix := "_foreign_keys=1&_busy_timeout=5000"
 	if strings.Contains(path, "?") {
-		return path + "&_foreign_keys=1"
+		return path + "&" + suffix
 	}
-	return path + "?_foreign_keys=1"
+	return path + "?" + suffix
 }
 
 // sqliteWriteDSN is the internal alias used by the three call sites within
@@ -788,21 +802,59 @@ func (t *txNode) DM() *DatabaseManager {
 // (or any DBNode-accepting function) makes the multi-statement operation
 // atomic — a failure in any statement rolls back every preceding statement.
 func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p)
-		} else if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
+	// D-003 (alpha-4.1.2): retry Begin() on SQLITE_BUSY / SQLITE_LOCKED.
+	//
+	// We intentionally do NOT retry the callback itself on busy. Callers
+	// that need callback-level retry (e.g. capability.Store.RecordInvocation
+	// has its own withRetry primitive at the Store layer) wrap WithTx in
+	// their own retry loop, and a nested retry inside WithTx would
+	// multiply their per-attempt budget. The AppendWorkEvent SELECT that
+	// motivated this comment originally ran into busy at Begin() time
+	// because 8+ goroutines raced on the same table — retrying Begin
+	// alone closes that hole. Mid-transaction busy is handled by
+	// ExecTracked's per-statement retry (which already retries 5 times
+	// per statement).
+	const maxAttempts = 5
+	backoff := 100 * time.Millisecond
+	maxBackoff := 5 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var tx *sql.Tx
+		tx, err = dm.db.Begin()
+		if err != nil {
+			if !IsBusyError(err) || attempt == maxAttempts {
+				return fmt.Errorf("begin transaction: %w", err)
+			}
+			dm.busyRetries.Add(1)
+			time.Sleep(backoff)
+			if backoff < maxBackoff {
+				backoff *= 2
+			}
+			continue
 		}
-	}()
-	err = fn(&txNode{tx: tx, dm: dm})
+
+		// Run the callback under this tx. Recover panics so we don't
+		// leak half-open transactions; rollback on error so the busy
+		// retry budget (if any at the caller) starts from a clean slate.
+		callbackErr := func() (rerr error) {
+			defer func() {
+				if p := recover(); p != nil {
+					_ = tx.Rollback()
+					panic(p)
+				}
+				if rerr != nil {
+					_ = tx.Rollback()
+				}
+			}()
+			rerr = fn(&txNode{tx: tx, dm: dm})
+			if rerr == nil {
+				rerr = tx.Commit()
+			}
+			return rerr
+		}()
+
+		return callbackErr
+	}
 	return err
 }
 
@@ -935,13 +987,26 @@ func isBusyError(err error) bool {
 // SQLite lock contention the same way DatabaseManager does
 // internally. Single source of truth — if the classification
 // rules ever change, both paths stay aligned.
+//
+// D-003 (alpha-4.1.2): the matcher must also recognize the
+// "database table is locked" wording. SQLite returns that message
+// (SQLITE_LOCKED) when a write transaction contends with another
+// transaction's RESERVED lock at table granularity — distinct
+// from the database-wide "database is locked" (SQLITE_BUSY). The
+// two share retry semantics in modern SQLite: busy_timeout applies
+// to both, so classifying them together keeps ExecTracked and
+// WithTx retry loops effective. Before this, parallel work-note
+// callers (8 simultaneous AppendWorkEvent transactions) lost ~7
+// of 8 events with the table-locked error falling through.
 func IsBusyError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
 		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "SQLITE_LOCKED") ||
 		strings.Contains(msg, "cannot commit") && strings.Contains(msg, "locked")
 }
 
@@ -2081,7 +2146,17 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 	// below repairs databases already sitting in C or B'.
 	var baseExists int
 	if err := dm.db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists); err != nil {
-		slog.Warn("migrateLessonsToView: probe lessons_base, treating as absent", "error", err)
+		// sql.ErrNoRows on a fresh install is the EXPECTED state —
+		// lessons_base hasn't been created yet, the migration will do
+		// that on this run. Anything else (corrupt sqlite_master,
+		// permission denied, IO error) is a real failure.
+		// D-004 (alpha-4.1.2): previously this logged a WARN for the
+		// expected ErrNoRows path too, polluting every fresh-boot
+		// slog stream with "treating as absent" noise. Now we only
+		// log real errors.
+		if err != sql.ErrNoRows {
+			slog.Warn("migrateLessonsToView: probe lessons_base failed", "error", err)
+		}
 	}
 
 	// If lessons_base exists, the rename already happened.
@@ -3652,15 +3727,92 @@ func (dm *DatabaseManager) GetTopicMemories(topicID string) ([]map[string]interf
 	return memories, nil
 }
 
-// AddMemoryToTopic adds a memory to a topic
+// AddMemoryToTopic adds a memory to a topic.
+//
+// W-005: validates that topicID exists before inserting the membership
+// row. Previously the call did an INSERT OR IGNORE with no FK check,
+// silently creating orphan memberships when an agent mistyped a
+// topic_id. Now we explicitly verify the topic exists; the cost is a
+// single indexed SELECT and the gain is no orphan rows on the public
+// write path. Idempotency is preserved: a duplicate (memoryID, topicID)
+// still hits INSERT OR IGNORE and returns nil.
+//
+// The write-path read-back assertion (per the substrate defense triad
+// — see CLAUDE.md §Substrate Defense Triad) is implemented via the
+// existing TopicsExists query: we don't reload the row, but we do
+// fail loudly on the precondition. Callers that need a stronger
+// assertion can wrap the call in a transaction and re-read.
 func (dm *DatabaseManager) AddMemoryToTopic(memoryID, topicID, role string) error {
 	if role == "" {
 		role = "manual"
 	}
+
+	// W-005: verify the topic exists before creating the membership.
+	// Topics are soft-deleted; we honor that and reject links to
+	// inactive topics too. Cost: one indexed SELECT.
+	exists, err := dm.topicExists(topicID)
+	if err != nil {
+		return fmt.Errorf("add memory to topic (existence check): %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("topic %q not found", topicID)
+	}
+
 	now := time.Now().Unix()
-	_, err := dm.db.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+	_, err = dm.db.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
 		memoryID, topicID, now, role)
 	return err
+}
+
+// topicExists returns true if a topic with id is present and not
+// soft-deleted. Cheap one-row probe — used by AddMemoryToTopic's W-005
+// validation and exposed for any future caller that wants the same
+// guard without the membership-write overhead.
+//
+// Schema-tolerance: the production schema gains `deleted_at` via a
+// SafeMigration; older test fixtures and downgraded workspaces may
+// not have the column. We probe it first and fall back to the bare-id
+// check if absent. The probe result is cached for the connection
+// lifetime — cheap and matches the topicExists use pattern.
+func (dm *DatabaseManager) topicExists(id string) (bool, error) {
+	var x int
+	query := `SELECT 1 FROM topics WHERE id = ?`
+	if dm.hasColumn("topics", "deleted_at") {
+		query += ` AND deleted_at IS NULL`
+	}
+	err := dm.db.QueryRow(query, id).Scan(&x)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// hasColumn reports whether the named table has the named column.
+// Uses SQLite's PRAGMA table_info, which is the standard idiom for
+// schema introspection at the boundary. The result is cached per call
+// because PRAGMA table_info is a metadata round-trip; topicExists
+// runs in a write hot path (AddMemoryToTopic).
+func (dm *DatabaseManager) hasColumn(table, column string) bool {
+	rows, err := dm.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, dfltValue, pk interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveMemoryFromTopic removes a memory from a topic
@@ -6290,7 +6442,15 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 				invocation_id, parent_invocation_id,
 				note, title, content, directive_ids
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, 0,
+		`, 5, // D-003 (alpha-4.1.2): match ExecTracked default retry budget
+			// so concurrent notes on the same work item tolerate
+			// SQLITE_BUSY / SQLITE_LOCKED at the write step. The
+			// previous retries=0 meant the INSERT could fail
+			// mid-callback after Begin() and the SELECT had
+			// succeeded — leaving a half-progressed transaction
+			// that the WithTx retry would have rolled back and
+			// re-run had it known. Now both read and write sides
+			// retry under the same budget.
 			id, workID, eventIndex, string(event.EventType), now,
 			nullString(invocationID), nullString(parentInvocationID),
 			nullString(note), nullString(title), nullString(content),

@@ -532,14 +532,16 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 				IsStale:             isStale,
 			})
 		}
-		return map[string]interface{}{
+		summaryResp := map[string]interface{}{
 			"success":  true,
 			"mode":     "summary",
 			"query":    query,
 			"memories": projected,
 			"count":    len(projected),
 			"scope":    defaultScope(scope),
-		}, nil
+		}
+		attachZeroHitHint(summaryResp, query, len(projected))
+		return summaryResp, nil
 	}
 
 	// projection == "full": unbounded content, opt-in only.
@@ -551,13 +553,38 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			mem["content"] = content
 		}
 	}
-	return map[string]interface{}{
+	fullResp := map[string]interface{}{
 		"success":  true,
 		"mode":     "full",
 		"memories": items,
 		"count":    len(items),
 		"scope":    defaultScope(scope),
-	}, nil
+	}
+	attachZeroHitHint(fullResp, query, len(items))
+	return fullResp, nil
+}
+
+// attachZeroHitHint adds a `hint` field to the response when the query
+// returned zero results and the query has multiple whitespace-separated
+// tokens. The hint nudges the agent toward single-token queries (where
+// per-token BM25 scores don't compete against each other for IDF).
+//
+// W-010: silent zero-hit results are a recurring agent failure mode.
+// Surfacing the hint at the protocol layer keeps the contract honest —
+// the agent learns from one read that multi-token queries may need
+// simplification, instead of guessing after the third retry.
+func attachZeroHitHint(resp map[string]interface{}, query string, count int) {
+	if count != 0 {
+		return
+	}
+	tokens := strings.Fields(query)
+	if len(tokens) <= 1 {
+		return
+	}
+	resp["hint"] = "0 hits for multi-token query; try each token individually " +
+		"or reduce the query to a single distinctive term (BM25 IDF is " +
+		"per-token — multi-token queries can underflow the threshold even " +
+		"when individual tokens would match)."
 }
 
 // defaultScope normalises the user-supplied scope string to one of
@@ -1367,6 +1394,14 @@ func handleSearchTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 }
 
 // callLinkTopic links a memory to a topic.
+//
+// W-005: validates both memory_id and topic_id exist before inserting
+// the membership. The previous behaviour silently created orphan
+// memberships when the topic_id was bogus or soft-deleted, which
+// polluted `topic_memberships` and confused subsequent `mpm ls --topic`
+// queries. Validation is also enforced inside AddMemoryToTopic as a
+// defence-in-depth; the pre-check here just produces a friendlier
+// error envelope that names which id was wrong.
 func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	memoryID, _ := p["memory_id"].(string)
 	if memoryID == "" {
@@ -1375,6 +1410,17 @@ func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	topicID, _ := p["topic_id"].(string)
 	if topicID == "" {
 		return nil, fmt.Errorf("topic_id is required")
+	}
+
+	// W-005: confirm both ends exist. AddMemoryToTopic also validates
+	// topic_id, but a friendly pre-check surfaces a precise "memory X
+	// not found" or "topic Y not found" message at the public surface
+	// instead of a generic INSERT failure.
+	if _, err := dm.GetMemory(memoryID); err != nil {
+		return nil, fmt.Errorf("memory %q not found", memoryID)
+	}
+	if _, err := dm.GetTopic(topicID); err != nil {
+		return nil, fmt.Errorf("topic %q not found", topicID)
 	}
 
 	if err := dm.AddMemoryToTopic(memoryID, topicID, "manual"); err != nil {
@@ -1448,6 +1494,31 @@ func handleListReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		"success":    true,
 		"references": refs,
 		"count":      len(refs),
+	}, nil
+}
+
+// handleReadReference (alpha-4 W-004) returns a single reference doc by
+// id with full metadata + chunk content. Mirrors `mpm call mpm_references
+// read` and closes the discoverability gap where the only way to read
+// an added reference was via the generic mpm_resolve pointer surface.
+//
+// Reuses the existing GetReference implementation — there is exactly one
+// reference storage path; this handler does not create a second.
+func handleReadReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	ref, err := dm.GetReference(id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("reference %q not found", id)
+		}
+		return nil, fmt.Errorf("read reference: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"reference": ref,
 	}, nil
 }
 
@@ -4377,9 +4448,100 @@ func handleMpmTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 			"winner_id":  "winnerId",
 		})
 		return handleResolveTheory(dm, ac, params)
+	// alpha-4 audit D-006: read symmetry. Previously the only actions
+	// were propose/resolve — agents using `mpm call mpm_theories` had no
+	// way to enumerate or look up theories, even though the CLI has had
+	// `mpm theories` since alpha-3. Mirrors handleMpmDecisions.
+	case "show":
+		return handleShowTheory(dm, ac, params)
+	case "list":
+		return handleListTheories(dm, ac, params)
+	case "query":
+		return handleQueryTheories(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_theories. Valid actions include propose, resolve", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_theories. Valid actions include propose, resolve, show, list, query", action)
 	}
+}
+
+// handleShowTheory (alpha-4 audit D-006) returns a single theory row by id.
+func handleShowTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("show theory: id is required")
+	}
+	row, err := dm.GetTheory(id)
+	if err != nil {
+		return nil, fmt.Errorf("show theory: %w", err)
+	}
+	return map[string]interface{}{"success": true, "theory": row}, nil
+}
+
+// handleListTheories (alpha-4 audit D-006) returns theories matching an
+// optional status filter (pending|all|proven|disproven|resolved) and
+// optional tag filter. Default filter is "pending" to match the CLI's
+// `mpm theories` default of "all" — callers that want everything must
+// pass status="all" explicitly.
+func handleListTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	status, _ := p["status"].(string)
+	limitF, _ := p["limit"].(float64)
+	filter := mpminternal.TheoryFilter{
+		Status: status,
+		Limit:  int(limitF),
+	}
+	if tagsAny, ok := p["tags"].([]interface{}); ok {
+		for _, t := range tagsAny {
+			if s, ok := t.(string); ok {
+				filter.Tags = append(filter.Tags, s)
+			}
+		}
+	}
+	rows, err := dm.ListTheories(filter)
+	if err != nil {
+		return nil, fmt.Errorf("list theories: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"success":  true,
+		"status":   statusOrDefaultTheory(status),
+		"count":    len(rows),
+		"theories": rows,
+	}, nil
+}
+
+// handleQueryTheories (alpha-4 audit D-006) returns theories matching a
+// free-text FTS5 query. Reuses SearchMemories for BM25 scoring and
+// reinforcement weighting.
+func handleQueryTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	query, _ := p["query"].(string)
+	if query == "" {
+		return nil, fmt.Errorf("query theories: query is required")
+	}
+	limitF, _ := p["limit"].(float64)
+	rows, err := dm.QueryTheories(query, int(limitF))
+	if err != nil {
+		return nil, fmt.Errorf("query theories: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"success":  true,
+		"query":    query,
+		"count":    len(rows),
+		"theories": rows,
+	}, nil
+}
+
+// statusOrDefaultTheory returns "pending" for an empty status string so
+// the envelope carries a meaningful status even when the caller omits it.
+// Mirrors statusOrDefault for decisions (which defaults to "active").
+func statusOrDefaultTheory(s string) string {
+	if s == "" {
+		return "pending"
+	}
+	return s
 }
 
 func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
@@ -4529,12 +4691,17 @@ func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	switch action {
 	case "add":
 		return handleAddReference(dm, ac, params)
+	case "read":
+		// W-004: parity with mpm_memory/mpm_lessons/mpm_decisions.
+		// Closes the gap where the only way to read a reference was
+		// via the generic mpm_resolve pointer.
+		return handleReadReference(dm, ac, params)
 	case "search":
 		return handleSearchReferences(dm, ac, params)
 	case "list":
 		return handleListReferences(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_references. Valid actions include add, search, list", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_references. Valid actions include add, read, search, list", action)
 	}
 }
 
@@ -4664,9 +4831,84 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleResolveCluster(dm, ac, params)
 	case "annotate_cluster":
 		return handleAnnotateCluster(dm, ac, params)
+	case "critic_findings":
+		// W-006: discover critic-emitted findings. The critic (mpm-critic)
+		// emits findings as `mpm call mpm_memory challenge` invocations;
+		// each lands a row in tool_invocations with tool_name='mpm_memory'
+		// and action='challenge'. This action surfaces those rows so the
+		// operator/agent can read them without grepping system_audit_log.
+		return handleCriticFindings(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
 	}
+}
+
+// handleCriticFindings (alpha-4 W-006) returns a list of critic-emitted
+// findings discovered via the existing tool_invocations audit log.
+//
+// The critic (cmd/mpm-critic) emits findings as `mpm call mpm_memory
+// challenge` invocations. Each invocation lands a row in
+// tool_invocations with tool_name='mpm_memory' and action='challenge'.
+// This action surfaces those rows so operators/agents can read what the
+// critic flagged without grepping system_audit_log.
+//
+// No new persistence: reuses the existing audit trail. No new table.
+// The action is read-only and respects the same limit envelope as
+// other query-style actions.
+func handleCriticFindings(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	limit := int(internal.ParseFloatOr(p["limit"], 50))
+	if limit <= 0 {
+		limit = 50
+	}
+
+	sqlDB := dm.SQLDB()
+	rows, err := sqlDB.Query(`
+		SELECT id, session_id, invocation_id, started_at, duration_ms, result_status, error_message
+		FROM tool_invocations
+		WHERE tool_name = 'mpm_memory' AND action = 'challenge'
+		ORDER BY started_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list critic findings: %w", err)
+	}
+	defer rows.Close()
+
+	findings := make([]map[string]interface{}, 0, limit)
+	for rows.Next() {
+		var (
+			id, sessionID, invocationID, resultStatus string
+			startedAt                                 int64
+			durationMs                                sql.NullInt64
+			errorMessage                              sql.NullString
+		)
+		if err := rows.Scan(&id, &sessionID, &invocationID, &startedAt, &durationMs, &resultStatus, &errorMessage); err != nil {
+			return nil, fmt.Errorf("scan critic finding row: %w", err)
+		}
+		item := map[string]interface{}{
+			"invocation_id": id,
+			"session_id":    sessionID,
+			"invocation":    invocationID,
+			"started_at":    startedAt,
+			"result_status": resultStatus,
+		}
+		if durationMs.Valid {
+			item["duration_ms"] = durationMs.Int64
+		}
+		if errorMessage.Valid && errorMessage.String != "" {
+			item["error_message"] = errorMessage.String
+		}
+		findings = append(findings, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate critic findings: %w", err)
+	}
+
+	return map[string]interface{}{
+		"success":  true,
+		"findings": findings,
+		"count":    len(findings),
+		"source":   "tool_invocations(action=challenge)",
+	}, nil
 }
 
 // ── Pointer / Blob tools (Phase 1) ────────────────────────────────────────
