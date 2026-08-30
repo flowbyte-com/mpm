@@ -418,12 +418,44 @@ func handleMemorySearch(args []string) int {
 		return respond("", "Usage: mpm memory search <query>", 1)
 	}
 
-	query := strings.Join(args, " ")
+	// Alpha-4.1 F-005 / W-006: strip `--json` / `-j` from the argument
+	// list before constructing the query. Pre-fix this joined the
+	// literal flag string into the FTS5 query and returned zero hits
+	// because no document contained the token "--json".
+	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+	query := strings.Join(cleaned, " ")
+	if strings.TrimSpace(query) == "" {
+		return respond("", "Usage: mpm memory search <query>", 1)
+	}
+
 	store := getMemoryStore()
 
 	memories, err := store.FullTextSearch(query, "memories", 20)
 	if err != nil {
 		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
+	}
+
+	if wantJSON {
+		// JSON envelope — the canonical machine contract. Always
+		// emit the same shape regardless of hit count so callers can
+		// parse without branching.
+		items := make([]map[string]interface{}, 0, len(memories))
+		for _, mem := range memories {
+			items = append(items, map[string]interface{}{
+				"id":         mem.ID,
+				"created_at": mem.CreatedAt,
+				"tags":       mem.Tags,
+				"metadata":   mem.Metadata,
+				"snippet":    truncateSnippet(mem.Content, 500),
+			})
+		}
+		body, _ := json.Marshal(map[string]interface{}{
+			"success": true,
+			"query":   query,
+			"count":   len(memories),
+			"memories": items,
+		})
+		return respond(string(body)+"\n", "", 0)
 	}
 
 	if len(memories) == 0 {
@@ -454,6 +486,44 @@ func handleMemorySearch(args []string) int {
 	}
 
 	return respond(output.String(), "", 0)
+}
+
+// stripMemoryFlagToken removes one or more flag tokens (with their
+// optional `=value` form) from an argument list. Returns the cleaned
+// list plus a bool indicating whether any matching flag was found.
+// Shared by handleMemorySearch / List / Show so W-006 has a single
+// canonical flag-stripper.
+func stripMemoryFlagToken(args []string, flags ...string) (cleaned []string, found bool) {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		stripped := false
+		for _, f := range flags {
+			if a == f {
+				found = true
+				stripped = true
+				break
+			}
+			// `--flag=value` form: drop entirely (we don't carry the value).
+			if strings.HasPrefix(a, f+"=") {
+				found = true
+				stripped = true
+				break
+			}
+		}
+		if !stripped {
+			out = append(out, a)
+		}
+	}
+	return out, found
+}
+
+// truncateSnippet is a small helper for the JSON output path so the
+// snippet field stays bounded regardless of source content size.
+func truncateSnippet(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func handleMemoryShow(args []string) int {

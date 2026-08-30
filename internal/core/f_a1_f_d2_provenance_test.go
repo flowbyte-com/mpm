@@ -63,7 +63,7 @@ func TestF_A1_DedupProvenanceAuditRowRecoverable(t *testing.T) {
 	}
 
 	// Now query the audit log for the canonical memory id.
-	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", memA.ID, 1, 50)
+	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", memA.ID, 1, 50, false)
 	if err != nil {
 		t.Fatalf("query audit: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestF_A1_MultipleDedupAuditsSurfacesDistinctActors(t *testing.T) {
 	}
 
 	// Query all provenance audits for this artifact.
-	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", memA.ID, 1, 50)
+	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", memA.ID, 1, 50, false)
 	if err != nil {
 		t.Fatalf("query audit: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestF_A1_AuditQueryFilterContract(t *testing.T) {
 	dm.LogAudit(AuditInfo, "provenance", "second", "", AuditContext{"artifact_id": "X"})
 	dm.LogAudit(AuditInfo, "provenance", "third", "", AuditContext{"artifact_id": "Y"})
 
-	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", "X", 1, 50)
+	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", "X", 1, 50, false)
 	if err != nil {
 		t.Fatalf("audit query: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestF_A1_AuditQueryFilterContract(t *testing.T) {
 	}
 
 	// Verify no-filter returns all 3.
-	allRows, _ := dm.QueryAuditLog(AuditInfo, "provenance", "", 1, 50)
+	allRows, _ := dm.QueryAuditLog(AuditInfo, "provenance", "", 1, 50, false)
 	if len(allRows) != 3 {
 		t.Fatalf("no filter: expected 3 rows, got %d", len(allRows))
 	}
@@ -337,7 +337,7 @@ func TestF_A1_EmptyArtifactIDFilterReturnsAll(t *testing.T) {
 	dm.LogAudit(AuditInfo, "provenance", "any1", "", AuditContext{"artifact_id": "X"})
 	dm.LogAudit(AuditInfo, "provenance", "any2", "", AuditContext{"artifact_id": "Y"})
 
-	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", "", 1, 50)
+	rows, err := dm.QueryAuditLog(AuditInfo, "provenance", "", 1, 50, false)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}

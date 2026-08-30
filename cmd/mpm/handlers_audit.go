@@ -14,7 +14,13 @@
 //	          [--artifact-id <memory|lesson|decision|... id>]
 //	          [--days N]
 //	          [--limit N]
+//	          [--include-stack]
 //	          [--json]
+//
+// Alpha-4.1 F-007 / W-002: --include-stack (or `--include_stack` for the
+// MCP payload) opts the result rows into carrying the multi-KB
+// stack_trace. Default off — most callers want the headline event
+// without the per-row stack payload.
 package main
 
 import (
@@ -36,6 +42,7 @@ func handleAudit(args []string) int {
 	days := fs.Int("days", 7, "Lookback window in days (default 7)")
 	limit := fs.Int("limit", 20, "Max rows to return (default 20, max 500)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	includeStack := fs.Bool("include-stack", false, "Include the per-row stack_trace payload (alpha-4.1 F-007 / W-002; default off)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -66,7 +73,7 @@ func handleAudit(args []string) int {
 		}
 	}
 
-	rows, err := dm.QueryAuditLog(lvl, *component, *artifactID, *days, *limit)
+	rows, err := dm.QueryAuditLog(lvl, *component, *artifactID, *days, *limit, *includeStack)
 	if err != nil {
 		usererror.Error("audit: %v", err)
 		return 1
@@ -104,6 +111,11 @@ func handleAudit(args []string) int {
 		if ctx, ok := r["context"].(map[string]interface{}); ok {
 			for k, v := range ctx {
 				fmt.Printf("    %s = %v\n", k, v)
+			}
+		}
+		if *includeStack {
+			if st, ok := r["stack_trace"].(string); ok && st != "" {
+				fmt.Printf("    --- stack trace ---\n%s\n", st)
 			}
 		}
 	}

@@ -902,28 +902,30 @@ This is one of the four enforcement patterns that make MPM's guarantees stick. S
 
 ### 6.3 Retrieval Architecture
 
-*Combines lexical, semantic, reinforcement, and recency signals into a single ranking — because no single signal is sufficient.*
+*Combines lexical and semantic signals into a single ranking — because no single signal is sufficient.*
 
-MPM combines four signals:
+MPM combines two retrieval signals:
 
 - **Keyword ranking** — SQLite FTS5 with BM25.
 - **Semantic similarity** — 768-dim embeddings, cosine distance.
-- **Reinforcement history** — how often a memory has been re-surfaced and re-used.
-- **Recency** — when the memory was last reinforced.
 
-The hybrid score is a weighted sum:
+The hybrid score is a weighted blend of BM25 and cosine similarity:
 
 ```
-score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
+combined_score = vector_weight × normalized_cosine + (1 - vector_weight) × sigmoid(BM25)
 ```
 
-BM25's raw scores are unbounded; they are sigmoid-normalized so the four signals live on a comparable scale before combining. Use `--semantic` to drop BM25 and search by embedding similarity alone.
+with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search by embedding similarity alone.
+
+**What the current ranker does NOT consume.** `weight`, `reinforcement_count`, and `last_accessed_at` are stored on every memory but **do not influence ranking order** today. They are surfaced in the projected payload so agents can reason about provenance ("this memory was reinforced 4 times") and in `formatRationaleForMemory` to render the human-readable `weight N · Mx ref` string, but they are not part of `combined_score`. The `DefaultRanker` returns the FTS / hybrid score unchanged — see `internal/core/hybrid_search.go::HybridSearch`. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today this is aspirational.
+
+> **If you want a memory to surface higher, write better content.** Lexical match and semantic similarity respond to the words you put in. `mpm reinforce` increases the displayed `reinforcement_count` but does not change retrieval order.
 
 > **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=query` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
 
-**Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing reinforcement contribution, weight contribution, recency age, and the FTS5 terms that matched. Useful for "why did the agent pick this memory?" introspection without re-running the search.
+**Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing the FTS5 terms that matched, the cosine similarity (when vector search contributed), and the stored weight / reinforcement_count metadata. The metadata fields are surfaced for **provenance / display only** — they are not part of the ranking score, so changes in `reinforcement_count` do not move a memory up or down the list. Useful for "why did the agent pick this memory?" introspection without re-running the search.
 
 > **Retrieval ranking determines what is surfaced. Confidence determines what is believed.** A frequently retrieved artifact is not necessarily a trusted artifact.
 >
@@ -1915,7 +1917,7 @@ Three tiers, in increasing specificity:
 
 1. **Inventory** — `mpm call list_skills` (CLI: `mpm list-skills`). Returns one row per name with the highest-version row's id, name, version, when_to_use, is_global, weight. Used by wake context to render an `<available_skills>` block bounded to the top 20 by weight.
 2. **Read** — `mpm call read_skill --payload '{"name":"agentshell"}'` (or `"skill_id":"skill:agentshell-v2.0.0"`). Returns the full Skill struct with parsed frontmatter and body.
-3. **Proactive** — `mpm_context action=proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + reinforcement + recency + Shared Premium for `is_global=1` rows.
+3. **Proactive** — `mpm_context action=proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + cosine + Shared Premium for `is_global=1` rows. `weight` and `reinforcement_count` are surfaced in the hint metadata but do not influence the ranking order.
 
 ##### Versioning
 
