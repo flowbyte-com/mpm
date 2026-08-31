@@ -83,6 +83,12 @@ func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	return workToMapWork(w), nil
 }
 
+// validWorkStatuses enumerates the accepted values for the `status`
+// filter on mpm_work action=list. W-010: invalid statuses used to
+// silently return zero rows, indistinguishable from "no items
+// exist". The enum is the single source of truth — keep it sorted.
+var validWorkStatuses = []string{"all", "cancelled", "done", "open"}
+
 func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
 	// Support status filtering: "open" (default), "done", "cancelled", "all".
 	// The legacy ListWorks only returned open, which prevented reliable
@@ -92,6 +98,15 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 		// Maintain backward compatibility: default to open when no status supplied.
 		// Callers that want all should pass status="all".
 		status = "open"
+	}
+	// W-010: validate the status enum explicitly. Previously a typo
+	// like "openx" silently fell through to ListWorksByStatus which
+	// returned zero rows — indistinguishable from "no items exist".
+	if !isValidWorkStatus(status) {
+		return nil, fmt.Errorf(
+			"field `status` must be one of [%s], got %q",
+			strings.Join(validWorkStatuses, ", "), status,
+		)
 	}
 	var works []*mpminternal.Work
 	var err error
@@ -369,4 +384,18 @@ func workEventToMap(e *mpminternal.WorkEvent) map[string]interface{} {
 		m["directive_ids"] = e.DirectiveIDs
 	}
 	return m
+}
+
+// isValidWorkStatus reports whether s is one of the accepted work-status
+// filter values. W-010: a typo like "openx" used to silently fall
+// through to ListWorksByStatus, which returned zero rows indistinguishable
+// from "no items exist". Now an invalid status errors at the API boundary
+// before the DB call, with the valid options listed.
+func isValidWorkStatus(s string) bool {
+	for _, v := range validWorkStatuses {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

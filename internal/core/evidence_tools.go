@@ -281,15 +281,23 @@ func (dm *DatabaseManager) QueryMemoryQuality() (map[string]interface{}, error) 
 
 // ShowConfidence returns the current confidence and history for an artifact.
 //
-// The result shape is {"current": <float>, "history": {"history": [...]}} —
-// the nested "history" map is the result of QueryConfidenceHistory, which
-// is itself wrapped in a {"history": rows} map. This double-nesting is
-// load-bearing: existing CLI callers and tests parse `result.history.history`.
-// Do not flatten it.
+// W-015: previously this read the stored confidence column directly
+// while ExplainConfidence recomputed from the evidence ledger. The two
+// surfaces returned different numbers for the same artifact (0.5 vs 0.8
+// in the audit), creating a false-belief trap: agents asking "what's
+// the confidence?" via `show` got a stale cache value; asking "why?"
+// via `explain` got the live value. Now both surfaces route through
+// the same recompute path so the `confidence` field is authoritative.
 //
-// Both `mpm call show_confidence` and the `show_confidence` MCP tool route
-// through this method, so neither surface can drift in the required-arg
-// check, the artifact-type default, or the nested shape contract.
+// Result shape: {"confidence": <float>, "history": {"history": [...]}} —
+// the nested "history" map is the result of QueryConfidenceHistory,
+// which is itself wrapped in a {"history": rows} map. This double-
+// nesting is load-bearing: existing CLI callers and tests parse
+// `result.history.history`. Do not flatten it.
+//
+// Both `mpm call show_confidence` and the `show_confidence` MCP tool
+// route through this method, so neither surface can drift in the
+// required-arg check, the artifact-type default, or the shape contract.
 //
 // Required: artifact_id. Optional: artifact_type (default "memory").
 func (dm *DatabaseManager) ShowConfidence(artifactID, artifactType string) (map[string]interface{}, error) {
@@ -299,20 +307,30 @@ func (dm *DatabaseManager) ShowConfidence(artifactID, artifactType string) (map[
 	if artifactType == "" {
 		artifactType = "memory"
 	}
-	var conf float64
-	if err := dm.QueryRowTracked(
-		fmt.Sprintf(`SELECT confidence FROM %s WHERE id = ?`, ArtifactTable(artifactType)),
-		artifactID,
-	).Scan(&conf); err != nil {
-		return nil, fmt.Errorf("read confidence: %w", err)
+	// W-015: recompute via the explain path so the value matches
+	// `mpm_confidence explain`. The previous direct read of the cached
+	// confidence column was the source of the show-vs-explain drift.
+	exp, err := ExplainConfidence(dm, artifactID, artifactType)
+	if err != nil {
+		return nil, fmt.Errorf("recompute confidence: %w", err)
 	}
+	expJSON, err := json.Marshal(exp)
+	if err != nil {
+		return nil, fmt.Errorf("encode explanation: %w", err)
+	}
+	var expMap map[string]interface{}
+	if err := json.Unmarshal(expJSON, &expMap); err != nil {
+		return nil, fmt.Errorf("decode explanation: %w", err)
+	}
+	conf, _ := expMap["confidence"].(float64)
+
 	hist, err := dm.QueryConfidenceHistory(artifactID, artifactType, 50)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"current": conf,
-		"history": hist,
+		"confidence": conf,
+		"history":    hist,
 	}, nil
 }
 

@@ -446,9 +446,14 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
-	limit := int(internal.ParseFloatOr(p["limit"], 5))
-	if limit <= 0 {
-		limit = 5
+	// W-009: explicit limit validation at the API boundary. The previous
+	// shape silently coerced limit=-1 to 5 and limit=100000 to a hidden
+	// cap, which made the caller's intent unobservable. Now: limit=0
+	// returns zero results (literally), negative limits error, and
+	// excessive values are clamped to a documented ceiling.
+	limit, err := parseLimitStrict(p["limit"], 5)
+	if err != nil {
+		return nil, err
 	}
 	collection, _ := p["collection"].(string)
 
@@ -552,6 +557,12 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		if len(content) > 0 {
 			mem["content"] = content
 		}
+		// W-013: hybridResultsToMaps already decodes tags to []string;
+		// decode metadata to a real object so consumers don't get a
+		// quoted JSON blob.
+		if rawMeta, ok := mem["metadata"].(string); ok {
+			mem["metadata"] = parseMetadataColumn(rawMeta)
+		}
 	}
 	fullResp := map[string]interface{}{
 		"success":  true,
@@ -562,6 +573,81 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	}
 	attachZeroHitHint(fullResp, query, len(items))
 	return fullResp, nil
+}
+
+// handleShowMemory fetches a single memory record by id and returns it
+// verbatim. W-003: agents used to have to run a search query to fetch a
+// known id — wasteful when the id is already in hand. Mirrors the
+// canonical CLI surface at `mpm show <id>` (see cmd/mpm/handlers.go).
+//
+// Required params: id (string).
+// Tags and metadata are JSON-decoded into native Go types before
+// returning so the response is array/object-shaped (not stringified),
+// which is the W-013 contract.
+func handleShowMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+
+	mem, err := dm.GetMemory(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// W-013: tags column is JSON-encoded as a string in the DB.
+	// Unwrap it into a native []string so consumers get a real array,
+	// not the literal string "[]". Empty/null tags → []string{}.
+	if rawTags, ok := mem["tags"].(string); ok {
+		mem["tags"] = parseTagsColumn(rawTags)
+	}
+
+	// W-013: metadata column is also JSON-encoded. Decode into
+	// map[string]interface{} so nested fields (e.g. validation_criteria,
+	// tags inside metadata) become real JSON, not a quoted blob.
+	if rawMeta, ok := mem["metadata"].(string); ok {
+		mem["metadata"] = parseMetadataColumn(rawMeta)
+	}
+
+	mem["success"] = true
+	mem["pointer"] = "mpm://memory/" + id
+	return mem, nil
+}
+
+// parseTagsColumn parses the JSON-encoded tags column into a native
+// []string. Empty / null / invalid input yields []string{} (never nil,
+// never a string), so the wire shape is always a JSON array.
+func parseTagsColumn(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return []string{}
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(raw), &tags); err != nil {
+		return []string{}
+	}
+	if tags == nil {
+		return []string{}
+	}
+	return tags
+}
+
+// parseMetadataColumn parses the JSON-encoded metadata column into a
+// map[string]interface{}. Empty / null / invalid input yields
+// map[string]interface{}{} (never nil, never a string).
+func parseMetadataColumn(raw string) map[string]interface{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return map[string]interface{}{}
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+		return map[string]interface{}{}
+	}
+	if meta == nil {
+		return map[string]interface{}{}
+	}
+	return meta
 }
 
 // attachZeroHitHint adds a `hint` field to the response when the query
@@ -4320,6 +4406,12 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleSaveToMemory(dm, ac, params)
 	case "query":
 		return handleQueryLongTermMemory(dm, ac, params)
+	case "show":
+		// W-003: agents used to have to run a search query to fetch a
+		// known id. show fetches one row directly and decodes tags +
+		// metadata JSON columns into native types so consumers get
+		// real arrays/objects, not stringified blobs (W-013).
+		return handleShowMemory(dm, ac, params)
 	case "shred":
 		return handleShredMemory(dm, ac, params)
 	case "reinforce":
@@ -4351,7 +4443,7 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
 	}
 }
 
@@ -5319,4 +5411,55 @@ func parseFloatStrictOr(v interface{}, def float64, fieldName string) (float64, 
 		return float64(n), nil
 	}
 	return 0, fmt.Errorf("field `%s` must be a number (float64/int), got %T", fieldName, v)
+}
+
+// maxQueryLimit caps the per-call result ceiling so a runaway `limit`
+// can't fan out a massive FTS5 + vector scan. 200 is well above the
+// documented "default 5" and the historical "silent cap at 10" without
+// inviting DoS-shaped queries.
+const maxQueryLimit = 200
+
+// parseLimitStrict validates a `limit`-shaped numeric input at the API
+// boundary. W-009: prior behaviour silently substituted a default for
+// every value <= 0, hiding the caller's intent. Now:
+//
+//	nil          → def
+//	0            → 0 (literally "no results")
+//	negative     → error (was the silent-substitution bug)
+//	above max    → max (clamped, not silently substituted)
+//	wrong type   → error
+//
+// The "above max → max" branch is a clamp, not a substitution — the
+// caller can still ask for less, just not absurdly more.
+func parseLimitStrict(v interface{}, def int) (int, error) {
+	if v == nil {
+		return def, nil
+	}
+	var n int
+	switch x := v.(type) {
+	case float64:
+		// JSON numbers parse to float64 by default; reject fractional limits.
+		if x != float64(int(x)) {
+			return 0, fmt.Errorf("field `limit` must be an integer, got %v", x)
+		}
+		n = int(x)
+	case float32:
+		if x != float32(int(x)) {
+			return 0, fmt.Errorf("field `limit` must be an integer, got %v", x)
+		}
+		n = int(x)
+	case int:
+		n = x
+	case int64:
+		n = int(x)
+	default:
+		return 0, fmt.Errorf("field `limit` must be a number (float64/int), got %T", v)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("field `limit` must be >= 0, got %d", n)
+	}
+	if n > maxQueryLimit {
+		n = maxQueryLimit
+	}
+	return n, nil
 }
