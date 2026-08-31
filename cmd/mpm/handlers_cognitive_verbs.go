@@ -352,12 +352,17 @@ func printTheorizeHelp() {
 Cognitive-verb alias for the underlying propose_theory primitive.
 A theory is a testable hypothesis with explicit validation criteria.
 
-Usage:
-  mpm theorize hypothesis_id="<id>" validation="<criteria>"
-              [--tags csv] [--json]
+Usage (all forms produce the same canonical record):
+  mpm theorize --hypothesis "<text>" --validation "<criteria>" [--tags csv] [--json]
+  mpm theorize hypothesis="<text>" validation="<criteria>" [--json]
+  mpm theorize --hypothesis "<text>" --validation "<criteria>" | <more args>
+  mpm theorize "HYPOTHESIS: <text>
+                VALIDATION_CRITERIA: <criteria>"
 
 Examples:
-  mpm theorize hypothesis_id=wal-better validation="throughput on 4 readers"
+  mpm theorize --hypothesis "wal is faster than delete-journal" \
+               --validation "throughput on 4 concurrent readers"
+  mpm theorize hypothesis="wal is faster" validation="throughput on 4 readers"
   mpm call mpm_theories --payload '{"action":"propose","params":{"hypothesis":"...","validation_criteria":"..."}}'`)
 }
 
