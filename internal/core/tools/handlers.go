@@ -620,6 +620,18 @@ func handleShowMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		mem["metadata"] = parseMetadataColumn(rawMeta)
 	}
 
+	// W-007: surface challenge status as top-level fields so callers
+	// can branch on `is_challenged` without re-querying the metadata
+	// column. The `content` field is intentionally NOT mutated — the
+	// banner is exposed alongside the original payload.
+	metaForChallenge := map[string]interface{}{}
+	if m, ok := mem["metadata"].(map[string]interface{}); ok {
+		metaForChallenge = m
+	}
+	isChallenged, banner := deriveChallengeFields(metaForChallenge)
+	mem["is_challenged"] = isChallenged
+	mem["banner"] = banner
+
 	mem["success"] = true
 	mem["pointer"] = "mpm://memory/" + id
 	return mem, nil
@@ -659,6 +671,25 @@ func parseMetadataColumn(raw string) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return meta
+}
+
+// deriveChallengeFields inspects a memory's metadata for the
+// `status: "challenged"` flag and returns a banner pair for callers to
+// surface in their response. Used by handleShowMemory and both branches
+// of handleMpmResolve so all three paths advertise the challenge
+// status with parity.
+//
+// W-007 (2026-08-31): without this, a challenged memory is returned
+// unchanged — the caller has to discover the status by re-querying the
+// metadata column, which is a contract asymmetry. Surfacing
+// is_challenged as a top-level field and a ready-to-render banner
+// keeps the contract honest without mutating the stored `content`
+// string.
+func deriveChallengeFields(meta map[string]interface{}) (bool, string) {
+	if status, ok := meta["status"].(string); ok && status == "challenged" {
+		return true, "[Note: This memory is challenged — treat as unverified]"
+	}
+	return false, ""
 }
 
 // attachZeroHitHint adds a `hint` field to the response when the query
@@ -5075,6 +5106,18 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			if mem != nil {
 				resp["metadata"] = mem
 			}
+			// W-007: surface challenge status with parity to handleShowMemory.
+			// The stored `content` string is intentionally untouched — the
+			// banner is exposed alongside the (possibly bounded) content.
+			metaForChallenge := map[string]interface{}{}
+			if rawMeta, ok := mem["metadata"].(string); ok {
+				metaForChallenge = parseMetadataColumn(rawMeta)
+			} else if m, ok := mem["metadata"].(map[string]interface{}); ok {
+				metaForChallenge = m
+			}
+			isChallenged, banner := deriveChallengeFields(metaForChallenge)
+			resp["is_challenged"] = isChallenged
+			resp["banner"] = banner
 			return resp, nil
 		case "lesson":
 			lesson, err := dm.GetLesson(ptr.ID)
@@ -5161,6 +5204,26 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	if result.Metadata != nil {
 		resp["metadata"] = result.Metadata
 	}
+	// W-007: surface challenge banner with parity to handleShowMemory.
+	// The resolver-driven path is what CLI `mpm call mpm_resolve` uses;
+	// the database-manager fallback inside the memory-branch case
+	// above injects the same fields for the test / direct-handler path.
+	// Both branches must advertise the same banner so callers cannot
+	// observe a contract asymmetry between routes.
+	metaForChallenge := map[string]interface{}{}
+	if result.Metadata != nil {
+		// The memory-shaped result has `metadata` as a JSON-encoded
+		// string (the raw column value). Parse it so deriveChallengeFields
+		// can see `status` directly.
+		if rawMeta, ok := result.Metadata["metadata"].(string); ok {
+			metaForChallenge = parseMetadataColumn(rawMeta)
+		} else if inner, ok := result.Metadata["metadata"].(map[string]interface{}); ok {
+			metaForChallenge = inner
+		}
+	}
+	isChallenged, banner := deriveChallengeFields(metaForChallenge)
+	resp["is_challenged"] = isChallenged
+	resp["banner"] = banner
 	return resp, nil
 }
 
