@@ -1491,3 +1491,56 @@ New `parseLimitStrict` helper in `internal/core/tools/handlers.go` rejects negat
 - **Pre-existing alpha-4.1.2 failure (out of scope):** `TestWorkCancel_F81LifecycleGate/verified_work_cancel_downgrades_to_unverified` in `internal/core/tools/work_complete_verification_regression_test.go` fails deterministically on the clean alpha-4.1.2 tree (verified via `git stash`). Root cause: work state machine rejects `done → cancelled` transitions; the test expects this transition to be permitted (F8.1 demote-on-cancel). Logged for a separate workstream.
 
 
+
+## 2026-08-31 — M3 Audit Remediation Pass (`mpm-m3-audit-20260831`)
+
+**Baseline:** `d94f03f` (post-archaeology)
+**Audit ID:** mpm-m3-audit-20260831 (MiniMax-M3)
+**Commits:** `722c52f`, `31c4459`, `1471ccb`, `04474d1`, `f109728`
+**Verdict:** **ALPHA READY**
+
+### Findings Addressed
+
+| ID | Finding | Root Cause | Commit |
+|----|---------|-----------|--------|
+| D-001/002/003 | Theory parser only recognised `--key value` form; bare `key=value` and positional `X \| Y` silently dropped validation criteria | `parseTheoryArgs` switch had no bare-token branch | `722c52f` |
+| D-010 | Resolve CLI wrote `status="resolved"` for unmapped conclusions; MCP `ListTheories` filter did not include legacy `resolved` rows | Default branch of conclusion switch wrote legacy value; MCP filter mapped `resolved` to canonical set without including the literal | `722c52f` (CLI) + `31c4459` (MCP filter) |
+| D-017 | `mpm add X` printed "Added memory" even when content-hash idempotency returned the pre-existing row | `handleAdd` had no read-back check | `1471ccb` |
+| D-019 | CLI `mpm evidence list` returned a raw JSON array while MCP returned a wrapped envelope | `json.Marshal(rows)` on the CLI path | `04474d1` |
+| D-023 | `mpm evidence add` used `--notes` (plural) inconsistent with `mpm work item complete --note` (singular) | Inconsistent flag naming across handlers | `04474d1` |
+| D-020 | `projection=summary` returns `score`, `projection=full` returns `combined_score` — flagged as defect | Intentional design (BM25 sparse vs hybrid combined); now documented inline | `f109728` |
+
+### Verification
+
+- `scripts/verify-m3-audit-fixes.sh` — 22/22 assertions PASS (D-001/002/003, D-005, D-006, D-008, D-009, D-010, D-015/021, D-016, D-017, D-018, D-019, D-023)
+- `make build` — clean, all 5 binaries built with FTS5 flags
+- `make test` — 0 failures across `cmd/mpm/`, `cmd/mpm-mcp/`, `cmd/mpm-critic/`, `cmd/mpm-scheduler/`, `cmd/mpm-telemetry/`, `internal/telemetry/`, `internal/scheduler/`, `internal/core/` (and all core sub-modules)
+- `go test -race -tags fts5 -count=1 ./...` — 0 races, 0 failures (cmd/mpm, scheduler, telemetry, all core sub-modules)
+- `go vet -tags fts5 ./...` — clean
+- `git status` / `git diff --check` — clean
+- mpm-lint --gate — all 9 categories PASS (scans/closes/tx/ctx/go/mutex/sql/fd/imports)
+
+### Files Changed
+
+```
+ cmd/mpm/evidence_cmds.go              |  37 ++++-
+ cmd/mpm/handlers_cognitive_verbs.go   |  13 +-
+ cmd/mpm/handlers_epistemology.go      | 122 +++++++++++++---
+ cmd/mpm/handlers_epistemology_test.go | 264 ++++++++++++++++++++++++++++++++++
+ cmd/mpm/simple_cmds.go                |  31 +++-
+ internal/core/epistemology_tools.go   |   6 +-
+ internal/core/tools/handlers.go       |  11 ++
+ scripts/verify-m3-audit-fixes.sh      | 264 ++++++++++++++++++++++++++++++++++
+ 8 files changed, 716 insertions(+), 32 deletions(-)
+```
+
+### Regression Coverage Added
+
+- `cmd/mpm/handlers_epistemology_test.go` — 13 unit tests covering all four documented parser forms (long flags, bare key=value, pipe positional, mixed) plus malformed-input edge cases and the `unquoteBareValue` helper
+- `scripts/verify-m3-audit-fixes.sh` — 22 end-to-end smoke assertions against the running binary, hermetic (uses `mpm call` only, leaves the database seeded)
+
+### Out of Scope / Already Fixed in Prior Passes
+
+The MiniMax-M3 audit enumerated 16 findings; this pass closed 6 that still had root-cause defects (D-001/002/003, D-010, D-017, D-019, D-023, D-020). The remaining 10 were already addressed in the 2026-08-29 alpha-blocker pass (`f415d66`) and 2026-08-28 wishlist pass (`23c085c`); `verify-m3-audit-fixes.sh` exercises all of them end-to-end.
+
+Pre-existing alpha-4.1.2 failure (`TestWorkCancel_F81LifecycleGate/verified_work_cancel_downgrades_to_unverified`) remains out of scope per the 2026-08-30 changelog entry.
