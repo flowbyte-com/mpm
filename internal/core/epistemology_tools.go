@@ -261,6 +261,17 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 		return nil, fmt.Errorf("memory %s is not a theory (collection: %s)", theoryID, coll)
 	}
 
+	// D-002: capture the current status so a no-op resolve can report
+	// the persisted state. Without this, a retry/duplicate resolve
+	// would return success with the *requested* status while the
+	// substrate still holds the prior terminal status — a silent
+	// response lie.
+	//
+	// GetMemory returns metadata as a raw JSON string (see web_db.go),
+	// so the live status has to be parsed out of that envelope rather
+	// than via a top-level type assertion.
+	currentStatus := extractTheoryStatusFromMemory(mem)
+
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// Atomicity boundary: status update + reinforcement + cascade
@@ -285,7 +296,8 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 		// Atomic UPDATE: the WHERE filter on status='pending' is the
 		// transition detector. A second disprove call (status is
 		// already 'disproven') updates zero rows and transitioned
-		// stays false → cascade hook skipped.
+		// stays false → cascade hook skipped, and the post-tx
+		// D-002 guard surfaces the persisted terminal status.
 		//
 		// The +1 reinforcement is folded into the same UPDATE so it
 		// participates in the transition filter (no reinforcement
@@ -321,6 +333,20 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// D-002: a no-op resolve (RowsAffected==0) means the theory was
+	// already in a terminal state. Returning success here would let
+	// the caller believe the new status was applied; the persisted
+	// status remains the prior terminal value. Surface the lie as an
+	// explicit error so retry wrappers and double-clicks stop
+	// reporting false state transitions.
+	if !transitioned {
+		persisted := currentStatus
+		if persisted == "" {
+			persisted = "non-pending"
+		}
+		return nil, fmt.Errorf("theory %s is already resolved (status=%s); refusing to overwrite with newStatus=%s", theoryID, persisted, newStatus)
 	}
 
 	return map[string]interface{}{
@@ -1030,4 +1056,31 @@ func parseDecisionTags(tags string) []string {
 		return []string{}
 	}
 	return out
+}
+
+// extractTheoryStatusFromMemory pulls metadata.status from a GetMemory
+// map projection. The metadata column is returned as a raw JSON string
+// (see web_db.go:GetMemory), so the live status has to be parsed out
+// of that envelope. Returns "" when the field is missing or unparseable
+// — callers must treat "" as "unknown" rather than "pending".
+func extractTheoryStatusFromMemory(mem map[string]interface{}) string {
+	if mem == nil {
+		return ""
+	}
+	// Some call sites pass an already-parsed metadata map.
+	if meta, ok := mem["metadata"].(map[string]interface{}); ok {
+		if s, ok := meta["status"].(string); ok {
+			return s
+		}
+	}
+	// Canonical shape: metadata is a raw JSON string.
+	if raw, ok := mem["metadata"].(string); ok && raw != "" {
+		var meta map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &meta); err == nil {
+			if s, ok := meta["status"].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
