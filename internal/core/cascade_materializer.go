@@ -501,6 +501,21 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 }
 
 // markMaterialized records the generated theory ID on the outbox row.
+//
+// Post-M3 audit H-2 (2026-08-31): prior version performed a bare
+// db.Exec with no read-back. A crash between the UPDATE and the
+// caller returning would leave restart-recovery reclaiming the row
+// (status still 'processing' for the staleness window) but no
+// observable signal that the materialized state was committed. The
+// Defense Triad (Substrate Defense Triad, 2026-08-17) requires every
+// non-tx write to do a read-back assertion so silent failures surface.
+//
+// Fix: after UPDATE, SELECT the row and verify status='materialized'
+// AND materialized_theory_id matches. Returns an error on mismatch so
+// the caller can leave the row in 'processing' for restart-recovery
+// to re-materialize (idempotently — the theory is identified by the
+// invalidation_event_id + downstream_artifact_id, so a re-run produces
+// the same theory).
 func (cm *CascadeMaterializer) markMaterialized(intentID, theoryID string) error {
 	now := time.Now().Unix()
 	_, err := cm.dm.db.Exec(`
@@ -508,7 +523,29 @@ func (cm *CascadeMaterializer) markMaterialized(intentID, theoryID string) error
 		SET status = 'materialized', materialized_theory_id = ?, updated_at = ?
 		WHERE id = ?
 	`, theoryID, now, intentID)
-	return err
+	if err != nil {
+		return fmt.Errorf("markMaterialized exec: %w", err)
+	}
+
+	// Defense Triad #3 — Write-Path Read-Back Assertion.
+	// Confirms the UPDATE actually landed (no CHECK rejection, no
+	// swallowed trigger, no DB-level silent no-op).
+	var gotStatus, gotTheoryID string
+	readErr := cm.dm.db.QueryRow(`
+		SELECT status, materialized_theory_id
+		FROM epistemic_cascade_outbox
+		WHERE id = ?
+	`, intentID).Scan(&gotStatus, &gotTheoryID)
+	if readErr != nil {
+		return fmt.Errorf("markMaterialized read-back: %w", readErr)
+	}
+	if gotStatus != "materialized" {
+		return fmt.Errorf("markMaterialized read-back mismatch: status=%q (want 'materialized')", gotStatus)
+	}
+	if gotTheoryID != theoryID {
+		return fmt.Errorf("markMaterialized read-back mismatch: theory_id=%q (want %q)", gotTheoryID, theoryID)
+	}
+	return nil
 }
 
 // markFailed moves an intent to dead-letter state (status='failed').
