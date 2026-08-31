@@ -20,7 +20,7 @@ import {
   definePluginEntry,
   registerInternalHook,
   DEFAULT_SOUL_FILENAME,
-} from "@openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk";
 
 // sessionKey → most recent `mpm route --apply` stdout
 const sessionReminders = new Map();
