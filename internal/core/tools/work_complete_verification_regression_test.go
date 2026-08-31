@@ -151,29 +151,46 @@ func TestWorkCancel_ResponseReflectsDerivedVerification(t *testing.T) {
 }
 
 // TestWorkCancel_F81LifecycleGate covers the F8.1 invariant that motivated
-// this fix: cancellation must downgrade verification to "unverified" even
-// when prior outcome evidence would otherwise yield "verified". The gate
-// is structural and cannot be bypassed by a follow-up evidence write.
+// this fix: when a verified work item enters the cancelled lifecycle state,
+// verification must downgrade to "unverified". The gate is structural and
+// cannot be bypassed by a follow-up evidence write.
+//
+// Canonical lifecycle rule (F-B1 + F8.1):
+//
+//	open      -> done                (complete)
+//	open      -> cancelled            (cancel)
+//	done      -> open                (reopen)
+//	cancelled -> open                (reopen)
+//
+// The transition done -> cancelled is FORBIDDEN at the state-machine layer
+// (F-B1 rejects it; an operator wishing to cancel a completed item must
+// reopen first). F8.1 then guarantees that once the legal open -> cancelled
+// edge fires, the verification column locks below "verified".
 //
 // Regression scenarios:
-//   1. Fresh work → cancel → "unverified" (the case above, also covered).
-//   2. Verified work → cancel → "unverified" (F8.1 demote on lifecycle change).
-//   3. Work + challenge evidence → cancel → "contradicted" (contradiction
+//   1. Fresh work -> cancel -> "unverified" (covered by
+//      TestWorkCancel_ResponseReflectsDerivedVerification above).
+//   2. Verified work -> reopen -> cancel -> "unverified" (F8.1 demote on
+//      the legal lifecycle path; this is the canonical F8.1 case).
+//   3. Direct done -> cancelled MUST still be rejected by CancelWork
+//      (F-B1 contract — an explicit reopen is the only legal way to
+//      cancel a completed item).
+//   4. Work + challenge evidence -> cancel -> "contradicted" (contradiction
 //      still surfaces as the most informative verdict, not as "unverified").
-//   4. Cancel does not corrupt evidence history (entries remain in the
+//   5. Cancel does not corrupt evidence history (entries remain in the
 //      evidence ledger regardless of lifecycle state).
-//   5. Lifecycle status is independent of verification state — the cancel
+//   6. Lifecycle status is independent of verification state — the cancel
 //      response must carry status="cancelled" AND the F8.1-locked
 //      verification, never "cancelled" implying a derivation result
 //      that contradicts the gate.
 func TestWorkCancel_F81LifecycleGate(t *testing.T) {
-	t.Run("verified_work_cancel_downgrades_to_unverified", func(t *testing.T) {
+	t.Run("verified_work_reopen_then_cancel_downgrades_to_unverified", func(t *testing.T) {
 		dm := newTestSharedDM(t)
 
 		// Create + verify by attaching outcome evidence + completing.
 		res, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
 			"action": "create",
-			"params": map[string]interface{}{"title": "F8.1 verified-then-cancel"},
+			"params": map[string]interface{}{"title": "F8.1 verified-reopen-cancel"},
 		})
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -209,7 +226,30 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 			t.Fatalf("precondition: expected verified after complete, got %q", string(v))
 		}
 
-		// Now cancel a VERIFIED item — F8.1 must downgrade.
+		// Legal lifecycle: done -> open (reopen). The state machine
+		// permits this transition; F8.1's verification re-derive runs
+		// so the work reflects its fresh open state.
+		if _, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "reopen",
+			"params": map[string]interface{}{"work_id": workID, "note": "F8.1 demote setup"},
+		}); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		showAfterReopen, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "show",
+			"params": map[string]interface{}{"work_id": workID},
+		})
+		if err != nil {
+			t.Fatalf("show post-reopen: %v", err)
+		}
+		if s := workStatus(showAfterReopen.(map[string]interface{}), "status"); s != "open" {
+			t.Fatalf("precondition after reopen: status = %q, want open", s)
+		}
+
+		// Now cancel via the legal open -> cancelled edge. F8.1 must
+		// lock verification below "verified" — same outcome evidence
+		// that promoted to "verified" while status was "done" is no
+		// longer authoritative once status flips to "cancelled".
 		cancelRes, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
 			"action": "cancel",
 			"params": map[string]interface{}{"work_id": workID, "note": "F8.1 demote check"},
@@ -223,8 +263,74 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 		}
 		respVerification, _ := m["verification"].(internal.WorkVerification)
 		if !strings.EqualFold(string(respVerification), "unverified") {
-			t.Errorf("F8.1 demote on cancel: verification = %q, want %q (a verified item cancelled must NOT remain verified)",
+			t.Errorf("F8.1 demote on cancel: verification = %q, want %q (verified item cancelled via legal lifecycle must NOT remain verified)",
 				string(respVerification), "unverified")
+		}
+	})
+
+	// F-B1 contract pin: direct done -> cancelled MUST still be rejected.
+	// This is the F-B1 surface-error guarantee — operators cannot silently
+	// cancel a completed item; the only legal path is the explicit reopen
+	// demonstrated in the previous subtest. Both legacy CancelWork and
+	// event-sourced CancelWorkWithContext enforce this.
+	t.Run("direct_done_to_cancelled_is_rejected_F_B1", func(t *testing.T) {
+		// Event-sourced path: handleMpmWork action=cancel on a done work.
+		dm := newTestSharedDM(t)
+		res, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "create",
+			"params": map[string]interface{}{"title": "F-B1 direct-done-cancel event"},
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		workID := res.(map[string]interface{})["id"].(string)
+		if _, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "complete",
+			"params": map[string]interface{}{"work_id": workID},
+		}); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		_, err = handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "cancel",
+			"params": map[string]interface{}{"work_id": workID},
+		})
+		if err == nil {
+			t.Fatalf("event-sourced done -> cancelled must be rejected (F-B1); must reopen first")
+		}
+		if !strings.Contains(err.Error(), "invalid transition") {
+			t.Errorf("error must mention invalid transition; got: %v", err)
+		}
+
+		// Legacy path: dm.CancelWork on a done work.
+		dm2 := newTestSharedDM(t)
+		res2, err := handleMpmWork(dm2, internal.ActiveContext{}, map[string]interface{}{
+			"action": "create",
+			"params": map[string]interface{}{"title": "F-B1 direct-done-cancel legacy"},
+		})
+		if err != nil {
+			t.Fatalf("create (legacy): %v", err)
+		}
+		workID2 := res2.(map[string]interface{})["id"].(string)
+		if _, err := dm2.CompleteWork(workID2); err != nil {
+			t.Fatalf("complete (legacy): %v", err)
+		}
+		if _, err := dm2.CancelWork(workID2); err == nil {
+			t.Fatalf("legacy done -> cancelled must be rejected (F-B1); must reopen first")
+		} else if !strings.Contains(err.Error(), "invalid transition") {
+			t.Errorf("legacy error must mention invalid transition; got: %v", err)
+		}
+
+		// Verify the work item is still 'done' after both rejections —
+		// the rejection must not have leaked a partial state.
+		showRes, err := handleMpmWork(dm, internal.ActiveContext{}, map[string]interface{}{
+			"action": "show",
+			"params": map[string]interface{}{"work_id": workID},
+		})
+		if err != nil {
+			t.Fatalf("show post-rejection: %v", err)
+		}
+		if s := workStatus(showRes.(map[string]interface{}), "status"); s != "done" {
+			t.Errorf("status after rejected cancel = %q, want done (rejection must not mutate state)", s)
 		}
 	})
 
