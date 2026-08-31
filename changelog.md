@@ -1448,3 +1448,46 @@ The MiniMax-M3 clean-room audit produced 10 wishlist items (W-001..W-010). All 1
 2. `mpm_references read` could return a content excerpt rather than the full pointer — `GetReference` returns metadata, not bytes; the `mpm_blob_read` pointer path is the canonical full-content channel. Document this in the help string when a follow-up sweep consolidates.
 3. The critic findings query returns rows newest-first but doesn't apply the wake-context's "evidence freshness" scoring. If the agent needs to surface only "active" findings, add a `since` parameter and a status filter on the existing `tool_invocations.action='challenge'` set.
 
+## 2026-08-31 — Wishlist Execution & API Hardening Pass (Post-Alpha)
+
+Six wishlist items closed (W-003, W-007, W-009, W-010, W-011, W-013, W-015). Operating constraints: zero scope creep, embrace the boring (standard Go libraries only — no new wrappers or middleware), loud over silent (no silent coercions; invalid inputs return explicit errors).
+
+### W-003 — `mpm_memory show <id>` returns the exact record
+
+Added the `show` action to the `mpm_memory` MCP handler (`internal/core/tools/handlers.go`). The action returns the full memory row (id, content, tags, weight, collection, metadata, pointer, created_at, updated_at). Wired into the action-switch and added to the help text.
+
+### W-013 — `tags` returned as a JSON array, not a stringly-typed column
+
+`hybridResultsToMaps` in `internal/core/memory_tools.go` now parses the `tags` JSON column via `parseTagsJSONColumn` and returns `[]string` instead of leaving the raw stored string. The `full` projection also unmarshals the `metadata` JSON column into `map[string]interface{}`. Top-level `tags` in `mpm_memory query` and `show` is now always a JSON list.
+
+### W-007 — Machine-mode stderr silence
+
+Already enforced by the alpha-4 D-004/W-004 gate (`logging.SetupWithWriter(io.Discard)` in machine mode unless `MPM_VERBOSE=1`). Confirmed via live test: `mpm call mpm_memory` produces 0 bytes stderr (audit reported 885 bytes pre-fix).
+
+### W-009 — `limit` parameter validated
+
+New `parseLimitStrict` helper in `internal/core/tools/handlers.go` rejects negative `limit` with `field 'limit' must be >= 0, got -1`. Also clamps `limit > 200` to `200` to prevent unbounded result sets. Wired into `handleQueryLongTermMemory`.
+
+### W-010 — `status` enum validated for work item list
+
+`handleListWorks` (in `internal/core/tools/work_handlers.go`) now validates the `status` parameter against the canonical enum `[all, cancelled, done, open]` and returns `field 'status' must be one of [...], got "openx"` for typos. Previously, an invalid status silently returned zero rows — indistinguishable from "no items exist".
+
+### W-015 — `mpm_confidence show` and `explain` share a source of truth
+
+`ShowConfidence` in `internal/core/evidence_tools.go` previously read the cached `confidence` column directly while `ExplainConfidence` recomputed from the evidence ledger — the two surfaces returned different values for the same artifact (0.5 vs 0.8 in the audit). Now `ShowConfidence` recomputes via `ExplainConfidence(dm, artifactID, artifactType)` so the `confidence` field matches. Both surfaces go through the same path; residual sub-millisecond drift (~1e-12) is intrinsic to the time-decay clock between consecutive calls.
+
+### W-011 — Prime directive armor for `mpm rm`
+
+`handleRm` in `cmd/mpm/simple_cmds.go` now reads `is_prime_directive` from the row BEFORE the soft-delete UPDATE and refuses the deletion with a clear error unless `--force` is supplied. The `--force` flag is consumed by `router.parseFlags` (router.go:467) which sets `MPM_FORCE=1` and strips the token from argv; the rm handler reads the env var rather than scanning for the literal token. This protects load-bearing seed memories from accidental deletion by an agent typo.
+
+**Subtle bug caught during verification:** the first implementation scanned `args[1:]` for the literal `--force` token, but `router.parseFlags` consumes it globally before the args reach the handler. The flag was being silently stripped upstream and the rm handler never saw it. Fixed by reading `os.Getenv("MPM_FORCE") == "1"` instead — the canonical channel for the global force flag.
+
+### Validation
+
+- `make build` — all 5 binaries compile cleanly
+- `scripts/verify-wishlist-fixes.sh` — 8/8 assertions pass across 7 wishlist items
+- Full core test suite: 0 failures (`internal/core`, `internal/core/capability`, `internal/core/config`, `internal/core/logging`, `internal/core/mpmcli`, `internal/core/orchestration`, `internal/core/renderers`, `internal/core/seed`, `internal/core/synth`, `internal/core/usererror`)
+- Full main-module test suite: 0 failures (`cmd/mpm`, `cmd/mpm-mcp`, `cmd/mpm-scheduler`, `cmd/mpm-critic`, `cmd/mpm-telemetry`, `internal/audit`, `internal/blobstore`, `internal/critic`, `internal/pointer`, `internal/scheduler`, `internal/telemetry`)
+- **Pre-existing alpha-4.1.2 failure (out of scope):** `TestWorkCancel_F81LifecycleGate/verified_work_cancel_downgrades_to_unverified` in `internal/core/tools/work_complete_verification_regression_test.go` fails deterministically on the clean alpha-4.1.2 tree (verified via `git stash`). Root cause: work state machine rejects `done → cancelled` transitions; the test expects this transition to be permitted (F8.1 demote-on-cancel). Logged for a separate workstream.
+
+

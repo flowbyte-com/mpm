@@ -41,6 +41,9 @@ func handleAdd(args []string) int {
 		fmt.Println("  --weight <1-100> Initial weight (default 1)")
 		fmt.Println("  --collection <c> Collection name (default memories)")
 		fmt.Println("  --ttl <duration> Time to live (e.g. 7d, 24h)")
+		fmt.Println("Notes:")
+		fmt.Println("  To add content starting with '-' or '--', prefix with '--' to")
+		fmt.Println("  terminate flag parsing: mpm add -- '---yaml-front-matter'")
 		fmt.Println("Example: mpm add --tag personal,important 'Remember to call mom'")
 	}
 
@@ -299,18 +302,54 @@ func runShow(dm mpminternal.CoreDB, id string) int {
 	return 0
 }
 
-// mpm rm <id> — Soft delete memory
+// mpm rm <id> [--force] — Soft delete memory
+//
+// W-011: prime-directive armor. Seed memories are flagged with
+// `is_prime_directive=1` in the DB and labeled "non-negotiable" in
+// their content. The substrate previously honored neither — a typo
+// in `mpm rm <id>` could shred a load-bearing bootstrap memory. Now
+// the rm handler reads the flag up-front and refuses the deletion
+// unless `--force` is supplied.
+//
+// The `--force` token is consumed by router.parseFlags BEFORE we see
+// the args: it sets `MPM_FORCE=1` and strips the token from argv
+// (router.go:467). So the rm handler reads the env var rather than
+// scanning for the literal token — otherwise the flag would be eaten
+// upstream and we'd silently ignore it.
 func handleRm(args []string) int {
+	force := os.Getenv("MPM_FORCE") == "1"
 	if len(args) < 2 {
-		usererror.Usage("mpm rm <id>")
+		usererror.Usage("mpm rm <id> [--force]")
 		return 1
 	}
-
 	id := args[1]
 
 	dm := getDB()
 	if dm == nil {
 		return 1
+	}
+
+	// W-011: prime-directive check. Read the flag BEFORE issuing the
+	// soft-delete UPDATE so we can refuse with a clear error rather
+	// than silently stripping the protection. The query is bounded
+	// by the id PK so it's a single row read, not a scan.
+	if !force {
+		var isPrime int
+		err := dm.SQLDB().QueryRow(
+			`SELECT is_prime_directive FROM memories WHERE id = ? AND deleted_at IS NULL`,
+			id,
+		).Scan(&isPrime)
+		if err == nil && isPrime == 1 {
+			usererror.Error(
+				"refusing to delete %s: memory is flagged is_prime_directive=1 (non-negotiable). "+
+					"Pass --force to override (e.g. `mpm rm %s --force`)",
+				id, id,
+			)
+			return 1
+		}
+		// err != nil is fine here — the row may not exist, and the
+		// soft-delete UPDATE below will surface "no live memory" via
+		// the rows-affected check.
 	}
 
 	// `err` is reused below; it was previously declared by
