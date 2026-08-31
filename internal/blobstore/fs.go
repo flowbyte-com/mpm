@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -362,13 +363,28 @@ func (r *readerCloser) Close() error {
 }
 
 // Delete removes the blob metadata row and the payload file.
-// It is best-effort and idempotent: if either the DB row or the file is
-// already gone, Delete returns nil.
+//
+// Idempotency: a missing file is acceptable — GC or manual cleanup
+// may have already removed it. This is the documented
+// best-effort/idempotent contract.
+//
+// Audit M-3 (post-M3, 2026-08-31): the pre-fix version swallowed the
+// DB DELETE error with `_, _ = ...`. A non-nil driver error (lock
+// failure, FK violation, closed conn) would silently leave the row in
+// place while returning nil. Fix: surface non-`sql.ErrNoRows`-class
+// errors so the caller learns the persistence guarantee failed.
+//
+// Note: `db.Exec` on DELETE reports RowsAffected=0 when zero rows
+// matched (idempotent miss), which is the correct idempotent path —
+// we do NOT treat zero-affected as an error.
 func (f *FilesystemBackend) Delete(ctx context.Context, id string) error {
 	path := f.payloadPath(id)
 
-	// Delete DB row first.
-	_, _ = f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id)
+	// Delete DB row first. Surface any driver-level error; an
+	// idempotent miss (zero rows affected) is fine.
+	if _, err := f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete blob db row %s: %w", id, err)
+	}
 
 	// Remove payload file.
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
