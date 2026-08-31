@@ -71,6 +71,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
+import { withWorkspace } from "./lib/workspace.js";
 
 const MP_MEMORY_PATH_PREFIX = "mpm://memory/";
 const PLUGIN_ID = "openclaw-mpm-memory";
@@ -128,7 +129,7 @@ async function callMpmTool(tool, payload, opts) {
           : { ...(payload || {}), params: {} };
       child = spawn(bin, ["call", tool, "--payload", JSON.stringify(envelope)], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, MPM_LOG_FORMAT: "json" },
+        env: withWorkspace({ MPM_LOG_FORMAT: "json" }),
       });
     } catch (e) {
       resolve({ success: false, error: `spawn failed: ${e.message}` });
@@ -203,7 +204,7 @@ async function fetchWakeContext(opts) {
         }),
       ], {
         stdio: ["ignore", "pipe", "pipe"],
-        env,
+        env: withWorkspace(env),
       });
     } catch (e) {
       resolve("");
@@ -621,6 +622,7 @@ export default definePluginEntry({
             const r = spawnSync(mpmBin, ["--version"], {
               stdio: ["ignore", "pipe", "pipe"],
               timeout: Math.min(timeoutMs, 2000),
+              env: withWorkspace(),
             });
             if (r.status === 0) return { ok: true, checked: true };
             return {

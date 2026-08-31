@@ -16,6 +16,7 @@
 //   - subprocess timeout → child killed, partial stdout discarded.
 
 import { spawn } from "node:child_process";
+import { withWorkspace } from "./lib/workspace.js";
 import {
   definePluginEntry,
   registerInternalHook,
@@ -47,6 +48,7 @@ function runMpmRoute(prompt, mpmBin, timeoutMs) {
     try {
       child = spawn(mpmBin, ["route", "--apply", prompt], {
         stdio: ["ignore", "pipe", "pipe"],
+        env: withWorkspace(),
       });
     } catch {
       // mpmBin not found, etc.
