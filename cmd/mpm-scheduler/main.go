@@ -155,6 +155,13 @@ func main() {
 		},
 	).TickHandler())
 	s.RegisterTickHandler("openclaw_ingest", scheduler.NewIngestHandler(dm, logger).TickHandler())
+	// cascade_wake_reconcile → per-tick recovery pass for wake
+	// bookings lost to crash windows. Reads rows where status=
+	// 'materialized' AND wake_scheduled=0 and re-schedules the wake.
+	// Audit H-3 (post-M3, 2026-08-31). The handler is idempotent
+	// (LIMIT 100, flag-flip semantics) so re-running is safe.
+	s.RegisterTickHandler("cascade_wake_reconcile",
+		scheduler.NewCascadeWakeReconcileHandler(dm, logger).TickHandler())
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
