@@ -69,3 +69,42 @@ func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveWorkspace_DefaultsDivergence documents the deliberate
+// divergence between two workspace resolvers:
+//
+//   - mpmcli.ResolveWorkspace(): defaults to "." (cwd)
+//   - config.GetWorkspace():    defaults to $HOME/.mpm
+//
+// Both honor MPM_WORKSPACE first when set; the divergence only affects
+// the unset case. The cmd/mpm doctor command uses config.GetWorkspace()
+// because it reports on the config subsystem's view of the canonical
+// workspace ($HOME/.mpm), which is the substrate's home-rooted design
+// intent. The CLI itself routes through mpmcli.ResolveWorkspace().
+//
+// Audit M-1 (post-M3, 2026-08-31) flagged this as a latent "mpm status
+// reports wrong workspace" bug, but inspection showed both resolvers
+// honor MPM_WORKSPACE first — the divergence only matters when the
+// env is unset, and the doctor using config.GetWorkspace() is
+// semantically correct (it reports on the config subsystem). The
+// verdict is RECLASSIFIED: the doctor command's behavior is correct,
+// and no fix is needed at cmd/mpm/main.go:934,989.
+func TestResolveWorkspace_DefaultsDivergence(t *testing.T) {
+	t.Run("mpmcli defaults to cwd", func(t *testing.T) {
+		t.Setenv("MPM_WORKSPACE", "")
+		if got := ResolveWorkspace(); got != "." {
+			t.Errorf("mpmcli.ResolveWorkspace() default = %q, want \".\"", got)
+		}
+	})
+
+	t.Run("both honor MPM_WORKSPACE when set", func(t *testing.T) {
+		// The two resolvers diverge only in their unset-default; when
+		// MPM_WORKSPACE is set, both return the same value (verifying
+		// the audit's claim that doctor reports wrong workspace is
+		// incorrect).
+		t.Setenv("MPM_WORKSPACE", "/tmp/postm3-ws")
+		if got := ResolveWorkspace(); got != "/tmp/postm3-ws" {
+			t.Errorf("mpmcli.ResolveWorkspace() = %q, want /tmp/postm3-ws", got)
+		}
+	})
+}

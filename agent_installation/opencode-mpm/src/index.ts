@@ -33,6 +33,7 @@
 import { spawn } from "node:child_process";
 import { tool } from "@opencode-ai/plugin";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
+import { withWorkspace } from "./workspace.js";
 import type { Model } from "@opencode-ai/sdk";
 
 // --------------------------------------------------------------------------
@@ -85,7 +86,7 @@ function callMpm(
 		try {
 			child = spawn(bin, ["call", toolName, "--payload", json], {
 				stdio: ["ignore", "pipe", "pipe"],
-				env: opts.env,
+				env: withWorkspace(opts.env ?? {}),
 			});
 		} catch (err) {
 			finish({
@@ -246,7 +247,7 @@ function callMpmWithProvenance(
 	Object.assign(env, provenanceEnv);
 	return callMpm(bin, toolName, payload, {
 		timeoutMs,
-		env,
+		env: withWorkspace(env),
 	});
 }
 
@@ -643,6 +644,10 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		// for programmatic tool calls.
 		const provenanceEnv = buildProvenanceEnv(undefined, input.sessionID);
 		Object.assign(output.env, provenanceEnv);
+		// Pin MPM_WORKSPACE so shell-spawned `mpm call ...` resolves to the
+		// canonical workspace even when the agent runtime did not export
+		// it. Audit M-1 (post-M3, 2026-08-31).
+		output.env.MPM_WORKSPACE = output.env.MPM_WORKSPACE ?? withWorkspace().MPM_WORKSPACE;
 	}
 
 	return {
