@@ -700,6 +700,13 @@ var sensitivePatterns = []struct {
 	{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
 	{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
 	{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
+	// D-008: fine-grained PATs use the github_pat_ prefix. The legacy
+	// family (ghp_/gho_/ghr_) predates this shape; the new prefix
+	// escapes the scanner if not added here. Suffix length is variable
+	// (alphanumeric + underscore) so the threshold is set conservatively
+	// to {20,} to match real-world credential length while tolerating
+	// truncated test fixtures.
+	{"GitHub Fine-Grained PAT", regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{20,}`)},
 	{"AWS Access Key ID", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
 	{"Slack Token", regexp.MustCompile(`xox[baprs]-[0-9]+-[0-9]+`)},
 	{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
