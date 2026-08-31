@@ -34,15 +34,29 @@ func handleProposeTheory(args []string) int {
 		return respond("", "Usage: mpm propose_theory [--json] <text>", 1)
 	}
 
-	input := strings.Join(args, " ")
+	// D-001/002/003: parse named flags first (--hypothesis, --validation,
+	// --tags, --status). The pre-fix implementation joined all args into a
+	// single string and ran the legacy token-form extractor, which silently
+	// dropped --validation and concatenated flag text into the hypothesis.
+	// Flag form takes precedence; legacy HYPOTHESIS:/VALIDATION_CRITERIA:
+	// token form is still supported for backwards compatibility.
+	hypothesis, validationCriteria, status, tagsStr, leftoverArgs := parseTheoryArgs(args)
 
-	hypothesis := extractField(input, "HYPOTHESIS:")
-	validationCriteria := extractField(input, "VALIDATION_CRITERIA:")
-	status := extractField(input, "STATUS:")
-	tagsStr := extractField(input, "TAGS:")
-
-	if hypothesis == "" {
-		hypothesis = strings.TrimSpace(input)
+	if hypothesis == "" && len(leftoverArgs) > 0 {
+		input := strings.Join(leftoverArgs, " ")
+		hypothesis = extractField(input, "HYPOTHESIS:")
+		if hypothesis == "" {
+			hypothesis = strings.TrimSpace(input)
+		}
+		if validationCriteria == "" {
+			validationCriteria = extractField(input, "VALIDATION_CRITERIA:")
+		}
+		if status == "" {
+			status = extractField(input, "STATUS:")
+		}
+		if tagsStr == "" {
+			tagsStr = extractField(input, "TAGS:")
+		}
 	}
 	// Reject empty/whitespace-only hypotheses so a stray `mpm propose_theory
 	// "   "` doesn't create an empty theories row.
@@ -200,8 +214,22 @@ func handleResolveTheory(args []string) int {
 
 	// Build metadata patch (upserts into existing metadata via json_patch)
 	now := time.Now().UTC().Format(time.RFC3339)
+	// D-010: align the internal status vocabulary with the filter
+	// vocabulary. The MCP/arbitration paths write "proven"/"disproven";
+	// the legacy CLI wrote "resolved" for both outcomes, which made
+	// `mpm call mpm_theories list status=proven` return zero rows for
+	// theories resolved through the CLI. Map the conclusion keyword to
+	// the matching status; fall back to "resolved" for free-form
+	// conclusions (back-compat with existing rows).
+	status := "resolved"
+	switch strings.ToLower(strings.TrimSpace(conclusion)) {
+	case "confirmed", "proven":
+		status = "proven"
+	case "disproven", "refuted", "invalidated":
+		status = "disproven"
+	}
 	patch := map[string]interface{}{
-		"status":      "resolved",
+		"status":      status,
 		"conclusion":  conclusion,
 		"resolved_at": now,
 	}
@@ -453,6 +481,77 @@ func parseDecisionArgs(args []string) (string, string, string, string, string, [
 		choice = strings.TrimSpace(input)
 	}
 	return contextText, choice, rationale, tagsStr, "", leftovers
+}
+
+// parseTheoryArgs extracts named flags from `mpm propose_theory` /
+// `mpm theorize` args. Two forms are accepted:
+//
+//  1. flag form: --hypothesis "X" --validation "Y" [--tags a,b] [--status proven]
+//  2. legacy token form: "HYPOTHESIS: X\nVALIDATION_CRITERIA: Y"
+//
+// Flag form takes precedence. If no flag is present, the leftover positional
+// args are returned for the caller to feed into the legacy extractor
+// (extractField on HYPOTHESIS:/VALIDATION_CRITERIA:/STATUS:/TAGS: prefixes).
+//
+// Returns: hypothesis, validationCriteria, status, tagsStr, leftoverArgs.
+func parseTheoryArgs(args []string) (string, string, string, string, []string) {
+	var (
+		hypothesis         string
+		validationCriteria string
+		status             string
+		tagsStr            string
+		leftovers          []string
+	)
+	flagMode := false
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch a {
+		case "--hypothesis", "--h", "-h":
+			if i+1 < len(args) {
+				hypothesis = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--validation", "--validation-criteria", "--v":
+			if i+1 < len(args) {
+				validationCriteria = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--status", "--s":
+			if i+1 < len(args) {
+				status = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		case "--tags", "--t", "-t":
+			if i+1 < len(args) {
+				tagsStr = args[i+1]
+				i += 2
+				flagMode = true
+				continue
+			}
+			i++
+		default:
+			leftovers = append(leftovers, a)
+			i++
+		}
+	}
+
+	if flagMode {
+		return hypothesis, validationCriteria, status, tagsStr, leftovers
+	}
+
+	// No flags detected — caller may still run the legacy token-form
+	// extractor over the joined leftover args.
+	return "", "", "", "", leftovers
 }
 
 // hasDecisionFlags returns true if any decision-style flag is present

@@ -49,7 +49,7 @@ func NewRouter() *CommandRouter {
 
 		// Memory verbs — capability-named
 		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"s"}},
-		"add":          {Name: "add", Description: "Persist knowledge", MinArgs: 1},
+		"add":          {Name: "add", Description: "Persist knowledge (prefix content with `-- ` if it starts with `-`)", MinArgs: 1},
 		"ls":           {Name: "ls", Description: "List memories", MinArgs: 0},
 		"show":         {Name: "show", Description: "Show memory details", MinArgs: 1},
 		"rm":           {Name: "rm", Description: "Delete memory", MinArgs: 1},
