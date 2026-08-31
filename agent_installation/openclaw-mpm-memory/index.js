@@ -69,8 +69,8 @@
 // --------------------------------------------------------------------------
 
 import { spawn, spawnSync } from "node:child_process";
-import { definePluginEntry } from "@openclaw/plugin-sdk/plugin-entry";
-import { jsonResult } from "@openclaw/plugin-sdk/tool-results";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 
 const MP_MEMORY_PATH_PREFIX = "mpm://memory/";
 const PLUGIN_ID = "openclaw-mpm-memory";
