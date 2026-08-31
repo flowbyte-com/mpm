@@ -212,15 +212,25 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 	}
 
 	// ── Schedule cascade wake ────────────────────────────────────────────────
-	// The wake is async — failure to schedule is non-fatal. The theory
-	// was successfully created and the intent is marked materialized.
+	// The wake is async — failure to schedule is non-fatal but durable:
+	// the wake_scheduled column on the outbox stays 0 so the reconcile
+	// pass (ReconcileUnscheduledCascadeWakes) re-schedules the wake. The
+	// theory was successfully created and the intent is marked materialized.
 	// When WakeDelay == 0 the wake is scheduled synchronously (no defer).
 	if cm.opts.WakeDelay > 0 {
 		time.AfterFunc(cm.opts.WakeDelay, func() {
-			cm.scheduleCascadeWake(theoryID, intent.InvalidationEventID)
+			if err := cm.scheduleCascadeWake(intent.ID, theoryID, intent.InvalidationEventID); err != nil {
+				cm.dm.LogAudit(AuditError, "cascade-materializer",
+					fmt.Sprintf("failed to schedule cascade wake for intent=%s theory=%s: %v",
+						intent.ID, theoryID, err), "", nil)
+			}
 		})
 	} else {
-		cm.scheduleCascadeWake(theoryID, intent.InvalidationEventID)
+		if err := cm.scheduleCascadeWake(intent.ID, theoryID, intent.InvalidationEventID); err != nil {
+			cm.dm.LogAudit(AuditError, "cascade-materializer",
+				fmt.Sprintf("failed to schedule cascade wake for intent=%s theory=%s: %v",
+					intent.ID, theoryID, err), "", nil)
+		}
 	}
 
 	return resultMaterialized
@@ -582,10 +592,20 @@ func (cm *CascadeMaterializer) revertToPending(intentID string) {
 	`, now, intentID)
 }
 
-// scheduleCascadeWake schedules a cascade wake for the generated theory.
-// The wake is the delivery mechanism that notifies the agent that a
-// cascade theory requires review.
-func (cm *CascadeMaterializer) scheduleCascadeWake(theoryID, invalidationEventID string) {
+// scheduleCascadeWake schedules a cascade wake for the generated theory
+// and durably records the booking by flipping wake_scheduled=1 on the
+// outbox row. Returns nil on success and a non-nil error when
+// ScheduleWake or markWakeScheduled fails. The reconcile pass scans
+// for rows where wake_scheduled=0 and re-schedules — this is the
+// durability guarantee that closes the crash window between
+// markMaterialized and the wake insert.
+//
+// Post-M3 audit H-3 (2026-08-31): the pre-fix version was fire-and-
+// forget; a crash between markMaterialized and the wake insert lost
+// the wake silently with no observable signal. The wake_scheduled
+// column provides the durable record; reconcile turns "lost wake" into
+// "recoverable wake".
+func (cm *CascadeMaterializer) scheduleCascadeWake(intentID, theoryID, invalidationEventID string) error {
 	reason := fmt.Sprintf("cascade: theory %s requires review — downstream of invalidation %s",
 		theoryID, invalidationEventID)
 	createdBy := "cascade-materializer"
@@ -598,16 +618,68 @@ func (cm *CascadeMaterializer) scheduleCascadeWake(theoryID, invalidationEventID
 	// Metadata tags the wake as a cascade delivery so check_wakes can
 	// apply its per-check delivery cap.
 	meta := map[string]interface{}{
-		"kind":                 "cascade",
-		"theory_id":            theoryID,
+		"kind":                  "cascade",
+		"theory_id":             theoryID,
 		"invalidation_event_id": invalidationEventID,
-		"source":               "cascade-materializer",
+		"source":                "cascade-materializer",
 	}
 
 	if _, err := cm.dm.ScheduleWake(reason, targetTime, theoryID, "", createdBy, meta); err != nil {
-		cm.dm.LogAudit(AuditError, "cascade-materializer",
-			fmt.Sprintf("failed to schedule cascade wake for theory=%s: %v", theoryID, err), "", nil)
+		return fmt.Errorf("schedule cascade wake for theory=%s: %w", theoryID, err)
 	}
+
+	// Defense Triad #3 — Write-Path Read-Back Assertion.
+	// Flip the wake_scheduled flag *after* ScheduleWake succeeds, so a
+	// future reconcile pass does not double-schedule. The flag is the
+	// ground truth for "wake booking completed".
+	if markErr := cm.markWakeScheduled(intentID); markErr != nil {
+		// ScheduleWake succeeded but the bookkeeping update failed.
+		// Surface the error so the caller logs it; reconcile will pick
+		// up the unscheduled row and re-schedule. We do NOT delete the
+		// wake — the wake is a valid delivery signal; the duplication
+		// risk is bounded by the per-check delivery cap.
+		return fmt.Errorf("scheduleCascadeWake markWakeScheduled for intent=%s: %w", intentID, markErr)
+	}
+	return nil
+}
+
+// markWakeScheduled flips the wake_scheduled flag on the outbox row to 1.
+// Called by scheduleCascadeWake after a successful ScheduleWake. The flag
+// is the durable record that the wake booking completed; reconcile scans
+// for materialized rows with wake_scheduled=0 to recover lost wakes.
+func (cm *CascadeMaterializer) markWakeScheduled(intentID string) error {
+	now := time.Now().Unix()
+	res, err := cm.dm.db.Exec(`
+		UPDATE epistemic_cascade_outbox
+		SET wake_scheduled = 1, updated_at = ?
+		WHERE id = ?
+	`, now, intentID)
+	if err != nil {
+		return fmt.Errorf("markWakeScheduled exec: %w", err)
+	}
+	// Defense Triad #3: read-back assertion. Views with INSTEAD OF
+	// triggers report 0 affected rows on success; for direct tables
+	// (epistemic_cascade_outbox is a plain table), zero rows indicates
+	// the UPDATE targeted a missing id.
+	rows, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("markWakeScheduled rows-affected: %w", raErr)
+	}
+	if rows == 0 {
+		return fmt.Errorf("markWakeScheduled: 0 rows updated for intent_id=%s", intentID)
+	}
+
+	var flag int
+	readErr := cm.dm.db.QueryRow(`
+		SELECT wake_scheduled FROM epistemic_cascade_outbox WHERE id = ?
+	`, intentID).Scan(&flag)
+	if readErr != nil {
+		return fmt.Errorf("markWakeScheduled read-back: %w", readErr)
+	}
+	if flag != 1 {
+		return fmt.Errorf("markWakeScheduled read-back mismatch: wake_scheduled=%d (want 1)", flag)
+	}
+	return nil
 }
 
 // strSliceToInterface converts a []string to []interface{} for dynamic
