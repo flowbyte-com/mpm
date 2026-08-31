@@ -192,9 +192,12 @@ func TestInvalidation_ProvenTheoryDoesNotEnqueue(t *testing.T) {
 
 // TestInvalidation_RepeatedDisproveDoesNotReEnqueue pins the
 // idempotency contract: re-resolving a theory that is already disproven
-// is a no-op at the outbox level. The first call enqueues; the second
-// does not (the schema's UNIQUE constraint would collapse it anyway, but
-// the brief asks us not to even attempt the enqueue).
+// must not add another cascade intent. D-002 (alpha-4.1.2) tightened
+// the contract further — a repeated resolve now surfaces an explicit
+// error rather than a silent success — but the outbox-level invariant
+// (no second intent) is preserved by the early-return path: the WHERE
+// status='pending' filter matches zero rows, the cascade branch is
+// skipped, and the caller learns the theory is already terminal.
 func TestInvalidation_RepeatedDisproveDoesNotReEnqueue(t *testing.T) {
 	dm := hermeticDatabaseManager(t)
 
@@ -217,15 +220,15 @@ func TestInvalidation_RepeatedDisproveDoesNotReEnqueue(t *testing.T) {
 	assert.Equal(t, 1, countOutboxRows(t, dm, ""),
 		"first disprove should enqueue one intent")
 
-	// Second disprove: must NOT add another intent.
-	// Note: the current ResolveTheory implementation does not prevent
-	// repeated disprove calls — but the brief asks us to make the
-	// invalidation hook idempotent on the source state, not on the
-	// schema. We test the invalidation hook contract directly.
+	// Second disprove: D-002 explicitly errors instead of silently
+	// re-asserting. The outbox stays at 1 (the WHERE filter rejects
+	// the second UPDATE before the cascade branch fires).
 	_, err = dm.ResolveTheory(theoryID, "rejected", "disproven")
-	require.NoError(t, err, "repeated disprove should not error")
+	require.Error(t, err, "D-002: repeated disprove must error (theory already resolved)")
+	assert.Contains(t, err.Error(), "already resolved",
+		"error must surface the persisted terminal status, not a generic failure")
 	assert.Equal(t, 1, countOutboxRows(t, dm, ""),
-		"second disprove should NOT enqueue another cascade intent (idempotent)")
+		"second disprove must NOT enqueue another cascade intent (idempotent at the schema layer)")
 }
 
 // ── Shred invalidation path ─────────────────────────────────────────────────
