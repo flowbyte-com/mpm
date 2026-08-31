@@ -1963,6 +1963,15 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("weight column real conversion failed: %w", err)
 	}
+	// H-3 fix (post-M3 audit, 2026-08-31): adds the wake_scheduled
+	// column to epistemic_cascade_outbox so that a crash between
+	// markMaterialized and ScheduleWake is recoverable — the
+	// reconcile pass scans materialized rows with wake_scheduled=0
+	// and re-schedules the wake. Idempotent via sentinel.
+	if err := MigrateCascadeWakeScheduled(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("cascade wake_scheduled migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}

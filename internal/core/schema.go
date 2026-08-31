@@ -293,6 +293,12 @@ var BaseTables = []string{
 		terminal_error            TEXT,
 		created_at                INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		updated_at                INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		-- wake_scheduled: 0 until the cascade wake for this row has been
+		-- durably INSERTed into scheduled_wakes. Reconciled by
+		-- ReconcileUnscheduledCascadeWakes when the materializer restarts
+		-- after a crash between markMaterialized and ScheduleWake.
+		-- See H-3 fix (post-M3 audit, 2026-08-31).
+		wake_scheduled            INTEGER NOT NULL DEFAULT 0,
 		UNIQUE (dead_artifact_id, downstream_artifact_id, invalidation_event_id)
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_epistemic_cascade_outbox_event
