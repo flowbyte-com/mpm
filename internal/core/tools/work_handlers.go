@@ -241,6 +241,15 @@ func handleHistoryWork(dm mpminternal.CoreDB, p map[string]interface{}) (interfa
 		return nil, fmt.Errorf("work_id is required for history")
 	}
 
+	// D-006: verify the work exists before listing its events. Without
+	// this check, a missing work_id returns `count=0, events=[]` with
+	// `success=true` — indistinguishable from a freshly-created work
+	// that genuinely has no events yet. Operators typing a title (or
+	// any typo'd id) get a silent lie about the work's existence.
+	if _, err := dm.GetWork(workID); err != nil {
+		return nil, workNotFoundHint(err, workID)
+	}
+
 	events, err := dm.GetWorkEvents(workID)
 	if err != nil {
 		return nil, fmt.Errorf("get work events: %w", err)
