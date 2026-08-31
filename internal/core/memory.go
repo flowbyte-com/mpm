@@ -413,9 +413,17 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 // backward compatibility for every existing caller (SaveMemoryWithContext,
 // admission path, changelog tool, milestone tool) while honoring the
 // intent of new callers passing 0-100 values.
-func normalizeWeightToColumn(weight float64) int {
+// normalizeWeightToColumn accepts the legacy 0.0-1.0 float API and the
+// newer 0-100 float scale transparently. Detection rule: weight > 1.0
+// means the caller used the integer scale and the value should be used
+// directly. weight <= 1.0 means the caller used the legacy float scale
+// and we apply the historical *10 conversion. Both paths clamp to
+// [1.0, 100.0] to match the column constraint. The return type is
+// float64 (W-004, 2026-08-31) so fractional weights like 7.5 survive
+// the round-trip into the REAL column without truncation.
+func normalizeWeightToColumn(weight float64) float64 {
 	if weight <= 0 {
-		return 5 // historical default (0.5 * 10)
+		return 5.0 // historical default (0.5 * 10)
 	}
 	if weight >= 1.0 {
 		// 0-100 scale: use directly. The boundary at weight=1.0 is
@@ -426,24 +434,20 @@ func normalizeWeightToColumn(weight float64) int {
 		// passed an integer value (e.g. --weight 1 → column=10) — the
 		// CLI silently promoted every save to long-term memory because
 		// the legacy *10 conversion tripped.
-		i := int(weight)
-		if i < 1 {
-			return 1
+		if weight > 100.0 {
+			return 100.0
 		}
-		if i > 100 {
-			return 100
-		}
-		return i
+		return weight
 	}
 	// 0-1 float scale: apply legacy *10 conversion (sub-1 fractional values).
-	i := int(weight * 10)
-	if i < 1 {
-		return 1
+	w := weight * 10.0
+	if w < 1.0 {
+		return 1.0
 	}
-	if i > 100 {
-		return 100
+	if w > 100.0 {
+		return 100.0
 	}
-	return i
+	return w
 }
 
 // AddMemoryWithWeight persists a memory with an explicit caller-supplied
@@ -462,7 +466,8 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		}
 	}
 
-	intWeight := normalizeWeightToColumn(weight)
+	floatWeight := normalizeWeightToColumn(weight)
+	intWeight := int(floatWeight)
 
 	embedding := EmbedText(content)
 	createdAt := time.Now().UTC().Format(time.RFC3339)
@@ -480,9 +485,9 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	var err error
 
 	if s.DM != nil {
-		id, err = s.DM.SaveMemoryWithExtras(collection, content, sessionID, tags, fullMetadata, embedding, intWeight >= 10, intWeight, "", "0.5", "0.5", createdAt)
+		id, err = s.DM.SaveMemoryWithExtras(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight >= 10.0, floatWeight, "", "0.5", "0.5", createdAt)
 	} else {
-		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, intWeight, createdAt)
+		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight, createdAt)
 	}
 	if err != nil {
 		return nil, err
@@ -513,7 +518,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 // addMemoryDirect is the fallback path when s.DM is nil (e.g. test fixtures
 // using NewMemoryStore directly). It inlines the scanner so tests still
 // catch unsanned writes via TestScannerCoverage.
-func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, weight int, createdAt string) (string, error) {
+func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, weight float64, createdAt string) (string, error) {
 	// Alpha remediation (2026-08-27): mirror the canonical saveMemoryRow
 	// validation on this fallback path. Empty / whitespace-only content
 	// is rejected before the scanner and the INSERT fire.

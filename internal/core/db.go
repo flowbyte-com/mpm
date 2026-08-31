@@ -2824,7 +2824,7 @@ func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]ma
 	return results, rows.Err()
 }
 
-func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error) {
+func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, expiresAt ...time.Time) (string, error) {
 	return dm.SaveMemoryWithExtras(collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, "", "0.5", "0.5", "", expiresAt...)
 }
 
@@ -2844,7 +2844,7 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 // Watchdog telemetry: when node is a txNode (in-tx), the ExecTracked call
 // is attributed to the txNode, so watchdog.jsonl entries from inside a tx
 // carry the same shape as standalone queries.
-func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	id := GenerateID()
 	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
 }
@@ -2859,7 +2859,7 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 // Watchdog telemetry, IVF cluster assignment, content_hash, and all
 // other insert-time invariants live here so future fields added to
 // the memories schema automatically reach every caller.
-func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	// Alpha remediation (2026-08-27): reject empty / whitespace-only content.
 	// The validation run found that `mpm remember ""` and `mpm add "   "`
 	// both create memories. A persisted memory must contain meaningful
@@ -3063,7 +3063,7 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 // unaffected — the refactor is purely an internal restructuring to expose the
 // tx-aware primitive. Callers that need transactional atomicity should call
 // SaveMemoryNode directly inside a WithTx callback.
-func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	return dm.SaveMemoryNode(dm, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
 }
 
@@ -4648,7 +4648,10 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 	// patch so restore sees both atomically. Read through the same tx
 	// for a consistent snapshot. The prior_confidence value is forensic
 	// only; restoration does NOT silently re-elevate it (F7.1).
-	var priorWeight int
+	// W-004 (2026-08-31): weight is REAL in the schema; Scan into float64
+	// so fractional prior weights (e.g. 7.5) survive the challenge
+	// round-trip without silent truncation in the metadata snapshot.
+	var priorWeight float64
 	var priorConfidence float64
 	if err := tx.QueryRow(`SELECT COALESCE(weight, 1), COALESCE(confidence, 0.5) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight, &priorConfidence); err != nil {
 		return fmt.Errorf("ChallengeMemory: read prior state: %w", err)
@@ -6052,7 +6055,7 @@ func ProvenancePreamble(metadataJSON string) string {
 //
 // Phase 3 of docs/archive/shared-epistemology.md: operator-only. No agent should be writing
 // house rules autonomously. CLI and MCP both gate on confirm=true.
-func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weight int, provenance string) (string, error) {
+func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weight float64, provenance string) (string, error) {
 	if !dm.sharedAttached {
 		return "", fmt.Errorf("shared DB not attached (set MPM_SHARED_DB)")
 	}
@@ -6060,7 +6063,7 @@ func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weigh
 		return "", fmt.Errorf("content is required")
 	}
 	if weight < 0 || weight > 100 {
-		return "", fmt.Errorf("weight must be 0-100, got %d", weight)
+		return "", fmt.Errorf("weight must be 0-100, got %v", weight)
 	}
 	id := GenerateID()
 	tagsJSON, _ := json.Marshal(tags)

@@ -31,7 +31,7 @@ func handleAdd(args []string) int {
 	collection := fs.String("collection", "memories", "Collection name")
 	tag := fs.String("tag", "", "Tag to add (can specify multiple)")
 	session := fs.String("session", "", "Session ID to associate")
-	weight := fs.Int("weight", 1, "Initial weight (1-100)")
+	weight := fs.Float64("weight", 1, "Initial weight (1-100, fractional allowed)")
 	ttl := fs.String("ttl", "", "Time to live (e.g., 7d, 24h)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	fs.Usage = func() {
@@ -62,7 +62,7 @@ func handleAdd(args []string) int {
 	content := strings.Join(fs.Args(), " ")
 
 	if *weight < 1 || *weight > 100 {
-		usererror.Error("--weight must be 1-100 (got %d)", *weight)
+		usererror.Error("--weight must be 1-100 (got %v)", *weight)
 		return 1
 	}
 
@@ -163,7 +163,7 @@ func handleAdd(args []string) int {
 		})
 		fmt.Println(string(data))
 	} else if isNew {
-		fmt.Printf("Added memory %s to %s (weight=%d)\n", id, *collection, *weight)
+		fmt.Printf("Added memory %s to %s (weight=%v)\n", id, *collection, *weight)
 	} else {
 		fmt.Printf("Memory already exists: %s (idempotent save — no new row written)\n", id)
 	}
@@ -657,13 +657,16 @@ func handleSetWeight(args []string) int {
 	}
 
 	id := args[1]
-	w, err := strconv.Atoi(args[2])
+	// W-004 (2026-08-31): parse as float64 so fractional weights like 7.5
+	// reach the REAL column intact. The previous Atoi parse truncated to
+	// int before the SQLite UPDATE.
+	w, err := strconv.ParseFloat(args[2], 64)
 	if err != nil {
 		usererror.Error("invalid weight '%s'", args[2])
 		return 1
 	}
 	if w < 0 || w > 100 {
-		usererror.Error("weight must be 0-100 (got %d)", w)
+		usererror.Error("weight must be 0-100 (got %v)", w)
 		return 1
 	}
 
@@ -688,7 +691,7 @@ func handleSetWeight(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("Set weight of %s to %d\n", id, w)
+	fmt.Printf("Set weight of %s to %v\n", id, w)
 	return 0
 }
 
