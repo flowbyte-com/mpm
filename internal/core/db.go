@@ -4798,6 +4798,36 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 	return work, nil
 }
 
+// addWorkTx is the transaction-aware companion to AddWork. It performs
+// the works INSERT using the supplied DBNode so callers running inside
+// a WithTx closure share the transaction boundary (D-001 fix: the prior
+// AddWork wrote directly to dm.db, leaving CreateWorkWithContext's
+// WithTx with a half-protected boundary — the works row could commit
+// while the AppendWorkEvent insert failed, producing ghost works under
+// contention).
+//
+// Read-back: callers inside a WithTx defer the read-back to after
+// commit (mirrors saveMemoryRow's tx-vs-non-tx split). Callers outside
+// a transaction should call dm.GetWork after addWorkTx returns.
+func (dm *DatabaseManager) addWorkTx(node DBNode, title, content, sessionID string) (string, error) {
+	id := GenerateID()
+	now := time.Now().Unix()
+
+	var sessionIDArg interface{}
+	if sessionID != "" {
+		sessionIDArg = sessionID
+	}
+
+	_, err := node.ExecTracked(`
+		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at)
+		VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+	`, 0, id, title, content, now, now, sessionIDArg, now)
+	if err != nil {
+		return "", fmt.Errorf("insert work: %w", err)
+	}
+	return id, nil
+}
+
 func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 	var w Work
 	var content, sessionID, verification sql.NullString
@@ -5302,11 +5332,16 @@ func (dm *DatabaseManager) CreateWorkWithContext(title, content, sessionID strin
 	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
 	var workID string
 	err := dm.WithTx(func(node DBNode) error {
-		w, err := dm.AddWork(title, content, sessionID)
+		// D-001: use the tx-aware helper so the works INSERT joins the
+		// WithTx transaction. Previously this called AddWork which
+		// wrote to dm.db directly — under contention, the works row
+		// could commit before AppendWorkEvent hit SQLITE_BUSY, leaving
+		// a ghost work with no created event in the ledger.
+		id, err := dm.addWorkTx(node, title, content, sessionID)
 		if err != nil {
 			return err
 		}
-		workID = w.ID
+		workID = id
 		_, err = dm.AppendWorkEvent(workID, WorkEvent{
 			EventType:    WorkEventTypeCreated,
 			Title:        title,
@@ -5701,6 +5736,16 @@ func (dm *DatabaseManager) AddWorkNoteWithContext(workID, note string, ac Active
 	}
 	if note == "" {
 		return nil, fmt.Errorf("note is required for note action")
+	}
+	// D-005: scan the note against the secret/poison scanner before
+	// the underlying AppendWorkEvent fires. The error format mirrors
+	// saveMemoryRow so the diagnostic surface is consistent across
+	// write paths.
+	if isSensitive, reason := isSensitiveContent(note); isSensitive {
+		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(note); isPoisoned {
+		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 	prov := dm.provenanceFromContext(ac)
 	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
@@ -6281,9 +6326,35 @@ func (dm *DatabaseManager) migrateWorkEventsCheck() error {
 // stored. Full execution telemetry lives in artifact_provenance and is
 // reachable via JOIN on invocation_id.
 //
+// D-005: the event's note/title/content are scanned against the
+// secret/poison scanner before the INSERT fires. The error format
+// mirrors saveMemoryRow so the diagnostic surface is consistent across
+// write paths.
+//
 // node: DBNode from WithTx callback. Use node.ExecTracked/QueryRowTracked when
 // non-nil; fall back to dm.db when nil.
 func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *EffectiveProvenance, node DBNode) (*WorkEvent, error) {
+	// D-005: scan the user-supplied note/title/content against the
+	// secret/poison scanner. The check must happen before any DB
+	// write so blocked content never reaches work_events (which is
+	// FTS-indexed and surfaces in `work history` and
+	// `wake_context.open_works`).
+	scanned := event.Note
+	if event.Title != "" {
+		scanned = scanned + " " + event.Title
+	}
+	if event.Content != "" {
+		scanned = scanned + " " + event.Content
+	}
+	if scanned != "" {
+		if isSensitive, reason := isSensitiveContent(scanned); isSensitive {
+			return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
+		}
+		if isPoisoned, reason := isPoisoned(scanned); isPoisoned {
+			return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
+		}
+	}
+
 	// 1. Resolve invocation linkage. Full provenance is in artifact_provenance;
 	// work_events stores only the join keys.
 	invocationID := event.InvocationID
