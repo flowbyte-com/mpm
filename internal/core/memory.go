@@ -741,6 +741,13 @@ var sensitivePatterns = []struct {
 		`(?im)\b(password|secret)\b\s*:\s*[^\s:]{1,}\s*$`,
 	)},
 	{"Database Connection", regexp.MustCompile(`(?i)(mysql|postgres|mongodb|redis)://[^\s]+`)},
+	// D-007: short-form credential prefixes. The patterns above (sk-ant-,
+	// ghp_, AKIA, xoxb-) all require long suffixes calibrated against
+	// real-world credential lengths. These shorter variants catch
+	// synthetic and truncated keys so the scanner behaves consistently
+	// across realistic and adversarial test inputs.
+	{"Generic Short Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{8,}`)},
+	{"Generic Short GitHub Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{8,}`)},
 	// Generic Secret Key MUST be last — it matches any sk- prefix not caught above
 	{"Generic Secret Key", regexp.MustCompile(`sk-[a-zA-Z0-9_-]{20,}`)},
 }

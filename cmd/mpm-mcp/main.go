@@ -121,6 +121,20 @@ func main() {
 
 	ac := mpmcli.ActiveContextFromEnv()
 
+	// D-013: bootstrap mode/ and persona/ directories if absent.
+	// The CLI tolerates a fresh workspace (mode/ is optional for CLI
+	// commands), but mpm-mcp used to fail silently when either
+	// directory was missing because NewRouter's loadComponents helper
+	// surfaces os.ReadDir errors verbatim. Bootstrap empty dirs so a
+	// fresh workspace doesn't produce an opaque fatal on first MCP
+	// boot — operators can drop .md files in later to activate modes.
+	for _, subdir := range []string{"mode", "persona"} {
+		dir := filepath.Join(workspace, subdir)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			log.Fatalf("mpm-mcp: bootstrap %s/: %v", subdir, err)
+		}
+	}
+
 	// Build the router once — pre-compiles all mode/persona patterns at boot.
 	router, err := internal.NewRouter(workspace)
 	if err != nil {
