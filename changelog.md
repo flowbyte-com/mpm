@@ -1543,4 +1543,41 @@ New `parseLimitStrict` helper in `internal/core/tools/handlers.go` rejects negat
 
 The MiniMax-M3 audit enumerated 16 findings; this pass closed 6 that still had root-cause defects (D-001/002/003, D-010, D-017, D-019, D-023, D-020). The remaining 10 were already addressed in the 2026-08-29 alpha-blocker pass (`f415d66`) and 2026-08-28 wishlist pass (`23c085c`); `verify-m3-audit-fixes.sh` exercises all of them end-to-end.
 
-Pre-existing alpha-4.1.2 failure (`TestWorkCancel_F81LifecycleGate/verified_work_cancel_downgrades_to_unverified`) remains out of scope per the 2026-08-30 changelog entry.
+## 2026-08-31 — F8.1 Lifecycle Regression Resolved (F-B1 ⊥ F8.1 alignment)
+
+**Commit:** `cadc117`
+
+Pre-existing alpha-4.1.2 failure (`TestWorkCancel_F81LifecycleGate/verified_work_cancel_downgrades_to_unverified`) resolved. The failing subtest expected `done → cancelled` to succeed and demote verification; this conflicted with F-B1's state-machine invariant that rejects the same transition.
+
+**Root cause:** The original F8.1 commit message (55226a2) defines F8.1 as: *"Cancelled status locks verification below verified regardless of evidence pattern."* That is a *demote-on-cancel* invariant — when cancellation happens, verified status must drop. F8.1 does **not** mandate that "verified work may be cancelled directly." The lifecycle edge `done → cancelled` belongs to F-B1, where `TestF_B1_CancelAfterDoneRejected` explicitly pins it as rejected.
+
+**Fix (test-only, no production code change):** Aligned the F8.1 regression test with the actual F8.1 contract by exercising the legal lifecycle:
+
+```
+open → evidence → done (verification = verified)
+done → open       (explicit reopen — F-B1 permits this)
+open → cancelled  (DeriveWorkVerification locks below verified)
+```
+
+Replaced the failing subtest `verified_work_cancel_downgrades_to_unverified` with two pinning subtests:
+
+1. `verified_work_reopen_then_cancel_downgrades_to_unverified` — exercises the canonical F8.1 demote via legal `done → open → cancelled` lifecycle. Asserts verification drops to `unverified` after the final cancel.
+2. `direct_done_to_cancelled_is_rejected_F_B1` — pins both legacy `dm.CancelWork` and event-sourced `handleMpmWork action=cancel` rejection paths; asserts the rejection does not mutate work state.
+
+**Why this is the correct resolution:**
+
+- F-B1's `isValidWorkTransition` matrix stays intact: `done → cancelled` is still rejected at the state-machine layer.
+- F8.1's verification demote invariant is preserved: the legal `open → cancelled` edge still triggers `DeriveWorkVerification`, which locks verification below `verified`.
+- Audit history is honest: every lifecycle transition appears as exactly one event in `work_events`; no implicit reopen is synthesized on the operator's behalf.
+- The substrate surfaces operator error: an operator who tries to `cancel` a completed item gets a clear `invalid transition done → cancelled` error rather than a silent auto-reopen that masks their mistake.
+
+**Validation:**
+
+- `TestWorkCancel_F81LifecycleGate` — 5/5 PASS (was 1/5)
+- `TestF_B1_*` — 5/5 PASS (transition matrix, CancelAfterDoneRejected, EventSourcedPathRejected, etc.)
+- `TestF81_*` — 5/5 PASS
+- `TestF71_*` — 5/5 PASS
+- `make test` — 0 failures across all packages
+- `go test -race -tags fts5` — 0 races
+- `go vet -tags fts5 ./...` — clean
+- `scripts/verify-m3-audit-fixes.sh` — 22/22 PASS
