@@ -133,14 +133,39 @@ func handleAdd(args []string) int {
 		}
 	}
 
+	// D-017: distinguish "added" from "already exists". SaveMemory is
+	// content-hash idempotent — a duplicate identical save returns the
+	// existing row's id without inserting. Querying the row's
+	// created_at lets us tell the user whether this was a fresh add
+	// or a dedup hit, so a workflow that re-saves a memory by mistake
+	// doesn't silently lose visibility.
+	isNew := true
+	if row := dm.SQLDB().QueryRow(
+		`SELECT created_at FROM memories WHERE id = ?`, id,
+	); row != nil {
+		var createdAt int64
+		if err := row.Scan(&createdAt); err == nil {
+			// M3 audit D-017: a row whose created_at is meaningfully
+			// older than the current second cannot have been inserted
+			// by this call — it must pre-exist. Use a 2-second window
+			// to absorb SQLite timestamp rounding on fast machines.
+			if time.Now().Unix()-createdAt > 2 {
+				isNew = false
+			}
+		}
+	}
+
 	if *jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
-			"id":      id,
-			"success": true,
+			"id":           id,
+			"success":      true,
+			"already_existed": !isNew,
 		})
 		fmt.Println(string(data))
-	} else {
+	} else if isNew {
 		fmt.Printf("Added memory %s to %s (weight=%d)\n", id, *collection, *weight)
+	} else {
+		fmt.Printf("Memory already exists: %s (idempotent save — no new row written)\n", id)
 	}
 	return 0
 }
