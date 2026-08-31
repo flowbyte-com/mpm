@@ -4773,7 +4773,17 @@ func (dm *DatabaseManager) DecayWeights(policies map[string]DecayPolicy, interva
 }
 
 // AddWork inserts a new work item and returns it after read-back assertion.
+//
+// D-005: title and content are scanned against the secret/poison scanner
+// before the INSERT fires. The error format mirrors saveMemoryRow so the
+// diagnostic surface is consistent across write paths.
 func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, error) {
+	if isSensitive, reason := isSensitiveContent(title + " " + content); isSensitive {
+		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(title + " " + content); isPoisoned {
+		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
+	}
 	id := GenerateID()
 	now := time.Now().Unix()
 
@@ -4806,10 +4816,20 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 // while the AppendWorkEvent insert failed, producing ghost works under
 // contention).
 //
+// The scanner check is duplicated here because addWorkTx is also
+// reachable directly (e.g. via thin-handler surfaces) and must enforce
+// the same invariant regardless of which entry point was used.
+//
 // Read-back: callers inside a WithTx defer the read-back to after
 // commit (mirrors saveMemoryRow's tx-vs-non-tx split). Callers outside
 // a transaction should call dm.GetWork after addWorkTx returns.
 func (dm *DatabaseManager) addWorkTx(node DBNode, title, content, sessionID string) (string, error) {
+	if isSensitive, reason := isSensitiveContent(title + " " + content); isSensitive {
+		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
+	}
+	if isPoisoned, reason := isPoisoned(title + " " + content); isPoisoned {
+		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
+	}
 	id := GenerateID()
 	now := time.Now().Unix()
 
