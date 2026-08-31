@@ -509,7 +509,7 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 			"id":                    m.ID,
 			"content":               m.Content,
 			"weight":                m.Weight,
-			"tags":                  m.Tags,
+			"tags":                  parseTagsJSONColumn(m.Tags),
 			"collection":            m.Collection,
 			"created_at":            m.CreatedAt,
 			"reinforcement_count":   m.ReinforcementCount,
@@ -522,6 +522,26 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 		})
 	}
 	return items
+}
+
+// parseTagsJSONColumn decodes the JSON-encoded tags column from the
+// memories table into a native []string. W-013: prior behaviour returned
+// the raw string (literally `"[]"` for an empty tag set), which broke
+// agent code that called `.append()` on the field. Empty/null/invalid
+// input yields []string{} (never nil, never a string).
+func parseTagsJSONColumn(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return []string{}
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(raw), &tags); err != nil {
+		return []string{}
+	}
+	if tags == nil {
+		return []string{}
+	}
+	return tags
 }
 
 // ── Memory feedback / mutation tools (Tier 1) ───────────────────────────────

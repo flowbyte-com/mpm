@@ -220,9 +220,9 @@ func TestCallHelpers_ShowConfidence_NestedHistoryShape(t *testing.T) {
 
 	out, err := dm.ShowConfidence("mem-1", "memory")
 	require.NoError(t, err)
-	assert.Contains(t, out, "current")
-	_, hasCurrent := out["current"].(float64)
-	assert.True(t, hasCurrent, "current must be a float64")
+	assert.Contains(t, out, "confidence")
+	_, hasConf := out["confidence"].(float64)
+	assert.True(t, hasConf, "confidence must be a float64")
 	hist, hasHist := out["history"].(map[string]interface{})
 	assert.True(t, hasHist, "history must be a nested map (NOT a slice)")
 	_, hasInnerHist := hist["history"].([]map[string]interface{})
@@ -249,8 +249,8 @@ func TestCallHelpers_RecomputeConfidence_TriggersRecompute(t *testing.T) {
 	out, err := dm.RecomputeConfidence("mem-1", "memory")
 	require.NoError(t, err)
 	// Returns the same shape as ShowConfidence.
-	_, hasCurrent := out["current"].(float64)
-	assert.True(t, hasCurrent)
+	_, hasConf := out["confidence"].(float64)
+	assert.True(t, hasConf)
 	_, hasHist := out["history"].(map[string]interface{})
 	assert.True(t, hasHist)
 }
