@@ -23,6 +23,7 @@
 import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withWorkspace } from "./src/workspace.js";
 
 // --------------------------------------------------------------------------
 // Subprocess adapter — `mpm call <tool> --payload '<json>'`
@@ -69,6 +70,7 @@ function callMpm(
 		try {
 			child = spawn(bin, ["call", tool, "--payload", json], {
 				stdio: ["ignore", "pipe", "pipe"],
+				env: withWorkspace(),
 			});
 		} catch (err) {
 			finish({
@@ -598,7 +600,10 @@ function callMpmCli(
 
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(bin, [subcommand, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+			child = spawn(bin, [subcommand, ...args], {
+				stdio: ["ignore", "pipe", "pipe"],
+				env: withWorkspace(),
+			});
 		} catch (err) {
 			finish({
 				success: false,
