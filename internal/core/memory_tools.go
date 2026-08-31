@@ -832,12 +832,16 @@ func (dm *DatabaseManager) SnoozeMemory(memoryID string, days int) (map[string]i
 // SetMemoryWeight sets a memory's weight directly. Validates the weight
 // is in the [0, 100] range so a typo can't blow the scoring model out of
 // proportion. Returns an error if the memory doesn't exist.
-func (dm *DatabaseManager) SetMemoryWeight(memoryID string, weight int) (map[string]interface{}, error) {
+//
+// W-004 (2026-08-31): weight is float64 so fractional values like 7.5
+// round-trip to the REAL column without truncation. The schema column is
+// REAL (not INTEGER), so the float lands exactly as supplied.
+func (dm *DatabaseManager) SetMemoryWeight(memoryID string, weight float64) (map[string]interface{}, error) {
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
 	}
 	if weight < 0 || weight > 100 {
-		return nil, fmt.Errorf("weight must be 0-100 (got %d)", weight)
+		return nil, fmt.Errorf("weight must be 0-100 (got %v)", weight)
 	}
 	res, err := dm.db.Exec(`UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL`, weight, memoryID)
 	if err != nil {

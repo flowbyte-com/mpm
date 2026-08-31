@@ -73,7 +73,7 @@ func TestF8_DebugShowReportsStoredWeight(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		weight int
+		weight float64
 	}{
 		{"default weight", 1},
 		{"weight five", 5},
@@ -102,8 +102,8 @@ func TestF8_DebugShowReportsStoredWeight(t *testing.T) {
 			case float64:
 				storedWeight = int(w)
 			}
-			if storedWeight != tc.weight {
-				t.Fatalf("persistence layer returned weight %d, want %d", storedWeight, tc.weight)
+			if storedWeight != int(tc.weight) {
+				t.Fatalf("persistence layer returned weight %d, want %d", storedWeight, int(tc.weight))
 			}
 
 			out := captureStdout(t, func() {
@@ -118,9 +118,9 @@ func TestF8_DebugShowReportsStoredWeight(t *testing.T) {
 				line = line[:nl]
 			}
 			got := strings.TrimSpace(strings.TrimPrefix(line, "Weight:"))
-			want := strings.TrimSpace(itoaString(tc.weight))
+			want := strings.TrimSpace(itoaString(int(tc.weight)))
 			if got != want {
-				t.Errorf("F8 REGRESSION: debug show printed %q, want %q (stored=%d)", got, want, tc.weight)
+				t.Errorf("F8 REGRESSION: debug show printed %q, want %q (stored=%d)", got, want, storedWeight)
 			}
 		})
 	}

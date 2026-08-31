@@ -272,7 +272,7 @@ func newTestFileDM(t *testing.T) *DatabaseManager {
 
 // seedWeight inserts a fresh memory row and forces its weight to `start`.
 // Returns the inserted memory id.
-func seedWeight(t *testing.T, dm CoreDB, start int) string {
+func seedWeight(t *testing.T, dm CoreDB, start float64) string {
 	t.Helper()
 	id, err := dm.SaveMemoryWithExtras(
 		"memories", "race target memory", "",

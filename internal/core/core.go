@@ -56,8 +56,8 @@ type CoreDB interface {
 	MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error)
 
 	// ─── Memory CRUD ─────────────────────────────────────────────────
-	SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, expiresAt ...time.Time) (string, error)
-	SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
+	SaveMemory(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, expiresAt ...time.Time) (string, error)
+	SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
 	GetMemory(id string) (map[string]interface{}, error)
 	GetMemoryByExternalID(sourceDB, sourceID string) (map[string]interface{}, error)
 	UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error
@@ -66,7 +66,7 @@ type CoreDB interface {
 	ShredMemoryWithCascade(memoryID string) (map[string]interface{}, error)
 	SaveMemoryWithContext(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext) (map[string]interface{}, *Memory, error)
 	SaveMemoryWithContextAndSnapshot(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext, wc *WrapperContext) (map[string]interface{}, *Memory, error)
-	SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight int, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
+	SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
 
 	// ─── Memory Search & Query ───────────────────────────────────────
 	QueryMemories(collection string, primeOnly bool, limit, offset int) ([]map[string]interface{}, error)
@@ -89,7 +89,7 @@ type CoreDB interface {
 	WeakenMemory(id string, delta int) error
 	WeakenMemoryTool(memoryID string, delta int) (map[string]interface{}, error)
 	AdjustMemoryWeight(id string, delta int) error
-	SetMemoryWeight(memoryID string, weight int) (map[string]interface{}, error)
+	SetMemoryWeight(memoryID string, weight float64) (map[string]interface{}, error)
 	ChallengeMemory(memoryID string, slashAmount int, evidence string) error
 	ChallengeMemoryAsync(memoryID string, evidence string)
 	ChallengeAndReinforce(id string, delta int) error
@@ -325,7 +325,7 @@ type CoreDB interface {
 
 	// ─── Global / Shared ─────────────────────────────────────────────
 	QueryGlobalRules(query string, limit int) ([]map[string]interface{}, error)
-	RecordGlobalRule(content string, tags []string, weight int, provenance string) (string, error)
+	RecordGlobalRule(content string, tags []string, weight float64, provenance string) (string, error)
 	PromoteToGlobal(localID string) (string, error)
 
 	// ─── Admission ───────────────────────────────────────────────────
