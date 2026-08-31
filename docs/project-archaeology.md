@@ -2,7 +2,8 @@
 
 **Author:** 808 (via repo archaeology pass)
 **Baseline:** `f415d66` (main, `fix(alpha-blocker): D-001/002/003/004/007/010/013 — eradication pass`)
-**Date:** 2026-08-31
+**Verification pass:** `b67ee79..HEAD` (after this reconciliation)
+**Date:** 2026-08-31 (initial pass + verification commit)
 
 ## Purpose
 
@@ -229,25 +230,23 @@ salvage commit. No live uncommitted work is at risk.
 
 ## Repository hygiene issues observed (separate from consolidation)
 
-1. **3 conflicted/bad git objects:** `.git/objects/89/1915fc9... [conflicted]`,
-   `.git/objects/c6/acbdb13... [conflicted]`, `.git/objects/cb/19b1b9... [conflicted]`.
-   These are corrupt object files (zero-byte or partial), not blobs. Origin:
-   the `persona/critic [conflicted].md` / `persona/forensic [conflicted].md`
-   merge-conflict artifacts on the cascade branch (now classified
-   `CONFLICT_LEFTOVER`). **Disposition:** archive the cascade branch (which
-   holds the conflicting objects), then prune with `git gc --prune=now`. The
-   conflicted objects are not on main and not referenced.
+1. **Conflicted/bad git objects:** The cascade branch held two merge-conflict
+   artifacts: `persona/critic [conflicted].md` and `persona/forensic
+   [conflicted].md`. Both blobs are byte-identical to the resolved `persona/critic.md`
+   and `persona/forensic.md` on the same branch AND on main — they are merge
+   artifacts, not unique content. Preserved by archiving the cascade branch.
+   **No corrupt objects found** in final `git fsck --full --no-reflogs` after GC.
 2. **1 orphan stash:** `stash@{0}: WIP on alpha-4-surface-tightening: 261adef`.
-   `alpha-4-surface-tightening` was merged and deleted. The stash may contain
-   incomplete alpha-4 work; since alpha-4 is closed and shipped, the stash is
-   **disposable**. **Disposition:** drop after this archaeology doc lands,
-   unless v wants to inspect.
-3. **Many unreachable commits from `git fsck --unreachable`.** These are
-   stale objects from prior branch deletions (the three already-deleted
-   `alpha-4-surface-tightening`, `worktree-agent-a77967f6cf7d719ba`,
-   `critic-hunt-guard` are not the source — these unreachable commits are
-   from earlier topology churn, pre-alpha). **Disposition:** `git gc
-   --prune=now --aggressive` after the archive pass, in a separate step.
+   Verified that all 12 files in the stash (1499 lines) are present on main
+   as alpha-4.1.2 commits (7573a46, c987b2e, 9686cfc, bbf5a0b). Preserved as
+   tag `archive/stash-alpha-4-wip` (sha `291d3a41`), then the stash itself
+   dropped. **Verification:** `git ls-tree HEAD` confirms every file in the
+   stash is on main.
+3. **Unreachable commits from `git fsck --unreachable`.** 988 unreachable
+   commits/trees existed before GC, from earlier topology churn (pre-alpha).
+   Ran `git gc --prune=now --aggressive`. Post-GC: 6 dangling commits, all
+   historical orphans whose content is on main in evolved form. None
+   contain unique product logic.
 
 ---
 
@@ -273,9 +272,9 @@ salvage commit. No live uncommitted work is at risk.
 - **Branches (live):** `main` only.
 - **Branches (archive):** `archive/feat-drill-orchestrator`, `archive/worktree-feat-epistemic-cascade`, `archive/rescue-cascade-work`.
 - **Worktrees:** main only.
-- **Tag:** existing `v0.1.0-*` tags preserved.
-- **Stash:** dropped (see Repository hygiene §3).
-- **Conflicted objects:** pruned via `git gc --prune=now` after archive.
+- **Tags:** existing `v0.1.0-*` tags preserved; `archive/stash-alpha-4-wip` added.
+- **Stash:** dropped (preserved as tag first, see Repository hygiene §3).
+- **Conflicted objects:** preserved in archive branches; no corrupt objects in final fsck.
 - **Unreachable objects:** pruned via `git gc --prune=now --aggressive`.
 
 ---
@@ -295,9 +294,20 @@ git worktree list
 # Confirm no conflicted git objects
 git fsck --no-reflogs
 
-# Confirm main is unchanged from f415d66
+# Confirm main is at b67ee79 (this doc's parent)
 git rev-parse main
+# expect: b67ee7952ae5084705ddb9151d89d8bd0294d435
+
+# Confirm the alpha-blocker baseline is preserved
+git rev-parse f415d66
 # expect: f415d6641b1772e0721750b45940037c8c5a2110
+
+# Run verification scripts (both missions' gates still pass after reconciliation)
+make build
+./scripts/verify-alpha-blocker-fixes.sh   # expect: 16/16 PASS
+./scripts/verify-wishlist-fixes.sh        # expect: 8/8 PASS
+go test -tags fts5 -timeout 180s ./cmd/... ./internal/...  # expect: 0 failures
+(cd internal/core && go test -tags fts5 -timeout 180s ./...)  # expect: 0 failures
 ```
 
 ---
@@ -313,3 +323,8 @@ git rev-parse main
 5. `git status` clean on the main worktree.
 6. `go test ./...` (or `make test`) green on main.
 7. `git fsck --no-reflogs` clean (no `bad sha1 file [conflicted]` lines).
+
+**Final state (verified 2026-08-31):** all 7 criteria met. The 13-phase
+archaeology produced a single-commit net change to main (`b67ee79`), 988
+unreachable commits pruned via GC, 1 stash preserved as `archive/stash-alpha-4-wip`
+tag then dropped.
