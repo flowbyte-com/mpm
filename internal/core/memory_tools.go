@@ -296,9 +296,12 @@ func (dm *DatabaseManager) applyTheoryResolutions(content string, tags []string)
 //	            no Shared Premium (within a single side there is no
 //	            local to soften). is_global=1 rows only.
 func (dm *DatabaseManager) HybridSearchMemories(query, collection string, limit int, scope string) ([]map[string]interface{}, error) {
-	if limit <= 0 {
-		limit = 5
-	}
+	// D-004: previously this function coerced `limit <= 0` to 5, which
+	// silently violated the parseLimitStrict contract (`0 → 0,
+	// literally "no results"`). The handler layer already validates
+	// limit via parseLimitStrict, so any non-positive value reaching
+	// here is an honest caller request for "no results" and must be
+	// honoured rather than overridden.
 	if scope == "" {
 		scope = "all"
 	}
