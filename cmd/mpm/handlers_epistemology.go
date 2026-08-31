@@ -43,19 +43,37 @@ func handleProposeTheory(args []string) int {
 	hypothesis, validationCriteria, status, tagsStr, leftoverArgs := parseTheoryArgs(args)
 
 	if hypothesis == "" && len(leftoverArgs) > 0 {
-		input := strings.Join(leftoverArgs, " ")
-		hypothesis = extractField(input, "HYPOTHESIS:")
-		if hypothesis == "" {
-			hypothesis = strings.TrimSpace(input)
-		}
-		if validationCriteria == "" {
-			validationCriteria = extractField(input, "VALIDATION_CRITERIA:")
-		}
-		if status == "" {
-			status = extractField(input, "STATUS:")
-		}
-		if tagsStr == "" {
-			tagsStr = extractField(input, "TAGS:")
+		// Pipe-separated positional form (M3 audit D-001/002/003): the
+		// documented "<hypothesis> | <validation>" shape with `|` as the
+		// explicit separator. Both single-token (whole phrase in one arg)
+		// and two-token (split across args) shapes are supported. Without
+		// the separator, two bare tokens are too ambiguous to disambiguate
+		// (which is hypothesis, which is validation?), so we refuse
+		// rather than silently dropping validation. The single-token
+		// form keeps the legacy HYPOTHESIS:/VALIDATION_CRITERIA:
+		// extractor as a final fallback.
+		if validationCriteria == "" && len(leftoverArgs) >= 1 {
+			joined := strings.Join(leftoverArgs, " ")
+			if strings.Contains(joined, "|") {
+				parts := strings.SplitN(joined, "|", 2)
+				hypothesis = strings.TrimSpace(parts[0])
+				validationCriteria = strings.TrimSpace(parts[1])
+			} else {
+				input := joined
+				hypothesis = extractField(input, "HYPOTHESIS:")
+				if hypothesis == "" {
+					hypothesis = strings.TrimSpace(input)
+				}
+				if validationCriteria == "" {
+					validationCriteria = extractField(input, "VALIDATION_CRITERIA:")
+				}
+				if status == "" {
+					status = extractField(input, "STATUS:")
+				}
+				if tagsStr == "" {
+					tagsStr = extractField(input, "TAGS:")
+				}
+			}
 		}
 	}
 	// Reject empty/whitespace-only hypotheses so a stray `mpm propose_theory
@@ -219,14 +237,22 @@ func handleResolveTheory(args []string) int {
 	// the legacy CLI wrote "resolved" for both outcomes, which made
 	// `mpm call mpm_theories list status=proven` return zero rows for
 	// theories resolved through the CLI. Map the conclusion keyword to
-	// the matching status; fall back to "resolved" for free-form
-	// conclusions (back-compat with existing rows).
-	status := "resolved"
+	// the matching status. For an unknown conclusion keyword, refuse
+	// rather than silently writing the legacy "resolved" value — the
+	// audit's D-010 finding was that an operator running
+	// `mpm resolve_theory <id> some random text` got a row that
+	// `list status=proven` couldn't find. The legacy "resolved" value
+	// is still honored as a stored value on rows written before the
+	// fix, but never written by this handler.
+	status := ""
 	switch strings.ToLower(strings.TrimSpace(conclusion)) {
 	case "confirmed", "proven":
 		status = "proven"
 	case "disproven", "refuted", "invalidated":
 		status = "disproven"
+	}
+	if status == "" {
+		return respond("", "resolve_theory: conclusion must be one of: confirmed, proven, disproven, refuted, invalidated\n", 1)
 	}
 	patch := map[string]interface{}{
 		"status":      status,
@@ -484,14 +510,23 @@ func parseDecisionArgs(args []string) (string, string, string, string, string, [
 }
 
 // parseTheoryArgs extracts named flags from `mpm propose_theory` /
-// `mpm theorize` args. Two forms are accepted:
+// `mpm theorize` args. Four forms are accepted:
 //
-//  1. flag form: --hypothesis "X" --validation "Y" [--tags a,b] [--status proven]
-//  2. legacy token form: "HYPOTHESIS: X\nVALIDATION_CRITERIA: Y"
+//  1. long-flag form: --hypothesis "X" --validation "Y" [--tags a,b] [--status proven]
+//  2. short-flag form: -h X --v Y
+//  3. bare key=value form: hypothesis=X validation=Y  (D-001/002/003, M3 audit)
+//  4. legacy token form: "HYPOTHESIS: X\nVALIDATION_CRITERIA: Y"
 //
-// Flag form takes precedence. If no flag is present, the leftover positional
-// args are returned for the caller to feed into the legacy extractor
-// (extractField on HYPOTHESIS:/VALIDATION_CRITERIA:/STATUS:/TAGS: prefixes).
+// The bare key=value form is matched only when the token does NOT start with
+// `--` (otherwise it would collide with the long-flag form) and contains
+// `=` (otherwise it's a positional arg). Values are unquoted by trimming a
+// single matched leading/trailing `"`.
+//
+// Flag forms take precedence over positional/legacy forms. If no flag is
+// detected, the leftover positional args are returned for the caller to feed
+// into the legacy extractor (extractField on HYPOTHESIS: / VALIDATION_CRITERIA:
+// / STATUS: / TAGS: prefixes), or for the two-token positional form
+// "<hypothesis> | <validation>" where `|` is the explicit separator.
 //
 // Returns: hypothesis, validationCriteria, status, tagsStr, leftoverArgs.
 func parseTheoryArgs(args []string) (string, string, string, string, []string) {
@@ -540,6 +575,38 @@ func parseTheoryArgs(args []string) (string, string, string, string, []string) {
 			}
 			i++
 		default:
+			// Bare key=value form (M3 audit D-001/002/003): tokens
+			// without `--` prefix that contain `=` are interpreted as
+			// `key=value`. The key namespace matches the long-flag
+			// forms. Surrounding double-quotes are trimmed.
+			if !strings.HasPrefix(a, "--") && !strings.HasPrefix(a, "-") {
+				if eq := strings.IndexByte(a, '='); eq > 0 {
+					key := strings.ToLower(strings.TrimSpace(a[:eq]))
+					val := unquoteBareValue(a[eq+1:])
+					switch key {
+					case "hypothesis", "hypothesis_id", "h":
+						hypothesis = val
+						flagMode = true
+						i++
+						continue
+					case "validation", "validation_criteria", "v":
+						validationCriteria = val
+						flagMode = true
+						i++
+						continue
+					case "status", "s":
+						status = val
+						flagMode = true
+						i++
+						continue
+					case "tags", "t":
+						tagsStr = val
+						flagMode = true
+						i++
+						continue
+					}
+				}
+			}
 			leftovers = append(leftovers, a)
 			i++
 		}
@@ -552,6 +619,17 @@ func parseTheoryArgs(args []string) (string, string, string, string, []string) {
 	// No flags detected — caller may still run the legacy token-form
 	// extractor over the joined leftover args.
 	return "", "", "", "", leftovers
+}
+
+// unquoteBareValue trims a single matched pair of leading/trailing double
+// quotes. Used by the bare key=value parser so callers can write
+// `validation="throughput on 4 readers"` without shell quoting headaches.
+// Single quotes and asymmetric quotes are preserved verbatim.
+func unquoteBareValue(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // hasDecisionFlags returns true if any decision-style flag is present
