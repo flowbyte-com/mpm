@@ -915,7 +915,11 @@ func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]inter
 	case "disproven":
 		whereExtra = `AND json_extract(metadata, '$.status') = 'disproven'`
 	case "resolved":
-		whereExtra = `AND json_extract(metadata, '$.status') IN ('proven','disproven')`
+		// M3 audit D-010: include the legacy literal `resolved` value
+		// alongside the canonical `proven`/`disproven` so pre-fix rows
+		// remain queryable through the same filter. New resolutions
+		// (post-fix) write only `proven` or `disproven`.
+		whereExtra = `AND json_extract(metadata, '$.status') IN ('proven','disproven','resolved')`
 	case "all":
 		// No extra filter.
 	default:
