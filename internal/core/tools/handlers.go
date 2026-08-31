@@ -482,6 +482,17 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	// Default is "summary" so broad queries never bloat the agent context.
 	// The full payload is always retrievable via mpm_resolve / mpm_blob_read
 	// against the pointer on each entry.
+	//
+	// M3 audit D-020: the summary and full projections intentionally
+	// use different score field names (`score` vs `combined_score`).
+	// Summary returns the BM25 sparse retrieval score (cheap, for chat
+	// bubbles and headline displays). Full returns the post-hybrid
+	// combined score (BM25 + vector + reinforcement, opt-in only — see
+	// projection == "full" branch below). Unifying the names would
+	// force callers to inspect the projection mode before interpreting
+	// the score, which is the opposite of the design intent: the
+	// projection itself signals which scoring algorithm produced the
+	// value.
 	projection, err := normalizeProjection(p)
 	if err != nil {
 		return nil, err
