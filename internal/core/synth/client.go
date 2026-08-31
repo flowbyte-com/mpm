@@ -8,13 +8,10 @@
 package synth
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -201,9 +198,15 @@ type SynthResult struct {
 // body shape on both wires (system message first, user second in the
 // messages array) — the divergence is in the URL, the header, and the
 // response unwrap, all of which live in wire.go.
+//
+// Transport routed through doLLMRequest (post-M3 audit H-1): the
+// prior inline HTTP code here was the gold-standard for wire-aware
+// dispatch; the audit found that compact.go and admission.go had
+// diverged from it. Pulling all three sites through the helper is
+// the structural fix.
 func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*SynthResult, error) {
 	if sc.APIKey == "" {
-		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block, MINIMAX_API_KEY env var, or OPENROUTER_API_KEY env var)")
+		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
 
 	userContent := strings.Join(fragments, "\n---MEMORY---\n")
@@ -217,55 +220,12 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 		},
 	}
 
-	payload, err := json.Marshal(body)
+	respBody, err := sc.DoLLMRequest(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", sc.BaseURL+sc.Wire.path(), bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	authName, authValue := sc.Wire.authHeader(sc.APIKey)
-	req.Header.Set(authName, authValue)
-
-	var resp *http.Response
-	var respBody []byte
-
-	for attempt := 0; attempt <= 1; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
-		}
-
-		client := &http.Client{Timeout: sc.Timeout}
-		resp, err = client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("API request failed: %w", err)
-		}
-
-		respBody, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if resp.StatusCode == 200 {
-			break // success
-		}
-
-		// Retry once on server errors (5xx), bail on everything else
-		if attempt == 0 && resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			continue
-		}
-		return nil, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	rawResult, err := sc.Wire.parseResponseBody(respBody)
+	rawResult, err := sc.ParseResponseBody(respBody, "synthesis")
 	if err != nil {
 		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}

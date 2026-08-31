@@ -18,14 +18,9 @@
 package synth
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
 )
 
 // compactLessonSystemPrompt is the strict-JSON instruction sent as the
@@ -59,11 +54,17 @@ Rules:
 // orchestrator level, where domain validation can inspect and the
 // data plane can stay pristine (no DB writes on parse failure).
 //
-// HTTP retry: same shape as Synthesize — one retry on 5xx, 3s delay.
-// 4xx and other status codes fail immediately.
+// HTTP transport: routes through doLLMRequest — wire-aware path
+// selection (/messages vs /chat/completions) and auth header
+// (X-Api-Key vs Authorization: Bearer) come from sc.Wire, which is
+// inferred from BaseURL at construction time. Retry policy (one
+// retry on 5xx with 3s backoff, fail-fast on 4xx) is centralized in
+// the helper so all three call sites behave identically. Post-M3
+// audit H-1: prior version hardcoded /messages + X-Api-Key which
+// broke OpenRouter and OpenAI-protocol vendors.
 func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories []string) (string, error) {
 	if sc.APIKey == "" {
-		return "", fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
+		return "", fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
 
 	userContent := strings.Join(rawMemories, "\n---MEMORY---\n")
@@ -77,47 +78,9 @@ func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories 
 		},
 	}
 
-	payload, err := json.Marshal(body)
+	respBody, err := sc.DoLLMRequest(ctx, body)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", sc.BaseURL+"/messages", bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", sc.APIKey)
-
-	var respBody []byte
-	for attempt := 0; attempt <= 1; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
-		}
-
-		client := &http.Client{Timeout: sc.Timeout}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("API request failed: %w", err)
-		}
-
-		respBody, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return "", fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if resp.StatusCode == 200 {
-			break
-		}
-		if attempt == 0 && resp.StatusCode >= 500 && resp.StatusCode < 600 {
-			continue
-		}
-		return "", fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("compact_lesson: %w", err)
 	}
 
 	rawResult, err := sc.ParseResponseBody(respBody, "compact_lesson")
