@@ -12,6 +12,10 @@ import (
 // parseEvidenceAddArgs converts a CLI args slice into a map with keys matching
 // the EvidenceInput struct fields. Kept separate so it's testable without
 // touching the DB.
+//
+// M3 audit D-023: --note (singular) is canonical; --notes (plural) is the
+// deprecated alias kept for backwards compatibility with callers who picked
+// up the original spelling. Both flags populate the same Notes field.
 func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	fs := flag.NewFlagSet("evidence-add", flag.ContinueOnError)
 	artifactID := fs.String("artifact", "", "artifact id (required)")
@@ -21,9 +25,24 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	strength := fs.String("strength", "", "strength in [-1, 1]; defaults to type's registry value")
 	independence := fs.String("independence", "1.0", "independence factor; defaults to 1.0")
 	createdBy := fs.String("by", "", "creator (required)")
-	notes := fs.String("notes", "", "optional notes")
+	notes := fs.String("note", "", "optional notes")
+	notesAlias := fs.String("notes", "", "deprecated alias for --note")
+	fs.Usage = func() {
+		fmt.Println("Usage: mpm evidence add --artifact <id> --type <t> --source <s> --by <c> [--note <text>]")
+		fmt.Println()
+		fmt.Println("Flags:")
+		fs.PrintDefaults()
+		fmt.Println()
+		fmt.Println("Note: --notes (plural) is a deprecated alias for --note.")
+	}
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	// M3 audit D-023: --notes (plural) wins when set, --note (singular)
+	// is the canonical form. Operator who types both sees the
+	// plural-supplied value.
+	if *notesAlias != "" && *notes == "" {
+		*notes = *notesAlias
 	}
 	if *artifactID == "" {
 		return nil, fmt.Errorf("--artifact is required")
@@ -163,7 +182,21 @@ func handleEvidenceList(args []string) int {
 		printError("list evidence: %v", err)
 		return 1
 	}
-	out, _ := json.Marshal(rows)
+	// M3 audit D-019: the CLI evidence list returned a bare JSON
+	// array. The MCP `mpm_evidence` action wraps the same payload in
+	// `{success, count, evidence}` so the two surfaces disagree on
+	// shape. Normalize on the wrapped envelope here too — callers
+	// parsing the CLI output get the same keys as the call interface.
+	if rows == nil {
+		rows = []mpminternal.Evidence{}
+	}
+	out, _ := json.Marshal(map[string]interface{}{
+		"success":       true,
+		"artifact_id":   artifactID,
+		"artifact_type": artifactType,
+		"count":         len(rows),
+		"evidence":      rows,
+	})
 	respond(string(out), "", 0)
 	return 0
 }
