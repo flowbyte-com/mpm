@@ -21,9 +21,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func persistedWeightAndMeta(t *testing.T, dm *DatabaseManager, id string) (int, map[string]interface{}) {
+func persistedWeightAndMeta(t *testing.T, dm *DatabaseManager, id string) (float64, map[string]interface{}) {
 	t.Helper()
-	var weight int
+	// W-004 (2026-08-31): weight is REAL in the schema; Scan into float64
+	// so fractional values (e.g. 7.5) round-trip without truncation. The
+	// previous `var weight int` would silently drop fractional bits.
+	var weight float64
 	var metaStr string
 	err := dm.db.QueryRow(`SELECT COALESCE(weight,0), COALESCE(metadata,'{}') FROM memories WHERE id = ? AND deleted_at IS NULL`, id).
 		Scan(&weight, &metaStr)
@@ -33,7 +36,7 @@ func persistedWeightAndMeta(t *testing.T, dm *DatabaseManager, id string) (int, 
 	return weight, meta
 }
 
-func seedWeightedMemory(t *testing.T, dm *DatabaseManager, content string, weight int) string {
+func seedWeightedMemory(t *testing.T, dm *DatabaseManager, content string, weight float64) string {
 	t.Helper()
 	id, err := dm.SaveMemory("memories", content, "", []string{"f11"}, nil, nil, false, weight)
 	require.NoError(t, err)
@@ -47,10 +50,10 @@ func TestF11_ChallengeMustNotIncreaseWeight(t *testing.T) {
 	dm := newTestDM(t)
 	defer dm.Close()
 
-	for _, initial := range []int{5, 3, 7, 12} {
+	for _, initial := range []float64{5, 3, 7, 12} {
 		// Unique content per case: F19 identity dedup makes an identical
 		// re-save return the first row, which would conflate the cases.
-		id := seedWeightedMemory(t, dm, fmt.Sprintf("deploy to prod via blue-green %d", initial), initial)
+		id := seedWeightedMemory(t, dm, fmt.Sprintf("deploy to prod via blue-green %v", initial), initial)
 		res, err := dm.ChallengeMemoryWithTheory(id, "contradicted by ops runbook 2026-08")
 		require.NoError(t, err)
 		assert.Equal(t, "weakened", res["action"])
@@ -78,7 +81,7 @@ func TestF11_RestoreReturnsPriorEpistemicState(t *testing.T) {
 	require.NoError(t, err)
 
 	wChallenged, meta := persistedWeightAndMeta(t, dm, id)
-	assert.Equal(t, 4, wChallenged)
+	assert.Equal(t, float64(4), wChallenged)
 
 	// Restore through the same code path as `mpm challenge restore`:
 	// resolve theory disproven + clear status + reset prior weight.
@@ -87,7 +90,7 @@ func TestF11_RestoreReturnsPriorEpistemicState(t *testing.T) {
 	restoreForTest(t, dm, id, theoryID)
 
 	wRestored, metaAfter := persistedWeightAndMeta(t, dm, id)
-	assert.Equal(t, 6, wRestored, "restore must return the pre-challenge weight")
+	assert.Equal(t, float64(6), wRestored, "restore must return the pre-challenge weight")
 	assert.NotContains(t, metaAfter, "status")
 	assert.NotContains(t, metaAfter, "challenged_theory_id")
 	assert.NotContains(t, metaAfter, "challenged_prior_weight")
@@ -105,7 +108,7 @@ func TestF11_RepeatedChallengeRestoreCyclesStable(t *testing.T) {
 	defer dm.Close()
 
 	id := seedWeightedMemory(t, dm, "retry thrice then alert", 9)
-	const original = 9
+	const original = float64(9)
 
 	for cycle := 0; cycle < 3; cycle++ {
 		_, err := dm.ChallengeMemoryWithTheory(id, "cycle evidence")
@@ -153,7 +156,7 @@ func TestF11_NegativeSlashRejected(t *testing.T) {
 	assert.Error(t, err, "negative slashAmount must be rejected, not inverted into a boost")
 
 	w, _ := persistedWeightAndMeta(t, dm, id)
-	assert.Equal(t, 5, w, "rejected challenge must leave weight untouched")
+	assert.Equal(t, float64(5), w, "rejected challenge must leave weight untouched")
 }
 
 // restoreForTest mirrors cmd/mpm handleChallengeRestore's transaction so the

@@ -981,7 +981,10 @@ func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 
 func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
-	weight := int(internal.ParseFloatOr(p["weight"], 0))
+	// W-004 (2026-08-31): pass float64 directly so fractional weights like
+	// 7.5 persist to the REAL column without truncation. The previous
+	// `int(...)` cast silently coerced 7.5 → 7 before the UPDATE.
+	weight := internal.ParseFloatOr(p["weight"], 0)
 	return dm.SetMemoryWeight(id, weight)
 }
 
@@ -2984,13 +2987,13 @@ func handleRecordGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 	}
 	tagsRaw, _ := p["tags"].(string)
 	tags := splitTags(tagsRaw)
-	weight := 10
+	weight := 10.0
 	if v, ok := p["weight"]; ok {
 		switch t := v.(type) {
 		case float64:
-			weight = int(t)
-		case int:
 			weight = t
+		case int:
+			weight = float64(t)
 		}
 	}
 	provenance, _ := p["provenance"].(string)

@@ -464,7 +464,7 @@ func TestCallHelpers_SetMemoryWeight_ClampsAndUpdates(t *testing.T) {
 
 	out, err := dm.SetMemoryWeight("mem-1", 7)
 	require.NoError(t, err)
-	assert.Equal(t, 7, out["weight"])
+	assert.Equal(t, 7.0, out["weight"])
 
 	var w int
 	require.NoError(t, dm.QueryRowTracked(`SELECT weight FROM memories WHERE id = ?`, "mem-1").Scan(&w))

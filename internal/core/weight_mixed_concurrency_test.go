@@ -98,7 +98,7 @@ func closureBFS(rc0, w0 int, reinforceOK, weakenOK, reinDelta, weakDelta int) ma
 // captures every operation's outcome verbatim, and asserts the
 // durable (rc, weight) is in the closure set for the SUCCESSFUL
 // operation count.
-func runMixedCase(t *testing.T, name string, iters, nReinforce, nWeaken, reinDelta, weakDelta, baselineWeight int) {
+func runMixedCase(t *testing.T, name string, iters, nReinforce, nWeaken, reinDelta, weakDelta int, baselineWeight float64) {
 	t.Helper()
 	dm := newTestFileDM(t)
 	id := seedWeight(t, dm, baselineWeight)
@@ -156,7 +156,7 @@ func runMixedCase(t *testing.T, name string, iters, nReinforce, nWeaken, reinDel
 			t.Fatalf("[%s] iter=%d read: %v", name, iter, err)
 		}
 
-		closure := closureBFS(0, baselineWeight, reinforceOK, weakenOK, reinDelta, weakDelta)
+		closure := closureBFS(0, int(baselineWeight), reinforceOK, weakenOK, reinDelta, weakDelta)
 		key := [2]int{rcFinal, int(wFinal)}
 		if !closure[key] {
 			t.Errorf("[%s] iter=%d: (rc=%d, w=%v) not in closure (succ: r=%d w=%d errs=%v) — silent lost update",

@@ -55,10 +55,10 @@ func TestRecordGlobalRule_HappyPath(t *testing.T) {
 func TestRecordGlobalRule_RejectsInvalidWeight(t *testing.T) {
 	dm := NewTestSharedDM(t)
 
-	for _, bad := range []int{-1, 101, 9999} {
+	for _, bad := range []float64{-1, 101, 9999} {
 		_, err := dm.RecordGlobalRule("rule", nil, bad, "")
 		if err == nil {
-			t.Errorf("expected error for weight=%d, got nil", bad)
+			t.Errorf("expected error for weight=%v, got nil", bad)
 		}
 	}
 }
