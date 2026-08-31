@@ -70,6 +70,41 @@ func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 	})
 }
 
+// TestActiveContextFromEnv_FrameworkPrecedence pins the canonical
+// precedence for the framework-name env var resolution. Audit M-2
+// (post-M3, 2026-08-31) found that mpmcli only read MPM_FRAMEWORK and
+// silently ignored MPM_PROVENANCE_FRAMEWORK — even though the
+// artifact-write channel (provenance.go) and the call-handler channel
+// (call.go) had honored canonical-first since 2026-08.
+//
+// Precedence (after fix):
+//   1. MPM_PROVENANCE_FRAMEWORK (canonical)
+//   2. MPM_FRAMEWORK (legacy fallback)
+//   3. "mcp" (default)
+func TestActiveContextFromEnv_FrameworkPrecedence(t *testing.T) {
+	cases := []struct {
+		name          string
+		provenanceEnv string
+		frameworkEnv  string
+		want          string
+	}{
+		{"both_set_canonical_wins", "opencode", "claude-code", "opencode"},
+		{"only_canonical", "opencode", "", "opencode"},
+		{"only_legacy", "", "claude-code", "claude-code"},
+		{"both_empty_defaults_to_mcp", "", "", "mcp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MPM_PROVENANCE_FRAMEWORK", tc.provenanceEnv)
+			t.Setenv("MPM_FRAMEWORK", tc.frameworkEnv)
+			ac := ActiveContextFromEnv()
+			if ac.FrameworkName != tc.want {
+				t.Errorf("FrameworkName = %q, want %q", ac.FrameworkName, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolveWorkspace_DefaultsDivergence documents the deliberate
 // divergence between two workspace resolvers:
 //

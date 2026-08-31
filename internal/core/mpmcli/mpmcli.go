@@ -43,10 +43,18 @@ func ResolveWorkspace() string {
 // global-only when framework is the empty string, so the hardcoded
 // default never accidentally surfaces a framework-scoped directive.
 //
+// Precedence: MPM_PROVENANCE_FRAMEWORK (canonical) is consulted
+// before MPM_FRAMEWORK (legacy fallback). Mirrors the precedence used
+// by internal/core/provenance.go (artifact-write channel) and
+// cmd/mpm/call.go (call-handler channel). See docs/provenance-env.md.
+//
 // See docs/archive/directives.md §5 for the runtime transport
 // contract.
 func ActiveContextFromEnv() internal.ActiveContext {
-	framework := os.Getenv("MPM_FRAMEWORK")
+	framework := os.Getenv("MPM_PROVENANCE_FRAMEWORK")
+	if framework == "" {
+		framework = os.Getenv("MPM_FRAMEWORK")
+	}
 	if framework == "" {
 		framework = "mcp"
 	}
