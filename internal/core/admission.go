@@ -11,12 +11,9 @@ package internal
 // and lets admission use any synth.SynthClient (or mock) interchangeably.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -106,9 +103,14 @@ type AdmitChainEntry struct {
 // free function that takes the client as an argument. Keeps the synth
 // package free of admission concerns and avoids the cross-package method
 // receiver Go restriction.
+//
+// Post-M3 audit H-1 (2026-08-31): prior version hardcoded `/messages`
+// + `X-Api-Key` and was a single-attempt call (no retry). Routed
+// through client.doLLMRequest so admission picks up wire-aware path +
+// auth + retry parity with Synthesize and SynthesizeCompactLesson.
 func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate *AdmissionCandidate) (*AdmitResult, error) {
 	if client.APIKey == "" {
-		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or MINIMAX_API_KEY env var)")
+		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
 
 	userContent := candidate.ToPrompt()
@@ -121,31 +123,10 @@ func EvaluateCandidate(ctx context.Context, client *synth.SynthClient, candidate
 			{"role": "user", "content": userContent},
 		},
 	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", client.BaseURL+"/messages", bytes.NewReader(payload))
+	respBody, err := client.DoLLMRequest(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-Key", client.APIKey)
-
-	httpClient := &http.Client{Timeout: client.Timeout}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("admission API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("admission API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("admission: %w", err)
 	}
 
 	rawResult, err := client.ParseResponseBody(respBody, "admission")
