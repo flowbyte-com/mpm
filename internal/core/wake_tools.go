@@ -760,9 +760,21 @@ func nullableInt64(p *int64) interface{} {
 // visually distinct from the tool's actual output without requiring custom
 // per-client annotation parsing.
 //
-// Each wake entry includes: id (truncated), reason (up to 80 chars), and
-// overdue_secs so the agent can autonomously triage (alert immediately,
-// archive as stale, etc.).
+// Each wake entry includes: id (truncated), reason (up to 80 chars),
+// overdue_secs, and (when present) directive_id — the latter extracted
+// from the wake's metadata so the agent can identify which prime
+// directive to consult without a follow-up lookup. The directive_id
+// field is the canonical seam between the substrate (which delivers
+// the wake) and the agent (which reads the directive and acts). For
+// cron-injected wakes from seed.SeedScheduledTasks, this is the
+// stable id the agent should pass to read_directives.
+//
+// Fields omitted when not applicable:
+//
+//   - directive_id is only rendered when the wake's metadata has a
+//     non-empty `directive_id` string. Notification-kind wakes and
+//     cascade wakes without a directive reference render without the
+//     field — preserves the legacy contract for non-cron wakes.
 func FormatWakeNotification(wakes []map[string]interface{}) string {
 	if len(wakes) == 0 {
 		return ""
@@ -783,10 +795,50 @@ func FormatWakeNotification(wakes []map[string]interface{}) string {
 		} else if o, ok := w["overdue_secs"].(float64); ok {
 			overdueSecs = int64(o)
 		}
-		b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n", id, reason, overdueSecs))
+		// Extract directive_id from the parsed metadata map, if
+		// present. Defensive against both nil metadata and
+		// non-string directive_id (e.g. null) — the field is omitted
+		// rather than rendered as "directive_id=null" which would
+		// confuse the LLM triage path.
+		directiveID := extractDirectiveID(w)
+		if directiveID != "" {
+			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d | directive_id=%q\n",
+				id, reason, overdueSecs, directiveID))
+		} else {
+			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n",
+				id, reason, overdueSecs))
+		}
 	}
 	b.WriteString("</system_wake_notification>\n")
 	return b.String()
+}
+
+// extractDirectiveID pulls the directive_id string out of a wake row
+// map, defensively. The map's metadata key (when present) is a
+// parsed JSON object (from wakeRowToMap), but external callers
+// passing a raw row map may also have a string-typed metadata —
+// handle both shapes for forward compatibility.
+func extractDirectiveID(w map[string]interface{}) string {
+	meta, ok := w["metadata"]
+	if !ok || meta == nil {
+		return ""
+	}
+	switch v := meta.(type) {
+	case map[string]interface{}:
+		if id, ok := v["directive_id"].(string); ok {
+			return id
+		}
+	case string:
+		// Best-effort: parse if it looks like JSON. Keep the call
+		// cheap (single attempt, swallow errors).
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(v), &parsed); err == nil {
+			if id, ok := parsed["directive_id"].(string); ok {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 // maxBytes truncates s to max rune count, appending U+2026 if trimmed.

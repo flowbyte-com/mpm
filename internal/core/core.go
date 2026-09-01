@@ -12,6 +12,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/flowbyte-com/mpm-core/seed"
 )
 
 // DecisionFilter narrows the result set for ListDecisions. The zero value
@@ -301,6 +303,14 @@ type CoreDB interface {
 	UpsertScheduledTask(task ScheduledTask) error
 	ListScheduledTasks() ([]ScheduledTask, error)
 	DeleteScheduledTask(id string) error
+	// SeedBaselineScheduledTasks is the public wrapper around the
+	// Baseline Cognitive Bootstrap for scheduled tasks (registry in
+	// internal/core/seed/scheduled_tasks.go, apply logic in db.go).
+	// Idempotent: existing rows with the canonical stable id are
+	// preserved verbatim; only the canonical rows that are absent
+	// are inserted. Called by `mpm ops init tasks` and by
+	// NewDatabaseManager at every production boot.
+	SeedBaselineScheduledTasks() (seed.SeedTaskSummary, error)
 
 	// ─── Arc 2: Active Dissemination ────────────────────────────────
 	BroadcastMemory(memoryID string, opts BroadcastOpts) (*BroadcastReport, error)

@@ -134,7 +134,7 @@ var SeedDirectives = []SeedDirective{
 		StableID: "mpm-seed-wake-triage-policy",
 		Tags:     []string{"prime_directive", "wake", "triage", "notification", "2026-07-09"},
 		Scope:    "global",
-		Content: "When receiving a <system_wake_notification> block in any MCP tool response (it is always Block 1, prepended before the tool's JSON result):\n\n1. Parse each entry. Each entry has id, reason, and overdue_secs.\n\n2. Triage rule: if overdue_secs <= 86400 (24 hours), alert the user IMMEDIATELY before continuing whatever they were doing. The wake is timely. Include the wake reason verbatim or paraphrased.\n\n3. If overdue_secs > 86400, the wake is stale. DO NOT interrupt the user with the obsolete notification. Silently archive it by calling mpm call record_global_rule with a brief fact explaining why it expired (e.g. \"Spain WC theory wake fired 5 days late; resolved manually as theory is now in active tracking\"). Then continue the conversation as if the wake had not fired.\n\n4. Exception: if the wake's reason text contains the words 'critical', 'urgent', or 'immediate' (case-insensitive), it bypasses the 24-hour threshold and ALWAYS interrupts the user, regardless of overdue_secs. These are time-sensitive operational signals, not background reminders.\n\n5. The <system_wake_notification> is delivered on EVERY tool call, not just scheduled_wake-related ones. This is the opportunistic fold: any user interaction surfaces due wakes. Do not be confused into thinking the wake is part of the tool's actual output — the XML block is a system interrupt prepended to the response.",
+		Content: "When receiving a <system_wake_notification> block in any MCP tool response (it is always Block 1, prepended before the tool's JSON result):\n\n1. Parse each entry. Each entry has id, reason, overdue_secs, and (for cron-style wakes) an optional directive_id. The directive_id names the prime directive the agent should consult via `mpm call mpm_context --payload '{\"action\":\"read_directives\"}'` — it is the canonical seam between the substrate (which delivers the wake) and the agent (which reads the directive and acts).\n\n2. Triage rule: if overdue_secs <= 86400 (24 hours), alert the user IMMEDIATELY before continuing whatever they were doing. The wake is timely. Include the wake reason verbatim or paraphrased.\n\n3. If overdue_secs > 86400, the wake is stale. DO NOT interrupt the user with the obsolete notification. Silently archive it by calling mpm call record_global_rule with a brief fact explaining why it expired (e.g. \"Spain WC theory wake fired 5 days late; resolved manually as theory is now in active tracking\"). Then continue the conversation as if the wake had not fired.\n\n4. Exception: if the wake's reason text contains the words 'critical', 'urgent', or 'immediate' (case-insensitive), it bypasses the 24-hour threshold and ALWAYS interrupts the user, regardless of overdue_secs. These are time-sensitive operational signals, not background reminders.\n\n5. The <system_wake_notification> is delivered on EVERY tool call, not just scheduled_wake-related ones. This is the opportunistic fold: any user interaction surfaces due wakes. Do not be confused into thinking the wake is part of the tool's actual output — the XML block is a system interrupt prepended to the response.",
 	},
 	{
 		// The daemon-health directive. Closed-loop: agent wake (session start)
@@ -155,6 +155,40 @@ var SeedDirectives = []SeedDirective{
 		Tags:     []string{"prime_directive", "daemon", "lazy-start", "ecryptfs", "runtime-death", "2026-07-23"},
 		Scope:    "global",
 		Content: "On every session start, after read_wake_context, run `systemctl --user is-active mpm-scheduler`. Two distinct inactive states need different framing:\n\n1. Lazy-Start Architecture (EXPECTED after reboot with encrypted /home). When /home is eCryptfs-encrypted, the daemon is DESIGNED to stay dead at boot. The lockfile lives inside the encrypted tree (~/.mpm/scheduler.lock); starting the daemon before /home is decrypted would either fail (inaccessible path) or risk writing to the wrong location. Boot + locked home = SAFE state. This agent's wake event is the trigger that spins the daemon up post-decryption. It is a security feature, not a bug — see INSTALL.md §2 and README §5.2 for the full rationale.\n\n2. Runtime death (UNEXPECTED, real issue). A clean `context canceled` exit leaves the daemon dead; Restart=always in the user-level unit does not fire on graceful exit. The vital-signs check at every wake is the workaround until the structural root-cause lands. See memory 9e7830172663ed29 for the 2026-07-22 incident details.\n\nRecovery (applies to both cases): (a) systemctl --user start mpm-scheduler, (b) wait 2s, re-check. If still inactive, surface to v immediately with the last 10 lines of `journalctl --user -u mpm-scheduler --no-pager` and DO NOT call mpm stats, scheduled-wake tooling, or any daemon-dependent substrate operation until the daemon is confirmed active.",
+	},
+	{
+		// The epistemic-compaction reflex directive. Closed-loop: scheduled
+		// wake (id `epistemic-compaction`, cron `0 3 * * *`) → agent reads
+		// this directive → invokes mpm_system.compact with force=false →
+		// bounded drain reduces raw_count below threshold. The scheduler
+		// ONLY delivers the wake; it does NOT perform LLM compaction
+		// itself. The agent owns this reflex.
+		//
+		// force=false is the safe reflex: the drain stops as soon as
+		// raw_count <= threshold. Do NOT pass force=true from a
+		// scheduled wake — that bypasses the pressure gate and is the
+		// explicit operator/agent choice, not a scheduled-task reflex.
+		// The 50-item per-batch cap and max_batches safety cap are not
+		// affected by force.
+		//
+		// Inspect the response's stop_reason and raw_remaining:
+		//   "no_work"              → no eligible raw memories
+		//   "completed"            → eligible rows consumed; raw_remaining
+		//                            may be > 0 if ineligible rows remain
+		//   "threshold_reached"    → pressure relieved; eligible rows
+		//                            may remain below the gate
+		//   "max_batches_reached"  → safety cap hit; re-run next cycle
+		//   "failure"              → mid-drain batch failure; earlier
+		//                            batches are durable, log the
+		//                            failure_reason, do NOT retry
+		//                            inside the same wake
+		//
+		// success=true does NOT mean raw_remaining == 0. success=false
+		// is set ONLY on a mid-drain batch failure.
+		StableID: "mpm-seed-epistemic-compaction-policy",
+		Tags:     []string{"prime_directive", "epistemic_pressure", "compaction", "scheduled_directive", "2026-09-01"},
+		Scope:    "global",
+		Content: "When the wake context reports epistemic_pressure.exceeded=true (typically from the canonical `epistemic-compaction` scheduled task; verify via `mpm tasks list`), run:\n\n  mpm call mpm_system --payload '{\"action\":\"compact\",\"params\":{\"force\":false,\"max_batches\":5}}'\n\nto drain eligible raw memories into lessons.\n\nforce=false is the safe reflex: the drain stops as soon as raw_count <= threshold. Do NOT pass force=true from a scheduled wake — that bypasses the pressure gate and is the explicit operator/agent choice, not a scheduled-task reflex. The 50-item per-batch cap and max_batches safety cap are not affected by force.\n\nInspect the response's stop_reason and raw_remaining:\n  - \"no_work\"              → no eligible raw memories\n  - \"completed\"            → eligible rows consumed; raw_remaining may be > 0 (ineligible rows do not count)\n  - \"threshold_reached\"    → pressure relieved; eligible rows may remain below the gate\n  - \"max_batches_reached\"  → safety cap hit; re-run next scheduled cycle to continue\n  - \"failure\"              → mid-drain batch failure; earlier batches are durable, log the failure_reason, do NOT retry inside the same wake\n\nsuccess=true does NOT mean raw_remaining == 0. success=false is set ONLY on a mid-drain batch failure. The wake is timely if overdue_secs <= 86400 (24h); beyond that it is stale — see mpm-seed-wake-triage-policy.\n\nThis directive is invoked by the canonical epistemic-compaction scheduled task. The scheduler only delivers the wake; it does NOT invoke compaction itself. The agent owns this reflex.",
 	},
 }
 
