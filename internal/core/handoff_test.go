@@ -168,15 +168,13 @@ func TestHandoff_EndSession_EmptySlicesSerializeAsBrackets(t *testing.T) {
 }
 
 // TestHandoff_EndSession_RejectsBadInputs covers the validation paths:
-// empty session_id, empty summary, nil DB.
+// empty summary and nil DB. (Empty session_id is intentionally NOT
+// rejected — see TestHandoff_EndSession_EmptySessionIDCoexists for the
+// new "external session IDs are optional" contract.)
 func TestHandoff_EndSession_RejectsBadInputs(t *testing.T) {
 	dm := newHandoffTestDM(t)
 
-	_, err := dm.EndSession("", "summary", HandoffClean, nil, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "session_id is required")
-
-	_, err = dm.EndSession("sid", "", HandoffClean, nil, nil)
+	_, err := dm.EndSession("sid", "", HandoffClean, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "summary is required")
 

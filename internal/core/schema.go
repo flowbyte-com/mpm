@@ -859,9 +859,22 @@ var CommonIndexes = []string{
 	// surfaced in wake. Distinct from the dormant `sessions` table (which
 	// holds content snapshots) — handoffs are bootstrap data, not logs.
 	// 90-day TTL enforced by gc sweep.
+	//
+	// session_id is OPTIONAL — it is opaque correlation metadata the
+	// caller may supply (typically the framework's own session
+	// identifier), but the durable identity of a handoff is the
+	// MPM-generated `id` and `created_at`. NULL session_id rows are
+	// permitted (multiple NULLs coexist because SQLite's UNIQUE
+	// constraints treat each NULL as distinct from every other value,
+	// including other NULLs — sqlite.org/lang_createtable §3).
+	// The UPSERT-on-collision semantics in EndSession therefore key
+	// on the supplied session_id when present and INSERT-fresh when
+	// absent. See migration_session_handoffs_optional_session_id.go
+	// for the upgrade-in-place migration that drops NOT NULL on
+	// pre-existing on-disk databases.
 	`CREATE TABLE IF NOT EXISTS session_handoffs (
 		id            TEXT PRIMARY KEY,
-		session_id    TEXT NOT NULL UNIQUE,
+		session_id    TEXT UNIQUE,
 		ended_at      INTEGER NOT NULL,
 		ended_state   TEXT NOT NULL CHECK (ended_state IN ('clean','crashed','interrupted','force_end')),
 		summary       TEXT NOT NULL,

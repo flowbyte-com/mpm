@@ -1972,6 +1972,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("cascade wake_scheduled migration failed: %w", err)
 	}
+	// session_handoffs.session_id → nullable. See
+	// migration_session_handoffs_optional_session_id.go for the
+	// rationale (external session identifiers are correlation metadata,
+	// not a prerequisite for handoff persistence).
+	if err := MigrateSessionHandoffsOptionalSessionID(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("session_handoffs session_id optional migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}
