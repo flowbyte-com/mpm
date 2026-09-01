@@ -29,6 +29,15 @@ import (
 // still 0, and re-schedules the cascade wake for each. Returns the
 // number of wakes successfully recovered.
 //
+// Concurrency model: the SELECT-then-UPDATE pattern is racy on its
+// own (two passes can SELECT the same row before either commits the
+// flag flip, causing double-booking). The fix is to schedule the wake
+// FIRST and atomically claim the row via an UPDATE with
+// `WHERE wake_scheduled = 0`. The UPDATE returns RowsAffected=1 only
+// if THIS pass won the race; if another pass already flipped the
+// flag, the UPDATE affects 0 rows and the duplicate wake is deleted
+// to keep wake count bounded.
+//
 // The function is idempotent: re-running on the same database will
 // recover zero rows once the prior pass has flushed its flag writes.
 // On a wake-scheduling failure for a single row, the loop logs and
@@ -83,27 +92,46 @@ func ReconcileUnscheduledCascadeWakes(ctx context.Context, dm *DatabaseManager) 
 			"source":                "cascade-reconciler",
 		}
 
-		if _, schedErr := dm.ScheduleWake(reason, time.Now().Format(time.RFC3339),
-			p.theoryID, "", "cascade-reconciler", meta); schedErr != nil {
+		wakeResult, schedErr := dm.ScheduleWake(reason, time.Now().Format(time.RFC3339),
+			p.theoryID, "", "cascade-reconciler", meta)
+		if schedErr != nil {
 			dm.LogAudit(AuditWarn, "cascade-reconciler",
 				fmt.Sprintf("failed to reschedule wake for theory=%s intent=%s: %v",
 					p.theoryID, p.intentID, schedErr), "", nil)
 			continue
 		}
 
-		// Defense Triad #3 — flip the wake_scheduled flag immediately
-		// after ScheduleWake succeeds, so the next reconcile pass does
-		// not double-book. read-back assertion is implicit: a second
-		// reconcile tick will find wake_scheduled=1 and skip.
-		if _, markErr := dm.db.ExecContext(ctx, `
+		// Atomic claim via conditional UPDATE. If another reconcile
+		// pass already flipped wake_scheduled=1 between our SELECT and
+		// this UPDATE, RowsAffected=0 and we MUST delete the duplicate
+		// wake to keep wake count bounded.
+		res, claimErr := dm.db.ExecContext(ctx, `
 			UPDATE epistemic_cascade_outbox
 			SET wake_scheduled = 1, updated_at = ?
-			WHERE id = ?
-		`, time.Now().Unix(), p.intentID); markErr != nil {
+			WHERE id = ? AND wake_scheduled = 0
+		`, time.Now().Unix(), p.intentID)
+		if claimErr != nil {
+			// Roll back the just-scheduled wake so we don't leave a
+			// orphan wake for a row that another pass already owns.
+			deleteOrphanWake(dm, wakeResult)
 			dm.LogAudit(AuditError, "cascade-reconciler",
-				fmt.Sprintf("failed to mark wake_scheduled for intent=%s after reschedule: %v",
-					p.intentID, markErr), "", nil)
-			return recovered, fmt.Errorf("mark wake_scheduled for intent=%s: %w", p.intentID, markErr)
+				fmt.Sprintf("failed to atomically claim wake_scheduled for intent=%s: %v",
+					p.intentID, claimErr), "", nil)
+			return recovered, fmt.Errorf("atomic claim wake_scheduled for intent=%s: %w", p.intentID, claimErr)
+		}
+		affected, raErr := res.RowsAffected()
+		if raErr != nil {
+			deleteOrphanWake(dm, wakeResult)
+			return recovered, fmt.Errorf("rows-affected for claim: %w", raErr)
+		}
+		if affected == 0 {
+			// Lost the race: another pass already flipped the flag.
+			// Delete the duplicate wake we just scheduled.
+			deleteOrphanWake(dm, wakeResult)
+			dm.LogAudit(AuditInfo, "cascade-reconciler",
+				fmt.Sprintf("lost race for intent=%s theory=%s — duplicate wake deleted",
+					p.intentID, p.theoryID), "", nil)
+			continue
 		}
 
 		recovered++
@@ -113,4 +141,22 @@ func ReconcileUnscheduledCascadeWakes(ctx context.Context, dm *DatabaseManager) 
 	}
 
 	return recovered, nil
+}
+
+// deleteOrphanWake removes a wake that was scheduled but lost the
+// race to own its outbox row. The wakeResult map is the return value
+// of dm.ScheduleWake (contains "id"). Best-effort: a delete failure
+// is logged but does not surface to the caller — the wake will be
+// filtered at delivery time via the per-check delivery cap.
+func deleteOrphanWake(dm *DatabaseManager, wakeResult map[string]interface{}) {
+	wakeID, ok := wakeResult["id"].(string)
+	if !ok || wakeID == "" {
+		return
+	}
+	if _, err := dm.db.Exec(
+		`DELETE FROM scheduled_wakes WHERE id = ?`, wakeID,
+	); err != nil {
+		dm.LogAudit(AuditWarn, "cascade-reconciler",
+			fmt.Sprintf("failed to delete orphan wake id=%s: %v", wakeID, err), "", nil)
+	}
 }
