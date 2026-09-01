@@ -210,7 +210,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		const lessonCount = ep.lesson_count;
 		const lessonStr = typeof lessonCount === "number" ? `, lessons=${lessonCount}` : "";
 		lines.push(
-			`\nEpistemic pressure is elevated (ratio=${ratioStr}${lessonStr}). Consider running \`mpm_system\` with action "gc_run" to consolidate.`,
+			`\nEpistemic pressure is elevated (ratio=${ratioStr}${lessonStr}). Run \`mpm_system\` with action "compact" to drain outstanding eligible raw memories into lessons (≤50 per LLM batch, atomic per batch, repeats until no eligible rows remain).`,
 		);
 	}
 	lines.push(
@@ -456,8 +456,8 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 		name: "mpm_system",
 		label: "MPM System",
 		description: `Maintenance, audit, and diagnostics. Literal actions:
-  gc_run — Lifecycle decay sweep. Optional: params.dry_run (default true), params.aggressive, params.max_age_hours (default 24).
-  compact — Compact raw memories into a lesson. Optional: params.force.
+  gc_run — Lifecycle decay sweep. Optional: params.dry_run (default true), params.aggressive, params.max_age_hours (default 24). NOT for epistemic pressure — use "compact" when epistemic_pressure.exceeded is true.
+  compact — Drain outstanding eligible raw memories into lessons. Processes every eligible row in sequential batches of at most 50 (the LLM context safeguard); each batch is independently atomic. Continues until no eligible rows remain, the per-invocation batch cap is reached, or a batch fails. Optional params: force (default false, bypasses pressure threshold), max_batches (default 20, hard cap 100). Response: success, batches_processed, raw_processed, lessons_created, raw_remaining, lesson_ids, stop_reason, plus failed_batch/failure_reason on partial failure. The 50-item batch limit is load-bearing on every batch.
   health_check — SQLite integrity + domain counts. No params.
   migrate — Import from markdown/JSON. Required params.from_path. Optional: params.format, params.label, params.dry_run, params.commit, params.commit_batch, params.undo_batch.
   query_audit_log — Query anomaly ledger. Optional: params.level, params.component, params.days (default 7), params.limit (default 20).
