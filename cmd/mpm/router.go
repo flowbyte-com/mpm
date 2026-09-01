@@ -305,7 +305,13 @@ func (r *CommandRouter) Execute(args []string) int {
 	case "why":
 		return handleWhy(args[1:])
 	case "lint":
-		return handleLint(args)
+		// W-6 (debt burn-down, 2026-09-01): the top-level dispatch was
+		// passing `args` (which still contains "lint" at index 0) into
+		// handleLint, causing the handler's flag loop to see "lint" as
+		// the first positional and reject it with "unknown flag 'lint'".
+		// Strip the command name so handleLint sees only flags, matching
+		// the convention used by handleWhy and the ops subcommand path.
+		return handleLint(args[1:])
 	case "switch":
 		return r.handleSwitch()
 	case "add":
