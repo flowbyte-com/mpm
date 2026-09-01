@@ -1,15 +1,35 @@
 // compact.go — Phase 2 of the epistemic compaction pipeline.
 //
 // The compact_epistemology MCP tool is the agent's reflex to the
-// epistemic_pressure trigger (see wake_context.go). It extracts a
-// bounded batch of raw memories, hands them to the LLM for synthesis,
-// validates the response structurally, then commits a lesson and
-// marks the raw memories in a single transaction.
+// epistemic_pressure trigger (see wake_context.go). The PUBLIC surface
+// is CompactEpistemologyDrain, a bounded sequential drain that loops
+// the per-batch primitive (CompactEpistemology) until no eligible raw
+// memories remain, the pressure threshold condition is satisfied, the
+// safety cap is hit, or a batch fails. The 50-item LLM context
+// safeguard (compactBatchSize) is preserved on every batch.
 //
-// The PUBLIC surface is CompactEpistemologyDrain, which loops
-// CompactEpistemology (the per-batch primitive) until no eligible raw
-// memories remain. The 50-item LLM context safeguard (compactBatchSize)
-// is preserved on every batch — only the loop boundary changed.
+// Compact semantics:
+//
+//   - force=false (default) — compact RELIEVES pressure. The drain
+//     stops as soon as raw_count <= threshold. Eligible raw memories
+//     may remain after the call. This is the reflex to
+//     epistemic_pressure.exceeded=true.
+//   - force=true            — compact DRAINS everything. The threshold
+//     gate is bypassed; the drain continues until the substrate is
+//     empty or the safety cap is hit.
+//   - max_batches           — per-invocation cap on LLM calls (default
+//     20, hard cap 100). 20 batches × 50 raw = 1000 raw memories per
+//     call. Protects against runaway LLM cost when new eligible raw
+//     memories arrive faster than the drain can consume them.
+//
+// StopReason taxonomy (always set on return):
+//
+//   - "no_work"             substrate was empty from the start.
+//   - "completed"           every eligible row was consumed.
+//   - "threshold_reached"   force=false and raw count fell to/at the
+//                           threshold; eligible rows remain.
+//   - "max_batches_reached" safety cap hit; eligible rows remain.
+//   - "failure"             mid-drain batch failure (success=false).
 //
 // Atomicity guarantee: the lesson insert and the raw-memory mark
 // happen in one SQL transaction per batch. Either both commit or
@@ -105,22 +125,44 @@ const compactBatchSize = 50
 // batches × 50 raw = 1000 raw memories per invocation, matching the
 // original design rationale ("draining a backlog of 1000+ raw in
 // ~20 calls"). Prevents runaway LLM cost when new eligible raw
-// memories arrive faster than the drain can consume them.
+// memories arrive faster than the drain can consume them, and makes
+// the absolute worst-case cost of a single compact call bounded.
 const compactDrainMaxBatchesDefault = 20
 
 // compactDrainMaxBatchesHardCap is the absolute upper bound accepted
 // from callers (regardless of what they pass). 100 batches × 50 raw
 // = 5000 raw memories — large enough for any realistic backlog,
-// small enough to keep a single invocation bounded.
+// small enough to keep a single invocation bounded. Callers passing
+// a value above this are silently clamped, not rejected.
 const compactDrainMaxBatchesHardCap = 100
 
 // CompactEpistemologyDrainResult is the wire-format return shape for
 // the drain-mode compact operation. Aggregates per-batch results from
 // the underlying CompactEpistemology primitive.
 //
+// StopReason vocabulary (always set on return):
+//   - "no_work"             — substrate was empty from the start;
+//                              0 batches ran. SkippedReason="no_raw_memories".
+//   - "completed"           — at least one batch ran and every eligible
+//                              row has been consumed. raw_remaining=0.
+//   - "threshold_reached"   — force=false and raw_count fell to/at the
+//                              configured threshold during the drain.
+//                              The remaining raw memories are eligible
+//                              but the threshold gate stopped further
+//                              compaction. SkippedReason="below_threshold".
+//   - "max_batches_reached" — caller-requested or default safety cap
+//                              (default 20 batches, hard cap 100) was
+//                              hit. Work may remain; check raw_remaining.
+//   - "failure"             — a mid-drain batch failed. Earlier batches
+//                              remain committed; FailedBatch and
+//                              FailureReason identify the failed batch.
+//
 // Field semantics:
-//   - Success: false only when a mid-drain batch failed. Always true
-//     for "drained cleanly" and "below_threshold" skip paths.
+//   - Success: false ONLY on "failure". Always true for every other
+//     stop_reason — including "threshold_reached" and
+//     "max_batches_reached", where the operation completed successfully
+//     but work remains. Callers must inspect stop_reason (not success)
+//     to determine whether the substrate is fully drained.
 //   - BatchesProcessed: count of batches that committed a lesson.
 //   - RawProcessed: sum of compacted raw memories across all batches.
 //   - LessonsCreated: equal to BatchesProcessed on success (1 lesson
@@ -129,9 +171,8 @@ const compactDrainMaxBatchesHardCap = 100
 //     the loop ends. Reflects concurrent writes — the canonical source
 //     of truth.
 //   - LessonIDs: lesson IDs created in batch order.
-//   - SkippedReason: set when 0 batches were processed (no_raw_memories
-//     or below_threshold).
-//   - StopReason: "drained" | "max_batches" | "failed".
+//   - SkippedReason: set only on "no_work" (no_raw_memories) or
+//     "threshold_reached" (below_threshold).
 type CompactEpistemologyDrainResult struct {
 	Success         bool     `json:"success"`
 	BatchesProcessed int     `json:"batches_processed"`
@@ -140,7 +181,7 @@ type CompactEpistemologyDrainResult struct {
 	RawRemaining    int      `json:"raw_remaining"`
 	LessonIDs       []string `json:"lesson_ids,omitempty"`
 	SkippedReason   string   `json:"skipped_reason,omitempty"`
-	StopReason      string   `json:"stop_reason,omitempty"`
+	StopReason      string   `json:"stop_reason"`
 	// Partial-failure visibility. FailedBatch is 1-indexed.
 	FailedBatch   int    `json:"failed_batch,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
@@ -152,15 +193,21 @@ var compactSynthesizeFunc = func(ctx context.Context, rawMemories []string) (str
 	return synth.NewSynthClient().SynthesizeCompactLesson(ctx, rawMemories)
 }
 
-// CompactEpistemology is the DM method backing the MCP tool. Pure
-// orchestration: pre-check, extract, synthesize, validate, transaction.
-// The caller (tool handler) supplies ctx and force flag; force=true
-// bypasses the pressure threshold check (rare — explicit agent override).
+// CompactEpistemology is the per-batch primitive. Pure orchestration:
+// pre-check, extract, synthesize, validate, transaction. The caller
+// (CompactEpistemologyDrain or test code) supplies ctx and force flag;
+// force=true bypasses the pressure threshold pre-check so this single
+// batch proceeds even when raw_count <= threshold.
 //
 // Return shape: non-nil result on no-op paths (pre-check failed,
 // threshold not exceeded) with SkippedReason set. Non-nil error on
 // synthesis / validation / DB failures. Either way, the data plane
 // is consistent — no partial states ever persist.
+//
+// Callers that need a bounded multi-batch drain should use
+// CompactEpistemologyDrain instead. CompactEpistemology is exposed
+// for direct use only when the caller genuinely wants exactly one
+// batch (tests, or a future orchestrator that manages its own loop).
 func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error) {
 	// 1. Pre-check — read the pressure gauge. Bail out cheaply on no-op.
 	rawCount, threshold, err := dm.compactPreCheck(ctx)
@@ -219,30 +266,39 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 // CompactEpistemologyDrain is the public drain-mode compact surface.
 // Loops the per-batch primitive (CompactEpistemology) until no
 // eligible raw memories remain, the per-invocation batch cap is hit,
-// or a batch fails. The 50-item LLM context safeguard applies on
-// every batch — only the loop boundary was added.
+// the pressure threshold condition is satisfied, or a batch fails.
+// The 50-item LLM context safeguard applies on every batch — only the
+// loop boundary was added.
 //
-// Termination:
-//   - "drained" — last batch was partial (< batchSize), or the next
-//     pre-check returned SkippedReason: "no_raw_memories" / "below_threshold".
-//   - "max_batches" — caller-requested or default safety cap reached.
-//     RawRemaining reflects work still to be done.
-//   - "failed" — a mid-drain batch failed. Earlier successful batches
-//     remain committed; the failed batch and all subsequent eligible
-//     rows are untouched. The next invocation resumes from the
-//     remaining work.
+// StopReason taxonomy (see result struct doc):
 //
-// Each batch stays independently atomic — the per-batch transaction
-// boundary is inside CompactEpistemology. The drain loop holds NO
-// transaction across iterations.
+//   - "no_work"             substrate was empty from the start.
+//   - "completed"           every eligible row was consumed.
+//   - "threshold_reached"   force=false and the raw count fell to/at
+//                           the threshold; eligible rows remain.
+//   - "max_batches_reached" safety cap hit; eligible rows remain.
+//   - "failure"             mid-drain batch failure (success=false).
+//
+// force semantics: passed through to each per-batch call.
+//
+//   - force=false — compact RELIEVES pressure. The drain stops as
+//     soon as the pressure threshold condition is satisfied
+//     (raw_count <= threshold). Eligible raw memories may remain.
+//     This is the default reflex to epistemic_pressure.exceeded=true.
+//   - force=true  — compact DRAINS everything. The threshold gate is
+//     bypassed; the drain continues until the substrate is empty or
+//     the per-invocation safety cap is hit.
+//
+// The 50-item batch safety is unrelated to force — every batch is
+// capped at compactBatchSize regardless of force or threshold.
 //
 // maxBatches semantics:
 //   - 0 or negative: use compactDrainMaxBatchesDefault (20).
 //   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (100).
 //
-// force semantics: passed through to each per-batch call. force=false
-// stops the drain at the pressure threshold; force=true drains every
-// eligible row regardless of threshold.
+// Each batch stays independently atomic — the per-batch transaction
+// boundary is inside CompactEpistemology. The drain loop holds NO
+// transaction across iterations.
 func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error) {
 	if maxBatches <= 0 {
 		maxBatches = compactDrainMaxBatchesDefault
@@ -252,8 +308,9 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 	}
 
 	result := &CompactEpistemologyDrainResult{
-		Success:   true,
-		LessonIDs: []string{},
+		Success:    true,
+		StopReason: "", // explicit; set by every return path
+		LessonIDs:  []string{},
 	}
 
 	for i := 0; i < maxBatches; i++ {
@@ -264,7 +321,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 			// all subsequent eligible rows are untouched. Report
 			// success=false with the partial aggregate and the error.
 			result.Success = false
-			result.StopReason = "failed"
+			result.StopReason = "failure"
 			result.FailedBatch = i + 1
 			result.FailureReason = err.Error()
 			result.RawRemaining = dm.liveRawCount(ctx)
@@ -273,15 +330,22 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 
 		// Skip path — pre-check said no work to do.
 		if batch.SkippedReason != "" {
-			// Always propagate the skip reason. Whether the loop ran
-			// zero batches (empty substrate, force=false below
-			// threshold) or stopped mid-stream (raw fell below
-			// threshold after some commits), the agent benefits from
-			// knowing why. The "drained" stop reason is implied by
-			// StopReason; the skipped_reason field carries the
-			// diagnostic of the iteration that ended the loop.
 			result.SkippedReason = batch.SkippedReason
-			result.StopReason = "drained"
+			switch batch.SkippedReason {
+			case "no_raw_memories":
+				if result.BatchesProcessed == 0 {
+					result.StopReason = "no_work"
+				} else {
+					// Hit the empty-substrate path after doing some
+					// work (theoretical — concurrent drain would have
+					// to leave raw at 0, but stays consistent).
+					result.StopReason = "completed"
+				}
+			case "below_threshold":
+				result.StopReason = "threshold_reached"
+			default:
+				result.StopReason = "completed"
+			}
 			break
 		}
 
@@ -298,7 +362,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 		// "no_raw_memories". Exit early without paying for the
 		// redundant pre-check on the next iteration.
 		if batch.Compacted < compactBatchSize {
-			result.StopReason = "drained"
+			result.StopReason = "completed"
 			break
 		}
 	}
@@ -306,7 +370,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 	if result.StopReason == "" {
 		// Loop ran to maxBatches without a partial-batch or skip
 		// signal — the safety cap was reached. Work may remain.
-		result.StopReason = "max_batches"
+		result.StopReason = "max_batches_reached"
 	}
 
 	// Final raw_remaining from the canonical live view. Reflects

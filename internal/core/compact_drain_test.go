@@ -118,8 +118,8 @@ func TestDrain_Empty(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "no_work" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "no_work")
 	}
 	if res.SkippedReason != "no_raw_memories" {
 		t.Errorf("SkippedReason: got %q, want %q", res.SkippedReason, "no_raw_memories")
@@ -155,8 +155,8 @@ func TestDrain_SmallBatch(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 	if len(res.LessonIDs) != 1 {
 		t.Errorf("LessonIDs: got %d, want 1", len(res.LessonIDs))
@@ -184,8 +184,8 @@ func TestDrain_ExactBoundary(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 }
 
@@ -215,8 +215,8 @@ func TestDrain_TwoFullBatches(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 	if len(res.LessonIDs) != 2 {
 		t.Errorf("LessonIDs: got %d, want 2", len(res.LessonIDs))
@@ -249,8 +249,8 @@ func TestDrain_WithRemainder(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 }
 
@@ -311,11 +311,11 @@ func TestDrain_ForceFalse_StopsAtThreshold(t *testing.T) {
 	if res.RawRemaining != 100 {
 		t.Errorf("RawRemaining: got %d, want 100 (rows still eligible, now at threshold)", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "threshold_reached" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "threshold_reached")
 	}
 	if res.SkippedReason != "below_threshold" {
-		t.Errorf("SkippedReason: got %q, want %q (first pre-check that found raw=100)", res.SkippedReason, "below_threshold")
+		t.Errorf("SkippedReason: got %q, want %q (the pre-check that ended the loop)", res.SkippedReason, "below_threshold")
 	}
 }
 
@@ -344,8 +344,8 @@ func TestDrain_ForceTrue_BypassesThreshold(t *testing.T) {
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
 	}
-	if res.StopReason != "drained" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "drained")
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 }
 
@@ -389,8 +389,8 @@ func TestDrain_LLMFailureMidDrain_PartialCommit(t *testing.T) {
 	if res.FailureReason == "" {
 		t.Error("FailureReason: empty, want the underlying error")
 	}
-	if res.StopReason != "failed" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "failed")
+	if res.StopReason != "failure" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "failure")
 	}
 
 	// Verify DB state: batch 1's 50 rows are marked, batch 2's 50 are
@@ -596,8 +596,8 @@ func TestDrain_MaxBatchesCap(t *testing.T) {
 	if res.RawProcessed != 150 {
 		t.Errorf("RawProcessed: got %d, want 150", res.RawProcessed)
 	}
-	if res.StopReason != "max_batches" {
-		t.Errorf("StopReason: got %q, want %q", res.StopReason, "max_batches")
+	if res.StopReason != "max_batches_reached" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "max_batches_reached")
 	}
 	if res.RawRemaining != 850 {
 		t.Errorf("RawRemaining: got %d, want 850 (1000 - 150)", res.RawRemaining)
@@ -657,8 +657,8 @@ func TestDrain_IdempotentAfterFullSuccess(t *testing.T) {
 	if res2.SkippedReason != "no_raw_memories" {
 		t.Errorf("second drain SkippedReason: got %q, want %q", res2.SkippedReason, "no_raw_memories")
 	}
-	if res2.StopReason != "drained" {
-		t.Errorf("second drain StopReason: got %q, want %q", res2.StopReason, "drained")
+	if res2.StopReason != "no_work" {
+		t.Errorf("second drain StopReason: got %q, want %q (substrate already empty)", res2.StopReason, "no_work")
 	}
 
 	// Lesson count unchanged: exactly 2 lessons, not 4.
@@ -757,5 +757,347 @@ func TestDrain_PrimitiveStillCallable(t *testing.T) {
 	}
 	if res.LessonsCreated != 1 {
 		t.Errorf("primitive LessonsCreated: got %d, want 1", res.LessonsCreated)
+	}
+}
+
+// ── 18. Boundary sizes — single-batch shapes (1, 49, 51) ───────────
+
+func TestDrain_OneRow(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 1)
+
+	withMockSynth(t, drainSynthOK())
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.BatchesProcessed != 1 {
+		t.Errorf("BatchesProcessed: got %d, want 1", res.BatchesProcessed)
+	}
+	if res.RawProcessed != 1 {
+		t.Errorf("RawProcessed: got %d, want 1", res.RawProcessed)
+	}
+	if res.RawRemaining != 0 {
+		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
+	}
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
+	}
+}
+
+func TestDrain_FortyNineRows(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 49)
+
+	withMockSynth(t, drainSynthOK())
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.BatchesProcessed != 1 {
+		t.Errorf("BatchesProcessed: got %d, want 1 (49 fits in one batch)", res.BatchesProcessed)
+	}
+	if res.RawProcessed != 49 {
+		t.Errorf("RawProcessed: got %d, want 49", res.RawProcessed)
+	}
+	if res.RawRemaining != 0 {
+		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
+	}
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
+	}
+}
+
+func TestDrain_FiftyOneRows(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 51)
+
+	withMockSynth(t, drainSynthOK())
+
+	// 51 rows: iter 0 → 50, iter 1 → 1 (partial). 2 batches.
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.BatchesProcessed != 2 {
+		t.Errorf("BatchesProcessed: got %d, want 2 (50 + 1 partial)", res.BatchesProcessed)
+	}
+	if res.RawProcessed != 51 {
+		t.Errorf("RawProcessed: got %d, want 51", res.RawProcessed)
+	}
+	if res.RawRemaining != 0 {
+		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
+	}
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
+	}
+}
+
+// ── 19. StopReason vocabulary lock ───────────────────────────────────
+//
+// One test per stop_reason value, pinned to a specific scenario.
+// Locks down the contract so future refactors cannot silently change
+// the taxonomy without breaking this test.
+
+func TestDrain_StopReason_NoWork(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 0)
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.StopReason != "no_work" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "no_work")
+	}
+	if res.SkippedReason != "no_raw_memories" {
+		t.Errorf("SkippedReason: got %q, want %q", res.SkippedReason, "no_raw_memories")
+	}
+	if res.BatchesProcessed != 0 {
+		t.Errorf("BatchesProcessed: got %d, want 0", res.BatchesProcessed)
+	}
+	if !res.Success {
+		t.Error("Success: got false, want true (no_work is a successful no-op)")
+	}
+}
+
+func TestDrain_StopReason_Completed(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 50)
+
+	withMockSynth(t, drainSynthOK())
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
+	}
+	if res.RawRemaining != 0 {
+		t.Errorf("RawRemaining: got %d, want 0 (the substrate is empty)", res.RawRemaining)
+	}
+	if !res.Success {
+		t.Error("Success: got false, want true")
+	}
+}
+
+func TestDrain_StopReason_ThresholdReached(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 200)
+	// Default threshold is 100. With force=false the drain runs while
+	// raw > threshold and stops when raw <= threshold.
+
+	withMockSynth(t, drainSynthOK())
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), false, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.StopReason != "threshold_reached" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "threshold_reached")
+	}
+	if res.SkippedReason != "below_threshold" {
+		t.Errorf("SkippedReason: got %q, want %q", res.SkippedReason, "below_threshold")
+	}
+	if res.RawRemaining != 100 {
+		t.Errorf("RawRemaining: got %d, want 100 (eligible rows still present)", res.RawRemaining)
+	}
+	if !res.Success {
+		t.Error("Success: got false, want true (threshold_reached is a successful bounded stop)")
+	}
+}
+
+func TestDrain_StopReason_MaxBatchesReached(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 1000)
+
+	withMockSynth(t, drainSynthOK())
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 3)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.StopReason != "max_batches_reached" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "max_batches_reached")
+	}
+	if res.RawRemaining != 850 {
+		t.Errorf("RawRemaining: got %d, want 850 (1000 - 3×50)", res.RawRemaining)
+	}
+	if !res.Success {
+		t.Error("Success: got false, want true (max_batches_reached is a successful bounded stop)")
+	}
+}
+
+func TestDrain_StopReason_Failure(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 120)
+
+	// Force batch 2 to fail.
+	callCount := 0
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		callCount++
+		if callCount == 2 {
+			return "", errors.New("synthesize: taxonomy test failure")
+		}
+		return drainSynthOK()(ctx, raw)
+	})
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err == nil {
+		t.Fatal("expected error from mid-drain batch failure")
+	}
+	if res.StopReason != "failure" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "failure")
+	}
+	if res.FailedBatch != 2 {
+		t.Errorf("FailedBatch: got %d, want 2", res.FailedBatch)
+	}
+	if res.Success {
+		t.Error("Success: got true, want false (failure is the only stop_reason where success=false)")
+	}
+}
+
+// ── 20. Concurrent arrival safety ───────────────────────────────────
+//
+// The drain must NOT enter an uncontrolled loop if new eligible raw
+// memories arrive during the drain. Two safety mechanisms bound it:
+//
+//   1. Each iteration's pre-check reads raw_count from the live view.
+//      New arrivals are picked up by the NEXT batch, not retroactively.
+//   2. The per-invocation cap (max_batches) is hard-bounded; the loop
+//      cannot exceed compactDrainMaxBatchesHardCap regardless of what
+//      the caller passes.
+//
+// This test simulates the worst case: the drain is mid-loop and a
+// concurrent writer inserts new eligible raw memories. The drain must
+// exit cleanly (either via max_batches_reached or completed) with no
+// infinite loop, no more than max_batches×50 raw processed, and the
+// new arrivals remain in the substrate (next invocation handles them).
+
+func TestDrain_ConcurrentArrival_BoundedByCap(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 100)
+
+	// Inject 50 more eligible rows ONCE, after batch 1's LLM call.
+	// This simulates a concurrent writer bumping raw from 50 → 100
+	// mid-drain. The drain must respect the cap and exit within it.
+	injected := false
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		if !injected {
+			injected = true
+			base := time.Now().UTC().Add(2 * time.Hour)
+			for i := 0; i < 50; i++ {
+				ts := base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)
+				id := fmt.Sprintf("concurrent-%05d", i)
+				if _, err := dm.SQLDB().Exec(`
+					INSERT INTO memories (id, collection, content, created_at, updated_at)
+					VALUES (?, 'memories', 'concurrent', ?, ?)
+				`, id, ts, ts); err != nil {
+					return "", err
+				}
+			}
+		}
+		return drainSynthOK()(ctx, raw)
+	})
+
+	// Cap the drain at 3 batches. Even with new arrivals, the loop
+	// must exit within the cap — no runaway behavior.
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 3)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	// Expected shape: 3 batches of 50 each = 150 raw processed.
+	// (Original 100 + 50 concurrent injected — first batch consumed
+	// 50 of the originals, then the injection, then batch 2 saw 50
+	// remaining originals, batch 3 saw the 50 injected.) Total raw
+	// processed = 150.
+	if res.BatchesProcessed != 3 {
+		t.Errorf("BatchesProcessed: got %d, want 3 (cap respected)", res.BatchesProcessed)
+	}
+	if res.RawProcessed > 3*compactBatchSize {
+		t.Errorf("RawProcessed: got %d, want <=%d (cap respected)", res.RawProcessed, 3*compactBatchSize)
+	}
+	if res.RawProcessed < 100 {
+		t.Errorf("RawProcessed: got %d, want >=100 (at least the original backlog)", res.RawProcessed)
+	}
+
+	// The drain must NOT have looped indefinitely. If the cap had
+	// been ignored, this test would have run many more batches.
+	if res.StopReason != "max_batches_reached" && res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want max_batches_reached or completed (bounded stop)", res.StopReason)
+	}
+
+	// Verify one lesson per batch (no duplicate synthesis from the
+	// injection — each batch extracts distinct eligible rows).
+	var lessonCount int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
+	if lessonCount != res.BatchesProcessed {
+		t.Errorf("lessons: got %d, want %d (one lesson per batch)", lessonCount, res.BatchesProcessed)
+	}
+
+	// Verify processed + remaining accounts for every row.
+	total := res.RawProcessed + res.RawRemaining
+	if total < 100 {
+		t.Errorf("raw_processed + raw_remaining = %d, want >=100", total)
+	}
+}
+
+// ── 21. Concurrency: live raw_count is the source of truth ──────────
+//
+// The drain's final RawRemaining reads from epistemic_pressure_v, not
+// from a sum kept during the loop. Concurrent inserts after the last
+// batch commits must surface in RawRemaining.
+
+func TestDrain_RawRemainingReflectsConcurrentInsert(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 50)
+
+	// Inject 10 new rows ONCE during the first batch's LLM call. After
+	// the first batch commits (50 marked, 10 injected remaining),
+	// the drain continues with iter 1 because batch.Compacted==50 ==
+	// compactBatchSize (no early partial-batch break). iter 1 sees
+	// raw=10 and processes those — this is the expected concurrent
+	// arrival path. We guard the inject so iter 1's LLM call doesn't
+	// re-insert the same IDs.
+	injected := false
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		if !injected {
+			injected = true
+			base := time.Now().UTC().Add(2 * time.Hour)
+			for i := 0; i < 10; i++ {
+				ts := base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)
+				if _, err := dm.SQLDB().Exec(`
+					INSERT INTO memories (id, collection, content, created_at, updated_at)
+					VALUES (?, 'memories', 'injected', ?, ?)
+				`, fmt.Sprintf("inject-%03d", i), ts, ts); err != nil {
+					return "", err
+				}
+			}
+		}
+		return drainSynthOK()(ctx, raw)
+	})
+
+	// With force=true, both batches run: iter 0 consumes the 50
+	// originals (then 10 injected arrive); iter 1 consumes the 10
+	// injected (partial batch → early break). raw_remaining = 0.
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if res.BatchesProcessed != 2 {
+		t.Errorf("BatchesProcessed: got %d, want 2 (50 originals + 10 injected)", res.BatchesProcessed)
+	}
+	if res.RawProcessed != 60 {
+		t.Errorf("RawProcessed: got %d, want 60 (50 original + 10 injected)", res.RawProcessed)
+	}
+	if res.RawRemaining != 0 {
+		t.Errorf("RawRemaining: got %d, want 0 (force=true drains everything)", res.RawRemaining)
+	}
+	if res.StopReason != "completed" {
+		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
 }
