@@ -39,25 +39,40 @@ const (
 )
 
 // EndSession writes a handoff for the just-ended session. Safe to call
-// after the agent has done its work. The session_id is opaque — usually a
-// UUID the agent generates, but anything unique works.
+// after the agent has done its work. session_id is OPTIONAL — callers
+// without an external session identifier (e.g. Claude Code, which boots
+// without `MPM_SESSION_ID` and has no native UUID) can pass an empty
+// string; the handoff is still preserved. The durable identity of the
+// handoff is the MPM-generated `id` and `created_at`; session_id is
+// opaque correlation metadata only.
+//
+// IDENTITY MODEL (2026-09-01 — external session IDs are optional):
+//   - id:            MPM-generated PRIMARY KEY via GenerateID(). Stable
+//                    across upserts; the canonical handle for any later
+//                    reference (wake context, logs, foreign keys).
+//   - created_at:    MPM-generated Unix-epoch timestamp at write time.
+//                    Moves forward on every UPSERT so a stale row's age
+//                    reflects the latest closeout.
+//   - session_id:    OPTIONAL external identifier. May be a UUID, a
+//                    numeric framework id, a framework-tagged string
+//                    (e.g. "claude-code-2026-09-01"), or empty (stored
+//                    as SQL NULL).
 //
 // UPSERT SEMANTICS (added 2026-06-26, see decision
-// be61de1c4ef2ff4a-adjacent fix): session_handoffs.session_id is UNIQUE.
-// A session is a living context, not an append-only ledger. If the agent
-// writes a handoff, the user replies, and the agent does 20 more minutes
-// of substantive work, the final handoff should reflect the new final
-// state — not the snapshot from 20 minutes ago. So this is now an UPSERT
-// keyed on session_id: last writer wins. If a row already exists for
-// this session_id, every column is overwritten in place. The id is
-// preserved (existing id returned) so external references stay stable.
-// The created_at column is also preserved; only ended_at moves forward.
+// be61de1c4ef2ff4a-adjacent fix): session_handoffs.session_id is UNIQUE
+// (NULL-distinct — see sqlite.org/lang_createtable §3). When the caller
+// supplies a non-empty session_id, this is an UPSERT keyed on
+// session_id: last writer wins. If a row already exists for this
+// session_id, every column is overwritten in place. The id is preserved
+// (existing id returned) so external references stay stable. The
+// created_at column moves forward.
 //
-// The earlier "warn on UNIQUE failure" path was a schema rule firing
-// against a wrong mental model (treating the table as append-only). The
-// upsert aligns the SQL constraint with the semantic reality: the agent
-// may legitimately write a handoff multiple times per session as work
-// accumulates.
+// When the caller supplies an EMPTY session_id, this is a plain INSERT
+// (no UPSERT): the new row gets a fresh MPM-generated id and the
+// session_id column is stored as SQL NULL. Multiple such rows coexist
+// (each NULL is distinct from every other value under the UNIQUE
+// constraint). This is the recovery shape for callers that boot without
+// any external session identifier.
 //
 // Returns the persisted Handoff (with ID, timestamps populated) and a log
 // row to the audit ledger on real error. If the DB is nil or the upsert
@@ -66,9 +81,6 @@ const (
 func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("EndSession: db not initialized")
-	}
-	if sessionID == "" {
-		return nil, ErrSessionIDRequired()
 	}
 	if summary == "" {
 		return nil, fmt.Errorf("EndSession: summary is required")
@@ -95,54 +107,67 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 	}
 
 	now := time.Now().UTC().Unix()
+	newID := GenerateID()
 
-	// ON CONFLICT(session_id) DO UPDATE — overwrite every column except id.
-	// id: preserve the existing id (id = session_handoffs.id refers to
-	//     the row being updated; excluded.id would clobber it). Stable id
-	//     across upserts is required so external references (wake
-	//     context pointers, logs, foreign keys) stay valid as the agent
-	//     writes multiple handoffs per session.
-	// created_at: moves forward to the latest write. The table reader
-	//     should see the most recent closeout as a fresh row — a stale
-	//     created_at (e.g. 12 days before ended_at) is actively
-	//     misleading. A handoff with new content IS a new handoff, and
-	//     the timestamp should reflect that.
-	// read_at + read_by: reset to NULL on every upsert. A handoff with
-	//     new content is, by definition, unread. Without this reset, a
-	//     long-lived session_id whose first handoff was consumed weeks
-	//     ago would silently shadow every subsequent closeout — wake
-	//     context would skip the new content as "already read." (Bug
-	//     surfaced 2026-07-06: 12 days of agent:main:main closeouts
-	//     invisible to wake because the read_at from the row's first
-	//     incarnation carried over across UPSERTs.)
-	// ended_at + content columns: move forward to reflect the new
-	//     final state (last writer wins).
-	_, err = dm.db.Exec(`
-		INSERT INTO session_handoffs
-			(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id) DO UPDATE SET
-			id             = session_handoffs.id,
-			ended_at       = excluded.ended_at,
-			ended_state    = excluded.ended_state,
-			summary        = excluded.summary,
-			commitments    = excluded.commitments,
-			open_questions = excluded.open_questions,
-			created_at     = excluded.created_at,
-			read_at        = NULL,
-			read_by        = NULL`,
-		GenerateID(), sessionID, now, endedState, summary,
-		string(commitJSON), string(questionJSON), now,
-	)
-	if err != nil {
-		// Audit the failure — meta-error: even the handoff writer failed.
-		// The UNIQUE-constraint path no longer fires here (upsert handles
-		// it), so any error from this Exec is a real problem: DB locked,
-		// disk full, schema mismatch, etc.
-		dm.LogAudit(AuditWarn, "handoff", "EndSession upsert failed: "+err.Error(), "", AuditContext{
-			"session_id": sessionID,
-		})
-		return nil, fmt.Errorf("EndSession: upsert: %w", err)
+	// Two write paths depending on whether the caller supplied an
+	// external session identifier:
+	//
+	//   - non-empty: ON CONFLICT(session_id) DO UPDATE — UPSERT. The
+	//     id is preserved across upserts (existing row's id is
+	//     returned, not the freshly generated one) so external
+	//     references stay valid. created_at moves forward on every
+	//     upsert so the row's age reflects the latest closeout.
+	//     read_at + read_by reset to NULL on every upsert — a handoff
+	//     with new content is, by definition, unread. (Bug surfaced
+	//     2026-07-06: 12 days of agent:main:main closeouts invisible
+	//     to wake because the read_at from the row's first incarnation
+	//     carried over across UPSERTs.)
+	//
+	//   - empty:     plain INSERT. Stored as SQL NULL on the
+	//     session_id column. The freshly generated id is the row's
+	//     durable identity; multiple NULL rows coexist because SQLite
+	//     treats each NULL as distinct from every other value under
+	//     the UNIQUE constraint.
+	if sessionID != "" {
+		_, err = dm.db.Exec(`
+			INSERT INTO session_handoffs
+				(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(session_id) DO UPDATE SET
+				id             = session_handoffs.id,
+				ended_at       = excluded.ended_at,
+				ended_state    = excluded.ended_state,
+				summary        = excluded.summary,
+				commitments    = excluded.commitments,
+				open_questions = excluded.open_questions,
+				created_at     = excluded.created_at,
+				read_at        = NULL,
+				read_by        = NULL`,
+			newID, sessionID, now, endedState, summary,
+			string(commitJSON), string(questionJSON), now,
+		)
+		if err != nil {
+			// Audit the failure — meta-error: even the handoff writer failed.
+			// The UNIQUE-constraint path no longer fires here (upsert handles
+			// it), so any error from this Exec is a real problem: DB locked,
+			// disk full, schema mismatch, etc.
+			dm.LogAudit(AuditWarn, "handoff", "EndSession upsert failed: "+err.Error(), "", AuditContext{
+				"session_id": sessionID,
+			})
+			return nil, fmt.Errorf("EndSession: upsert: %w", err)
+		}
+	} else {
+		_, err = dm.db.Exec(`
+			INSERT INTO session_handoffs
+				(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
+			VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+			newID, now, endedState, summary,
+			string(commitJSON), string(questionJSON), now,
+		)
+		if err != nil {
+			dm.LogAudit(AuditWarn, "handoff", "EndSession insert (no session_id) failed: "+err.Error(), "", AuditContext{})
+			return nil, fmt.Errorf("EndSession: insert (no session_id): %w", err)
+		}
 	}
 
 	// No audit log on the success path. The session_handoffs row IS the
@@ -151,12 +176,19 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 	// (Was: AuditWarn with full summary. Removed 2026-06-23. The upsert
 	// continues this principle: silent on success, loud on real error.)
 
-	// Read the persisted row back so the caller sees the canonical id
-	// (the one that survived the upsert, not a now-stale generated id)
-	// and the canonical created_at (preserved across upserts).
-	persisted, err := dm.GetHandoffBySessionID(sessionID)
+	// Read-back assertion (Defense Triad #3) proves persistence to the
+	// substrate. Returns the canonical id (the one that survived the
+	// upsert, or the freshly generated id on the no-session-id path).
+	if sessionID != "" {
+		persisted, err := dm.GetHandoffBySessionID(sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("EndSession: read back: %w", err)
+		}
+		return persisted, nil
+	}
+	persisted, err := dm.GetHandoffByID(newID)
 	if err != nil {
-		return nil, fmt.Errorf("EndSession: read back: %w", err)
+		return nil, fmt.Errorf("EndSession: read back by id: %w", err)
 	}
 	return persisted, nil
 }
@@ -169,9 +201,20 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 // before shredding. The handoff id is required for DeleteHandoff, so
 // callers that have only session_id must round-trip through here.
 //
+// Empty sessionID returns sql.ErrNoRows without hitting the database.
+// The UNIQUE-on-session_id column allows multiple NULLs; rows stored
+// with NULL session_id are not addressable via this lookup — callers
+// wanting those should use GetHandoffByID or ListHandoffs. The early
+// return keeps the SQL semantics clean (WHERE session_id = '' would
+// not match NULL rows anyway, but the explicit ErrNoRows short-circuit
+// avoids a query that is guaranteed to return zero rows).
+//
 // Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
 // timestamps_unified_v1). The driver scans them directly into int64.
 func (dm *DatabaseManager) GetHandoffBySessionID(sessionID string) (*Handoff, error) {
+	if sessionID == "" {
+		return nil, sql.ErrNoRows
+	}
 	row := dm.db.QueryRow(`
 		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
 		FROM session_handoffs WHERE session_id = ?`, sessionID)
@@ -383,20 +426,27 @@ func (dm *DatabaseManager) DeleteHandoff(id string) (int64, error) {
 //
 // Timestamp fields are stored as INTEGER Unix-epoch seconds (see migration
 // timestamps_unified_v1). read_at is nullable → sql.NullInt64.
+// session_id is nullable (external session identifiers are optional
+// — see EndSession for the contract); rows stored with NULL session_id
+// surface to callers as Handoff.SessionID == "".
 func scanHandoff(row *sql.Row) (*Handoff, error) {
 	var (
 		h            Handoff
+		sessionID    sql.NullString
 		commitJSON   string
 		questionJSON string
 		readAt       sql.NullInt64
 		readBy       sql.NullString
 	)
 	err := row.Scan(
-		&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&h.ID, &sessionID, &h.EndedAt, &h.EndedState, &h.Summary,
 		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if sessionID.Valid {
+		h.SessionID = sessionID.String
 	}
 	if readAt.Valid {
 		v := readAt.Int64
@@ -418,17 +468,21 @@ func scanHandoff(row *sql.Row) (*Handoff, error) {
 func scanHandoffRows(rows *sql.Rows) (*Handoff, error) {
 	var (
 		h            Handoff
+		sessionID    sql.NullString
 		commitJSON   string
 		questionJSON string
 		readAt       sql.NullInt64
 		readBy       sql.NullString
 	)
 	err := rows.Scan(
-		&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&h.ID, &sessionID, &h.EndedAt, &h.EndedState, &h.Summary,
 		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if sessionID.Valid {
+		h.SessionID = sessionID.String
 	}
 	if readAt.Valid {
 		v := readAt.Int64

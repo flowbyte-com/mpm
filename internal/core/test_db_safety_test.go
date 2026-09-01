@@ -45,6 +45,7 @@ var testDBSafetyWhitelist = map[string]string{
 	"database_manager_arg_test.go": "pins the constructor's argument-handling contract (HonoursProjectRoot, EmptyArg_FallsBackToGetMPMDir, UnwritableHome_NoSpuriousError)",
 	"foreign_keys_test.go":         "needs the real file-DB DSN with _foreign_keys=1; NewTestDM would skip the DSN and silently disable FK enforcement",
 	"shared_attach_test.go":        "two tests (BadPathFallsBackGracefully, ReadOnlyEnv) construct a DatabaseManager after manipulating MPM_SHARED_DB / MPM_SHARED_READONLY, which requires the raw ctor",
+	"handoff_identity_test.go":     "needs the real file-DB DSN with _foreign_keys=1 to drive close+reopen across migration boundaries (recovery-across-restart + sentinel-gated migration round-trip); NewTestDM's in-memory store cannot simulate on-disk persistence",
 }
 
 // TestTestDBSafety_NoLiveDBLeakInTests walks every _test.go file in the

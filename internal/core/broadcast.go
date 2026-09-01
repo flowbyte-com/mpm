@@ -296,6 +296,19 @@ func (dm *DatabaseManager) CheckPendingEventWakes(sessionID string) ([]EventWake
 	if dm.SharedAttached() == "" {
 		return nil, nil // shared DB not attached: nothing to do, no error
 	}
+	// Intentionally NOT the same anti-pattern as handoff.go:71 (the
+	// session_id requirement here is real, not a contract bug). This
+	// is a peer-to-peer broadcast delivery: the sessionID is the
+	// TARGET recipient of cross-agent event wakes. There is no
+	// "anonymous recipient" concept — if we don't know who to deliver
+	// to, we can't deliver. The handoff identity model (where the
+	// durable identity is the MPM-generated id) does not apply
+	// because every row in shared.bcast_event_wakes already has its
+	// own primary key; what we need is the SELECT-side WHERE clause
+	// value, and that requires a session identifier from the caller.
+	// See internal/core/handoff.go EndSession for the (different)
+	// contract that motivated making session_handoffs.session_id
+	// optional.
 	if sessionID == "" {
 		return nil, ErrSessionIDRequired()
 	}
