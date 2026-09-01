@@ -2762,11 +2762,16 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 // string arrays ARE persisted (F13) so the next session's wake context
 // carries the full continuity picture — accepted fields are never
 // silently dropped.
+//
+// session_id is OPTIONAL. Callers without an external session identifier
+// (e.g. Claude Code, which boots without `MPM_SESSION_ID` and has no
+// native UUID) may pass an empty string — the handoff is still preserved,
+// keyed only on the MPM-generated id and created_at. See EndSession for
+// the full identity model. Multiple handoffs with empty session_id are
+// allowed to coexist (each NULL session_id is distinct under the UNIQUE
+// constraint).
 func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	sessionID := getString(p, "session_id")
-	if sessionID == "" {
-		return nil, internal.ErrSessionIDRequired()
-	}
 	summary := getString(p, "summary")
 	if summary == "" {
 		return nil, fmt.Errorf("summary is required")
@@ -2793,6 +2798,7 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		"success":        true,
 		"handoff":        h,
 		"handoff_id":     h.ID,
+		"session_id":     h.SessionID,
 		"message":        "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
 		"open_questions": h.OpenQuestions,
 	}, nil
