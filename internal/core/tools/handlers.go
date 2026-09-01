@@ -3618,31 +3618,50 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 
 // handleCompactEpistemology is the reflex to epistemic_pressure.
 //
-// Drains all eligible raw memories in sequential batches of at most
-// 50 (the LLM context safeguard — see compactBatchSize in
+// Drains eligible raw memories in sequential batches of at most 50
+// (the LLM context safeguard — see compactBatchSize in
 // internal/core/compact.go). Each batch is independently atomic; the
-// drain loops the per-batch primitive until no eligible work remains,
-// the per-invocation safety cap is reached, or a batch fails.
+// drain loops the per-batch primitive until one of the documented
+// stop_reason conditions is reached.
+//
+// Compact semantics:
+//
+//   - force=false (default) — RELIEVE pressure. The drain stops as
+//     soon as raw_count <= threshold. Eligible raw memories may
+//     remain after the call. This is the reflex to
+//     epistemic_pressure.exceeded=true.
+//   - force=true            — DRAIN everything. The threshold gate
+//     is bypassed; the drain continues until the substrate is empty
+//     or the per-invocation safety cap is hit.
+//
+// The 50-item batch safety is unrelated to force — every batch is
+// capped at compactBatchSize regardless of force or threshold.
 //
 // Parameters:
-//   - force (bool, default false): bypass the pressure threshold gate.
-//     force=false stops the drain at threshold; force=true drains every
-//     eligible row regardless of threshold.
+//   - force (bool, default false): bypass the pressure threshold gate
+//     (does NOT bypass the 50-item per-batch limit).
 //   - max_batches (int, default 20, hard cap 100): per-invocation
 //     safety cap on LLM calls. 20 batches × 50 raw = 1000 raw memories
-//     per invocation. When the cap is reached, the response reports
-//     stop_reason="max_batches" and the live raw_remaining count.
+//     per invocation. Caller-supplied values above the hard cap are
+//     silently clamped, not rejected.
 //
-// Result envelope:
-//   - success: true unless a mid-drain batch failed
-//   - batches_processed: count of batches that committed a lesson
-//   - raw_processed: sum of compacted raw memories across all batches
-//   - lessons_created: equal to batches_processed on success
-//   - raw_remaining: live read of the pressure view after the loop
-//   - lesson_ids: lesson IDs created in batch order
-//   - skipped_reason: set when 0 batches were processed
-//   - stop_reason: "drained" | "max_batches" | "failed"
-//   - failed_batch + failure_reason: present on partial failure
+// Result envelope (always set):
+//   - success: false ONLY on a mid-drain batch failure. true for
+//     every other stop_reason — including threshold_reached and
+//     max_batches_reached, where work may remain.
+//   - batches_processed: count of batches that committed a lesson.
+//   - raw_processed: sum of compacted raw memories across all batches.
+//   - lessons_created: equal to batches_processed on success.
+//   - raw_remaining: live read of the pressure view after the loop —
+//     the canonical post-drain count. Inspect this to determine
+//     whether more work remains.
+//   - lesson_ids: lesson IDs created in batch order.
+//   - stop_reason: one of "no_work" | "completed" | "threshold_reached"
+//     | "max_batches_reached" | "failure". See the result struct doc
+//     for the full taxonomy.
+//   - skipped_reason: set only on "no_work" (no_raw_memories) and
+//     "threshold_reached" (below_threshold).
+//   - failed_batch + failure_reason: present only on "failure".
 //
 // Failure semantics: when a batch fails mid-drain, earlier successful
 // batches remain committed (each batch is atomic). The failed batch
