@@ -99,6 +99,7 @@ type CoreDB interface {
 	PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error)
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
 	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
+	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error)
 	PruneExpired() (int, error)
 	PruneOlderThan(beforeUnixSec int64) (int, error)
 	PruneNeverAccessed() (int, error)

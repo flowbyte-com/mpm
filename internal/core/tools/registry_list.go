@@ -395,8 +395,14 @@ Promote to memory when the thought is complete and worth preserving. Discard whe
 		Name: "mpm_system",
 		Description: `Maintenance, diagnostics, and housekeeping for the MPM substrate.
 Use when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters; list active audit clusters (list_clusters); surface critic-emitted findings (critic_findings).
-This tool is for system health — not for daily agent work. Prefer specific tools for regular operations.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},"params":{"type":"object","properties":{"limit":{"type":"number","description":"For critic_findings: max rows to return (default 50)."}},"additionalProperties":true}},"required":["action"]}`),
+This tool is for system health — not for daily agent work. Prefer specific tools for regular operations.
+
+Per-action semantics:
+
+- gc_run: Lifecycle decay sweep. Optional params: dry_run (default true), aggressive, max_age_hours (default 24). gc_run is NOT for epistemic compaction — it decays stale/expired artifacts by age. Use "compact" instead when epistemic_pressure.exceeded is true.
+
+- compact: Drain outstanding eligible raw memories into lessons. The default behavior processes every eligible raw memory row in sequential batches of at most 50 (the LLM context safeguard); each batch is independently synthesized, validated, and committed. A single compact invocation continues through outstanding eligible work until none remain. If a batch fails, earlier successful batches remain committed and the response reports raw_remaining plus failure_reason so the next invocation can resume. Optional params: force (default false) — when true, bypasses the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold; max_batches (default 20, hard cap 100) — per-invocation safety limit on LLM calls (20 batches × 50 raw = 1000 raw memories per call). The result envelope reports success, batches_processed, raw_processed, lessons_created, raw_remaining, lesson_ids, stop_reason ("drained" | "max_batches" | "failed"), and on partial failure failed_batch + failure_reason. The 50-item batch limit is load-bearing — it protects LLM context size — and remains in force on every batch.`,
+		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},"params":{"type":"object","properties":{"force":{"type":"boolean","description":"compact: bypass the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold."},"max_batches":{"type":"number","description":"compact: per-invocation safety cap on LLM calls. Default 20, hard cap 100."},"limit":{"type":"number","description":"For critic_findings: max rows to return (default 50)."}},"additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmSystem,
 	},
 	{

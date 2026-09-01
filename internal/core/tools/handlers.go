@@ -1257,6 +1257,28 @@ func parseBoolDefault(v interface{}, def bool) bool {
 	return def
 }
 
+// parseIntDefault parses a JSON-shaped integer parameter (float64 from
+// the JSON boundary, int from native callers, string from legacy
+// callers) and returns the default for any unparseable value. The
+// compact_drain handler uses it to accept max_batches from any
+// caller shape without forcing schema changes.
+func parseIntDefault(v interface{}, def int) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		var n int
+		if _, err := fmt.Sscanf(t, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 // inferNodeType best-effort classifies a citation id into one of the
 // cognitive-object types (memory / lesson / skill / decision / theory)
 // by inspecting the id prefix. Falls back to "memory" when the prefix
@@ -3595,41 +3617,81 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 }
 
 // handleCompactEpistemology is the reflex to epistemic_pressure.
-// Reads its own state (raw_count, threshold) from the pressure view,
-// batches the oldest 50 raw memories, calls the LLM for a strict-JSON
-// lesson, validates, and commits atomically. See internal/core.CompactEpistemology
-// for the orchestration details.
 //
-// Optional `force` flag bypasses the pressure threshold — used by
-// agents who want to compact proactively even when the gauge reads
-// below_threshold (rare; mostly for tests and one-off cleanups).
+// Drains all eligible raw memories in sequential batches of at most
+// 50 (the LLM context safeguard — see compactBatchSize in
+// internal/core/compact.go). Each batch is independently atomic; the
+// drain loops the per-batch primitive until no eligible work remains,
+// the per-invocation safety cap is reached, or a batch fails.
+//
+// Parameters:
+//   - force (bool, default false): bypass the pressure threshold gate.
+//     force=false stops the drain at threshold; force=true drains every
+//     eligible row regardless of threshold.
+//   - max_batches (int, default 20, hard cap 100): per-invocation
+//     safety cap on LLM calls. 20 batches × 50 raw = 1000 raw memories
+//     per invocation. When the cap is reached, the response reports
+//     stop_reason="max_batches" and the live raw_remaining count.
+//
+// Result envelope:
+//   - success: true unless a mid-drain batch failed
+//   - batches_processed: count of batches that committed a lesson
+//   - raw_processed: sum of compacted raw memories across all batches
+//   - lessons_created: equal to batches_processed on success
+//   - raw_remaining: live read of the pressure view after the loop
+//   - lesson_ids: lesson IDs created in batch order
+//   - skipped_reason: set when 0 batches were processed
+//   - stop_reason: "drained" | "max_batches" | "failed"
+//   - failed_batch + failure_reason: present on partial failure
+//
+// Failure semantics: when a batch fails mid-drain, earlier successful
+// batches remain committed (each batch is atomic). The failed batch
+// and all subsequent eligible rows are untouched. The next invocation
+// resumes from the remaining work.
 func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	force := parseBoolDefault(p["force"], false)
+	maxBatches := parseIntDefault(p["max_batches"], 0)
 
-	result, err := dm.CompactEpistemology(context.Background(), force)
+	result, err := dm.CompactEpistemologyDrain(context.Background(), force, maxBatches)
 	if err != nil {
+		// Mid-drain failure — return the partial aggregate AND the
+		// error. Earlier successful batches are durable; the agent
+		// can decide whether to retry.
+		if result != nil {
+			out := map[string]interface{}{
+				"success":          result.Success,
+				"batches_processed": result.BatchesProcessed,
+				"raw_processed":     result.RawProcessed,
+				"lessons_created":   result.LessonsCreated,
+				"raw_remaining":     result.RawRemaining,
+				"stop_reason":       result.StopReason,
+				"failed_batch":      result.FailedBatch,
+				"failure_reason":    result.FailureReason,
+			}
+			if len(result.LessonIDs) > 0 {
+				out["lesson_ids"] = result.LessonIDs
+			}
+			return out, err
+		}
 		return nil, err
 	}
 
-	// No-op path (skipped_reason set): return as-is.
-	if result.SkippedReason != "" {
-		return map[string]interface{}{
-			"success":        true,
-			"compacted":       0,
-			"lessons_created": 0,
-			"raw_marked":      0,
-			"skipped_reason":  result.SkippedReason,
-		}, nil
+	// Success or skip path.
+	out := map[string]interface{}{
+		"success":          result.Success,
+		"batches_processed": result.BatchesProcessed,
+		"raw_processed":     result.RawProcessed,
+		"lessons_created":   result.LessonsCreated,
+		"raw_remaining":     result.RawRemaining,
+		"stop_reason":       result.StopReason,
 	}
-
-	// Commit path: lesson inserted, raw memories marked.
-	return map[string]interface{}{
-		"success":         true,
-		"compacted":        result.Compacted,
-		"lessons_created":  result.LessonsCreated,
-		"raw_marked":      result.RawMarked,
-		"lesson_id":        result.LessonID,
-	}, nil
+	if result.SkippedReason != "" {
+		out["skipped_reason"] = result.SkippedReason
+	}
+	if len(result.LessonIDs) > 0 {
+		out["lesson_ids"] = result.LessonIDs
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
