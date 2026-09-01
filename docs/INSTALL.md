@@ -222,6 +222,55 @@ MPM_BACKUP_DIR=/custom/path/backups
 > polls on its 60s tick — nightly compactions, weekly security audits, etc.
 > Single-agent workflows that don't need a fixed cadence can skip this.
 
+A fresh MPM install (since the 2026-09-01 productization pass) arrives
+with one canonical scheduled task pre-configured:
+
+| Task ID | Cron (UTC) | Directive | What it does |
+|---|---|---|---|
+| `epistemic-compaction` | `0 3 * * *` (daily 03:00) | `mpm-seed-epistemic-compaction-policy` | Wakes the agent. The agent reads the directive and invokes `mpm_system.compact` with `force=false`, `max_batches=5`. |
+
+This is the **agent-owned** reflex to `epistemic_pressure.exceeded=true`.
+The scheduler only delivers the wake — it does not invoke compaction
+itself. The substrate measures pressure, the agent runs the reflex, the
+scheduler transports the wake. The boundary is preserved end-to-end.
+
+**Why daily 03:00 UTC.** The 19-day empirical gap (2026-08-13 →
+2026-09-01) where no compact invocation occurred produced no measurable
+substrate harm: 99% compaction ratio held, query latencies stayed
+nominal, FTS5 indexes were unaffected. The reflex does not need to be
+aggressive. Daily 03:00 UTC is the documented cadence and the seed
+default. Operators with different ingest profiles can re-upsert to a
+custom cadence (see "Custom cadence" below).
+
+**Custom cadence by ingest profile.** The seed default is the
+conservative middle. Re-upsert the task with a different cron if the
+default doesn't fit your workload:
+
+| Profile | Suggested cron | Reasoning |
+|---|---|---|
+| High ingest (≥500 raw/day) | `0 */4 * * *` (every 4h) | Pressure may exceed threshold between daily cycles; shorter cycles keep `raw_count` near the threshold without crossing it. |
+| Normal / default | `0 3 * * *` (daily 03:00 UTC) | Low-noise window for a background LLM reflection pass. Matches the seed default. |
+| Low ingest (<50 raw/week) | `0 3 * * 0` (weekly Sunday) | Threshold rarely crossed; weekly is enough. |
+
+Inspect or change the current schedule:
+
+```bash
+mpm tasks list                          # see all tasks and their cron
+mpm tasks upsert epistemic-compaction \
+  "Nightly epistemic compaction" \
+  "0 */4 * * *" \
+  mpm-seed-epistemic-compaction-policy active
+```
+
+**Idempotency and operator customization.** Re-running the seed
+(`mpm ops init tasks`, or restarting any `mpm` binary — boot calls
+the same apply loop) NEVER overwrites a customized row. If the
+operator paused the task or changed the cron, the seed reports
+`Skipped` and leaves the row verbatim. The seed is a starting
+configuration, not a sync target. To upgrade a canonical row, the
+operator must `mpm tasks upsert` it explicitly with the new
+parameters.
+
 Once the daemon is running, recurring tasks are managed via `mpm tasks`:
 
 ```bash
@@ -230,7 +279,37 @@ mpm tasks list
 mpm tasks delete <id>    # or pass 'rm'; prefer status='paused' for soft-stop
 ```
 
-**Example: nightly epistemic compaction at 03:00 UTC.** The directive_id
+**Compact contract (what the directive tells the agent to do).** The
+`mpm_system.compact` call has explicit force/threshold/batch semantics:
+
+- `force=false` (default) — RELIEVE pressure. The drain stops as soon
+  as `raw_count <= threshold`. Eligible raw memories may remain after
+  the call. This is the safe reflex.
+- `force=true` — DRAIN everything. The threshold gate is bypassed;
+  the drain continues until the substrate is empty or the per-
+  invocation safety cap is hit. Use only for explicit operator or
+  agent action, not from a scheduled wake.
+- `max_batches` (default 20, hard cap 100) — per-invocation safety
+  cap on LLM calls. 20 × 50 = 1000 raw memories per invocation. The
+  seed-directive default is 5, which keeps the per-wake LLM cost
+  bounded for the common case.
+
+Inspect the response's `stop_reason` and `raw_remaining`:
+- `no_work` — no eligible raw memories (below threshold or all consumed).
+- `completed` — eligible rows consumed; `raw_remaining` may be > 0 if
+  ineligible rows remain (the seed default).
+- `threshold_reached` — pressure relieved; eligible rows may remain
+  below the gate.
+- `max_batches_reached` — safety cap hit; the next scheduled cycle
+  resumes the work.
+- `failure` — mid-drain batch failure; earlier batches are durable;
+  the next cycle resumes the remaining work.
+
+`success=true` does NOT mean `raw_remaining == 0`. `success=false`
+is set ONLY on a mid-drain batch failure.
+
+**Example: nightly epistemic compaction at 03:00 UTC (manual override).** The directive_id
+
 must already exist in `memories` where `collection='directives'` — the
 handler runs a fail-fast index lookup before writing, so a typo is caught
 at upsert time, not at 3 AM as a silent wake drop.

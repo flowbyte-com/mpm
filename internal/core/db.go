@@ -1124,6 +1124,19 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		return nil, fmt.Errorf("seed baseline directives: %w", err)
 	}
 
+	// Baseline Cognitive Bootstrap for scheduled tasks. Runs AFTER
+	// seedBaselineDirectives so the canonical directives
+	// (mpm-seed-epistemic-compaction-policy) are present in the
+	// memories table before the apply loop validates directive_id
+	// references. Same idempotency contract: existing rows are
+	// detected by stable id and preserved verbatim — operator's
+	// custom cron / name / status / directive_id are NEVER
+	// overwritten.
+	if _, err := manager.seedBaselineScheduledTasks(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("seed baseline scheduled tasks: %w", err)
+	}
+
 	// Check and rotate watchdog/mirror logs at startup so operators don't
 	// need to rely solely on manual `mpm ops logs rotate`. Auto-rotation
 	// also happens on each tracked Exec/Query; the startup check catches
@@ -2110,6 +2123,146 @@ func (dm *DatabaseManager) seedBaselineDirectives() error {
 		slog.Info("baseline directives seeded", "created", len(summary.Created))
 	}
 	return nil
+}
+
+// seedBaselineScheduledTasks runs the Baseline Cognitive Bootstrap
+// for scheduled tasks (2026-09-01 productization pass). The canonical
+// scheduled task list lives in seed.SeedScheduledTasks; the apply
+// logic lives here in core because it depends on core-only types
+// (ScheduledTask, CalculateNextRun, the dm's UpsertScheduledTask
+// writer). The split is registry-in-seed, apply-in-core — a seed ->
+// core import for the apply loop would create a cycle.
+//
+// Contract (parallel to seedBaselineDirectives):
+//
+//   - StableID absent       → Created (UpsertScheduledTask via the
+//                             canonical writer; cron validated and
+//                             next_run_at computed by CalculateNextRun)
+//   - StableID present      → Skipped (no-op). Operator's custom
+//                             cron_expr / name / directive_id / status
+//                             are preserved verbatim.
+//   - DirectiveID missing   → Missing (the task is skipped; the
+//                             operator can run `mpm ops init
+//                             directives` first and re-run this).
+//
+// This runs AFTER seedBaselineDirectives so the canonical
+// directives (specifically mpm-seed-epistemic-compaction-policy)
+// are present in the memories table before the apply loop
+// validates the directive_id FK.
+//
+// `mpm ops init tasks` remains available for manual re-init /
+// shared-DB seeding.
+func (dm *DatabaseManager) seedBaselineScheduledTasks() (seed.SeedTaskSummary, error) {
+	summary := seed.SeedTaskSummary{
+		Created: []string{},
+		Skipped: []string{},
+		Missing: []string{},
+	}
+
+	now := time.Now().UTC()
+
+	for _, st := range seed.SeedScheduledTasks {
+		// 1. Look up the row by id. We don't filter on status: even
+		// a soft-deleted (paused-then-deleted) task should not be
+		// silently re-created — but since the table has no soft-delete
+		// column (DELETE is hard), the only way to get a "missing"
+		// row is the operator running `mpm tasks delete`.
+		var existingID string
+		err := dm.db.QueryRow(
+			`SELECT id FROM scheduled_tasks WHERE id = ?`, st.StableID,
+		).Scan(&existingID)
+		switch {
+		case err == nil:
+			summary.Skipped = append(summary.Skipped, st.StableID)
+			continue
+		case err == sql.ErrNoRows:
+			// fall through to directive-existence check
+		default:
+			return summary, fmt.Errorf("seed lookup %s: %w", st.StableID, err)
+		}
+
+		// 2. Verify the directive exists before inserting. The
+		// scheduled_tasks table does not enforce a FK on directive_id
+		// (the column is text and the directive lives in memories),
+		// so a missing directive would only surface at wake time —
+		// too late. Fail fast here.
+		var dirID string
+		err = dm.db.QueryRow(
+			`SELECT id FROM memories WHERE id = ? AND collection = 'directives' AND deleted_at IS NULL LIMIT 1`,
+			st.DirectiveID,
+		).Scan(&dirID)
+		switch {
+		case err == nil:
+			// fall through to insert
+		case err == sql.ErrNoRows:
+			summary.Missing = append(summary.Missing, st.StableID)
+			continue
+		default:
+			return summary, fmt.Errorf("seed directive lookup for %s: %w", st.StableID, err)
+		}
+
+		// 3. Status defaulting. SeedScheduledTask entries may leave
+		// Status empty to mean "use the substrate default". The
+		// substrate default is "active" (ScheduledTaskActive) — the
+		// seed never inserts a paused task.
+		status := st.Status
+		if status == "" {
+			status = seed.ScheduledTaskActive
+		}
+
+		// 4. Compute next_run_at via the canonical cron calculator.
+		// The apply loop uses CalculateNextRun directly (not
+		// UpsertScheduledTask) so the seed package does not need
+		// to import core — registry-in-seed, apply-in-core split
+		// keeps the dependency direction one-way (core -> seed).
+		//
+		// A canonical cron expression always parses, but we still
+		// handle the error to surface typos in the registry before
+		// they cause a poison-pill loop in the daemon.
+		nextRun, err := CalculateNextRun(st.CronExpr, now)
+		if err != nil {
+			return summary, fmt.Errorf("seed cron calc for %s: %w", st.StableID, err)
+		}
+
+		// 5. Insert via the canonical writer. ComputeNextRun already
+		// happened above; the writer recomputes it from `now` to
+		// avoid a microsecond drift between the seed path and the
+		// operator's `mpm tasks upsert` path.
+		task := ScheduledTask{
+			ID:          st.StableID,
+			Name:        st.Name,
+			CronExpr:    st.CronExpr,
+			DirectiveID: st.DirectiveID,
+			Status:      status,
+			NextRunAt:   nextRun.Unix(),
+			CreatedAt:   now.Unix(),
+			UpdatedAt:   now.Unix(),
+		}
+		if err := dm.UpsertScheduledTask(task); err != nil {
+			return summary, fmt.Errorf("upsert seed task %s: %w", st.StableID, err)
+		}
+		summary.Created = append(summary.Created, st.StableID)
+	}
+
+	if len(summary.Created) > 0 {
+		slog.Info("baseline scheduled tasks seeded", "created", len(summary.Created))
+	}
+	return summary, nil
+}
+
+// SeedBaselineScheduledTasks is the public wrapper around
+// seedBaselineScheduledTasks. It is the entry point the CLI's
+// `mpm ops init tasks` command uses for manual re-init. Production
+// boot path calls the unexported seedBaselineScheduledTasks
+// directly from NewDatabaseManager — that path is what makes a
+// fresh install arrive with the canonical tasks configured.
+//
+// The wrapper exists so the CLI does not need to import the
+// seed package directly for the apply loop (which lives in core,
+// not seed). Returns the same SeedTaskSummary shape used by the
+// unexported function.
+func (dm *DatabaseManager) SeedBaselineScheduledTasks() (seed.SeedTaskSummary, error) {
+	return dm.seedBaselineScheduledTasks()
 }
 
 // dropFTS5Triggers removes all FTS5 triggers from the database.

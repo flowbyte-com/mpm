@@ -951,6 +951,7 @@ var opsSubcommandDescs = []struct {
 	{"milestones [--flavor/--days/--limit]", "List recent narrative milestones (memories tagged type:milestone-*)"},
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"init skills", "Seed the Baseline Skill Library (idempotent)"},
+	{"init tasks", "Seed the Baseline Cognitive Bootstrap for scheduled tasks (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
 	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
 	{"broadcast <memory_id> [--kind/--rationale/--to/--dry-run/--json]", "Arc 2 fan-out: push an epistemic event to every active session"},
@@ -1425,12 +1426,13 @@ func isatty(f *os.File) bool {
 }
 
 // handleOpsInit dispatches `mpm ops init <subcommand>`. Currently
-// supports `init directives` (Baseline Cognitive Bootstrap) and
-// `init skills` (Baseline Skill Library). Other init subcommands
+// supports `init directives` (Baseline Cognitive Bootstrap),
+// `init skills` (Baseline Skill Library), and `init tasks` (Baseline
+// Cognitive Bootstrap for scheduled tasks). Other init subcommands
 // (e.g. `init config`) can be added here.
 func handleOpsInit(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives, init skills")
+		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives, init skills, init tasks")
 		return 1
 	}
 	sub := args[0]
@@ -1439,7 +1441,9 @@ func handleOpsInit(args []string) int {
 		return handleOpsInitDirectives(args[1:])
 	case "skills":
 		return handleOpsInitSkills(args[1:])
+	case "tasks":
+		return handleOpsInitTasks(args[1:])
 	default:
-		return usererror.Error("unknown init subcommand: %q (want: directives, skills)", sub)
+		return usererror.Error("unknown init subcommand: %q (want: directives, skills, tasks)", sub)
 	}
 }
