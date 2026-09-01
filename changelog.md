@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-09-01 — Compact Drain Contract Cleanup
+
+The `15b7293` bounded-drain implementation shipped with ambiguous stop semantics: callers could not distinguish "all eligible work drained" from "stopped at threshold with rows still eligible" by inspecting the result alone. `force=false` could silently leave eligible rows; `force=true` could be confused for "bypass every safety guard"; the `stop_reason` vocabulary was inconsistent across paths. This pass hardens the contract without behavior changes.
+
+**Model B retained.** The threshold gate stays as a stop condition for `force=false`. The drain's "RELIEVE pressure" reflex to `epistemic_pressure.exceeded=true` is preserved. `force=true` is the explicit deep-drain override.
+
+**StopReason taxonomy (always set on return):**
+
+- `no_work` — substrate was empty from the start.
+- `completed` — every eligible row was consumed.
+- `threshold_reached` — `force=false` and raw count fell to/at the threshold; eligible rows remain.
+- `max_batches_reached` — safety cap hit; eligible rows remain.
+- `failure` — mid-drain batch failure (`success=false`).
+
+**Force semantics clarified.** `force=true` bypasses the threshold gate but NEVER widens the 50-item LLM batch cap. The 50-item safeguard applies on every batch regardless of force. `force=false` is documented to intentionally stop at threshold — this is by design.
+
+**`success` is no longer a drain signal.** `success=true` is set on every stop_reason EXCEPT `failure`. To determine whether the substrate is fully drained, callers must inspect `stop_reason` and `raw_remaining`. The phrase "single-shot compact" is removed from all agent-facing surfaces; the drain loops sequentially until a stop condition is reached.
+
+**One-time backlog drain envelope (recorded on every invocation):** `raw_before`, `lessons_before` (implicit via the live view), `batches_processed`, `llm_calls` (= `batches_processed` on success), `raw_after` (= `raw_remaining`), `lessons_after` (= live `lesson_count`), `stop_reason`.
+
+**Files:**
+
+- `internal/core/compact.go` — drain loop's skip path now switches on `SkippedReason` to set the canonical `StopReason`; `StopReason` field is no longer `omitempty` (always-set guarantee).
+- `internal/core/tools/handlers.go` — `handleCompactEpistemology` doc block now documents force/threshold/max_batches semantics and the success-only-false-on-failure clarification.
+- `internal/core/tools/registry_list.go` — `mpm_system.compact` action description matches the new vocabulary.
+- `agent_installation/pi-mpm/index.ts` + `agent_installation/opencode-mpm/src/index.ts` — agent integration prompts updated to match (removed stale "single-shot" language; added full StopReason vocabulary).
+
+**Tests** (`internal/core/compact_drain_test.go`): 9 existing tests updated to assert the new vocabulary; 8 new tests added — boundary sizes (1, 49, 51), per-stop-reason taxonomy lock (5 tests), and concurrent arrival safety (bounded by cap, raw_remaining reflects live raw_count). All 26 drain tests pass.
+
+**Auditability.** Existing infrastructure is sufficient to reconstruct drain metadata: `system_config.compaction.last_run` carries the last invocation's timestamp + result envelope; the `tool_invocations` table (auto-populated by `mpm call` / `mpm-mcp`) records the action, params (force, max_batches), success flag, and error message. No new event table introduced.
+
+**Validation:** full core test suite passes (0 failures); no regressions.
+
 ## 2026-08-27 — Pointer-Native Projection on Retrieval APIs (Context-Bloat Fix)
 
 The `mpm_memory query` and `mpm_lessons search|list` surfaces previously returned full content inline (bounded to 2048 bytes by `BoundInlineContent`), destroying agent context windows when a broad query matched many rows. Callers that explicitly opted out via `full_content: true` got unbounded content. The opt-in path was correct; the default was the bug.
