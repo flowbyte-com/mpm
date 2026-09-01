@@ -705,18 +705,48 @@ var sensitivePatterns = []struct {
 	{"GitHub Personal Token", regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`)},
 	{"GitHub OAuth Token", regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`)},
 	{"GitHub Refresh Token", regexp.MustCompile(`ghr_[a-zA-Z0-9]{72}`)},
+	// W-1 (debt burn-down, 2026-09-01): GitHub App server-to-server
+	// tokens (ghs_) and user-to-server tokens (ghu_) escaped the scanner
+	// despite being real-world credential shapes. Length thresholds
+	// match the GitHub-published format (36 alphanumerics). Listed
+	// alongside the existing GitHub family for grep-ability.
+	{"GitHub App Server-to-Server Token", regexp.MustCompile(`ghs_[a-zA-Z0-9]{36}`)},
+	{"GitHub User-to-Server Token", regexp.MustCompile(`ghu_[a-zA-Z0-9]{36}`)},
 	// D-008: fine-grained PATs use the github_pat_ prefix. The legacy
-	// family (ghp_/gho_/ghr_) predates this shape; the new prefix
-	// escapes the scanner if not added here. Suffix length is variable
-	// (alphanumeric + underscore) so the threshold is set conservatively
-	// to {20,} to match real-world credential length while tolerating
-	// truncated test fixtures.
+	// family (ghp_/gho_/ghr_/ghs_/ghu_) predates this shape; the new
+	// prefix escapes the scanner if not added here. Suffix length is
+	// variable (alphanumeric + underscore) so the threshold is set
+	// conservatively to {20,} to match real-world credential length
+	// while tolerating truncated test fixtures.
 	{"GitHub Fine-Grained PAT", regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{20,}`)},
 	{"AWS Access Key ID", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
+	// W-1 (debt burn-down, 2026-09-01): AWS STS temporary credentials
+	// use ASIA prefix (permanent credentials use AKIA, already covered).
+	// Same shape as AKIA but uppercase letter S. {16} matches the
+	// published credential length.
+	{"AWS STS Temporary Credential", regexp.MustCompile(`ASIA[A-Z0-9]{16}`)},
 	{"Slack Token", regexp.MustCompile(`xox[baprs]-[0-9]+-[0-9]+`)},
 	{"Stripe API Key", regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`)},
 	{"Stripe Test Key", regexp.MustCompile(`sk_test_[0-9a-zA-Z]{24,}`)},
 	{"JWT Token", regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`)},
+	// W-1 (debt burn-down, 2026-09-01): Google API keys use the AIza
+	// prefix. The full key is typically 39 characters total (AIza + 35
+	// alphanumeric/dash/underscore). The threshold {35,} tolerates
+	// truncated test fixtures while still rejecting short prose that
+	// happens to begin with "AIza" (rare but worth guarding).
+	{"Google API Key", regexp.MustCompile(`AIza[a-zA-Z0-9_-]{35,}`)},
+	// W-1 (debt burn-down, 2026-09-01): Google OAuth 2.0 access tokens
+	// begin with "ya29." (lowercase y, lowercase a, then 29). The full
+	// token is ~100+ characters; {60,} tolerates shorter fixtures while
+	// still requiring credential-shaped length.
+	{"Google OAuth Access Token", regexp.MustCompile(`ya29\.[a-zA-Z0-9_-]{60,}`)},
+	// W-1 (debt burn-down, 2026-09-01): Azure storage account keys are
+	// 88-character base64 strings surfaced in connection strings. The
+	// shape is highly ambiguous on its own (88-char base64 is common),
+	// so we anchor on the Azure-specific prefix `AccountKey=` which only
+	// appears in Azure connection strings. This avoids false positives
+	// on legitimate long base64 strings in other contexts.
+	{"Azure Storage Account Key", regexp.MustCompile(`(?i)AccountKey=[A-Za-z0-9+/=]{80,}`)},
 	// BLOCKER 4 (scanner false-positives): generic labels no longer block
 	// unless the value is credential-shaped. The previous pattern
 	// `(secret|token)[=:]\s*[^\s]+` matched any non-whitespace token after
