@@ -6,10 +6,24 @@
 // validates the response structurally, then commits a lesson and
 // marks the raw memories in a single transaction.
 //
+// The PUBLIC surface is CompactEpistemologyDrain, which loops
+// CompactEpistemology (the per-batch primitive) until no eligible raw
+// memories remain. The 50-item LLM context safeguard (compactBatchSize)
+// is preserved on every batch — only the loop boundary changed.
+//
 // Atomicity guarantee: the lesson insert and the raw-memory mark
-// happen in one SQL transaction. Either both commit or neither commits.
-// The LLM call is OUTSIDE the transaction — a failure there leaves
-// zero DB writes, no partial state.
+// happen in one SQL transaction per batch. Either both commit or
+// neither commits. The LLM call is OUTSIDE the transaction — a
+// failure there leaves zero DB writes for that batch, no partial
+// state. Each batch is independently atomic; a later-batch failure
+// leaves earlier successful batches committed and reports the
+// remaining work.
+//
+// Drain-level failure semantics: when a batch fails mid-drain, the
+// drain returns success=false with the partial aggregate and the
+// underlying error. Earlier successful batches remain durable; the
+// failed batch and all subsequent eligible rows are untouched. The
+// next invocation resumes from the remaining eligible work.
 //
 // Provenance convention: the LLM does NOT see or return the raw memory
 // IDs. The Go orchestrator holds the slice from the SELECT and attaches
@@ -86,6 +100,52 @@ type CompactEpistemologyResult struct {
 // 1000+ raw in ~20 calls.
 const compactBatchSize = 50
 
+// compactDrainMaxBatchesDefault is the per-invocation safety cap on
+// the number of LLM-bounded batches the drain will process. 20
+// batches × 50 raw = 1000 raw memories per invocation, matching the
+// original design rationale ("draining a backlog of 1000+ raw in
+// ~20 calls"). Prevents runaway LLM cost when new eligible raw
+// memories arrive faster than the drain can consume them.
+const compactDrainMaxBatchesDefault = 20
+
+// compactDrainMaxBatchesHardCap is the absolute upper bound accepted
+// from callers (regardless of what they pass). 100 batches × 50 raw
+// = 5000 raw memories — large enough for any realistic backlog,
+// small enough to keep a single invocation bounded.
+const compactDrainMaxBatchesHardCap = 100
+
+// CompactEpistemologyDrainResult is the wire-format return shape for
+// the drain-mode compact operation. Aggregates per-batch results from
+// the underlying CompactEpistemology primitive.
+//
+// Field semantics:
+//   - Success: false only when a mid-drain batch failed. Always true
+//     for "drained cleanly" and "below_threshold" skip paths.
+//   - BatchesProcessed: count of batches that committed a lesson.
+//   - RawProcessed: sum of compacted raw memories across all batches.
+//   - LessonsCreated: equal to BatchesProcessed on success (1 lesson
+//     per batch).
+//   - RawRemaining: live read of epistemic_pressure_v.raw_count after
+//     the loop ends. Reflects concurrent writes — the canonical source
+//     of truth.
+//   - LessonIDs: lesson IDs created in batch order.
+//   - SkippedReason: set when 0 batches were processed (no_raw_memories
+//     or below_threshold).
+//   - StopReason: "drained" | "max_batches" | "failed".
+type CompactEpistemologyDrainResult struct {
+	Success         bool     `json:"success"`
+	BatchesProcessed int     `json:"batches_processed"`
+	RawProcessed    int      `json:"raw_processed"`
+	LessonsCreated  int      `json:"lessons_created"`
+	RawRemaining    int      `json:"raw_remaining"`
+	LessonIDs       []string `json:"lesson_ids,omitempty"`
+	SkippedReason   string   `json:"skipped_reason,omitempty"`
+	StopReason      string   `json:"stop_reason,omitempty"`
+	// Partial-failure visibility. FailedBatch is 1-indexed.
+	FailedBatch   int    `json:"failed_batch,omitempty"`
+	FailureReason string `json:"failure_reason,omitempty"`
+}
+
 // compactSynthesizeFunc is the LLM injection seam. Production wires
 // it in init; tests override the variable directly.
 var compactSynthesizeFunc = func(ctx context.Context, rawMemories []string) (string, error) {
@@ -154,6 +214,120 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 		RawMarked:      len(rawIDs),
 		LessonID:       lessonID,
 	}, nil
+}
+
+// CompactEpistemologyDrain is the public drain-mode compact surface.
+// Loops the per-batch primitive (CompactEpistemology) until no
+// eligible raw memories remain, the per-invocation batch cap is hit,
+// or a batch fails. The 50-item LLM context safeguard applies on
+// every batch — only the loop boundary was added.
+//
+// Termination:
+//   - "drained" — last batch was partial (< batchSize), or the next
+//     pre-check returned SkippedReason: "no_raw_memories" / "below_threshold".
+//   - "max_batches" — caller-requested or default safety cap reached.
+//     RawRemaining reflects work still to be done.
+//   - "failed" — a mid-drain batch failed. Earlier successful batches
+//     remain committed; the failed batch and all subsequent eligible
+//     rows are untouched. The next invocation resumes from the
+//     remaining work.
+//
+// Each batch stays independently atomic — the per-batch transaction
+// boundary is inside CompactEpistemology. The drain loop holds NO
+// transaction across iterations.
+//
+// maxBatches semantics:
+//   - 0 or negative: use compactDrainMaxBatchesDefault (20).
+//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (100).
+//
+// force semantics: passed through to each per-batch call. force=false
+// stops the drain at the pressure threshold; force=true drains every
+// eligible row regardless of threshold.
+func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error) {
+	if maxBatches <= 0 {
+		maxBatches = compactDrainMaxBatchesDefault
+	}
+	if maxBatches > compactDrainMaxBatchesHardCap {
+		maxBatches = compactDrainMaxBatchesHardCap
+	}
+
+	result := &CompactEpistemologyDrainResult{
+		Success:   true,
+		LessonIDs: []string{},
+	}
+
+	for i := 0; i < maxBatches; i++ {
+		batch, err := dm.CompactEpistemology(ctx, force)
+		if err != nil {
+			// Mid-drain failure: earlier successful batches are already
+			// committed (each batch is atomic). The failed batch and
+			// all subsequent eligible rows are untouched. Report
+			// success=false with the partial aggregate and the error.
+			result.Success = false
+			result.StopReason = "failed"
+			result.FailedBatch = i + 1
+			result.FailureReason = err.Error()
+			result.RawRemaining = dm.liveRawCount(ctx)
+			return result, err
+		}
+
+		// Skip path — pre-check said no work to do.
+		if batch.SkippedReason != "" {
+			// Always propagate the skip reason. Whether the loop ran
+			// zero batches (empty substrate, force=false below
+			// threshold) or stopped mid-stream (raw fell below
+			// threshold after some commits), the agent benefits from
+			// knowing why. The "drained" stop reason is implied by
+			// StopReason; the skipped_reason field carries the
+			// diagnostic of the iteration that ended the loop.
+			result.SkippedReason = batch.SkippedReason
+			result.StopReason = "drained"
+			break
+		}
+
+		// Commit path.
+		result.BatchesProcessed++
+		result.RawProcessed += batch.Compacted
+		result.LessonsCreated += batch.LessonsCreated
+		if batch.LessonID != "" {
+			result.LessonIDs = append(result.LessonIDs, batch.LessonID)
+		}
+
+		// Last partial batch: this batch returned fewer than
+		// compactBatchSize rows, so the next iteration will skip with
+		// "no_raw_memories". Exit early without paying for the
+		// redundant pre-check on the next iteration.
+		if batch.Compacted < compactBatchSize {
+			result.StopReason = "drained"
+			break
+		}
+	}
+
+	if result.StopReason == "" {
+		// Loop ran to maxBatches without a partial-batch or skip
+		// signal — the safety cap was reached. Work may remain.
+		result.StopReason = "max_batches"
+	}
+
+	// Final raw_remaining from the canonical live view. Reflects
+	// concurrent writes during the drain — this is the source of
+	// truth, not a sum or estimate from the loop.
+	result.RawRemaining = dm.liveRawCount(ctx)
+
+	return result, nil
+}
+
+// liveRawCount reads the canonical raw_count from the
+// epistemic_pressure_v view. Used to populate CompactEpistemologyDrainResult
+// .RawRemaining at loop end. Returns 0 on any read failure — the
+// safe default for a post-drain diagnostic; the operation itself
+// remains correct regardless of this number.
+func (dm *DatabaseManager) liveRawCount(ctx context.Context) int {
+	var n int
+	if err := dm.db.QueryRowContext(ctx, `SELECT raw_count FROM epistemic_pressure_v`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 // compactPreCheck reads raw_count and the system_config threshold in
