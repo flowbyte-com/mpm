@@ -175,7 +175,15 @@ func handleUpdateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 }
 
 func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// D-8.1: accept either `work_id` (canonical) or `id` (alias), matching
+	// the same surface convention used by mpm_memory (memory_id) and
+	// mpm_handoff (id).
 	workID, _ := p["work_id"].(string)
+	if workID == "" {
+		if v, ok := p["id"].(string); ok && v != "" {
+			workID = v
+		}
+	}
 	note, _ := p["note"].(string)
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for complete")
