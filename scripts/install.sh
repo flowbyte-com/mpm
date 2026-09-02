@@ -9,7 +9,7 @@
 # want shared system state.
 #
 # What this script does:
-#   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic)
+#   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
 #   2. Installs binaries to $HOME/.mpm/bin/ (canonical — same root as data)
 #   3. Writes a workspace-setting wrapper at $HOME/.mpm/bin/mpm
 #   4. Creates $HOME/.mpm/ as the runtime data root (0700/0600 enforced
