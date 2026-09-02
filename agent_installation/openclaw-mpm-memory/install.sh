@@ -47,7 +47,54 @@ else
   log "NOTE: systemctl not available on PATH; skipping mpm-scheduler check. mpm read-only access still works."
 fi
 
-# 4. Print summary + next steps
+# 4. Persist the absolute mpm path to plugin config.
+#
+# Why: the gateway runs under a systemd --user service with a stripped PATH,
+# so a bare `mpmBin: "mpm"` config (PATH-resolved) fails at runtime with
+# `spawn mpm ENOENT`. Writing the absolute path here closes that gap once
+# at install time instead of every operator hitting it post-install.
+#
+# Skip silently if `openclaw` is not on PATH (e.g. minimal environments,
+# Docker containers) — the operator can run the equivalent `openclaw
+# config set` command themselves later. Failures of `openclaw config set`
+# are non-fatal: the plugin still works once the operator sets it.
+if command -v openclaw >/dev/null 2>&1; then
+  MPM_ABS_PATH="$(command -v mpm)"
+  if [ -n "${MPM_ABS_PATH}" ]; then
+    log "persisting mpmBin=${MPM_ABS_PATH} to plugin config (absolute path avoids systemd PATH gotcha)"
+    if openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin "${MPM_ABS_PATH}" >/dev/null 2>&1; then
+      log "mpmBin persisted. Restart the gateway to apply."
+    else
+      log "WARN: failed to persist mpmBin automatically. Run manually:"
+      log "  openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin ${MPM_ABS_PATH}"
+    fi
+  fi
+else
+  log "NOTE: openclaw CLI not on PATH; skipping automatic mpmBin persistence. After linking the plugin, set manually:"
+  log "  openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin \$(command -v mpm)"
+fi
+
+# 5. Persist hooks.allowConversationAccess=true (opt-in for typed hooks).
+#
+# Why: the plugin uses the typed hook `agent_turn_prepare` to inject
+# wake context as `prependContext`. OpenClaw requires non-bundled plugins
+# to explicitly opt in to typed hooks via this flag, otherwise the
+# gateway silently blocks the hook at register time (the plugin keeps
+# running but wake-context injection never fires). Added 0.1.3.
+#
+# This step is also non-fatal — the operator can set it manually.
+if command -v openclaw >/dev/null 2>&1; then
+  if openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowConversationAccess true >/dev/null 2>&1; then
+    log "hooks.allowConversationAccess=true persisted (enables agent_turn_prepare typed hook)."
+  else
+    log "WARN: failed to persist hooks.allowConversationAccess. Run manually:"
+    log "  openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowConversationAccess true"
+  fi
+else
+  log "NOTE: openclaw CLI not on PATH; skipping hooks.allowConversationAccess persistence. Set manually after linking."
+fi
+
+# 6. Print summary + next steps
 cat >&2 <<'NEXT'
 [openclaw-mpm-memory install] Done.
 
