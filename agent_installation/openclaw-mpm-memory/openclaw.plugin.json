@@ -17,6 +17,10 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Master toggle. When false, the plugin is a complete no-op."
+      },
       "mpmBin": {
         "type": "string",
         "description": "Path to the mpm binary. Default 'mpm' (PATH-resolved). NOTE: the OpenClaw gateway runs as a systemd --user service with a stripped PATH, so a PATH-resolved value like 'mpm' typically fails at runtime with 'spawn mpm ENOENT'. Always set this to an absolute path (e.g. /home/<user>/.local/bin/mpm or /home/<user>/.mpm/bin/mpm) — install.sh does this automatically on this host."
