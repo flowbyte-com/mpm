@@ -115,9 +115,14 @@ func parseMemoryCreatedAt(s string) int64 {
 	return 0
 }
 
-// MemoryPaths represents the INPUT (watch) and OUTPUT (storage) paths for MPM.
+// MemoryPaths represents the INPUT (file-ingest sources) and OUTPUT
+// (storage) paths for MPM.
+//
 // OUTPUT paths are ALWAYS inside mpm/src/db/.
-// INPUT paths are the directories watched by the fsnotify daemon.
+// INPUT paths are operator-driven ingest sources consumed by
+// `mpm cascade materialize`. The fsnotify-based watch daemon was
+// deprecated in commit 6588cb8 and hard-removed in 215fd09 — these
+// fields are no longer auto-watched at runtime.
 type MemoryPaths struct {
 	// OUTPUT (write destination — ALWAYS mpm/src/db/mpm.db)
 	MemorySavePath  string `json:"memory_save_path"`  // Legacy alias for SQLiteDBPath
@@ -125,12 +130,12 @@ type MemoryPaths struct {
 	MirrorFilePath  string `json:"mirror_file_path"`  // Internal: mpm/src/db/mirror.jsonl
 	SQLiteDBPath    string `json:"sqlite_db_path"`    // Internal: ALWAYS mpm/src/db/mpm.db
 
-	// INPUT (watch directories for the fsnotify daemon)
-	MemoryPath  string `json:"memory_path"`  // Watch daemon: dir for .md files
-	SessionPath string `json:"session_path"` // Watch daemon: dir for .jsonl files
+	// INPUT (operator-driven cascade ingest sources).
+	// Consumed by `mpm cascade materialize` — NOT auto-watched at runtime.
+	MemoryPath  string `json:"memory_path"`  // Cascade source: dir for .md files
+	SessionPath string `json:"session_path"` // Cascade source: dir for .jsonl files
 }
 
-// DefaultMemoryPaths returns the default memory paths for MPM.
 // DefaultMemoryPaths returns the canonical MPM storage paths.
 //
 // OUTPUT (Internal Storage — ALWAYS mpm/src/db/mpm.db):
@@ -138,9 +143,9 @@ type MemoryPaths struct {
 //   - MirrorFilePath: mpm/src/db/mirror.jsonl (audit mirror)
 //   - SessionSavePath: mpm/src/db/mpm.db (session data stored HERE, not a dir)
 //
-// INPUT (Watch Directories — for the fsnotify daemon):
-//   - MemoryPath:  Config memory_dir OR ~/.openclaw/workspace/memory (OpenClaw memory dir)
-//   - SessionsPath: Config sessions_dir OR ~/.openclaw/agents/main/sessions (OpenClaw sessions dir)
+// INPUT (Operator-Driven Cascade Sources — `mpm cascade materialize`):
+//   - MemoryPath:  Config memory_dir OR $WORKSPACE/memory
+//   - SessionsPath: Config sessions_dir OR ~/.openclaw/agents/main/sessions
 //
 // NOTE: Does NOT create directories — fails if paths don't exist.
 func DefaultMemoryPaths() MemoryPaths {
@@ -148,12 +153,12 @@ func DefaultMemoryPaths() MemoryPaths {
 	internalDBPath := filepath.Join(mpmDir, "src", "db")
 	sqliteDBPath := filepath.Join(internalDBPath, "mpm.db")
 
-	// Load config for external watch directories
+	// Load config for external cascade ingest sources
 	cfg, _ := config.LoadConfig()
 	memoryPath := config.ResolveEnvPath(cfg.MemoryDir)
 	sessionsPath := config.ResolveEnvPath(cfg.SessionsDir)
 
-	// Fallbacks for watch directories (OpenClaw workspace defaults)
+	// Fallbacks for cascade ingest sources (OpenClaw workspace defaults)
 	homeDir, _ := os.UserHomeDir()
 	if sessionsPath == "" {
 		sessionsPath = filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
@@ -169,9 +174,9 @@ func DefaultMemoryPaths() MemoryPaths {
 		MirrorFilePath:  filepath.Join(internalDBPath, "mirror.jsonl"),
 		SQLiteDBPath:    sqliteDBPath, // Internal: ALWAYS mpm/src/db/mpm.db
 
-		// INPUT (watch directories for the fsnotify daemon)
-		MemoryPath:  memoryPath,   // Watch daemon: directory to scan for .md files
-		SessionPath: sessionsPath, // Watch daemon: directory to scan for .jsonl files
+		// INPUT (operator-driven cascade ingest sources)
+		MemoryPath:  memoryPath,   // Cascade: directory to scan for .md files
+		SessionPath: sessionsPath, // Cascade: directory to scan for .jsonl files
 	}
 }
 

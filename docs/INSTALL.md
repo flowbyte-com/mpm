@@ -357,12 +357,19 @@ If you skipped that step or need to re-register manually:
 ```bash
 openclaw mcp add mpm \
   --command /usr/local/bin/mpm-mcp \
-  --env MPM_WORKSPACE=/var/lib/mpm \
-  --env MPM_ACTIVE_MODE=programming \
-  --env MPM_ACTIVE_PERSONA=correspondent
+  --env MPM_WORKSPACE=/var/lib/mpm
 
 openclaw gateway restart                  # gateway caches MCP servers at startup
 ```
+
+> **Note:** `MPM_ACTIVE_MODE` and `MPM_ACTIVE_PERSONA` are intentionally
+> not set here. MPM resolves both from env at request time via
+> `internal/core/mpmcli.ActiveContextFromEnv()` and applies its own
+> `default`/`default` contract when unset. Hardcoding framework-specific
+> defaults at MCP-wiring time was a pre-2026-08-29 drift that leaked
+> old mode taxonomy into every registration. To pin a non-default mode
+> for this OpenClaw session, set the env vars on the gateway process
+> itself, not on the MCP server entry.
 
 > **Important:** `openclaw mcp add` is a silent no-op if `mpm` is already
 > registered. To update an existing registration, use `set`:

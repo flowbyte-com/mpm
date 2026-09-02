@@ -149,10 +149,17 @@ config (NOT the MPM repo):
 ```bash
 openclaw config set mcp.servers.mpm.command '/home/v/.mpm/bin/mpm-mcp'
 openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE '/home/v/.mpm'
-openclaw config set mcp.servers.mpm.env.MPM_ACTIVE_MODE 'programming'
-openclaw config set mcp.servers.mpm.env.MPM_ACTIVE_PERSONA 'correspondent'
 openclaw gateway restart
 ```
+
+> **Note:** `MPM_ACTIVE_MODE` and `MPM_ACTIVE_PERSONA` are intentionally
+> not set in the MCP env. MPM resolves both from env at request time
+> via `internal/core/mpmcli.ActiveContextFromEnv()` and falls back to
+> `default`/`default` when unset. Hardcoding framework-specific values
+> here was a pre-2026-08-29 drift that leaked old mode taxonomy into
+> every registration. To pin a non-default mode for this OpenClaw
+> session, set the env vars on the gateway process itself, not on the
+> MCP server entry.
 
 A canonical `.mcp.json` snapshot lives at
 [`openclaw-mpm-memory/.mcp.json`](./openclaw-mpm-memory/.mcp.json) for

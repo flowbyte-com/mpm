@@ -227,9 +227,11 @@ func verifyTimestampsMigration(tx *sql.Tx) error {
 //  4. Sentinel write — only reached if all three prior steps succeed.
 //
 // The sentinel uses INSERT OR IGNORE so two concurrent processes
-// (e.g. CLI handling and detached watch daemon) that both run initUnifiedSchema
-// against the same DB converge cleanly to a single sentinel row instead of
-// failing on PRIMARY KEY.
+// (e.g. CLI handling and a detached mpm-mcp / mpm-scheduler) that both
+// run initUnifiedSchema against the same DB converge cleanly to a
+// single sentinel row instead of failing on PRIMARY KEY. The fsnotify
+// watch daemon was deprecated in commit 6588cb8 and hard-removed in
+// 215fd09 — it is no longer a concurrency partner.
 //
 // Error contract: any error from this migration is a genuine failure and must
 // roll back. With the Phase 7 DDL flip (18-table INTEGER rebuild), all

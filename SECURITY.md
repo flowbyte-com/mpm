@@ -72,7 +72,10 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 
 ### In scope
 
-- The `mpm` CLI binary (single-process daemon + fsnotify watcher)
+- The `mpm` CLI binary (single-process daemon; file ingestion is
+  operator-driven via `mpm cascade materialize`, not watcher-based —
+  the watch daemon was deprecated in commit `6588cb8` and
+  hard-removed in `215fd09`)
 - `mpm-mcp` (MCP server surface)
 - `mpm-scheduler` (universal wake executor)
 - `mpm-agent` companion binary (Telegram bot, MCP client, CLI REPL)
@@ -83,7 +86,9 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 - Backup and restore (`mpm backup-db`, `mpm restore-db`)
 - Configuration (`mpm_config.json` and its equivalents)
 - The skill system (loaded skills, skill content, registry interception)
-- The watch daemon (fsnotify-based file ingestion)
+- File ingestion surface (`mpm cascade materialize`); the legacy
+  fsnotify-based watch daemon is no longer compiled into `mpm` and is
+  not reachable as an attack surface
 - Pre-commit hooks and CI workflows (`.github/workflows/`,
   `.superpowers/`)
 - **Dependencies used directly by MPM.** Vulnerabilities in a Go
