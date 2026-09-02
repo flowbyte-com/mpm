@@ -10,6 +10,7 @@
 package internal
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -877,19 +878,29 @@ func (dm *DatabaseManager) GetTheory(id string) (map[string]interface{}, error) 
 		WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL`, id)
 
 	var (
-		gotID, content, tags, metadata string
-		createdAt, updatedAt           int64
-		weight, reinforcement          int64
+		gotID, content           string
+		tags, metadata           sql.NullString
+		createdAt, updatedAt     int64
+		weight, reinforcement    int64
 	)
 	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 		return nil, fmt.Errorf("get theory %s: %w", id, err)
 	}
 
+	// Defense-in-depth: tags/metadata are JSON columns written through
+	// distinct paths (legacy callers omit them entirely → SQL NULL,
+	// current callers write '[]' / '{}'). Scan to NullString so a
+	// NULL row cannot panic the read path. The 2026-08-17 substrate
+	// defense triad mandates this on every nullable scalar column.
 	parsedMeta := map[string]interface{}{}
-	if metadata != "" {
-		if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
-			parsedMeta = map[string]interface{}{"_unparsed": metadata}
+	if metadata.Valid && metadata.String != "" {
+		if err := json.Unmarshal([]byte(metadata.String), &parsedMeta); err != nil {
+			parsedMeta = map[string]interface{}{"_unparsed": metadata.String}
 		}
+	}
+	tagsStr := ""
+	if tags.Valid {
+		tagsStr = tags.String
 	}
 
 	// Theory content is stored as "<hypothesis>\n\nVALIDATION_CRITERIA: ..."
@@ -901,7 +912,7 @@ func (dm *DatabaseManager) GetTheory(id string) (map[string]interface{}, error) 
 		"id":                  gotID,
 		"hypothesis":          hypothesis,
 		"validation_criteria": validationCriteria,
-		"tags":                parseDecisionTags(tags),
+		"tags":                parseDecisionTags(tagsStr),
 		"metadata":            parsedMeta,
 		"created_at":          createdAt,
 		"updated_at":          updatedAt,
@@ -935,19 +946,26 @@ func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]inter
 	var whereExtra string
 	switch status {
 	case "pending":
-		whereExtra = `AND json_extract(metadata, '$.status') = 'pending'`
+		// The `pending` predicate MUST match health_check.theories_pending
+		// exactly — including the expires_at filter — so the OpenClaw
+		// gateway's pending-theory count agrees with what
+		// `mpm_theories list status=pending` returns.
+		whereExtra = `AND json_extract(metadata, '$.status') = 'pending' AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	case "proven":
-		whereExtra = `AND json_extract(metadata, '$.status') = 'proven'`
+		whereExtra = `AND json_extract(metadata, '$.status') = 'proven' AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	case "disproven":
-		whereExtra = `AND json_extract(metadata, '$.status') = 'disproven'`
+		whereExtra = `AND json_extract(metadata, '$.status') = 'disproven' AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	case "resolved":
 		// M3 audit D-010: include the legacy literal `resolved` value
 		// alongside the canonical `proven`/`disproven` so pre-fix rows
 		// remain queryable through the same filter. New resolutions
 		// (post-fix) write only `proven` or `disproven`.
-		whereExtra = `AND json_extract(metadata, '$.status') IN ('proven','disproven','resolved')`
+		whereExtra = `AND json_extract(metadata, '$.status') IN ('proven','disproven','resolved') AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	case "all":
-		// No extra filter.
+		// No extra filter. `all` is for forensics / historical review —
+		// operators may want to surface expired rows to triage stale work.
+		// The strict status filters above match the health_check metric
+		// exactly; `all` does not, by design.
 	default:
 		return nil, fmt.Errorf("list theories: unknown status filter %q (use pending|all|proven|disproven|resolved)", status)
 	}
@@ -970,25 +988,36 @@ func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]inter
 	var out []map[string]interface{}
 	for rows.Next() {
 		var (
-			gotID, content, tags, metadata string
-			createdAt, updatedAt           int64
-			weight, reinforcement          int64
+			gotID, content         string
+			tags, metadata         sql.NullString
+			createdAt, updatedAt   int64
+			weight, reinforcement  int64
 		)
 		if err := rows.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 			return nil, fmt.Errorf("scan theory row: %w", err)
 		}
+		// Defense-in-depth (Substrate Defense Triad #2): rows from
+		// pre-D-005 paths may have NULL `tags` / `metadata` columns.
+		// Scanning NULL into a concrete `string` panics with
+		// "converting NULL to string is unsupported"; this read surface
+		// must stay reachable even for legacy rows so the agent can
+		// triage them via mpm_resolve.
 		parsedMeta := map[string]interface{}{}
-		if metadata != "" {
-			if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
-				parsedMeta = map[string]interface{}{"_unparsed": metadata}
+		if metadata.Valid && metadata.String != "" {
+			if err := json.Unmarshal([]byte(metadata.String), &parsedMeta); err != nil {
+				parsedMeta = map[string]interface{}{"_unparsed": metadata.String}
 			}
+		}
+		tagsStr := ""
+		if tags.Valid {
+			tagsStr = tags.String
 		}
 		hypothesis, validationCriteria := splitHypothesisAndCriteria(content)
 		out = append(out, map[string]interface{}{
 			"id":                  gotID,
 			"hypothesis":          hypothesis,
 			"validation_criteria": validationCriteria,
-			"tags":                parseDecisionTags(tags),
+			"tags":                parseDecisionTags(tagsStr),
 			"metadata":            parsedMeta,
 			"created_at":          createdAt,
 			"updated_at":          updatedAt,
