@@ -116,11 +116,18 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	if artifactType == "" {
 		return nil, fmt.Errorf("artifact_type is required")
 	}
+	// Alpha-4 ledger audit: ListEvidence (MCP mpm_evidence list) had no
+	// expires_at predicate; the sibling ListEvidenceForArtifact (used by
+	// the CLI handler) filters expired rows. Without parity, an MCP call
+	// returns evidence that the CLI marks as gone — a count and identity
+	// divergence between the two surfaces. The audit-trail intact / derivation
+	// clean contract documented in ListEvidenceForArtifact applies here too.
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group, strength,
 		       independence_factor, created_by, created_at, expires_at, notes
 		FROM evidence
 		WHERE artifact_id = ? AND artifact_type = ?
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		ORDER BY created_at DESC
 	`, artifactID, artifactType)
 	if err != nil {

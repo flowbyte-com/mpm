@@ -115,13 +115,13 @@ func handleLessonAdd(args []string) int {
 		return respond("", err.Error(), 1)
 	}
 
-	lessonStore, err := internal.NewLessonStore("")
-	if err != nil {
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
 		if jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to initialize lesson store: %v", err)})
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Failed to initialize lesson store: database not available"})
 			fmt.Println(string(data))
 		} else {
-			respond("", fmt.Sprintf("Failed to initialize lesson store: %v", err), 1)
+			respond("", "Failed to initialize lesson store: database not available", 1)
 		}
 		return 1
 	}
@@ -164,9 +164,9 @@ func handleLessonList(args []string) int {
 		}
 	}
 
-	lessonStore, storeErr := internal.NewLessonStore("")
-	if storeErr != nil {
-		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
 	lessons, listErr := lessonStore.ListLessons(internal.LessonType(lessonType))
 	if listErr != nil {
@@ -231,9 +231,9 @@ func handleLessonSearch(args []string) int {
 		query = strings.Join(queryArgs, " ")
 	}
 
-	lessonStore, storeErr := internal.NewLessonStore("")
-	if storeErr != nil {
-		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
 	results, searchErr := lessonStore.SearchLessons(query, 20)
 	if searchErr != nil {
@@ -292,9 +292,9 @@ func handleLessonGet(args []string) int {
 	}
 
 	id := args[0]
-	lessonStore, storeErr := internal.NewLessonStore("")
-	if storeErr != nil {
-		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
 	lesson, getErr := lessonStore.GetLesson(id)
 	if getErr != nil {
@@ -322,9 +322,9 @@ func handleLessonShred(args []string) int {
 	}
 
 	id := args[0]
-	lessonStore, storeErr := internal.NewLessonStore("")
-	if storeErr != nil {
-		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
 	err := lessonStore.DeleteLesson(id)
 	if err != nil {
@@ -335,9 +335,9 @@ func handleLessonShred(args []string) int {
 }
 
 func handleLessonStats() int {
-	lessonStore, storeErr := internal.NewLessonStore("")
-	if storeErr != nil {
-		return respond("", fmt.Sprintf("Failed to initialize lesson store: %v", storeErr), 1)
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
 	stats, statsErr := lessonStore.GetLessonStats()
 	if statsErr != nil {

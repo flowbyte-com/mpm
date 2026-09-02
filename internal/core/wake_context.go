@@ -602,6 +602,7 @@ func (dm *DatabaseManager) recentMemories(limit int) ([]WakeContextMemory, error
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		  AND collection NOT IN ('decisions', 'theories')
 		ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
@@ -650,6 +651,7 @@ func (dm *DatabaseManager) recentMilestones(limit int) ([]WakeContextMemory, err
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at FROM memories
 		WHERE deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		  AND tags LIKE ?
 		  AND created_at > CAST(strftime('%s','now', '-30 days') AS INTEGER)
 		ORDER BY created_at DESC LIMIT ?`,

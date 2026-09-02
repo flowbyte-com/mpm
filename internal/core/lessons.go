@@ -18,6 +18,20 @@ func NewLessonStore(dbPath string) (*LessonStore, error) {
 	return &LessonStore{dm: dm}, nil
 }
 
+// NewLessonStoreForDM returns a LessonStore backed by an existing
+// DatabaseManager instance. Use this from CLI/MCP callers that already
+// hold a shared DatabaseManager (cmd/mpm uses `getDBConcrete()`) so
+// every command family operates on the same SQLite connection rather
+// than each opening its own — alpha-4 ledger audit fix for the CLI
+// lesson handlers that previously called `NewLessonStore("")` and
+// silently fell back to a different database than the active session.
+func NewLessonStoreForDM(dm *DatabaseManager) *LessonStore {
+	if dm == nil {
+		return nil
+	}
+	return &LessonStore{dm: dm}
+}
+
 // AddLesson delegates to DatabaseManager.AddLesson
 func (s *LessonStore) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
 	if s.dm == nil {

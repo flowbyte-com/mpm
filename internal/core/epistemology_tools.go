@@ -702,10 +702,18 @@ func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error
 		FROM memories
 		WHERE id = ? AND collection = 'decisions' AND deleted_at IS NULL`, id)
 
+	// Substrate Defense Triad #2: NULL safety on legacy tags/metadata
+	// columns. The sibling GetTheory in this file uses sql.NullString for
+	// these columns (the exact same NULL-panic class that caused the
+	// 2026-09-02 OpenClaw `theories_pending` discrepancy). Decision rows
+	// written before tags/metadata were mandatory could have SQL NULL,
+	// and scanning NULL into a concrete string panics with
+	// "converting NULL to string is unsupported".
 	var (
-		gotID, content, tags, metadata string
-		createdAt, updatedAt           int64
-		weight, reinforcement          int64
+		gotID, content      string
+		tags, metadata      sql.NullString
+		createdAt, updatedAt int64
+		weight, reinforcement int64
 	)
 	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 		return nil, fmt.Errorf("get decision %s: %w", id, err)
@@ -714,16 +722,16 @@ func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error
 	// Parse metadata_json so callers see a `metadata` sub-map instead of
 	// a string blob. Defensive: an unparseable metadata becomes {}.
 	parsedMeta := map[string]interface{}{}
-	if metadata != "" {
-		if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
-			parsedMeta = map[string]interface{}{"_unparsed": metadata}
+	if metadata.Valid && metadata.String != "" {
+		if err := json.Unmarshal([]byte(metadata.String), &parsedMeta); err != nil {
+			parsedMeta = map[string]interface{}{"_unparsed": metadata.String}
 		}
 	}
 
 	return map[string]interface{}{
 		"id":                   gotID,
 		"content":              content,
-		"tags":                 parseDecisionTags(tags),
+		"tags":                 parseDecisionTagsAny(tags),
 		"metadata":             parsedMeta,
 		"created_at":           createdAt,
 		"updated_at":           updatedAt,
@@ -764,6 +772,26 @@ func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]in
 		return nil, fmt.Errorf("list decisions: unknown status filter %q (use active|all|superseded|invalidated)", status)
 	}
 
+	// Tag filter — alpha-4 ledger audit SEV-1 fix. The DecisionFilter
+	// contract has always promised a Tags filter, but ListDecisions
+	// never applied it (the field was dead code). Tags are stored as a
+	// JSON array in the `tags` column; an OR-of-exists predicate per
+	// requested tag filters to rows whose tags array contains any of
+	// the requested tags. A NULL tags column cannot match a tag query,
+	// which is the documented behavior.
+	if len(filter.Tags) > 0 {
+		tagClauses := make([]string, 0, len(filter.Tags))
+		for _, t := range filter.Tags {
+			if t == "" {
+				continue
+			}
+			tagClauses = append(tagClauses, "EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)")
+		}
+		if len(tagClauses) > 0 {
+			whereExtra += " AND (" + strings.Join(tagClauses, " OR ") + ")"
+		}
+	}
+
 	// COALESCE wraps the limit so NULL from the params binding becomes 50.
 	// Defensive against a caller passing 0 explicitly (handled above, but
 	// the SQL is the load-bearing boundary).
@@ -776,7 +804,18 @@ func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]in
 		ORDER BY created_at DESC
 		LIMIT COALESCE(?, 50)`, whereExtra)
 
-	rows, err := dm.db.Query(query, limit)
+	// Build args: tag placeholders + limit placeholder. Order matches
+	// the WHERE clause construction (tags first, then limit).
+	args := make([]interface{}, 0, len(filter.Tags)+1)
+	for _, t := range filter.Tags {
+		if t == "" {
+			continue
+		}
+		args = append(args, t)
+	}
+	args = append(args, limit)
+
+	rows, err := dm.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list decisions: %w", err)
 	}
@@ -785,23 +824,24 @@ func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]in
 	var out []map[string]interface{}
 	for rows.Next() {
 		var (
-			id, content, tags, metadata string
-			createdAt, updatedAt        int64
-			weight, reinforcement       int64
+			id, content         string
+			tags, metadata      sql.NullString
+			createdAt, updatedAt int64
+			weight, reinforcement int64
 		)
 		if err := rows.Scan(&id, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 			return nil, fmt.Errorf("scan decision: %w", err)
 		}
 		parsedMeta := map[string]interface{}{}
-		if metadata != "" {
-			if err := json.Unmarshal([]byte(metadata), &parsedMeta); err != nil {
-				parsedMeta = map[string]interface{}{"_unparsed": metadata}
+		if metadata.Valid && metadata.String != "" {
+			if err := json.Unmarshal([]byte(metadata.String), &parsedMeta); err != nil {
+				parsedMeta = map[string]interface{}{"_unparsed": metadata.String}
 			}
 		}
 		out = append(out, map[string]interface{}{
 			"id":                  id,
 			"content":             content,
-			"tags":                parseDecisionTags(tags),
+			"tags":                parseDecisionTagsAny(tags),
 			"metadata":            parsedMeta,
 			"created_at":          createdAt,
 			"updated_at":          updatedAt,
@@ -1085,6 +1125,18 @@ func parseDecisionTags(tags string) []string {
 		return []string{}
 	}
 	return out
+}
+
+// parseDecisionTagsAny is the NULL-safe variant for the read paths that
+// scan the tags column into sql.NullString. It mirrors parseDecisionTags
+// on the Valid=true branch and returns an empty slice on NULL — the same
+// default the string-typed variant returns on the empty-string branch.
+// Substrate Defense Triad #2 (NULL safety).
+func parseDecisionTagsAny(tags sql.NullString) []string {
+	if !tags.Valid || tags.String == "" {
+		return []string{}
+	}
+	return parseDecisionTags(tags.String)
 }
 
 // extractTheoryStatusFromMemory pulls metadata.status from a GetMemory

@@ -2958,10 +2958,22 @@ func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]ma
 		limit = 5
 	}
 
+	// Alpha-4 ledger audit fix: this read path was the lone
+	// memory query that lacked both NULL safety on the tags/metadata
+	// columns and the deleted_at + expires_at predicates that every
+	// other read surface applies. Scanning NULL tags/metadata into
+	// concrete Go strings panicked with "converting NULL to string is
+	// unsupported" — the exact class of bug that caused the 2026-09-02
+	// OpenClaw `theories_pending` discrepancy. The deleted_at + expires_at
+	// predicates bring parity with GetMemory, SearchMemories, and
+	// HybridSearch so a session-scoped query cannot return rows that
+	// any other surface would have hidden.
 	rows, err := dm.db.Query(`
 		SELECT id, collection, content, tags, metadata, created_at
 		FROM memories
 		WHERE session_id = ?
+		  AND deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		ORDER BY created_at DESC
 		LIMIT ?
 	`, sessionID, limit)
@@ -2972,15 +2984,24 @@ func (dm *DatabaseManager) GetSessionMemories(sessionID string, limit int) ([]ma
 
 	var results []map[string]interface{}
 	for rows.Next() {
-		var memID, collection, content, tagsJSON, metadataJSON, createdAt string
+		var memID, collection, content, createdAt string
+		var tagsJSON, metadataJSON sql.NullString
 		if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
 			return nil, err
 		}
-		var tags []string
-		var metadata map[string]interface{}
-		json.Unmarshal([]byte(tagsJSON), &tags)
-		if metadataJSON != "" {
-			json.Unmarshal([]byte(metadataJSON), &metadata)
+		// Substrate Defense Triad #2: NULL-safe unwrap. The legacy
+		// 42 rows with NULL tags on the live DB would have panicked
+		// before this fix; the 0-session rows in the live DB mean the
+		// bug is latent today, but the session_id column is general
+		// substrate infrastructure and any future writer populating it
+		// would trigger the crash.
+		tags := []string{}
+		if tagsJSON.Valid && tagsJSON.String != "" {
+			_ = json.Unmarshal([]byte(tagsJSON.String), &tags)
+		}
+		metadata := map[string]interface{}{}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			_ = json.Unmarshal([]byte(metadataJSON.String), &metadata)
 		}
 		results = append(results, map[string]interface{}{
 			"id":         memID,
@@ -3773,8 +3794,14 @@ func (dm *DatabaseManager) GetTopicByName(name string) (string, error) {
 // GetTopic returns a topic record by ID
 func (dm *DatabaseManager) GetTopic(id string) (map[string]interface{}, error) {
 	var name, desc, createdAt, tagsJSON string
+	// Alpha-4 ledger audit T-1 fix: GetTopic by ID lacked the
+	// is_active = 1 filter that ListTopics and GetTopicByName apply.
+	// After DeleteTopic (which sets is_active = 0), a topic disappears
+	// from ListTopics but GetTopic still returns it — a divergent
+	// surface where direct ID lookup contradicts the canonical list.
+	// Match the canonical filter here too.
 	err := dm.db.QueryRow(
-		`SELECT name, COALESCE(description,''), created_at, COALESCE(tags,'{}') FROM topics WHERE id = ?`, id).Scan(
+		`SELECT name, COALESCE(description,''), created_at, COALESCE(tags,'{}') FROM topics WHERE id = ? AND is_active = 1`, id).Scan(
 		&name, &desc, &createdAt, &tagsJSON)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("topic not found")
@@ -4539,15 +4566,30 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 	return dm.searchLessonsLike(query, limit)
 }
 
-// searchLessonsLike is a fallback when FTS5 is unavailable
+// searchLessonsLike is a fallback when FTS5 is unavailable. The
+// FTS5 path uses BM25 over tokenized content; this fallback uses
+// LIKE on content and on each tag in the tags JSON array.
+//
+// alpha-4 ledger audit fix: the previous form was
+//   WHERE LOWER(content) LIKE ? OR LOWER(tags) LIKE ?
+// which treats the JSON-encoded tags column as a string. The literal
+// `LOWER('["alpha","beta"]') LIKE '%alpha%'` does match, but only as
+// an accidental substring — the comparison misses tag queries against
+// lessons whose tags column is NULL (it gets coerced to '[]', which
+// never matches) and queries against numeric/uppercase tags (the
+// JSON-array brackets/quotes/commas complicate substring matching).
+// The replacement uses json_each to enumerate tag tokens individually,
+// mirroring what BM25 would tokenize.
 func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson, error) {
 	q := "%" + strings.ToLower(query) + "%"
 	rows, err := dm.db.Query(`
-		SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
-		       source_session_id, created
-		FROM lessons
-		WHERE LOWER(content) LIKE ? OR LOWER(tags) LIKE ?
-		ORDER BY reinforcement_count DESC
+		SELECT DISTINCT l.id, l.type, l.content, COALESCE(l.tags,'[]'),
+		       l.reinforcement_count, l.source_session_id, l.created
+		FROM lessons l
+		LEFT JOIN json_each(COALESCE(l.tags,'[]')) je
+		WHERE LOWER(l.content) LIKE ?
+		   OR LOWER(je.value) LIKE ?
+		ORDER BY l.reinforcement_count DESC
 		LIMIT ?
 	`, q, q, limit)
 	if err != nil {
@@ -5317,6 +5359,19 @@ func (dm *DatabaseManager) ListAllWorks() ([]*Work, error) {
 }
 
 func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
+	// Alpha-4 ledger audit W-1 fix: ListWorksByStatus silently returned
+	// zero rows for any unknown status string (no validation). The MCP
+	// handler validated the enum before invoking this method, but
+	// direct DatabaseManager callers (and any future CLI/migration
+	// path) would see "0 results" with no signal that the input was
+	// invalid. Reject the unknown status at the SQL boundary, matching
+	// the validation pattern used by ListDecisions and ListTheories.
+	switch WorkStatus(status) {
+	case WorkStatusOpen, WorkStatusDone, WorkStatusCancelled:
+		// valid
+	default:
+		return nil, fmt.Errorf("list works by status: unknown status %q (use open|done|cancelled)", status)
+	}
 	rows, err := dm.db.Query(`
 		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
 		FROM works WHERE status = ?
