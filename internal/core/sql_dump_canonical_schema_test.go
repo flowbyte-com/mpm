@@ -86,6 +86,7 @@ func scanSchemaSources(t *testing.T) (map[string]bool, error) {
 		"work_events_new":            true,  // rename target in migrateWorkEventsCheck (domain-neutral migration)
 		"evidence_new":                true,  // rename target in migrateEvidenceWorkType
 		"new_session_handoffs":       true,  // rename target in MigrateSessionHandoffsOptionalSessionID (handoff-identity hardening)
+		"scheduled_tasks_new":        true,  // rename target in scheduled_tasks_migration (table-recreate pattern)
 	}
 
 	matches, err := filepath.Glob("*.go")
