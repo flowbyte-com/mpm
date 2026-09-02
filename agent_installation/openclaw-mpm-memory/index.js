@@ -398,10 +398,14 @@ export default definePluginEntry({
         } else {
           const err = (hc && hc.error) || "no ok:true in response";
           if (typeof log.warn === "function") {
+            const errStr = String(err);
+            const isPathError = /ENOENT|not found|spawn/i.test(errStr) || (typeof errStr === "string" && errStr.toLowerCase().includes("enoent"));
+            const hint = isPathError
+              ? `Looks like a missing-binary or PATH issue — the gateway runs under systemd with a stripped PATH. Set the absolute mpm path in plugin config: openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin /absolute/path/to/mpm. Current mpmBin="${mpmBin}".`
+              : `Check that ${mpmBin} exists and mcp.servers.mpm is registered.`;
             log.warn(
               `openclaw-mpm-memory: health_check failed — ${err}. ` +
-              `Recall will return disabled:true until mpm is reachable. ` +
-              `Check that ${mpmBin} exists and mcp.servers.mpm is registered.`
+              `Recall will return disabled:true until mpm is reachable. ${hint}`
             );
           }
         }
@@ -425,6 +429,14 @@ export default definePluginEntry({
       try {
         api.session?.state?.registerSessionExtension?.({
           id: `${PLUGIN_ID}:wake-context`,
+          // OpenClaw plugin SDK requires namespace + description; missing
+          // either logs a warning at every boot and may reject the
+          // extension in strict mode. Added 0.1.3.
+          namespace: PLUGIN_ID,
+          description:
+            "MPM wake context cache — durable projection of the per-" +
+            "session Promise<string> map for the session_start → " +
+            "agent_turn_prepare hook chain.",
           init: () => ({}),
           onLoad: () => ({}),
         });
