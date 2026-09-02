@@ -123,6 +123,13 @@ func extractCommands(path string) ([]entry, error) {
 				continue
 			}
 			name := strings.Trim(keyLit.Value, `"`)
+			// Filter: raw tool-action aliases (e.g. "mpm_theories action=propose")
+			// must not leak into the top-level CLI catalogue. These are
+			// MCP/tool payload shapes, not shell commands. Only entries that
+			// look like a bare CLI verb (no spaces, no "=") belong here.
+			if strings.Contains(name, " ") || strings.Contains(name, "=") {
+				continue
+			}
 			cmdLit, ok := kv.Value.(*ast.CompositeLit)
 			if !ok {
 				continue
