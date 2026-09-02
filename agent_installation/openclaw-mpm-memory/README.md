@@ -34,10 +34,15 @@ openclaw config set plugins.slots.memory openclaw-mpm-memory
 # 5. (Optional, recommended) Silence memory-core
 openclaw config set plugins.entries.memory-core.enabled false
 
-# 6. Restart the gateway
+# 6. (Required since 0.1.3) Opt in to typed hooks so wake-context injection works
+# Without this, the plugin runs but `agent_turn_prepare` is silently blocked by
+# the gateway and prependContext never reaches the agent prompt.
+openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowConversationAccess true
+
+# 7. Restart the gateway
 openclaw gateway restart
 
-# 7. Verify — should return ok:true with zero findings
+# 8. Verify — should return ok:true with zero findings
 openclaw doctor --lint --only core/doctor/memory-search --json
 ```
 
@@ -125,7 +130,12 @@ plugins: {
     "openclaw-mpm-memory": {
       enabled: true,
       config: {
-        mpmBin: "mpm",            // path to mpm; resolves from PATH by default
+        // ALWAYS use an absolute path here. The OpenClaw gateway runs as a
+        // systemd --user service with a stripped PATH; the bare default
+        // "mpm" (PATH-resolved) fails at runtime with `spawn mpm ENOENT`.
+        // install.sh detects and writes the absolute path automatically
+        // on this host — see the systemd gotcha note below.
+        mpmBin: "/home/v/.local/bin/mpm",
         timeoutMs: 5000,           // subprocess timeout; default 5000
         scope: "all",              // "all" | "local" | "shared"; default "all"
         limitDefault: 6            // default memory_search limit; 1-50
@@ -136,11 +146,36 @@ plugins: {
 }
 ```
 
+### systemd / PATH-resolved gotcha
+
+The OpenClaw gateway is launched by `systemd --user` and inherits a
+deliberately minimal `PATH` (typically `/usr/local/bin:/usr/bin`). Even if
+your interactive shell has `mpm` on PATH (e.g. via `~/.local/bin` from a
+profile), the gateway's subprocess will not see it. This is by design — the
+service-level PATH is independent of the user-shell PATH for predictability
+and security.
+
+**Symptom:** plugin logs `health_check failed — mpm mpm_system failed:
+spawn mpm ENOENT` at gateway boot, and every `memory_search` /
+`memory_get` returns `{disabled:true}`.
+
+**Fix:** set `mpmBin` to the absolute path of the `mpm` binary:
+
+```bash
+openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin "$(command -v mpm)"
+openclaw gateway restart
+```
+
+The bundled `install.sh` does this automatically when an `openclaw` CLI is
+on PATH, so fresh installs are unaffected. This hit was filed and fixed in
+0.1.3 (2026-09-02) after a clean reinstall on a host where the interactive
+shell PATH differed from the systemd unit's PATH.
+
 ## Failure Modes (All Fail-Open)
 
 | Condition | Behaviour |
 |---|---|
-| `mpm` not on PATH | `memory_search` returns `{disabled:true, error:"...not on PATH..."}` |
+| `mpm` not on PATH / binary not found | `memory_search` returns `{disabled:true, error:"...ENOENT..."}`; health-check log surfaces the config-set hint (added 0.1.3) |
 | `mpm` exits non-zero | Tool result includes last 500 chars of stderr/stdout as `error` |
 | Subprocess timeout | `error: "mpm ... timed out after Nms"` |
 | MPM returns zero hits | `results: []`, `total: 0` — normal |
