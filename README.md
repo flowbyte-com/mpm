@@ -4,7 +4,7 @@
 
 > **An observable substrate for long-lived autonomous systems.**
 
-> **Looking to install?** See [INSTALL.md](INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
+> **Looking to install?** See [docs/INSTALL.md](docs/INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
 
 MPM (Managed Persistent Memory) is a durable state substrate for AI agents, providing persistent memory, work, provenance, and evidence across sessions.
 
@@ -202,11 +202,11 @@ Theories create a structured workflow for experimentation and debugging.
 A tracked unit of work with an immutable event-sourced history. Every state change is recorded as an append-only event; the current state (`status`, `completed_at`, `updated_at`) is derived at read time via `RecomputeWorkProjection`.
 
 ```
-mpm call mpm_work '{"action":"create","params":{"title":"Fix the parser bug","note":"Suspect flag ordering in cli.go"}}'
-mpm call mpm_work '{"action":"complete","params":{"work_id":"<id>"}}'
-mpm call mpm_work '{"action":"history","params":{"work_id":"<id>"}}'
-mpm call mpm_work '{"action":"note","params":{"work_id":"<id>","note":"Confirmed: --json before positional causes parse failure"}}'
-mpm call mpm_work '{"action":"reopen","params":{"work_id":"<id>"}}'
+mpm call mpm_work --payload '{"action":"create","params":{"title":"Fix the parser bug","note":"Suspect flag ordering in cli.go"}}'
+mpm call mpm_work --payload '{"action":"complete","params":{"work_id":"<id>"}}'
+mpm call mpm_work --payload '{"action":"history","params":{"work_id":"<id>"}}'
+mpm call mpm_work --payload '{"action":"note","params":{"work_id":"<id>","note":"Confirmed: --json before positional causes parse failure"}}'
+mpm call mpm_work --payload '{"action":"reopen","params":{"work_id":"<id>"}}'
 ```
 
 New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
@@ -390,7 +390,7 @@ dropped, never weakened. Tunable per install via
 `system_config.epistemic_snapshot.max_observation_window_ms`
 (default `60000`).
 
-**CLI vs MCP asymmetry.** The CLI (`mpm call mpm_memory '{"action":"save",...}'`) does
+**CLI vs MCP asymmetry.** The CLI (`mpm call mpm_memory --payload '{"action":"save",...}'`) does
 not stamp `provenance` by default — it has no persistent tool buffer.
 The MCP server, being long-lived, instruments every tool invocation
 through `internal/core/tools/registry_intercept.go` and attributes saves
@@ -642,7 +642,7 @@ cd ~/mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 ```
 
-The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it copies all five binaries to `$HOME/.local/bin`. For a full systemd + OpenClaw install, run `./scripts/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it verifies/syncs all five binaries to `$HOME/.mpm/bin` — the canonical install prefix. For a full systemd + OpenClaw install, run `./scripts/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
@@ -652,7 +652,7 @@ For autonomous operation — the scheduler dispatches system-kind wakes (critic 
 git clone https://github.com/flowbyte-com/mpm
 cd mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
-make install         # optional — copies all five to $HOME/.local/bin (no sudo)
+make install         # optional — verifies/syncs all five to $HOME/.mpm/bin (no sudo)
 ```
 
 **Install the scheduler as a systemd user service:**
@@ -683,7 +683,7 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > rationale.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
-> headless deployments) can opt out via the drop-ins documented in INSTALL.md
+> headless deployments) can opt out via the drop-ins documented in docs/INSTALL.md
 > Troubleshooting.
 
 The default unit assumes `~/projects/mpm` layout. Override via either:
@@ -2144,7 +2144,7 @@ mpm doctor --deep-scan --fix   # clean soft-delete ghosts in place
 
 The asymmetry is deliberate. Soft-delete ghosts are the only drift class where we have a precise model of the correct state AND a proven-safe mechanism that should have produced that state. For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug or the source-table row is the bug. Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate.
 
-The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context action=read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
+The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'` surfaces it; the agent acts on it. **No new wake code is needed.**
 
 #### Recommended cron
 
@@ -2269,13 +2269,13 @@ The conceptual vocabulary of MPM. Implementation-specific terms (decay, wake, LT
 
 **Memory.** A general fact, observation, or synthesized insight.
 
-**Projection Principle.** The substrate records facts, and records facts about facts (events, invocations). The substrate never records views of facts (projections, scores, summaries). Every view is computed from authoritative state at read time. Commands and CLI surfaces may evolve. Truth may not. See `docs/architecture.md`.
+**Projection Principle.** The substrate records facts, and records facts about facts (events, invocations). The substrate never records views of facts (projections, scores, summaries). Every view is computed from authoritative state at read time. Commands and CLI surfaces may evolve. Truth may not. See `docs/archive/architecture.md`.
 
 **Projection Test.** A design constraint applied before adding any new table, column, cache, score, or summary: if the value can be computed from authoritative state at read time, do not persist it. The burden of proof is on persistence. See CLAUDE.md.
 
 **Runtime.** The evolvable part of MPM: wake, scheduling, personas, modes, directives, routing, audit, review. Changes here are cheap; changes to Core are not.
 
-**Theory.** A testable hypothesis with explicit validation criteria. Theories have lifecycle states: pending → confirmed | disproven.
+**Theory.** A testable hypothesis with explicit validation criteria. Theories have lifecycle states: pending → proven | disproven.
 
 ---
 
@@ -2768,7 +2768,7 @@ How this is enforced:
 
 **Why the asymmetry.** Soft-delete ghosts are the only drift class where we have a precise model of the correct state AND a proven-safe mechanism that should have produced that state. For FTS orphans and dangling memberships, we cannot tell from inside the scan whether the FTS row is the bug or the source-table row is the bug. Auto-fixing novel drift is exactly the kind of guesswork that causes data corruption. Escalate.
 
-The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context action=read_wake_context` surfaces it; the agent acts on it. **No new wake code is needed.**
+The cognitive loop closes through the existing wake context: when self-heal escalates unknown drift, it injects a pending theory; the next `mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'` surfaces it; the agent acts on it. **No new wake code is needed.**
 
 ## C.5 When to use which pattern
 
@@ -2796,8 +2796,8 @@ The discipline is the same in every case: when in doubt, escalate. The agent's w
 
 ## Community & Security
 
-* **[Security Policy](SECURITY.md)** — how to report a vulnerability privately, what to expect back, supported versions, and the credential-handling rules specific to MPM.
-* **[Contributing Guide](CONTRIBUTING.md)** — architecture invariants (Projection Test, scanner chokepoint, single-connection invariant, foreign-key posture), testing gates, schema discipline, and PR expectations.
+* **[Security Policy](docs/SECURITY.md)** — how to report a vulnerability privately, what to expect back, supported versions, and the credential-handling rules specific to MPM.
+* **[Contributing Guide](docs/CONTRIBUTING.md)** — architecture invariants (Projection Test, scanner chokepoint, single-connection invariant, foreign-key posture), testing gates, schema discipline, and PR expectations.
 
 This is an alpha release (`mpm-alpha`). APIs, CLI surfaces, on-disk formats, and schema may change without notice. Pin a commit SHA if you need a specific shape to stay that way.
 
