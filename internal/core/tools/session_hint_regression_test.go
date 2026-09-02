@@ -41,28 +41,57 @@ func TestSessionIDRequired_HintNamesBothRecoveryPaths(t *testing.T) {
 	}
 }
 
-// TestHandleHandoffWrite_EmptySessionIDUsesCanonicalHint covers one
-// of the routing sites: handleHandoffWrite must surface the canonical
-// hint message when called without session_id. This pins the actual
-// wire response so a future refactor that reverts to a bare
-// fmt.Errorf would fail this test.
-func TestHandleHandoffWrite_EmptySessionIDUsesCanonicalHint(t *testing.T) {
+// TestHandleHandoffWrite_EmptySessionIDSucceeds pins the alpha-5 contract:
+// handoff write with an empty session_id is allowed — the durable identity of
+// a handoff is the MPM-generated id + created_at; session_id is opaque
+// optional correlation metadata. Production evolved this contract in
+// 4b8f8d4 (fix(handoff): make session_id optional) to let callers without a
+// stable framework session id (e.g. Claude Code) still persist handoffs.
+//
+// Summary is the only required input; a successful write echoes a handoff
+// with empty session_id and a generated id. If a future change reverts to
+// mandating session_id, callers that boot without `MPM_SESSION_ID` would
+// silently fail to preserve continuity — this test pins the boundary.
+func TestHandleHandoffWrite_EmptySessionIDSucceeds(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+
+	res, err := handleMpmHandoff(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "write",
+		"params": map[string]interface{}{
+			"summary": "test handoff with no session_id",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected success on empty session_id; got error %v", err)
+	}
+	m, ok := res.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map response; got %T", res)
+	}
+	if m["handoff_id"] == nil || m["handoff_id"] == "" {
+		t.Errorf("expected generated handoff_id; got %v", m["handoff_id"])
+	}
+	if sid, _ := m["session_id"].(string); sid != "" {
+		t.Errorf("expected echoed session_id to be empty; got %q", sid)
+	}
+}
+
+// TestHandleHandoffWrite_MissingSummaryFails pins that summary remains the
+// sole required input for handoff write — even after session_id became
+// optional. The wire error must name the missing field so an agent can
+// self-correct.
+func TestHandleHandoffWrite_MissingSummaryFails(t *testing.T) {
 	dm := newTestIsolatedDM(t)
 
 	_, err := handleMpmHandoff(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "write",
-		"params": map[string]interface{}{
-			"summary": "test",
-		},
+		"params": map[string]interface{}{},
 	})
 	if err == nil {
-		t.Fatal("expected error on missing session_id")
+		t.Fatal("expected error on missing summary")
 	}
-
-	for _, want := range []string{"session_id is required", "mpm_context read_wake_context", "MPM_SESSION_ID"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("handoff-write error missing %q; got %q", want, err.Error())
-		}
+	if !strings.Contains(err.Error(), "summary") {
+		t.Errorf("expected error to mention 'summary'; got %q", err.Error())
 	}
 }
 
