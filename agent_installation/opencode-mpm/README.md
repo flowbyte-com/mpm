@@ -161,8 +161,8 @@ MPM DeriveWorkVerification derives verification status
 The legacy plugin (`agent-plugins/opencode-mpm-plugin` in pCloud) generated one tool per (action, artifact-type) pair — 18 tool definitions spanning memory / lessons / topics / references / wake / decisions / etc. It was bound to the **old 77-tool schema** that pre-dated the 13-aggregator collapse (2026-08-11). It is **dead code** and should be removed.
 
 The lightweight adapter:
-- 16 tools instead of 18 named-individually (`mpm_memory` replaces `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc.)
-- One Zod schema shape for the 13 Domain Tools (free-form `params` validated by mpm backend)
+- 22 tools instead of 18 named-individually (`mpm_memory` replaces `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc.)
+- One Zod schema shape for the 20 Domain Tools (free-form `params` validated by mpm backend)
 - No prompt bloat — the description strings are short, and the heavy `params` documentation lives in the mpm backend where it can be evolved without disrupting the plugin
 - No domain logic — no LLM calls, no caching, no local state
 

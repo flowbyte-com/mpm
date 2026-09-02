@@ -59,15 +59,15 @@ not an option. The next-best is `mpm call`, which is a plain
 bridge: 13 Fat-RPC domain adapters (one per domain) plus 3 standalone
 adapters.
 
-## Why 16 tools (and not 77)
+## Why 22 tools (and not 77)
 
 Until the Phase 1/2 registry refactor of mpm, `mpm-mcp` exposed 77
 granular tools (one per registry entry). The agent-facing tool definition
 prompt — every tool's name, description, and parameter schema — grew to
-~15KB of context on every turn. mpm now exposes **16** tools: the 13
+~15KB of context on every turn. mpm now exposes **22** tools: the 20
 Domain Tools are "Fat RPC" — each takes `{action: string, params: object}`
 and the mpm backend validates and dispatches. That collapses ~77 distinct
-tool definitions into 13 near-identical ones.
+tool definitions into 20 near-identical ones.
 
 Because every domain tool shares the same trivial parameter schema
 (`action` + free-form `params`), the tool-definition prompt is now compact

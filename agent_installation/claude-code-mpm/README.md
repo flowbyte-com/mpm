@@ -1,8 +1,9 @@
 # claude-code-mpm
 
 Claude Code ↔ MPM integration. Wires the full MPM cognitive substrate into
-Claude Code as **17 native MCP tools** (`mpm__mpm_memory`, `mpm__mpm_handoff`,
-`mpm__mpm_scratchpad`, `mpm__explain_retrieval`, `mpm__mpm_wakes`, …).
+Claude Code as **22 native MCP tools** (20 unified domain tools plus 2
+standalones: `mpm__mpm_memory`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`,
+`mpm__mpm_retrieval_diagnose`, `mpm__mpm_wakes`, …).
 
 ## Why this exists
 
@@ -19,14 +20,14 @@ serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
 
 ## Coverage
 
-**16 tools**, identical to the opencode-mpm and pi-mpm agents:
+**22 tools**, identical to the opencode-mpm and pi-mpm agents:
 
 | Layer | Count | Tool names |
 |---|---|---|
-| Unified Domain Tools (Fat RPC) | 14 | `mpm__mpm_memory`, `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system` |
-| Standalone tools | 3 | `mpm__explain_retrieval`, `mpm__log_to_changelog`, `mpm__request_review` |
+| Unified Domain Tools (Fat RPC) | 20 | `mpm__mpm_memory`, `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_challenge`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
+| Standalone tools | 2 | `mpm__log_to_changelog`, `mpm__request_review` |
 
-The 13 Domain Tools share the same `(action, params)` shape. The 3
+The 20 Domain Tools share the same `(action, params)` shape. The 2
 Standalones have their own narrower schemas. See `~/.mpm/bin/mpm-mcp`'s
 `tools/list` JSON-RPC method for the canonical schemas.
 
@@ -155,7 +156,7 @@ live `mpm-mcp` binary. Tests:
 | A — MPM discovery | `mpm_system health_check` returns `ok:true` |
 | B — Durable memory write | `mpm_memory save` persists a uniquely-tagged probe |
 | C — Memory retrieval | `mpm_memory query` finds the probe by ID |
-| D — Retrieval diagnostics | `explain_retrieval` returns structured per-node breakdown |
+| D — Retrieval diagnostics | `mpm_retrieval_diagnose` returns structured per-node breakdown |
 | E — Cross-session continuity | `mpm_handoff write` writes a handoff that `mpm_handoff list` sees |
 | F — Missing MPM handling | A bad `MPM_WORKSPACE` does not fabricate success |
 | G — Malformed input handling | An unknown action returns a structured error, not fabricated success |

@@ -17,11 +17,16 @@
 
 import { spawn } from "node:child_process";
 import { withWorkspace } from "./lib/workspace.js";
-import {
-  definePluginEntry,
-  registerInternalHook,
-  DEFAULT_SOUL_FILENAME,
-} from "openclaw/plugin-sdk";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { registerInternalHook } from "openclaw/plugin-sdk/hook-runtime";
+
+// `openclaw/plugin-sdk` (root) is not a valid subpath in the current SDK
+// (see node_modules/openclaw/package.json `exports`), and `DEFAULT_SOUL_FILENAME`
+// is not re-exported from any plugin-sdk/* subpath either. The constant's
+// value is "SOUL.md" (the canonical bootstrap file name). Hardcoding matches
+// the SDK source (dist/workspace-CAteGiRq.js:63) and keeps the import surface
+// minimal.
+const DEFAULT_SOUL_FILENAME = "SOUL.md";
 
 // sessionKey → most recent `mpm route --apply` stdout
 const sessionReminders = new Map();
@@ -75,7 +80,14 @@ function runMpmRoute(prompt, mpmBin, timeoutMs) {
 export default definePluginEntry({
   id: "openclaw-mpm-auto-mode-persona",
   register(api) {
-    const cfg = api?.config?.plugins?.entries?.["openclaw-mpm-auto-mode-persona"] ?? {};
+    // OpenClaw plugin config lives under entries[id].config (not entries[id]
+    // directly). Reading from the bare entry silently picks up nothing — the
+    // configured mpmBin/timeoutMs values never reach this code, and `mpm` is
+    // resolved from PATH only. Fixes finding (A) of the 2026-09-02 forensic
+    // audit; same nesting is used by openclaw-mpm-memory.
+    const entry =
+      api?.config?.plugins?.entries?.["openclaw-mpm-auto-mode-persona"];
+    const cfg = entry?.config ?? {};
     const enabled = cfg.enabled !== false; // default true
     const mpmBin = typeof cfg.mpmBin === "string" && cfg.mpmBin ? cfg.mpmBin : "mpm";
     const timeoutMs = typeof cfg.timeoutMs === "number" ? cfg.timeoutMs : 5000;

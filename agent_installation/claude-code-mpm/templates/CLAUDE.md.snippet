@@ -6,13 +6,14 @@
 > install; manual changes outside the markers will be preserved.
 
 MPM is the persistent agent substrate for cross-session continuity on this
-machine. It exposes 17 native MCP tools (`mpm__mpm_memory`,
+machine. It exposes 20 unified domain MCP tools (`mpm__mpm_memory`,
 `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`,
 `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`,
 `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`,
 `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`,
-`mpm__mpm_system`) plus 3 standalones (`mpm__explain_retrieval`,
-`mpm__log_to_changelog`, `mpm__request_review`).
+`mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_challenge`,
+`mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose`)
+plus 2 standalones (`mpm__log_to_changelog`, `mpm__request_review`).
 
 <BEGIN MPM-CANONICAL-BLOCK>
 The MPM behavioral contract is the host-independent agent protocol at

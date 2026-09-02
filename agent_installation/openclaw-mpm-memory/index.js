@@ -129,7 +129,13 @@ async function callMpmTool(tool, payload, opts) {
           : { ...(payload || {}), params: {} };
       child = spawn(bin, ["call", tool, "--payload", JSON.stringify(envelope)], {
         stdio: ["ignore", "pipe", "pipe"],
-        env: withWorkspace({ MPM_LOG_FORMAT: "json" }),
+        // Inherit process.env first so PATH (and any user-set vars) reach the
+        // child. Without this spread, the child receives an env of only
+        // { MPM_LOG_FORMAT: "json", MPM_WORKSPACE: <default> }, dropping PATH
+        // — so a bare `mpm` invocation fails under systemd --user where the
+        // gateway's PATH may not include ~/.mpm/bin. Fixes finding (B) of the
+        // 2026-09-02 forensic audit.
+        env: withWorkspace({ ...process.env, MPM_LOG_FORMAT: "json" }),
       });
     } catch (e) {
       resolve({ success: false, error: `spawn failed: ${e.message}` });
@@ -343,6 +349,14 @@ export default definePluginEntry({
     const scope = typeof entryConfig.scope === "string" ? entryConfig.scope : "all";
     const limitDefault =
       typeof entryConfig.limitDefault === "number" ? entryConfig.limitDefault : 6;
+    const enabled = entryConfig.enabled !== false; // default true
+
+    if (!enabled) {
+      if (typeof log.info === "function") {
+        log.info("openclaw-mpm-memory: disabled by config");
+      }
+      return;
+    }
 
     if (typeof log.info === "function") {
       log.info(
@@ -652,8 +666,35 @@ export default definePluginEntry({
             };
           }
         },
-        async search() {
-          return { results: [], total: 0 };
+        // Real MPM-backed search — fixes finding (D) of the 2026-09-02
+        // forensic audit. Previously returned `{ results: [], total: 0 }`
+        // unconditionally, silently advertising a search capability that
+        // never ran. Delegates to the same callMpm path used by the explicit
+        // memory_search tool so the capability surface and the tool surface
+        // share one backend.
+        async search(query, opts) {
+          if (typeof query !== "string" || !query) return [];
+          const maxResults =
+            typeof opts?.maxResults === "number" && opts.maxResults > 0
+              ? Math.min(opts.maxResults, 50)
+              : limitDefault;
+          const params = { query, limit: maxResults, scope };
+          if (typeof opts?.minScore === "number") params.min_score = opts.minScore;
+          const result = await callMpm("mpm_memory", {
+            action: "query",
+            params,
+          });
+          if (!result || result.success === false) return [];
+          const memories = Array.isArray(result.memories) ? result.memories : [];
+          // Adapt to MemorySearchResult[] (the OpenClaw SDK contract) —
+          // `source` is constrained to "memory" | "sessions"; we use "memory"
+          // for all MPM memory-collection hits.
+          return memories
+            .map((memory, idx) => adaptMemoryHit(memory, idx))
+            .map((h) => {
+              const { source, ...rest } = h;
+              return { ...rest, source: "memory" };
+            });
         },
         async close() {},
       };
