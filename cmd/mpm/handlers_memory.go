@@ -415,7 +415,7 @@ func handleMemoryAdd(args []string) int {
 
 func handleMemorySearch(args []string) int {
 	if len(args) == 0 {
-		return respond("", "Usage: mpm memory search <query>", 1)
+		return respond("", "Usage: mpm memory search <query> [--limit N] [--json]", 1)
 	}
 
 	// Alpha-4.1 F-005 / W-006: strip `--json` / `-j` from the argument
@@ -423,14 +423,19 @@ func handleMemorySearch(args []string) int {
 	// literal flag string into the FTS5 query and returned zero hits
 	// because no document contained the token "--json".
 	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+	// D-4.2: also strip `--limit N` / `-l N` so the limit flag doesn't
+	// pollute the FTS5 query. Default to 20 (matches prior hardcoded
+	// behaviour); explicit --limit N caps the result set.
+	limit := 20
+	cleaned, limit = extractLimitFlag(cleaned, limit)
 	query := strings.Join(cleaned, " ")
 	if strings.TrimSpace(query) == "" {
-		return respond("", "Usage: mpm memory search <query>", 1)
+		return respond("", "Usage: mpm memory search <query> [--limit N] [--json]", 1)
 	}
 
 	store := getMemoryStore()
 
-	memories, err := store.FullTextSearch(query, "memories", 20)
+	memories, err := store.FullTextSearch(query, "memories", limit)
 	if err != nil {
 		return respond("", fmt.Sprintf("Search failed: %v", err), 1)
 	}
@@ -515,6 +520,39 @@ func stripMemoryFlagToken(args []string, flags ...string) (cleaned []string, fou
 		}
 	}
 	return out, found
+}
+
+// extractLimitFlag parses `--limit N` / `-l N` from args, returning the
+// remaining args and the parsed limit. D-4.2: supports both space-separated
+// (`--limit 5`) and equals-form (`--limit=5`); an unparseable value leaves
+// the default untouched. Used by `mpm memory search --limit`.
+func extractLimitFlag(args []string, defaultLimit int) (cleaned []string, limit int) {
+	limit = defaultLimit
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--limit" || a == "-l":
+			// Value is the next arg, if present and parseable.
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					limit = n
+				}
+				i++ // consume the value regardless
+			}
+		case strings.HasPrefix(a, "--limit="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil && n > 0 {
+				limit = n
+			}
+		case strings.HasPrefix(a, "-l="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "-l=")); err == nil && n > 0 {
+				limit = n
+			}
+		default:
+			out = append(out, a)
+		}
+	}
+	return out, limit
 }
 
 // truncateSnippet is a small helper for the JSON output path so the
