@@ -10,7 +10,7 @@ production-grade agent stack with everything in `$HOME`, isolated from
 other users on the host, secured at 0700/0600 by the binary's startup
 gate.
 
-For background and design rationale, see [README.md](README.md).
+For background and design rationale, see [README.md](../README.md).
 
 ---
 
@@ -63,8 +63,8 @@ What the script does, in order:
    Detects legacy data at `/var/lib/mpm/mpm.db` and warns about migration.
 2. **Build** — `make build` produces all five binaries
 3. **Binaries** — installs `mpm-scheduler`, `mpm-critic`, `mpm-mcp`, `mpm-telemetry` to
-   `$HOME/.local/bin/`. Installs `mpm.real` and a workspace wrapper at
-   `$HOME/.local/bin/mpm`
+   `$HOME/.mpm/bin/`. Installs `mpm.real` and a workspace wrapper at
+   `$HOME/.mpm/bin/mpm`
 4. **Data directory** — creates `$HOME/.mpm/{src/db,backups/critic-pre}`.
    Runtime perms are tightened to 0700/0600 by the binary's startup gate
 5. **Systemd service (user)** — installs
@@ -111,7 +111,7 @@ into the database. Re-running is safe — local edits are preserved.
 | `--validate` | Post-install validation (read-only) |
 | `--uninstall` | Remove installed artifacts. Data at `$HOME/.mpm/` is preserved |
 | `--system` | Use legacy `/var/lib/mpm` + system systemd (requires sudo) |
-| `--prefix <path>` | Override install prefix (default `$HOME/.local/bin`) |
+| `--prefix <path>` | Override install prefix (default `$HOME/.mpm`) |
 | `--data-root <path>` | Override data root (default `$HOME/.mpm`) |
 | `--user <name>` | Override target user (default: current user) |
 | `--yes` | Skip confirmation prompts (auto-disable legacy unit when detected) |
@@ -341,7 +341,7 @@ injected wake on its next MCP call and reads the directive.
 **Three MCP tools** mirror the CLI for agent-driven automation:
 `upsert_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task`.
 Architecture and edge cases (re-upsert semantics, poison-pill handling,
-why pre-compute `next_run_at`) documented in [README §9.3](README.md#agentic-cron-recurring-tasks).
+why pre-compute `next_run_at`) documented in [README §9.3](../README.md#agentic-cron-recurring-tasks).
 
 ## 3. Wire to your host
 
@@ -418,21 +418,41 @@ hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ## 4. Uninstall
 
 ```bash
-sudo ./scripts/install.sh --uninstall
+./scripts/install.sh --uninstall          # user-space (default)
+sudo ./scripts/install.sh --uninstall     # system install
 ```
 
-Removes: binaries, wrapper, systemd unit. **Preserves:** `/var/lib/mpm/`
-data, source code at `~/projects/mpm`, legacy user unit (if any).
+Removes: binaries, wrapper, systemd unit. **Preserves:** data directory
+(`$HOME/.mpm/` for user-space, `/var/lib/mpm/` for system), source code at
+`~/projects/mpm`, legacy unit (if any).
 
 To remove data too:
 
 ```bash
-sudo rm -rf /var/lib/mpm
+rm -rf ~/.mpm          # user-space
+sudo rm -rf /var/lib/mpm   # system install only
 ```
 
 ---
 
 ## 5. Path cheat sheet
+
+### User-space install (default — `./scripts/install.sh`)
+
+| Path | Owner | Purpose |
+|------|-------|---------|
+| `~/.mpm/bin/mpm` | $USER | Wrapper script (sets MPM_WORKSPACE, exec's mpm.real) |
+| `~/.mpm/bin/mpm.real` | $USER | The actual mpm CLI binary |
+| `~/.mpm/bin/mpm-mcp` | $USER | MCP server stdio binary |
+| `~/.mpm/bin/mpm-scheduler` | $USER | Scheduler daemon |
+| `~/.mpm/bin/mpm-critic` | $USER | Memory critic binary |
+| `~/.mpm/bin/mpm-telemetry` | $USER | Telemetry sidecar |
+| `~/.config/systemd/user/mpm-scheduler.service` | $USER | User service unit |
+| `~/.mpm/src/db/mpm.db` | $USER | SQLite database |
+| `~/.mpm/backups/critic-pre/` | $USER | Pre-critic DB snapshots |
+| `~/.mpm/scheduler.lock` | $USER | flock singleton lock |
+
+### System install (`sudo ./scripts/install.sh --system`)
 
 | Path | Owner | Purpose |
 |------|-------|---------|
@@ -441,14 +461,13 @@ sudo rm -rf /var/lib/mpm
 | `/usr/local/bin/mpm-mcp` | root | MCP server stdio binary |
 | `/usr/local/bin/mpm-scheduler` | root | Scheduler daemon |
 | `/usr/local/bin/mpm-critic` | root | Memory critic binary |
+| `/usr/local/bin/mpm-telemetry` | root | Telemetry sidecar |
 | `/etc/systemd/system/mpm-scheduler.service` | root | System service unit |
 | `/var/lib/mpm/src/db/mpm.db` | $USER | SQLite database |
 | `/var/lib/mpm/backups/critic-pre/` | $USER | Pre-critic DB snapshots |
 | `/var/lib/mpm/scheduler.lock` | $USER | flock singleton lock |
-| `~/projects/mpm/` | $USER | Source code (NOT runtime data) |
 
-The split between `/usr/local/bin/` (binaries), `/var/lib/mpm/` (runtime data),
-and `~/projects/mpm/` (source code) is intentional. Source code can be wiped
+Source code (e.g. `~/projects/mpm/`) is NOT runtime data. It can be wiped
 without losing agent state; runtime data persists across `git pull`.
 
 ---
@@ -460,13 +479,13 @@ without losing agent state; runtime data persists across `git pull`.
 | Install fails: "Go not found" | `go version` | Install Go 1.26+ or add to PATH |
 | Install fails: "systemd required" | `systemctl --version` | Install systemd (most distros have it) |
 | `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `sudo loginctl enable-linger $USER` (set `Linger=yes`) |
-| Service won't start: "permission denied" on `/var/lib/mpm/` | `ls -la /var/lib/mpm/` | `sudo chown -R $USER:$USER /var/lib/mpm` |
+| Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` (user) or `ls -la /var/lib/mpm/` (system) | `chown -R $USER:$USER ~/.mpm` (user) or `sudo chown -R $USER:$USER /var/lib/mpm` (system) |
 | Service won't start after reboot on encrypted home | `findmnt /home` | Use `sudo ./scripts/install.sh` (system service) instead of `make service-scheduler` (user service) |
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
 | `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` (this is expected) | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | This is **expected behaviour** under the Lazy-Start Architecture — see INSTALL §2. The daemon is designed to stay dead at boot when `/home` is encrypted (the lockfile inside the encrypted tree would be inaccessible otherwise). On the next agent wake, `AGENTS.md` Session Startup step 2 detects the dead daemon and starts it post-decryption. If your workload runs unattended with no agent wake path (cron / system timers only), opt out by adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. |
-| CLI fails: "no such file: mpm.real" | `ls -la /usr/local/bin/mpm*` | Re-run `sudo ./scripts/install.sh` to restore the wrapper |
-| CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 /usr/local/bin/mpm` | `/usr/local/bin/mpm` must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
-| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l $HOME/projects/mpm/bin/mpm-mcp` | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
+| CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` (or `/usr/local/bin/mpm*` for system) | Re-run `./scripts/install.sh` (or `sudo ./scripts/install.sh --system`) to restore the wrapper |
+| CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 $(which mpm)` | The `mpm` binary must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
+| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
 | MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path; restart gateway |
 | `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
 | OpenClaw: agent doesn't see MPM tools in chat | `openclaw mcp list \| grep mpm` | `openclaw gateway restart` (Gateway caches MCP servers at startup) |
@@ -509,9 +528,9 @@ saved before the resolver existed — those rows carry partial snapshots.
 
 ## See also
 
-- [README.md](README.md) — cognitive model, design, full reference
-- [scripts/install.sh](scripts/install.sh) — the install script (read the source)
-- [scripts/](scripts/) — utility scripts (smoke tests, completion, etc.)
-- [contrib/systemd/](contrib/systemd/) — unit file templates (system + user)
+- [README.md](../README.md) — cognitive model, design, full reference
+- [scripts/install.sh](../scripts/install.sh) — the install script (read the source)
+- [scripts/](../scripts/) — utility scripts (smoke tests, completion, etc.)
+- [contrib/systemd/](../contrib/systemd/) — unit file templates (system + user)
 - [OpenClaw docs](https://docs.openclaw.ai) — platform reference
 - [Hermes Agent docs](https://hermes-agent.nousresearch.com/docs) — runtime reference

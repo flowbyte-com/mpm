@@ -745,7 +745,7 @@ Modes (default: install):
   --uninstall     Remove installed artifacts (data preserved)
 
 Options:
-  --prefix <path>      Install prefix (user default: \$HOME/.local/bin;
+  --prefix <path>      Install prefix (user default: \$HOME/.mpm;
                         system default: /usr/local)
   --data-root <path>   Runtime data root (user default: \$HOME/.mpm;
                         system default: /var/lib/mpm)

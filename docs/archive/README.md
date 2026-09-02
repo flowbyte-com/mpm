@@ -20,10 +20,9 @@ path. Filenames carry the metadata (date prefix, `-design` for specs,
 
 If you're reading current MPM documentation, you want:
 
-- [`../README.md`](../README.md) — the substrate overview
+- [`../../README.md`](../../README.md) — the substrate overview
 - [`../INSTALL.md`](../INSTALL.md) — MPM install procedure
-- [`../architecture.md`](../architecture.md) — canonical architectural principles
-- [`../concept-vocabulary-authoring.md`](../concept-vocabulary-authoring.md) — active authoring convention
+- [`architecture.md`](architecture.md) — canonical architectural principles (archived)
 - [`../../agent_installation/INSTALL.md`](../../agent_installation/INSTALL.md) — per-agent installation
 
 ## Contents
