@@ -12,15 +12,15 @@ that "work" locally and corrupt invariants globally.
 
 ## Before you change code
 
-1. Read [`README.md`](README.md). It is the user-facing spec; most
+1. Read [`README.md`](../README.md). It is the user-facing spec; most
    architectural intent is summarised there.
-2. Read [`CLAUDE.md`](CLAUDE.md). It contains the
+2. Read [`CLAUDE.md`](../CLAUDE.md). It contains the
    repository-specific rules the lead developer relies on day-to-day
    (projection test, scanner coverage, threading caps, single-connection
    invariant, foreign-key posture, the stranger test as a release gate).
-3. Read [`docs/architecture.md`](docs/architecture.md) for the
+3. Read [`docs/archive/architecture.md`](archive/architecture.md) for the
    Projection Principle and the Projection Test. Both are short.
-4. Read [`docs/archive/RELEASE-NOTES-mpm-alpha.md`](docs/archive/RELEASE-NOTES-mpm-alpha.md)
+4. Read [`docs/archive/RELEASE-NOTES-mpm-alpha.md`](archive/RELEASE-NOTES-mpm-alpha.md)
    for what is and is not part of the current alpha.
 5. Read the code you are about to change. The substrate has structural
    tests that enforce invariants — if your change breaks one, it is
@@ -35,7 +35,7 @@ is built on. Violations will be rejected in review even when the code
 - **Source of truth vs. projections.** If a value can be computed from
   authoritative state at read time, do not persist it. Indexes are not
   persistence; caches that can drift are. The Projection Test in
-  `docs/architecture.md` is the operational form of this rule.
+  `docs/archive/architecture.md` is the operational form of this rule.
 - **One persistence for one concern.** Do not write the same fact to two
   tables. Do not write the same value to `metadata.X` *and* a dedicated
   column.
@@ -160,7 +160,7 @@ PRs that change behaviour should explain:
    behaviour change without a corresponding README change is a
    documentation bug.
 5. **Whether anything in `docs/` needs updating.** Architecture
-   shifts go in `docs/architecture.md` (or a sibling). Behaviour
+   shifts go in `docs/archive/architecture.md` (or a sibling). Behaviour
    shifts go in `README.md`. Cross-cutting shifts go in
    `docs/archive/RELEASE-NOTES-*.md`.
 
@@ -188,7 +188,7 @@ the stranger test or a sibling test should show X happening.
 AGPL-3.0. Contributions are accepted under the project's AGPL-3.0
 license. If your situation requires a formal Contributor License
 Agreement (CLA) or Developer Certificate of Origin (DCO), contact
-the maintainer before sending a patch. See [`LICENSE`](LICENSE) for
+the maintainer before sending a patch. See [`LICENSE`](../LICENSE) for
 the full text.
 
 ---

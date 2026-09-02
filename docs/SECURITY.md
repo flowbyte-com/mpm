@@ -78,7 +78,7 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
   hard-removed in `215fd09`)
 - `mpm-mcp` (MCP server surface)
 - `mpm-scheduler` (universal wake executor)
-- `mpm-agent` companion binary (Telegram bot, MCP client, CLI REPL)
+- `mpm-telemetry` (telemetry sidecar) and `mpm-critic` (standalone audit runner)
 - Agent plugins under `agent_installation/` (hermes, openclaw, opencode)
 - The SQLite data plane (`src/db/mpm.db`, FTS5 indexes, triggers)
 - The **shared database** (`shared.memories`, `shared.memories_fts`,
