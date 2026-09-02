@@ -75,7 +75,14 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 		limit = 50
 	}
 
-	query := `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE 1=1`
+	// Alpha-4 ledger audit D-001 fix: QueryMemories was the lone memory
+	// read path that omitted `deleted_at IS NULL`. Every other read
+	// surface (GetMemory, SearchMemories, HybridSearch, GetMemoriesForExport,
+	// recentMemories, recentMilestones) filters soft-deleted rows. Without
+	// this predicate the web UI returned 90 phantom memories on the live
+	// DB; CLI/MCP would never surface those rows. The MemoryExpireClause
+	// is applied below for the same parity reason.
+	query := `SELECT id, collection, content, session_id, tags, metadata, created_at, source_db, source_id, promoted_at FROM memories WHERE deleted_at IS NULL`
 	args := []interface{}{}
 
 	if collection != "" {
@@ -86,6 +93,12 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 	if primeOnly {
 		query += " AND (metadata LIKE '%is_prime_directive%' OR tags LIKE '%is_prime_directive%' OR collection = 'directives')"
 	}
+
+	// Apply expiry parity with the rest of the read surface. Without
+	// this, an expired-but-not-deleted memory appears in QueryMemories
+	// but is invisible to HybridSearch/SearchMemories/GetMemory — same
+	// population-divergence class as the missing deleted_at filter.
+	query += MemoryExpireClause
 
 	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -1648,6 +1661,14 @@ func (dm *DatabaseManager) GetMemoriesForExport(collection, since, until string)
 		query += " AND created_at <= ?"
 		args = append(args, until+" 23:59:59")
 	}
+
+	// Alpha-4 ledger audit D-002 fix: GetMemoriesForExport is the read
+	// path behind `mpm ls`. Every other read surface (GetMemory,
+	// SearchMemories, HybridSearch, QueryMemories) applies
+	// MemoryExpireClause. Without it, `mpm ls` surfaces expired rows
+	// that `mpm show` and `mpm_memory query` will never find — a
+	// population-divergence class identical to the deleted_at fix.
+	query += MemoryExpireClause
 
 	query += " ORDER BY created_at DESC"
 

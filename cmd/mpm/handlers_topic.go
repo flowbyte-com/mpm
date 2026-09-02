@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -193,8 +194,14 @@ func handleTopicShow(args []string) int {
 	db := store.DB
 
 	var name, description, created string
+	// Alpha-4 ledger audit fix: the CLI topic show/list surfaces
+	// omitted the is_active = 1 filter that ListTopics and GetTopicByName
+	// apply. After DeleteTopic (which sets is_active=0), a topic
+	// disappears from ListTopics but still shows up via `mpm topic show
+	// <id>` and `mpm topic list`. Match the canonical read surface
+	// here too.
 	err := db.QueryRow(`
-		SELECT name, description, created_at FROM topics WHERE id = ?
+		SELECT name, description, created_at FROM topics WHERE id = ? AND is_active = 1
 	`, id).Scan(&name, &description, &created)
 
 	if err != nil {
@@ -210,14 +217,23 @@ func handleTopicShow(args []string) int {
 	if jsonOutput {
 		// Get memory IDs for this topic
 		memoryIDs := []string{}
+		// Alpha-4 ledger audit T-4 fix: topic_memberships.memory_id is
+		// nullable (the CHECK on `tm.memory_id IS NOT NULL` in the
+		// canonical join is explicit about this). Scanning NULL into a
+		// concrete string would panic with "converting NULL to string
+		// is unsupported" — the same NULL-panic class as
+		// `theories_pending`. Use sql.NullString and skip NULL rows.
 		if rows, err := db.Query("SELECT memory_id FROM topic_memberships WHERE topic_id = ?", id); err == nil {
 			for rows.Next() {
-				var mid string
+				var mid sql.NullString
 				if err := rows.Scan(&mid); err != nil {
 					usererror.Warn("handleTopicShow: failed to scan topic membership row, skipping: %v", err)
 					continue
 				}
-				memoryIDs = append(memoryIDs, mid)
+				if !mid.Valid {
+					continue
+				}
+				memoryIDs = append(memoryIDs, mid.String)
 			}
 			rows.Close()
 		}
@@ -293,6 +309,7 @@ func handleTopicList(args []string) int {
 
 	rows, err := db.Query(`
 		SELECT id, name, description, created_at FROM topics
+		WHERE is_active = 1
 		ORDER BY created_at DESC LIMIT 20
 	`)
 	if err != nil {
