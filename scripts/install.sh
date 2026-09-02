@@ -410,7 +410,8 @@ phase_binaries() {
 #!/bin/sh
 # mpm CLI wrapper — installed by scripts/install.sh
 # Routes CLI to the per-user workspace regardless of CWD.
-exec env MPM_WORKSPACE=${DATA_ROOT} ${PREFIX}/bin/mpm.real "\$@"
+# Override at invocation: `MPM_WORKSPACE=/tmp/foo mpm call …`
+exec env MPM_WORKSPACE=\${MPM_WORKSPACE:-${DATA_ROOT}} ${PREFIX}/bin/mpm.real "\$@"
 WRAPPER
     chmod 0755 "$PREFIX/bin/mpm"
     log "  installed wrapper $PREFIX/bin/mpm -> $PREFIX/bin/mpm.real"
@@ -568,7 +569,7 @@ phase_validate() {
     fi
 
     # 2. CLI wrapper (uses wrapper which sets MPM_WORKSPACE)
-    if "$PREFIX/bin/mpm" call health_check --payload '{}' 2>/dev/null \
+    if "$PREFIX/bin/mpm" call mpm_system --payload '{"action":"health_check"}' 2>/dev/null \
         | grep -q '"ok":true'; then
         log "  ✓ CLI wrapper functional (health_check ok)"
     else
