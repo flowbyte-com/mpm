@@ -6,13 +6,13 @@
 > install; manual changes outside the markers will be preserved.
 
 MPM is the persistent agent substrate for cross-session continuity on this
-machine. It exposes 16 native MCP tools (`mpm__mpm_memory`,
-`mpm__mpm_session`, `mpm__mpm_wakes`, `mpm__mpm_theories`,
-`mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`,
-`mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`,
-`mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_system`) plus 3
-standalones (`mpm__explain_retrieval`, `mpm__log_to_changelog`,
-`mpm__request_review`).
+machine. It exposes 17 native MCP tools (`mpm__mpm_memory`,
+`mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`,
+`mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`,
+`mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`,
+`mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`,
+`mpm__mpm_system`) plus 3 standalones (`mpm__explain_retrieval`,
+`mpm__log_to_changelog`, `mpm__request_review`).
 
 <BEGIN MPM-CANONICAL-BLOCK>
 The MPM behavioral contract is the host-independent agent protocol at
@@ -43,9 +43,12 @@ text. The non-negotiable behavioral invariants:
 4. **Handoff before genuine session closure.** Before sending any turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
-   `mpm__mpm_session(action: "end", params: {summary, state,
-   commitments, open_questions})`. Wake is how future-me starts; handoff
-   is how future-me receives the previous session.
+   `mpm__mpm_handoff(action: "write", params: {session_id, summary,
+   state, commitments, open_questions, note})`. Use
+   `mpm__mpm_scratchpad(action: "flush"|"read"|"discard"|"promote",
+   params: {session_id, thesis, supporting}) for in-session volatile
+   working state. Wake is how future-me starts; handoff is how
+   future-me receives the previous session.
 
    Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
    session-closing. Do not write a handoff on every chat ack — write one
