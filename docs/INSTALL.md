@@ -61,8 +61,8 @@ What the script does, in order:
    `/etc/systemd/system/mpm-scheduler.service` and offers to disable it
    (avoids split-brain dual-scheduler scenario for upgrading testers).
    Detects legacy data at `/var/lib/mpm/mpm.db` and warns about migration.
-2. **Build** — `make build` produces all four binaries
-3. **Binaries** — installs `mpm-scheduler`, `mpm-critic`, `mpm-mcp` to
+2. **Build** — `make build` produces all five binaries
+3. **Binaries** — installs `mpm-scheduler`, `mpm-critic`, `mpm-mcp`, `mpm-telemetry` to
    `$HOME/.local/bin/`. Installs `mpm.real` and a workspace wrapper at
    `$HOME/.local/bin/mpm`
 4. **Data directory** — creates `$HOME/.mpm/{src/db,backups/critic-pre}`.
@@ -85,7 +85,7 @@ Or manually:
 
 ```bash
 systemctl --user status mpm-scheduler                    # expect: active
-~/.mpm/bin/mpm call health_check --payload '{}'        # expect: "ok":true
+~/.mpm/bin/mpm call mpm_system --payload '{"action":"health_check","params":{}}'        # expect: "ok":true
 journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler running"
 ```
 
@@ -94,7 +94,7 @@ journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler run
 ```bash
 ~/.mpm/bin/mpm ops init directives          # seed prime directives (idempotent)
 ~/.mpm/bin/mpm status                      # verify DB reachable
-~/.mpm/bin/mpm call read_wake_context        # first agent tool call
+~/.mpm/bin/mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'        # first agent tool call
 ```
 
 `ops init directives` is the *only* command that touches cognitive state during
@@ -172,7 +172,7 @@ Or manually:
 
 ```bash
 sudo systemctl status mpm-scheduler                       # expect: active
-sudo /usr/local/bin/mpm call health_check --payload '{}'  # expect: "ok":true
+sudo /usr/local/bin/mpm call mpm_system --payload '{"action":"health_check","params":{}}'  # expect: "ok":true
 sudo journalctl -u mpm-scheduler -n 20 --no-pager         # expect: "scheduler running"
 ```
 

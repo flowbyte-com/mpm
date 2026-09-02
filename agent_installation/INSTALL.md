@@ -110,7 +110,7 @@ host's persistent-instruction surface (CLAUDE.md / AGENTS.md /
 All hosts invoke the workshop via the universal machine interface:
 
 ```
-mpm call mpm_skills '{"action":"workshop","params":{...}}'
+mpm call mpm_skills --payload '{"action":"workshop","params":{...}}'
 ```
 
 Hosts with native MCP integration (Claude Code, etc.) may invoke
