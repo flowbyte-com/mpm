@@ -1,6 +1,8 @@
-# @openclaw/mpm-auto-route
+# @openclaw/mpm-auto-mode-persona
 
 Per-turn auto mode/persona switching for OpenClaw, driven by [MPM](https://flowbyte.com/mpm)'s `mpm route` command.
+
+> **Note (2026-09-02):** Renamed from `mpm-auto-route` to `openclaw-mpm-auto-mode-persona` for clarity — "route" alone didn't say *what* is being routed. Old name still appears in pre-2026-09-02 docs and the `docs/archive/*` historical trail.
 
 ## What it does
 
@@ -16,13 +18,13 @@ Zero core modification. Pure transport adapter. MPM owns the selector (three-sta
 
 ```bash
 # From this directory (dev / alpha-MV):
-openclaw plugins install ./openclaw-mpm-auto-route --link
+openclaw plugins install ./openclaw-mpm-auto-mode-persona --link
 
 # From a published tarball (later):
-openclaw plugins install npm-pack:./openclaw-mpm-auto-route-0.1.0.tgz
+openclaw plugins install npm-pack:./openclaw-mpm-auto-mode-persona-0.1.0.tgz
 
 # Verify:
-openclaw plugins inspect mpm-auto-route --runtime --json
+openclaw plugins inspect openclaw-mpm-auto-mode-persona --runtime --json
 ```
 
 Requires MPM installed at the canonical location `$HOME/.mpm/bin/mpm` (alpha default), or reachable on PATH (set `MPM_BIN=/path/to/mpm` to override). The auto-switch is silently a no-op when `mpm` is missing.
@@ -32,7 +34,7 @@ Requires MPM installed at the canonical location `$HOME/.mpm/bin/mpm` (alpha def
 ```yaml
 plugins:
   entries:
-    mpm-auto-route:
+    openclaw-mpm-auto-mode-persona:
       config:
         enabled: true          # default true. Set false to no-op the plugin.
         mpmBin: mpm            # path to mpm binary. Default 'mpm' (PATH-resolved).
@@ -61,9 +63,9 @@ All silent, fail-open:
 ## Manual override of the plugin itself
 
 ```bash
-openclaw plugins disable mpm-auto-route   # disable the plugin (config preserved)
-openclaw plugins enable mpm-auto-route    # re-enable
-openclaw plugins uninstall mpm-auto-route # remove entirely
+openclaw plugins disable openclaw-mpm-auto-mode-persona   # disable the plugin (config preserved)
+openclaw plugins enable openclaw-mpm-auto-mode-persona    # re-enable
+openclaw plugins uninstall openclaw-mpm-auto-mode-persona # remove entirely
 ```
 
 ## Post-alpha cleanup

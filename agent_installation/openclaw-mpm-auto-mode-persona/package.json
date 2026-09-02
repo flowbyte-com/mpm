@@ -1,5 +1,5 @@
 {
-  "name": "@openclaw/mpm-auto-route",
+  "name": "@openclaw/mpm-auto-mode-persona",
   "version": "0.1.0",
   "description": "Auto mode/persona switch for OpenClaw — calls `mpm route --apply` per turn and injects the rendered <system-reminder> into SOUL.md.",
   "type": "module",
