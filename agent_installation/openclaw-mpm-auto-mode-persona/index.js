@@ -1,4 +1,4 @@
-// @openclaw/mpm-auto-route — Per-turn mode/persona auto-switch via MPM.
+// @openclaw/mpm-auto-mode-persona — Per-turn mode/persona auto-switch via MPM.
 //
 // Per-framework integration: MPM owns the selector (three-state gate:
 // blank / auto / manual — see `~/.mpm/cmd/mpm/router.go::handleRoute`).
@@ -73,15 +73,15 @@ function runMpmRoute(prompt, mpmBin, timeoutMs) {
 // ─── Hook registrations ──────────────────────────────────────────────────
 
 export default definePluginEntry({
-  id: "mpm-auto-route",
+  id: "openclaw-mpm-auto-mode-persona",
   register(api) {
-    const cfg = api?.config?.plugins?.entries?.["mpm-auto-route"] ?? {};
+    const cfg = api?.config?.plugins?.entries?.["openclaw-mpm-auto-mode-persona"] ?? {};
     const enabled = cfg.enabled !== false; // default true
     const mpmBin = typeof cfg.mpmBin === "string" && cfg.mpmBin ? cfg.mpmBin : "mpm";
     const timeoutMs = typeof cfg.timeoutMs === "number" ? cfg.timeoutMs : 5000;
 
     if (!enabled) {
-      api?.log?.info?.("[mpm-auto-route] disabled by config");
+      api?.log?.info?.("[openclaw-mpm-auto-mode-persona] disabled by config");
       return;
     }
 
@@ -133,7 +133,7 @@ export default definePluginEntry({
         // No SOUL.md in the bootstrap set — synthesize a slot.
         files.push({
           name: DEFAULT_SOUL_FILENAME,
-          path: "<mpm-auto-route>",
+          path: "<openclaw-mpm-auto-mode-persona>",
           content: reminder,
           missing: false,
         });
@@ -148,7 +148,7 @@ export default definePluginEntry({
     });
 
     api?.log?.info?.(
-      `[mpm-auto-route] registered (mpmBin=${mpmBin}, timeoutMs=${timeoutMs})`,
+      `[openclaw-mpm-auto-mode-persona] registered (mpmBin=${mpmBin}, timeoutMs=${timeoutMs})`,
     );
   },
 });

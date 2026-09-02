@@ -135,7 +135,7 @@ If mpm changes its CLI surface:
 ## Related mpm integrations in this repo
 
 - `agent_installation/openclaw-mpm-memory/` — OpenClaw memory slot plugin (2 tools).
-- `agent_installation/mpm-auto-route/`     — OpenClaw per-turn persona auto-routing.
+- `agent_installation/openclaw-mpm-auto-mode-persona/` — OpenClaw per-turn mode/persona auto-routing.
 
 Both follow the same `mpm call` subprocess pattern; pi-mpm is the Pi-shaped
 adaptation with **full coverage** instead of the narrow OpenClaw slot.

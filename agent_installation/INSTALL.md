@@ -137,7 +137,7 @@ the same MPM install and database.
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
 | **Memory slot plugin** | `~/.openclaw/plugins/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM |
-| **Auto-route plugin** *(optional)* | `~/.openclaw/plugins/mpm-auto-route/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
+| **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/plugins/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
 
@@ -197,19 +197,19 @@ sources — scratchpad + explicit memories).
 #### Step 3 — Auto-route plugin (optional; turn-key mode/persona injection)
 
 ```bash
-openclaw plugins install ./mpm-auto-route --link
-openclaw plugins inspect mpm-auto-route --runtime --json
+openclaw plugins install ./openclaw-mpm-auto-mode-persona --link
+openclaw plugins inspect openclaw-mpm-auto-mode-persona --runtime --json
 ```
 
 On every inbound prompt, this plugin shells out to `mpm route --apply`
 and appends MPM's returned `<system-reminder>` block to the bootstrap
 prompt. Lets MPM own mode/persona switching without touching OpenClaw
-core. Configuration (per `mpm-auto-route/README.md`):
+core. Configuration (per `openclaw-mpm-auto-mode-persona/README.md`):
 
 ```yaml
 plugins:
   entries:
-    mpm-auto-route:
+    openclaw-mpm-auto-mode-persona:
       config:
         enabled: true        # default true
         mpmBin: mpm          # PATH-resolved
@@ -254,7 +254,7 @@ openclaw plugins uninstall openclaw-mpm-memory
 openclaw config set plugins.slots.memory memory-core          # restore default
 
 # Auto-route plugin
-openclaw plugins uninstall mpm-auto-route
+openclaw plugins uninstall openclaw-mpm-auto-mode-persona
 openclaw gateway restart
 ```
 
@@ -787,6 +787,6 @@ rollback points are available.
   - [`claude-code-mpm/README.md`](./claude-code-mpm/README.md)
   - [`opencode-mpm/README.md`](./opencode-mpm/README.md)
   - [`openclaw-mpm-memory/README.md`](./openclaw-mpm-memory/README.md)
-  - [`mpm-auto-route/README.md`](./mpm-auto-route/README.md)
+  - [`openclaw-mpm-auto-mode-persona/README.md`](./openclaw-mpm-auto-mode-persona/README.md)
   - [`hermes-mpm/SKILL.md`](./hermes-mpm/SKILL.md)
   - [`pi-mpm/README.md`](./pi-mpm/README.md)
