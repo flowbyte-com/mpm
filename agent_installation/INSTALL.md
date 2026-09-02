@@ -91,14 +91,15 @@ mpm call mpm_system --payload '{"action":"health_check","params":{}}'
 
 ## Canonical protocol
 
-Every host adapter inherits the same five invariants from
+Every host adapter inherits the same six invariants from
 [`mpm-agent-protocol.md`](./mpm-agent-protocol.md):
 
 1. **Wake** at session start
 2. **Persist** during work, not only at the end
-3. **Handoff** before genuine session closure
-4. **MPM is the source of truth** for cross-session continuity
-5. **Recovery / fallback** to `mpm call <tool> --payload ...` when the
+3. **Skill discovery** before reinventing an established procedure
+4. **Handoff** before genuine session closure
+5. **MPM is the source of truth** for cross-session continuity
+6. **Recovery / fallback** to `mpm call <tool> --payload ...` when the
    preferred integration breaks
 
 Most hosts have an installer that materializes the protocol into the
@@ -131,12 +132,24 @@ OpenClaw participates in the MPM cognitive substrate via **two
 complementary surfaces**, plus an optional third. All three converge on
 the same MPM install and database.
 
+> **Adoption note (OpenClaw is the exception).** Most hosts require
+> editing a persistent-instruction file (CLAUDE.md / AGENTS.md /
+> .hermes.md) to teach the agent the MPM behavioral contract.
+> **OpenClaw does not.** The `openclaw-mpm-memory` plugin adopts the
+> wake invariant through the OpenClaw typed-hook chain
+> (`session_start` → `agent_turn_prepare` returning `prependContext`).
+> The plugin fetches the wake context, caches it per session, and
+> injects it into the agent prompt — the agent therefore wakes from MPM
+> without any SOUL.md / AGENTS.md / CLAUDE.md edit. The same hook chain
+> is documented in [`openclaw-mpm-memory/index.js`](./openclaw-mpm-memory/index.js)
+> (`api.on("session_start", ...)` + `api.on("agent_turn_prepare", ...)`).
+
 ### What gets installed
 
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/plugins/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM |
+| **Memory slot plugin** | `~/.openclaw/plugins/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare`) — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
 | **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/plugins/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
@@ -443,7 +456,7 @@ The plugin reads `MPM_BINARY` from env (defaults to `mpm`) and
 
 ```bash
 # Plugin loaded? List its commands in an OpenCode session:
-opencode # then :commands — expect mpm__mpm_memory, mpm__mpm_session, ...
+opencode # then :commands — expect mpm__mpm_memory, mpm__mpm_handoff, mpm__mpm_scratchpad, ...
 
 # AGENTS.md has exactly one managed block:
 grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
@@ -530,7 +543,7 @@ behavioral section** for a specific project:
 cd /path/to/project
 python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions.py \
     --target-dir /path/to/project \
-    --snippet ~/.m/pm/agent_installation/hermes-mpm/templates/hermes.md.snippet
+    --snippet ~/.mpm/agent_installation/hermes-mpm/templates/hermes.md.snippet
 ```
 
 The installer writes `/path/to/project/.hermes.md` with leading
@@ -619,7 +632,7 @@ Pi participates in the MPM substrate via:
 # 2. Install the AGENTS.md behavioral section (global scope):
 python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.m/pm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
 
 # 3. Make sure `mpm` is on PATH (Pi spawns `mpm` as a subprocess):
 export PATH=$HOME/.mpm/bin:$PATH
@@ -634,7 +647,7 @@ grep -c '<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->' \
 # expect: 1
 
 # 2. The extension is discoverable (Pi-side, in a Pi session):
-#    :tools — expect mpm_memory, mpm_session, mpm_wakes, ...
+#    :tools — expect mpm_memory, mpm_handoff, mpm_scratchpad, mpm_wakes, ...
 
 # 3. End-to-end via a Pi session:
 #    "use mpm_memory action=save to remember that pi-mpm integration smoke test passed"
@@ -688,7 +701,7 @@ python3 ~/.mpm/agent_installation/claude-code-mpm/scripts/install_claude_instruc
 # OpenCode:
 python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.m/pm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
 
 # Hermes (per project):
 python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions.py \
@@ -696,7 +709,7 @@ python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions
     --snippet ~/.mpm/agent_installation/hermes-mpm/templates/hermes.md.snippet
 
 # Pi:
-python3 ~/.m/pm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
     --scope user \
     --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
 ```
@@ -742,7 +755,7 @@ contract honest.
 | `db_path` in health_check differs across hosts | MPM_DB_PATH / MPM_WORKSPACE / symlink drift | Set `MPM_REQUIRED_DB_PATH` in `~/.config/mpm/mpm.env` to the canonical DB path; restart scheduler |
 | Claude Code's `mpm__*` tools don't appear | MCP bundle not reloaded after install.sh | Restart Claude Code (mcpServers are loaded at session start) |
 | OpenClaw doctor check still fails after install | `plugins.slots.memory` not set | `openclaw config set plugins.slots.memory openclaw-mpm-memory` |
-| Hermes `.hermes.md` not picked up | Project not under a git root | Verify `_find_hermes_md` would walk into the directory; install `--target` explicitly |
+| Hermes `.hermes.md` not picked up | Project not under a git root | Verify `_find_hermes_md` would walk into the directory; install `--target /path/to/.hermes.md` explicitly |
 | Pi extension not visible in `:tools` | Extension path wrong in settings.json | Check `~/.pi/agent/settings.json` `"extensions"` array; restart Pi |
 | Installer refuses to modify target file | Corrupted managed block (one marker without the other) | Restore from `~/.claude/CLAUDE.md.bak.<TS>` (or analogous `.bak.*`) or hand-remove the orphan marker, then re-run installer |
 | AGENTS.md / CLAUDE.md missing after uninstall | Uninstall correctly unlinked an empty file | Re-run the installer's install command (not uninstall) to recreate |

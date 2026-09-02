@@ -4489,8 +4489,9 @@ func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // payload and fails LOUDLY when it is missing or wrong-typed.
 //
 // Background: prior to this hardening, every domain dispatcher (mpm_memory,
-// mpm_session, mpm_wakes, …) silently coerced a missing `params` envelope
-// to an empty map. That meant a payload shaped like
+// the legacy mpm_session [now mpm_handoff / mpm_scratchpad], mpm_wakes, …)
+// silently coerced a missing `params` envelope to an empty map. That
+// meant a payload shaped like
 //
 //	{"action":"query","query":"..."}
 //

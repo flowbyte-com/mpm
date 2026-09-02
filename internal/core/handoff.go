@@ -393,8 +393,10 @@ func (dm *DatabaseManager) PruneHandoffs(retentionDays int) (int64, error) {
 // audit ledger should see exactly when a handoff was removed and why.
 //
 // Closes MPM-GAP-SHRED-HANDOFF-2026-08-19: before this method,
-// `mpm_session` had no shred path for handoffs and tests had to bypass
-// the supported interface (direct SQL) to clean up after themselves.
+// the legacy `mpm_session` tool had no shred path for handoffs
+// (it was later split into `mpm_handoff` / `mpm_scratchpad`; shred
+// is the `mpm_handoff` action) and tests had to bypass the supported
+// interface (direct SQL) to clean up after themselves.
 func (dm *DatabaseManager) DeleteHandoff(id string) (int64, error) {
 	if dm == nil || dm.db == nil {
 		return 0, fmt.Errorf("DeleteHandoff: db not initialized")

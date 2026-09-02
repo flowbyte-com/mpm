@@ -1,8 +1,8 @@
 # claude-code-mpm
 
 Claude Code ↔ MPM integration. Wires the full MPM cognitive substrate into
-Claude Code as **16 native MCP tools** (`mpm__mpm_memory`, `mpm__mpm_session`,
-`mpm__explain_retrieval`, `mpm__mpm_wakes`, …).
+Claude Code as **17 native MCP tools** (`mpm__mpm_memory`, `mpm__mpm_handoff`,
+`mpm__mpm_scratchpad`, `mpm__explain_retrieval`, `mpm__mpm_wakes`, …).
 
 ## Why this exists
 
@@ -23,7 +23,7 @@ serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
 
 | Layer | Count | Tool names |
 |---|---|---|
-| Unified Domain Tools (Fat RPC) | 13 | `mpm__mpm_memory`, `mpm__mpm_session`, `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_system` |
+| Unified Domain Tools (Fat RPC) | 14 | `mpm__mpm_memory`, `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system` |
 | Standalone tools | 3 | `mpm__explain_retrieval`, `mpm__log_to_changelog`, `mpm__request_review` |
 
 The 13 Domain Tools share the same `(action, params)` shape. The 3
@@ -40,7 +40,7 @@ Standalones have their own narrower schemas. See `~/.mpm/bin/mpm-mcp`'s
 #    Without restart, the `mpm__*` tools will not appear in the tool list.
 
 # 3. Verify
-./install.sh --verify   # or directly: ./verify.sh
+./install.sh --verify   # or directly: ./verify.py
 ```
 
 The install script:
@@ -59,17 +59,27 @@ is the canonical Claude Code wire location for MCP server entries.
 ```
 
 Removes the `mpm` entry from `~/.claude/.mcp.json` (or removes the file if
-it was the only entry). Original state is preserved in
+it was the only entry). The shell `--uninstall` mode does **not** strip
+the managed CLAUDE.md section — to do that, run the Python uninstaller
+directly:
+
+```bash
+python3 ~/.mpm/agent_installation/claude-code-mpm/scripts/install_claude_instructions.py \
+    --scope user --home "$HOME" \
+    --target ~/.claude/CLAUDE.md --uninstall
+```
+
+Original state is preserved in
 `~/.claude/backups/claude-code-mpm-<TS>/`.
 
 ## Path resolution
 
-The install script resolves paths deterministically:
-
-1. `MPM_BINARY` env var → explicit operator override
-2. `${HOME}/.mpm/bin/mpm-mcp` — canonical install (the same path the
-   opencode-mpm and openclaw-mpm integrations use)
-3. `mpm-mcp` on PATH — last-resort fallback
+The install script hardcodes the canonical install path
+(`${HOME}/.mpm/bin/mpm-mcp`) and the canonical workspace
+(`${HOME}/.mpm`). It does **not** read `MPM_BINARY` or `MPM_WORKSPACE`
+env vars for resolution — the same deterministic absolute path is what
+the opencode-mpm and openclaw-mpm integrations expect. To override,
+edit `~/.claude/.mcp.json` after install.
 
 The `~/.mcp.json` template uses `${HOME}` substitution so the same template
 works on any machine. The install script resolves `${HOME}` to an absolute
@@ -146,7 +156,7 @@ live `mpm-mcp` binary. Tests:
 | B — Durable memory write | `mpm_memory save` persists a uniquely-tagged probe |
 | C — Memory retrieval | `mpm_memory query` finds the probe by ID |
 | D — Retrieval diagnostics | `explain_retrieval` returns structured per-node breakdown |
-| E — Cross-session continuity | `mpm_session end` writes a handoff that `mpm_session list_handoffs` sees |
+| E — Cross-session continuity | `mpm_handoff write` writes a handoff that `mpm_handoff list` sees |
 | F — Missing MPM handling | A bad `MPM_WORKSPACE` does not fabricate success |
 | G — Malformed input handling | An unknown action returns a structured error, not fabricated success |
 | H — Non-zero exit semantics | Malformed JSON-RPC produces a non-zero exit |
@@ -154,7 +164,8 @@ live `mpm-mcp` binary. Tests:
 | J — Shared substrate | The DB the agent uses is the same inode as the canonical DB |
 
 Cleanup is automatic: probe memories and the test handoff are removed via
-the supported `mpm_memory shred` and `mpm_session shred_handoff` interfaces.
+the supported `mpm_memory shred` and `mpm_handoff(action: "shred")`
+interfaces.
 
 ## Limitations
 
