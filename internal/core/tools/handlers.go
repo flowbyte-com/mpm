@@ -992,20 +992,44 @@ func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	return result, nil
 }
 
+// D-8.1: accept either `memory_id` or the bare `id` for memory-targeted
+// operations. The canonical wire form remains `memory_id` (snake_case);
+// `id` is accepted as a synonym so the surface is consistent with
+// mpm_handoff shred (which uses `id`). Same helper used by every
+// memory-action handler below.
+func memoryIDFromParams(p map[string]interface{}) string {
+	if v, _ := p["memory_id"].(string); v != "" {
+		return v
+	}
+	if v, _ := p["id"].(string); v != "" {
+		return v
+	}
+	return ""
+}
+
 func handleReinforceMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id := memoryIDFromParams(p)
+	if id == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
 	delta := int(internal.ParseFloatOr(p["delta"], 1))
 	return dm.ReinforceMemoryTool(id, delta)
 }
 
 func handleWeakenMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id := memoryIDFromParams(p)
+	if id == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
 	delta := int(internal.ParseFloatOr(p["delta"], 1))
 	return dm.WeakenMemoryTool(id, delta)
 }
 
 func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id := memoryIDFromParams(p)
+	if id == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
 	days := int(internal.ParseFloatOr(p["days"], 1))
 	return dm.SnoozeMemory(id, days)
 }
@@ -1583,6 +1607,49 @@ func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"success":   true,
 		"memory_id": memoryID,
 		"topic_id":  topicID,
+	}, nil
+}
+
+// handleListTopics returns all active topics (matches `mpm topic list`
+// CLI surface). D-4.1: the prior MCP surface exposed only
+// create|search|link; this restores parity so an agent using MCP can
+// enumerate existing topics before linking or promoting.
+func handleListTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	limit := int(internal.ParseFloatOr(p["limit"], 20))
+	if limit <= 0 {
+		limit = 20
+	}
+	items, err := dm.ListTopics()
+	if err != nil {
+		return nil, fmt.Errorf("list topics: %w", err)
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return map[string]interface{}{
+		"success": true,
+		"topics":  items,
+		"count":   len(items),
+	}, nil
+}
+
+// handleShowTopic returns a single topic by id (matches `mpm topic show
+// <id>` CLI surface). D-4.1: parity closure.
+func handleShowTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	topic, err := dm.GetTopic(id)
+	if err != nil {
+		return nil, fmt.Errorf("get topic: %w", err)
+	}
+	if topic == nil {
+		return nil, fmt.Errorf("topic not found: %s", id)
+	}
+	return map[string]interface{}{
+		"success": true,
+		"topic":   topic,
 	}, nil
 }
 
@@ -2936,7 +3003,16 @@ func handleHandoffList(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 //
 // Closes MPM-GAP-SHRED-HANDOFF-2026-08-19.
 func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// D-8.1: accept either `id` or the legacy `handoff_id` alias so the
+	// surface is consistent with mpm_work (work_id) and mpm_memory
+	// (memory_id) — all family members accept either a family-specific
+	// key or the bare `id`.
 	id, _ := p["id"].(string)
+	if id == "" {
+		if v, ok := p["handoff_id"].(string); ok && v != "" {
+			id = v
+		}
+	}
 	if id == "" {
 		// Accept session_id for callers that have only the session
 		// identifier (the common test-handoff case). Lookup is a
@@ -2965,7 +3041,11 @@ func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		}
 	}
 	if id == "" {
-		return nil, fmt.Errorf("shred_handoff: 'id' (or 'session_id') is required")
+		// D-10.1: use the canonical W-006 hint so the agent knows how
+		// to recover (mpm_context read_wake_context → session_current_id,
+		// or MPM_SESSION_ID env var). The hint also names both `id`
+		// and `session_id` as accepted forms.
+		return nil, internal.ErrSessionIDRequired()
 	}
 
 	n, err := dm.DeleteHandoff(id)
@@ -4901,8 +4981,14 @@ func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleSearchTopics(dm, ac, params)
 	case "link":
 		return handleLinkTopic(dm, ac, params)
+	case "list":
+		// D-4.1: parity with `mpm topic list` CLI surface.
+		return handleListTopics(dm, ac, params)
+	case "show":
+		// D-4.1: parity with `mpm topic show <id>` CLI surface.
+		return handleShowTopic(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link, list, show", action)
 	}
 }
 
