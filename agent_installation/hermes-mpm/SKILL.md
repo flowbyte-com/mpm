@@ -7,7 +7,7 @@
 | Agent / framework | Hermes (minimax-oauth provider, hermes-agent CLI) |
 | Integration path | `~/.mpm/agent_installation/hermes-mpm/` |
 | Native mechanism | Hermes MCP client (`mcp_servers` in `config.yaml`) + Hermes Skill (`mpm` skill at `~/.hermes/skills/mpm/SKILL.md`) |
-| MPM interface used | `mpm-mcp` stdio server (16 MCP tools via JSON-RPC over stdio) |
+| MPM interface used | `mpm-mcp` stdio server (22 MCP tools via JSON-RPC over stdio) |
 | Auto-load mechanism | MCP server auto-discovered via `mcp_servers` config; skill auto-loaded when task involves MPM |
 | MPM binary actually resolved | `/home/v/.mpm/bin/mpm-mcp` (canonical, absolute path) |
 | Database actually used | `/home/v/workspace/projects/mpm/src/db/mpm.db` (symlinked: `~/.mpm/src/db/mpm.db` ↔ `~/.openclaw/workspace/projects/mpm/src/db/mpm.db`) |
@@ -78,8 +78,8 @@ The legacy plugin loader should be removed or repaired separately. It is not par
 | Native agent invocation | **PASS** | `mcp__mpm__mpm_memory` action=save returned `{"success":true,"id":"b3b7efb24876b160"}` |
 | Memory write | **PASS** | Write succeeded with returned ID `b3b7efb24876b160` |
 | Memory retrieval | **PASS** | Query found the test fact with matching ID `b3b7efb24876b160` |
-| Retrieval diagnostics | **PASS** | `mcp__mpm__explain_retrieval` returned structured 3-stage pipeline trace |
-| Cross-session continuity | **PASS (code-inspected)** | `mcp__mpm__mpm_session` list_handoffs returned valid handoff records; `read_wake_context` returned session state |
+| Retrieval diagnostics | **PASS** | `mcp__mpm__mpm_retrieval_diagnose` returned structured 3-stage pipeline trace |
+| Cross-session continuity | **PASS (code-inspected)** | `mcp__mpm__mpm_handoff` list returned valid handoff records; `read_wake_context` returned session state |
 | Missing MPM handling | **INSPECTED** | MCP server spawn failure produces non-zero exit; Hermes MCP client propagates errors |
 | Malformed response handling | **INSPECTED** | MCP error responses are wrapped in JSON-RPC error envelope; `mcp__mpm__mpm_system` health_check showed `ok:false` with integrity_status field |
 | Non-zero exit handling | **INSPECTED** | `mpm-mcp` returns exit code 1 on tool invocation failure |
