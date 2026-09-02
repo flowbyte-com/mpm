@@ -89,7 +89,14 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.theoryTotal, _ = countMemories(dm, "collection = 'theories'")
 	d.decisions, _ = countMemories(dm, "collection = 'decisions'")
 	d.theoryPend, _ = countTheoriesByStatus(dm, "pending")
-	d.theoryResolv, _ = countTheoriesByStatus(dm, "resolved")
+	// D-5.1: theories have terminal statuses 'proven' / 'disproven'
+	// (with 'challenged' as a non-terminal variant on the way to terminal).
+	// The literal status='resolved' is never written. Count proven +
+	// disproven so the "resolved" line on the dashboard reflects the actual
+	// terminal population.
+	proven, _ := countTheoriesByStatus(dm, "proven")
+	disproven, _ := countTheoriesByStatus(dm, "disproven")
+	d.theoryResolv = proven + disproven
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
@@ -247,9 +254,17 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 	var query string
 	var args []interface{}
 	if where == "" {
-		query = "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"
+		// D-5.2: apply the canonical EXPIRE filter (expires_at IS NULL
+		// OR expires_at > now). The prior code only filtered deleted_at,
+		// so an expired memory continued to count toward memTotal.
+		query = `SELECT COUNT(*) FROM memories
+			WHERE deleted_at IS NULL
+			AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	} else {
-		query = "SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND " + where
+		query = `SELECT COUNT(*) FROM memories
+			WHERE deleted_at IS NULL
+			AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+			AND ` + where
 	}
 	var count int
 	if err := dm.SQLDB().QueryRow(query, args...).Scan(&count); err != nil {
