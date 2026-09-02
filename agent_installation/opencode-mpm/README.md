@@ -30,7 +30,8 @@ The 13 Domain Tools cover the full cognitive surface from mpm's registry, each d
 | Domain | Actions |
 |---|---|
 | `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
-| `mpm_session` | end, handoff, list_handoffs, flush, read, discard, promote_scratchpad |
+| `mpm_handoff` | write, read, list, shred |
+| `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |
 | `mpm_theories` | propose, resolve |
 | `mpm_lessons` | save, search, list |
@@ -174,10 +175,64 @@ ln -s /path/to/agent_installation/opencode-mpm ~/.config/opencode/plugin/opencod
 # 2. make sure ~/.mpm/bin/mpm is on PATH (or set MPM_BINARY)
 export PATH=$HOME/.mpm/bin:$PATH
 
-# 3. (re)start opencode — the plugin will register and emit the boot health check
+# 3. install the AGENTS.md behavioral section (user scope):
+python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
+    --scope user \
+    --target ~/.config/opencode/AGENTS.md \
+    --snippet ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
+
+# 4. (re)start opencode — the plugin will register and emit the boot health check
 ```
 
-The plugin reads `MPM_BINARY` from env (defaults to `mpm`) and `MPM_WORKSPACE` from env (defaults to `<cwd>`).
+The plugin reads `MPM_BINARY` from env (defaults to the literal string
+`"mpm"`, resolved via `$PATH`) and `MPM_WORKSPACE` from env
+(defaults to `$HOME/.mpm`, computed by `src/workspace.ts`). If you
+need a deterministic absolute path (so the integration does not
+depend on `$PATH` in the OpenCode runtime), set
+`MPM_BINARY=/home/v/.mpm/bin/mpm` in the OpenCode env block — the
+plugin does not chain fallbacks to the canonical install root
+itself.
+
+The behavioral section in step 3 is **required** for the agent to
+honor the MPM persistent-state, skill-discovery, and handoff
+invariants. The plugin wires wake-context injection automatically via
+`experimental.chat.system.transform`; the AGENTS.md managed section
+delivers the rest of the protocol.
+
+## Verification
+
+```bash
+# Plugin loaded? List its commands in an OpenCode session:
+#   :commands — expect mpm__mpm_memory, mpm__mpm_handoff, mpm__mpm_scratchpad, ...
+
+# AGENTS.md has exactly one managed block:
+grep -c '<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->' \
+  ~/.config/opencode/AGENTS.md
+# expect: 1
+
+# End-to-end via the plugin's exposed tool (in OpenCode):
+#   "use mpm__mpm_memory action=save to remember that opencode-mpm integration smoke test passed"
+mpm recall --semantic "opencode-mpm integration smoke test"
+```
+
+## Uninstall
+
+```bash
+# 1. Remove the plugin symlink:
+rm ~/.config/opencode/plugin/opencode-mpm
+
+# 2. Strip the managed section from AGENTS.md (user scope):
+python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
+    --scope user --target ~/.config/opencode/AGENTS.md --uninstall
+
+# 3. (For project scope, repeat with --scope project and the project --target.)
+```
+
+The uninstall path strips both the current `opencode-instructions`
+managed block and any legacy `MPM-MANAGED SECTION` block (without
+`:opencode-instructions` suffix). If the file would be empty
+afterwards, the file is unlinked. A backup is written before any
+mutation.
 
 ## Build
 

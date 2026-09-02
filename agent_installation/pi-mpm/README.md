@@ -19,7 +19,8 @@ each dispatching on an `action` enum with free-form `params`:
 | Domain | Actions |
 |---|---|
 | `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
-| `mpm_session` | end, handoff, list_handoffs, flush, read, discard, promote_scratchpad |
+| `mpm_handoff` | write, read, list, shred |
+| `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |
 | `mpm_theories` | propose, resolve |
 | `mpm_lessons` | save, search, list |
@@ -34,7 +35,7 @@ each dispatching on an `action` enum with free-form `params`:
 
 Plus 3 standalone tools with their own parameter schemas:
 
-- `explain_retrieval` — per-node retrieval diagnostic (same ordering as query)
+- `mpm_retrieval_diagnose` — per-node retrieval diagnostic (same ordering as query). Subprocess invocation: `mpm call mpm_retrieval_diagnose`.
 - `log_to_changelog` — self-report work against a git commit SHA
 - `request_review` — concurrent multi-component review
 
@@ -93,6 +94,60 @@ Or copy/symlink `index.ts` to `~/.pi/agent/extensions/`. See
 for details.
 
 MPM itself must be on `PATH` (`mpm --version` to verify).
+
+**Loading precedence (per Pi docs):** Pi searches for `AGENTS.md` (or
+`CLAUDE.md`) at session start in this order:
+
+1. `~/.pi/agent/AGENTS.md` (global, all projects)
+2. `AGENTS.md` in any parent directory of cwd (walking up)
+3. `AGENTS.md` in cwd (current project)
+
+The installer in this directory defaults to writing the global
+location (`~/.pi/agent/AGENTS.md`). Per-project scope is `--scope
+project`. To target a specific file name (e.g. `CLAUDE.md` instead of
+`AGENTS.md`), pass `--filename CLAUDE.md`. To bypass the entire
+context-file chain (and therefore skip the MPM behavioral contract
+for a single session), launch Pi with `--no-context-files` / `-nc`.
+
+## Behavioral-protocol install (per-project, optional)
+
+The Pi extension handles wake-context injection automatically via the
+`before_agent_start` hook. The behavioral protocol is delivered via
+`AGENTS.md`, not via the typed tools. To install the AGENTS.md managed
+section:
+
+```bash
+# Global scope (writes ~/.pi/agent/AGENTS.md):
+python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+    --scope user \
+    --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
+
+# Per-project scope (writes $cwd/AGENTS.md):
+python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+    --scope project \
+    --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
+```
+
+The installer accepts `--target <file>`, `--target-dir <dir>`,
+`--filename <name>`, and `--uninstall` overrides.
+
+## Uninstall
+
+```bash
+# 1. Remove the extension entry from ~/.pi/agent/settings.json.
+#    (The Python installer does not touch settings.json — that is a
+#    manual step.)
+
+# 2. Strip the managed section from the global AGENTS.md:
+python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+    --scope user --uninstall
+
+# 3. (Or for project scope, repeat with --scope project.)
+```
+
+The uninstall path strips the managed block; if the file would be
+empty afterwards, the file is unlinked. A backup is written before
+any mutation (`<target>.bak.YYYYMMDDTHHMMSSZ`).
 
 ## Trade-offs
 
