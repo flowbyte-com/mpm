@@ -351,7 +351,7 @@ This is why MPM can answer questions ordinary memory systems cannot: not just "w
 
 ### 3.6 The epistemic snapshot
 
-Every memory saved through `mcp-mcp` carries a `metadata._epistemic_snapshot`
+Every memory saved through `mpm-mcp` carries a `metadata._epistemic_snapshot`
 block — a system-stamped envelope that captures the epistemic environment
 at the exact moment the memory was written. Five sub-blocks under one JSON
 key (the leading underscore signals system-owned; agents and operators
@@ -998,7 +998,7 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
-### 6.5 Multi-Agent Shared Epistemology
+### 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
 
 *Federates house rules across operators via a separate DB — five layers from local cache to global arbitration, no IPC invented.*
 
