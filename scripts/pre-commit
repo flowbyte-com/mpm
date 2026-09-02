@@ -102,7 +102,15 @@ echo "[pre-commit] running synthesis / reliability / lifecycle / wake context te
 # as a standalone Go module. The pre-commit
 # gate now runs from inside the Core module because main/ and core/ are
 # separate Go modules (cross-module `./internal/core/...` from main/ fails).
-if ! (cd internal/core && "$GO" test -short -count=1 ./... \
+#
+# Build tag: -tags fts5 is REQUIRED for tests that exercise FTS5 (notably
+# TestHybridSearch_BM25OnlyStillWorks). Without it, the test DB is built
+# without the sqlite_fts5 module, 'bm25-strong' matches return as
+# 'bm25-fts-only', and the test fails. The production builds use this tag
+# in the Makefile; tests must match. Hit on 2026-09-02 plugin commit
+# (96e0917) — without this flag the pre-commit gate spuriously aborts
+# unrelated diffs.
+if ! (cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... \
      -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
   echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
   exit 1
