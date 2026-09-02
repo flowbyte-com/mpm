@@ -1,5 +1,5 @@
 // lib/workspace.js — canonical MPM_WORKSPACE resolver for the
-// mpm-auto-route spawn surface.
+// openclaw-mpm-auto-mode-persona spawn surface.
 //
 // Mirrors mpm-critic/main.go:126 (the gold-standard pattern). The
 // canonical resolver is process.env.MPM_WORKSPACE; only fall back to
