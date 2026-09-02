@@ -43,9 +43,12 @@ that this host adapter inherits:
 4. **Handoff before genuine session closure.** Before sending a turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
-   `mcp__mpm__mpm_session` action `end` (params: `summary`, `state`,
-   `commitments`, `open_questions`). Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
+   `mcp__mpm__mpm_handoff` action `write` (params: `session_id`,
+   `summary`, `state`, `commitments`, `open_questions`, `note`). Use
+   `mcp__mpm__mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`
+   (params: `session_id`, `thesis`, `supporting`) for in-session
+   volatile working state. Wake is how future-me starts; handoff is
+   how future-me receives the previous session.
 
    Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
    session-closing. Do not write a handoff on every chat ack — write

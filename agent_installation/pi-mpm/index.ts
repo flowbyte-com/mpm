@@ -214,7 +214,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		);
 	}
 	lines.push(
-		"\nUse the mpm_memory tool to query prior memories and persist new ones, and mpm_session (action \"end\") to write the handoff at the end of meaningful work. The full mpm_* domain surface is registered (13 domain tools + 3 standalone).",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The full mpm_* domain surface is registered (14 domain tools + 3 standalones).",
 	);
 	return lines.join("\n");
 }
@@ -440,16 +440,23 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	});
 
 	registerDomainTool(pi, {
-		name: "mpm_session",
-		label: "MPM Session",
-		description: `Session lifecycle and scratchpad. Literal actions:
-  end — Write a handoff for next wake. Required params.session_id, params.summary. Optional: params.state, params.commitments, params.open_questions.
-  handoff — Read latest handoff. Optional: params.unread, params.mark_read.
-  list_handoffs — List handoff history. Optional: params.limit (default 10), params.unread.
-  flush — Overwrite the ephemeral scratchpad. Required params.session_id, params.thesis. Optional: params.supporting.
+		name: "mpm_handoff",
+		label: "MPM Handoff",
+		description: `Inter-session communication: write, read, and audit handoff records. Literal actions:
+  write — Write a handoff for the next session. Required params.session_id, params.summary. Optional: params.state ("clean"|"crashed"|"interrupted"|"force_end"), params.commitments, params.open_questions, params.note.
+  read — Read a specific handoff. Required params.handoff_id. Optional: params.mark_read.
+  list — List handoffs. Optional: params.session_id, params.unread, params.limit (default 10).
+  shred — Hard-delete a handoff. Required params.handoff_id. Optional: params.confirm (true).`,
+	});
+
+	registerDomainTool(pi, {
+		name: "mpm_scratchpad",
+		label: "MPM Scratchpad",
+		description: `Intra-session volatile working memory for thoughts, partial conclusions, and working context that may not survive to the next session. Literal actions:
+  flush — Overwrite the scratchpad for a session. Required params.session_id, params.thesis. Optional: params.supporting.
   read — Read scratchpad for a session. Required params.session_id.
   discard — Delete scratchpad without promoting. Required params.session_id.
-  promote_scratchpad — Promote scratchpad to memory, then delete. Required params.session_id.`,
+  promote — Promote scratchpad to memory, then delete. Required params.session_id.`,
 	});
 
 	registerDomainTool(pi, {

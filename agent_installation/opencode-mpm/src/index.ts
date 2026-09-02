@@ -529,15 +529,21 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 	});
 
 	registerDomainTool(bin, tools, {
-		name: "mpm_session",
-		description: `Session lifecycle and scratchpad. Literal actions:
-  end — Write a handoff for next wake. Required params.session_id, params.summary. Optional: params.state, params.commitments, params.open_questions.
-  handoff — Read latest handoff. Optional: params.unread, params.mark_read.
-  list_handoffs — List handoff history. Optional: params.limit (default 10), params.unread.
-  flush — Overwrite the ephemeral scratchpad. Required params.session_id, params.thesis. Optional: params.supporting.
+		name: "mpm_handoff",
+		description: `Inter-session communication: write, read, and audit handoff records. Literal actions:
+  write — Write a handoff for the next session. Required params.session_id, params.summary. Optional: params.state ("clean"|"crashed"|"interrupted"|"force_end"), params.commitments, params.open_questions, params.note.
+  read — Read a specific handoff. Required params.handoff_id. Optional: params.mark_read.
+  list — List handoffs. Optional: params.session_id, params.unread, params.limit (default 10).
+  shred — Hard-delete a handoff. Required params.handoff_id. Optional: params.confirm (true).`,
+	});
+
+	registerDomainTool(bin, tools, {
+		name: "mpm_scratchpad",
+		description: `Intra-session volatile working memory for thoughts, partial conclusions, and working context that may not survive to the next session. Literal actions:
+  flush — Overwrite the scratchpad for a session. Required params.session_id, params.thesis. Optional: params.supporting.
   read — Read scratchpad for a session. Required params.session_id.
   discard — Delete scratchpad without promoting. Required params.session_id.
-  promote_scratchpad — Promote scratchpad to memory, then delete. Required params.session_id.`,
+  promote — Promote scratchpad to memory, then delete. Required params.session_id.`,
 	});
 
 	registerDomainTool(bin, tools, {

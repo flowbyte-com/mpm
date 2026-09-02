@@ -13,12 +13,13 @@ this machine. The full behavioral contract is canonical at
 `~/.mpm/agent_installation/mpm-agent-protocol.md`. The non-negotiable invariants
 that this host adapter inherits:
 
-1. **Wake on session start.** Read MPM wake context (`mode`, `persona`,
-   active `topics`, recent memories, open work, last handoff) before
-   answering substantive questions. With the `pi-mpm` extension
-   installed, the wake payload is exposed as the
-   `mpm_context` tool's `read_wake_context` action. Calling it is
-   mandatory, not optional, at the start of every session.
+1. **Wake on session start.** Already handled automatically by the
+   `pi-mpm` extension's `before_agent_start` hook (which fetches
+   `mpm_context` action `read_wake_context` and injects the result
+   into the system prompt once per session). You do not need to call
+   `read_wake_context` manually. If the extension is unavailable,
+   fall back to the CLI path:
+   `mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'`.
 
 2. **Persist during work, not only at the end.** Use the appropriate
    MPM tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`,
@@ -42,9 +43,12 @@ that this host adapter inherits:
 4. **Handoff before genuine session closure.** Before sending a turn
    that closes the session, run the handoff check. If substantial work
    has occurred since the last handoff, write it via
-   `mpm_session` action `end` (params: `summary`, `state`,
-   `commitments`, `open_questions`). Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
+   `mpm_handoff` action `write` (params: `session_id`, `summary`,
+   `state`, `commitments`, `open_questions`, `note`). Use
+   `mpm_scratchpad` actions `flush`/`read`/`discard`/`promote` (params:
+   `session_id`, `thesis`, `supporting`) for in-session volatile
+   working state. Wake is how future-me starts; handoff is how
+   future-me receives the previous session.
 
    Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
    session-closing. Do not write a handoff on every chat ack — write

@@ -271,14 +271,16 @@ def test_d_diagnostics(report: Report) -> None:
                       f"diagnostics missing fields; raw={json.dumps(resp)[:200]}")
 
 
-def test_e_continuity(report: Report) -> Optional[str]:
+def test_e_continuity(report: Report) -> Optional[tuple[str, str]]:
     """E — cross-session continuity via handoff write + read.
 
-    ended_state must be one of: clean, crashed, interrupted, force_end.
+    Returns (session_id, handoff_id) on success so cleanup can shred
+    the specific handoff row via mpm_handoff shred. state must be one
+    of: clean, crashed, interrupted, force_end.
     """
     session_id = f"agent:claude-code:test-{PROBE_TAG}"
-    handoff_resp = mcp_call("mpm_session", {
-        "action": "end",
+    handoff_resp = mcp_call("mpm_handoff", {
+        "action": "write",
         "params": {
             "session_id": session_id,
             "summary": f"Claude Code ↔ MPM alpha integration test handoff — probe {PROBE_HUMAN}",
@@ -288,7 +290,8 @@ def test_e_continuity(report: Report) -> Optional[str]:
         },
     })
     handoff_ok = handoff_resp.get("success") is True
-    list_resp = mcp_call("mpm_session", {"action": "list_handoffs", "params": {"limit": 50}})
+    handoff_id = handoff_resp.get("handoff_id") or ""
+    list_resp = mcp_call("mpm_handoff", {"action": "list", "params": {"limit": 50}})
     handoffs = list_resp.get("results") or list_resp.get("handoffs") or []
     list_found = any(
         h.get("session_id") == session_id for h in handoffs
@@ -296,11 +299,11 @@ def test_e_continuity(report: Report) -> Optional[str]:
     if handoff_ok and list_found:
         report.record("E — Cross-session continuity", "PASS",
                       f"handoff written + listed under {session_id}")
-        return session_id
+        return session_id, handoff_id
     if handoff_ok:
         report.record("E — Cross-session continuity", "PARTIAL",
                       f"handoff written but not visible in list ({len(handoffs)} handoffs scanned)")
-        return session_id
+        return session_id, handoff_id
     report.record("E — Cross-session continuity", "FAIL",
                   f"handoff write returned success={handoff_resp.get('success')}; err={handoff_resp.get('error', '')}")
     return None
@@ -448,17 +451,21 @@ def test_j_shared_substrate(report: Report) -> None:
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
-def cleanup(memory_id: Optional[str], session_id: Optional[str]) -> None:
+def cleanup(memory_id: Optional[str], handoff_target: Optional[tuple[str, str]]) -> None:
     print("\nCleanup")
     if memory_id:
         resp = mcp_call("mpm_memory", {"action": "shred", "params": {"memory_id": memory_id}})
         print(f"  shredded memory {memory_id}: success={resp.get('success')}")
-    if session_id:
-        resp = mcp_call("mpm_session", {
-            "action": "shred_handoff",
-            "params": {"session_id": session_id},
-        })
-        print(f"  shredded handoff {session_id}: success={resp.get('success')}")
+    if handoff_target:
+        session_id, handoff_id = handoff_target
+        if handoff_id:
+            resp = mcp_call("mpm_handoff", {
+                "action": "shred",
+                "params": {"handoff_id": handoff_id, "confirm": True},
+            })
+            print(f"  shredded handoff {handoff_id} (session {session_id}): success={resp.get('success')}")
+        else:
+            print(f"  no handoff_id captured for session {session_id}; skipping shred")
 
     # Sweep any leftover test memories from prior failed runs.
     print("  sweeping leftover test memories...")
@@ -513,7 +520,7 @@ def main() -> int:
     test_d_diagnostics(report)
 
     # Test E — continuity
-    session_id = test_e_continuity(report)
+    handoff_target = test_e_continuity(report)
 
     # Test F — missing MPM
     test_f_missing_mpm(report)
@@ -531,7 +538,7 @@ def main() -> int:
     test_j_shared_substrate(report)
 
     # Cleanup
-    cleanup(memory_id, session_id)
+    cleanup(memory_id, handoff_target)
 
     # Report
     report.print_summary()
