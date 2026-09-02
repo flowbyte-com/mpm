@@ -19,7 +19,7 @@ passed live.
 | Field | Value |
 |---|---|
 | **Agent / framework** | OpenClaw (`minimax-portal/MiniMax-M3` model, webchat channel, session `agent:main:main:2026-08-19`) |
-| **Integration path(s)** | `~/.mpm/agent_installation/openclaw-mpm-memory/` (memory slot plugin) + `~/.mpm/bin/mpm-mcp` (MCP stdio server) + `~/.mpm/agent_installation/mpm-auto-route/` (mode/persona injection) |
+| **Integration path(s)** | `~/.mpm/agent_installation/openclaw-mpm-memory/` (memory slot plugin) + `~/.mpm/bin/mpm-mcp` (MCP stdio server) + `~/.mpm/agent_installation/openclaw-mpm-auto-mode-persona/` (mode/persona injection; was `mpm-auto-route/` at validation time, renamed 2026-09-02) |
 | **Native mechanism(s)** | (a) OpenClaw plugin SDK (`@openclaw/plugin-sdk`) for the memory slot; (b) MCP stdio server (`mcpServers.mpm` block in `openclaw config get mcp`) for full surface; (c) OpenClaw plugin SDK for the auto-router |
 | **MPM interface used** | CLI: `mpm call <tool> --payload '{"action":"…","params":{…}}'` ; MCP: `mpm__*` native tool surface (the 33-tool aggregator exposed via `mpm-mcp`) |
 | **Auto-load mechanism** | OpenClaw gateway auto-loads the MCP server from runtime config; the memory plugin loads via `plugins.slots.memory` and `plugins.entries["openclaw-mpm-memory"].enabled=true` |
