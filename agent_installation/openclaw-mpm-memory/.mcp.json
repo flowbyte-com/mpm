@@ -4,8 +4,13 @@
     "Source of truth for the OpenClaw runtime: configure via",
     "  openclaw config set mcp.servers.mpm.command '/home/v/.mpm/bin/mpm-mcp'",
     "  openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE '/home/v/.mpm'",
-    "  openclaw config set mcp.servers.mpm.env.MPM_ACTIVE_MODE 'programming'",
-    "  openclaw config set mcp.servers.mpm.env.MPM_ACTIVE_PERSONA 'correspondent'",
+    "MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT set here.",
+    "MPM resolves mode/persona from env at request time via",
+    "internal/core/mpmcli.ActiveContextFromEnv() and falls back to its",
+    "own default/default contract when unset. Hardcoding framework-",
+    "specific defaults at install/MCP-wiring time was a pre-2026-08-29",
+    "drift that leaked an old mode taxonomy into every registration.",
+    "",
     "or merge this file directly via the OpenClaw MCP import path.",
     "",
     "Validation: 2026-08-19 alpha-integration-test, all four surfaces passed.",
@@ -18,9 +23,7 @@
       "command": "/home/v/.mpm/bin/mpm-mcp",
       "args": [],
       "env": {
-        "MPM_WORKSPACE": "/home/v/.mpm",
-        "MPM_ACTIVE_MODE": "programming",
-        "MPM_ACTIVE_PERSONA": "correspondent"
+        "MPM_WORKSPACE": "/home/v/.mpm"
       }
     }
   }

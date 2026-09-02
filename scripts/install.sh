@@ -513,15 +513,20 @@ phase_host_integration() {
 
     log "openclaw detected — registering mpm MCP"
 
+    # MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT injected
+    # here. MPM resolves mode/persona from env at request time via
+    # internal/core/mpmcli.ActiveContextFromEnv(), which returns "" when
+    # unset — and the substrate applies its own default/default contract.
+    # Hardcoding framework-specific defaults (e.g. "programming"/
+    # "correspondent") at install time was a pre-2026-08-29 drift that
+    # leaked old mode taxonomy into every MCP registration.
     if openclaw mcp list 2>/dev/null | grep -q -- '^- mpm$'; then
         log "  mpm MCP exists — updating via 'set'"
         openclaw mcp set mpm "$(cat <<JSON
 {
   "command": "$PREFIX/bin/mpm-mcp",
   "env": {
-    "MPM_WORKSPACE": "$DATA_ROOT",
-    "MPM_ACTIVE_MODE": "programming",
-    "MPM_ACTIVE_PERSONA": "correspondent"
+    "MPM_WORKSPACE": "$DATA_ROOT"
   }
 }
 JSON
@@ -530,9 +535,7 @@ JSON
         log "  mpm MCP not registered — adding"
         openclaw mcp add mpm \
             --command "$PREFIX/bin/mpm-mcp" \
-            --env "MPM_WORKSPACE=$DATA_ROOT" \
-            --env "MPM_ACTIVE_MODE=programming" \
-            --env "MPM_ACTIVE_PERSONA=correspondent"
+            --env "MPM_WORKSPACE=$DATA_ROOT"
     fi
 
     log "  restarting gateway to load MCP config"
@@ -640,6 +643,14 @@ mode_install() {
     log "  mpm ops init directives   # seed prime directives (cognitive rules)"
     log "  mpm status                # verify DB reachable"
     log "  mpm call read_wake_context   # first agent tool call"
+    log ""
+    log "configuration (required for LLM-backed features — synthesis, critic, review):"
+    log "  config file:    $DATA_ROOT/mpm_config.json (canonical; checked first)"
+    log "  env-file path:  ~/.config/mpm/mpm.env (optional override; systemd unit sources it via EnvironmentFile=-)"
+    log "  setup:          mpm config profile add default --model <model> --base-url <url>"
+    log "                  mpm config profile set default api_key <key>   # writes 0600 to mpm_config.json"
+    log "                  mpm config component set memory default         # bind component to profile"
+    log "  the installer did NOT create, store, request, or echo any API key or secret."
 }
 
 mode_check() {

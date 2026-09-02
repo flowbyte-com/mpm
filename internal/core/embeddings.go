@@ -153,7 +153,11 @@ func probeEmbeddingConfig() *EmbeddingConfig {
 }
 
 // EmbedText tries the real embedding provider; falls back to HashEmbed on failure.
-// This is the correct usage in all hot paths (mpm add, watcher ingest).
+// This is the correct usage in all hot paths (mpm add, cascade materialize,
+// and any other ingestion surface). The fsnotify-based watch daemon was
+// deprecated in commit 6588cb8 and hard-removed in 215fd09 — there is
+// no watcher ingest hot path; file ingestion is operator-driven via
+// `mpm cascade materialize`.
 func EmbedText(text string) []float32 {
 	cfg := DefaultEmbeddingConfig()
 	if cfg.Provider.Name() != "null" {
