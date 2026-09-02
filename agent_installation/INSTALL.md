@@ -149,8 +149,8 @@ the same MPM install and database.
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/plugins/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare`) — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
-| **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/plugins/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
+| **Memory slot plugin** | `~/.openclaw/extensions/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare`) — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
+| **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
 
@@ -348,7 +348,7 @@ What `verify.py` checks:
 
 - `~/.claude/.mcp.json` parses, contains the `mpm` entry, command is
   absolute.
-- `mpm-mcp` boots and responds to `tools/list` (expects 16 tools).
+- `mpm-mcp` boots and responds to `tools/list` (expects 22 tools).
 - `mpm_system health_check` returns `ok:true` with the canonical
   `db_path`.
 - `~/.claude/CLAUDE.md` contains exactly one managed block (count of
@@ -414,7 +414,7 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 16 tools) |
+| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 22 tools) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + scripts/install.sh) | `mpm` binary on `$PATH` |
 
