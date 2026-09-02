@@ -2025,6 +2025,18 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		return fmt.Errorf("memories column affinity rebuild: %w", err)
 	}
 
+	// alpha-5 D-12.1: alter scheduled_tasks timestamp column DECLARED TYPEs
+	// (DATETIME/DATE/TIMESTAMP) to INTEGER. mattn/go-sqlite3 returns Go types
+	// based on declared TYPE; even after timestamps_unified_v1 converted the
+	// storage class to INTEGER, the legacy declared TYPE made the driver
+	// hand back time.Time and break every scan into int64. SQLite does not
+	// support ALTER COLUMN, so this uses the table-recreate pattern. Runs
+	// after the outer migration transaction commits and rebuilds its own
+	// index. Idempotent — no-op when no DATETIME column remains.
+	if err := dm.migrateScheduledTasksToIntegerColumns(); err != nil {
+		return fmt.Errorf("scheduled_tasks column affinity rebuild: %w", err)
+	}
+
 	// Try FTS5 tables - if they fail, continue without them (fallback search)
 	if err := dm.initFTSTables(); err != nil {
 		slog.Warn("FTS5 initialization failed; search will use LIKE fallback", "error", err.Error())
