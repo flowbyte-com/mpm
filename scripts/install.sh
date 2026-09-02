@@ -343,19 +343,68 @@ phase_binaries() {
     note "BINARIES"
     install -d -m 0755 "$PREFIX/bin"
 
-    # Daemon binaries (raw ELF, owned by current user in user mode)
+    # Daemon binaries (raw ELF, owned by current user in user mode).
+    #
+    # When the user cloned the repository directly to $HOME/.mpm — the
+    # canonical install prefix — PROJECT_ROOT/bin/$bin and PREFIX/bin/$bin
+    # resolve to the SAME file. Coreutils' install(1) refuses to copy a
+    # file onto itself and ``set -e`` would abort the installer before
+    # the wrapper is written or any later phase runs. ``[ -ef ]`` is a
+    # POSIX test that returns true when both paths refer to the same
+    # inode (handles direct equality AND symlink resolution), which is
+    # the right notion of "same file" for this case. If source and dest
+    # are the same file, the binary is already at the install target —
+    # nothing to do.
     for bin in mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
-        install -m 0755 "$PROJECT_ROOT/bin/$bin" "$PREFIX/bin/$bin"
-        log "  installed $PREFIX/bin/$bin"
+        local src="$PROJECT_ROOT/bin/$bin"
+        local dst="$PREFIX/bin/$bin"
+        if [ "$src" -ef "$dst" ]; then
+            log "  $dst is build output (same file as $src) — skipping copy"
+        else
+            install -m 0755 "$src" "$dst"
+            log "  installed $dst"
+        fi
     done
 
-    # Real mpm binary (renamed to .real so the wrapper can claim the canonical name)
-    install -m 0755 "$PROJECT_ROOT/bin/mpm" "$PREFIX/bin/mpm.real"
-    log "  installed $PREFIX/bin/mpm.real"
+    # Real mpm binary (renamed to .real so the wrapper can claim the
+    # canonical name). ``mpm`` and ``mpm.real`` are different filenames
+    # so install(1) is happy even when PROJECT_ROOT == PREFIX — but we
+    # still guard with ``-ef`` to be safe against the (unlikely) case
+    # of an existing ``mpm.real`` symlink resolving to the source.
+    #
+    # Idempotency note: in the same-prefix case the wrapper written by
+    # a previous install overwrites ``$PROJECT_ROOT/bin/mpm``. Re-running
+    # the installer would then copy the WRAPPER (not the real binary)
+    # to ``.real``. Detect a wrapper at the source and skip — the
+    # existing ``.real`` from the prior install is still correct.
+    local real_src="$PROJECT_ROOT/bin/mpm"
+    local real_dst="$PREFIX/bin/mpm.real"
+    if [ "$real_src" -ef "$real_dst" ]; then
+        log "  $real_dst is build output (same file as $real_src) — skipping copy"
+    elif [ -f "$real_dst" ] && [ "$(head -c 2 "$real_src" 2>/dev/null || true)" = "#!" ]; then
+        log "  $real_src is already a wrapper — preserving existing $real_dst"
+    else
+        install -m 0755 "$real_src" "$real_dst"
+        log "  installed $real_dst"
+    fi
 
     # Wrapper: sets MPM_WORKSPACE then exec's the real binary.
-    # Any pre-existing mpm at this path is backed up first (safety).
-    backup_raw_binary_if_present "$PREFIX/bin/mpm" >/dev/null
+    #
+    # Wrapper ordering invariant: ``mpm.real`` MUST exist at this path
+    # before we overwrite ``mpm`` with the wrapper, otherwise the wrapper
+    # would exec a non-existent binary. The install above already
+    # created ``mpm.real``; do not move the wrapper write before it.
+    #
+    # In the same-prefix case, backing up the existing ``mpm`` (which is
+    # the build's real binary) before overwriting it would just create
+    # a useless ``mpm.pre-wrapper.*`` sidecar — the binary's content is
+    # already preserved as ``mpm.real``. Skip the backup to keep the
+    # install layout tidy.
+    if [ ! "$PROJECT_ROOT/bin/mpm" -ef "$PREFIX/bin/mpm" ]; then
+        backup_raw_binary_if_present "$PREFIX/bin/mpm" >/dev/null
+    else
+        log "  source tree at $PREFIX/bin/mpm is the build output — wrapper will replace it directly"
+    fi
 
     cat > "$PREFIX/bin/mpm" <<WRAPPER
 #!/bin/sh
