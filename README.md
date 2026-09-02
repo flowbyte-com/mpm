@@ -2,13 +2,7 @@
 
 > **License:** [AGPL-3.0](LICENSE) — copyleft with network-use clause. See [LICENSE](LICENSE) for the full text.
 
-> **An observable substrate for long-lived autonomous systems.**
-
 > **Looking to install?** See [docs/INSTALL.md](docs/INSTALL.md) for the full OpenClaw + MPM stack setup, or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
-
-MPM (Managed Persistent Memory) is a durable state substrate for AI agents, providing persistent memory, work, provenance, and evidence across sessions.
-
-> *Add managed persistent memory to your agents.*
 
 MPM is an observable substrate for long-lived autonomous systems. Persistent memory is just one capability. Work, provenance, decisions, theories, and execution telemetry are all governed by the same self-observing foundation. The substrate is closed under observation: every operation on MPM is itself observable through MPM's own tools.
 
@@ -68,6 +62,7 @@ Every section is self-contained enough to read in isolation.
    - 6.3 Retrieval Architecture
    - 6.4 MCP Integration
    - 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
+   - 6.6 Telemetry Sidecar (mpm-telemetry)
 7. Core Stability
 8. CLI Reference
 9. Runtime Services
@@ -82,7 +77,7 @@ Every section is self-contained enough to read in isolation.
 
 ## 1. What is MPM?
 
-MPM is a single binary that provides long-term memory, behavioral modes, persona management, and an **epistemology engine** — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
+MPM is a unified substrate deployed as a primary CLI (`mpm`) with companion daemon binaries (`mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
 
 It is the reasoning layer for AI agents. It tracks not just *what* the agent knows, but *why* it decided to act, *how* it chose to act, and *what it believes but hasn't proven yet*.
 
@@ -226,6 +221,8 @@ New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `updat
 
 External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are stored with their source URL, section markers, and ingestion timestamp, and are searchable via the same FTS5 index as memories.
 
+#### Lesson
+
 Reusable knowledge that survives across tasks — best practices, warnings, patterns, and insights.
 
 #### Skill
@@ -282,8 +279,6 @@ The exact formula may change. The properties do not: more positive evidence neve
 For the deeper mechanics (atomic recompute, evidence registry, trigger wiring, source-of-truth/cache split), see §6.2 and **Appendix C** (Enforcement Patterns).
 
 > **Implementation note:** The properties are enforced by property tests in `internal/core/confidence_test.go`. The tests describe what the formula means, not what it currently is. The implementation can change; the meaning survives.
-
-> **Reference** in this table refers to `reference` artifacts — external material ingested into MPM for the agent to consult, distinct from `memory` which is the agent's own synthesized knowledge.
 
 ### 3.4 Reframe, not rename
 
@@ -610,7 +605,7 @@ The cascade recurses: invalidating a downstream artifact may itself be a foundat
 
 When cascade intents materialize into pending theories, the change must surface to the agent's wake context. `check_wakes` caps **cascade-kind wakes at 3 per call** (`MaxCascadeWakePerCheck`) — so a 50-intent cascade materialization doesn't flood the agent on the next call. Non-cascade wakes (notification, cron, system) are interleaved normally and unaffected by the cap; the throttle is per-call, not global.
 
-**Why a CLI subcommand, not a daemon.** MPM is CLI-only — the watch daemon was deprecated in commit `e1bc707`, and the materializer is invoked from `mpm cascade materialize`. Operators schedule the invocation from `cron` or `systemd`, each call drains the outbox and exits. This avoids the latency tax of a hidden per-CLI background drain and respects the architecture's "no moving parts" principle.
+**Why a CLI subcommand, not a daemon.** MPM is CLI-only — the watch daemon was deprecated in commit `6588cb8` and hard-removed in `215fd09`, and the materializer is invoked from `mpm cascade materialize`. Operators schedule the invocation from `cron` or `systemd`, each call drains the outbox and exits. This avoids the latency tax of a hidden per-CLI background drain and respects the architecture's "no moving parts" principle.
 
 **Inspecting dead letters.**
 
@@ -1472,8 +1467,9 @@ The `--max-iterations` bound is a safety valve — the operator's job is to keep
 
 Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. `mpm kb memory list`, `mpm ops gc`) are dispatched via `handlers_*.go` and documented manually in the subsections above. Regenerate this block with `go run ./cmd/gen-cli`.
 
-- **`add`** — Persist knowledge
+- **`add`** — Persist knowledge (prefix content with '-- ' if it starts with '-')
 - **`backup`** — Export database to SQL dump (optional path arg)
+- **`blob`** — Blob storage management (gc)
 - **`call`** — Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
@@ -1481,11 +1477,12 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`config`** — Configure AI provider (interactive wizard or scripted set|get|show|edit)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
 - **`debug`** — Low-level debugging tools
-- **`decide`** — Record decision (cognitive verb for 'mpm_decisions action=save')
+- **`decide`** — Record decision (cognitive verb for 'record_decision')
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
 - **`doctor`** — Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
+- **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)
@@ -1493,6 +1490,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`hint`** — Surface context-relevant artifacts
 - **`info`** — Show install identity (version, database, models, scheduler, skills, persona, counts)
 - **`ingest`** — Import from external SQLite
+- **`integration`** — Cross-framework config emitters (export-mcp)
 - **`kb`** — Knowledge-base operations (memory|topic|lesson|reference)
 - **`learn`** — Curate lesson (cognitive verb for 'mpm lesson add')
 - **`lesson`** — Manage lessons
@@ -1507,13 +1505,14 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`patch-memory`** — Patch memory metadata
 - **`persona`** — Manage personas
 - **`promote`** — Mark as durable (exempt from decay)
-- **`mpm_theories action=propose`** — Propose hypothesis
+- **`propose_theory`** — Propose hypothesis
+- **`provenance`** — Show artifact provenance (mpm provenance help for subcommands)
 - **`prune`** — Prune expired memories
 - **`read-skill`** — Read skill by name (or id) and optional version
 - **`recall`** _(aliases: s)_ — Recall relevant context
-- **`mpm_decisions action=save`** — Record decision (full substrate form: context, choice, rationale)
+- **`record_decision`** — Record decision (full substrate form: context, choice, rationale)
 - **`reference`** — Manage reference documents
-- **`reinforce`** — Raise retrieval priority
+- **`reinforce`** — Record reinforcement (provenance/display; does not affect current retrieval ranking — see §6.3)
 - **`remember`** — Persist knowledge (cognitive verb for 'mpm add')
 - **`resolve_theory`** — Resolve theory
 - **`restore`** — Restore soft-deleted memory
@@ -1523,7 +1522,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`route`** — Route prompt to mode/persona (Claude Code hook input)
 - **`save-skill`** — Save skill from markdown file (--file, --name, --version, --force)
 - **`session`** — Manage sessions
-- **`set-weight`** — Override retrieval priority
+- **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
 - **`show`** — Show memory details
 - **`shred`** — Hard-delete memory
 - **`skill`** — Skill CRUD
@@ -1534,13 +1533,13 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`synthesize`** — Merge near-duplicate memories
 - **`tasks`** — Manage scheduled tasks (upsert|list|delete)
 - **`theories`** — List theories [pending|resolved|all]
-- **`theorize`** — Propose theory (cognitive verb for 'mpm_theories action=propose')
+- **`theorize`** — Propose theory (cognitive verb for 'propose_theory')
 - **`theory`** — Theory CRUD
 - **`topic`** — Manage topics
 - **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
 - **`version`** — Show version + build identity
 - **`wake`** — Show wake context (--json, --strict)
-- **`weaken`** — Lower retrieval priority
+- **`weaken`** — Record weakening (provenance/display; does not affect current retrieval ranking — see §6.3)
 - **`why`** — Show artifact provenance (evidence + confidence + retrieval)
 - **`work`** — Working context scratchpad — status|show|clear|promote
 
@@ -1560,7 +1559,7 @@ Three groups organize the runtime substrate: **Scheduling** (when system work fi
 
 *One-off reminders that surface on the next MCP call — no separate process required for self-scheduled work.*
 
-The agent can defer work to a future moment with `mpm call mpm_wakes --payload '{"action":"schedule",...}' and have the reminder surface automatically on the next call. The database is the queue, the next call is the dispatcher — no scheduler process required for this path.
+The agent can defer work to a future moment with `mpm call mpm_wakes --payload '{"action":"schedule",...}'` and have the reminder surface automatically on the next call. The database is the queue, the next call is the dispatcher — no scheduler process required for this path.
 
 ```
 mpm call mpm_wakes --payload '{
