@@ -157,9 +157,10 @@ func TestForensicClassifier(t *testing.T) {
 // weight should be restored (all its challenges are synthetic).
 //
 // NOTE: the memories.kind column does not exist in the current schema.
-// markSyntheticTheories uses source_id (not memory_id — theories reference
-// the challenged memory via source_id) and has no kind filter. This matches
-// the spec intent: mark all theories whose challenged-memory was hash-embedded.
+// markSyntheticTheories uses json_extract(metadata, '$.challenged_memory_id')
+// (not source_id — theories store the challenged-memory reference in metadata,
+// per epistemology_tools.go:54-60). The filter has no kind column restriction
+// because the memories.kind column does not exist in the current schema.
 // The provenance-gated gate uses weight<1.0 as the action-precondition
 // heuristic (origin_weight column does not exist).
 func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
