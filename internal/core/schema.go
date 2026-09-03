@@ -930,6 +930,10 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_due ON scheduled_wakes(fired, target_time);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_theory ON scheduled_wakes(theory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_wakes_created ON scheduled_wakes(created_at);`,
+	// Partial covering index for the deadline-driven ad-hoc wake dispatch loop
+	// (mpm-scheduler Run). The MIN(target_time) WHERE fired=0 query runs on
+	// every wake-up; this index keeps it sub-millisecond at realistic queue sizes.
+	`CREATE INDEX IF NOT EXISTS idx_sw_pending ON scheduled_wakes(target_time) WHERE fired = 0;`,
 
 	// ── Scheduled Tasks (Agentic Cron) ──────────────────────────────
 	//
@@ -970,6 +974,12 @@ var CommonIndexes = []string{
 		updated_at   INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);`,
+	// Partial covering index for the deadline-driven scheduler loop's cron
+	// fold: the SCHEDULED_TASKS half of the UNION ALL folds into
+	// computeEarliestDeadline alongside scheduled_wakes. Keeping it partial
+	// (active-only) makes the loop sub-millisecond even when many tasks are
+	// paused.
+	`CREATE INDEX IF NOT EXISTS idx_st_active ON scheduled_tasks(next_run_at) WHERE status = 'active';`,
 
 	// Ephemeral Scratchpad — single-row-per-session volatile thesis
 	// storage. Used by agents (808 in particular) to checkpoint
