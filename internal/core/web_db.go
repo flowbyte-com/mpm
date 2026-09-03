@@ -455,19 +455,54 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 // Errors with ErrMemoryNotFound-equivalent when the id doesn't exist —
 // a silent 0-row success would let callers believe a typo'd id was
 // updated (Defense Triad rule 3: verify persistence).
+//
+// Embedding contract on update:
+//   - When EmbedText succeeds, the new embedding is stored.
+//   - When EmbedText fails (provider error), the new embedding is
+//     NOT stored (preserves any prior valid embedding rather than
+//     overwriting with NULL) and the failure is surfaced as an
+//     AuditWarn. This mirrors the AddMemory "embedding failure must
+//     not become a silent semantic degradation" rule.
+//   - When EmbedText returns (nil, nil) because the embedding
+//     provider is absent/disabled (NullProvider), the embedding column
+//     is preserved as-is (NOT overwritten with the literal string
+//     "null") so a previously-stored embedding survives.
 func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error {
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
-	embedding, _ := EmbedText(content)
-	embeddingJSON, _ := json.Marshal(embedding)
+	embedding, embedErr := EmbedText(content)
+	if embedErr != nil {
+		// Provider error: do NOT overwrite the embedding column. Log
+		// to audit so the failure is visible without blocking the
+		// durable update of content/tags/metadata.
+		dm.LogAudit(AuditWarn, "memory", fmt.Sprintf("UpdateMemory: embedding failed, prior embedding preserved (memory_id=%s): %v", id, embedErr), "", AuditContext{})
+		embedding = nil
+	}
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
-	res, err := dm.db.Exec(`
-		UPDATE memories
-		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-		    updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE id = ?
-	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+	// If we have a fresh embedding, write it. Otherwise preserve the
+	// existing embedding column by NOT including it in the UPDATE.
+	// This protects against:
+	//   (a) provider error — see above, audit logged
+	//   (b) NullProvider (absent/disabled) — embedding column preserved
+	var res sql.Result
+	var err error
+	if embedding != nil {
+		embeddingJSON, _ := json.Marshal(embedding)
+		res, err = dm.db.Exec(`
+			UPDATE memories
+			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE id = ?
+		`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+	} else {
+		res, err = dm.db.Exec(`
+			UPDATE memories
+			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE id = ?
+		`, content, string(tagsJSON), string(metadataJSON), contentHash, id)
+	}
 	if err != nil {
 		return err
 	}
