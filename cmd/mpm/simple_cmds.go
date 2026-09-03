@@ -99,19 +99,23 @@ func handleAdd(args []string) int {
 		return usererror.Error("memory content too large: %d bytes (max %d = 1 MiB); split into chunks or use `mpm reference add`", len(content), maxAddBytes)
 	}
 
-	// Auto-embed: try real embeddings, fall back to hash if provider unavailable
+	// Auto-embed: try real embeddings; on provider failure we still
+	// save the memory with NULL embedding so the operator never loses
+	// data, then surface the error so they can run
+	// `mpm ops backfill-embeddings` later.
 	embedding, embedErr := mpminternal.EmbedText(content)
-	if embedErr != nil {
-		// Memory is saved with NULL embedding; we surface the error
-		// and exit non-zero.
-		fmt.Fprintf(os.Stderr, "Memory saved, but embedding generation failed:\n  embedding provider %q is unreachable\nThe memory has been stored without an embedding.\nRun `mpm ops backfill-embeddings` after the provider is available.\n", mpminternal.DefaultEmbeddingConfig().ProfileName)
-		os.Exit(1)
-	}
 	isLongTerm := *weight >= 10
 
 	id, err := dm.SaveMemory(*collection, content, *session, tags, metadata, embedding, isLongTerm, *weight)
 	if err != nil {
-		usererror.Error("%v", err)
+		return usererror.Errorf(fmt.Sprintf("save memory: %v", err))
+	}
+	if embedErr != nil {
+		cfg := mpminternal.DefaultEmbeddingConfig()
+		usererror.Warn("Memory saved (id %s) with NULL embedding.\n"+
+			"  embedding provider %q is unreachable: %v\n"+
+			"Run `mpm ops backfill-embeddings` after the provider is available.",
+			id, cfg.ProviderName, embedErr)
 		return 1
 	}
 
