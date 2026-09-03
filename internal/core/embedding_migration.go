@@ -338,3 +338,70 @@ func recordSentinel(dm *DatabaseManager) error {
 	`)
 	return err
 }
+
+// UndoMigration reverses the migration by replaying the audit log in reverse.
+// The pre-migration backup is the last-resort rollback.
+func UndoMigration(dm *DatabaseManager, timestamp string) error {
+	if dm == nil || dm.db == nil {
+		return fmt.Errorf("UndoMigration: nil database manager")
+	}
+
+	workspace := config.GetWorkspace()
+	backupPath := filepath.Join(workspace, "migrations", "embeddings-"+timestamp+".db.bak")
+	if _, err := os.Stat(backupPath); err != nil {
+		return fmt.Errorf("UndoMigration: backup not found at %s; cannot undo without a verified snapshot", backupPath)
+	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Restore weights from the audit log (skip sentinel rows).
+	rows, err := tx.Query(`
+		SELECT memory_id, old_weight
+		FROM embedding_migration_log
+		WHERE reason = 'unchallenge_provenance_gated'
+		ORDER BY id DESC
+	`)
+	if err != nil {
+		return err
+	}
+	type restore struct {
+		id string
+		w  float64
+	}
+	var restores []restore
+	for rows.Next() {
+		var r restore
+		if err := rows.Scan(&r.id, &r.w); err != nil {
+			rows.Close()
+			return err
+		}
+		restores = append(restores, r)
+	}
+	rows.Close()
+
+	for _, r := range restores {
+		if _, err := tx.Exec(`UPDATE memories SET weight = ? WHERE id = ?`, r.w, r.id); err != nil {
+			return err
+		}
+	}
+
+	// Clear synthetic markers we set (theory rows only).
+	if _, err := tx.Exec(`UPDATE memories SET synthetic = 0 WHERE synthetic = 1 AND collection = 'theories'`); err != nil {
+		return err
+	}
+
+	// Remove audit rows.
+	if _, err := tx.Exec(`DELETE FROM embedding_migration_log`); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	slog.Info("UndoMigration: complete", "restored_count", len(restores), "backup_preserved_at", backupPath)
+	return nil
+}
