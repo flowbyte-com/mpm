@@ -150,7 +150,50 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	// Per spec §4.4: surface structured embedding status in the MCP response.
+	// Three cases:
+	//   1. embedErr != nil  → provider unreachable; §4.4 error shape
+	//   2. embedErr == nil but intentionally disabled → success with embedding_status="disabled"
+	//   3. all other cases (available OR absent/unconfigured) → pure success
+	//
+	// Case 3 preserves the full response from SaveMemoryWithContextAndSnapshot,
+	// which carries F4 bounded-echo fields (content, content_truncated, etc.).
+	// Note: absent/unconfigured is NOT an error; it falls through to Case 3
+	// so the full F4 bounded-echo response is preserved.
+	embedErrStr, hasEmbedErr := out["embedding_error"].(string)
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	if hasEmbedErr && embedErrStr != "" {
+		// Case 1: provider unreachable — §4.4 structured error
+		return map[string]interface{}{
+			"memory_persisted":  true,
+			"embedding_status":  "unavailable",
+			"backfill_required": true,
+			"error":            fmt.Sprintf("embedding provider %q is unreachable: %s", cfg.ProviderName, embedErrStr),
+			"memory_id":        out["id"],
+		}, nil
+	}
+
+	// Case 2: intentionally disabled — not an error, but embedding_status="disabled"
+	// so the caller knows the memory has no embedding vector.
+	if cfg.IntentionallyDisabled {
+		return map[string]interface{}{
+			"memory_persisted":  true,
+			"embedding_status":   "disabled",
+			"backfill_required": false,
+			"memory_id":         out["id"],
+		}, nil
+	}
+
+	// Case 3: pure success — preserve all F4 bounded-echo fields from out.
+	// Also add memory_id alias so callers using the §4.4 field name get a hit.
+	result := make(map[string]interface{}, len(out)+2)
+	for k, v := range out {
+		result[k] = v
+	}
+	result["memory_persisted"] = true
+	result["memory_id"] = out["id"]
+	return result, nil
 }
 
 // MinMilestoneSummaryChars is the minimum length for a milestone summary.

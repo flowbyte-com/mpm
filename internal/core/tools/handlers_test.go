@@ -1992,3 +1992,145 @@ func TestHandleListEvidence_HappyPath(t *testing.T) {
 		t.Fatalf("expected success with valid payload, got: %v", err)
 	}
 }
+
+// stubProviderOK is a test double that returns a fixed embedding vector.
+type stubProviderOK struct{}
+
+func (stubProviderOK) Embed(text string) ([]float32, error) {
+	return []float32{0.1, 0.2, 0.3, 0.4}, nil
+}
+func (stubProviderOK) Name() string { return "stub-ok" }
+
+// stubProviderFail is a test double that always returns an error.
+type stubProviderFail struct{ err error }
+
+func (p stubProviderFail) Embed(text string) ([]float32, error) { return nil, p.err }
+func (p stubProviderFail) Name() string                        { return "stub-fail" }
+
+// TestHandleSaveToMemory_EmbeddingAvailable verifies that when the embedding
+// provider is reachable, the response is pure success with no embedding_status field.
+func TestHandleSaveToMemory_EmbeddingAvailable(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	cfg := &internal.EmbeddingConfig{
+		Source:       internal.EmbeddingSourceProfile,
+		ProviderName: "stub-ok",
+		Provider:     stubProviderOK{},
+		Status:       internal.EmbeddingStatusConfigured,
+	}
+	prev := internal.SetEmbedConfigForTest(cfg)
+	defer internal.ResetEmbedConfigForTest()
+	_ = prev // restored by defer
+
+	result, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": "test embedding available",
+			"tags": []interface{}{"embed-test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmMemory save failed: %v", err)
+	}
+	res := result.(map[string]interface{})
+
+	if memID, ok := res["memory_id"].(string); !ok || memID == "" {
+		t.Errorf("memory_id missing or empty: %v", res["memory_id"])
+	}
+	if pers, ok := res["memory_persisted"].(bool); !ok || !pers {
+		t.Errorf("memory_persisted should be true: %v", res["memory_persisted"])
+	}
+	// No embedding_status field when provider is available (spec §4.4 Case 3)
+	if _, hasStatus := res["embedding_status"]; hasStatus {
+		t.Errorf("embedding_status should not be present when provider is available: %v", res["embedding_status"])
+	}
+}
+
+// TestHandleSaveToMemory_EmbeddingDisabled verifies that when embeddings are
+// intentionally disabled, the response carries embedding_status="disabled" and
+// backfill_required=false.
+func TestHandleSaveToMemory_EmbeddingDisabled(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	cfg := &internal.EmbeddingConfig{
+		Source:                internal.EmbeddingSourceDisabled,
+		ProviderName:          "null",
+		IntentionallyDisabled: true,
+		Status:                internal.EmbeddingStatusNull,
+	}
+	prev := internal.SetEmbedConfigForTest(cfg)
+	defer internal.ResetEmbedConfigForTest()
+	_ = prev
+
+	result, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": "test embedding disabled",
+			"tags": []interface{}{"embed-test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmMemory save failed: %v", err)
+	}
+	res := result.(map[string]interface{})
+
+	if memID, ok := res["memory_id"].(string); !ok || memID == "" {
+		t.Errorf("memory_id missing or empty: %v", res["memory_id"])
+	}
+	if pers, ok := res["memory_persisted"].(bool); !ok || !pers {
+		t.Errorf("memory_persisted should be true: %v", res["memory_persisted"])
+	}
+	if status, ok := res["embedding_status"].(string); !ok || status != "disabled" {
+		t.Errorf("embedding_status should be 'disabled': %v", res["embedding_status"])
+	}
+	if backfill, ok := res["backfill_required"].(bool); !ok || backfill {
+		t.Errorf("backfill_required should be false: %v", res["backfill_required"])
+	}
+}
+
+// TestHandleSaveToMemory_EmbeddingUnreachable verifies that when the configured
+// embedding provider is unreachable, the response is the §4.4 structured error
+// shape: memory_persisted=true, embedding_status="unavailable",
+// backfill_required=true, error=..., memory_id=....
+func TestHandleSaveToMemory_EmbeddingUnreachable(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	cfg := &internal.EmbeddingConfig{
+		Source:       internal.EmbeddingSourceProfile,
+		ProviderName: "stub-fail",
+		Provider:     stubProviderFail{err: fmt.Errorf("connection refused")},
+		Status:       internal.EmbeddingStatusUnreachable,
+	}
+	prev := internal.SetEmbedConfigForTest(cfg)
+	defer internal.ResetEmbedConfigForTest()
+	_ = prev
+
+	result, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": "test embedding unreachable",
+			"tags": []interface{}{"embed-test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmMemory save should not return error for unreachable provider, got: %v", err)
+	}
+	res := result.(map[string]interface{})
+
+	if memID, ok := res["memory_id"].(string); !ok || memID == "" {
+		t.Errorf("memory_id missing or empty: %v", res["memory_id"])
+	}
+	if pers, ok := res["memory_persisted"].(bool); !ok || !pers {
+		t.Errorf("memory_persisted should be true: %v", res["memory_persisted"])
+	}
+	if status, ok := res["embedding_status"].(string); !ok || status != "unavailable" {
+		t.Errorf("embedding_status should be 'unavailable': %v", res["embedding_status"])
+	}
+	if backfill, ok := res["backfill_required"].(bool); !ok || !backfill {
+		t.Errorf("backfill_required should be true: %v", res["backfill_required"])
+	}
+	errMsg, hasErr := res["error"].(string)
+	if !hasErr || errMsg == "" {
+		t.Errorf("error field should be non-empty: %v", res["error"])
+	}
+	if hasErr && !strings.Contains(errMsg, "unreachable") {
+		t.Errorf("error should mention 'unreachable': %v", errMsg)
+	}
+}
