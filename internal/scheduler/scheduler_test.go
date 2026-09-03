@@ -649,3 +649,91 @@ func TestScheduler_NotifyScheduleChanged_NilReceiverSafe(t *testing.T) {
 	s := &Scheduler{}
 	s.NotifyScheduleChanged() // must not panic
 }
+
+// TestScheduler_computeEarliestDeadline verifies the deadline query
+// folds both scheduled_wakes (unfired) and scheduled_tasks (active)
+// into a single MIN() and respects the partial-index partitions:
+// fired wakes and paused tasks are excluded.
+func TestScheduler_computeEarliestDeadline(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T, s *Scheduler, now time.Time)
+		wantOff time.Duration // 0 == empty (zero time)
+	}{
+		{
+			name:  "empty database yields zero time",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {},
+		},
+		{
+			name: "wake only",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				seedWake(t, s, "w1", now.Add(30*time.Second), "")
+			},
+			wantOff: 30 * time.Second,
+		},
+		{
+			name: "active task only",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				mustExec(t, s.db, `INSERT INTO scheduled_tasks (id, name, cron_expr, directive_id, status, next_run_at) VALUES ('t1','a','* * * * *','d1','active',?)`, now.Add(10*time.Second).Unix())
+			},
+			wantOff: 10 * time.Second,
+		},
+		{
+			name: "wake + active task, task wins",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				seedWake(t, s, "w1", now.Add(30*time.Second), "")
+				mustExec(t, s.db, `INSERT INTO scheduled_tasks (id, name, cron_expr, directive_id, status, next_run_at) VALUES ('t1','a','* * * * *','d1','active',?)`, now.Add(5*time.Second).Unix())
+			},
+			wantOff: 5 * time.Second,
+		},
+		{
+			name: "past wake yields negative offset",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				seedWake(t, s, "w1", now.Add(-1*time.Minute), "")
+			},
+			wantOff: -1 * time.Minute,
+		},
+		{
+			name: "fired wake is excluded",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				seedWake(t, s, "w1", now.Add(1*time.Second), "")
+				mustExec(t, s.db, `UPDATE scheduled_wakes SET fired=1 WHERE id='w1'`)
+			},
+		},
+		{
+			name: "paused task is excluded",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				mustExec(t, s.db, `INSERT INTO scheduled_tasks (id, name, cron_expr, directive_id, status, next_run_at) VALUES ('t1','a','* * * * *','d1','paused',?)`, now.Add(1*time.Second).Unix())
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestScheduler(t)
+			now := time.Now()
+			c.setup(t, s, now)
+			got, err := s.computeEarliestDeadline(context.Background(), now)
+			if err != nil {
+				t.Fatalf("compute: %v", err)
+			}
+			if c.wantOff == 0 {
+				if !got.IsZero() {
+					t.Errorf("got %v, want zero (empty)", got)
+				}
+				return
+			}
+			want := now.Add(c.wantOff)
+			// Allow 1-second slack for unix-truncation between arg and result.
+			if diff := got.Sub(want); diff > time.Second || diff < -time.Second {
+				t.Errorf("got %v (Δ=%v from now), want ~%v (Δ=%v from now)", got, diff, want, c.wantOff)
+			}
+		})
+	}
+}
+
+func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
+	t.Helper()
+	if _, err := db.Exec(q, args...); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+}
