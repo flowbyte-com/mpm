@@ -65,6 +65,7 @@ import (
 	"syscall"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -149,6 +150,28 @@ func handleConfigShow(c *config.Config) int {
 	}
 	fmt.Println()
 	fmt.Printf("  Synthesis engine: %s\n", synStatus)
+
+	// Embedding — canonical embedding configuration per spec §6.1.
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	fmt.Println()
+	fmt.Println("  Embedding")
+	if cfg.IntentionallyDisabled {
+		fmt.Printf("    source:  intentionally disabled\n")
+	} else {
+		srcLabel := cfg.Source.String()
+		if cfg.Source == mpminternal.EmbeddingSourceEnvFallback {
+			srcLabel = "env (legacy fallback)"
+		}
+		fmt.Printf("    source:  %s\n", srcLabel)
+		if cfg.ProfileName != "" {
+			fmt.Printf("    profile: %s\n", cfg.ProfileName)
+		}
+		fmt.Printf("    provider: %s\n", cfg.ProviderName)
+		fmt.Printf("    status:  %s\n", cfg.Status)
+		if cfg.LastError != nil {
+			fmt.Printf("    error:   %v\n", cfg.LastError)
+		}
+	}
 
 	// Profiles — the operator-facing execution-profile abstraction.
 	if len(c.Profiles) > 0 {
