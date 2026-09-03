@@ -32,7 +32,7 @@ import (
 func main() {
 	var (
 		interval = flag.Duration("interval", 60*time.Second,
-			"Ticker interval for wake polling (min 1s)")
+			"System-maintenance cadence (default 60s). Bounds the cross-process wake-dispatch latency to min(interval, time_to_next_deadline). Min 1s.")
 		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
 			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
 		lockPath = flag.String("lock", defaultLockPath(),
