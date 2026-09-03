@@ -56,7 +56,8 @@ done
 if [ "$MODE" = "install" ]; then
   if [ ! -x "$MPM_CANONICAL_BIN" ]; then
     echo "❌ mpm-mcp not found at $MPM_CANONICAL_BIN" >&2
-    echo "   run 'make install' from the MPM source first, or set MPM_BINARY." >&2
+    echo "   run 'make install' from the MPM source first (which places the" >&2
+    echo "   binary at $MPM_CANONICAL_BIN)." >&2
     exit 1
   fi
   if [ ! -r "$TEMPLATE" ]; then
