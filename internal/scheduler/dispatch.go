@@ -61,6 +61,8 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 	nowUnix := now.Unix()
 	var w Wake
 	var metaJSON string
+	var theoryID sql.NullString
+	var recurringRule sql.NullString
 	err := db.QueryRowContext(ctx, `
 		UPDATE scheduled_wakes
 		SET fired = 1,
@@ -86,7 +88,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 		RETURNING id, target_time, reason, theory_id, recurring_rule,
 		          created_by, created_at, metadata
 	`, nowUnix, nowUnix).Scan(
-		&w.ID, &w.TargetTime, &w.Reason, &w.TheoryID, &w.RecurringRule,
+		&w.ID, &w.TargetTime, &w.Reason, &theoryID, &recurringRule,
 		&w.CreatedBy, &w.CreatedAt, &metaJSON,
 	)
 	if err == sql.ErrNoRows {
@@ -94,6 +96,12 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 	}
 	if err != nil {
 		return Wake{}, false, fmt.Errorf("claim ad-hoc wake: %w", err)
+	}
+	if theoryID.Valid {
+		w.TheoryID = theoryID.String
+	}
+	if recurringRule.Valid {
+		w.RecurringRule = recurringRule.String
 	}
 	if metaJSON != "" {
 		_ = json.Unmarshal([]byte(metaJSON), &w.Metadata)
