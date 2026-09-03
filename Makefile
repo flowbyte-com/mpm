@@ -8,14 +8,14 @@
 # is convenience, not contract.
 #
 # If you cloned to a different location, PREFIX defaults to whatever
-# $(HOME)/.mpm resolves to via the standard mpm data-root convention. To
-# override (rare; for shared-host system mode), pass PREFIX=/usr/local or
-# use scripts/install.sh --system.
+# $(HOME)/.mpm resolves to via the standard mpm data-root convention.
+# Override with `make install PREFIX=/somewhere` for non-standard layouts.
 #
 # Targets:
-#   make build               - Build bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
+#   make build               - Build all five binaries to bin/
+#                              (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
 #   make install             - Verify binaries are at $(PREFIX)/bin/ (canonical). No copy step.
-#   make service-scheduler   - [LEGACY/OPT-IN] Install mpm-scheduler systemd USER unit
+#   make service-scheduler   - Install mpm-scheduler systemd USER unit
 #                              (fails on encrypted home dirs — use scripts/install.sh instead)
 #   make service             - Alias for service-scheduler
 #   make clean               - Remove bin/
@@ -26,9 +26,9 @@
 # RECOMMENDED INSTALL PATH:
 #   ./scripts/install.sh
 # This single command builds, installs binaries + wrapper at $HOME/.mpm/bin/,
-# creates the data root, installs the USER-level systemd unit, registers with
-# OpenClaw if present, and validates end-to-end. No sudo required. See
-# INSTALL.md for full details.
+# creates ~/.local/bin symlinks for `mpm` and `mpm-mcp`, installs the
+# USER-level systemd unit, registers with OpenClaw if present, and
+# validates end-to-end. No sudo required. See INSTALL.md for full details.
 
 BINARY_NAME := mpm
 MCP_BINARY  := mpm-mcp
@@ -42,8 +42,6 @@ PREFIX      ?= $(HOME)/.mpm
 SERVICE_NAME := mpm-scheduler
 SERVICE_SRC  := contrib/systemd/$(SERVICE_NAME).service.user
 SERVICE_DST := $(HOME)/.config/systemd/user/$(SERVICE_NAME).service
-SYSTEM_SERVICE_SRC := contrib/systemd/$(SERVICE_NAME).service.system
-SYSTEM_SERVICE_DST := /etc/systemd/system/$(SERVICE_NAME).service
 
 TELEMETRY_SERVICE_NAME := mpm-telemetry
 TELEMETRY_SERVICE_SRC := contrib/systemd/$(TELEMETRY_SERVICE_NAME).service.user
@@ -59,7 +57,7 @@ BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
 
-.PHONY: all build install service-scheduler service-telemetry service install-system-service uninstall-service gen-cli clean test lint help
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli clean test lint help
 
 all: build
 
@@ -77,7 +75,7 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
 	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
 
-# Verify the canonical install location contains all four binaries.
+# Verify the canonical install location contains all five binaries.
 # `make build` already writes to bin/, which IS $(PREFIX)/bin/ when the repo
 # is cloned at $HOME/.mpm (the standard layout). On a non-standard layout
 # (repo cloned somewhere other than $HOME/.mpm), this target copies the
@@ -106,13 +104,14 @@ install: build
 # mpm-mcp is intentionally NOT shipped as a systemd unit — it's spawned
 # by MCP hosts (Claude Code, OpenClaw) as a stdio child process.
 #
-# ⚠ OPT-IN ONLY: this installs a USER-level service which silently fails
-# on hosts with encrypted home directories (eCryptfs/LUKS). For the
-# default SYSTEM-level install, use `sudo scripts/install.sh`.
+# ⚠  This target installs a USER-level systemd unit. It silently fails
+#    on hosts with encrypted home directories (eCryptfs/LUKS). For the
+#    full install flow (PATH symlinks, MCP registration, validation),
+#    use scripts/install.sh instead.
 service-scheduler:
 	@echo "⚠  This target installs a USER-level systemd unit."
 	@echo "   It silently fails on encrypted home directories."
-	@echo "   For the default system-level install, use: sudo scripts/install.sh"
+	@echo "   For the full install flow, use: scripts/install.sh"
 	@echo ""
 	@install -Dm644 $(SERVICE_SRC) $(SERVICE_DST)
 	@systemctl --user daemon-reload
@@ -150,20 +149,6 @@ uninstall-service:
 	-@systemctl --user daemon-reload
 	@echo "✓ Removed $(SERVICE_DST) (if it existed)"
 
-# Install the SYSTEM-level systemd unit. Requires sudo.
-# Use scripts/install.sh instead — it does this and more (binaries,
-# wrapper, /var/lib/mpm, MCP registration, validation).
-install-system-service:
-	@echo "⚠  For full install use: sudo scripts/install.sh"
-	@echo "   This target only installs the system unit."
-	@sudo install -Dm644 $(SYSTEM_SERVICE_SRC) $(SYSTEM_SERVICE_DST)
-	@sudo systemctl daemon-reload
-	@echo "✓ Installed $(SYSTEM_SERVICE_DST)"
-	@echo ""
-	@echo "  Next steps:"
-	@echo "    sudo systemctl enable --now $(SERVICE_NAME)"
-	@echo "    systemctl status $(SERVICE_NAME)"
-
 # Regenerate the CLI command catalogue in README.md (sent-injected
 # auto-generated block in §8). Walks r.Commands via go/ast — no
 # reflection, no runtime import, source-level extraction. Idempotent.
@@ -195,7 +180,8 @@ help:
 	@echo "  Canonical location: \$$HOME/.mpm/bin/ (no sudo, no /usr/local copy)"
 	@echo ""
 	@echo "  Targets:"
-	@echo "    make build               - Build all four binaries to bin/"
+	@echo "    make build               - Build all five binaries to bin/ (mpm, mpm-mcp,"
+	@echo "                              mpm-scheduler, mpm-critic, mpm-telemetry)"
 	@echo "    make install             - Verify/sync bin/ to \$$(PREFIX)/bin/ (default \$$HOME/.mpm)"
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
