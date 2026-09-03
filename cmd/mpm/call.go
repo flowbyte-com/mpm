@@ -192,12 +192,29 @@ func handleCall(args []string) int {
 		return 1
 	}
 
-	// Opportunistic wake fold (Phase 5a): any `mpm call` surfaces due
-	// wakes in its response. The dispatcher is the single chokepoint so we
-	// add the fold here rather than in every handler. Cost: one indexed
-	// SELECT (sub-millisecond on WAL with the scheduled_wakes_due index).
-	// The wake handlers themselves also fold (defense-in-depth + unit-test
-	// visibility when the dispatcher is bypassed).
+	// Opportunistic wake fold — compatibility safety net for the
+	// deadline-driven mpm-scheduler daemon. As of the deadline-driven
+	// work, mpm-scheduler is the authoritative dispatcher for
+	// notification-kind scheduled_wakes at their target_time. This
+	// fold remains so that:
+	//
+	//   1. When the daemon is unavailable (down for restart, missing
+	//      install, single-shot mpm call from a CI script) the agent
+	//      still sees due wakes in the response payload.
+	//   2. Latency on cross-process writes is bounded: any `mpm call`
+	//      triggers a fold, picking up wakes the bounded-sleep floor in
+	//      Run() would otherwise have to wait up to `interval` for.
+	//
+	// Atomic safety: dm.CheckPendingWakes performs an UPDATE WHERE
+	// fired=0 in a single transaction. The daemon's dispatchClaim
+	// uses the same shape. When both run on the same database, exactly
+	// one wins; the loser sees the row already claimed (fired=1).
+	// No double-fire, no double-delivery to the agent.
+	//
+	// Cost: one indexed SELECT + UPDATE per `mpm call` (sub-millisecond
+	// on WAL with the partial idx_sw_pending index). The dispatch
+	// daemon and this fold share the cost budget; both are read-only
+	// cheap.
 	//
 	// Arc 2: also fold EventWakesPending from shared.event_wakes when the
 	// session has an ID. The receiving agent sees incoming epistemic
