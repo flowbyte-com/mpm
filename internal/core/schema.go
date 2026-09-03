@@ -539,8 +539,9 @@ var BaseTables = []string{
 		probation_max_failure_rate       REAL    NOT NULL DEFAULT 0.10,
 		promoted_at                      INTEGER,
 
-		embedding BLOB,
-		tags     TEXT NOT NULL DEFAULT '[]',
+		embedding        BLOB,
+		embedding_source TEXT NOT NULL DEFAULT 'provider',
+		tags             TEXT NOT NULL DEFAULT '[]',
 
 		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
