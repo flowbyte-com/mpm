@@ -237,7 +237,7 @@ After all three surfaces are wired:
 # 1. Confirm MCP wiring (should respond to tools/list):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | /home/v/.mpm/bin/mpm-mcp 2>/dev/null | jq '.result.tools | length'
-# expect: 16
+# expect: 22
 
 # 2. Confirm DB path invariance:
 mpm call mpm_system --payload '{"action":"health_check","params":{}}' \
@@ -360,7 +360,7 @@ Manual probe (independent of `verify.py`):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | /home/v/.mpm/bin/mpm-mcp 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 16
+# expect: 22
 ```
 
 Then **restart Claude Code** (mcpServers and CLAUDE.md are loaded at
@@ -437,7 +437,8 @@ the user-level one when both exist.
 ln -s "$HOME/.mpm/agent_installation/opencode-mpm" \
       "$HOME/.config/opencode/plugin/opencode-mpm"
 
-# 2. make sure ~/.mpm/bin/mpm is on PATH (or set MPM_BINARY)
+# 2. make sure ~/.mpm/bin/mpm is on PATH (the plugin's PATH-resolved
+#    default is `mpm`; this exports the canonical install root)
 export PATH=$HOME/.mpm/bin:$PATH
 
 # 3. install the AGENTS.md behavioral section (user scope):
@@ -449,8 +450,11 @@ python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructio
 #    health check
 ```
 
-The plugin reads `MPM_BINARY` from env (defaults to `mpm`) and
-`MPM_WORKSPACE` from env (defaults to `<cwd>`).
+The plugin reads the binary from `$PATH` by default (`mpm`); if you
+need a deterministic absolute path, set it via the OpenCode env block
+(`MPM_BINARY=/home/v/.mpm/bin/mpm` is the plugin's recognized
+override). The plugin also reads `MPM_WORKSPACE` from env (defaults to
+`<cwd>`).
 
 ### Verification
 
@@ -558,7 +562,7 @@ unchanged.
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | /home/v/.mpm/bin/mpm-mcp 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 16
+# expect: 22
 
 # 2. .hermes.md was written with exactly one managed block:
 grep -c '<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->' /path/to/project/.hermes.md
@@ -608,9 +612,14 @@ would be empty, and writes a backup before mutation.
 
 Pi participates in the MPM substrate via:
 
-1. **Pi extension.** `pi-mpm/index.ts` registers 16 typed Pi tools
-   (13 Domain Tools via Fat RPC + 3 Standalones). Pi auto-loads
-   extensions declared in `~/.pi/agent/settings.json`.
+1. **Pi extension.** `pi-mpm/index.ts` registers a **16-tool subset**
+   of the full 22-tool MPM registry (13 Domain Tools via Fat RPC + 3
+   Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
+   `request_review`). Tools in the full registry not exposed here
+   (`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
+   `mpm_blob_search`) remain reachable via `mpm call <tool> --payload
+   '<json>'`. Pi auto-loads extensions declared in
+   `~/.pi/agent/settings.json`.
 
 2. **AGENTS.md behavioral protocol.** Per pi docs, Pi loads `AGENTS.md`
    (or `CLAUDE.md`) at session start, searching in this order:
@@ -669,9 +678,10 @@ file if it would be empty, and writes a backup before mutation.
 ### Host-specific constraints
 
 - **`mpm` on PATH.** Pi spawns `mpm` as a subprocess to dispatch each
-  tool call. If `mpm` is not on `$PATH` or `MPM_BINARY` is unset, every
-  tool call will fail. Set `MPM_BINARY=/home/v/.mpm/bin/mpm` (absolute)
-  to make this explicit.
+  tool call. If `mpm` is not on `$PATH`, every tool call will fail.
+  Either add the canonical install root (`$HOME/.mpm/bin`) to your PATH,
+  or override the binary path used by Pi via its extension config (the
+  default path resolver is `mpm` resolved against `$PATH`).
 - **Parameter schema permissiveness.** Each domain tool's parameter
   schema is `{action: string, params: object}` — free-form. The
   per-action fields are documented in each tool's description; the
