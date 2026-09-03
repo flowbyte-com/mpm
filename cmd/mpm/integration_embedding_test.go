@@ -189,19 +189,23 @@ func TestMpmAdd_UnreachableWritesNullAndExitsNonZero(t *testing.T) {
 		t.Fatal("expected exit code != 0 for unreachable provider, got 0")
 	}
 
-	// Verify the memory was NOT saved (os.Exit preempts SaveMemory).
-	// Open the database and query.
+	// Verify the memory WAS saved with NULL embedding (graceful
+	// degradation: operator never loses data on provider failure).
 	dm, dmErr := mpminternal.NewDatabaseManager(workspaceDir)
 	if dmErr != nil {
 		t.Fatalf("opening database: %v", dmErr)
 	}
 	var count int
-	row := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE content = 'unreachable provider test'`)
-	if scanErr := row.Scan(&count); scanErr != nil {
+	var embStr string
+	row := dm.SQLDB().QueryRow(`SELECT COUNT(*), COALESCE(embedding, '') FROM memories WHERE content = 'unreachable provider test'`)
+	if scanErr := row.Scan(&count, &embStr); scanErr != nil {
 		t.Fatalf("querying memory count: %v", scanErr)
 	}
-	if count != 0 {
-		t.Fatalf("memory should NOT be saved when embedding fails (os.Exit preempts SaveMemory), got %d rows", count)
+	if count != 1 {
+		t.Fatalf("memory should be saved with NULL embedding when provider is unreachable, got %d rows", count)
+	}
+	if embStr != "null" {
+		t.Fatalf("expected embedding = 'null' for unreachable-provider save, got %q", embStr)
 	}
 }
 
