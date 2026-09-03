@@ -244,7 +244,7 @@ func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID strin
 		if ctx.Err() != nil {
 			return embedded, failed, ctx.Err()
 		}
-		vec := EmbedText(p.content)
+		vec, _ := EmbedText(p.content)
 		bytes, marshalErr := embeddingBytes(vec)
 		if marshalErr != nil {
 			failed++
