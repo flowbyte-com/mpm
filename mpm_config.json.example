@@ -82,6 +82,11 @@
       "max_tokens": 2048,
       "timeout_seconds": 120,
       "temperature": 0.2
+    },
+    "local-ollama": {
+      "provider": "ollama",
+      "model": "nomic-embed-text",
+      "base_url": "http://localhost:11434"
     }
   },
 
@@ -90,11 +95,13 @@
   // │
   // │  Maps substrate components to execution profiles above.
   // │  Any component not explicitly bound falls back to "default".
+  // │  See docs/embedding-config.md for the embedding subsystem.
   // └────────────────────────────────────────────────────────────────────
   "components": {
     "memory": "default",
     "critic": "critic",
-    "synth": "fast"
+    "synth": "fast",
+    "embedding": "local-ollama"
   },
 
   // ┌────────────────────────────────────────────────────────────────────

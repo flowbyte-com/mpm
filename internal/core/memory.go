@@ -67,9 +67,10 @@ type SearchResult struct {
 	Created   string `json:"created"`
 }
 
-// HashEmbed creates a simple deterministic hash-based embedding
-// for provenance-gated dedup and similarity search. It is NOT called
-// by EmbedText — it is a private forensic-classifier helper.
+// HashEmbed is a SHA-256-derived 256-dim vector. It is NOT called by
+// EmbedText; retained only as a forensic-classifier helper for
+// `mpm ops migrate-embeddings`. New code must not call HashEmbed —
+// use EmbedText, which returns (vec, err).
 func HashEmbed(text string) []float32 {
 	h := sha256.Sum256([]byte(text))
 	vec := make([]float32, 256)
