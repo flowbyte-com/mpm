@@ -45,7 +45,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -278,23 +277,51 @@ func checkDatabase(dm *mpminternal.DatabaseManager) ReadinessItem {
 	return ReadinessItem{Name: "Database connected", OK: true}
 }
 
-// checkEmbeddings verifies the embedding provider is reachable.
-// Today the substrate uses OLLAMA (configurable via env). If
-// OLLAMA_ENDPOINT isn't set, embed-related functions will fall
-// back to FTS5-only — not a failure, just a feature-degradation
-// signal.
+// checkEmbeddings reports embedding provider state per spec §7.2 table:
+//   disabled            → OK=true, "embedding intentionally disabled"
+//   configured         → OK=true, "embedding provider reachable"
+//   unavailable        → OK=false, "embedding provider configured but unreachable"
+//   misconfigured      → OK=false, "embedding provider misconfigured: <reason>"
+//   absent             → OK=true, "no embedding provider configured"
 func checkEmbeddings() ReadinessItem {
-	if endpoint := os.Getenv("OLLAMA_ENDPOINT"); endpoint != "" {
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	switch {
+	case cfg.IntentionallyDisabled:
 		return ReadinessItem{
 			Name:   "Embeddings available",
 			OK:     true,
-			Detail: truncate(endpoint, 50),
+			Detail: "embedding intentionally disabled",
+		}
+	case cfg.Status == mpminternal.EmbeddingStatusConfigured:
+		return ReadinessItem{
+			Name:   "Embeddings available",
+			OK:     true,
+			Detail: "embedding provider reachable",
+		}
+	case cfg.Status == mpminternal.EmbeddingStatusUnreachable:
+		return ReadinessItem{
+			Name:   "Embeddings available",
+			OK:     false,
+			Detail: "embedding provider configured but unreachable",
+		}
+	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:
+		return ReadinessItem{
+			Name:   "Embeddings available",
+			OK:     false,
+			Detail: fmt.Sprintf("embedding provider misconfigured: %v", cfg.LastError),
+		}
+	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
+		return ReadinessItem{
+			Name:   "Embeddings available",
+			OK:     true,
+			Detail: "no embedding provider configured",
 		}
 	}
+	// Should not reach here; treat as warning.
 	return ReadinessItem{
 		Name:   "Embeddings available",
 		OK:     true,
-		Detail: "FTS5-only (set OLLAMA_ENDPOINT for semantic)",
+		Detail: "unknown embedding state",
 	}
 }
 

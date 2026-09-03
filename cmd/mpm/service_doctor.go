@@ -61,6 +61,7 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	// change Check() itself.
 	report.Checks = append(report.Checks, s.checkDatabase())
 	report.Checks = append(report.Checks, s.checkEmbeddings())
+	report.Checks = append(report.Checks, s.checkEmbeddingProvider())
 	report.Checks = append(report.Checks, s.checkWorkingContextOrphans())
 	report.Checks = append(report.Checks, s.checkScheduler())
 	report.Checks = append(report.Checks, s.checkReviewBacklog())
@@ -114,11 +115,15 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 	return check
 }
 
-// checkEmbeddings counts memories without embeddings.
-// WARN if >= 10% of active memories are missing embeddings.
+// checkEmbeddings inspects the embedding_source provenance of live memories.
+// Reports per spec §7.1 table:
+//   hash>0 AND provider=0 → FAIL (fully degraded)
+//   hash>0               → WARN (legacy rows present)
+//   null/total > 10%     → WARN (backfill needed)
+//   all real provider    → PASS
 func (s *DoctorService) checkEmbeddings() DoctorCheck {
 	check := DoctorCheck{Name: "Embeddings"}
-	var total, missing int
+	var total, hashCount, nullCount int
 	if err := s.dm.QueryRowTracked(
 		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`,
 	).Scan(&total); err != nil {
@@ -127,31 +132,69 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 		return check
 	}
 	if err := s.dm.QueryRowTracked(
-		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND embedding IS NULL`,
-	).Scan(&missing); err != nil {
+		`SELECT
+			COALESCE(SUM(CASE WHEN embedding_source='hash' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN embedding_source='null' THEN 1 ELSE 0 END), 0)
+		FROM memories WHERE deleted_at IS NULL`,
+	).Scan(&hashCount, &nullCount); err != nil {
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("could not count missing embeddings: %v", err)
+		check.Message = fmt.Sprintf("could not count embedding sources: %v", err)
 		return check
 	}
-	if total == 0 {
-		check.Status = "PASS"
-		check.Message = "no memories to embed"
-		return check
-	}
-	pct := (missing * 100) / total
-	if missing == 0 {
-		check.Status = "PASS"
-		check.Message = fmt.Sprintf("%d memories, all embedded", total)
-		return check
-	}
-	if pct >= 10 {
+	providerCount := total - hashCount - nullCount
+	switch {
+	case hashCount > 0 && providerCount == 0:
+		check.Status = "FAIL"
+		check.Message = fmt.Sprintf("%d legacy hash rows; no real embeddings persisted; semantic search fully degraded", hashCount)
+		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
+	case hashCount > 0:
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("%d / %d missing (%d%%) — semantic search degraded", missing, total, pct)
-		check.Details = []string{"Run 'mpm ops backfill-embeddings' to fill the gaps."}
+		check.Message = fmt.Sprintf("%d legacy hash rows present", hashCount)
+		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
+	case total > 0 && nullCount*10 > total: // > 10%
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", nullCount, total)
+	default:
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("%d memories, all from real provider", total)
+	}
+	return check
+}
+
+// checkEmbeddingProvider reads the canonical EmbeddingConfig and surfaces
+// the four provider states per spec §7.1 table.
+// Does NOT perform a network probe; reads the cached config snapshot.
+func (s *DoctorService) checkEmbeddingProvider() DoctorCheck {
+	check := DoctorCheck{Name: "Embedding provider"}
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	switch {
+	case cfg.IntentionallyDisabled:
+		check.Status = "PASS"
+		check.Message = "intentionally disabled"
+		return check
+	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
+		check.Status = "WARN"
+		check.Message = "no embedding provider configured"
+		return check
+	case cfg.Status == mpminternal.EmbeddingStatusConfigured:
+		note := ""
+		if cfg.Source == mpminternal.EmbeddingSourceEnvFallback {
+			note = " (legacy env fallback)"
+		}
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("provider %q reachable%s", cfg.ProviderName, note)
+		return check
+	case cfg.Status == mpminternal.EmbeddingStatusUnreachable:
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf("provider %q unreachable: %v", cfg.ProviderName, cfg.LastError)
+		return check
+	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf("provider misconfigured: %v", cfg.LastError)
 		return check
 	}
-	check.Status = "PASS"
-	check.Message = fmt.Sprintf("%d / %d missing (%d%%) — under the 10%% threshold", missing, total, pct)
+	check.Status = "WARN"
+	check.Message = "unknown embedding state"
 	return check
 }
 
