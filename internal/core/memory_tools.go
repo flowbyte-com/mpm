@@ -183,9 +183,18 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 
 	// Use AddMemoryWithWeight so the caller's weight actually reaches the
 	// weight column instead of falling back to the DB default (or Go zero).
-	mem, err := store.AddMemoryWithWeight(fact, collection, tags, meta, "", "call", weight)
+	mem, err, embedErr := store.AddMemoryWithWeight(fact, collection, tags, meta, "", "call", weight)
 	if err != nil {
 		return nil, nil, fmt.Errorf("add memory: %w", err)
+	}
+	if mem == nil {
+		// Defensive: should never happen. If it does, treat as an error.
+		// Log details for forensic diagnosis.
+		slog.Error("saveMemoryWithContextImpl: mem is nil after AddMemoryWithWeight returned no error",
+			"collection", collection,
+			"content_len", len(fact),
+			"embedErr", embedErr)
+		return nil, nil, fmt.Errorf("add memory: internal error: MemoryStore returned nil memory with no error (embedErr=%v)", embedErr)
 	}
 
 	if ttl != "" {
@@ -219,6 +228,13 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 	}
 	if len(applied) > 0 {
 		result["theory_resolutions_applied"] = applied
+	}
+	// Propagate embedding error so handleSaveToMemory can build the §4.4
+	// structured response. embedErr is non-nil when the configured provider
+	// was reachable in principle but the call failed. nil means the provider
+	// was disabled/absent — not an error condition.
+	if embedErr != nil {
+		result["embedding_error"] = embedErr.Error()
 	}
 	return result, mem, nil
 }

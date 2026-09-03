@@ -314,7 +314,7 @@ func handleMemoryAdd(args []string) int {
 	}
 
 	store := getMemoryStore()
-	mem, err := store.AddMemoryWithWeight(content, "memories", tagsList, memMetadata, "", "cli", weightArg)
+	mem, err, _ := store.AddMemoryWithWeight(content, "memories", tagsList, memMetadata, "", "cli", weightArg)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to add memory: %v", err), 1)
 	}
