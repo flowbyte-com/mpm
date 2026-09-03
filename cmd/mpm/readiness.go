@@ -303,6 +303,7 @@ func checkEmbeddings() ReadinessItem {
 			Name:   "Embeddings available",
 			OK:     false,
 			Detail: "embedding provider configured but unreachable",
+			Hint:   "verify the provider endpoint is reachable, then run `mpm readiness` again",
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:
 		return ReadinessItem{
@@ -311,17 +312,23 @@ func checkEmbeddings() ReadinessItem {
 			Detail: fmt.Sprintf("embedding provider misconfigured: %v", cfg.LastError),
 		}
 	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
+		// Spec §7.2: absent is WARN. ReadinessItem has no tri-state;
+		// WARN is mapped to OK=false so the binary go/no-go signal
+		// honestly reflects that semantic retrieval is a no-op.
 		return ReadinessItem{
 			Name:   "Embeddings available",
-			OK:     true,
+			OK:     false,
 			Detail: "no embedding provider configured",
+			Hint:   "configure a provider via `mpm config component set embedding <profile>`, or `mpm config detect-embedding [--apply]`",
 		}
 	}
-	// Should not reach here; treat as warning.
+	// Should not reach here; treat as failure so unhandled states
+	// surface honestly instead of silently reporting ready.
 	return ReadinessItem{
 		Name:   "Embeddings available",
-		OK:     true,
+		OK:     false,
 		Detail: "unknown embedding state",
+		Hint:   "run `mpm doctor` for diagnostics",
 	}
 }
 
