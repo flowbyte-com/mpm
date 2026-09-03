@@ -356,7 +356,6 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		content         string
 		isChallenged    bool
 		metadataJSON    string
-		embeddingSource string
 	}
 
 	// isStructuralPrefix returns true when content starts with a template
@@ -385,16 +384,16 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			args[i] = c.ID
 		}
 		rows, err := dm.SQLDB().Query(
-			fmt.Sprintf(`SELECT id, embedding, content, COALESCE(metadata, '{}'), embedding_source FROM %s WHERE id IN (%s) AND embedding IS NOT NULL AND embedding != 'null' AND embedding_source != 'hash'`, contradictionTable, strings.Join(placeholders, ",")),
+			fmt.Sprintf(`SELECT id, embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id IN (%s) AND embedding IS NOT NULL AND embedding != 'null' AND embedding_source != 'hash'`, contradictionTable, strings.Join(placeholders, ",")),
 			args...,
 		)
 		if err == nil {
 			for rows.Next() {
-				var id, embStr, contentStr, metaStr, embeddingSource string
-				if err := rows.Scan(&id, &embStr, &contentStr, &metaStr, &embeddingSource); err == nil && embStr != "" {
+				var id, embStr, contentStr, metaStr string
+				if err := rows.Scan(&id, &embStr, &contentStr, &metaStr); err == nil && embStr != "" {
 					var emb []float32
 					if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-						candMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr, embeddingSource: embeddingSource}
+						candMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr}
 					}
 				}
 			}
