@@ -535,13 +535,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	allTags = append(allTags, "synthesized", "ltm")
 	embedding, embedErr := EmbedText(result.Content)
 	if embedErr != nil {
-		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("synthesis succeeded but embedding failed: %v", embedErr), "", AuditContext{})
-		// Spec §4.4: persist the embedding failure on the memory itself so
-		// a later query or backfill can find it without scanning the
-		// audit ledger. Mirrors the structured-error contract that the
-		// MCP save_to_memory surface exposes (Task 14).
-		metadata["embedding_error"] = embedErr.Error()
-		metadata["embedding_status"] = "unavailable"
+		applyEmbeddingFailureToMetadata(dm, metadata, embedErr)
 	}
 
 	// 8. Save the synthesized LTM
@@ -641,4 +635,28 @@ func truncatedContent(s string) string {
 		return s[:120] + "..."
 	}
 	return s
+}
+
+// applyEmbeddingFailureToMetadata records a synthesis-time embedding
+// failure onto both the audit ledger and the synthesized memory's
+// metadata. Extracted from AutoSynthesize so the contract is testable
+// in isolation — the AutoSynthesize integration path is hard to drive
+// from a unit test (FTS5 bm25 threshold gating makes reaching the
+// embedding step conditional on corpus shape).
+//
+// Contract (regression-pinned by TestApplyEmbeddingFailureToMetadata):
+//
+//   - AuditWarn row written with component="synthesis" and the canonical
+//     phrase "synthesis succeeded but embedding failed".
+//   - metadata["embedding_error"] = embedErr.Error() (verbatim provider text).
+//   - metadata["embedding_status"] = "unavailable" (canonical sentinel,
+//     matches the MCP save_to_memory structured-response contract from
+//     spec §4.4).
+//
+// Callers MUST pass a non-nil dm and a non-nil metadata map. nil values
+// panic — these are programming errors, not runtime degradation paths.
+func applyEmbeddingFailureToMetadata(dm CoreDB, metadata map[string]interface{}, embedErr error) {
+	dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("synthesis succeeded but embedding failed: %v", embedErr), "", AuditContext{})
+	metadata["embedding_error"] = embedErr.Error()
+	metadata["embedding_status"] = "unavailable"
 }
