@@ -1,0 +1,779 @@
+# AUTO_AGENT_INSTALL.md
+
+## Purpose
+
+This file is the **agent-directed MPM installation entry point**.
+
+An agent may be given this file and told:
+
+> Follow `AUTO_AGENT_INSTALL.md` and install/configure MPM for the framework you are currently running.
+
+The goal is to make a fresh MPM installation work for the current agent with the least guesswork and without duplicating the framework-specific installation knowledge already kept under:
+
+```text
+agent_installation/
+```
+
+**Do not invent a new integration when a matching adapter already exists.**
+
+---
+
+# 1. Core rule: discover, reuse, verify
+
+Start by inspecting the repository's current integration material:
+
+```bash
+find agent_installation -maxdepth 3 -type f | sort
+```
+
+The current repository contains these host integrations:
+
+```text
+agent_installation/claude-code-mpm/
+agent_installation/hermes-mpm/
+agent_installation/openclaw-mpm-memory/
+agent_installation/openclaw-mpm-auto-mode-persona/
+agent_installation/opencode-mpm/
+agent_installation/pi-mpm/
+agent_installation/mpm-agent-protocol.md
+```
+
+Use the matching adapter when one exists.
+
+For the current repository:
+
+| Framework | Adapter(s) | Native integration | Persistent behavioral instruction surface |
+|---|---|---|---|
+| OpenClaw | `openclaw-mpm-memory/` + `openclaw-mpm-auto-mode-persona/` | OpenClaw plugins | `SOUL.md` for the OpenClaw agent behavior; also inspect the current OpenClaw adapter documentation for any host-loaded `AGENTS.md` material |
+| Claude Code | `claude-code-mpm/` | MCP via `mpm-mcp` | `CLAUDE.md` |
+| OpenCode | `opencode-mpm/` | OpenCode plugin using `mpm call` | `AGENTS.md` |
+| Hermes | `hermes-mpm/` | MCP via `mpm-mcp` | `.hermes.md` / `HERMES.md` according to the adapter documentation |
+| Pi | `pi-mpm/` | Pi extension using `mpm call` | `AGENTS.md` or `CLAUDE.md` according to Pi's context-file rules |
+
+The adapter directory is the implementation-specific source of truth.
+
+The shared behavioral protocol is:
+
+```text
+agent_installation/mpm-agent-protocol.md
+```
+
+Read it before constructing a new framework adapter.
+
+---
+
+# 2. Understand the two installation layers
+
+A complete MPM agent installation has two distinct layers.
+
+## Layer A: capability
+
+Install the MPM core and the framework integration:
+
+```text
+MPM binaries
++
+MCP / plugin / extension / adapter
+```
+
+This gives the agent the ability to call MPM.
+
+## Layer B: behavioral adoption
+
+Install the MPM behavioral contract into the persistent instruction file the host agent actually loads:
+
+```text
+SOUL.md
+AGENTS.md
+CLAUDE.md
+.hermes.md / HERMES.md
+```
+
+This tells the agent **when and why** to use MPM.
+
+Capability without behavioral adoption is an incomplete installation.
+
+Do not stop after installing an MCP server/plugin/extension.
+
+---
+
+# 3. Establish the current environment
+
+Before modifying anything:
+
+```bash
+pwd
+git rev-parse --show-toplevel 2>/dev/null || true
+git status --short 2>/dev/null || true
+
+printf 'SHELL=%s\n' "${SHELL:-}"
+printf 'HOME=%s\n' "${HOME:-}"
+uname -srm
+
+command -v go || true
+command -v mpm || true
+command -v mpm-mcp || true
+```
+
+Determine:
+
+- the current project root;
+- the current framework/agent;
+- the user's home directory;
+- whether MPM is already installed;
+- whether the current shell is interactive;
+- whether this is a project-scoped or user-scoped installation.
+
+**Do not delete existing MPM state.**
+
+---
+
+# 4. Never overwrite user working instructions
+
+Before touching:
+
+```text
+SOUL.md
+AGENTS.md
+CLAUDE.md
+.hermes.md
+HERMES.md
+```
+
+inspect the file.
+
+The installer should preserve existing user content.
+
+Prefer the framework's supplied installer and managed-section mechanism.
+
+Where the adapter uses a managed block such as:
+
+```text
+<!-- BEGIN MPM-MANAGED SECTION:... -->
+...
+<!-- END MPM-MANAGED SECTION:... -->
+```
+
+use it exactly as implemented.
+
+If the target has a malformed/partial managed section, follow the adapter's fail-closed behaviour. Do not repair it destructively.
+
+---
+
+# 5. Install MPM itself
+
+Use the repository's canonical MPM installer/build procedure.
+
+Where available, prefer:
+
+```text
+scripts/install.sh
+```
+
+over reimplementing installation manually.
+
+A normal installation should provide the current MPM binaries, which currently include:
+
+```text
+mpm
+mpm-mcp
+mpm-scheduler
+mpm-critic
+mpm-telemetry
+```
+
+The exact installation location is determined by the current installer/configuration.
+
+Do not assume a hard-coded user path.
+
+After installation verify:
+
+```bash
+command -v mpm
+mpm --help
+mpm --version
+```
+
+If `mpm` is not resolvable, determine the installed binary location before changing PATH.
+
+---
+
+# 6. Put MPM on the user's PATH
+
+MPM must be resolvable by normal agent subprocesses where the integration expects `mpm` to be found by name.
+
+First inspect:
+
+```bash
+printf '%s\n' "${PATH:-}"
+printf '%s\n' "${SHELL:-}"
+```
+
+Then determine the shell's appropriate persistent startup/configuration file.
+
+Add the actual MPM binary directory, preserving the existing PATH.
+
+Requirements:
+
+- do not replace the user's PATH;
+- do not add duplicate entries;
+- do not hard-code a developer-specific home directory;
+- make the edit idempotent;
+- verify the resulting shell can resolve `mpm`.
+
+Then run:
+
+```bash
+command -v mpm
+mpm --version
+```
+
+### Non-interactive agents and services
+
+An interactive shell PATH is not necessarily inherited by services.
+
+If a framework integration supports an explicit absolute `mpmBin`, use that current configuration mechanism for service/plugin execution.
+
+This is particularly important for OpenClaw's gateway when it runs under `systemd --user`.
+
+Do not assume that editing `.bashrc` or `.zshrc` fixes a service process.
+
+---
+
+# 7. Initialise/configure MPM
+
+Follow the current MPM installation documentation and the framework adapter's instructions.
+
+Verify the current configuration/state locations rather than assuming them.
+
+Before initialising:
+
+```bash
+ls -la "$HOME/.mpm" 2>/dev/null || true
+```
+
+Preserve existing databases and configuration.
+
+Where configuration is required, make that requirement explicit to the user.
+
+Do not create credentials or secrets.
+
+After setup, perform a harmless health check using the current command/interface documented by the repository.
+
+---
+
+# 8. Identify and install the matching framework adapter
+
+Inspect the adapter directory's current README/INSTALL/SKILL material.
+
+### Claude Code
+
+Use:
+
+```text
+agent_installation/claude-code-mpm/
+```
+
+Install/configure the current `mpm-mcp` integration and install the managed MPM section into the appropriate `CLAUDE.md`.
+
+Use the supplied installer:
+
+```text
+claude-code-mpm/install.sh
+claude-code-mpm/scripts/install_claude_instructions.py
+```
+
+Do not hand-copy the snippet when the installer can do it safely.
+
+### OpenCode
+
+Use:
+
+```text
+agent_installation/opencode-mpm/
+```
+
+Install the OpenCode plugin and install the managed MPM section into the appropriate `AGENTS.md`.
+
+Use:
+
+```text
+opencode-mpm/scripts/install_agents_instructions.py
+opencode-mpm/templates/AGENTS.md.snippet
+```
+
+Follow the adapter documentation for user/global versus project scope.
+
+### Hermes
+
+Use:
+
+```text
+agent_installation/hermes-mpm/
+```
+
+Follow `SKILL.md` and the supplied installer for the Hermes behavioral section.
+
+Use the framework's actual instruction-file loading rules, which may use `.hermes.md` / `HERMES.md`.
+
+Do not assume `AGENTS.md` for Hermes just because another agent uses it.
+
+### Pi
+
+Use:
+
+```text
+agent_installation/pi-mpm/
+```
+
+The extension provides the MPM tools; the managed behavioral section goes into the Pi-compatible context file.
+
+The supplied installer is:
+
+```text
+pi-mpm/scripts/install_agents_instructions.py
+```
+
+Use the documented scope:
+
+```text
+user
+project
+```
+
+and the supported target/filename options.
+
+Respect Pi's documented context-file precedence.
+
+### OpenClaw
+
+OpenClaw currently has **two complementary MPM plugins**:
+
+```text
+agent_installation/openclaw-mpm-memory/
+agent_installation/openclaw-mpm-auto-mode-persona/
+```
+
+They are not interchangeable.
+
+`openclaw-mpm-memory` provides the MPM-backed memory capability plus wake-context/provenance integration.
+
+`openclaw-mpm-auto-mode-persona` provides per-turn mode/persona routing.
+
+Inspect both README files and manifests before installing.
+
+For the agent's behavioral instruction surface, ensure the current OpenClaw setup has the MPM behavioral instructions in the `SOUL.md` path used by the running agent. Also inspect the current OpenClaw adapter documentation for any `AGENTS.md` material it expects.
+
+For OpenClaw's gateway, remember that plugin subprocesses may not inherit the user's interactive PATH. Use the adapter's supported `mpmBin` configuration when required.
+
+---
+
+# 9. Install the working-instruction contract
+
+This is mandatory.
+
+Use the framework adapter's snippet/template/installer when present.
+
+The resulting managed section should express the current MPM contract.
+
+The host-independent contract includes:
+
+1. **Wake**  
+   Recover relevant MPM context before substantive session work.
+
+2. **Persist**  
+   Store durable knowledge during the work rather than only at the end.
+
+3. **Skill discovery**  
+   Discover a relevant prior procedure when the task context suggests one may apply, without scanning the entire skill catalogue every turn.
+
+4. **Handoff**  
+   Before genuine session closure, record a handoff when substantial work has occurred.
+
+5. **Cross-session source of truth**  
+   Durable continuity belongs in MPM, not only transient agent context.
+
+6. **Recovery**  
+   If the preferred integration is unavailable, use the documented current `mpm call <tool> --payload ...` fallback.
+
+The exact tool names/actions must come from the current adapter/runtime contract.
+
+Do **not** revive retired `mpm_session` instructions.
+
+The current session-boundary surfaces are split across:
+
+```text
+mpm_handoff
+mpm_scratchpad
+```
+
+according to the current tool contract.
+
+---
+
+# 10. Do not confuse session lifecycle with work completion
+
+The current protocol treats these as distinct:
+
+```text
+session ended
+    !=
+work completed
+    !=
+work verified
+```
+
+Do not instruct an agent to mark work complete merely because a session ended.
+
+Use the current `mpm_work` contract for explicit work completion.
+
+---
+
+# 11. Verify framework scope
+
+A working-instruction file can be:
+
+```text
+global
+project-local
+parent-directory
+```
+
+depending on the host.
+
+Install at the scope the user intends.
+
+Examples:
+
+```text
+Claude:
+  global ~/.claude/CLAUDE.md
+  or project CLAUDE.md where supported
+
+OpenCode:
+  ~/.config/opencode/AGENTS.md
+  or project AGENTS.md
+
+Pi:
+  ~/.pi/agent/AGENTS.md
+  or project AGENTS.md
+```
+
+Use the host adapter documentation to determine exact precedence.
+
+Do not assume that a project-local file affects every project on the machine.
+
+---
+
+# 12. If no adapter exists for the current framework
+
+If `agent_installation/` has no matching framework directory:
+
+### Do not fabricate a native plugin.
+
+Instead:
+
+1. Install/configure MPM core normally.
+2. Read:
+
+   ```text
+   agent_installation/mpm-agent-protocol.md
+   ```
+
+3. Determine the current framework's actual persistent instruction file.
+4. Create a framework-specific behavioral adapter under:
+
+   ```text
+   agent_installation/<framework>/
+   ```
+
+5. The adapter should at minimum contain:
+   - README/instructions;
+   - the framework-specific instruction template/snippet;
+   - an installer or deterministic installation procedure where justified;
+   - verification instructions.
+6. Install the behavioral section into the actual host working file.
+7. Clearly state that this is a **behavioral adapter**, not a native plugin/MCP implementation, unless native integration actually exists.
+
+Do not invent a second persistence system.
+
+Use the existing MPM CLI/MCP interfaces.
+
+---
+
+# 13. Store newly created adapter material correctly
+
+If a framework has no existing adapter and new adapter files must be created, keep them under:
+
+```text
+agent_installation/<framework>/
+```
+
+Do not scatter them through the root of the repository.
+
+Use a structure consistent with the existing adapters, for example:
+
+```text
+agent_installation/<framework>/
+    README.md
+    templates/
+        <working-file>.snippet
+    scripts/
+        <installer>.py
+```
+
+Only add plugin/extension source if a genuine native integration has been implemented.
+
+The root `AUTO_AGENT_INSTALL.md` should remain the generic dispatcher, not a dumping ground for framework-specific code.
+
+---
+
+# 14. Verify the installed tools
+
+After installation, verify the current framework can actually access the MPM integration.
+
+At minimum verify:
+
+```text
+integration/plugin/extension is present
+working-instruction managed section is present
+current tool names are used
+retired tool names are absent from current instructions
+```
+
+For MCP integrations, inspect the actual current tool registry where practical.
+
+The current MPM MCP surface has 22 tools according to the repository's current registry. Do not hard-code this number into new framework-specific documentation if the integration can derive tool information from the current registry.
+
+---
+
+# 15. Verify the agent can actually call MPM
+
+Use a harmless representative operation.
+
+The exact mechanism depends on the framework.
+
+Verify at least one complete path:
+
+```text
+agent
+  ->
+framework integration
+  ->
+mpm / mpm-mcp
+  ->
+MPM
+  ->
+successful result
+```
+
+Do not treat the existence of a config file as proof that the runtime works.
+
+For OpenClaw, explicitly consider the gateway's non-interactive environment.
+
+For integrations that spawn `mpm` subprocesses, verify binary resolution under the environment where the integration actually runs.
+
+---
+
+# 16. Verify behavioral adoption
+
+The installation is incomplete if:
+
+```text
+tool/plugin exists
+but
+the agent's persistent instruction file does not contain the MPM contract
+```
+
+Check the installed working file.
+
+Confirm that it contains the correct current managed section and refers to the current tool surface.
+
+For a fresh agent session, verify at least:
+
+```text
+wake context behaviour
+durable persistence instruction
+handoff instruction
+recovery/fallback instruction
+```
+
+Where runtime testing is available, exercise the relevant path.
+
+---
+
+# 17. Verify idempotency
+
+Run the relevant installation operation twice.
+
+The second run must not:
+
+- duplicate managed sections;
+- overwrite user instructions;
+- duplicate PATH entries;
+- create duplicate configuration entries;
+- corrupt existing MPM state.
+
+The existing framework installers are intended to preserve user content and manage only their own sections. Use those installers rather than replacing them with ad-hoc edits.
+
+---
+
+# 18. Verify safe failure behaviour
+
+If the preferred integration cannot be used:
+
+- the agent should still have a documented MPM fallback where the host adapter supports it;
+- installation should report missing prerequisites clearly;
+- configuration errors should identify what must be fixed;
+- failure must not destroy existing user files or databases.
+
+Do not silently continue with a half-installed agent integration.
+
+---
+
+# 19. Do not install obsolete architecture
+
+A current installation must not add or require:
+
+```text
+session watchers
+memory watchers
+database-path watchers
+old Python MCP shims
+retired mpm_session tool registrations
+obsolete lifecycle hooks
+```
+
+The runtime's current session continuity contract uses the split handoff/scratchpad surfaces.
+
+The old `mpm_session` name may still exist in compatibility/history code. That is not a reason to expose it as a current agent tool.
+
+---
+
+# 20. Configuration and PATH summary
+
+At the end of installation, be able to state:
+
+```text
+MPM binary:
+MPM binary directory:
+PATH updated:
+MPM config:
+MPM database:
+Agent/framework:
+Framework adapter:
+Integration/plugin/extension:
+Working instruction file:
+Installation scope:
+Managed MPM section:
+Verification result:
+```
+
+Do not print secrets.
+
+---
+
+# 21. If installation modifies the repository
+
+Normally this document is for installing MPM into the user's environment, not for altering the project source.
+
+If a new unsupported framework adapter is genuinely created, then repository changes are expected.
+
+Before writing:
+
+```bash
+git status --short
+```
+
+Preserve unrelated changes.
+
+Review newly created files before presenting the installation as complete.
+
+---
+
+# 22. Final verification checklist
+
+The installation is complete only when all applicable items are true:
+
+```text
+[ ] Current agent/framework identified
+[ ] Matching adapter found, or new adapter created under agent_installation/<framework>/
+[ ] Existing adapter documentation inspected
+[ ] MPM core installed/built
+[ ] Required binaries available
+[ ] mpm resolvable on PATH or configured by supported absolute-path mechanism
+[ ] Configuration requirements satisfied and surfaced
+[ ] Existing MPM state preserved
+[ ] Matching integration/plugin/extension installed
+[ ] Persistent working-instruction file identified correctly
+[ ] MPM behavioral contract installed there
+[ ] Existing user instructions preserved
+[ ] Managed section is valid and idempotent
+[ ] Current tool names used
+[ ] Retired mpm_session is not exposed as a current tool
+[ ] No obsolete watcher/Python-shim architecture installed
+[ ] Representative MPM operation succeeds
+[ ] Non-interactive/service environment considered where relevant
+[ ] Second installation run is safe/idempotent
+[ ] Final installation state is clearly reported
+```
+
+---
+
+# 23. Source-of-truth hierarchy
+
+When instructions disagree, use this order:
+
+```text
+1. Current running MPM/tool registry and implementation
+2. Matching adapter implementation under agent_installation/
+3. agent_installation/mpm-agent-protocol.md
+4. Current INSTALL.md / agent_installation documentation
+5. README/examples
+6. Historical/archive material
+```
+
+Do not use an archived audit report to override current implementation.
+
+Do not modify runtime behaviour merely to preserve a stale document.
+
+---
+
+# 24. Final rule
+
+The purpose of this file is to make agent installation **discoverable and executable**, not to replace the framework adapters.
+
+The correct process is:
+
+```text
+AUTO_AGENT_INSTALL.md
+        |
+        v
+identify current agent
+        |
+        v
+inspect agent_installation/
+        |
+        +---- adapter exists ----> use it
+        |
+        +---- no adapter --------> create a minimal documented adapter
+                                      |
+                                      v
+                               install behavioral contract
+                                      |
+                                      v
+                               configure integration
+                                      |
+                                      v
+                               verify real runtime
+```
+
+The completed installation should leave the user with both:
+
+```text
+MPM capability
+    +
+agent behavioral adoption
+```
+
+not merely a plugin sitting on disk that the agent promptly ignores, which would be a remarkably human way to install a memory system.
