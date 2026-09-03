@@ -1,17 +1,23 @@
 /**
  * pi-mpm — Pi extension that wires MPM's cognitive substrate into Pi.
  *
- * Static, hand-maintained bridge to the 16 MPM tools now exposed by the
- * mpm registry (13 unified Domain Tools + 3 standalone tools). This is a
- * deliberate replacement for the previous ~1,500-line, build-generated
- * file (scripts/gen.py + scripts/build.sh + header/footer.ts are gone).
+ * Static, hand-maintained bridge to a curated **16-tool subset** of the
+ * current 22-tool MPM registry (13 unified Domain Tools + 3 standalone
+ * tools). This is a deliberate replacement for the previous ~1,500-line,
+ * build-generated file (scripts/gen.py + scripts/build.sh + header/footer.ts
+ * are gone).
  *
  * Until the Phase 1/2 refactor, mpm-mcp exposed 77 granular tools. The
- * registry now exposes 16: the 13 Domain Tools are "Fat RPC" —
- * they take {action: string, params: object} and the backend dispatches.
- * That collapses ~77 distinct tool definitions into 13 near-identical
- * ones, permanently resolving the ~15KB prompt bloat the old surface
- * caused.
+ * current registry exposes 22 tools total; this Pi adapter registers 16
+ * of them. The 13 Domain Tools are "Fat RPC" — they take {action: string,
+ * params: object} and the backend dispatches. That collapses ~77 distinct
+ * tool definitions into 13 near-identical ones, permanently resolving
+ * the ~15KB prompt bloat the old surface caused.
+ *
+ * Tools in the full registry not registered here (`mpm_work`,
+ * `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`, `mpm_blob_search`)
+ * remain reachable via `mpm call <tool> --payload '<json>'` from a
+ * subprocess.
  *
  * Transport: each tool spawns `mpm call <tool> --payload '<json>'` as a
  * subprocess. mpm emits one zap-style log line to stderr and one JSON
@@ -214,7 +220,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		);
 	}
 	lines.push(
-		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The full mpm_* domain surface is registered (14 domain tools + 3 standalones).",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 13 Domain Tools + 3 Standalones (16 typed tools total); tools in the full 22-tool MPM registry not exposed here remain reachable via `mpm call <tool> --payload '<json>'`.",
 	);
 	return lines.join("\n");
 }

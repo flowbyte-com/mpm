@@ -21,8 +21,12 @@ that this host adapter inherits:
 2. **Persist during work, not only at the end.** Use the appropriate MPM
    tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`,
    `mpm_references`) for any durable knowledge a future session would
-   otherwise have to rediscover. The plugin proxies these calls through
-   `mpm call` via the `buildProvenanceEnv` shim so provenance is captured.
+   otherwise have to rediscover. The plugin registers the **adapter's
+   16-tool subset** as typed tools (13 Domain Tools via Fat RPC + 3
+   Standalones); the full MPM registry exposes 22 tools, and tools not
+   registered here remain reachable via the `mpm call <tool> --payload
+   '<json>'` CLI fallback. The plugin proxies calls through `mpm call`
+   via the `buildProvenanceEnv` shim so provenance is captured.
 
 3. **Skill discovery before reinventing.** When the current task
    context suggests a previously learned procedure would apply, query

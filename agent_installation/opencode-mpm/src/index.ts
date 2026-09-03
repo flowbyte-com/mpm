@@ -1,6 +1,6 @@
 /**
  * opencode-mpm — OpenCode plugin that wires MPM's cognitive substrate in
- * as 16 typed tools.
+ * as 16 typed tools (a curated subset of the full 22-tool MPM registry).
  *
  * Architecture: lightweight adapter. No domain logic, no LLM prompts, no
  * caching. Each tool is a thin transport shim that stringifies its
@@ -14,7 +14,9 @@
  * legacy plugin generated one tool per (action, artifact-type) pair —
  * ~15KB of prompt bloat per agent. The 16-tool adapter collapses to
  * one Zod schema shape with free-form `params`, validated by the mpm
- * backend.
+ * backend. Tools in the full 22-tool registry not exposed here
+ * (`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
+ * `mpm_blob_search`) remain reachable via the CLI fallback.
  *
  * Boot-time health check: on plugin initialization we ping
  * `mpm call mpm_system action:health_check` with a 2s timeout. If the
