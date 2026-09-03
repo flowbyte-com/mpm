@@ -1,16 +1,38 @@
 // Package scheduler implements the universal wake executor for MPM.
 //
 // The scheduler is the platform-level fix for MPM's opportunistic-fold gap.
-// Wakes registered in `scheduled_wakes` are pulled on a 60s ticker. Each
-// wake's `metadata.kind` field routes it through a HandlerFunc registered
-// at startup. System kinds (snapshot, critic_audit, gc, broadcast) execute
-// inline. Notification kinds and untagged wakes are left untouched so the
-// existing mpm-mcp opportunistic fold handles them on the next MCP call.
+// Wakes registered in `scheduled_wakes` are dispatched at their
+// `target_time` by a deadline-driven Run loop — NOT by a fixed-period
+// poll. The scheduler computes the earliest pending deadline (across
+// scheduled_wakes AND scheduled_tasks), sleeps until that deadline
+// (bounded above by the system-maintenance interval), and drains all
+// currently-due notification-kind wakes atomically.
+//
+// Two kinds of latency:
+//
+//   - In-process (same OS process as the scheduler): a NotifyScheduleChanged
+//     channel signal wakes Run() from its deadline sleep. ~immediate.
+//
+//   - Cross-process (mpm call CLI, mpm-mcp server running as separate OS
+//     processes): bounded by `min(interval, time_to_next_deadline)` —
+//     the bounded-sleep floor. With the default 60s interval, cross-
+//     process wake mutations surface within ≤ 60s without any
+//     goroutine-channel handoff. See Run() doc for the full contract.
+//
+// Two kinds of dispatch:
+//
+//   - System kinds (snapshot, critic_audit, gc, broadcast, drill,
+//     cascade_summary, cascade, cron) are owned by Tick() and run on
+//     the maintenance ticker (interval — default 60s).
+//
+//   - Notification-kind and untagged wakes are owned by the deadline-
+//     driven dispatch path (internal/scheduler/dispatch.go). They
+//     fire at target_time, not on a poll cadence.
 //
 // Three guarantees from the locked architecture (decision 27d7b3c18199e098):
 //
 //   1. Default kind = notification (backward compat). Existing wakes with
-//      no kind tag pass through to mpm-mcp's fold unchanged.
+//      no kind tag pass through to the notification dispatch path.
 //   2. Concurrent execution. Independent system wakes fire in parallel
 //      goroutines. Serial would re-introduce the SF2 race failure mode.
 //   3. Failure isolation. Non-zero handler exit still marks the wake
@@ -18,7 +40,10 @@
 //      subsequent wakes.
 //
 // Singleton enforcement is via flock on a PID file so two scheduler
-// instances cannot race on the same wake batch.
+// instances cannot race on the same wake batch. The atomic UPDATE...
+// RETURNING claim in dispatch.go provides exactly-once fire semantics
+// even when the opportunistic fold in mpm call / mpm-mcp also runs on
+// the same database.
 package scheduler
 
 import (
