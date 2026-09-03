@@ -47,7 +47,7 @@ test("(A) config nesting: entries[id].config.mpmBin is read", () => {
           "openclaw-mpm-auto-mode-persona": {
             enabled: true,
             config: {
-              mpmBin: "/usr/local/bin/mpm",
+              mpmBin: "/home/alice/.local/bin/mpm",
               timeoutMs: 7777,
             },
           },
@@ -56,7 +56,7 @@ test("(A) config nesting: entries[id].config.mpmBin is read", () => {
     },
   };
   const cfg = readPluginConfig(api, "openclaw-mpm-auto-mode-persona");
-  assert.strictEqual(cfg.mpmBin, "/usr/local/bin/mpm");
+  assert.strictEqual(cfg.mpmBin, "/home/alice/.local/bin/mpm");
   assert.strictEqual(cfg.timeoutMs, 7777);
   assert.strictEqual(cfg.enabled, true);
 });
