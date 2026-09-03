@@ -171,6 +171,59 @@ func TestDispatchClaimNextAdHocWake_NoEligibleReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestDispatchClaimNextAdHocWake_HandlesEmptyMetadata is the regression
+// for the production-shape metadata column. ScheduleWake stores
+// metadata='' (not '{}') for the default no-kind case. Earlier the
+// claim UPDATE used COALESCE(metadata,'{}'), which on empty string
+// returned '' because '' is non-NULL in SQLite — then json_set('')
+// raised "malformed JSON" and the entire drain failed.
+//
+// Live-acceptance caught this: the first wake that fired was
+// acceptance-A (target_time=1788438304, fired_at=1788438309) and the
+// scheduler log showed 17 "malformed JSON" errors between 13:25:09.024
+// and 13:25:09.027 before ctx cancel. The wake row was marked fired
+// because the UPDATE itself succeeded — the failure was on the RETURNING
+// metadata column decode on the Go side. The subsequent claims errored
+// out the same way until ctx-cancel.
+//
+// This test inserts a row with metadata='' directly and asserts the
+// claim succeeds, returns the row, and stamps dispatched_by.
+func TestDispatchClaimNextAdHocWake_HandlesEmptyMetadata(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	// Insert a wake with metadata='' directly, mirroring the production
+	// ScheduleWake shape. seedWake always sets metadata to '{}' so it
+	// can't exercise this path.
+	if _, err := s.db.Exec(
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
+		 VALUES ('prod-shape', ?, 'test prod-shape wake', '', '', 0, 'test', '')`,
+		now.Add(-1*time.Minute).Unix(),
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim on empty-metadata row: %v (must NOT return malformed JSON)", err)
+	}
+	if !ok {
+		t.Fatal("expected a claim")
+	}
+	if w.ID != "prod-shape" {
+		t.Errorf("claimed = %q, want prod-shape", w.ID)
+	}
+
+	var dispatchedBy sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT json_extract(metadata, '$.dispatched_by') FROM scheduled_wakes WHERE id='prod-shape'`,
+	).Scan(&dispatchedBy); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatchedBy.Valid || dispatchedBy.String != "mpm-scheduler" {
+		t.Errorf("dispatched_by = %v, want mpm-scheduler", dispatchedBy)
+	}
+}
+
 // TestDispatchDrainAdHocWakes_DrainsAllDue verifies the drain loop
 // claims every due row in a single call up to the cap.
 func TestDispatchDrainAdHocWakes_DrainsAllDue(t *testing.T) {

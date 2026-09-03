@@ -65,13 +65,17 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 		UPDATE scheduled_wakes
 		SET fired = 1,
 		    fired_at = ?,
-		    metadata = json_set(COALESCE(metadata,'{}'), '$.dispatched_by', 'mpm-scheduler')
+		    metadata = json_set(
+		        CASE WHEN metadata IS NULL OR metadata = '' THEN '{}' ELSE metadata END,
+		        '$.dispatched_by', 'mpm-scheduler'
+		    )
 		WHERE id = (
 			SELECT id FROM scheduled_wakes
 			WHERE fired = 0
 			  AND target_time <= ?
 			  AND (
 			    metadata IS NULL
+			    OR metadata = ''
 			    OR json_extract(metadata, '$.kind') IS NULL
 			    OR json_extract(metadata, '$.kind') = ''
 			    OR json_extract(metadata, '$.kind') = 'notification'
