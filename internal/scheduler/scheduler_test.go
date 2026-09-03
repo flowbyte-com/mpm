@@ -163,9 +163,19 @@ func TestQueryDueWakes(t *testing.T) {
 	}
 }
 
-// TestTick_NotificationPassThrough verifies untagged (notification kind)
-// wakes are NOT marked fired by the scheduler. The mpm-mcp opportunistic
-// fold remains the only path that fires them.
+// TestTick_NotificationPassThrough verifies that Tick() never touches
+// notification-kind wakes — they remain owned by the deadline-driven
+// dispatch loop (internal/scheduler/dispatch.go + Run's deadlineTimer.C
+// branch). The split is load-bearing:
+//
+//   - Tick handles only system kinds (snapshot, gc, critic_audit,
+//     broadcast, drill, cascade_summary, cascade, cron).
+//   - dispatchDrainAdHocWakes handles notification + untagged wakes.
+//
+// A wake must NEVER be claimed by both paths. The atomic UPDATE
+// WHERE fired=0 invariant in dispatchClaimNextAdHocWake makes the
+// claim idempotent if the safety-net opportunistic fold in mpm call /
+// mpm-mcp later races on the same row.
 func TestTick_NotificationPassThrough(t *testing.T) {
 	s := newTestScheduler(t)
 	now := time.Now()
@@ -177,17 +187,18 @@ func TestTick_NotificationPassThrough(t *testing.T) {
 		t.Fatalf("Tick: %v", err)
 	}
 	if executed != 0 {
-		t.Errorf("executed = %d, want 0 (notification wakes must not be executed)", executed)
+		t.Errorf("executed = %d, want 0 (notification wakes must not be executed by Tick)", executed)
 	}
 
-	// Both wakes should still be unfired.
+	// Both wakes should still be unfired — Tick left them for the
+	// deadline-driven dispatch loop (or the opportunistic fold).
 	for _, id := range []string{"notif-1", "notif-2"} {
 		var fired int
 		if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id = ?`, id).Scan(&fired); err != nil {
 			t.Fatal(err)
 		}
 		if fired != 0 {
-			t.Errorf("%s fired = %d, want 0 (must remain for opportunistic fold)", id, fired)
+			t.Errorf("%s fired = %d, want 0 (Tick must not claim notification wakes)", id, fired)
 		}
 	}
 }
