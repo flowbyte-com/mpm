@@ -564,7 +564,7 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 
 	// ---------- 3 Standalone Tools ----------------------------------------
 
-	tools.explain_retrieval = tool({
+	tools.mpm_retrieval_diagnose = tool({
 		description:
 			"Run a standard FTS search and return a per-node diagnostic breakdown: Base FTS Match score, Reuse Count, Last Retrieved timestamp, and Success Count. The retrieval ordering is identical to mpm_memory/query — it layers observability on top without altering ranking. Use when you want to understand WHY a result ranked where it did.",
 		args: {
@@ -577,8 +577,8 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		async execute(args, ctx) {
 			const model = (ctx as { model?: Model }).model;
 			const sessionID = (ctx as { sessionID?: string }).sessionID;
-			const r = await callMpmWithProvenance(bin, "explain_retrieval", (args as Record<string, unknown>) ?? {}, { model, sessionID });
-			if (!r.success) return formatFailure("explain_retrieval", r);
+			const r = await callMpmWithProvenance(bin, "mpm_retrieval_diagnose", (args as Record<string, unknown>) ?? {}, { model, sessionID });
+			if (!r.success) return formatFailure("mpm_retrieval_diagnose", r);
 			return jsonToText(r.payload);
 		},
 	});
