@@ -3,17 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 // MigrateEmbeddingsCmd implements `mpm ops migrate-embeddings`.
-// The --undo flag is reserved for Task 13 (undo path); the struct field
-// is present for forward-compatibility but the forward path is all that
-// is implemented here.
+// The --undo flag reverts a previously-applied migration.
 type MigrateEmbeddingsCmd struct {
-	UndoTimestamp string // reserved for Task 13 undo implementation
+	UndoTimestamp string
 }
 
 // Run executes the embedding migration or the undo path.
@@ -26,8 +24,7 @@ func (c *MigrateEmbeddingsCmd) Run() int {
 
 	if c.UndoTimestamp != "" {
 		if err := mpminternal.UndoMigration(dm, c.UndoTimestamp); err != nil {
-			fmt.Fprintf(os.Stderr, "migrate-embeddings --undo: %v\n", err)
-			return 1
+			return usererror.Errorf(fmt.Sprintf("migrate-embeddings --undo: %v", err))
 		}
 		fmt.Println("Migration undone.")
 		return 0
@@ -35,16 +32,14 @@ func (c *MigrateEmbeddingsCmd) Run() int {
 
 	// Check idempotency before running.
 	if already, err := mpminternal.IsAlreadyApplied(dm); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate-embeddings: idempotency check: %v\n", err)
-		return 1
+		return usererror.Errorf(fmt.Sprintf("migrate-embeddings: idempotency check: %v", err))
 	} else if already {
 		fmt.Println("Migration already applied.")
 		return 0
 	}
 
 	if err := mpminternal.RunMigration(dm); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate-embeddings: %v\n", err)
-		return 1
+		return usererror.Errorf(fmt.Sprintf("migrate-embeddings: %v", err))
 	}
 	fmt.Println("Migration applied.")
 	return 0
@@ -56,7 +51,7 @@ func handleMigrateEmbeddings(args []string) int {
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm ops migrate-embeddings [flags]")
 		fmt.Println("\nFlags:")
-		fmt.Println("  --undo <timestamp>   Undo a migration (reserved for Task 13)")
+		fmt.Println("  --undo <timestamp>   Undo a previously-applied migration")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 1

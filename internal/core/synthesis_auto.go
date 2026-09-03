@@ -536,6 +536,12 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	embedding, embedErr := EmbedText(result.Content)
 	if embedErr != nil {
 		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("synthesis succeeded but embedding failed: %v", embedErr), "", AuditContext{})
+		// Spec §4.4: persist the embedding failure on the memory itself so
+		// a later query or backfill can find it without scanning the
+		// audit ledger. Mirrors the structured-error contract that the
+		// MCP save_to_memory surface exposes (Task 14).
+		metadata["embedding_error"] = embedErr.Error()
+		metadata["embedding_status"] = "unavailable"
 	}
 
 	// 8. Save the synthesized LTM
