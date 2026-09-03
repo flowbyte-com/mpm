@@ -67,7 +67,7 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				ProviderName: "null",
 				Status:       mpminternal.EmbeddingStatusNull,
 			},
-			wantOK:   true, // absent is OK but with a warning note
+			wantOK:   false, // spec §7.2: absent is WARN; ReadinessItem has no tri-state, so WARN maps to OK=false
 			wantNote: "no embedding provider configured",
 		},
 	}
