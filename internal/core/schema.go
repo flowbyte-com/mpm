@@ -739,6 +739,22 @@ var WorkTables = []string{
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_work_events_work_id ON work_events(work_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
+
+	// Embedding migration audit log. Every un-challenge the migration
+	// applies is recorded here (memory_id, old/new weight, reason,
+	// theory_id, timestamp). Reversible: --undo replays these rows
+	// in reverse. Sentinel row with reason='migration_applied' marks
+	// the end of a successful run for idempotency.
+	`CREATE TABLE IF NOT EXISTS embedding_migration_log (
+	  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	  memory_id    TEXT NOT NULL,
+	  old_weight   REAL NOT NULL,
+	  new_weight   REAL NOT NULL,
+	  reason       TEXT NOT NULL,
+	  theory_id    TEXT,
+	  migrated_at  INTEGER NOT NULL,
+	  operator     TEXT NOT NULL DEFAULT 'mpm-migration'
+	);`,
 }
 
 // ReferenceIndexes contains the indexes that support the reference tables.
@@ -1132,6 +1148,18 @@ var CommonIndexes = []string{
 		ON drill_runs(session_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_drill_runs_drill
 		ON drill_runs(drill_id, started_at DESC);`,
+
+	// Partial indexes for live (non-deleted) memories only. Trust
+	// machinery uses idx_memories_embedding_source to skip
+	// 'hash' and 'null' rows cheaply.
+	`CREATE INDEX IF NOT EXISTS idx_memories_embedding_source
+		ON memories(embedding_source)
+		WHERE deleted_at IS NULL;`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_embedding_dimension
+		ON memories(embedding_dimension)
+		WHERE deleted_at IS NULL;`,
+	`CREATE INDEX IF NOT EXISTS idx_embedding_migration_log_memory_id
+		ON embedding_migration_log(memory_id);`,
 }
 
 // BlobsTable contains the blob storage table for MCP result spilling.
@@ -1229,4 +1257,16 @@ var SafeMigrations = [][3]string{
 	// with no mpm process alive cannot leak into runtime.
 	{"memories", "runtime_seconds_since_access", "INTEGER NOT NULL DEFAULT 0"},
 	{"memories", "runtime_last_accrued_at",      "INTEGER"},
+
+	// Embedding provenance (alpha-3.5 hardening): the live DB has 791
+	// HashEmbed-derived vectors from the silent SHA-256 fallback. These
+	// columns record provenance so the trust machinery can skip
+	// non-semantic rows without losing them. Backfill runs as part of
+	// `mpm ops migrate-embeddings`.
+	{"memories", "embedding_source", "TEXT NOT NULL DEFAULT 'provider'"},
+	{"memories", "embedding_dimension", "INTEGER"},
+	// Theories (collection='theories' rows in the memories table) whose
+	// evidence was a HashEmbed cosine get marked so the provenance-gated
+	// un-challenge can identify them.
+	{"memories", "synthetic", "INTEGER NOT NULL DEFAULT 0"},
 }

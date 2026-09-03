@@ -122,6 +122,7 @@ var CanonicalMPMSchema = []string{
 	"capability_events",
 	"capability_invocations",
 	"confidence_history",
+	"embedding_migration_log",
 	"ephemeral_scratchpad",
 	"epistemic_cascade_outbox",
 	"epistemic_provenance",
