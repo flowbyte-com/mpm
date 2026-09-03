@@ -223,3 +223,7 @@ src/db/watchdog.jsonl.pre-*
 /telemetry.db-shm
 /telemetry.db-wal
 /run/
+
+# Migration backup artifacts (runtime-generated undo snapshots from
+# `mpm ops migrate-embeddings --undo`). Not source.
+embeddings-*.db.bak
