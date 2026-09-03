@@ -64,12 +64,10 @@ func handleBackfillEmbeddings(args []string) int {
 
 	// Provider needed for actual embedding generation
 	cfg := mpminternal.DefaultEmbeddingConfig()
-	provider := cfg.Provider
-
-	if provider.Name() == "null" {
-		return usererror.Error("no embedding provider available.\nSet OLLAMA_ENDPOINT and OLLAMA_MODEL env vars and ensure Ollama is running.")
+	if cfg.Source == mpminternal.EmbeddingSourceAbsent {
+		return usererror.Errorf("refusing to backfill: no embedding provider is configured and reachable.\nResolve one of:\n  - Run `mpm config detect-embedding --apply <name>` to discover and configure.\n  - Set `components[\"embedding\"]` in mpm_config.json.\n  - Set OLLAMA_ENDPOINT and OLLAMA_MODEL in the environment.")
 	}
-	fmt.Printf("⚡ Embedding backfill using %s\n", provider.Name())
+	fmt.Printf("⚡ Embedding backfill using %s\n", cfg.Provider.Name())
 
 	// Process in batches
 	batch := *batchSize
@@ -88,7 +86,7 @@ func handleBackfillEmbeddings(args []string) int {
 		}
 
 		for _, mem := range memories {
-			vec, err := provider.Embed(mem.Content)
+			vec, err := cfg.Provider.Embed(mem.Content)
 			if err != nil {
 				// Log to mirror.jsonl and continue
 				logEmbeddingFailure(mem.ID, mem.Content, err)
