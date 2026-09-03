@@ -85,6 +85,7 @@ func newTestScheduler(t *testing.T) *Scheduler {
 		log:          log,
 		handlers:     make(map[string]HandlerFunc),
 		tickHandlers: make(map[string]func(ctx context.Context) error),
+		wakeCh:       make(chan struct{}, 1),
 	}
 }
 
@@ -614,4 +615,37 @@ func TestCascadeSummaryHandler_LogsAndReturnsNil(t *testing.T) {
 	if id, _ := saw["wake_id"].(string); id != w.ID {
 		t.Errorf("log line wake_id = %q, want %q", id, w.ID)
 	}
+}
+
+// TestScheduler_NotifyScheduleChanged_NonBlocking verifies that the
+// in-process notification API does not deadlock when the channel is
+// already full. Capacity-1 coalescing is the documented behaviour:
+// a second signal during a pending wake-up must not block, must not
+// queue, must simply be ignored.
+func TestScheduler_NotifyScheduleChanged_NonBlocking(t *testing.T) {
+	s := newTestScheduler(t)
+	// Fill the channel directly.
+	s.wakeCh <- struct{}{}
+	// This send must not block, must not deadlock the test.
+	done := make(chan struct{})
+	go func() {
+		s.NotifyScheduleChanged()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("NotifyScheduleChanged blocked when channel was full (capacity-1 coalescing invariant violated)")
+	}
+	// Drain the original signal; wakeCh now empty.
+	<-s.wakeCh
+}
+
+// TestScheduler_NotifyScheduleChanged_NilReceiver verifies the
+// defensive nil-check on wakeCh. A Scheduler constructed without
+// going through New() (e.g. embedded test stub) must not panic when
+// NotifyScheduleChanged is called.
+func TestScheduler_NotifyScheduleChanged_NilReceiverSafe(t *testing.T) {
+	s := &Scheduler{}
+	s.NotifyScheduleChanged() // must not panic
 }
