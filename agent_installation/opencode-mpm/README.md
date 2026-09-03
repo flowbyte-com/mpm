@@ -66,7 +66,7 @@ These have their own narrower schemas (action dispatch is the wrong shape — th
 
 | Tool | Purpose |
 |---|---|
-| `explain_retrieval` | Per-node diagnostic breakdown of a query (Base FTS Match, Reuse Count, Last Retrieved, Success Count). Layered on top of `mpm_memory/query` without altering ranking. |
+| `mpm_retrieval_diagnose` | Per-node diagnostic breakdown of a query (Base FTS Match, Reuse Count, Last Retrieved, Success Count). Layered on top of `mpm_memory/query` without altering ranking. |
 | `log_to_changelog` | Self-report agent work tied to a git commit SHA. |
 | `request_review` | Concurrent multi-component review. |
 
