@@ -348,10 +348,11 @@ func (s *Store) GetEvents(capabilityID string, sinceUnix int64, limit int) ([]*E
 // because that's the Forge's job (different consumers may want
 // the bytes raw for hashing, etc.).
 type EmbeddingRef struct {
-	ID        string
-	Name      string
-	State     CapabilityState
-	Embedding []byte // JSON-encoded []float32
+	ID              string
+	Name            string
+	State           CapabilityState
+	Embedding       []byte // JSON-encoded []float32
+	EmbeddingSource string // 'provider' | 'hash' | 'null'
 }
 
 // ListNonRetiredEmbeddings returns the (id, name, embedding) for
@@ -373,11 +374,12 @@ func (s *Store) ListNonRetiredEmbeddings(limit int) ([]*EmbeddingRef, error) {
 		limit = 1024
 	}
 	rows, err := s.dm.QueryTracked(
-		`SELECT id, name, state, embedding
+		`SELECT id, name, state, embedding, embedding_source
 		 FROM capabilities
 		 WHERE deleted_at IS NULL
 		   AND state != 'retired'
 		   AND state != 'rolled_back'
+		   AND embedding_source != 'hash'
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
 		limit,
@@ -391,7 +393,7 @@ func (s *Store) ListNonRetiredEmbeddings(limit int) ([]*EmbeddingRef, error) {
 	for rows.Next() {
 		ref := &EmbeddingRef{}
 		var state string
-		if err := rows.Scan(&ref.ID, &ref.Name, &state, &ref.Embedding); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.Name, &state, &ref.Embedding, &ref.EmbeddingSource); err != nil {
 			return nil, wrapDBError("ListNonRetiredEmbeddings:scan", err)
 		}
 		ref.State = CapabilityState(state)
