@@ -25,11 +25,12 @@ func (c *MigrateEmbeddingsCmd) Run() int {
 	defer dm.Close()
 
 	if c.UndoTimestamp != "" {
-		// Task 13 implements the undo path. The struct field exists
-		// here for forward-compat so the dispatcher can parse --undo
-		// and hand the timestamp through without further coordination.
-		fmt.Fprintln(os.Stderr, "migrate-embeddings --undo: not yet implemented (Task 13)")
-		return 1
+		if err := mpminternal.UndoMigration(dm, c.UndoTimestamp); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate-embeddings --undo: %v\n", err)
+			return 1
+		}
+		fmt.Println("Migration undone.")
+		return 0
 	}
 
 	// Check idempotency before running.

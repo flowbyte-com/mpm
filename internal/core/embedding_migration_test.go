@@ -5,7 +5,11 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 func TestForensicClassifier(t *testing.T) {
@@ -402,6 +406,158 @@ func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
 	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM embedding_migration_log WHERE reason = 'migration_applied'`).Scan(&sentinelAfter)
 	if sentinelAfter != sentinelBefore {
 		t.Errorf("second-run sentinel count=%d, want %d (idempotency broken)", sentinelAfter, sentinelBefore)
+	}
+}
+
+// TestUndoMigration exercises the UndoMigration path: weights are restored
+// to old_weight, synthetic markers are cleared, and the audit log is purged.
+// The test uses a temp workspace so the backup file is created and found.
+func TestUndoMigration(t *testing.T) {
+	// Isolate to a temp workspace to avoid backup file collisions with
+	// other tests that call RunMigration in the full suite.
+	tmpDir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Build the 256-dim hash embedding.
+	vec256 := make([]float32, 256)
+	for i := range vec256 {
+		vec256[i] = float32(i) / 255.0
+	}
+	emb256, _ := json.Marshal(vec256)
+
+	// Insert a hash memory with reduced weight (must be restored on undo).
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, weight, synthetic)
+		VALUES ('hash-mem', 'memories', 'hash-sourced memory', ?, 'hash', 256, 0.5, 0)`,
+		string(emb256))
+	if err != nil {
+		t.Fatalf("insert hash-mem: %v", err)
+	}
+
+	// Insert a theory challenging hash-mem (must become synthetic on forward,
+	// then synthetic=0 on undo).
+	metaJSON, _ := json.Marshal(map[string]interface{}{
+		"status":               "pending",
+		"challenged_memory_id": "hash-mem",
+	})
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, weight, synthetic)
+		VALUES ('hash-theory', 'theories', 'CHALLENGED_MEMORY_ID: hash-mem', ?, 1.0, 0)`,
+		string(metaJSON))
+	if err != nil {
+		t.Fatalf("insert hash-theory: %v", err)
+	}
+
+	// Run the forward migration.
+	if err := RunMigration(dm); err != nil {
+		t.Fatalf("RunMigration: %v", err)
+	}
+
+	// Verify forward migration state.
+	var weightAfterForward float64
+	dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = 'hash-mem'`).Scan(&weightAfterForward)
+	if weightAfterForward != 1.0 {
+		t.Fatalf("forward: hash-mem weight=%f, want 1.0", weightAfterForward)
+	}
+	var synthAfterForward int
+	dm.SQLDB().QueryRow(`SELECT synthetic FROM memories WHERE id = 'hash-theory'`).Scan(&synthAfterForward)
+	if synthAfterForward != 1 {
+		t.Fatalf("forward: hash-theory synthetic=%d, want 1", synthAfterForward)
+	}
+
+	// Find the backup path that was created by RunMigration.
+	// RunMigration logs: slog.Info("RunMigration: pre-migration backup", "path", backupPath)
+	// We find it by scanning the migrations directory.
+	// We need a workspace to find the backup. Use the canonical path or scan.
+	// Since NewTestDM uses in-memory DB, the workspace backup path is not
+	// accessible from the test DB. Instead, we directly invoke takeBackup
+	// to get a timestamp we can use for undo.
+	//
+	// Alternative: we test UndoMigration by calling it without a real backup
+	// file (it will fail with "backup not found"). But we want GREEN.
+	// Solution: create a dummy backup file so the check passes.
+	// The actual restore is from the audit log, not the backup file.
+	workspace := config.GetWorkspace()
+	migrationsDir := filepath.Join(workspace, "migrations")
+	if err := os.MkdirAll(migrationsDir, 0700); err != nil {
+		t.Fatalf("mkdir migrations: %v", err)
+	}
+
+	// Create a dummy backup file so UndoMigration's stat check passes.
+	// The actual restore is from the audit log rows.
+	// Use a unique far-future timestamp to avoid collision with other tests.
+	undoTS := "2099-12-31T23-59-59Z"
+	dummyBackup := filepath.Join(migrationsDir, "embeddings-"+undoTS+".db.bak")
+	if err := os.WriteFile(dummyBackup, nil, 0600); err != nil {
+		t.Fatalf("create dummy backup: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(dummyBackup) })
+
+	// Run undo.
+	if err := UndoMigration(dm, undoTS); err != nil {
+		t.Fatalf("UndoMigration: %v", err)
+	}
+
+	// Verify weights restored to old values.
+	var weightAfterUndo float64
+	dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = 'hash-mem'`).Scan(&weightAfterUndo)
+	if weightAfterUndo != 0.5 {
+		t.Errorf("undo: hash-mem weight=%f, want 0.5", weightAfterUndo)
+	}
+
+	// Verify synthetic cleared.
+	var synthAfterUndo int
+	dm.SQLDB().QueryRow(`SELECT synthetic FROM memories WHERE id = 'hash-theory'`).Scan(&synthAfterUndo)
+	if synthAfterUndo != 0 {
+		t.Errorf("undo: hash-theory synthetic=%d, want 0", synthAfterUndo)
+	}
+
+	// Verify audit log is purged (sentinel removed too).
+	var logCount int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM embedding_migration_log`).Scan(&logCount)
+	if logCount != 0 {
+		t.Errorf("undo: embedding_migration_log count=%d, want 0", logCount)
+	}
+}
+
+// TestUndoMigration_BackupNotFound verifies that UndoMigration returns an
+// error when the backup file does not exist.
+func TestUndoMigration_BackupNotFound(t *testing.T) {
+	// Use an isolated temp workspace so the backup file from TestUndoMigration
+	// does not interfere.
+	tmpDir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+
+	// Re-initialise with the temp workspace.
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Insert a minimal setup so the function doesn't fail on nil DB.
+	vec256 := make([]float32, 256)
+	for i := range vec256 {
+		vec256[i] = float32(i) / 255.0
+	}
+	emb256, _ := json.Marshal(vec256)
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, weight, synthetic)
+		VALUES ('mem', 'memories', 'content', ?, 'hash', 256, 0.5, 0)`,
+		string(emb256))
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Run migration to create audit rows.
+	if err := RunMigration(dm); err != nil {
+		t.Fatalf("RunMigration: %v", err)
+	}
+
+	// Try undo with a timestamp that has no backup — should fail.
+	err = UndoMigration(dm, "2099-12-31T23-59-59Z")
+	if err == nil {
+		t.Fatal("UndoMigration: expected error when backup not found, got nil")
 	}
 }
 
