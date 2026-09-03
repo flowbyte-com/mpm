@@ -171,7 +171,49 @@ func TestDispatchClaimNextAdHocWake_NoEligibleReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestDispatchClaimNextAdHocWake_HandlesEmptyMetadata is the regression
+// TestDispatchClaimNextAdHocWake_HandlesNullableStrings is the
+// regression for the production-shape NULL columns. ScheduleWake
+// leaves theory_id and recurring_rule as NULL when no theory is
+// attached and no recurrence is set. Scanning NULL into a plain
+// `string` field trips "converting NULL to string is unsupported",
+// which fails the claim even though the UPDATE itself succeeded —
+// the row is now marked fired but the dispatch loop sees an error
+// and gives up.
+//
+// Live acceptance caught this: a cron-injected wake tripped the
+// scan error (target_time=1788438426, fired_at=None because the
+// drain errored before claiming). The acceptance-A wake (target
+// 1788438430) still fired because its claim hit a moment when no
+// other wake was ahead of it, but the loop kept erroring on every
+// iteration until ctx cancel.
+func TestDispatchClaimNextAdHocWake_HandlesNullableStrings(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	if _, err := s.db.Exec(
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
+		 VALUES ('null-fields', ?, 'test null wake', NULL, NULL, 0, 'test', '{}')`,
+		now.Add(-1*time.Minute).Unix(),
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim on NULL theory_id/recurring_rule row: %v (must NOT trip scan on NULL)", err)
+	}
+	if !ok {
+		t.Fatal("expected a claim")
+	}
+	if w.ID != "null-fields" {
+		t.Errorf("claimed = %q, want null-fields", w.ID)
+	}
+	if w.TheoryID != "" {
+		t.Errorf("TheoryID = %q, want empty (NULL scans to empty)", w.TheoryID)
+	}
+	if w.RecurringRule != "" {
+		t.Errorf("RecurringRule = %q, want empty (NULL scans to empty)", w.RecurringRule)
+	}
+}
 // for the production-shape metadata column. ScheduleWake stores
 // metadata='' (not '{}') for the default no-kind case. Earlier the
 // claim UPDATE used COALESCE(metadata,'{}'), which on empty string
