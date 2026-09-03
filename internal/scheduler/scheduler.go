@@ -81,6 +81,23 @@ type Scheduler struct {
 	tickHandlers map[string]func(ctx context.Context) error
 	mu           sync.RWMutex
 
+	// wakeCh is the in-process notification channel for callers that
+	// mutate scheduled_wakes from the SAME process as the scheduler
+	// (e.g. the scheduler's own tick handlers like cascade_drain or
+	// cascade_wake_reconcile, which insert new wake rows). A non-blocking
+	// send wakes Run() from its deadline sleep so the change is observed
+	// promptly instead of waiting for the next maintenance tick.
+	//
+	// Capacity 1 — coalesces bursts of mutations so the scheduler
+	// drains the wake queue once per wake-up rather than once per
+	// mutation.
+	//
+	// Cross-process mutation (mpm call, mpm-mcp on a separate OS
+	// process) cannot reach this channel and instead relies on the
+	// bounded-sleep floor in Run() (see Run doc for the latency
+	// bound — `min(interval, time_to_next_deadline)`).
+	wakeCh chan struct{}
+
 	// tickCount increments on every ticker fire (including idle ticks).
 	// heartbeatEvery controls how often a heartbeat log line is emitted
 	// (0 = disabled; default 100 ticks = ~100 min at 60s interval).
@@ -129,6 +146,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		log:                log,
 		handlers:           make(map[string]HandlerFunc),
 		tickHandlers:       make(map[string]func(ctx context.Context) error),
+		wakeCh:             make(chan struct{}, 1),
 		heartbeatEvery:     100, // ~100 min at 60s interval; override with SetHeartbeat
 		processStartedUnix: time.Now().Unix(),
 	}
@@ -150,6 +168,31 @@ func (s *Scheduler) SetHeartbeat(every uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.heartbeatEvery = every
+}
+
+// NotifyScheduleChanged signals Run() that the wake-mutation state has
+// changed in this process (e.g. a tick handler inserted a new wake row).
+// Run will wake from its deadline sleep, recompute the earliest pending
+// deadline, and re-arm the timer. The send is non-blocking — when the
+// channel is already pending, additional signals are coalesced into the
+// pending wake-up (no goroutine wait, no queue buildup).
+//
+// Scope: in-process only. Cross-process writers (mpm call CLI,
+// mpm-mcp server running as separate OS processes) cannot reach this
+// channel; their mutations are picked up via the bounded-sleep floor in
+// Run() within min(interval, time_to_next_deadline) — see the Run doc.
+//
+// Safe to call before Run() starts (no-op when wakeCh is nil —
+// defensive for callers that hand a partially-constructed Scheduler
+// to a tick handler).
+func (s *Scheduler) NotifyScheduleChanged() {
+	if s.wakeCh == nil {
+		return
+	}
+	select {
+	case s.wakeCh <- struct{}{}:
+	default: // channel already pending — coalesce
+	}
 }
 
 // Close is a no-op on the scheduler's bound *sql.DB. The DatabaseManager
