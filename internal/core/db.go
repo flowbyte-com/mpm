@@ -3566,8 +3566,15 @@ type searchResult struct {
 }
 
 func cosineSimilarity(a, b []float32) float32 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
 	var dotProduct, normA, normB float32
-	for i := range a {
+	for i := 0; i < n; i++ {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
