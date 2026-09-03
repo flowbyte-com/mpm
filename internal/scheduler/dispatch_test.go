@@ -1,0 +1,304 @@
+// Tests for the deadline-driven ad-hoc wake dispatch claim SQL
+// (internal/scheduler/dispatch.go).
+//
+// These tests verify the keystone correctness invariant: the atomic
+// UPDATE ... RETURNING claim pattern is the cross-process dedup
+// primitive. Two goroutines, two processes, two different dispatchers
+// (mpm-scheduler + mpm call opportunistic fold) must all agree that
+// each wake row is claimed at most once.
+//
+// The schema is the same minimal subset scheduler_test.go uses — enough
+// for the claim SQL to execute, no more.
+
+package scheduler
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+const dispatchTestSchema = `
+CREATE TABLE IF NOT EXISTS scheduled_wakes (
+    id              TEXT PRIMARY KEY,
+    target_time     INTEGER NOT NULL,
+    reason          TEXT NOT NULL,
+    theory_id       TEXT,
+    recurring_rule  TEXT,
+    fired           INTEGER NOT NULL DEFAULT 0,
+    fired_at        INTEGER,
+    created_by      TEXT NOT NULL,
+    created_at      INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    metadata        JSON
+);
+`
+
+// newDispatchTestScheduler returns a Scheduler backed by a temp-file
+// SQLite database (so WAL mode works across connections), with the
+// minimal schema and a discard logger. Tests reuse the existing
+// seedWake helper from scheduler_test.go.
+func newDispatchTestScheduler(t *testing.T) *Scheduler {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dispatch_test.db")
+	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL")
+	if err != nil {
+		t.Fatalf("open temp db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(dispatchTestSchema); err != nil {
+		t.Fatalf("install schema: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	return &Scheduler{
+		db:       db,
+		dbPath:   path,
+		log:      log,
+		handlers: make(map[string]HandlerFunc),
+	}
+}
+
+// TestDispatchClaimNextAdHocWake_ClaimsNotificationKind verifies the
+// keystone invariant: the claim partitions on notification-kind (and
+// untagged, which seedWake represents as kind=""). System kinds stay
+// unfired for Tick to handle on a future maintenance tick.
+func TestDispatchClaimNextAdHocWake_ClaimsNotificationKind(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "n1", now.Add(-1*time.Minute), "")              // untagged = notification
+	seedWake(t, s, "n2", now.Add(-30*time.Second), "notification") // explicit notification
+	seedWake(t, s, "sys", now.Add(-1*time.Minute), "snapshot")     // system kind — must NOT claim
+
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a claim (3 due, 2 eligible)")
+	}
+	if w.ID != "n1" {
+		t.Errorf("claimed id = %q, want n1 (oldest eligible)", w.ID)
+	}
+
+	// Verify system kind is NOT fired.
+	var fired int
+	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='sys'`).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Errorf("system-kind wake fired=%d, want 0 (must remain for maintenance tick)", fired)
+	}
+
+	// Verify metadata stamped with dispatched_by.
+	var dispatchedBy sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT json_extract(metadata, '$.dispatched_by') FROM scheduled_wakes WHERE id='n1'`,
+	).Scan(&dispatchedBy); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatchedBy.Valid || dispatchedBy.String != "mpm-scheduler" {
+		t.Errorf("dispatched_by = %v, want mpm-scheduler", dispatchedBy)
+	}
+}
+
+// TestDispatchClaimNextAdHocWake_FutureNotClaimed verifies the
+// target_time <= now guard — a wake scheduled for the future must NOT
+// be claimed by the deadline-driven drain until the deadline passes.
+func TestDispatchClaimNextAdHocWake_FutureNotClaimed(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "future", now.Add(1*time.Hour), "")
+
+	_, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if ok {
+		t.Error("future wake was claimed; the deadline-driven drain must respect target_time")
+	}
+}
+
+// TestDispatchClaimNextAdHocWake_OrderByTargetTime verifies that the
+// drain is FIFO: even when a future wake is inserted between two due
+// wakes, the older due wake is claimed first.
+func TestDispatchClaimNextAdHocWake_OrderByTargetTime(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	// Insert in REVERSE chronological order; claim must still return the oldest.
+	seedWake(t, s, "later", now.Add(-1*time.Second), "")
+	seedWake(t, s, "earliest", now.Add(-10*time.Second), "")
+	seedWake(t, s, "middle", now.Add(-5*time.Second), "")
+
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a claim")
+	}
+	if w.ID != "earliest" {
+		t.Errorf("claimed = %q, want earliest (FIFO order)", w.ID)
+	}
+}
+
+// TestDispatchClaimNextAdHocWake_NoEligibleReturnsFalse verifies the
+// no-row case: when there are no due notification-kind wakes, the
+// claim returns (zero, false, nil) without surfacing ErrNoRows.
+func TestDispatchClaimNextAdHocWake_NoEligibleReturnsFalse(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	// Only system-kind; ad-hoc claim must skip them.
+	seedWake(t, s, "sys", now.Add(-1*time.Minute), "snapshot")
+
+	_, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v (must return nil not sql.ErrNoRows)", err)
+	}
+	if ok {
+		t.Error("expected no claim (only system-kind wakes present)")
+	}
+}
+
+// TestDispatchDrainAdHocWakes_DrainsAllDue verifies the drain loop
+// claims every due row in a single call up to the cap.
+func TestDispatchDrainAdHocWakes_DrainsAllDue(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	const N = 5
+	for i := 0; i < N; i++ {
+		seedWake(t, s, fmt.Sprintf("n%d", i), now.Add(-time.Duration(i+1)*time.Second), "")
+	}
+
+	n, err := dispatchDrainAdHocWakes(context.Background(), s.db, now, 100)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if n != N {
+		t.Errorf("claimed %d, want %d", n, N)
+	}
+
+	var fired int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != N {
+		t.Errorf("fired count = %d, want %d", fired, N)
+	}
+}
+
+// TestDispatchDrainAdHocWakes_LeavesFutureAlone verifies that a drain
+// with mixed past/future wakes claims only the past ones.
+func TestDispatchDrainAdHocWakes_LeavesFutureAlone(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "past", now.Add(-1*time.Minute), "")
+	seedWake(t, s, "future", now.Add(1*time.Hour), "")
+
+	n, err := dispatchDrainAdHocWakes(context.Background(), s.db, now, 100)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("claimed %d, want 1 (only past)", n)
+	}
+
+	var pastFired, futureFired int
+	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='past'`).Scan(&pastFired); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='future'`).Scan(&futureFired); err != nil {
+		t.Fatal(err)
+	}
+	if pastFired != 1 {
+		t.Errorf("past fired=%d, want 1", pastFired)
+	}
+	if futureFired != 0 {
+		t.Errorf("future fired=%d, want 0", futureFired)
+	}
+}
+
+// TestDispatchDrainAdHocWakes_RespectsCap verifies capN bounds a
+// single drain pass. A cap of 1 against 5 due rows yields 1 claim and
+// 4 still-pending rows.
+func TestDispatchDrainAdHocWakes_RespectsCap(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	const N = 5
+	for i := 0; i < N; i++ {
+		seedWake(t, s, fmt.Sprintf("n%d", i), now.Add(-time.Duration(i+1)*time.Second), "")
+	}
+
+	n, err := dispatchDrainAdHocWakes(context.Background(), s.db, now, 1)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("claimed %d, want 1 (cap=1)", n)
+	}
+
+	var fired int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Errorf("fired count = %d, want 1", fired)
+	}
+}
+
+// TestDispatchDrain_ConcurrentNoDoubleFire is the concurrency
+// regression test for the keystone invariant. Two goroutines race to
+// drain the same SQLite file; the atomic claim ensures each wake is
+// fired exactly once across both goroutines.
+func TestDispatchDrain_ConcurrentNoDoubleFire(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	const N = 20
+	for i := 0; i < N; i++ {
+		seedWake(t, s, fmt.Sprintf("n%d", i), now.Add(-time.Duration(i+1)*time.Second), "")
+	}
+
+	var totalA, totalB atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(which int) {
+			defer wg.Done()
+			n, err := dispatchDrainAdHocWakes(context.Background(), s.db, now, 100)
+			if err != nil {
+				t.Errorf("drain %d: %v", which, err)
+				return
+			}
+			if which == 0 {
+				totalA.Add(int32(n))
+			} else {
+				totalB.Add(int32(n))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	got := int(totalA.Load()) + int(totalB.Load())
+	if got != N {
+		t.Errorf("total claimed = %d, want %d (atomic claim invariant violated)", got, N)
+	}
+
+	var firedCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&firedCount); err != nil {
+		t.Fatal(err)
+	}
+	if firedCount != N {
+		t.Errorf("fired count = %d, want %d (no double-fire)", firedCount, N)
+	}
+}
