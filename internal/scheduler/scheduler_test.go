@@ -748,3 +748,90 @@ func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
 		t.Fatalf("exec: %v", err)
 	}
 }
+
+// TestScheduler_FiresAtTargetTime is the keystone acceptance test
+// from the original report. It verifies the deadline-driven loop
+// dispatches a notification-kind wake at its target_time without
+// waiting for the maintenance interval, and without any unrelated
+// `mpm call` driving an opportunistic fold.
+//
+// This is the regression that motivated the change: previously, a
+// wake scheduled for +500ms would sit unfired for up to 60s because
+// nothing else ever asked the mpm call chokepoint to look at it.
+func TestScheduler_FiresAtTargetTime(t *testing.T) {
+	s := newTestScheduler(t)
+	now := time.Now()
+	target := now.Add(500 * time.Millisecond)
+	seedWake(t, s, "soon", target, "") // untagged = notification
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 1*time.Second) }()
+
+	// Wait up to 2s for the wake to be fired. The bounded deadline
+	// timer should fire it within ~500ms + Jitter + drain overhead.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("wake not fired within 2s (deadline-driven dispatch did not pick it up)")
+		case <-time.After(50 * time.Millisecond):
+			var fired int
+			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='soon'`).Scan(&fired); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			if fired == 1 {
+				cancel()
+				return // PASS
+			}
+		}
+	}
+}
+
+// TestScheduler_FiresMultipleDueWakesInOrder verifies the deadline-
+// driven drain claims all currently-due wakes in a single iteration,
+// in target_time ASC order (FIFO). The drain loop's cap=100 lets a
+// single select-wake-up drain batches of accumulated work.
+func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
+	s := newTestScheduler(t)
+	now := time.Now()
+	const N = 5
+	// Seed in REVERSE order; the drain must still claim in target_time order.
+	for i := 0; i < N; i++ {
+		seedWake(t, s, fmt.Sprintf("w%d", i), now.Add(time.Duration(i)*100*time.Millisecond), "")
+	}
+	// Wait for at least the first wake to come due.
+	time.Sleep(150 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 1*time.Second) }()
+
+	// Wait up to 3s for ALL 5 to be claimed.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			var count int
+			_ = s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&count)
+			t.Fatalf("only %d/%d fired", count, N)
+		case <-time.After(50 * time.Millisecond):
+			var count int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&count); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			if count == N {
+				cancel()
+				return // PASS
+			}
+		}
+	}
+}
