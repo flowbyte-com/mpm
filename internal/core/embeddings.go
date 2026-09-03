@@ -1,3 +1,16 @@
+// Package internal — Embedding subsystem.
+//
+// The embedding subsystem resolves configuration from
+// mpm_config.json's components["embedding"] binding, falling back
+// to OLLAMA_ENDPOINT / OLLAMA_MODEL env vars when the binding is
+// absent. The reserved sentinel "disabled" opts out cleanly.
+//
+// There is no runtime network probing. Operators who want to
+// discover reachable providers run `mpm config detect-embedding`,
+// which is explicitly diagnostic.
+//
+// See docs/superpowers/specs/2026-09-03-mpm-embedding-provider-design.md
+// for the full design.
 package internal
 
 import (
@@ -285,51 +298,37 @@ var (
 	defaultEmbedConfig     *EmbeddingConfig
 )
 
-// DefaultEmbeddingConfig returns a cached embedding config using environment variables.
-// The config is probed once and then cached for the lifetime of the process.
-// Checks OLLAMA_ENDPOINT + OLLAMA_MODEL first, falls back to NullProvider.
+// DefaultEmbeddingConfig returns a cached embedding config using
+// mpm_config.json. The config is resolved once and then cached for
+// the lifetime of the process.
+//
+// Resolution order (canonical; see docs/superpowers/specs/
+// 2026-09-03-mpm-embedding-provider-design.md §4.1):
+//   1. components.embedding == "disabled" → IntentionallyDisabled
+//   2. components.embedding == "<profile>" → resolve profile
+//   3. components.embedding absent → OLLAMA_* env fallback
+//   4. neither → NullProvider
+//
+// No network probing at any step. Probing lives in
+// `mpm config detect-embedding`.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
 	defaultEmbedConfigOnce.Do(func() {
-		defaultEmbedConfig = probeEmbeddingConfig()
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			// Treat load failure as "absent" rather than crashing
+			// boot. Operators see the error via `mpm config show`.
+			defaultEmbedConfig = &EmbeddingConfig{
+				Source:       EmbeddingSourceAbsent,
+				ProviderName: "null",
+				Provider:     NullProvider{},
+				Status:       EmbeddingStatusNull,
+				LastError:    err,
+			}
+			return
+		}
+		defaultEmbedConfig = resolveEmbeddingConfig(cfg)
 	})
 	return defaultEmbedConfig
-}
-
-// probeEmbeddingConfig attempts to detect and configure an embedding provider.
-func probeEmbeddingConfig() *EmbeddingConfig {
-	cfg := &EmbeddingConfig{
-		Provider:     NullProvider{},
-		ProviderName: "null",
-	}
-
-	endpoint := "http://localhost:11434/api/embeddings"
-	model := "nomic-embed-text"
-
-	if ep := getEnv("OLLAMA_ENDPOINT", ""); ep != "" {
-		endpoint = ep
-	}
-	if mod := getEnv("OLLAMA_MODEL", ""); mod != "" {
-		model = mod
-	}
-
-	// Build probe payload safely using json.Marshal to prevent injection
-	probePayload, _ := json.Marshal(map[string]string{"model": model, "prompt": "test"})
-
-	// Probe: try to reach Ollama
-	client := &http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(probePayload))
-	if err != nil {
-		return cfg
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		cfg.Provider = NewOllamaProvider(endpoint, model)
-		cfg.ProviderName = "ollama"
-		resp.Body.Close()
-	}
-
-	return cfg
 }
 
 // EmbedText tries the real embedding provider; falls back to HashEmbed on failure.
@@ -348,9 +347,3 @@ func EmbedText(text string) []float32 {
 	return HashEmbed(text)
 }
 
-func getEnv(key, defaultVal string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultVal
-}
