@@ -883,3 +883,144 @@ func TestScheduler_FoldsCronTasks(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduler_IdleDoesNotBusyLoop verifies that the deadline-driven
+// loop does NOT spin when nothing is pending. With a 60s maintenance
+// interval and an empty queue, computeEarliestDeadline returns zero,
+// scheduleNextDeadline arms the timer for `interval` (60s), and the
+// goroutine sleeps 60s.
+//
+// Asserting "no tick fired in 2.5s" is a proxy: at 60s interval, the
+// maintenance ticker can fire at most 0-1 times in 2.5s. We assert
+// tickCount == 0 because runOnce happens BEFORE Run's loop begins
+// and is not part of tickCount.
+func TestScheduler_IdleDoesNotBusyLoop(t *testing.T) {
+	s := newTestScheduler(t)
+	s.SetHeartbeat(0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 60*time.Second) }()
+
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("scheduler did not stop within 1s of ctx cancel")
+	}
+
+	if s.tickCount != 0 {
+		t.Errorf("tickCount = %d, want 0 (no maintenance ticks should fire within 2.5s at 60s interval)", s.tickCount)
+	}
+}
+
+// TestScheduler_RestartRecoversPending verifies that an overdue wake
+// is dispatched on (re)start without any unrelated mpm call. The
+// deadline-driven loop arms the timer with d=0 when earliest is in
+// the past, so the very first iteration of the select processes
+// the overdue wake.
+func TestScheduler_RestartRecoversPending(t *testing.T) {
+	s := newTestScheduler(t)
+	s.SetHeartbeat(0)
+	now := time.Now()
+	// An overdue wake.
+	seedWake(t, s, "overdue", now.Add(-1*time.Second), "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 60*time.Second) }()
+
+	// Wait up to 2s for it to fire (the deadline timer should fire on
+	// the very first iteration, since the only pending deadline is in
+	// the past).
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("overdue wake did not fire within 2s of scheduler start")
+		case <-time.After(50 * time.Millisecond):
+			var fired int
+			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='overdue'`).Scan(&fired); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			if fired == 1 {
+				cancel()
+				return // PASS
+			}
+		}
+	}
+}
+
+// TestScheduler_NotifyScheduleChanged_InterruptsWait verifies that
+// an in-process wake mutation wakes Run() from its deadline sleep
+// via the wakeCh. Scenario: schedule a far-future wake so the
+// deadline timer parks for an hour; inject a now-due wake and
+// NotifyScheduleChanged; the new earliest-deadline is "now" so the
+// select hits the deadlineTimer.C branch on the next iteration.
+func TestScheduler_NotifyScheduleChanged_InterruptsWait(t *testing.T) {
+	s := newTestScheduler(t)
+	s.SetHeartbeat(0)
+	now := time.Now()
+	// Far-future wake so the loop sleeps until interval (60s).
+	seedWake(t, s, "far", now.Add(1*time.Hour), "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 60*time.Second) }()
+
+	// Give the scheduler a moment to enter its select.
+	time.Sleep(200 * time.Millisecond)
+
+	// Insert a now-due wake and signal.
+	seedWake(t, s, "now-wake", now.Add(-100*time.Millisecond), "")
+	s.NotifyScheduleChanged()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("now-wake did not fire within 2s of NotifyScheduleChanged")
+		case <-time.After(50 * time.Millisecond):
+			var fired int
+			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='now-wake'`).Scan(&fired); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			if fired == 1 {
+				cancel()
+				return // PASS
+			}
+		}
+	}
+}
+
+// TestScheduler_ContextCancellation_CleanShutdown verifies that a
+// context cancellation terminates Run() promptly and returns nil.
+// Run() exits via the ctx.Done() case and stops its deadlineTimer.
+func TestScheduler_ContextCancellation_CleanShutdown(t *testing.T) {
+	s := newTestScheduler(t)
+	s.SetHeartbeat(0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 60*time.Second) }()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned err = %v, want nil", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Run did not stop within 1s of ctx cancel")
+	}
+}
