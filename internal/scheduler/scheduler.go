@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -104,6 +105,12 @@ type Scheduler struct {
 	// SetHeartbeat overrides the default at startup.
 	tickCount      uint64
 	heartbeatEvery uint64
+
+	// lastWakeupWasTick records which select branch fired on the most
+	// recent iteration, so the post-select ad-hoc drain only runs
+	// after the tick branch (avoids a double drain on the
+	// deadline-branch path — that branch already drained inline).
+	lastWakeupWasTick atomic.Bool
 
 	// processStartedUnix is captured at New() and persisted to
 	// scheduler.state every tick. The CLI's emitSchedulerHealthWarning
@@ -474,33 +481,76 @@ func (s *Scheduler) computeEarliestDeadline(ctx context.Context, now time.Time) 
 	return time.Unix(ts.Int64, 0), nil
 }
 
-// Run is the ticker loop. Blocks until ctx is cancelled.
+// Run is the scheduler's main loop. Blocks until ctx is cancelled.
+//
+// Loop structure: select on ctx.Done, the in-process wakeCh, the
+// ad-hoc deadline timer, and the system maintenance ticker.
+//
+//   - ctx.Done: shutdown.
+//   - wakeCh: in-process wake mutation (same-process writers).
+//   - deadlineTimer.C: a pending notification-kind wake is now due;
+//     drained via dispatchDrainAdHocWakes.
+//   - ticker.C: system maintenance cadence — runs Tick (cron poll +
+//     system-kind dispatch + tick handlers).
+//
+// After every non-shutdown wake-up we recompute the earliest deadline
+// and Reset the deadline timer. The deadline sleep is bounded above by
+// the `interval` argument (the system maintenance cadence) so cross-
+// process wake mutations (mpm call, mpm-mcp) are picked up within
+// `min(interval, time_to_next_deadline)` even though those processes
+// cannot send to wakeCh.
+//
+// Latency bounds:
+//   - in-process: ~immediate (channel-send latency).
+//   - cross-process: bounded by min(interval, time_to_deadline).
+//
+// `interval` keeps its historical meaning (the system maintenance
+// cadence). The default in cmd/mpm-scheduler/main.go is 60s.
 func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 	if interval < time.Second {
 		return errors.New("interval must be >= 1s")
 	}
-	s.log.Info("scheduler running", "interval", interval.String(), "db", s.dbPath)
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	s.log.Info("scheduler running",
+		"interval", interval.String(),
+		"db", s.dbPath,
+		"mode", "deadline-driven")
 
-	// Run once immediately so a wake that became due during shutdown
-	// doesn't have to wait a full interval for first dispatch.
-	if n, err := s.Tick(ctx); err != nil {
-		s.log.Error("initial tick failed", "err", err)
-	} else if n > 0 {
-		s.log.Info("initial tick executed wakes", "count", n)
-	}
-	// Persist initial state so a CLI that runs within the first tick
-	// interval sees a non-stale last_tick_unix and doesn't surface
-	// 'stalled' on a healthy daemon.
-	s.persistState()
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	deadlineTimer := time.NewTimer(time.Hour) // dummy; first Reset replaces it
+	defer deadlineTimer.Stop()
+
+	// Run once immediately so pre-existing pending work doesn't wait
+	// an interval to be observed; also seeds initial scheduler.state.
+	s.runOnce(ctx)
+
+	// Initial deadline timer arm (after runOnce so newly-injected cron
+	// wakes are visible).
+	s.scheduleNextDeadline(ctx, deadlineTimer, interval)
 
 	for {
+		// Default false; set only by the tick.C case below so the
+		// post-iteration ad-hoc drain runs after the maintenance tick
+		// (a long tick may have made earlier deadlines overdue).
+		s.lastWakeupWasTick.Store(false)
+
 		select {
 		case <-ctx.Done():
 			s.log.Info("scheduler stopping", "reason", ctx.Err())
 			return nil
-		case <-t.C:
+		case <-s.wakeCh:
+			// in-process mutation — recompute deadline and continue
+			s.log.Debug("in-process wake notification — recomputing deadline")
+		case <-deadlineTimer.C:
+			// ad-hoc deadline elapsed — drain notification-kind wakes
+			n, err := dispatchDrainAdHocWakes(ctx, s.db, time.Now(), 100)
+			if err != nil {
+				s.log.Error("ad-hoc drain failed", "err", err)
+			} else if n > 0 {
+				s.log.Info("ad-hoc drain executed wakes", "count", n)
+			}
+		case <-tick.C:
 			s.tickCount++
 			s.mu.RLock()
 			hb := s.heartbeatEvery
@@ -508,19 +558,91 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) error {
 			if hb > 0 && s.tickCount%hb == 0 {
 				s.log.Info("scheduler heartbeat",
 					"tick", s.tickCount,
-					"interval", interval.String(),
-					"uptime_ticks", s.tickCount)
+					"interval", interval.String())
 			}
 			if n, err := s.Tick(ctx); err != nil {
 				s.log.Error("tick failed", "err", err)
 			} else if n > 0 {
-				s.log.Info("tick executed wakes", "count", n)
+				s.log.Info("tick executed system wakes", "count", n)
 			}
-			// Persist state every tick (≈130 bytes, write amp negligible).
-			// Atomic tmp+rename — see internal/scheduler/state.go.
 			s.persistState()
+			s.lastWakeupWasTick.Store(true)
+		}
+
+		// After every wake-up (except ctx.Done): re-arm the timer AND,
+		// if we just ran a maintenance tick, opportunistically drain
+		// any ad-hoc wakes that became overdue during the tick (a long
+		// Tick may take seconds; a deadline that landed mid-Tick would
+		// otherwise wait until the timer fired).
+		if s.lastWakeupWasTick.Load() {
+			n, err := dispatchDrainAdHocWakes(ctx, s.db, time.Now(), 100)
+			if err != nil {
+				s.log.Error("post-tick ad-hoc drain failed", "err", err)
+			} else if n > 0 {
+				s.log.Info("post-tick ad-hoc drain executed wakes", "count", n)
+			}
+		}
+		s.scheduleNextDeadline(ctx, deadlineTimer, interval)
+	}
+}
+
+// runOnce does an immediate startup sweep: Tick (cron poll + system
+// dispatch + tick handlers) and persistState. Called once at scheduler
+// start, before the deadline-timer-armed select loop begins. Distinct
+// from Tick() only by its inline persistState + log line.
+func (s *Scheduler) runOnce(ctx context.Context) {
+	if n, err := s.Tick(ctx); err != nil {
+		s.log.Error("startup tick failed", "err", err)
+	} else if n > 0 {
+		s.log.Info("startup tick executed system wakes", "count", n)
+	}
+	s.persistState()
+}
+
+// scheduleNextDeadline recomputes the earliest pending deadline and
+// (re)arms the timer. Sleep duration = min(interval, time.Until(earliest))
+// when something is pending, else `interval`. d=0 means "fire on the
+// next loop iteration" (deadline already past — the drain handler runs
+// without further delay).
+func (s *Scheduler) scheduleNextDeadline(ctx context.Context, t *time.Timer, interval time.Duration) {
+	earliest, err := s.computeEarliestDeadline(ctx, time.Now())
+	if err != nil {
+		s.log.Error("compute earliest deadline failed", "err", err)
+		resetTimer(t, interval)
+		return
+	}
+	var d time.Duration
+	if earliest.IsZero() {
+		d = interval
+	} else {
+		d = time.Until(earliest)
+		if d <= 0 {
+			d = 0 // overdue — fire immediately
+		}
+		if d > interval {
+			d = interval
 		}
 	}
+	resetTimer(t, d)
+	if !earliest.IsZero() && d > 0 {
+		s.log.Debug("next deadline",
+			"delta", d.String(),
+			"abs", earliest.UTC().Format(time.RFC3339))
+	}
+}
+
+// resetTimer safely resets a time.Timer, draining the channel if the
+// timer has already fired but the value hasn't yet been read. This is
+// the canonical Go pattern documented in the standard library: an
+// unserviced timer can deadlock a Reset into spamming zero-delay fires.
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }
 
 // AcquireLock grabs an exclusive flock on path. Returns the file handle
