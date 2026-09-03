@@ -25,9 +25,13 @@ that this host adapter inherits:
    MPM tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`,
    `mpm_topics`, `mpm_references`) for any durable knowledge a future
    session would otherwise have to rediscover. The `pi-mpm` extension
-   registers all 16 MPM tools as typed Pi tools; calling them writes
-   provenance automatically via the same `mpm call` subprocess
-   path that other host plugins use.
+   registers the **adapter's 16-tool subset** as typed Pi tools (13
+   Domain Tools via Fat RPC + 3 Standalones: `mpm_retrieval_diagnose`,
+   `log_to_changelog`, `request_review`); the full MPM registry exposes
+   22 tools, and tools not registered here remain reachable via the
+   `mpm call <tool> --payload '<json>'` CLI fallback. Calling any MPM
+   tool writes provenance automatically via the same subprocess path
+   that other host plugins use.
 
 3. **Skill discovery before reinventing.** When the current task
    context suggests a previously learned procedure would apply, query
