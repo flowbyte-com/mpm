@@ -421,10 +421,22 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 			}
 		}
 
-		// Opportunistic wake fold (Phase 5a): check for due wakes and prepend
-		// a visually distinct XML notification block. Uses the raw JSON text
-		// for the primary content so any client that doesn't understand the
-		// wake block still gets clean machine-readable output.
+		// Opportunistic wake fold — compatibility safety net for the
+		// deadline-driven mpm-scheduler daemon. As of the deadline-driven
+		// work, mpm-scheduler is the authoritative dispatcher for
+		// notification-kind scheduled_wakes at their target_time. This
+		// fold remains so that MCP tool responses surface due wakes to
+		// the agent immediately, even when the daemon is unavailable,
+		// and without waiting for the bounded-sleep floor in Run().
+		//
+		// Atomic safety: dm.CheckPendingWakes performs an UPDATE WHERE
+		// fired=0 in a single transaction. The daemon's dispatchClaim
+		// uses the same shape. Exactly one wins on a race.
+		//
+		// check for due wakes and prepend a visually distinct XML
+		// notification block. Uses the raw JSON text for the primary
+		// content so any client that doesn't understand the wake block
+		// still gets clean machine-readable output.
 		if dm != nil {
 			if due, dErr := dm.CheckPendingWakes(time.Now(), nil); dErr == nil && len(due) > 0 {
 				notification := core.FormatWakeNotification(due)
