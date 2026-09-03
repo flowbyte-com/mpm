@@ -223,32 +223,44 @@ func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
 	}
 
 	// Insert two theories:
-	// - hash-theory challenges hash-mem (source_id='hash-mem') → must become synthetic
-	// - prov-theory challenges prov-mem (source_id='prov-mem') → must NOT become synthetic
+	// - hash-theory challenges hash-mem → must become synthetic
+	// - prov-theory challenges prov-mem → must NOT become synthetic
+	//
+	// Theories (collection='theories') reference the challenged memory via
+	// metadata['challenged_memory_id'] — NOT via source_id. This matches
+	// production theory creation in epistemology_tools.go:54-60. Storing
+	// the reference in source_id would test the wrong schema.
 	theories := []struct {
 		id      string
-		sourceID string // source_id: the memory this theory challenges
+		challengedID string // stored in metadata['challenged_memory_id']
 		coll    string
 		content string
 		weight  float64
 	}{
 		{
-			id: "hash-theory", sourceID: "hash-mem", coll: "theories",
+			id: "hash-theory", challengedID: "hash-mem", coll: "theories",
 			content: "CHALLENGED_MEMORY_ID: hash-mem\nEVIDENCE: theoretical challenge\nCHALLENGED_AT_NANO: 0\nORIGINAL_CONTENT: hash-sourced memory",
 			weight: 1.0,
 		},
 		{
-			id: "prov-theory", sourceID: "prov-mem", coll: "theories",
+			id: "prov-theory", challengedID: "prov-mem", coll: "theories",
 			content: "CHALLENGED_MEMORY_ID: prov-mem\nEVIDENCE: theoretical challenge\nCHALLENGED_AT_NANO: 0\nORIGINAL_CONTENT: provider-sourced memory",
 			weight: 1.0,
 		},
 	}
 
 	for _, th := range theories {
+		// Mirror production: challenged_memory_id goes into metadata JSON,
+		// source_id stays NULL.
+		metaJSON, _ := json.Marshal(map[string]interface{}{
+			"status":               "pending",
+			"challenged_memory_id": th.challengedID,
+			"evidence":             "theoretical challenge",
+		})
 		_, err := dm.SQLDB().Exec(`
-			INSERT INTO memories (id, collection, content, source_id, weight, synthetic)
+			INSERT INTO memories (id, collection, content, metadata, weight, synthetic)
 			VALUES (?, ?, ?, ?, ?, 0)`,
-			th.id, th.coll, th.content, th.sourceID, th.weight)
+			th.id, th.coll, th.content, string(metaJSON), th.weight)
 		if err != nil {
 			t.Fatalf("insert theory %s: %v", th.id, err)
 		}

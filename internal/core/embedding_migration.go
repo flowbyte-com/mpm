@@ -222,15 +222,20 @@ func takeBackup(dm *DatabaseManager) (string, error) {
 // The spec referenced kind IN ('semantic_collision', 'provenance_collision',
 // 'unresolved_state_collision') but that column was never added.
 // We identify collision theories by whether their challenged memory was
-// hash-embedded (source_id references the challenged memory).
+// hash-embedded.
+//
+// Theories (collection='theories') reference the challenged memory via
+// json_extract(metadata, '$.challenged_memory_id') — NOT via source_id.
+// Production theory creation lives in epistemology_tools.go:54-60 and
+// stores the reference in metadata; source_id is NULL on real theories
+// (194/194 in the live DB at the time of this migration).
 func markSyntheticTheories(dm *DatabaseManager) (int, error) {
-	// Theories (collection='theories') reference the challenged memory via source_id.
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET synthetic = 1
 		WHERE synthetic = 0
 		  AND collection = 'theories'
-		  AND source_id IN (
+		  AND json_extract(metadata, '$.challenged_memory_id') IN (
 			  SELECT id FROM memories
 			  WHERE embedding_source = 'hash' AND deleted_at IS NULL
 		  )
@@ -250,9 +255,12 @@ func markSyntheticTheories(dm *DatabaseManager) (int, error) {
 // NOTE: the memories.kind column does not exist, so all theories are
 // treated uniformly. The gate uses NOT EXISTS to ensure ALL challenges
 // are synthetic before restoring weight.
+//
+// Theory → challenged-memory reference lives in
+// json_extract(metadata, '$.challenged_memory_id'), not source_id —
+// see markSyntheticTheories for why.
 func runProvenanceGatedUnchallenge(dm *DatabaseManager) (int, error) {
 	// Find candidate memories: challenged only by synthetic theories, currently reduced.
-	// We use source_id to find theories (collection='theories') challenging this memory.
 	rows, err := dm.db.Query(`
 		SELECT m.id, m.weight
 		FROM memories m
@@ -260,13 +268,13 @@ func runProvenanceGatedUnchallenge(dm *DatabaseManager) (int, error) {
 		  AND m.weight < 1.0
 		  AND EXISTS (
 			  SELECT 1 FROM memories t
-			  WHERE t.source_id = m.id
+			  WHERE json_extract(t.metadata, '$.challenged_memory_id') = m.id
 			    AND t.collection = 'theories'
 			    AND t.synthetic = 1
 		  )
 		  AND NOT EXISTS (
 			  SELECT 1 FROM memories t
-			  WHERE t.source_id = m.id
+			  WHERE json_extract(t.metadata, '$.challenged_memory_id') = m.id
 			    AND t.collection = 'theories'
 			    AND t.synthetic = 0
 		  )
