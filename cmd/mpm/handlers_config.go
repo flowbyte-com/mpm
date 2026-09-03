@@ -99,11 +99,20 @@ func handleConfig(args []string) int {
 		return handleConfigComponent(args[1:])
 	case "capability":
 		return handleConfigCapability(args[1:])
+	case "detect-embedding":
+		cmd := &DetectEmbeddingCmd{}
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--apply" && i+1 < len(args) {
+				cmd.Apply = args[i+1]
+				i++
+			}
+		}
+		return cmd.Run()
 	case "help", "-h", "--help":
 		printConfigHelp()
 		return 0
 	default:
-		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, (no args = interactive wizard)", args[0])
+		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, detect-embedding, (no args = interactive wizard)", args[0])
 		return 1
 	}
 }
