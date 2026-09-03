@@ -210,7 +210,7 @@ func takeBackup(dm *DatabaseManager) (string, error) {
 	path := filepath.Join(dir, "embeddings-"+ts+".db.bak")
 	// VACUUM INTO is atomic (writes to temp then renames).
 	if _, err := dm.db.Exec("VACUUM INTO ?", path); err != nil {
-		return "", err
+		return "", fmt.Errorf("takeBackup: VACUUM INTO %s: %w", path, err)
 	}
 	return path, nil
 }
@@ -235,6 +235,7 @@ func markSyntheticTheories(dm *DatabaseManager) (int, error) {
 		SET synthetic = 1
 		WHERE synthetic = 0
 		  AND collection = 'theories'
+		  AND deleted_at IS NULL
 		  AND json_extract(metadata, '$.challenged_memory_id') IN (
 			  SELECT id FROM memories
 			  WHERE embedding_source = 'hash' AND deleted_at IS NULL
@@ -271,12 +272,14 @@ func runProvenanceGatedUnchallenge(dm *DatabaseManager) (int, error) {
 			  WHERE json_extract(t.metadata, '$.challenged_memory_id') = m.id
 			    AND t.collection = 'theories'
 			    AND t.synthetic = 1
+			    AND t.deleted_at IS NULL
 		  )
 		  AND NOT EXISTS (
 			  SELECT 1 FROM memories t
 			  WHERE json_extract(t.metadata, '$.challenged_memory_id') = m.id
 			    AND t.collection = 'theories'
 			    AND t.synthetic = 0
+			    AND t.deleted_at IS NULL
 		  )
 	`)
 	if err != nil {
