@@ -188,11 +188,12 @@ func (dm *DatabaseManager) DeleteReference(id string) error {
 // EmbedReferenceChunks fills in NULL embeddings for chunks belonging
 // to docID. Idempotent: chunks with non-NULL embeddings are skipped
 // (they were embedded by a previous pass or by re-ingest of unchanged
-// content). Per-chunk embedding uses EmbedText, which falls back to
-// HashEmbed when no provider is configured — so this method always
-// populates something, never returns per-chunk failure counts in
-// production. Database-level errors (query / UPDATE) are returned as
-// err; ctx cancellation is checked between chunks and aborts cleanly.
+// content). Per-chunk embedding uses EmbedText — when the provider is
+// absent, disabled, or unreachable, EmbedText returns (nil, ...) and
+// embeddingBytes(nil) writes NULL to the row. Database-level errors
+// (query / UPDATE) are returned as err; ctx cancellation is checked
+// between chunks and aborts cleanly. Per-chunk embed failures are
+// counted in `failed` but do not abort the loop.
 //
 // Embedding is intentionally split from AddReference:
 //   - AddReference's tx stays small and fast (chunk rows + diff logic
