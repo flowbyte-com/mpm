@@ -138,6 +138,13 @@ func (d *DefaultDedup) Check(_ context.Context, purpose string, skipCapabilityID
 			// dedup anyway.
 			continue
 		}
+		if ref.EmbeddingSource == "hash" {
+			// Hash-sourced embeddings are deterministic fingerprints
+			// with no semantic content — cosine comparison against them
+			// is meaningless. Skip (redundant with SQL filter; kept as
+			// defense-in-depth).
+			continue
+		}
 		var stored []float32
 		if err := json.Unmarshal(ref.Embedding, &stored); err != nil {
 			// Malformed embedding in the DB. Skip this row;
