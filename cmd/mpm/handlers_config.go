@@ -103,9 +103,12 @@ func handleConfig(args []string) int {
 	case "detect-embedding":
 		cmd := &DetectEmbeddingCmd{}
 		for i := 1; i < len(args); i++ {
-			if args[i] == "--apply" && i+1 < len(args) {
+			switch {
+			case args[i] == "--apply" && i+1 < len(args):
 				cmd.Apply = args[i+1]
 				i++
+			case args[i] == "--force":
+				cmd.Force = true
 			}
 		}
 		return cmd.Run()
@@ -152,6 +155,11 @@ func handleConfigShow(c *config.Config) int {
 	fmt.Printf("  Synthesis engine: %s\n", synStatus)
 
 	// Embedding — canonical embedding configuration per spec §6.1.
+	// Four operator-meaningful states must be clearly distinguishable:
+	//   - absent (no provider configured, no env fallback)
+	//   - intentionally disabled (components.embedding="disabled")
+	//   - profile/configured (a real profile is bound)
+	//   - env legacy fallback (OLLAMA_* env vars resolved directly)
 	cfg := mpminternal.DefaultEmbeddingConfig()
 	fmt.Println()
 	fmt.Println("  Embedding")
@@ -163,13 +171,30 @@ func handleConfigShow(c *config.Config) int {
 			srcLabel = "env (legacy fallback)"
 		}
 		fmt.Printf("    source:  %s\n", srcLabel)
+		// Only show the profile line when one was actually bound. The
+		// env-fallback path has no profile (the env vars resolved to a
+		// provider directly) — emitting "profile: env" would falsely
+		// suggest a profile binding exists.
 		if cfg.ProfileName != "" {
 			fmt.Printf("    profile: %s\n", cfg.ProfileName)
 		}
-		fmt.Printf("    provider: %s\n", cfg.ProviderName)
-		fmt.Printf("    status:  %s\n", cfg.Status)
-		if cfg.LastError != nil {
-			fmt.Printf("    error:   %v\n", cfg.LastError)
+		// For the absent state, "provider: null" / "status: null"
+		// reads as a Go-internal sentinel rather than a meaningful
+		// operator signal. Surface the diagnostic explicitly.
+		if cfg.Source == mpminternal.EmbeddingSourceAbsent {
+			fmt.Printf("    provider: (none configured — set components[\"embedding\"] in mpm_config.json or OLLAMA_ENDPOINT/OLLAMA_MODEL env vars)\n")
+		} else {
+			// Split "provider:model" into separate lines for readability.
+			// Format: "ollama:nomic-embed-text" → provider="ollama", model="nomic-embed-text"
+			provider, model := splitProviderModel(cfg.ProviderName)
+			fmt.Printf("    provider: %s\n", provider)
+			if model != "" {
+				fmt.Printf("    model:    %s\n", model)
+			}
+			fmt.Printf("    status:  %s\n", cfg.Status)
+			if cfg.LastError != nil {
+				fmt.Printf("    error:   %v\n", cfg.LastError)
+			}
 		}
 	}
 
@@ -834,6 +859,23 @@ func strconvAtoi(s string) (int, error) {
 	return n, nil
 }
 
+// splitProviderModel splits EmbeddingConfig.ProviderName ("provider:model")
+// into separate provider/model strings for human-readable display. If the
+// input has no colon (e.g. "null" or unexpected shapes), the entire input
+// is returned as the provider with an empty model. The display formatter
+// always renders the provider line; the model line is suppressed when empty.
+func splitProviderModel(s string) (provider, model string) {
+	if s == "" || s == "null" {
+		return s, ""
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			return s[:i], s[i+1:]
+		}
+	}
+	return s, ""
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -849,6 +891,12 @@ Usage:
   mpm config set <key> <value>     Set one value
   mpm config edit                  Open mpm_config.json in $EDITOR
   mpm config validate              Validate configuration shape
+  mpm config detect-embedding [--apply <name>] [--force]
+                                Probe Ollama for embedding-capable
+                                models; --apply writes a profile and
+                                binds components.embedding. --force
+                                overwrites an existing profile or
+                                rebinds the component binding.
 
 Keys (canonical names; aliases accepted):
   model, api_key (alias: token), base_url (alias: endpoint),

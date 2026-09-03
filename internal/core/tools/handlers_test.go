@@ -2134,3 +2134,112 @@ func TestHandleSaveToMemory_EmbeddingUnreachable(t *testing.T) {
 		t.Errorf("error should mention 'unreachable': %v", errMsg)
 	}
 }
+
+// TestHandleSaveToMemory_EmbeddingEnvFallbackConfigured verifies that
+// Source=EnvFallback + Status=Configured is treated as Case 3 (pure
+// success, no embedding_status field). The legacy env fallback path is
+// functionally identical to a profile-bound configured provider from
+// the caller's perspective — the embedding was generated successfully,
+// so the response carries no embedding_status / backfill_required noise.
+func TestHandleSaveToMemory_EmbeddingEnvFallbackConfigured(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	cfg := &internal.EmbeddingConfig{
+		Source:       internal.EmbeddingSourceEnvFallback,
+		ProviderName: "ollama:nomic-embed-text",
+		Provider:     stubProviderOK{},
+		Status:       internal.EmbeddingStatusConfigured,
+	}
+	prev := internal.SetEmbedConfigForTest(cfg)
+	defer internal.ResetEmbedConfigForTest()
+	_ = prev
+
+	result, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": "test embedding env fallback configured",
+			"tags": []interface{}{"embed-test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmMemory save failed: %v", err)
+	}
+	res := result.(map[string]interface{})
+
+	if memID, ok := res["memory_id"].(string); !ok || memID == "" {
+		t.Errorf("memory_id missing or empty: %v", res["memory_id"])
+	}
+	if pers, ok := res["memory_persisted"].(bool); !ok || !pers {
+		t.Errorf("memory_persisted should be true: %v", res["memory_persisted"])
+	}
+	// EnvFallback + Configured is functionally available — no
+	// embedding_status field should appear (spec §4.4 Case 3).
+	if _, hasStatus := res["embedding_status"]; hasStatus {
+		t.Errorf("embedding_status should not be present for env-fallback configured: %v", res["embedding_status"])
+	}
+	if _, hasBackfill := res["backfill_required"]; hasBackfill {
+		t.Errorf("backfill_required should not be present for env-fallback configured: %v", res["backfill_required"])
+	}
+	// Error field must NOT appear — the call succeeded.
+	if _, hasErr := res["error"]; hasErr {
+		t.Errorf("error field should not appear for env-fallback configured: %v", res["error"])
+	}
+}
+
+// TestHandleSaveToMemory_EmbeddingProfileMisconfigured verifies that
+// Source=Profile + Status=Misconfigured surfaces as the §4.4 Case 1
+// "unavailable" structured error. The misconfigured profile resolves
+// to NullProvider, which returns (nil, nil) from Embed — but the
+// runtime guard at embeddings.go:376 ("provider returned zero-length
+// vector") then converts that into a non-nil error, which trips the
+// embedding_error branch in the MCP handler.
+//
+// This test pins down that contract: a misconfigured profile at the
+// config layer becomes a runtime embedding failure for callers, so
+// they receive the same structured unavailable response as any other
+// embedding failure — and crucially, the memory row is still persisted.
+func TestHandleSaveToMemory_EmbeddingProfileMisconfigured(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	cfg := &internal.EmbeddingConfig{
+		Source:       internal.EmbeddingSourceProfile,
+		ProfileName:  "broken",
+		ProviderName: "null",
+		Provider:     internal.NullProvider{},
+		Status:       internal.EmbeddingStatusMisconfigured,
+		LastError:    fmt.Errorf("profile \"broken\" referenced by components.embedding does not exist"),
+	}
+	prev := internal.SetEmbedConfigForTest(cfg)
+	defer internal.ResetEmbedConfigForTest()
+	_ = prev
+
+	result, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": "test embedding profile misconfigured",
+			"tags": []interface{}{"embed-test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleMpmMemory save should not return error for misconfigured profile: %v", err)
+	}
+	res := result.(map[string]interface{})
+
+	// Memory is still persisted even though embedding failed.
+	if memID, ok := res["memory_id"].(string); !ok || memID == "" {
+		t.Errorf("memory_id missing or empty: %v", res["memory_id"])
+	}
+	if pers, ok := res["memory_persisted"].(bool); !ok || !pers {
+		t.Errorf("memory_persisted should be true (memory must persist even when embedding fails): %v", res["memory_persisted"])
+	}
+	// Misconfigured profile surfaces the same shape as any embedding
+	// failure — §4.4 Case 1 unavailable structured response.
+	if status, ok := res["embedding_status"].(string); !ok || status != "unavailable" {
+		t.Errorf("embedding_status should be 'unavailable' for misconfigured profile: %v", res["embedding_status"])
+	}
+	if backfill, ok := res["backfill_required"].(bool); !ok || !backfill {
+		t.Errorf("backfill_required should be true for misconfigured profile: %v", res["backfill_required"])
+	}
+	errMsg, hasErr := res["error"].(string)
+	if !hasErr || errMsg == "" {
+		t.Errorf("error field should be non-empty for misconfigured profile: %v", res["error"])
+	}
+}

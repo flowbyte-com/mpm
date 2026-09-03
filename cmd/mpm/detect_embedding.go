@@ -22,6 +22,10 @@ import (
 type DetectEmbeddingCmd struct {
 	// Apply is the profile name to create and bind when --apply is given.
 	Apply string
+	// Force overwrites an existing profile and rebinds components.embedding
+	// when --apply is given. Without --force, --apply refuses to mutate
+	// any existing profile.
+	Force bool
 }
 
 // Run executes the detect-embedding command.
@@ -76,9 +80,16 @@ func (c *DetectEmbeddingCmd) Run() int {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]config.Profile{}
 	}
-	if _, exists := cfg.Profiles[c.Apply]; exists {
-		usererror.Error("--apply refused: profile %q already exists; use mpm config profile remove %s first", c.Apply, c.Apply)
+	if _, exists := cfg.Profiles[c.Apply]; exists && !c.Force {
+		usererror.Errorf(fmt.Sprintf("--apply refused: profile %q already exists; re-run with --force to overwrite, or `mpm config profile remove %s` first", c.Apply, c.Apply))
 		return 1
+	}
+	// --force on an existing binding: warn so the operator knows they
+	// are about to rebind components.embedding.
+	if existingBinding, hasBinding := cfg.Components["embedding"]; hasBinding && existingBinding != c.Apply {
+		if c.Force {
+			fmt.Printf("⚠  rebinding components[\"embedding\"]: %q → %q (--force)\n", existingBinding, c.Apply)
+		}
 	}
 	cfg.Profiles[c.Apply] = config.Profile{
 		Provider: "ollama",
