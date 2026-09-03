@@ -296,7 +296,17 @@ func providerName(p *config.Profile) string {
 var (
 	defaultEmbedConfigOnce sync.Once
 	defaultEmbedConfig     *EmbeddingConfig
+	// testEmbedConfig is installed by tests to override the cached config.
+	testEmbedConfig *EmbeddingConfig
 )
+
+// SetEmbedConfigForTest installs a test config and returns the previous
+// value so tests can defer restoration.
+func SetEmbedConfigForTest(cfg *EmbeddingConfig) *EmbeddingConfig {
+	prev := testEmbedConfig
+	testEmbedConfig = cfg
+	return prev
+}
 
 // DefaultEmbeddingConfig returns a cached embedding config using
 // mpm_config.json. The config is resolved once and then cached for
@@ -312,6 +322,9 @@ var (
 // No network probing at any step. Probing lives in
 // `mpm config detect-embedding`.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
+	if testEmbedConfig != nil {
+		return testEmbedConfig
+	}
 	defaultEmbedConfigOnce.Do(func() {
 		cfg, err := config.LoadConfig()
 		if err != nil {
@@ -331,19 +344,35 @@ func DefaultEmbeddingConfig() *EmbeddingConfig {
 	return defaultEmbedConfig
 }
 
-// EmbedText tries the real embedding provider; falls back to HashEmbed on failure.
-// This is the correct usage in all hot paths (mpm add, cascade materialize,
-// and any other ingestion surface). The fsnotify-based watch daemon was
-// deprecated in commit 6588cb8 and hard-removed in 215fd09 — there is
-// no watcher ingest hot path; file ingestion is operator-driven via
-// `mpm cascade materialize`.
-func EmbedText(text string) []float32 {
+// EmbedText returns the embedding vector for the given text, or
+// (nil, nil) when no provider is configured / reachable and the
+// absence is acceptable. Returns (nil, err) when the provider was
+// configured but failed.
+//
+// HashEmbed is NOT a fallback. Silent semantic substitution is the
+// historical defect this spec eliminates. See docs/superpowers/specs/
+// 2026-09-03-mpm-embedding-provider-design.md §4.3.
+func EmbedText(text string) ([]float32, error) {
 	cfg := DefaultEmbeddingConfig()
-	if cfg.Provider.Name() != "null" {
-		if vec, err := cfg.Provider.Embed(text); err == nil && len(vec) > 0 {
-			return vec
+	switch cfg.Source {
+	case EmbeddingSourceDisabled, EmbeddingSourceAbsent:
+		return nil, nil
+	case EmbeddingSourceProfile, EmbeddingSourceEnvFallback:
+		vec, err := cfg.Provider.Embed(text)
+		if err != nil {
+			// Downgrade status for this process's lifetime.
+			cfg.Status = EmbeddingStatusUnreachable
+			cfg.LastError = err
+			return nil, err
 		}
+		if len(vec) == 0 {
+			err := fmt.Errorf("embed: provider %q returned zero-length vector", cfg.ProviderName)
+			cfg.Status = EmbeddingStatusUnreachable
+			cfg.LastError = err
+			return nil, err
+		}
+		return vec, nil
 	}
-	return HashEmbed(text)
+	return nil, nil
 }
 

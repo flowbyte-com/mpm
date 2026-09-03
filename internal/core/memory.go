@@ -67,7 +67,9 @@ type SearchResult struct {
 	Created   string `json:"created"`
 }
 
-// HashEmbed creates a simple hash-based embedding (fallback)
+// HashEmbed creates a simple deterministic hash-based embedding
+// for provenance-gated dedup and similarity search. It is NOT called
+// by EmbedText — it is a private forensic-classifier helper.
 func HashEmbed(text string) []float32 {
 	h := sha256.Sum256([]byte(text))
 	vec := make([]float32, 256)
@@ -359,7 +361,10 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 		}
 	}
 
-	embedding := EmbedText(content)
+	embedding, embedErr := EmbedText(content)
+	if embedErr != nil {
+		slog.Warn("AddMemory: embedding failed, memory saved without embedding", "error", embedErr.Error())
+	}
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	fullMetadata := map[string]interface{}{
 		"source":    source,
@@ -474,7 +479,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	floatWeight := normalizeWeightToColumn(weight)
 	intWeight := int(floatWeight)
 
-	embedding := EmbedText(content)
+	embedding, _ := EmbedText(content)
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	fullMetadata := map[string]interface{}{
 		"source":    source,
@@ -2977,7 +2982,7 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
-	embedding := EmbedText(content)
+	embedding, _ := EmbedText(content)
 	embeddingJSON, _ := json.Marshal(embedding)
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 

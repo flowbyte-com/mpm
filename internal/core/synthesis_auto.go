@@ -533,7 +533,10 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		allTags = []string{}
 	}
 	allTags = append(allTags, "synthesized", "ltm")
-	embedding := EmbedText(result.Content)
+	embedding, embedErr := EmbedText(result.Content)
+	if embedErr != nil {
+		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("synthesis succeeded but embedding failed: %v", embedErr), "", AuditContext{})
+	}
 
 	// 8. Save the synthesized LTM
 	newSynthID, err := dm.SaveMemory("memories", result.Content, "", allTags, metadata, embedding, true, 10)

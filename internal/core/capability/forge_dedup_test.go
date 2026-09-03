@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"math"
 	"testing"
 )
@@ -141,7 +142,7 @@ func TestDefaultDedup_EmptyEmbedderReturnsNoMatch(t *testing.T) {
 	store := &Store{} // ListNonRetiredEmbeddings will fail; but we test
 	// the early-return path with a non-empty purpose and nil embed
 	// result.
-	d := NewDefaultDedup(store, func(string) []float32 { return nil }, 0.92)
+	d := NewDefaultDedup(store, func(string) ([]float32, error) { return nil, errors.New("simulated embed failure") }, 0.92)
 	res, err := d.Check(context.Background(), "purpose", nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -162,8 +163,8 @@ func TestDefaultDedup_SkipsEmptyEmbeddings(t *testing.T) {
 
 	// Use a controlled embedder that returns a vector very
 	// similar to cap_match's stored embedding.
-	embedder := func(_ string) []float32 {
-		return []float32{0.1, 0.2, 0.3, 0.4}
+	embedder := func(_ string) ([]float32, error) {
+		return []float32{0.1, 0.2, 0.3, 0.4}, nil
 	}
 	d := NewDefaultDedup(store, embedder, 0.92)
 
@@ -189,7 +190,7 @@ func TestDefaultDedup_SkipsIDsInSkipList(t *testing.T) {
 	seedCapabilityWithEmbedding(t, db, "cap_b", "beta", []float32{0, 1, 0})
 
 	// Embedder returns (1, 0, 0) — matches cap_a perfectly.
-	embedder := func(_ string) []float32 { return []float32{1, 0, 0} }
+	embedder := func(_ string) ([]float32, error) { return []float32{1, 0, 0}, nil }
 	d := NewDefaultDedup(store, embedder, 0.92)
 
 	// Without skip: matches cap_a.
@@ -212,7 +213,7 @@ func TestDefaultDedup_BelowThresholdIsNotAMatch(t *testing.T) {
 	seedCapabilityWithEmbedding(t, db, "cap_x", "x", []float32{1, 0, 0})
 
 	// Orthogonal embedder — similarity 0, well below 0.92.
-	embedder := func(_ string) []float32 { return []float32{0, 1, 0} }
+	embedder := func(_ string) ([]float32, error) { return []float32{0, 1, 0}, nil }
 	d := NewDefaultDedup(store, embedder, 0.92)
 
 	res, err := d.Check(context.Background(), "p", nil)
@@ -241,7 +242,7 @@ func TestDefaultDedup_IgnoresRetiredAndRolledBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	embedder := func(_ string) []float32 { return []float32{1, 0, 0} }
+	embedder := func(_ string) ([]float32, error) { return []float32{1, 0, 0}, nil }
 	d := NewDefaultDedup(store, embedder, 0.92)
 
 	res, _ := d.Check(context.Background(), "p", nil)
@@ -259,7 +260,7 @@ func TestDefaultDedup_HandlesCorruptEmbedding(t *testing.T) {
 	seedCapabilityWithRawEmbedding(t, db, "cap_corrupt", "corrupt", []byte("not-json{"))
 	seedCapabilityWithEmbedding(t, db, "cap_good", "good", []float32{1, 0, 0})
 
-	embedder := func(_ string) []float32 { return []float32{1, 0, 0} }
+	embedder := func(_ string) ([]float32, error) { return []float32{1, 0, 0}, nil }
 	d := NewDefaultDedup(store, embedder, 0.92)
 
 	res, err := d.Check(context.Background(), "p", nil)
