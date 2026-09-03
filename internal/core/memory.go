@@ -2982,6 +2982,17 @@ func (s *MemoryStore) BackfillLTMFlags() (int, error) {
 
 // UpdateMemory updates an existing memory's content and metadata.
 // This allows agents to revise memories when they learn new information.
+//
+// Embedding contract on update (mirrors AddMemory / AddMemoryWithWeight):
+//   - When EmbedText succeeds, the new embedding is stored AND the
+//     cluster re-assignment runs.
+//   - When EmbedText fails (provider error), the embedding column is
+//     preserved (NOT overwritten with NULL) and the failure is logged.
+//     The durable update of content/tags/metadata still happens.
+//   - When EmbedText returns (nil, nil) because the embedding provider
+//     is absent/disabled (NullProvider), the existing embedding column
+//     is preserved as-is rather than overwritten with the literal
+//     "null" JSON token.
 func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, metadata map[string]interface{}) error {
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
@@ -2991,27 +3002,46 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
-	embedding, _ := EmbedText(content)
-	embeddingJSON, _ := json.Marshal(embedding)
+	embedding, embedErr := EmbedText(content)
+	if embedErr != nil {
+		// Provider error: do NOT overwrite the embedding column. Log
+		// to slog (the MemoryStore has no audit surface here) and
+		// fall through to the preserve-existing branch below.
+		slog.Warn("MemoryStore.UpdateMemory: embedding failed, prior embedding preserved",
+			"memory_id", id, "error", embedErr.Error())
+		embedding = nil
+	}
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
-	_, err := s.DB.Exec(`
-		UPDATE memories
-		SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-		    updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE id = ?
-	`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
-	if err != nil {
-		return err
+	var execErr error
+	if embedding != nil {
+		embeddingJSON, _ := json.Marshal(embedding)
+		_, execErr = s.DB.Exec(`UPDATE memories
+			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE id = ?`,
+			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+	} else {
+		// Embedding not regenerated — preserve the existing column.
+		_, execErr = s.DB.Exec(`UPDATE memories
+			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
+			    updated_at = CAST(strftime('%s','now') AS INTEGER)
+			WHERE id = ?`,
+			content, string(tagsJSON), string(metadataJSON), contentHash, id)
+	}
+	if execErr != nil {
+		return execErr
 	}
 
 	// Re-assign to nearest cluster after embedding change. Best-effort
 	// (no-op if no clusters exist; rebalance recovers missing
-	// assignments). The query path's JOIN picks up the new assignment
-	// immediately.
-	if _, assignErr := AssignToCluster(s.DB.DB, id, embedding, ""); assignErr != nil {
-		slog.Warn("MemoryStore.UpdateMemory: IVF re-assignment failed (memory still searchable via brute-force)",
-			"memory_id", id, "error", assignErr.Error())
+	// assignments). Skipped when embedding is nil — there's nothing new
+	// to cluster on.
+	if embedding != nil {
+		if _, assignErr := AssignToCluster(s.DB.DB, id, embedding, ""); assignErr != nil {
+			slog.Warn("MemoryStore.UpdateMemory: IVF re-assignment failed (memory still searchable via brute-force)",
+				"memory_id", id, "error", assignErr.Error())
+		}
 	}
 	return nil
 }
