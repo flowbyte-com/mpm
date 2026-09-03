@@ -100,16 +100,12 @@ func handleAdd(args []string) int {
 	}
 
 	// Auto-embed: try real embeddings, fall back to hash if provider unavailable
-	var embedding []float32
-	cfg := mpminternal.DefaultEmbeddingConfig()
-	if cfg.Provider.Name() != "null" {
-		if vec, err := cfg.Provider.Embed(content); err == nil && len(vec) > 0 {
-			embedding = vec
-		} else {
-			embedding = mpminternal.HashEmbed(content)
-		}
-	} else {
-		embedding = mpminternal.HashEmbed(content)
+	embedding, embedErr := mpminternal.EmbedText(content)
+	if embedErr != nil {
+		// Memory is saved with NULL embedding; we surface the error
+		// and exit non-zero.
+		fmt.Fprintf(os.Stderr, "Memory saved, but embedding generation failed:\n  embedding provider %q is unreachable\nThe memory has been stored without an embedding.\nRun `mpm ops backfill-embeddings` after the provider is available.\n", mpminternal.DefaultEmbeddingConfig().ProfileName)
+		os.Exit(1)
 	}
 	isLongTerm := *weight >= 10
 

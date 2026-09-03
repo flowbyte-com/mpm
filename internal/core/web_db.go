@@ -458,7 +458,7 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error {
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
-	embedding := EmbedText(content)
+	embedding, _ := EmbedText(content)
 	embeddingJSON, _ := json.Marshal(embedding)
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 

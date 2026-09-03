@@ -98,3 +98,42 @@ func TestResolveEmbeddingConfig_Absent(t *testing.T) {
 	// suppress unused-import warning
 	_ = os.Getenv
 }
+
+func TestEmbedText_NilForDisabled(t *testing.T) {
+	// Force a disabled-source config via the test setter.
+	prev := SetEmbedConfigForTest(&EmbeddingConfig{
+		Source:       EmbeddingSourceDisabled,
+		ProviderName: "null",
+		Provider:     NullProvider{},
+		Status:       EmbeddingStatusNull,
+	})
+	defer SetEmbedConfigForTest(prev)
+
+	vec, err := EmbedText("hello")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if vec != nil {
+		t.Errorf("vec = %v, want nil", vec)
+	}
+}
+
+func TestEmbedText_ErrorOnProviderFailure(t *testing.T) {
+	// Force a configured-but-unreachable provider by pointing at a closed port.
+	prev := SetEmbedConfigForTest(&EmbeddingConfig{
+		Source:       EmbeddingSourceEnvFallback,
+		ProfileName:  "",
+		ProviderName: "ollama:nomic-embed-text",
+		Provider:     NewOllamaProvider("http://127.0.0.1:1", "nomic-embed-text"),
+		Status:       EmbeddingStatusConfigured,
+	})
+	defer SetEmbedConfigForTest(prev)
+
+	vec, err := EmbedText("hello")
+	if err == nil {
+		t.Fatal("err = nil, want error")
+	}
+	if vec != nil {
+		t.Errorf("vec = %v, want nil", vec)
+	}
+}

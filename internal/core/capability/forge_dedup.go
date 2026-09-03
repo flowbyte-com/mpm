@@ -57,27 +57,26 @@ type DedupChecker interface {
 }
 
 // DefaultDedup is the production dedup. It uses the package-level
-// internal.EmbedText (which falls back to HashEmbed when no real
-// provider is configured) and scans the Store for non-retired
+// internal.EmbedText and scans the Store for non-retired
 // capabilities to compare against.
 //
 // Tests inject a custom embedder to make the check deterministic.
 type DefaultDedup struct {
 	store     *Store
-	embedder  func(string) []float32
+	embedder  func(string) ([]float32, error)
 	threshold float32
 }
 
 // DefaultDedupConfig returns the production defaults. Threshold
 // 0.92 is the spec §3.2 default; embedder is the package-level
-// internal.EmbedText (real provider or HashEmbed fallback).
-func DefaultDedupConfig() (func(string) []float32, float32) {
+// internal.EmbedText.
+func DefaultDedupConfig() (func(string) ([]float32, error), float32) {
 	return internal.EmbedText, 0.92
 }
 
 // NewDefaultDedup builds a DefaultDedup. Zero-value embedder or
 // threshold fall back to the defaults.
-func NewDefaultDedup(store *Store, embedder func(string) []float32, threshold float32) *DefaultDedup {
+func NewDefaultDedup(store *Store, embedder func(string) ([]float32, error), threshold float32) *DefaultDedup {
 	defEmbedder, defThreshold := DefaultDedupConfig()
 	if embedder == nil {
 		embedder = defEmbedder
@@ -112,12 +111,11 @@ func (d *DefaultDedup) Check(_ context.Context, purpose string, skipCapabilityID
 	}
 
 	// Embed the proposed purpose.
-	proposed := d.embedder(purpose)
-	if len(proposed) == 0 {
-		// Empty embedding means the provider failed AND HashEmbed
-		// returned nothing (shouldn't happen, but defensive).
-		// Treat as no match — better to over-accept than to block
-		// every proposal when the embedding service is down.
+	proposed, embedErr := d.embedder(purpose)
+	if embedErr != nil || len(proposed) == 0 {
+		// Embedding failed or returned empty. Treat as no match —
+		// better to over-accept than to block every proposal when
+		// the embedding service is down.
 		return DedupResult{}, nil
 	}
 
