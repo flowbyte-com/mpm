@@ -204,6 +204,7 @@ func IVFSearch(db *sql.DB, queryEmbedding []float32, collection string, cfg IVFC
 	whereClauses := []string{
 		"embedding IS NOT NULL",
 		"embedding != 'null'",
+		"embedding_source != 'hash'",
 		"deleted_at IS NULL" + MemoryExpireClause,
 		"cluster_id IN (" + strings.Join(placeholders, ",") + ")",
 	}
@@ -597,7 +598,7 @@ func Rebalance(db *sql.DB, schemaPrefix string) (KMeansResult, int, error) {
 
 	memTable := schemaPrefix + "memories"
 	rows, err := db.Query(`SELECT id, embedding FROM ` + memTable + `
-		WHERE embedding IS NOT NULL AND embedding != 'null' AND deleted_at IS NULL` + MemoryExpireClause)
+		WHERE embedding IS NOT NULL AND embedding != 'null' AND embedding_source != 'hash' AND deleted_at IS NULL` + MemoryExpireClause)
 	if err != nil {
 		return empty, 0, fmt.Errorf("rebalance: load memories: %w", err)
 	}

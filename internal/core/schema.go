@@ -1269,4 +1269,9 @@ var SafeMigrations = [][3]string{
 	// evidence was a HashEmbed cosine get marked so the provenance-gated
 	// un-challenge can identify them.
 	{"memories", "synthetic", "INTEGER NOT NULL DEFAULT 0"},
+
+	// Trust-machinery filter: capabilities with hash-sourced embeddings
+	// (deterministic but semantically empty fingerprints) must be excluded
+	// from dedup cosine comparison since hash vectors carry no semantic signal.
+	{"capabilities", "embedding_source", "TEXT NOT NULL DEFAULT 'provider'"},
 }
