@@ -308,6 +308,13 @@ func SetEmbedConfigForTest(cfg *EmbeddingConfig) *EmbeddingConfig {
 	return prev
 }
 
+// ResetEmbedConfigForTest clears any test config, restoring the default.
+// Tests that modify the embedding config should defer this to guarantee
+// isolation regardless of test execution order.
+func ResetEmbedConfigForTest() {
+	testEmbedConfig = nil
+}
+
 // DefaultEmbeddingConfig returns a cached embedding config using
 // mpm_config.json. The config is resolved once and then cached for
 // the lifetime of the process.

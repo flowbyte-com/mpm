@@ -467,20 +467,27 @@ func normalizeWeightToColumn(weight float64) float64 {
 // as AddMemory but writes the weight column directly. The column is INTEGER
 // 1-100; ReinforceMemory/WeakenMemory increment by small deltas against this
 // same scale, so all callers stay in one continuous range.
-func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string, weight float64) (*Memory, error) {
+//
+// The third return value is the embedding error. It is non-nil when the
+// configured provider was reachable in principle but the call failed (network
+// error, model-not-found, dimension zero, etc.). A nil embedding with nil
+// error means the provider was disabled or absent — not an error condition.
+// Callers that need to distinguish disabled/absent from unavailable should
+// consult DefaultEmbeddingConfig().Source.
+func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string, weight float64) (*Memory, error, error) {
 	if collection == "" {
 		collection = "memories"
 	}
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
-			return nil, fmt.Errorf("failed to initialize database: %v", err)
+			return nil, nil, fmt.Errorf("failed to initialize database: %v", err)
 		}
 	}
 
 	floatWeight := normalizeWeightToColumn(weight)
 	intWeight := int(floatWeight)
 
-	embedding, _ := EmbedText(content)
+	embedding, embedErr := EmbedText(content)
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	fullMetadata := map[string]interface{}{
 		"source":    source,
@@ -501,7 +508,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight, createdAt)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	mem := &Memory{
@@ -523,7 +530,7 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 	if err := s.appendToMirror(mem); err != nil {
 		slog.Warn("failed to write to mirror", "error", err.Error())
 	}
-	return mem, nil
+	return mem, nil, embedErr
 }
 
 // addMemoryDirect is the fallback path when s.DM is nil (e.g. test fixtures
