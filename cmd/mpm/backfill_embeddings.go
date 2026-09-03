@@ -64,8 +64,11 @@ func handleBackfillEmbeddings(args []string) int {
 
 	// Provider needed for actual embedding generation
 	cfg := mpminternal.DefaultEmbeddingConfig()
-	if cfg.Source == mpminternal.EmbeddingSourceAbsent {
-		return usererror.Errorf("refusing to backfill: no embedding provider is configured and reachable.\nResolve one of:\n  - Run `mpm config detect-embedding --apply <name>` to discover and configure.\n  - Set `components[\"embedding\"]` in mpm_config.json.\n  - Set OLLAMA_ENDPOINT and OLLAMA_MODEL in the environment.")
+	if cfg.Source == mpminternal.EmbeddingSourceAbsent ||
+		cfg.Source == mpminternal.EmbeddingSourceDisabled ||
+		cfg.IntentionallyDisabled {
+		return usererror.Errorf(fmt.Sprintf("refusing to backfill: embedding provider is %s.\nResolve one of:\n  - Run `mpm config detect-embedding --apply <name>` to discover and configure.\n  - Set `components[\"embedding\"]` in mpm_config.json to a real profile.\n  - Remove the `\"disabled\"` sentinel from `components[\"embedding\"]`.\n  - Set OLLAMA_ENDPOINT and OLLAMA_MODEL in the environment.",
+			providerStateLabel(cfg)))
 	}
 	fmt.Printf("⚡ Embedding backfill using %s\n", cfg.Provider.Name())
 
@@ -174,6 +177,22 @@ func updateMemoryEmbedding(db *sql.DB, id string, vec []float32) error {
 }
 
 // ── Logging ───────────────────────────────────────────────────────────────────────
+
+// providerStateLabel renders the EmbeddingConfig's source/state as a short
+// human-readable label for the operator-facing refusal message. Helps
+// distinguish "operator chose disabled" from "no profile configured."
+func providerStateLabel(cfg *mpminternal.EmbeddingConfig) string {
+	switch {
+	case cfg.IntentionallyDisabled:
+		return "intentionally disabled (components.embedding=\"disabled\")"
+	case cfg.Source == mpminternal.EmbeddingSourceDisabled:
+		return "disabled"
+	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
+		return "absent (no provider configured)"
+	default:
+		return fmt.Sprintf("in state %s", cfg.Source)
+	}
+}
 
 func logEmbeddingFailure(id, content string, err error) {
 	entry := map[string]interface{}{
