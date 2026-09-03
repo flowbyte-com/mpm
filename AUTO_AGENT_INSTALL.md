@@ -200,43 +200,88 @@ If `mpm` is not resolvable, determine the installed binary location before chang
 
 # 6. Put MPM on the user's PATH
 
-MPM must be resolvable by normal agent subprocesses where the integration expects `mpm` to be found by name.
+MPM must be resolvable by normal agent subprocesses where the integration
+expects `mpm` to be found by name. There is exactly one supported
+mechanism — do not improvise.
 
-First inspect:
+## Required mechanism: `~/.local/bin` symlinks
 
-```bash
-printf '%s\n' "${PATH:-}"
-printf '%s\n' "${SHELL:-}"
+The canonical `scripts/install.sh` (the **only** install path; the legacy
+`--system` mode has been removed) creates two symlinks under
+`~/.local/bin`:
+
+```text
+~/.local/bin/mpm      ->  ~/.mpm/bin/mpm        (CLI wrapper)
+~/.local/bin/mpm-mcp  ->  ~/.mpm/bin/mpm-mcp    (MCP stdio server)
 ```
 
-Then determine the shell's appropriate persistent startup/configuration file.
+`~/.local/bin` is the freedesktop.org-standard user-PATH location and
+is on `PATH` by default in every modern Linux shell (bash, zsh, fish).
+The symlinks are idempotent — re-running the installer replaces them.
 
-Add the actual MPM binary directory, preserving the existing PATH.
+Only these two binaries are symlinked. Internal daemons
+(`mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) live only at
+`~/.mpm/bin/` and are invoked by systemd, never by the user. Putting
+them on PATH would invite accidental direct invocation and drift.
 
-Requirements:
-
-- do not replace the user's PATH;
-- do not add duplicate entries;
-- do not hard-code a developer-specific home directory;
-- make the edit idempotent;
-- verify the resulting shell can resolve `mpm`.
-
-Then run:
+Verify:
 
 ```bash
-command -v mpm
+command -v mpm            # expect: /home/<user>/.local/bin/mpm
+command -v mpm-mcp        # expect: /home/<user>/.local/bin/mpm-mcp
 mpm --version
 ```
 
-### Non-interactive agents and services
+## What NOT to do
 
-An interactive shell PATH is not necessarily inherited by services.
+**Strictly forbidden** — never write to the user's shell startup files
+under any circumstance:
 
-If a framework integration supports an explicit absolute `mpmBin`, use that current configuration mechanism for service/plugin execution.
+- `~/.bashrc`
+- `~/.bash_profile`
+- `~/.zshrc`
+- `~/.zprofile`
+- `~/.profile`
+- `~/.config/fish/config.fish`
+- Any shell- or framework-specific startup file
 
-This is particularly important for OpenClaw's gateway when it runs under `systemd --user`.
+Rationale: the user may run multiple shells, may source these files
+in non-interactive contexts where `PATH` mutations cause downstream
+breakage, and may have already configured `~/.local/bin` via distro
+defaults. Mutating these files from an installer is a hostile act
+that creates the exact `PATH`-corruption / shell-state-drift the
+symlink mechanism was designed to prevent.
 
-Do not assume that editing `.bashrc` or `.zshrc` fixes a service process.
+If `~/.local/bin` is missing from the user's current `PATH` (rare —
+most distros source `/etc/profile.d/` to add it), surface a warning
+and instruct the user to add it themselves:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"   # user does this, not the agent
+```
+
+Do **not** perform the edit on the user's behalf.
+
+## Non-interactive agents and services (mandatory `mpmBin`)
+
+An interactive shell `PATH` is not necessarily inherited by services.
+
+If a framework integration supports an explicit absolute `mpmBin`
+configuration key (OpenClaw's gateway, for example), it MUST be set
+to:
+
+```text
+mpmBin = /home/<user>/.local/bin/mpm   # or absolute path to ~/.mpm/bin/mpm
+```
+
+NEVER rely on `PATH` resolution from the service's perspective. The
+service may have a stripped-down environment, no sourced shell rc
+files, and no `~/.local/bin` on its `PATH`. Absolute path binding is
+the contract.
+
+This is particularly important for OpenClaw's gateway when it runs
+under `systemd --user` and for any other framework whose integration
+spawns subprocesses under a non-interactive systemd unit.
 
 ---
 
@@ -467,37 +512,57 @@ Do not assume that a project-local file affects every project on the machine.
 
 # 12. If no adapter exists for the current framework
 
-If `agent_installation/` has no matching framework directory:
+If `agent_installation/` has no matching framework directory, the agent
+MUST fail closed. **Do NOT fabricate a native plugin, scaffold a new
+adapter directory, or write any files under `agent_installation/`** —
+that path is reserved for hand-reviewed, version-controlled integrations
+shipped with the repository. Auto-generating one of these from an
+installer is exactly the kind of side-effect that pollutes the source
+tree and is impossible to audit.
 
-### Do not fabricate a native plugin.
+## Required fail-closed behavior
 
-Instead:
-
-1. Install/configure MPM core normally.
-2. Read:
-
+1. Install/configure MPM core normally (Section 5) so the `mpm` and
+   `mpm-mcp` binaries are available on PATH via the `~/.local/bin`
+   symlinks (Section 6).
+2. Print a clear diagnostic to the user:
    ```text
-   agent_installation/mpm-agent-protocol.md
+   MPM agent install: FAIL-CLOSED
+     framework: <detected framework>
+     reason:    no matching adapter under agent_installation/
+     action:    falling back to canonical `mpm call` CLI surface
+                (no native plugin, no behavioral instruction file
+                will be installed)
    ```
+3. Fall back strictly to the `mpm call` CLI surface for any MPM
+   operation. The behavioral contract from
+   `agent_installation/mpm-agent-protocol.md` still applies to the
+   agent's reasoning (wake on session start, persist during work,
+   handoff before closure), but it is communicated through the
+   existing agent instruction surface — not by creating new files
+   under `agent_installation/`.
+4. Do not modify the user's shell startup files, the framework's
+   config directory beyond what is required for `mpm call` to resolve,
+   or the MPM repository layout.
 
-3. Determine the current framework's actual persistent instruction file.
-4. Create a framework-specific behavioral adapter under:
+## What is forbidden
 
-   ```text
-   agent_installation/<framework>/
-   ```
+The following are strict violations of this contract and MUST NOT be
+performed by an automated installer:
 
-5. The adapter should at minimum contain:
-   - README/instructions;
-   - the framework-specific instruction template/snippet;
-   - an installer or deterministic installation procedure where justified;
-   - verification instructions.
-6. Install the behavioral section into the actual host working file.
-7. Clearly state that this is a **behavioral adapter**, not a native plugin/MCP implementation, unless native integration actually exists.
+- Creating a new directory under `agent_installation/<framework>/`
+- Writing any TypeScript, JavaScript, Python, or shell file under
+  `agent_installation/` claiming to be a native integration
+- Modifying the framework's runtime config (e.g. `~/.openclaw/`,
+  `~/.config/opencode/`) beyond the minimum required to point at the
+  existing `~/.local/bin/mpm-mcp` MCP server entry
+- Generating "stub" plugin manifests that defer the actual integration
+- Patching `mpm-agent-protocol.md` or any other file under
+  `agent_installation/` to "make it work" for the missing framework
 
-Do not invent a second persistence system.
-
-Use the existing MPM CLI/MCP interfaces.
+Native integration for a new framework is a hand-authored,
+version-controlled artifact. An installer that needs one must surface
+the gap and stop, not invent the artifact.
 
 ---
 
@@ -614,7 +679,46 @@ The second run must not:
 - create duplicate configuration entries;
 - corrupt existing MPM state.
 
-The existing framework installers are intended to preserve user content and manage only their own sections. Use those installers rather than replacing them with ad-hoc edits.
+The existing framework installers are intended to preserve user content
+and manage only their own sections. Use those installers rather than
+replacing them with ad-hoc edits.
+
+## Architecture-idempotency contract
+
+Re-runs MUST NOT reintroduce deprecated architecture patterns. The
+following are forbidden both on first install and on every re-run:
+
+- **`mpm_session`** — retired. The current session-boundary surface
+  is split across `mpm_handoff` (write/read/list/shred) and
+  `mpm_scratchpad` (flush/read/discard/promote). Re-running an
+  installer must not produce any tool manifest, instruction snippet,
+  or config file that references `mpm_session`.
+- **Legacy Python MCP shims** — there is no Python wrapper layer
+  between the host and `mpm-mcp`. Re-running must not recreate any
+  `mpm_*.py` shim files or wrapper scripts under `agent_installation/`,
+  the user's config dir, or anywhere on the resolved tool path.
+- **Split-tool violations** — `mpm_handoff` and `mpm_scratchpad` are
+  independent tools. Do not collapse them into a single "session"
+  tool, do not re-introduce a combined `mpm_handoff_scratchpad`
+  helper, and do not write behavioral instruction text that refers
+  to them as a unified surface.
+- **Shell rc mutation** — re-runs must not touch `.bashrc`,
+  `.zshrc`, `.profile`, or any shell startup file. The `~/.local/bin`
+  symlinks created on first install are the durable PATH surface.
+
+Verify by grepping the installed instruction files:
+
+```bash
+grep -rE 'mpm_session|python.*mcp.*shim|session.py' \
+    agent_installation/ "$HOME/.claude" "$HOME/.config/opencode" \
+    "$HOME/.hermes" "$HOME/.pi" 2>/dev/null
+
+# expected: no matches (or matches only in passive migration warnings
+# under agent_installation/ — these are documentation, not active code)
+```
+
+The agent must surface any active (non-documentation) hit as a
+regression and refuse to declare the installation complete.
 
 ---
 

@@ -14,17 +14,6 @@ For background and design rationale, see [README.md](../README.md).
 
 ---
 
-## Choose your install path
-
-| Path | Sudo? | Data root | Use when |
-|------|-------|-----------|----------|
-| **`./scripts/install.sh`** (recommended) | no | `$HOME/.mpm` | Default. Multi-tenant hosts, personal machines, anything where state should be isolated to the operator. Linger enables the scheduler to survive logout. |
-| System mode (`sudo ./scripts/install.sh --system`) | yes | `/var/lib/mpm` | Dedicated headless VMs where shared system state is intentional. Uses a system systemd unit (no linger needed). |
-
-**Pick the first unless you specifically need shared system state.**
-
----
-
 ## Prerequisites
 
 | Requirement | Verify with | Pass criterion |
@@ -34,9 +23,10 @@ For background and design rationale, see [README.md](../README.md).
 | Node.js (host tooling only) | `node -v` | version ≥ v22 |
 | LLM API key | configured in host config | auth block present |
 
-`sudo` is **not required** for the default install. The system-mode
-install (`--system`) does require root; use it only when you specifically
-need a system-wide service.
+`sudo` is **not required**. The installer runs entirely in your user
+context — no `/var/lib/mpm`, no `/etc/systemd/system` writes, no system
+state mutations outside `$HOME`. The legacy `--system` install path
+has been removed.
 
 ---
 
@@ -110,94 +100,21 @@ into the database. Re-running is safe — local edits are preserved.
 | `--dry-run` | Print intended actions, no changes |
 | `--validate` | Post-install validation (read-only) |
 | `--uninstall` | Remove installed artifacts. Data at `$HOME/.mpm/` is preserved |
-| `--system` | Use legacy `/var/lib/mpm` + system systemd (requires sudo) |
 | `--prefix <path>` | Override install prefix (default `$HOME/.mpm`) |
 | `--data-root <path>` | Override data root (default `$HOME/.mpm`) |
 | `--user <name>` | Override target user (default: current user) |
-| `--yes` | Skip confirmation prompts (auto-disable legacy unit when detected) |
+| `--yes` | Skip confirmation prompts |
 
 ```bash
 ./scripts/install.sh --check           # safe, no changes
 ./scripts/install.sh --dry-run         # show what would happen
 ./scripts/install.sh --uninstall       # remove artifacts (data preserved)
-sudo ./scripts/install.sh --system     # legacy /var/lib/mpm + system service
 ```
 
----
-
-## 2. Legacy / opt-in: system install (`--system`)
-
-> **Skip this section unless** you specifically need shared system state —
-> for example, a dedicated headless VM running MPM under a service
-> account. For personal machines, multi-tenant hosts, and most alpha
-> use cases, the user-space install (Section 1) is correct.
->
-> **Why this is opt-in:** the system install puts MPM state at
-> `/var/lib/mpm` with root-owned systemd units. That's the right shape
-> for production servers but the wrong shape for personal / multi-tenant
-> use where state should be isolated to a single user. The alpha
-> baseline defaults to user-space for security reasons.
->
-> Operators who specifically need `/var/lib/mpm` (e.g., shared across
-> multiple service accounts on the same host) use this path.
-
-### 2a. System install (requires sudo)
-
-```bash
-cd ~/projects/mpm
-sudo ./scripts/install.sh --system
-```
-
-This is identical to the default install but:
-- Writes binaries to `/usr/local/bin/` (the ONLY mode that does this)
-- Creates `/var/lib/mpm/{src/db,backups/critic-pre}` (instead of `$HOME/.mpm/`)
-- Installs the system unit to `/etc/systemd/system/mpm-scheduler.service`
-- Uses plain `systemctl` (no `--user`)
-- Does NOT call `loginctl enable-linger` (not needed for system services)
-- Requires root at every step
-
-You can also pass `MPM_SYSTEM=1` instead of `--system`:
-
-```bash
-sudo MPM_SYSTEM=1 ./scripts/install.sh
-```
-
-### 2b. Validate
-
-```bash
-sudo ./scripts/install.sh --validate       # re-run from any mode
-```
-
-Or manually:
-
-```bash
-sudo systemctl status mpm-scheduler                       # expect: active
-sudo /usr/local/bin/mpm call mpm_system --payload '{"action":"health_check","params":{}}'  # expect: "ok":true
-sudo journalctl -u mpm-scheduler -n 20 --no-pager         # expect: "scheduler running"
-```
-
-**Migrating from system to user-space** (you've decided the system
-install was wrong): uninstall first (`sudo ./scripts/install.sh --uninstall`),
-then run the default install (`./scripts/install.sh`) which copies
-data over (it does NOT — see Section 4 for the manual migration recipe).
-The default install's preflight detects the legacy system unit and
-offers to tear it down before proceeding.
-
-### 2c. Override paths
-
-Use a drop-in override:
-
-```bash
-systemctl --user edit mpm-scheduler
-# writes to ~/.config/systemd/user/mpm-scheduler.service.d/override.conf
-```
-
-Or write `~/.config/mpm/mpm.env`:
-
-```bash
-MPM_DB_PATH=/custom/path/mpm.db
-MPM_BACKUP_DIR=/custom/path/backups
-```
+> The `--system` flag and `MPM_SYSTEM=1` env form have been removed. MPM
+> is user-space only as of this release. A legacy `/etc/systemd/system/
+> mpm-scheduler.service` left over from a previous install must be
+> disabled manually with `sudo`; the installer will not touch it.
 
 ---
 
@@ -215,7 +132,7 @@ MPM_BACKUP_DIR=/custom/path/backups
 > headless deployments) can opt out by adding the drop-in documented in the
 > Troubleshooting row below.
 
-### 2.1. Agentic Cron (recurring tasks, optional)
+## 2. Agentic Cron (recurring tasks, optional)
 
 > **Skip this subsection if:** self-scheduled one-off wakes via `schedule_wake`
 > are enough. The Agentic Cron adds a registry of recurring tasks the daemon
@@ -347,17 +264,21 @@ why pre-compute `next_run_at`) documented in [README §9.3](../README.md#agentic
 
 > **Pick one.** OpenClaw and Hermes are the two supported hosts as of
 > 2026-07-18. The recommended install (Section 1) handles OpenClaw
-> automatically. Re-run `sudo ./scripts/install.sh` after switching hosts.
+> automatically. Re-run `./scripts/install.sh` after switching hosts.
+> No `sudo` is required at any point — every command below runs in
+> the user's context.
 
 ### 3a. OpenClaw (auto-wired by install script)
 
-The install script detects OpenClaw and registers the MCP server automatically.
-If you skipped that step or need to re-register manually:
+The install script detects OpenClaw and registers the MCP server automatically,
+pointing at `$HOME/.local/bin/mpm-mcp` (the symlink the installer created)
+with `MPM_WORKSPACE=$HOME/.mpm`. If you skipped that step or need to
+re-register manually:
 
 ```bash
 openclaw mcp add mpm \
-  --command /usr/local/bin/mpm-mcp \
-  --env MPM_WORKSPACE=/var/lib/mpm
+  --command "$HOME/.local/bin/mpm-mcp" \
+  --env MPM_WORKSPACE="$HOME/.mpm"
 
 openclaw gateway restart                  # gateway caches MCP servers at startup
 ```
@@ -374,13 +295,13 @@ openclaw gateway restart                  # gateway caches MCP servers at startu
 > **Important:** `openclaw mcp add` is a silent no-op if `mpm` is already
 > registered. To update an existing registration, use `set`:
 > ```bash
-> openclaw mcp set mpm '{"command":"/usr/local/bin/mpm-mcp","env":{"MPM_WORKSPACE":"/var/lib/mpm"}}'
+> openclaw mcp set mpm '{"command":"'"$HOME"'/.local/bin/mpm-mcp","env":{"MPM_WORKSPACE":"'"$HOME"'/.mpm"}}'
 > ```
 
 **Validate:**
 
 ```bash
-openclaw mcp show mpm | grep MPM_WORKSPACE   # expect: "/var/lib/mpm"
+openclaw mcp show mpm | grep MPM_WORKSPACE   # expect: "$HOME/.mpm"
 openclaw mcp doctor mpm --probe              # expect: probe passes
 ```
 
@@ -388,8 +309,8 @@ openclaw mcp doctor mpm --probe              # expect: probe passes
 
 ```bash
 hermes mcp add mpm \
-  --command /usr/local/bin/mpm-mcp \
-  --env MPM_WORKSPACE=/var/lib/mpm \
+  --command "$HOME/.local/bin/mpm-mcp" \
+  --env MPM_WORKSPACE="$HOME/.mpm" \
   --connect-timeout 15
 ```
 
@@ -398,9 +319,9 @@ Edit `~/.hermes/config.yaml`:
 ```yaml
 mcp_servers:
   mpm:
-    command: /usr/local/bin/mpm-mcp
+    command: /home/<your-username>/.local/bin/mpm-mcp
     env:
-      MPM_WORKSPACE: /var/lib/mpm
+      MPM_WORKSPACE: /home/<your-username>/.mpm
     timeout: 60
     connect_timeout: 30
     enabled: true
@@ -409,7 +330,7 @@ mcp_servers:
 **Validate:**
 
 ```bash
-hermes mcp test mpm                    # expect: Connected, 61 tools discovered
+hermes mcp test mpm                    # expect: Connected, 22 tools discovered
 hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ```
 
@@ -418,54 +339,49 @@ hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ## 4. Uninstall
 
 ```bash
-./scripts/install.sh --uninstall          # user-space (default)
-sudo ./scripts/install.sh --uninstall     # system install
+./scripts/install.sh --uninstall
 ```
 
-Removes: binaries, wrapper, systemd unit. **Preserves:** data directory
-(`$HOME/.mpm/` for user-space, `/var/lib/mpm/` for system), source code at
-`~/projects/mpm`, legacy unit (if any).
+Removes: `~/.mpm/bin/` (all five binaries + wrapper), `~/.local/bin/mpm`,
+`~/.local/bin/mpm-mcp` symlinks, and `~/.config/systemd/user/mpm-scheduler.service`.
+**Preserves:** data directory (`$HOME/.mpm/`) and source code at
+`~/projects/mpm`.
 
 To remove data too:
 
 ```bash
-rm -rf ~/.mpm          # user-space
-sudo rm -rf /var/lib/mpm   # system install only
+rm -rf ~/.mpm
+```
+
+If a stale legacy unit remains at `/etc/systemd/system/mpm-scheduler.service`
+from a previous `--system` install, disable it manually:
+
+```bash
+sudo systemctl disable --now mpm-scheduler
+sudo rm -f /etc/systemd/system/mpm-scheduler.service
 ```
 
 ---
 
 ## 5. Path cheat sheet
 
-### User-space install (default — `./scripts/install.sh`)
+`./scripts/install.sh` is the only install path. All paths below are
+user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 
 | Path | Owner | Purpose |
 |------|-------|---------|
+| `~/.local/bin/mpm` | $USER | Symlink → `~/.mpm/bin/mpm`. User-PATH entry; subprocesses resolve this by name. |
+| `~/.local/bin/mpm-mcp` | $USER | Symlink → `~/.mpm/bin/mpm-mcp`. User-PATH entry for MCP hosts (Claude Code / OpenClaw / Hermes). |
 | `~/.mpm/bin/mpm` | $USER | Wrapper script (sets MPM_WORKSPACE, exec's mpm.real) |
 | `~/.mpm/bin/mpm.real` | $USER | The actual mpm CLI binary |
 | `~/.mpm/bin/mpm-mcp` | $USER | MCP server stdio binary |
-| `~/.mpm/bin/mpm-scheduler` | $USER | Scheduler daemon |
-| `~/.mpm/bin/mpm-critic` | $USER | Memory critic binary |
-| `~/.mpm/bin/mpm-telemetry` | $USER | Telemetry sidecar |
+| `~/.mpm/bin/mpm-scheduler` | $USER | Scheduler daemon (invoked by systemd --user only — not on PATH) |
+| `~/.mpm/bin/mpm-critic` | $USER | Memory critic binary (invoked by mpm-scheduler only — not on PATH) |
+| `~/.mpm/bin/mpm-telemetry` | $USER | Telemetry sidecar (invoked by systemd --user only — not on PATH) |
 | `~/.config/systemd/user/mpm-scheduler.service` | $USER | User service unit |
 | `~/.mpm/src/db/mpm.db` | $USER | SQLite database |
 | `~/.mpm/backups/critic-pre/` | $USER | Pre-critic DB snapshots |
 | `~/.mpm/scheduler.lock` | $USER | flock singleton lock |
-
-### System install (`sudo ./scripts/install.sh --system`)
-
-| Path | Owner | Purpose |
-|------|-------|---------|
-| `/usr/local/bin/mpm` | root | Wrapper script (sets MPM_WORKSPACE, exec's mpm.real) |
-| `/usr/local/bin/mpm.real` | root | The actual mpm CLI binary |
-| `/usr/local/bin/mpm-mcp` | root | MCP server stdio binary |
-| `/usr/local/bin/mpm-scheduler` | root | Scheduler daemon |
-| `/usr/local/bin/mpm-critic` | root | Memory critic binary |
-| `/usr/local/bin/mpm-telemetry` | root | Telemetry sidecar |
-| `/etc/systemd/system/mpm-scheduler.service` | root | System service unit |
-| `/var/lib/mpm/src/db/mpm.db` | $USER | SQLite database |
-| `/var/lib/mpm/backups/critic-pre/` | $USER | Pre-critic DB snapshots |
-| `/var/lib/mpm/scheduler.lock` | $USER | flock singleton lock |
 
 Source code (e.g. `~/projects/mpm/`) is NOT runtime data. It can be wiped
 without losing agent state; runtime data persists across `git pull`.
@@ -478,21 +394,22 @@ without losing agent state; runtime data persists across `git pull`.
 |---------|---------------|-----|
 | Install fails: "Go not found" | `go version` | Install Go 1.26+ or add to PATH |
 | Install fails: "systemd required" | `systemctl --version` | Install systemd (most distros have it) |
-| `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `sudo loginctl enable-linger $USER` (set `Linger=yes`) |
-| Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` (user) or `ls -la /var/lib/mpm/` (system) | `chown -R $USER:$USER ~/.mpm` (user) or `sudo chown -R $USER:$USER /var/lib/mpm` (system) |
-| Service won't start after reboot on encrypted home | `findmnt /home` | Use `sudo ./scripts/install.sh` (system service) instead of `make service-scheduler` (user service) |
+| `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `loginctl enable-linger $USER` (set `Linger=yes`) |
+| Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` | `chown -R $USER:$USER ~/.mpm` |
+| Service won't start after reboot on encrypted home | `findmnt /home` | Use `./scripts/install.sh` (full install flow handles linger + drop-in); or manually `systemctl --user edit mpm-scheduler` to add the post-decrypt delay described below. |
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
-| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` (this is expected) | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | This is **expected behaviour** under the Lazy-Start Architecture — see INSTALL §2. The daemon is designed to stay dead at boot when `/home` is encrypted (the lockfile inside the encrypted tree would be inaccessible otherwise). On the next agent wake, `AGENTS.md` Session Startup step 2 detects the dead daemon and starts it post-decryption. If your workload runs unattended with no agent wake path (cron / system timers only), opt out by adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. |
-| CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` (or `/usr/local/bin/mpm*` for system) | Re-run `./scripts/install.sh` (or `sudo ./scripts/install.sh --system`) to restore the wrapper |
+| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` (this is expected) | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | This is **expected behaviour** under the Lazy-Start Architecture — see the blockquote after §1d. The daemon is designed to stay dead at boot when `/home` is encrypted (the lockfile inside the encrypted tree would be inaccessible otherwise). On the next agent wake, `AGENTS.md` Session Startup step 2 detects the dead daemon and starts it post-decryption. If your workload runs unattended with no agent wake path (cron / system timers only), opt out by adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. |
+| CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` | Re-run `./scripts/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 $(which mpm)` | The `mpm` binary must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
-| MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path; restart gateway |
+| `mpm` not found on PATH after install | `command -v mpm`; `echo $PATH` | Verify `~/.local/bin` is on PATH: most shells pick it up via `/etc/profile.d/` defaults. If not: `export PATH="$HOME/.local/bin:$PATH"`. Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are NOT on PATH by design — they are invoked by systemd, never directly. |
+| MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path (`$HOME/.mpm`); restart gateway |
 | `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
 | OpenClaw: agent doesn't see MPM tools in chat | `openclaw mcp list \| grep mpm` | `openclaw gateway restart` (Gateway caches MCP servers at startup) |
 | Hermes: agent doesn't see MPM tools in chat | `hermes mcp list \| grep mpm` | Confirm `mcp` toolset in `~/.hermes/config.yaml:toolsets`. Restart session (`/reset`) — config changes don't apply mid-conversation. |
 | `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run `mpm ops init directives`. |
 | MCP tools load but `read_wake_context` returns empty | `mpm ops stats` | DB may be empty. Confirm `MPM_WORKSPACE` matches the canonical db path prime directive. |
-| Legacy user unit conflicts with system unit | `systemctl --user status mpm-scheduler`; `systemctl status mpm-scheduler` | Disable the legacy one: `systemctl --user disable --now mpm-scheduler; rm ~/.config/systemd/user/mpm-scheduler.service` |
+| Stale legacy unit at `/etc/systemd/system/mpm-scheduler.service` | `systemctl status mpm-scheduler` (system) shows `loaded failed` or `active` against the old path | The user installer cannot remove it (no sudo). Disable manually: `sudo systemctl disable --now mpm-scheduler && sudo rm -f /etc/systemd/system/mpm-scheduler.service && sudo systemctl daemon-reload`. The current user-space install is unaffected. |
 
 ---
 
@@ -531,6 +448,6 @@ saved before the resolver existed — those rows carry partial snapshots.
 - [README.md](../README.md) — cognitive model, design, full reference
 - [scripts/install.sh](../scripts/install.sh) — the install script (read the source)
 - [scripts/](../scripts/) — utility scripts (smoke tests, completion, etc.)
-- [contrib/systemd/](../contrib/systemd/) — unit file templates (system + user)
+- [contrib/systemd/](../contrib/systemd/) — unit file templates (user only; the legacy system template has been removed)
 - [OpenClaw docs](https://docs.openclaw.ai) — platform reference
 - [Hermes Agent docs](https://hermes-agent.nousresearch.com/docs) — runtime reference
