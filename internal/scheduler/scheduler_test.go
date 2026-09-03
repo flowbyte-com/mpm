@@ -835,3 +835,51 @@ func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduler_FoldsCronTasks verifies that scheduled_tasks rows
+// (cron) participate in the deadline-driven loop. The maintenance
+// tick (interval=1s in this test) calls ProcessScheduledTasks which
+// finds rows WHERE next_run_at <= now. We verify the injected wake
+// row (kind='cron', reason='cron:<task_id>') appears within a bounded
+// window — the actual firing happens later in the handler
+// (`hasHandler("cron")` returns whatever was registered, or false for
+// this test which doesn't register one). What's under test here is:
+// does the deadline-driven scheduler pick up the cron task on time?
+func TestScheduler_FoldsCronTasks(t *testing.T) {
+	s := newTestScheduler(t)
+	now := time.Now()
+	// A far-future wake to prove cron is the soonest pending deadline.
+	seedWake(t, s, "w1", now.Add(1*time.Hour), "")
+	// A cron task whose next_run_at is imminent.
+	mustExec(t, s.db, `INSERT INTO scheduled_tasks (id, name, cron_expr, directive_id, status, next_run_at) VALUES ('t1','a-cron','* * * * *','d1','active',?)`, now.Add(800*time.Millisecond).Unix())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 1*time.Second) }()
+
+	// Wait up to 4s for the cron-driven wake row to be injected
+	// (1s tick + 800ms slack + 2s headroom).
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("cron task did not produce an injected wake row within 4s")
+		case <-time.After(50 * time.Millisecond):
+			var n int
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*) FROM scheduled_wakes WHERE reason LIKE 'cron:%' AND created_by = ?`,
+				"mpm-scheduler", // CronCreatedBy per internal/core/scheduled_tasks.go
+			).Scan(&n); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			if n > 0 {
+				cancel()
+				return // PASS
+			}
+		}
+	}
+}
