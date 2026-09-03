@@ -210,6 +210,23 @@ func (c *Config) ProfileFor(component string) *Profile {
 	if c == nil {
 		return nil
 	}
+	// Embedding sentinel: "disabled" is reserved for components.embedding
+	// and returns nil so the embedding resolver can map it to
+	// IntentionallyDisabled. Other components treat "disabled" as a
+	// missing binding (misconfigured).
+	if component == "embedding" && c.Components != nil {
+		if name, ok := c.Components["embedding"]; ok && name == "disabled" {
+			return nil
+		}
+	}
+	// Non-embedding "disabled" binding: also return nil so callers do not
+	// silently get the default profile when a component is intentionally
+	// bound to "disabled".
+	if component != "embedding" && c.Components != nil {
+		if name, ok := c.Components[component]; ok && name == "disabled" {
+			return nil
+		}
+	}
 	// 1. Explicit binding in Components.
 	if c.Components != nil {
 		if name, ok := c.Components[component]; ok && name != "" {
