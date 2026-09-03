@@ -818,6 +818,8 @@ func handleOps(args []string) int {
 		return handleBackfillEmbeddings(subArgs)
 	case "backfill-snapshots":
 		return handleBackfillSnapshots(subArgs)
+	case "migrate-embeddings":
+		return handleMigrateEmbeddings(subArgs)
 	case "rebalance":
 		return handleOpsRebalance(subArgs)
 	case "resolve-contradictions":

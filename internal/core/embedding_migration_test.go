@@ -1,5 +1,5 @@
 // embedding_migration_test.go — forensic classifier for embedding_source
-// and embedding_dimension.
+// and embedding_dimension, plus RunMigration integration test.
 package internal
 
 import (
@@ -143,3 +143,253 @@ func TestForensicClassifier(t *testing.T) {
 		}
 	}
 }
+
+// TestRunMigration_IdempotentAndProvenanceGated exercises the full RunMigration
+// orchestrator: forensic classifier, synthetic-theory marker, provenance-gated
+// un-challenge, and idempotent sentinel. The setup has three memories
+// (hash-sourced, provider-sourced, null-sourced) and two theories: one
+// challenging the hash memory (must become synthetic) and one challenging
+// the provider memory (must NOT become synthetic). Only the hash memory's
+// weight should be restored (all its challenges are synthetic).
+//
+// NOTE: the memories.kind column does not exist in the current schema.
+// markSyntheticTheories uses source_id (not memory_id — theories reference
+// the challenged memory via source_id) and has no kind filter. This matches
+// the spec intent: mark all theories whose challenged-memory was hash-embedded.
+// The provenance-gated gate uses weight<1.0 as the action-precondition
+// heuristic (origin_weight column does not exist).
+func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Build the 256-dim hash embedding (HashEmbed convention: JSON []float32 len=256).
+	vec256 := make([]float32, 256)
+	for i := range vec256 {
+		vec256[i] = float32(i) / 255.0
+	}
+	emb256, _ := json.Marshal(vec256)
+
+	// Build a 384-dim provider embedding (non-256 → provider source).
+	vec384 := make([]float32, 384)
+	for i := range vec384 {
+		vec384[i] = float32(i) / 255.0
+	}
+	emb384, _ := json.Marshal(vec384)
+
+	// Insert three fixture memories covering all embedding_source cases.
+	// weight=0.5 for hash-mem (challenged, < 1.0) to test un-challenge.
+	// weight=1.0 for prov-mem and null-mem (unchallenged).
+	fixtures := []struct {
+		id     string
+		coll   string
+		content string
+		emb    interface{} // string = JSON text, nil = SQL NULL
+		embSrc string
+		embDim interface{}
+		weight float64
+	}{
+		{
+			id: "hash-mem", coll: "memories", content: "hash-sourced memory",
+			emb: string(emb256), embSrc: "hash", embDim: 256, weight: 0.5,
+		},
+		{
+			id: "prov-mem", coll: "memories", content: "provider-sourced memory",
+			emb: string(emb384), embSrc: "provider", embDim: 384, weight: 1.0,
+		},
+		{
+			id: "null-mem", coll: "memories", content: "null-embedded memory",
+			emb: nil, embSrc: "null", embDim: nil, weight: 1.0,
+		},
+	}
+
+	for _, f := range fixtures {
+		if f.emb == nil {
+			_, err := dm.SQLDB().Exec(`
+				INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, weight, synthetic)
+				VALUES (?, ?, ?, NULL, ?, ?, ?, 0)`,
+				f.id, f.coll, f.content, f.embSrc, f.embDim, f.weight)
+			if err != nil {
+				t.Fatalf("insert %s: %v", f.id, err)
+			}
+		} else {
+			_, err := dm.SQLDB().Exec(`
+				INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, weight, synthetic)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+				f.id, f.coll, f.content, f.emb, f.embSrc, f.embDim, f.weight)
+			if err != nil {
+				t.Fatalf("insert %s: %v", f.id, err)
+			}
+		}
+	}
+
+	// Insert two theories:
+	// - hash-theory challenges hash-mem (source_id='hash-mem') → must become synthetic
+	// - prov-theory challenges prov-mem (source_id='prov-mem') → must NOT become synthetic
+	theories := []struct {
+		id      string
+		sourceID string // source_id: the memory this theory challenges
+		coll    string
+		content string
+		weight  float64
+	}{
+		{
+			id: "hash-theory", sourceID: "hash-mem", coll: "theories",
+			content: "CHALLENGED_MEMORY_ID: hash-mem\nEVIDENCE: theoretical challenge\nCHALLENGED_AT_NANO: 0\nORIGINAL_CONTENT: hash-sourced memory",
+			weight: 1.0,
+		},
+		{
+			id: "prov-theory", sourceID: "prov-mem", coll: "theories",
+			content: "CHALLENGED_MEMORY_ID: prov-mem\nEVIDENCE: theoretical challenge\nCHALLENGED_AT_NANO: 0\nORIGINAL_CONTENT: provider-sourced memory",
+			weight: 1.0,
+		},
+	}
+
+	for _, th := range theories {
+		_, err := dm.SQLDB().Exec(`
+			INSERT INTO memories (id, collection, content, source_id, weight, synthetic)
+			VALUES (?, ?, ?, ?, ?, 0)`,
+			th.id, th.coll, th.content, th.sourceID, th.weight)
+		if err != nil {
+			t.Fatalf("insert theory %s: %v", th.id, err)
+		}
+	}
+
+	// Run the migration.
+	if err := RunMigration(dm); err != nil {
+		t.Fatalf("RunMigration: %v", err)
+	}
+
+	// ── Assert embedding_source classifications ──────────────────────────
+	for _, f := range fixtures {
+		var gotSrc string
+		var gotDim *int64
+		err := dm.SQLDB().QueryRow(`
+			SELECT embedding_source, embedding_dimension FROM memories WHERE id = ?`, f.id,
+		).Scan(&gotSrc, &gotDim)
+		if err != nil {
+			t.Fatalf("query classification %s: %v", f.id, err)
+		}
+		if gotSrc != f.embSrc {
+			t.Errorf("%s: embedding_source=%q, want %q", f.id, gotSrc, f.embSrc)
+		}
+		if f.embDim == nil {
+			if gotDim != nil {
+				t.Errorf("%s: embedding_dimension=%v, want NULL", f.id, *gotDim)
+			}
+		} else {
+			if gotDim == nil {
+				t.Errorf("%s: embedding_dimension=NULL, want %v", f.id, f.embDim)
+			} else if *gotDim != int64(f.embDim.(int)) {
+				t.Errorf("%s: embedding_dimension=%d, want %v", f.id, *gotDim, f.embDim)
+			}
+		}
+	}
+
+	// ── Assert synthetic markers on theories ────────────────────────────
+	// hash-theory → synthetic=1 (challenges a hash-embedded memory)
+	// prov-theory → synthetic=0 (challenges a provider-embedded memory)
+	wantSynthetic := map[string]int{
+		"hash-theory": 1,
+		"prov-theory":  0,
+	}
+	for thID, want := range wantSynthetic {
+		var got int
+		err := dm.SQLDB().QueryRow(`SELECT synthetic FROM memories WHERE id = ?`, thID).Scan(&got)
+		if err != nil {
+			t.Fatalf("query synthetic %s: %v", thID, err)
+		}
+		if got != want {
+			t.Errorf("%s: synthetic=%d, want %d", thID, got, want)
+		}
+	}
+
+	// ── Assert provenance-gated un-challenge ─────────────────────────────
+	// hash-mem: all challenges are synthetic → weight restored to 1.0
+	// prov-mem: has a non-synthetic challenge → weight unchanged
+	// null-mem: no theories → weight unchanged
+	wantWeight := map[string]float64{
+		"hash-mem": 1.0, // was 0.5, restored because all challenges are synthetic
+		"prov-mem": 1.0, // was 1.0, unchanged because prov-theory is NOT synthetic
+		"null-mem": 1.0, // was 1.0, unchanged (no theories)
+	}
+	for memID, want := range wantWeight {
+		var got float64
+		err := dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = ?`, memID).Scan(&got)
+		if err != nil {
+			t.Fatalf("query weight %s: %v", memID, err)
+		}
+		if got != want {
+			t.Errorf("%s: weight=%f, want %f", memID, got, want)
+		}
+	}
+
+	// ── Assert sentinel row for idempotency ─────────────────────────────
+	var sentinelCount int
+	err := dm.SQLDB().QueryRow(`
+		SELECT COUNT(*) FROM embedding_migration_log WHERE reason = 'migration_applied'`,
+	).Scan(&sentinelCount)
+	if err != nil {
+		t.Fatalf("query sentinel: %v", err)
+	}
+	if sentinelCount != 1 {
+		t.Errorf("sentinel count=%d, want 1", sentinelCount)
+	}
+
+	// ── Assert un-challenge log rows were recorded ──────────────────────
+	var unchallengeCount int
+	err = dm.SQLDB().QueryRow(`
+		SELECT COUNT(*) FROM embedding_migration_log WHERE reason = 'unchallenge_provenance_gated'`,
+	).Scan(&unchallengeCount)
+	if err != nil {
+		t.Fatalf("query unchallenge log: %v", err)
+	}
+	if unchallengeCount != 1 {
+		t.Errorf("unchallenge log count=%d, want 1 (only hash-mem)", unchallengeCount)
+	}
+
+	// ── Second run: must be idempotent (no changes) ─────────────────────
+	// Capture weights before second run.
+	weightsBefore := make(map[string]float64)
+	for _, f := range fixtures {
+		var w float64
+		dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = ?`, f.id).Scan(&w)
+		weightsBefore[f.id] = w
+	}
+	syntheticBefore := make(map[string]int)
+	for thID := range wantSynthetic {
+		var s int
+		dm.SQLDB().QueryRow(`SELECT synthetic FROM memories WHERE id = ?`, thID).Scan(&s)
+		syntheticBefore[thID] = s
+	}
+	sentinelBefore := sentinelCount
+
+	if err := RunMigration(dm); err != nil {
+		t.Fatalf("RunMigration (second): %v", err)
+	}
+
+	// Weights must be unchanged.
+	for _, f := range fixtures {
+		var w float64
+		dm.SQLDB().QueryRow(`SELECT weight FROM memories WHERE id = ?`, f.id).Scan(&w)
+		if w != weightsBefore[f.id] {
+			t.Errorf("%s: second-run weight=%f, want %f (idempotency broken)",
+				f.id, w, weightsBefore[f.id])
+		}
+	}
+	// Synthetics must be unchanged.
+	for thID := range wantSynthetic {
+		var s int
+		dm.SQLDB().QueryRow(`SELECT synthetic FROM memories WHERE id = ?`, thID).Scan(&s)
+		if s != syntheticBefore[thID] {
+			t.Errorf("%s: second-run synthetic=%d, want %d (idempotency broken)",
+				thID, s, syntheticBefore[thID])
+		}
+	}
+	// Sentinel count must still be 1 (no duplicate sentinel).
+	var sentinelAfter int
+	dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM embedding_migration_log WHERE reason = 'migration_applied'`).Scan(&sentinelAfter)
+	if sentinelAfter != sentinelBefore {
+		t.Errorf("second-run sentinel count=%d, want %d (idempotency broken)", sentinelAfter, sentinelBefore)
+	}
+}
+
