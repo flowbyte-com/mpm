@@ -82,7 +82,9 @@ See MPM cross-adapter integrity audit, 2026-09-04.
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -90,66 +92,130 @@ from pathlib import Path
 AGENT_INSTALLATION = Path("/home/v/workspace/projects/mpm/agent_installation")
 CANONICAL_PROTOCOL = AGENT_INSTALLATION / "mpm-agent-protocol.md"
 CANONICAL_SOURCE = AGENT_INSTALLATION / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
+RENDER_SCRIPT = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
 
-# The four behavioral-instruction surfaces. The two openclaw-mpm-*
-# adapters (openclaw-mpm-memory, openclaw-mpm-auto-mode-persona) inject
-# into the same ~/.claude/CLAUDE.md via claude-code-mpm and don't carry
-# separate behavioral files, so they are covered by the claude-code-mpm
-# tests below and by their own per-adapter regression suites.
+
+# --- single source of truth for adapter metadata ---------------------------
 #
-# Each adapter specifies:
-#   - `snippet`: the file containing the behavioral contract.
-#   - `tool_prefix`: the host-specific tool namespace for typed tool-call
-#     signatures (e.g., `mpm__mpm_work(action: ...)`). Used by the
-#     paren/backtick action-mention tests.
-#   - `persist_families`: the canonical family-name strings used in that
-#     snippet's prose/mentions of the memory tool set. Different adapters
-#     style the prefix differently (Claude Code uses `mpm__mpm_memory`
-#     where the prefix is `mpm__mpm_` and the family is `memory`; Pi /
-#     OpenCode / Hermes use `mpm_memory` with a separate prefix).
-ADAPTERS = {
-    "claude-code-mpm": {
-        "snippet": AGENT_INSTALLATION / "claude-code-mpm/templates/CLAUDE.md.snippet",
-        # Claude Code's MCP namespace is `mpm__`; the bare family name
-        # (e.g., `mpm_memory`) already includes the `mpm_` prefix, so
-        # the host-transport wrapper is just `mpm__`. (Earlier revisions
-        # of this test used `mpm__mpm_`, which double-prefixed; corrected
-        # after the canonical-snippets refactor of 2026-09-04.)
-        "tool_prefix": "mpm__",
-        "persist_families": ("mpm__mpm_memory", "mpm__mpm_decisions",
-                              "mpm__mpm_lessons", "mpm__mpm_topics",
-                              "mpm__mpm_references"),
-        "installer": AGENT_INSTALLATION / "claude-code-mpm/scripts/install_claude_instructions.py",
-    },
-    "opencode-mpm": {
-        "snippet": AGENT_INSTALLATION / "opencode-mpm/templates/AGENTS.md.snippet",
-        # OpenCode exposes the bare `mpm_<family>` names directly;
-        # no host-transport prefix is added.
-        "tool_prefix": "",
-        "persist_families": ("mpm_memory", "mpm_decisions", "mpm_lessons",
-                              "mpm_topics", "mpm_references"),
-        "installer": AGENT_INSTALLATION / "opencode-mpm/scripts/install_agents_instructions.py",
-    },
-    "pi-mpm": {
-        "snippet": AGENT_INSTALLATION / "pi-mpm/templates/AGENTS.md.snippet",
-        # Pi exposes the bare `mpm_<family>` names directly; no
-        # host-transport prefix is added.
-        "tool_prefix": "",
-        "persist_families": ("mpm_memory", "mpm_decisions", "mpm_lessons",
-                              "mpm_topics", "mpm_references"),
-        "installer": AGENT_INSTALLATION / "pi-mpm/scripts/install_agents_instructions.py",
-    },
-    "hermes-mpm": {
-        "snippet": AGENT_INSTALLATION / "hermes-mpm/templates/hermes.md.snippet",
-        # Hermes's MCP namespace is `mcp__mpm__`; the bare family name
-        # already includes `mpm_`, so the wrapper is just `mcp__mpm__`.
-        "tool_prefix": "mcp__mpm__",
-        "persist_families": ("mcp__mpm__mpm_memory", "mcp__mpm__mpm_decisions",
-                              "mcp__mpm__mpm_lessons", "mcp__mpm__mpm_topics",
-                              "mcp__mpm__mpm_references"),
-        "installer": AGENT_INSTALLATION / "hermes-mpm/scripts/install_hermes_instructions.py",
-    },
+# The render script's ADAPTERS list is the canonical source for adapter
+# names, tool prefixes, snippet paths, and copy/paste outer markers.
+# This test derives its ADAPTERS dict from that list, layering on only
+# test-specific concerns (installer paths and per-host install args).
+# Adding a new persistent-file adapter means editing ONE list
+# (render_managed_blocks.ADAPTERS) plus ONE map below (_INSTALLERS),
+# not three independent lists in two files.
+
+
+def _load_render_module():
+    spec = importlib.util.spec_from_file_location(
+        "render_managed_blocks", RENDER_SCRIPT,
+    )
+    assert spec and spec.loader, "render script must be importable"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_render = _load_render_module()
+
+
+# Canonical memory-family tool names. Each adapter renders these as
+# `<tool_prefix>mpm_<family>` (the bare family name `mpm_memory` already
+# includes the `mpm_` leading prefix, so the rendered form is just
+# `<tool_prefix>mpm_memory`).
+_PERSIST_FAMILIES = ("memory", "decisions", "lessons", "topics", "references")
+
+# Per-host installer script paths. The render script has no knowledge of
+# installer binaries — installers are a test/install concern only. Each
+# adapter has a distinct installer path; the test cannot derive this from
+# the adapter name alone because the conventions differ (e.g.,
+# `install_claude_instructions.py` vs `install_agents_instructions.py`).
+_INSTALLERS = {
+    "claude-code-mpm": AGENT_INSTALLATION / "claude-code-mpm/scripts/install_claude_instructions.py",
+    "opencode-mpm":    AGENT_INSTALLATION / "opencode-mpm/scripts/install_agents_instructions.py",
+    "pi-mpm":          AGENT_INSTALLATION / "pi-mpm/scripts/install_agents_instructions.py",
+    "hermes-mpm":      AGENT_INSTALLATION / "hermes-mpm/scripts/install_hermes_instructions.py",
 }
+
+# Per-host extra CLI args for the installer. Each adapter's installer
+# takes different scope flags and home-dir overrides; this is a
+# test-only concern (the render script does not invoke installers).
+_EXTRA_INSTALL_ARGS = {
+    "claude-code-mpm": ["--scope", "user", "--home", str(Path.home())],
+    "opencode-mpm":    ["--scope", "user"],
+    "pi-mpm":          [],
+    "hermes-mpm":      [],
+}
+
+# Outer markers the installer actually emits in the target file. These
+# are distinct from `copy_paste_outer_*` in render_managed_blocks.ADAPTERS,
+# which marks the canonical-source copy/paste section wrapper (used by
+# the render script for byte-parity verification). The installer emits
+# different outer anchors (e.g., hermes uses MPM-MANAGED BLOCK with a
+# hyphen; others use MPM-MANAGED SECTION). The cross-adapter test counts
+# the installer-emitted markers, not the canonical-source wrappers.
+_INSTALL_OUTER_MARKERS = {
+    "claude-code-mpm": (
+        "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
+        "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
+    ),
+    "opencode-mpm": (
+        "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
+        "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
+    ),
+    "pi-mpm": (
+        "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
+        "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
+    ),
+    "hermes-mpm": (
+        "<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->",
+        "<!-- END MPM-MANAGED BLOCK:hermes-mpm -->",
+    ),
+}
+
+
+def _build_test_adapter_info() -> dict:
+    """Build the test's ADAPTERS dict from render_managed_blocks.ADAPTERS.
+
+    Returns a name → info dict with:
+      - `snippet`: absolute path to the rendered template snippet
+      - `tool_prefix`: the host's transport-namespace prefix
+      - `persist_families`: tuple of fully-qualified persistence tool names
+      - `installer`: absolute path to the adapter's installer script
+      - `begin`/`end`: outer wrapper markers used to count managed sections
+      - `extra_args`: CLI args to pass to the installer when invoked by tests
+    """
+    out: dict = {}
+    for a in _render.ADAPTERS:
+        name = a["name"]
+        if name not in _INSTALLERS:
+            raise KeyError(
+                f"adapter {name!r} is in render_managed_blocks.ADAPTERS but "
+                f"missing from this test's _INSTALLERS map — add the "
+                f"installer path there to centralize adapter metadata."
+            )
+        snippet = _render.snippet_path(AGENT_INSTALLATION, a)
+        prefix = a["tool_prefix"]
+        families = tuple(f"{prefix}mpm_{fam}" for fam in _PERSIST_FAMILIES)
+        install_begin, install_end = _INSTALL_OUTER_MARKERS[name]
+        out[name] = {
+            "snippet": snippet,
+            "tool_prefix": prefix,
+            "persist_families": families,
+            "installer": _INSTALLERS[name],
+            "begin": install_begin,
+            "end": install_end,
+            "extra_args": _EXTRA_INSTALL_ARGS.get(name, []),
+        }
+    return out
+
+
+# The test's view of adapter metadata. Single source of truth:
+# render_managed_blocks.ADAPTERS for snippet paths / tool prefixes /
+# copy/paste markers; this test's _INSTALLERS + _EXTRA_INSTALL_ARGS
+# for installer-specific concerns.
+ADAPTERS = _build_test_adapter_info()
 
 
 # --- helpers ---------------------------------------------------------------
@@ -652,38 +718,9 @@ class NoDuplicateManagedSections(unittest.TestCase):
     host; the installer must NOT accumulate a second block on re-run.
     """
 
-    # Per-adapter: installer invocation + the host-specific managed-section
-    # markers used to count sections.
-    INSTALLS = {
-        "claude-code-mpm": {
-            "installer": ADAPTERS["claude-code-mpm"]["installer"],
-            "snippet": ADAPTERS["claude-code-mpm"]["snippet"],
-            "begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-            "end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-            "extra_args": ["--scope", "user", "--home", str(Path.home())],
-        },
-        "opencode-mpm": {
-            "installer": ADAPTERS["opencode-mpm"]["installer"],
-            "snippet": ADAPTERS["opencode-mpm"]["snippet"],
-            "begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
-            "end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
-            "extra_args": ["--scope", "user"],
-        },
-        "pi-mpm": {
-            "installer": ADAPTERS["pi-mpm"]["installer"],
-            "snippet": ADAPTERS["pi-mpm"]["snippet"],
-            "begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-            "end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-            "extra_args": [],
-        },
-        "hermes-mpm": {
-            "installer": ADAPTERS["hermes-mpm"]["installer"],
-            "snippet": ADAPTERS["hermes-mpm"]["snippet"],
-            "begin": "<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->",
-            "end": "<!-- END MPM-MANAGED BLOCK:hermes-mpm -->",
-            "extra_args": [],
-        },
-    }
+    # All adapter-specific fields come from the centralized ADAPTERS dict
+    # (installer path, snippet path, begin/end markers, extra CLI args).
+    # See `_build_test_adapter_info()` for the derivation chain.
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         import subprocess
@@ -698,7 +735,7 @@ class NoDuplicateManagedSections(unittest.TestCase):
         BEGIN/END MPM MANAGED BLOCK pair. Multiple pairs would mean
         the canonical source's last-occurrence extraction broke."""
         import re as _re
-        for name, info in self.INSTALLS.items():
+        for name, info in ADAPTERS.items():
             with self.subTest(adapter=name):
                 text = info["snippet"].read_text(encoding="utf-8")
                 begins = _re.findall(r"<!-- BEGIN MPM MANAGED BLOCK -->", text)
@@ -721,7 +758,7 @@ class NoDuplicateManagedSections(unittest.TestCase):
         replacing the existing one — produces a file with two MPM
         blocks, conflicting guidance, and inflated context cost."""
         import tempfile
-        for name, info in self.INSTALLS.items():
+        for name, info in ADAPTERS.items():
             with self.subTest(adapter=name):
                 with tempfile.TemporaryDirectory() as tmp:
                     target = Path(tmp) / info["snippet"].name
