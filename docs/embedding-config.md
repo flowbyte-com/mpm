@@ -18,7 +18,7 @@ compatibility.
 
 ## Canonical precedence
 
-See [spec §4.1](../superpowers/specs/2026-09-03-mpm-embedding-provider-design.md#41-configuration-precedence) for the full resolution table.
+See [spec §4.1](../archive/2026-09-03-mpm-embedding-provider-design.md#41-configuration-precedence) for the full resolution table.
 
 1. `components.embedding == "disabled"` → `disabled`
 2. `components.embedding == "<profile>"` → use the profile

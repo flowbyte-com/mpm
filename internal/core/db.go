@@ -1091,6 +1091,21 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 
 	db.Exec("PRAGMA foreign_keys = ON")
 	db.Exec("PRAGMA journal_mode = WAL")
+	// busy_timeout is the per-connection SQLite lock-wait window. The DSN
+	// suffix `_busy_timeout=5000` (see sqliteWriteDSN) is supposed to set
+	// this at connection-open time, but mattn/go-sqlite3's lazy-connection
+	// pool can open subsequent pooled connections without honoring it,
+	// leaving busy_timeout at the SQLite default of 0 (no waiting).
+	// Combined with go-sqlite3 v1.14.37's silent swallow of SQLITE_BUSY in
+	// (*SQLiteRows).nextSyncLocked (sqlite3.go:2236-2245), a transient
+	// BUSY response becomes an unbounded retry loop burning a full core —
+	// see scheduler.go:572 / dispatch.go:90 (dispatchClaimNextAdHocWake)
+	// for the canonical repro. Setting busy_timeout explicitly here closes
+	// the gap structurally; database/sql re-runs the Exec on the first
+	// connection of every newly pooled handle, so this complements rather
+	// than duplicates the DSN path. (D-003 alpha-4.1.2 fix in the DSN
+	// layer; this is the belt-and-suspenders Exec at construction time.)
+	db.Exec("PRAGMA busy_timeout = 5000")
 	db.Exec("PRAGMA synchronous = NORMAL")
 	db.Exec("PRAGMA cache_size = -64000")
 
