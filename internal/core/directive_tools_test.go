@@ -300,17 +300,20 @@ func TestReadDirectivesForFramework_LegacyZeroSentinelTreatedAsLive(t *testing.T
 // pins the writer-side fix that prevents recurrence on fresh
 // databases.
 func TestMigrateMemoriesCreatedAtBackfill_RepairsNullRows(t *testing.T) {
-	dm := NewTestDM(t)
+	// Pre-2026-09-04 fixture: open a raw *sql.DB with the legacy
+	// memories schema (created_at nullable, no DEFAULT), then wrap
+	// it in a DatabaseManager so ReadDirectivesForFramework is
+	// available. NewTestDM would now apply the BaseTables NOT NULL
+	// clause and reject the NULL INSERT below, which defeats the
+	// purpose of the test.
+	db := OpenLegacyMemoriesDB(t)
+	dm := NewDatabaseManagerForDB(db)
 
 	// Simulate the pre-fix writer-path defect: insert a directive
 	// with NULL created_at (the original failure mode). Mirrors the
 	// production row shape — metadata carries is_prime_directive and
 	// scope, both required for ReadDirectivesForFramework. The
-	// column list explicitly includes created_at with a NULL value:
-	// NewTestDM initialises the canonical BaseTables which declare
-	// `created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))`,
-	// so omitting the column would silently pick up the default and
-	// fail to reproduce the defect.
+	// column list explicitly includes created_at with a NULL value.
 	_, err := dm.SQLDB().Exec(`
 		INSERT INTO memories
 		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance, created_at, updated_at)
