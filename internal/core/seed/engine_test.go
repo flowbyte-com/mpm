@@ -12,6 +12,7 @@
 package seed_test
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -245,5 +246,41 @@ func TestApplyDirectives_ScopeMaterialisedInMetadata(t *testing.T) {
 		require.Equal(t, "global", *scope,
 			"seeded baseline directive %s must materialise scope=global in metadata, got %q",
 			id, *scope)
+	}
+}
+
+// TestApplyDirectives_FreshSeedPopulatesCreatedAt pins the writer
+// contract: every seeded directive row must have a non-NULL
+// created_at. The pre-2026-09-04 seed INSERT omitted created_at
+// from its column list, and on databases whose memories.created_at
+// column lacks the canonical DEFAULT clause (legacy installs that
+// went through the column-affinity rebuild without inheriting the
+// DEFAULT), the result was NULL — which crashed read_directives
+// with `converting NULL to string is unsupported`.
+//
+// Regression target: insertSeedRow must provide created_at
+// explicitly so the column invariant holds regardless of the
+// underlying schema's DEFAULT clause. The corresponding legacy-row
+// repair is covered by
+// TestMigrateMemoriesCreatedAtBackfill_RepairsNullRows in the
+// internal/core package.
+func TestApplyDirectives_FreshSeedPopulatesCreatedAt(t *testing.T) {
+	dm := newTestDM(t)
+
+	_, err := seed.ApplyDirectives(dm)
+	require.NoError(t, err)
+
+	for _, sd := range seed.SeedDirectives {
+		var ca sql.NullInt64
+		err := dm.SQLDB().QueryRow(
+			`SELECT created_at FROM memories WHERE id = ? AND deleted_at IS NULL`, sd.StableID,
+		).Scan(&ca)
+		require.NoError(t, err, "expected row %s to exist after seed", sd.StableID)
+		require.True(t, ca.Valid,
+			"seeded directive %s must have a non-NULL created_at (regression: pre-fix seed path inserted NULL on databases without the canonical DEFAULT clause)",
+			sd.StableID)
+		require.Greater(t, ca.Int64, int64(0),
+			"seeded directive %s created_at must be a positive Unix epoch, got %d",
+			sd.StableID, ca.Int64)
 	}
 }
