@@ -30,7 +30,7 @@ For broad queries, projection defaults to 'summary' to keep context bounded. Use
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","query","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","commit_milestone"]},
+				"action": {"type": "string", "enum": ["save","query","show","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
 				"params": {
 					"type": "object",
 					"properties": {

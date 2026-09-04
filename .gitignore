@@ -106,7 +106,7 @@ src/db/*-wal
 # Compressed rotated logs (log-rotation feature ships them next to jsonl).
 src/db/*.gz
 cmd/mpm/src/db/
-mpm-mcp
+/mpm-mcp
 *.pid
 *.lock
 backups/
