@@ -105,6 +105,30 @@ Most hosts have an installer that materializes the protocol into the
 host's persistent-instruction surface (CLAUDE.md / AGENTS.md /
 .hermes.md). The host-specific sections below cover this.
 
+### Installer vs copy/paste — same content
+
+The per-host installer (e.g. `install_agents_instructions.py`) writes
+the **same** managed block as the copy/paste example at the top of
+[`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md).
+Both paths converge on:
+
+  - The exact text of the universal canonical managed block, with the
+    host's transport-namespace prefix applied (`mpm__` for Claude,
+    `mcp__mpm__` for Hermes, bare for OpenCode and Pi).
+  - The host-specific wrapper markers (`<!-- BEGIN/END MPM-MANAGED
+    SECTION:… -->` for Claude/OpenCode/Pi, `<!-- BEGIN/END MPM-MANAGED
+    BLOCK:hermes-mpm -->` for Hermes).
+
+If you cannot or do not want to run the installer, copy the example
+for your host from the top of the snippets file and paste it into the
+target file inside the appropriate wrapper markers. The drift tests
+in `tests/test_render_managed_blocks.py` pin byte-for-byte parity
+between the copy/paste examples, the rendered adapter snippets, and
+the output of `python3 scripts/render_managed_blocks.py`.
+
+OpenClaw does not use a persistent managed file — runtime injection
+injects the same seven invariants automatically.
+
 ### Workshop invocation per host
 
 All hosts invoke the workshop via the universal machine interface:
