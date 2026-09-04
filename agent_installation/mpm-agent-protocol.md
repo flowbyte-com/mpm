@@ -33,9 +33,18 @@
 
 At the beginning of a new agent session, **before any substantive work**:
 
-- Read the MPM wake context (mode, persona, topics, recent memories,
-  open work, last handoff, key decisions, active lessons, key pointers).
-- Recover prior decisions, lessons, work-in-progress, and unresolved threads.
+- Read the MPM wake context — the bounded orientation surface that
+  carries recent durable context (active mode and persona, recent
+  topics, relevant memories, recent milestones, the last handoff,
+  any overdue scheduled wakes, a bounded inventory of available
+  skills, and other bounded wake information exposed by the current
+  wake-context projection). The full field list lives on the
+  `WakeContextData` struct in `internal/core/wake_context.go`.
+- Recover prior decisions, lessons, work-in-progress, and unresolved
+  threads. Decisions surface lives behind `mpm_decisions show | list |
+  query`; lessons behind `mpm_lessons search | list`; in-flight work
+  behind `mpm_work list`. None of these are part of the wake payload
+  itself — they are reachable from wake, not carried in it.
 - Acknowledge the local substrate state (e.g., daemon uptime if relevant).
 
 **Why this matters:** Skipping wake means arriving amnesic and forcing the
