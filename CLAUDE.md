@@ -56,7 +56,7 @@ Don't reach for a different shape; extend `mpm-lint --gate` instead. Code violat
 ## 4. Current CLI/API Interface Notes
 
 - **`projection` is canonical** on `mpm_memory query`, `mpm_lessons search`, `mpm_lessons list` (`summary|full`). `mode` is the deprecated alias (kept one release). `projection` wins when both are set; unknown values are rejected.
-- **Compact wake projection** — `mpm wake --compact` (or `mpm_context read_wake_context {projection: "compact"}`) returns a 9-field payload (~1-2 KB).
+- **Compact wake projection** — `mpm wake --compact` (or `mpm_context read_wake_context {projection: "compact"}`) returns a compact id+summary payload (~1-2 KB).
 - **Decisions read symmetry** — `mpm_decisions show|list|query` and the MCP tool mirror this. Don't FTS-query your own decisions.
 - **Skill save aggregates errors** — `mpm_skills save` returns `{success:false, errors:[...]}` (all errors). Pass `body` instead of `content` for minimal-frontmatter shortcut.
 - **`session_id is required`** errors name both recovery paths: `mpm_context read_wake_context` → `session_current_id`, or `MPM_SESSION_ID` env var.

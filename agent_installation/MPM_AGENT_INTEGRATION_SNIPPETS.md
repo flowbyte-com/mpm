@@ -589,7 +589,7 @@ in this file's git log.
 | `mpm_scratchpad` | `flush`, `read`, `discard`, `promote` | — |
 | `mpm_memory` | `save`, `query`, `shred`, `reinforce`, `weaken`, `snooze`, `set_weight`, `patch`, `promote`, `review`, `synthesize`, `challenge`, `commit_milestone` | `query` defaults `projection: "summary"`; full via `projection: "full"` |
 | `mpm_decisions` | `record`, `supersede`, `invalidate` | — |
-| `mpm_lessons` | `save`, `search`, `list` | `save` requires `type: "insight"\|"warning"\|"practice"` |
+| `mpm_lessons` | `save`, `search`, `list` | `save` defaults `type` to `"insight"` if absent; valid values: `"insight"`, `"warning"`, `"practice"` |
 | `mpm_topics` | `create`, `search`, `link` | — |
 | `mpm_references` | `add`, `read`, `search`, `list` | freshness surfaced as `current` `stale` `version-bound` `historical` `unknown` |
 | `mpm_context` | `read_wake_context`, `read_directives`, `proactive_recall_hint`, `query_global_rules`, `record_global_rule`, `promote_to_global`, `route` | `read_wake_context` accepts `params.projection: "compact"` |
