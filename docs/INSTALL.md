@@ -128,8 +128,13 @@ into the database. Re-running is safe — local edits are preserved.
 > on every graphical login (post-decrypt). `scripts/install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
 > autostart entry automatically; `scripts/install.sh --uninstall` removes it.
-> Lesson `071911bc` codifies the rationale and is stamped into the `.desktop`
-> `Comment=` line as the canonical reference.
+> Lesson `071911bc` is stamped into the `.desktop` `Comment=` line as the lesson
+> ID for the autostart-layer workaround (the pragmatic fix for hosts without an
+> agent wake path wired in). The architectural framing — that the *agent wake
+> layer* (AGENTS.md Session Startup step 2) is the structurally correct fix and
+> that systemd-level workarounds are transitional — is captured by lesson
+> `24be03ec71a5981f` (memory `463fb2c8014fc1f1`, currently challenged). Both
+> lessons apply; they describe different layers of the same problem.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
 > headless deployments) can opt out by removing the autostart entry and instead
