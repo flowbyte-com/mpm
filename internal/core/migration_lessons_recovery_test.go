@@ -150,10 +150,17 @@ func TestGetMemoriesForExport_NullLegacyColumns(t *testing.T) {
 	}
 	defer dm.Close()
 
-	// Legacy-shaped row: NULL tags/metadata/created_at (pre-affinity installs).
+	// Legacy-shaped row: NULL tags/metadata (the genuinely nullable
+	// legacy columns). The original fixture also used NULL
+	// created_at, but alpha-final's NOT NULL invariant on
+	// memories.created_at (commit 1aa8457) made that impossible.
+	// The test's semantic intent — verify the export path tolerates
+	// NULL legacy columns and COALESCES NULL tags to '[]' — is
+	// preserved: we set a real created_at and leave the genuinely
+	// nullable legacy columns NULL.
 	if _, err := dm.SQLDB().Exec(`
 		INSERT INTO memories (id, collection, content, tags, metadata, created_at)
-		VALUES ('legacy-null-row', 'memories', 'null columns row', NULL, NULL, NULL)`); err != nil {
+		VALUES ('legacy-null-row', 'memories', 'null columns row', NULL, NULL, 1700000000)`); err != nil {
 		t.Fatal(err)
 	}
 
