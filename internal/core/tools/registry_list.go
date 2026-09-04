@@ -68,7 +68,7 @@ Do not use when: you just want to remember something (mpm_memory); you have a co
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["propose","resolve"]},
+				"action": {"type": "string", "enum": ["propose","resolve","show","list","query"]},
 				"params": {
 					"type": "object",
 					"oneOf": [
@@ -160,7 +160,7 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["create","search","link"]},
+				"action": {"type": "string", "enum": ["create","search","link","list","show"]},
 				"params": {
 					"type": "object",
 					"properties": {
