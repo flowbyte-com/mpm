@@ -665,6 +665,12 @@ func TestScheduler_NotifyScheduleChanged_NilReceiverSafe(t *testing.T) {
 // folds both scheduled_wakes (unfired) and scheduled_tasks (active)
 // into a single MIN() and respects the partial-index partitions:
 // fired wakes and paused tasks are excluded.
+//
+// The wake branch filters to notification-eligible kinds (matching
+// dispatchClaimNextAdHocWake's WHERE clause) so the deadline reflects
+// work the deadline-driven dispatcher can actually perform. Cron-kind
+// and other system-kind rows are NOT the dispatcher's concern even
+// when their target_time is past.
 func TestScheduler_computeEarliestDeadline(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -698,7 +704,7 @@ func TestScheduler_computeEarliestDeadline(t *testing.T) {
 			wantOff: 5 * time.Second,
 		},
 		{
-			name: "past wake yields negative offset",
+			name: "past notification wake yields negative offset",
 			setup: func(t *testing.T, s *Scheduler, now time.Time) {
 				seedWake(t, s, "w1", now.Add(-1*time.Minute), "")
 			},
@@ -716,6 +722,21 @@ func TestScheduler_computeEarliestDeadline(t *testing.T) {
 			setup: func(t *testing.T, s *Scheduler, now time.Time) {
 				mustExec(t, s.db, `INSERT INTO scheduled_tasks (id, name, cron_expr, directive_id, status, next_run_at) VALUES ('t1','a','* * * * *','d1','paused',?)`, now.Add(1*time.Second).Unix())
 			},
+		},
+		{
+			name: "past cron-kind wake does NOT pin deadline to zero (wedge regression)",
+			setup: func(t *testing.T, s *Scheduler, now time.Time) {
+				// A cron-kind wake with target_time in the past. Without the
+				// notification-kind filter in computeEarliestDeadline, MIN(t)
+				// would return this past timestamp, scheduleNextDeadline
+				// clamps d=0, and Run enters a 0-delay select loop → 100% CPU
+				// wedge with no dispatcher work to perform.
+				mustExec(t, s.db, `INSERT INTO scheduled_wakes (id, target_time, reason, created_by, fired, metadata) VALUES ('cron-past',?, 'cron:test', 'mpm-scheduler', 0, ?)`,
+					now.Add(-1*time.Hour).Unix(),
+					`{"kind":"cron","task_id":"test"}`)
+			},
+			// No notification-eligible wake AND no scheduled_task → deadline zero.
+			wantOff: 0,
 		},
 	}
 	for _, c := range cases {
@@ -912,6 +933,68 @@ func TestScheduler_IdleDoesNotBusyLoop(t *testing.T) {
 
 	if s.tickCount != 0 {
 		t.Errorf("tickCount = %d, want 0 (no maintenance ticks should fire within 2.5s at 60s interval)", s.tickCount)
+	}
+}
+
+// TestScheduler_DoesNotWedgeOnPastCronKindWake is the regression test
+// for the 2026-09-04 100% CPU wedge. The reproduction:
+//   - 3156 unfired scheduled_wakes rows accumulated over time, ALL of
+//     them kind=cron (cron-injected wakes whose target_time is in the
+//     past because ProcessScheduledTasks periodically re-arms them).
+//   - 0 notification-eligible rows pending.
+//   - computeEarliestDeadline's MIN(t) query, without the kind filter,
+//     returned the soonest past cron-kind timestamp.
+//   - scheduleNextDeadline clamped d=0 → timer fires immediately.
+//   - select hits <-deadlineTimer.C → dispatchDrainAdHocWakes claims
+//     nothing (no notification-eligible rows) → exit.
+//   - select loops back, re-enters scheduleNextDeadline → d=0 again.
+//   - Tight loop with no waiting → 100% CPU with no work.
+//
+// The fix: computeEarliestDeadline filters the wake branch to the
+// kind-set dispatchClaimNextAdHocWake actually claims. With no
+// notification-eligible rows AND no scheduled_tasks, the deadline is
+// zero and the timer is armed for the full interval (60s).
+func TestScheduler_DoesNotWedgeOnPastCronKindWake(t *testing.T) {
+	s := newTestScheduler(t)
+	s.SetHeartbeat(0)
+	now := time.Now()
+
+	// Many cron-kind wakes with target_time deep in the past — these
+	// are the rows that piled up during cron re-arming cycles.
+	for i := 0; i < 50; i++ {
+		mustExec(t, s.db, `INSERT INTO scheduled_wakes (id, target_time, reason, created_by, fired, metadata) VALUES (?,?,?,?,0,?)`,
+			fmt.Sprintf("cron-past-%d", i),
+			now.Add(-time.Duration(i+1)*time.Minute).Unix(),
+			"cron:epistemic-compaction",
+			"mpm-scheduler",
+			`{"kind":"cron","task_id":"epistemic-compaction"}`)
+	}
+
+	// Snapshot of computeEarliestDeadline — must NOT return a past timestamp.
+	got, err := s.computeEarliestDeadline(context.Background(), now)
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("computeEarliestDeadline = %v, want zero (no notification-eligible work pending)", got)
+	}
+
+	// End-to-end: run scheduler with 60s interval for 2s and verify
+	// nothing in the loop spins. Before the fix this would burn 100%
+	// CPU within milliseconds.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, 60*time.Second) }()
+	time.Sleep(2000 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("scheduler did not stop within 1s of ctx cancel")
+	}
+
+	if s.tickCount != 0 {
+		t.Errorf("tickCount = %d, want 0 (no maintenance ticks should fire within 2s at 60s interval)", s.tickCount)
 	}
 }
 
