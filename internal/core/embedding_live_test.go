@@ -56,13 +56,16 @@ func TestLiveOllamaEmbedding(t *testing.T) {
 
 // probeOllamaDimension makes a minimal API call to discover the embedding
 // dimension for the given model without depending on a hard-coded model map.
+//
+// Ollama moved from POST /api/embeddings ({"model","prompt"}) to POST
+// /api/embed ({"model","input"}, response {"embeddings":[[...]]}).
 func probeOllamaDimension(endpoint, model string) (int, error) {
 	if model == "" {
 		model = "nomic-embed-text"
 	}
 	reqBody := map[string]interface{}{
-		"model":  model,
-		"prompt": "dimension-probe",
+		"model": model,
+		"input": "dimension-probe",
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -77,11 +80,21 @@ func probeOllamaDimension(endpoint, model string) (int, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, err
 	}
+	// Accept both the modern {"embeddings":[[...]]} shape and the legacy
+	// {"embedding":[...]} shape for forward/backward compatibility with
+	// installations still serving the older endpoint.
 	var result struct {
-		Embedding []float32 `json:"embedding"`
+		Embedding  []float32   `json:"embedding"`
+		Embeddings [][]float32 `json:"embeddings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return 0, err
 	}
-	return len(result.Embedding), nil
+	if len(result.Embedding) > 0 {
+		return len(result.Embedding), nil
+	}
+	if len(result.Embeddings) > 0 {
+		return len(result.Embeddings[0]), nil
+	}
+	return 0, nil
 }
