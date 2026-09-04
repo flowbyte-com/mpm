@@ -2049,6 +2049,18 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		return fmt.Errorf("memories column affinity rebuild: %w", err)
 	}
 
+	// EnforceMemoriesCreatedAtNotNull runs after the affinity rebuild
+	// because both use the FK envelope (outside any transaction). The
+	// affinity rebuild flips created_at to INTEGER; this migration
+	// then flips the column to NOT NULL — completing the
+	// schema-level discipline triad for the one timestamp column
+	// where "missing" has no defensible meaning. Idempotent via
+	// sentinel + schema-shape probe. See
+	// migration_memories_created_at_not_null.go.
+	if err := EnforceMemoriesCreatedAtNotNull(dm.db); err != nil {
+		return fmt.Errorf("memories created_at NOT NULL enforcement: %w", err)
+	}
+
 	// alpha-5 D-12.1: alter scheduled_tasks timestamp column DECLARED TYPEs
 	// (DATETIME/DATE/TIMESTAMP) to INTEGER. mattn/go-sqlite3 returns Go types
 	// based on declared TYPE; even after timestamps_unified_v1 converted the
