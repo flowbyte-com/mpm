@@ -8,10 +8,10 @@
  * are gone).
  *
  * Until the Phase 1/2 refactor, mpm-mcp exposed 77 granular tools. The
- * current registry exposes 22 tools total; this Pi adapter registers 16
- * of them. The 13 Domain Tools are "Fat RPC" — they take {action: string,
+ * current registry exposes 22 tools total; this Pi adapter registers 17
+ * of them. The 14 Domain Tools are "Fat RPC" — they take {action: string,
  * params: object} and the backend dispatches. That collapses ~77 distinct
- * tool definitions into 13 near-identical ones, permanently resolving
+ * tool definitions into 14 near-identical ones, permanently resolving
  * the ~15KB prompt bloat the old surface caused.
  *
  * Tools in the full registry not registered here (`mpm_work`,
@@ -220,7 +220,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		);
 	}
 	lines.push(
-		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 13 Domain Tools + 3 Standalones (16 typed tools total); tools in the full 22-tool MPM registry not exposed here remain reachable via `mpm call <tool> --payload '<json>'`.",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 14 Domain Tools + 3 Standalones (17 typed tools total); tools in the full 22-tool MPM registry not exposed here remain reachable via `mpm call <tool> --payload '<json>'`.",
 	);
 	return lines.join("\n");
 }
@@ -228,7 +228,7 @@ function renderWakeBlock(wake: WakeContext): string {
 // --------------------------------------------------------------------------
 // Domain Tool schema + registration helper
 //
-// All 13 Domain Tools use the same "Fat RPC" shape: {action, params}.
+// All 14 Domain Tools use the same "Fat RPC" shape: {action, params}.
 // The action enum and per-action parameters are documented in each tool's
 // description; validation happens in the mpm backend, which returns a
 // descriptive error envelope on a bad action / missing field.
