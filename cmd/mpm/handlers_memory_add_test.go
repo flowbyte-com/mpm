@@ -240,3 +240,53 @@ func TestMemoryAdd_ForensicMetadataForDefaultedFlags(t *testing.T) {
 		"--tags supplied → cli_tags metadata must echo the explicit values")
 	assert.NotContains(t, all[2].metadata, "cli_weight")
 }
+
+// TestMemoryAdd_DashDashSeparatorStripped is the regression test for
+// the D3 defect. `mpm memory add` documented the `-- ` prefix as the
+// way to terminate flag parsing for content that begins with `-`,
+// but pre-fix the handler did NOT consume `--` — it joined it with the
+// rest of the positional args verbatim. So `mpm memory add -- -flaglike`
+// stored `-- -flaglike` (with the leading `-- ` literal) instead of
+// `-flaglike`. The audit reported this as "mpm add rejects content
+// beginning with `-`"; on inspection, the actual defect is that the
+// escape hatch printed in the help text did not actually work for the
+// `mpm memory add` path.
+//
+// Fix: when the first positional arg is the literal token `--`, drop
+// it from contentArgs so the remaining content is stored verbatim,
+// matching POSIX-utility convention. Does NOT change flag parsing for
+// tokens that begin with a single dash — those continue to be rejected
+// at parse time as ambiguous (preserves the 2026-08-13 silent-failure
+// invariant).
+func TestMemoryAdd_DashDashSeparatorStripped(t *testing.T) {
+	dm := setupMemoryAddTest(t)
+
+	// The audit's reported form: content begins with `-` after the
+	// separator. Pre-fix: stored as `-- ---yaml-front-matter`.
+	// Post-fix: stored as `---yaml-front-matter`.
+	code := handleMemoryAdd([]string{"--", "---yaml-front-matter"})
+	require.Equal(t, 0, code)
+
+	var gotContent string
+	row := dm.SQLDB().QueryRow(
+		`SELECT content FROM memories WHERE content = '---yaml-front-matter' ORDER BY created_at DESC LIMIT 1`,
+	)
+	require.NoError(t, row.Scan(&gotContent),
+		"mpm memory add -- ---yaml-front-matter should have stored `---yaml-front-matter`")
+	assert.Equal(t, "---yaml-front-matter", gotContent,
+		"the leading `--` separator must be consumed, not stored verbatim")
+
+	// Negative control: a single-dash leading token in positional
+	// content (without the `--` separator) is preserved verbatim.
+	// Pre-fix behaviour accepted `-foo` and stored it as-is. The
+	// fix must not change that behaviour — only consume `--` when
+	// it appears in the separator position.
+	handleMemoryAdd([]string{"-leading-single-dash"})
+	var single string
+	row2 := dm.SQLDB().QueryRow(
+		`SELECT content FROM memories WHERE content = '-leading-single-dash' LIMIT 1`,
+	)
+	require.NoError(t, row2.Scan(&single),
+		"single-dash leading content must still be stored verbatim (no rejection)")
+	assert.Equal(t, "-leading-single-dash", single)
+}
