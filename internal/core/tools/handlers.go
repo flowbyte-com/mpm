@@ -3595,17 +3595,60 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 			limit = n
 		}
 	}
+	// F-5 (2026-09-04 residual inventory, P2): the JSON Schema for
+	// mpm_wakes list advertises `kinds: string[]` but pre-fix this
+	// parameter was silently discarded — every agent filtering on
+	// kinds received the unfiltered result set. The kinds semantics
+	// here match CheckPendingWakes at wake_tools.go:226-249: nil/empty
+	// → no filter (backward-compat default for list is "all wakes",
+	// NOT notification-only); explicit list → IN filter on
+	// json_extract(metadata, '$.kind'); "*" → no filter. We post-filter
+	// the ListScheduledWakes result set rather than changing the DB
+	// layer signature, which keeps the fix narrowly scoped to the bug.
+	kinds := readKindsParam(p)
 	items, err := dm.ListScheduledWakes(includeFired, overdueOnly, limit)
 	if err != nil {
 		return nil, err
 	}
-	return checkWakesAndFold(dm, ac, map[string]interface{}{
+	if len(kinds) > 0 {
+		filtered := items[:0]
+		wantAll := false
+		for _, k := range kinds {
+			if k == "*" {
+				wantAll = true
+				break
+			}
+		}
+		if !wantAll {
+			allowed := make(map[string]struct{}, len(kinds))
+			for _, k := range kinds {
+				allowed[k] = struct{}{}
+			}
+			for _, w := range items {
+				wk, _ := w["kind"].(string)
+				if wk == "" {
+					if md, ok := w["metadata"].(map[string]interface{}); ok {
+						wk, _ = md["kind"].(string)
+					}
+				}
+				if _, ok := allowed[wk]; ok {
+					filtered = append(filtered, w)
+				}
+			}
+			items = filtered
+		}
+	}
+	out := map[string]interface{}{
 		"success":       true,
 		"wakes":         items,
 		"count":         len(items),
 		"include_fired": includeFired,
 		"overdue_only":  overdueOnly,
-	}, nil), nil
+	}
+	if len(kinds) > 0 {
+		out["kinds"] = kinds
+	}
+	return checkWakesAndFold(dm, ac, out, nil), nil
 }
 
 // handleDigestWakes returns a compact summary of overdue + pending wakes.
