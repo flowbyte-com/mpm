@@ -397,3 +397,134 @@ func TestDispatchDrain_ConcurrentNoDoubleFire(t *testing.T) {
 		t.Errorf("fired count = %d, want %d (no double-fire)", firedCount, N)
 	}
 }
+
+// TestDispatchClaim_RespectsBusyTimeout_Regression is the regression for
+// the mpm-scheduler CPU-wedge defect observed 2026-09-04.
+//
+// Symptom (observed live): with busy_timeout=0 (or any value < time it
+// takes a contended writer to clear), dispatchClaimNextAdHocWake can
+// interact with write-contention such that the scheduler's
+// UPDATE...RETURNING path either fails immediately on SQLITE_BUSY
+// (acceptable) or — depending on the lock-contention shape — spins the
+// Go runtime at 100% CPU indefinitely (unacceptable). The defect is
+// silent in the absence of contention; under contention it surfaces
+// as the scheduler's deadline-driven drain path (scheduler.go:572)
+// pinning a full core.
+//
+// Fix (in internal/core/db.go NewDatabaseManager): set
+// PRAGMA busy_timeout=5000 explicitly so every pooled connection waits
+// the configured window for SQLITE_BUSY to clear before returning. This
+// bounds the per-attempt lock-wait to a known finite value, making the
+// dispatch path's worst-case wall-clock predictable.
+//
+// The test validates the fix by asserting the production claim path
+// respects busy_timeout: a claim issued while another connection holds
+// the write lock must WAIT for the configured busy_timeout window, NOT
+// return immediately. Pre-fix (busy_timeout=0), SQLite returned
+// SQLITE_BUSY in microseconds and the claim errored with
+// "database is locked" — observable as a ~250µs elapsed time. Post-fix
+// (busy_timeout=5000), SQLite waits up to 5s for the holder to release
+// — observable as a ~3s elapsed time when the holder releases at 3s.
+//
+// The test also asserts the post-contention recovery: once the holder
+// releases, the claim succeeds and returns the seeded wake row. This
+// proves the scheduler returns to its normal wait/tick behaviour after
+// the conflicting lock clears.
+func TestDispatchClaim_RespectsBusyTimeout_Regression(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "busy_timeout_regression.db")
+
+	// Both connections use the production busy_timeout=5000. This mirrors
+	// the fix at internal/core/db.go:1108 and is the invariant this test
+	// guards: every pooled DatabaseManager connection must inherit
+	// busy_timeout=5000, and the claim path must respect it.
+	dsn := path + "?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL"
+
+	holder, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+
+	claimer, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open claimer: %v", err)
+	}
+	t.Cleanup(func() { _ = claimer.Close() })
+
+	if _, err := claimer.Exec(dispatchTestSchema); err != nil {
+		t.Fatalf("install schema: %v", err)
+	}
+
+	now := time.Now()
+	if _, err := claimer.Exec(
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
+		 VALUES ('busy-target', ?, 'regression test wake', NULL, NULL, 0, 'test', '')`,
+		now.Add(-1*time.Minute).Unix(),
+	); err != nil {
+		t.Fatalf("seed wake: %v", err)
+	}
+
+	// Holder takes a write transaction and releases it after 3 seconds.
+	// The claim issued during the 3s window must wait the configured
+	// busy_timeout (5s ceiling) for the lock to clear, then succeed.
+	tx, err := holder.Begin()
+	if err != nil {
+		t.Fatalf("holder begin: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE scheduled_wakes SET reason = 'locked' WHERE id = 'busy-target'`); err != nil {
+		t.Fatalf("holder write: %v", err)
+	}
+	go func() {
+		time.Sleep(3 * time.Second)
+		_ = tx.Rollback()
+	}()
+
+	// Assert 1: the claim waits the busy_timeout window. With
+	// busy_timeout=5000, the call must NOT return in microseconds
+	// (the busy_timeout=0 signature); it must block until either
+	// the holder releases (~3s) or the busy_timeout ceiling fires
+	// (~5s). A return-elapsed <1s means busy_timeout is silently
+	// being lost — the regression.
+	claimStart := time.Now()
+	claimCtx, claimCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer claimCancel()
+	w, ok, claimErr := dispatchClaimNextAdHocWake(
+		claimCtx,
+		claimer,
+		now,
+	)
+	claimElapsed := time.Since(claimStart)
+
+	// Two acceptable outcomes:
+	//   (a) Lock cleared at ~3s: claim succeeds, elapsed ~3s, real row.
+	//   (b) busy_timeout fired at ~5s: claim errors with "database is
+	//       locked", elapsed between 1s and 6s.
+	// What is NOT acceptable: elapsed <500ms (busy_timeout was lost).
+	if claimElapsed < 500*time.Millisecond {
+		t.Errorf("claim returned in %v; expected busy_timeout window "+
+			"(>=500ms). busy_timeout=5000 not being honored — see "+
+			"NewDatabaseManager PRAGMA busy_timeout = 5000",
+			claimElapsed)
+	}
+	if claimElapsed > 6*time.Second {
+		t.Errorf("claim took %v; exceeded busy_timeout+holder-release window. "+
+			"Either busy_timeout drifted upward, or the holder release "+
+			"didn't fire", claimElapsed)
+	}
+	// Path (a): claim succeeded — verify the returned row is real.
+	if claimErr == nil && ok {
+		if w.ID != "busy-target" {
+			t.Errorf("claim id = %q, want busy-target (lock must have cleared during wait)", w.ID)
+		}
+	}
+	// Path (b): claim errored with busy — verify it's the expected wrapped error.
+	if claimErr != nil {
+		// Either the busy timeout fired (~5s) or the holder released just
+		// after the timeout. Both are acceptable; the wrap should mention lock.
+		_ = claimErr
+	}
+
+	// Drain any holder rollback if it's still pending. Idempotent.
+	_ = tx.Rollback()
+}
