@@ -214,11 +214,29 @@ ADAPTERS: list[dict] = [
 # BLOCK -->` markers are universal (one per host-form copy/paste example, plus
 # the host-neutral bare canonical at the end).
 
-# Word-boundary regex on the leading `mpm_` of canonical tool names.
-# Captures only after `mpm_` when followed by a letter (so `mpm_handoff`
-# matches with group=`handoff`, but `mpm__*` does NOT because the char after
-# the `mpm_` is another underscore, not a letter).
-_BARE_TOOL_RE = re.compile(r"\bmpm_([a-z]\w*)")
+# Per-token regex on canonical tool REFERENCES (not bare mentions).
+# Matches only `` `mpm_X` `` wrapped in backticks, capturing the
+# `mpm_X` portion. Prose mentions of bare `mpm_X` outside backticks
+# are intentionally NOT matched, so they cannot be transformed by
+# accident.
+#
+# Why backtick-bounded rather than bare-word: the canonical source
+# already wraps every tool reference in backticks (consistent with
+# the file's prose style), and prose mentions like `mpm_decisions` /
+# `mpm_lessons` in the wake-payload description are likewise in
+# backticks. Requiring backticks is a stronger guarantee than the
+# prior bare-form regex (which matched any `mpm_X` substring).
+_MPM_TOKEN_RE = re.compile(r"`(mpm_[a-z]\w*)`")
+
+# Sentence-tail boundary marker: a `.`, `?`, or `!` followed by
+# whitespace, newline, or end-of-string. Used to bound the sentence
+# containing a given `mpm_X` token.
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)")
+
+# The keyword that flags an invocation reference: `mpm_X action Y`.
+# Both singular (`action`) and plural (`actions`) are matched so
+# listings like "actions `flush`, `read`, ..." are caught.
+_ACTION_RE = re.compile(r"\baction(?:s)?\b")
 
 # The universal managed-block markers (used both in canonical source and in
 # the per-host copy/paste examples inside the source).
@@ -229,13 +247,36 @@ _BARE_BLOCK_RE = re.compile(
 
 
 def render_for_host(block: str, prefix: str) -> str:
-    """Return the canonical block rendered for one host. The leading
-    `mpm_` of each canonical tool name is replaced with
-    `<prefix>mpm_`. With an empty prefix (OpenCode, Pi), the result
-    is byte-identical to the bare canonical block."""
+    """Return the canonical block rendered for one host.
+
+    The renderer applies the host's transport-namespace prefix only to
+    `` `mpm_X` `` tokens that occur in `mpm_X action Y` invocation
+    context within the same sentence (i.e., the sentence containing the
+    token has the `action` keyword ahead of the next sentence
+    boundary). Tool references that appear in prose — with no
+    invocation keyword in the same sentence — are preserved (NOT
+    rewritten) so the renderer does not accidentally transform names
+    that happen to appear in explanatory prose.
+
+    With an empty prefix (OpenCode, Pi), the result is byte-identical
+    to the input block.
+    """
     if not prefix:
         return block
-    return _BARE_TOOL_RE.sub(lambda m: f"{prefix}mpm_{m.group(1)}", block)
+    out: list[str] = []
+    cursor = 0
+    for m in _MPM_TOKEN_RE.finditer(block):
+        sentence_end_m = _SENTENCE_END_RE.search(block, m.end())
+        sentence_end = sentence_end_m.start() if sentence_end_m else len(block)
+        if _ACTION_RE.search(block, m.end(), sentence_end):
+            out.append(block[cursor:m.start()])
+            out.append(f"`{prefix}{m.group(1)}`")
+            cursor = m.end()
+        # else: prose mention — leave the original `` `mpm_X` `` in place
+        # by NOT advancing the cursor past it. The trailing
+        # out.append(block[cursor:]) below carries it through verbatim.
+    out.append(block[cursor:])
+    return "".join(out)
 
 
 def extract_canonical_block(text: str) -> str:

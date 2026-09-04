@@ -103,7 +103,7 @@ canonical protocol, not this block, for behavioural changes.
 
 5. **Session closure is not work completion.** When work spans
    sessions or requires verification, track it separately via
-   `mpm__mpm_work`. Lifecycle: action `create` to open,
+   `mpm_work`. Lifecycle: action `create` to open,
    `update`/`note` during, `complete` to finish. `session ended`
    is **not** the same event as `work completed` is **not** the
    same event as `work verified`. The agent decides when work is
@@ -400,7 +400,7 @@ canonical protocol, not this block, for behavioural changes.
 
 5. **Session closure is not work completion.** When work spans
    sessions or requires verification, track it separately via
-   `mcp__mpm__mpm_work`. Lifecycle: action `create` to open,
+   `mpm_work`. Lifecycle: action `create` to open,
    `update`/`note` during, `complete` to finish. `session ended`
    is **not** the same event as `work completed` is **not** the
    same event as `work verified`. The agent decides when work is
