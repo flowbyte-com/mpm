@@ -59,7 +59,7 @@ that this host adapter inherits:
    work_id, status, note})` to track the work item itself. The agent
    decides when work is done — host session termination does NOT
    auto-complete a work item. See protocol §4.1: `session ended !=
-   work completed != work verified`. The OpenCode adapter exposes 16 typed
+   work completed != work verified`. The OpenCode adapter exposes 17 typed
    tools; `mpm_work` reaches the full registry via the `mpm call
    mpm_work --payload '<json>'` CLI fallback (call with action +
    params).
