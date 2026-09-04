@@ -71,9 +71,31 @@ def install(scope: str, target: str, snippet_path: str) -> int:
         return 0
     existing = target_path.read_text()
 
-    # Already managed by current version -> no-op.
+    # Already managed — refresh the block content from the snippet when it
+    # differs from the latest template, so re-runs converge on the canonical
+    # contract. User content outside the markers is preserved. Closes the
+    # drift class where the managed block became stale relative to the snippet
+    # while the markers still matched (the previous no-op branch let stale
+    # content survive indefinitely — see MPM cross-adapter integrity audit,
+    # 2026-09-04).
     if MANAGED_BEGIN_RE.search(existing) and MANAGED_END_RE.search(existing):
-        print(f"[install_agents_instructions] {target_path} already has opencode managed section; no-op")
+        new_managed = managed_block.rstrip() + "\n"
+        if _extract_managed_block(existing) == new_managed:
+            print(f"[install_agents_instructions] {target_path} already has current managed section; no-op")
+            return 0
+        backup = backup_path(target_path)
+        shutil.copy2(target_path, backup)
+        replaced = re.sub(
+            MANAGED_BEGIN_RE.pattern + r".*?" + MANAGED_END_RE.pattern,
+            new_managed.rstrip(),
+            existing,
+            flags=re.DOTALL,
+        )
+        target_path.write_text(replaced)
+        print(
+            f"[install_agents_instructions] {target_path} had stale managed "
+            f"section — refreshed from snippet. backup at {backup}"
+        )
         return 0
 
     # Legacy managed block -> replace in place.
@@ -143,6 +165,16 @@ def backup_path(target_path: Path) -> Path:
         p = parent / f"{target_path.name}.bak.{i}"
         i += 1
     return p
+
+
+def _extract_managed_block(content: str) -> str | None:
+    """Return the raw managed block (BEGIN/END inclusive) or None."""
+    m = re.search(
+        MANAGED_BEGIN_RE.pattern + r".*?" + MANAGED_END_RE.pattern,
+        content,
+        flags=re.DOTALL,
+    )
+    return m.group(0) if m else None
 
 
 def main() -> int:

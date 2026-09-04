@@ -199,6 +199,46 @@ session-closing trigger fires.
 **Mid-session acknowledgements** are not session-closing — they are
 conversational acks within an ongoing exchange.
 
+### 4.1 Work tracking is distinct from session closure
+
+The current protocol keeps three lifecycle surfaces split. They are **not
+the same event** and an installer/agent that collapses them is a contract
+violation:
+
+```text
+session ended
+    !=
+work completed
+    !=
+work verified
+```
+
+- **Session closure** ends the conversational loop. It emits a handoff
+  via `mpm_handoff` (action `write`). A handoff is **observation**,
+  not a claim of completion.
+- **Work completion** is an explicit agent action via `mpm_work` (action
+  `complete`) for a specific `work_id`. The agent decides when work is
+  done — the host runtime terminating the session does **not** decide
+  for it.
+- **Work verification** is a separate event (evidence accumulation +
+  `mpm_work` action `resolve_contradiction`); it follows completion, not
+  session end.
+
+When work spans sessions, the agent must:
+
+1. Create the work item via `mpm_work` (action `create`).
+2. Update it via `mpm_work` (action `update`, `note`) during the session.
+3. Mark it complete only when the agent decides it is done
+   (`mpm_work` action `complete` with `work_id`).
+4. Write the handoff separately via `mpm_handoff` (action `write`).
+
+**Do not** tell the agent that a closing session has completed any work.
+**Do not** infer `mpm_work` completion from `session_end` hooks. Host
+adapters MUST NOT auto-emit work completion on session termination.
+
+The session boundary is conversational. The work boundary is
+epistemic. The two boundaries are independent.
+
 ---
 
 ## 5. MPM AS SOURCE OF TRUTH

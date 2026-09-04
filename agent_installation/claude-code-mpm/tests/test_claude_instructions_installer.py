@@ -78,8 +78,11 @@ class CanonicalProtocol(unittest.TestCase):
         # Generic mentions of "MCP", "plugin", or "agent integration" are OK;
         # host-specific commands are not.
         # We don't enforce word counts — just ensure file size is reasonable.
+        # Threshold bumped from 20K → 25K chars to accommodate §4.1
+        # (`session != work` lifecycle split) added in the 2026-09-04
+        # cross-adapter integrity audit.
         self.assertGreater(len(self.text), 2000)
-        self.assertLess(len(self.text), 20000)
+        self.assertLess(len(self.text), 25000)
 
 
 class SnippetContract(unittest.TestCase):
