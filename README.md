@@ -678,12 +678,15 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
 > autostart entry automatically; `scripts/install.sh --uninstall` removes it.
 > Lesson `071911bc` is stamped into the `.desktop` Comment= line as the lesson ID
-> for the autostart-layer workaround (the pragmatic fix for hosts without an
-> agent wake path wired in). The architectural framing — that the *agent wake
-> layer* (AGENTS.md Session Startup step 2) is the structurally correct fix and
-> that systemd-level workarounds are transitional — is captured by lesson
-> `24be03ec71a5981f` (memory `463fb2c8014fc1f1`, currently challenged). Both
-> lessons apply; they describe different layers of the same problem.
+> for the autostart mechanism. Lesson `24be03ec71a5981f` is the substrate
+> memory that frames the daemon-stays-dead-at-boot behaviour as a designed
+> "Lazy-Start Architecture" (memory `463fb2c8014fc1f1`, currently flagged
+> for manual review — the challenge queue's `unresolved state collision
+> (cosine=0.88)` is a stale-detection flag, not a substantive dispute of
+> the lesson's content). **Both IDs are cited because the substrate
+> does not articulate how the two mechanisms relate; the relationship
+> between the wake-layer design and the autostart-layer workaround is
+> unresolved in the cited material.**
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
 > headless deployments) can opt out by removing the autostart entry and instead
