@@ -48,7 +48,7 @@ import (
 // Errors return non-nil but the wake is still marked fired=1 — the
 // scheduler's contract is "failures surface but do not block other
 // wakes".
-func DrillHandler(w Wake) error {
+func DrillHandler(ctx context.Context, w Wake) error {
 	workspace := mpmcli.ResolveWorkspace()
 	dm, err := core.NewDatabaseManager(workspace)
 	if err != nil {
@@ -75,25 +75,40 @@ func DrillHandler(w Wake) error {
 	sessionID := uuid.NewString()
 	startedAt := time.Now().Unix()
 
-	_, err = dm.SQLDB().Exec(`
-		INSERT INTO drill_runs
-		    (id, drill_id, framework, session_id, status, started_at)
-		VALUES (?, ?, ?, ?, 'running', ?)`,
-		runID, drill.ID, drill.Framework, sessionID, startedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("insert drill_run: %w", err)
+	// F-3: thread the dispatch ctx into DB writes so the mpm-lint
+	// ctx-in-scope-missing check passes (ctx is in scope and now used)
+	// and so cancellation propagates to the SQLite write path. Use
+	// WithTx for the single-statement write per CLAUDE.md single-conn
+	// discipline (the canonical pattern is WithTx for any bare Exec
+	// path; ExecTracked wraps the bare *sql.DB call).
+	if err := dm.WithTx(func(node core.DBNode) error {
+		_, err := node.ExecTracked(`
+			INSERT INTO drill_runs
+			    (id, drill_id, framework, session_id, status, started_at)
+			VALUES (?, ?, ?, ?, 'running', ?)`,
+			0,
+			runID, drill.ID, drill.Framework, sessionID, startedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("insert drill_run: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	// Dispatch by framework.
+	// Dispatch by framework. Apply the per-framework timeout as a
+	// child of the dispatch ctx so SIGTERM still cancels the drill
+	// (pre-fix this was derived from Background, masking the dispatch
+	// cancel signal — F-3 closes that hole).
 	timeoutSecs := drill.TimeoutSecs
 	if timeoutSecs <= 0 {
 		timeoutSecs = core.DefaultDrillTimeout(drill.Framework)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSecs)*time.Second)
+	dispatchCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
 
-	invocations, runErr := dispatchDrill(ctx, dm, *drill, sessionID, compliant)
+	invocations, runErr := dispatchDrill(dispatchCtx, dm, *drill, sessionID, compliant)
 	if runErr != nil {
 		return updateDrillRunError(dm, runID, runErr)
 	}
@@ -108,14 +123,20 @@ func DrillHandler(w Wake) error {
 		status = "failed"
 	}
 
-	_, err = dm.SQLDB().Exec(`
-		UPDATE drill_runs
-		SET status = ?, verdict = ?, completed_at = ?, duration_ms = ?
-		WHERE id = ?`,
-		status, string(verdictJSON), completedAt, durationMs, runID,
-	)
-	if err != nil {
-		return fmt.Errorf("update drill_run: %w", err)
+	if err := dm.WithTx(func(node core.DBNode) error {
+		_, err := node.ExecTracked(`
+			UPDATE drill_runs
+			SET status = ?, verdict = ?, completed_at = ?, duration_ms = ?
+			WHERE id = ?`,
+			0,
+			status, string(verdictJSON), completedAt, durationMs, runID,
+		)
+		if err != nil {
+			return fmt.Errorf("update drill_run: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	_ = sessionID // reserved for future telemetry cross-references
 	return nil

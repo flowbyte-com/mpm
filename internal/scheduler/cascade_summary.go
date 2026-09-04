@@ -20,6 +20,7 @@
 package scheduler
 
 import (
+	"context"
 	"log/slog"
 )
 
@@ -38,7 +39,7 @@ func NewCascadeSummaryHandler(logger *slog.Logger) HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return func(w Wake) error {
+	return func(ctx context.Context, w Wake) error {
 		// json.Unmarshal into map[string]interface{} yields float64 for
 		// all numbers — coerce defensively, since a missing or
 		// mis-typed field must not crash the scheduler.
