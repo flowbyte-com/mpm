@@ -130,6 +130,35 @@ func handleMemoryAdd(args []string) int {
 		return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>", 1)
 	}
 
+	// D3 fix: POSIX-style `--` separator. The router-level parseFlags
+	// (router.go:474) rewrites `-h/--help` (and a handful of other
+	// names) but does NOT know about per-handler flags like --fact,
+	// --tags, --weight. If the operator's content begins with `-`
+	// (think YAML front-matter `---\nfoo: bar` or a literal flag-like
+	// token they want preserved as data), the documented escape hatch
+	// is to prefix with `--`: `mpm memory add -- ---yaml-front-matter`.
+	//
+	// Pre-fix this worked for `mpm add` (the older simple_cmds.go
+	// path uses stdlib flag, which respects `--`), but for the
+	// `mpm memory add` path the pre-scan switch below does NOT
+	// consume a standalone `--` token — it fell through into
+	// contentArgs and got joined with the rest of the content,
+	// producing rows like content=`-- ---yaml-front-matter`. The
+	// audit reported this as "mpm add rejects content beginning
+	// with `-`"; the actual defect is that the documented escape
+	// hatch printed in the help text did not work for the
+	// `mpm memory add` path.
+	//
+	// Strip the leading `--` from positional args before the
+	// pre-scan loop. Single-dash leading tokens (`-foo`) and
+	// non-flag-like content are left untouched — the pre-scan
+	// switch below still rejects ambiguous tokens, preserving the
+	// 2026-08-13 silent-failure invariant (a typo in --fact/--tags
+	// shape must NEVER silently land as content).
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+
 	// Pre-scan --json, -i/--interactive, --fact, --tags, --weight, --expires-in flags.
 	// Unrecognized flags fall through to contentArgs (positional content),
 	// but --fact/--tags/--weight are EXPLICITLY recognized so a typo in flag
