@@ -294,6 +294,24 @@ func handleMemoryAdd(args []string) int {
 		}
 	}
 
+	// F-2 (2026-09-04 residual inventory, P1): reject whitespace-only
+	// content at the CLI boundary. Pre-fix, a literal "   " passed both
+	// the `factArg != ""` truthiness check (whitespace is truthy in Go)
+	// and the positional empty check, then fell through to
+	// store.AddMemoryWithWeight which produced a row with content="   "
+	// — a low-quality artifact future retrieval would surface verbatim.
+	// Worse, the topic-suggestion path that runs after the write
+	// dereferences the new memory's ID and panics on whitespace content
+	// (FTS sanitizer returns "" → NULL path was not nil-safe).
+	// Match the pattern already in use at handlers_epistemology.go:81
+	// for theory hypothesis.
+	if strings.TrimSpace(content) == "" {
+		return respond("", "Error: memory content is required (non-empty)\n", 1)
+	}
+	// Persist the trimmed form so retrieval doesn't surface leading/trailing
+	// whitespace as part of the content.
+	content = strings.TrimSpace(content)
+
 	// Parse tags: comma-separated, trim spaces, drop empties.
 	// F-H3: --tags accepts CSV only. A value that LOOKS LIKE JSON
 	// (starts with `{` or `[`) is rejected explicitly — the pre-audit

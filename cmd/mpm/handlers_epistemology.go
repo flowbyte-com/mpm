@@ -315,19 +315,29 @@ func handleRecordDecision(args []string) int {
 	// If the caller passed flags but no choice, refuse — silent-empty
 	// decisions were the bug F-C1 surfaced (the operator thought they
 	// had recorded a choice; the DB got an empty record).
-	if hasDecisionFlags(args) && choice == "" {
+	if hasDecisionFlags(args) && strings.TrimSpace(choice) == "" {
 		if jsonOutput {
 			return respond("", `{"success":false,"error":"--choice is required when using flag form"}`+"\n", 1)
 		}
 		return respond("", "Error: --choice is required when using flag form\n", 1)
 	}
 
-	if choice == "" {
+	// F-2 (2026-09-04 residual inventory, P1): reject whitespace-only
+	// choices at the CLI boundary. Pre-fix, `--choice "   "` passed the
+	// `choice == ""` emptiness check (whitespace is non-empty in Go)
+	// and the row landed in the decisions table with choice="   " — a
+	// low-quality artifact future retrieval would surface verbatim.
+	// Match the pattern already in use at handlers_epistemology.go:81
+	// for theory hypothesis and :94 for tags.
+	if strings.TrimSpace(choice) == "" {
 		if jsonOutput {
 			return respond("", `{"success":false,"error":"decision requires a CHOICE (flag --choice or CHOICE: token)"}`+"\n", 1)
 		}
 		return respond("", "Error: decision requires a CHOICE (flag --choice or CHOICE: token)\n", 1)
 	}
+	// Persist the trimmed form so retrieval doesn't surface leading/trailing
+	// whitespace as part of the choice.
+	choice = strings.TrimSpace(choice)
 
 	var tags []string
 	if tagsStr != "" {
