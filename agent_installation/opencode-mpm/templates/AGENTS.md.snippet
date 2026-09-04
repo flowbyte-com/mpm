@@ -53,6 +53,17 @@ that this host adapter inherits:
    session-closing. Do not write a handoff on every chat ack — write one
    when substantial work has happened or a session-closing trigger fires.
 
+   **Session closure is not work completion.** When the work spans
+   sessions or requires verification, also use `mpm_work(action:
+   "create"|"update"|"note"|"complete", params: {title, content,
+   work_id, status, note})` to track the work item itself. The agent
+   decides when work is done — host session termination does NOT
+   auto-complete a work item. See protocol §4.1: `session ended !=
+   work completed != work verified`. The OpenCode adapter exposes 16 typed
+   tools; `mpm_work` reaches the full registry via the `mpm call
+   mpm_work --payload '<json>'` CLI fallback (call with action +
+   params).
+
 5. **MPM is the source of truth for cross-session continuity.** Anything
    that should survive across sessions goes to MPM, not just transient
    conversation context.
@@ -62,6 +73,45 @@ that this host adapter inherits:
    fall back to the CLI path:
    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
    Do not abandon persistence when the preferred integration breaks.
+
+7. **Beyond the core invariants.** Other MPM capabilities exist for
+   specific decision points — invoke them only when their trigger applies,
+   don't gesture at them by reflex:
+
+   - **Skill formation.** When you discover a reusable procedure that
+     isn't already a skill, save it via `mpm_skills(action: "save")`.
+     Before saving, list existing skills with `mpm_skills(action:
+     "list")` to avoid duplicates; prefer `mpm_skills(action:
+     "workshop", mode: "refine")` over creating parallel skills.
+   - **Pointer-native results.** When a tool returns a `mpm://` URI
+     instead of inline content, do NOT inline the full payload — use
+     `mpm_resolve` to dereference with bounded context cost. For raw
+     byte access, use `mpm_blob_read` / `mpm_blob_search`. Pointer
+     architecture exists to keep context windows clean.
+   - **Retrieval diagnosis.** If `mpm_memory query` returns zero results,
+     unexpected ordering, or doesn't find something you know is stored,
+     use `mpm_retrieval_diagnose` to inspect BM25 scores and ranking —
+     don't reformulate blindly or compensate in application logic.
+   - **Epistemic surfaces.** Choose deliberately: `mpm_decisions` for
+     architectural choices with non-obvious alternatives; `mpm_lessons`
+     for failures and hard-won insights (with `flavor: warning|insight`);
+     `mpm_theories` for testable hypotheses (not guesses); `mpm_evidence`
+     to attach proof when truth requires it; `mpm_confidence` to audit
+     trust before acting on stored info; `mpm_challenge` when new
+     evidence contradicts a memory (record the contest formally rather
+     than shredding).
+   - **Wake vs scheduled wake.** Wake context is for session-start
+     recall (passive). `mpm_wakes` (`schedule` / `upsert_task`) is for
+     proactive future triggers. Don't conflate: reading wake context is
+     not consuming a scheduled wake, and a session-end handoff is not
+     the same as scheduling follow-up work.
+   - **Reference freshness.** Ingested references (`mpm_references add`)
+     carry a freshness state. Before relying on a long-ago reference,
+     query it — the substrate knows whether it has likely drifted.
+   - **Projection default.** `mpm_memory query` defaults to `summary`
+     projection. Switch to `projection: "full"` (or use `mpm_resolve`
+     with a `mpm://memory/<id>` URI) only when you need the unabridged
+     content of a specific artifact.
 
 ## OpenCode-specific notes
 
