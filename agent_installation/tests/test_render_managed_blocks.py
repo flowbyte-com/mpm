@@ -397,5 +397,61 @@ class RenderScriptInvariants(unittest.TestCase):
                          "render_for_host mutated its input (impure)")
 
 
+class CanonicalVersionMarker(unittest.TestCase):
+    """The top-of-file HTML comment pins the managed-instruction
+    contract version. Pinned by §C-3 of the known-debt closure pass."""
+
+    # Semver: MAJOR.MINOR.PATCH (each numeric).
+    _SEMVER_RE = re.compile(
+        r"^<!--\s*mpm_agent_integration_version:\s*"
+        r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+        r"\s*-->$"
+    )
+
+    def _marker_line(self) -> str | None:
+        for line in CANONICAL_SOURCE.read_text(encoding="utf-8").splitlines():
+            if "mpm_agent_integration_version" in line:
+                return line.strip()
+        return None
+
+    def test_marker_is_present(self):
+        line = self._marker_line()
+        self.assertIsNotNone(line,
+                             "canonical source must carry the "
+                             "mpm_agent_integration_version marker")
+
+    def test_marker_is_valid_semver(self):
+        line = self._marker_line()
+        self.assertIsNotNone(line)
+        m = self._SEMVER_RE.match(line.strip())
+        self.assertIsNotNone(
+            m,
+            f"version marker must be valid semver in an HTML comment, "
+            f"got: {line!r}"
+        )
+
+    def test_exactly_one_marker_at_top_of_file(self):
+        """The marker must appear exactly once at the top of the file
+        (before the H1). The Versioning section may mention the marker
+        in prose, but only the top-of-file one counts as the contract
+        version pointer."""
+        text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        # Find the line index of the H1.
+        h1_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith("# "):
+                h1_idx = i
+                break
+        self.assertIsNotNone(h1_idx, "canonical source must start with an H1")
+        head = "\n".join(lines[:h1_idx])
+        count = head.count("mpm_agent_integration_version")
+        self.assertEqual(
+            count, 1,
+            f"exactly one version marker expected at the top of the "
+            f"file (before the H1), found {count}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,5 @@
+<!-- mpm_agent_integration_version: 1.0.0 -->
+
 # MPM Agent Integration — Canonical Managed Instruction Snippets
 
 > **Status:** canonical source. This file is the **single source of truth**
@@ -643,3 +645,41 @@ recovery notes) belong in the per-host adapter's header/footer
 sections, **outside** the canonical managed block. Add or change
 those directly in `scripts/render_managed_blocks.py` (the
 `ADAPTERS` table carries per-host `header` and `footer` strings).
+
+# Versioning
+
+This file's top-of-file HTML comment carries the **managed-instruction
+contract version**:
+
+```
+<!-- mpm_agent_integration_version: MAJOR.MINOR.PATCH -->
+```
+
+The version pins the contract that adapters render into each host's
+managed section. It is independent of the MPM software release
+version (e.g., `v0.1.0-alpha-final`). Parity byte-for-byte remains
+the authoritative drift detector; the version marker is a coarse
+signal for downstream adapters that want to pin to a known contract
+shape.
+
+## When to bump
+
+- **patch** (1.0.0 → 1.0.1) — typo fixes, comment clarifications,
+  formatting, prose tightening; no semantic change to the rendered
+  contract. Example: fixing a wording glitch inside the canonical
+  block.
+- **minor** (1.0.0 → 1.1.0) — additive — new optional tool/param
+  documented in the tool-reference stability contract table, new
+  tool added, new host added, expanded examples; existing
+  contracts still resolve under the old version.
+- **major** (1.0.0 → 2.0.0) — breaking — managed-block marker
+  convention changes, required field added to an existing tool,
+  action rename, render-contract change that would force adapter
+  re-verification. Host adapters MUST be re-verified against the
+  new contract.
+
+Bump this marker when the canonical managed block or the
+tool-reference stability contract table changes in a way that
+matters to consumers. The marker does **not** replace byte-for-byte
+parity; the render script's `--check` mode remains the authoritative
+drift detector.
