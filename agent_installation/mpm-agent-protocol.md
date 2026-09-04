@@ -141,13 +141,13 @@ underlying persistence and validation architecture is unchanged.
 
 ### Decision Model
 
-- **Reusability** (0–2): <score> — <one-line reasoning>
-- **Non-obviousness** (0–2): <score> — <one-line reasoning>
-- **Stability** (0–2): <score> — <one-line reasoning>
-- **Leverage** (0–2): <score> — <one-line reasoning>
-- **Boundary**: procedure | fact | preference | one_off
+- **Reusability** (0–5): <score> — <one-line reasoning>
+- **Non-obviousness** (0–5): <score> — <one-line reasoning>
+- **Stability** (0–5): <score> — <one-line reasoning>
+- **Leverage** (0–5): <score> — <one-line reasoning>
+- **Boundary**: procedure | judgment | knowledge
 
-**Total**: <0–8>
+**Total**: <0–20>
 **Decision**: publish if total ≥ 6 AND boundary = procedure; else candidate / rejected
 
 ### Skill Proposal (if publishing or returning candidate)
@@ -331,7 +331,7 @@ class is relevant.
 | "What did we decide about X?" / "Before I decide..." | `mpm_memory query` with `collection=decisions`              |
 | "Why does X behave this way?" / "We suspect..."     | `mpm_memory query` with `collection=theories`               |
 | "We keep hitting this same error"                   | `mpm_lessons search` (tag filter if known)                  |
-| "I need to check the WordPress / vendor / API doc"  | `mpm_references list` (then `show`/`search` for the relevant doc) |
+| "I need to check the WordPress / vendor / API doc"  | `mpm_references list` (then `read`/`search` for the relevant doc) |
 | "What work is outstanding / what did I just ship"   | `mpm_work` list with `status=open` (or `done`)              |
 | "Where did we leave off last session?"              | `read_wake_context` (handoff is already in the payload)     |
 
@@ -400,12 +400,12 @@ The classifier is the single source of truth:
 
 - `internal/core/reference_freshness.go` — `Freshness` enum and
   `ClassifyReferenceFreshness(doc, now)` / `ClassifyReferenceFreshnessFromFields(tagsJSON, importReason, lastIndexed, now)`.
-- Surfaced in `mpm_references list`, `mpm_references show`,
+- Surfaced in `mpm_references list`, `mpm_references read`,
   `mpm_references search` as the `freshness` field on each row.
 
 ### 8.3 How agents must apply this contract
 
-When a reference surfaces in `mpm_references list` / `show` / `search`,
+When a reference surfaces in `mpm_references list` / `read` / `search`,
 read the `freshness` field alongside the title and tags:
 
 - `current` — proceed normally; the reference is the substrate's

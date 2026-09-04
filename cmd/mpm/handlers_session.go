@@ -114,7 +114,7 @@ func handleWake(args []string) int {
 		case "--strict":
 			strictMode = true
 		case "--compact":
-			// Alpha-4 W-001: emit a 9-field compact projection instead
+			// Alpha-4 W-001: emit a compact id+summary envelope instead
 			// of the full wake payload. The compact branch bypasses
 			// the local wakeResult rendering entirely and prints JSON
 			// directly.
@@ -449,7 +449,7 @@ func handleWake(args []string) int {
 	return 0
 }
 
-// handleWakeCompact (alpha-4 W-001) emits the 9-field compact wake
+// handleWakeCompact (alpha-4 W-001) emits the compact id+summary
 // projection as JSON. Mirrors `mpm call mpm_context read_wake_context
 // --payload '{"projection":"compact"}'` so the CLI and tool surface
 // stay in sync. Forces a GatherWakeContext pass — cheap, the cost is
