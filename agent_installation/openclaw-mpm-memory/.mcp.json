@@ -2,8 +2,8 @@
   "_comment": [
     "Canonical MCP wiring for the OpenClaw ↔ MPM integration.",
     "Source of truth for the OpenClaw runtime: configure via",
-    "  openclaw config set mcp.servers.mpm.command '/home/v/.mpm/bin/mpm-mcp'",
-    "  openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE '/home/v/.mpm'",
+    "  openclaw config set mcp.servers.mpm.command \"$HOME/.mpm/bin/mpm-mcp\"",
+    "  openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE \"$HOME/.mpm\"",
     "MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT set here.",
     "MPM resolves mode/persona from env at request time via",
     "internal/core/mpmcli.ActiveContextFromEnv() and falls back to its",
@@ -16,14 +16,18 @@
     "Validation: 2026-08-19 alpha-integration-test, all four surfaces passed.",
     "Replaces the stale relative-path entry that previously lived at",
     "~/.mpm/.mcp.json (now flagged as an MPM-side defect, NOT silently",
-    "edited here per the 'no MPM core edits' boundary)."
+    "edited here per the 'no MPM core edits' boundary).",
+    "",
+    "Path placeholders: substitute $HOME for your user home; the canonical",
+    "install layout places mpm-mcp at $HOME/.mpm/bin/mpm-mcp and the",
+    "MPM workspace at $HOME/.mpm (overridable via MPM_WORKSPACE)."
   ],
   "mcpServers": {
     "mpm": {
-      "command": "/home/v/.mpm/bin/mpm-mcp",
+      "command": "$HOME/.mpm/bin/mpm-mcp",
       "args": [],
       "env": {
-        "MPM_WORKSPACE": "/home/v/.mpm"
+        "MPM_WORKSPACE": "$HOME/.mpm"
       }
     }
   }

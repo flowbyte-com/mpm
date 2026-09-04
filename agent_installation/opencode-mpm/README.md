@@ -1,6 +1,6 @@
 # opencode-mpm
 
-OpenCode plugin that wires MPM's cognitive substrate in as **16 typed
+OpenCode plugin that wires MPM's cognitive substrate in as **17 typed
 tools** (a curated subset of the full 22-tool MPM registry).
 
 ## Parity with Claude Code Integration
@@ -17,18 +17,18 @@ The OpenCode plugin provides **automatic wake context injection** at session sta
 
 ## Coverage
 
-**16 OpenCode tools registered**, in two layers:
+**17 OpenCode tools registered**, in two layers:
 
 | Layer | Count | Source |
 |---|---|---|
-| Unified Domain Tools ("Fat RPC") | 13 | `src/index.ts` (hand-written) |
+| Unified Domain Tools ("Fat RPC") | 14 | `src/index.ts` (hand-written) |
 | Standalone tools | 3 | `src/index.ts` (hand-written) |
 
-### 13 Domain Tools
+### 14 Domain Tools
 
-The 13 Domain Tools cover the **core cognitive surface** exposed by this
+The 14 Domain Tools cover the **core cognitive surface** exposed by this
 adapter. The current MPM registry exposes **22 tools total**, so this
-adapter is a hand-curated 16-tool subset. Tools in the full registry not
+adapter is a hand-curated 17-tool subset. Tools in the full registry not
 registered here (`mpm_work`, `mpm_resolve`, `mpm_challenge`,
 `mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
 `mpm call <tool> --payload '<json>'` CLI fallback. Each registered
@@ -168,8 +168,8 @@ MPM DeriveWorkVerification derives verification status
 The legacy plugin (`agent-plugins/opencode-mpm-plugin` in pCloud) generated one tool per (action, artifact-type) pair — 18 tool definitions spanning memory / lessons / topics / references / wake / decisions / etc. It was bound to the **old 77-tool schema** that pre-dated the 13-aggregator collapse (2026-08-11). It is **dead code** and should be removed.
 
 The lightweight adapter:
-- 16 typed tools exposed by this plugin (a curated subset of the full 22-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc.)
-- One Zod schema shape for the 13 Domain Tools (free-form `params` validated by mpm backend)
+- 17 typed tools exposed by this plugin (a curated subset of the full 22-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc.)
+- One Zod schema shape for the 14 Domain Tools (free-form `params` validated by mpm backend)
 - No prompt bloat — the description strings are short, and the heavy `params` documentation lives in the mpm backend where it can be evolved without disrupting the plugin
 - No domain logic — no LLM calls, no caching, no local state
 
@@ -196,7 +196,7 @@ The plugin reads `MPM_BINARY` from env (defaults to the literal string
 (defaults to `$HOME/.mpm`, computed by `src/workspace.ts`). If you
 need a deterministic absolute path (so the integration does not
 depend on `$PATH` in the OpenCode runtime), set
-`MPM_BINARY=/home/v/.mpm/bin/mpm` in the OpenCode env block — the
+`MPM_BINARY=$HOME/.mpm/bin/mpm` in the OpenCode env block — the
 plugin does not chain fallbacks to the canonical install root
 itself.
 
@@ -217,7 +217,7 @@ grep -c '<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->' \
   ~/.config/opencode/AGENTS.md
 # expect: 1
 
-# Tool count — 16 typed tools registered by this adapter:
+# Tool count — 17 typed tools registered by this adapter:
 opencode # then :tools — count entries prefixed with `mpm__`
 
 # End-to-end via the plugin's exposed tool (in OpenCode):
@@ -265,8 +265,8 @@ const hooks = await plugin.server({
   serverUrl: new URL("http://localhost:8080"),
   $: () => ({ text: () => "" })
 });
-console.log("tools registered:", Object.keys(hooks.tool).length);  // → 16
+console.log("tools registered:", Object.keys(hooks.tool).length);  // → 17
 '
 ```
 
-Expected: `tools registered: 16` (silent on a healthy machine; emits BOOT WARNING on a broken mpm install).
+Expected: `tools registered: 17` (silent on a healthy machine; emits BOOT WARNING on a broken mpm install).

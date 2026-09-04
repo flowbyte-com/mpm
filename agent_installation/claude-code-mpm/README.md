@@ -95,8 +95,8 @@ response carries the resolved `db_path` so operators can verify convergence:
 ```json
 {
   "ok": true,
-  "db_path": "/home/v/.mpm/src/db/mpm.db",
-  "db_path_raw": "/home/v/.mpm/src/db/mpm.db",
+  "db_path": "$HOME/.mpm/src/db/mpm.db",
+  "db_path_raw": "$HOME/.mpm/src/db/mpm.db",
   ...
 }
 ```
