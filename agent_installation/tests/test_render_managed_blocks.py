@@ -397,6 +397,259 @@ class RenderScriptInvariants(unittest.TestCase):
                          "render_for_host mutated its input (impure)")
 
 
+class RendererSemanticGuard(unittest.TestCase):
+    """Lock the renderer's SEMANTICS — distinguish prose tool mentions
+    from `mpm_X action Y` invocation references by sentence context.
+
+    Pre-fix (D-R1, 2026-09-04): the renderer's regex rewrote every
+    `mpm_X` token, so prose mentions like `mpm_decisions` / `mpm_lessons`
+    in the wake-payload description got rewritten for Claude/Hermes but
+    stayed bare in the per-host copy/paste examples — causing 2 drift(s).
+
+    Post-fix: the renderer reads the sentence tail after each token;
+    if `\baction(?:s)?\b` does NOT appear in the same sentence, the
+    token is a prose mention and is preserved (NOT rewritten). This
+    test class locks the heuristic against:
+      * synthetic prose-only paragraphs (must stay bare)
+      * synthetic invocation references (must transform)
+      * prose-before-invocation in same paragraph (the Plan-agent
+        flagged asymmetry)
+      * multi-prose paragraph with single later invocation
+      * Hermes prose-unchanged / invocation-rewritten (different prefix)
+      * end-to-end lock on the actual canonical block — rendered
+        canonical must preserve prose mentions in the wake-payload
+        description exactly as they appear in the source.
+    """
+
+    # Synthetic canonical-shaped fragments used across multiple tests.
+    _PROSE_ONLY = (
+        "Decisions and lessons live behind `mpm_decisions` / "
+        "`mpm_lessons`, not in the wake payload.\n"
+    )
+    _INVOCATION_ONLY = (
+        "Persist during work via `mpm_memory` action `save`, "
+        "`mpm_decisions` action `record`, and `mpm_lessons` "
+        "action `save`.\n"
+    )
+
+    def test_prose_only_paragraph_leaves_tokens_bare(self):
+        """No `action` keyword anywhere → all `mpm_X` tokens stay bare,
+        regardless of host prefix. This is the canonical D-R1 prose
+        case: `mpm_decisions` / `mpm_lessons` in the wake-payload
+        description must NEVER get a transport prefix."""
+        for prefix in ("mpm__", "mcp__mpm__"):
+            out = _render.render_for_host(self._PROSE_ONLY, prefix)
+            self.assertIn(
+                "`mpm_decisions`", out,
+                f"prose mention of `mpm_decisions` got rewritten under "
+                f"prefix {prefix!r}: {out!r}",
+            )
+            self.assertIn(
+                "`mpm_lessons`", out,
+                f"prose mention of `mpm_lessons` got rewritten under "
+                f"prefix {prefix!r}: {out!r}",
+            )
+            # And the prefix did NOT slip into a prose token.
+            self.assertNotIn(
+                f"{prefix}mpm_decisions", out,
+                f"prose mention got transport prefix under {prefix!r}",
+            )
+            self.assertNotIn(
+                f"{prefix}mpm_lessons", out,
+                f"prose mention got transport prefix under {prefix!r}",
+            )
+
+    def test_invocation_only_paragraph_transforms_tokens(self):
+        """`mpm_X action Y` triple → token transforms under all real
+        prefixes. This guards against the renderer becoming too
+        conservative and accidentally leaving invocation references
+        bare for prefix hosts."""
+        for prefix in ("mpm__", "mcp__mpm__"):
+            out = _render.render_for_host(self._INVOCATION_ONLY, prefix)
+            self.assertIn(
+                f"`{prefix}mpm_memory`", out,
+                f"`mpm_memory` invocation not transformed under "
+                f"prefix {prefix!r}: {out!r}",
+            )
+            self.assertIn(
+                f"`{prefix}mpm_decisions`", out,
+                f"`mpm_decisions` invocation not transformed under "
+                f"prefix {prefix!r}: {out!r}",
+            )
+            self.assertIn(
+                f"`{prefix}mpm_lessons`", out,
+                f"`mpm_lessons` invocation not transformed under "
+                f"prefix {prefix!r}: {out!r}",
+            )
+
+    def test_prose_before_invocation_in_same_paragraph(self):
+        """The Plan-agent-flagged asymmetry: when prose mention precedes
+        invocation reference in the same paragraph (sentence), the
+        prose must stay bare and the invocation must transform. The
+        renderer must distinguish the two by sentence context, not by
+        paragraph scope (paragraph scope would either ignore the
+        prose distinction entirely or rewrite both as a single unit)."""
+        mixed = (
+            "Decisions and lessons live behind `mpm_decisions`, not in "
+            "wake. Persist via `mpm_memory` action `save`.\n"
+        )
+        out = _render.render_for_host(mixed, "mpm__")
+        # Prose `mpm_decisions` must stay bare.
+        self.assertIn(
+            "`mpm_decisions`", out,
+            f"prose `mpm_decisions` got rewritten (Plan-agent "
+            f"asymmetry regression): {out!r}",
+        )
+        self.assertNotIn(
+            "`mpm__mpm_decisions`", out,
+            f"prose `mpm_decisions` got transport prefix despite "
+            f"being a prose mention: {out!r}",
+        )
+        # Invocation `mpm_memory` MUST transform.
+        self.assertIn(
+            "`mpm__mpm_memory`", out,
+            f"invocation `mpm_memory` did NOT transform (renderer "
+            f"became too conservative): {out!r}",
+        )
+
+    def test_multi_prose_paragraph_with_single_later_invocation(self):
+        """Multiple prose mentions in one paragraph, followed by a
+        single invocation reference. All prose tokens must stay bare;
+        only the invocation token transforms. This is the strongest
+        guard against the renderer regressing back to its
+        paragraph-scope 'rewrite every token' behaviour."""
+        mixed = (
+            "Use `mpm_decisions` for traceability, `mpm_lessons` for "
+            "durable learnings, and `mpm_topics` for clustering. "
+            "Persist via `mpm_memory` action `save`.\n"
+        )
+        out = _render.render_for_host(mixed, "mpm__")
+        # All three prose mentions stay bare.
+        for prose in ("`mpm_decisions`", "`mpm_lessons`", "`mpm_topics`"):
+            self.assertIn(
+                prose, out,
+                f"prose {prose} got rewritten: {out!r}",
+            )
+        # ...and the prose tokens must not be prefixed.
+        for prose_prefixed in (
+            "`mpm__mpm_decisions`", "`mpm__mpm_lessons`",
+            "`mpm__mpm_topics`",
+        ):
+            self.assertNotIn(
+                prose_prefixed, out,
+                f"prose token got transport prefix: {prose_prefixed!r}",
+            )
+        # Invocation transforms.
+        self.assertIn(
+            "`mpm__mpm_memory`", out,
+            f"invocation `mpm_memory` did NOT transform: {out!r}",
+        )
+
+    def test_hermes_prose_unchanged_invocation_rewritten(self):
+        """Hermes has a different prefix (`mcp__mpm__`). Same semantic
+        distinction must hold: prose bare, invocation rewritten with
+        the Hermes prefix. Guards against the renderer accidentally
+        being prefix-sensitive at the prose layer."""
+        mixed = (
+            "Decisions and lessons live behind `mpm_decisions`, not in "
+            "wake. Persist via `mpm_memory` action `save`.\n"
+        )
+        out = _render.render_for_host(mixed, "mcp__mpm__")
+        # Prose stays bare under Hermes prefix.
+        self.assertIn(
+            "`mpm_decisions`", out,
+            f"Hermes prose got rewritten: {out!r}",
+        )
+        self.assertNotIn(
+            "`mcp__mpm__mpm_decisions`", out,
+            f"Hermes prose got transport prefix: {out!r}",
+        )
+        # Invocation rewrites with the Hermes prefix.
+        self.assertIn(
+            "`mcp__mpm__mpm_memory`", out,
+            f"Hermes invocation did NOT rewrite: {out!r}",
+        )
+
+    def test_empty_prefix_returns_block_unchanged(self):
+        """OpenCode and Pi have empty prefix. Rendered output must be
+        byte-identical to input regardless of any prose/invocation
+        distinction — the heuristic must short-circuit cleanly for
+        the empty-prefix case."""
+        block = self._PROSE_ONLY + self._INVOCATION_ONLY
+        out = _render.render_for_host(block, "")
+        self.assertEqual(
+            out, block,
+            "empty-prefix render must be byte-identical to input",
+        )
+
+    def test_rendered_canonical_preserves_prose_in_wake_payload(self):
+        """End-to-end lock on the actual canonical source: rendered
+        canonical must preserve the bare prose mentions of
+        `mpm_decisions` / `mpm_lessons` in the §1 wake-payload
+        description (proving the renderer reads the actual file, not
+        just synthetic inputs). This is the regression test that
+        closes D-R1.
+
+        Locks on the specific §1 prose context — the wake-payload
+        description line that says "Decisions and lessons are reachable
+        via `mpm_decisions` / `mpm_lessons`, not carried in wake." That
+        line contains no `action` keyword, so both tokens must remain
+        bare under every host prefix. (The §2 invocation reference to
+        `mpm_decisions action record` DOES still transform — that's
+        an invocation, not a prose mention, and must not regress.)"""
+        text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        block = _render.extract_canonical_block(text)
+
+        # The §1 prose line is what D-R1 is about: prose mentions of
+        # `mpm_decisions` / `mpm_lessons` in the wake-payload
+        # description. It must remain bare under every host prefix.
+        prose_phrase = (
+            "reachable via `mpm_decisions` / `mpm_lessons`, not "
+            "carried in"
+        )
+        for prefix in ("mpm__", "mcp__mpm__"):
+            rendered = _render.render_for_host(block, prefix)
+            self.assertIn(
+                prose_phrase, rendered,
+                f"§1 prose phrase drifted under prefix {prefix!r} — "
+                f"`mpm_decisions` / `mpm_lessons` in the wake-payload "
+                f"description got rewritten (D-R1 regression)",
+            )
+
+        # §5 also has a prose mention of `mpm_work` ("track it
+        # separately via `mpm_work`. Lifecycle: action ...") that must
+        # stay bare — the `action` keyword is in the NEXT sentence.
+        prose_work_phrase = (
+            "track it separately via\n   `mpm_work`. Lifecycle: "
+            "action `create` to open,"
+        )
+        for prefix in ("mpm__", "mcp__mpm__"):
+            rendered = _render.render_for_host(block, prefix)
+            self.assertIn(
+                prose_work_phrase, rendered,
+                f"§5 prose `mpm_work` drifted under prefix {prefix!r} — "
+                f"`mpm_work` in 'track it separately via' got rewritten "
+                f"(renderer treats it as invocation but `action` is in "
+                f"the next sentence)",
+            )
+
+        # Sanity: §2 invocations in the same block DO still transform.
+        # This guards against the renderer regressing to "never
+        # transform" instead of "transform only invocations".
+        rendered_claude = _render.render_for_host(block, "mpm__")
+        self.assertIn(
+            "`mpm__mpm_memory`", rendered_claude,
+            "§2 invocation `mpm_memory` did NOT transform — "
+            "renderer heuristic is too conservative (regressed away "
+            "from invocation handling)",
+        )
+        self.assertIn(
+            "`mpm__mpm_decisions` action `record`", rendered_claude,
+            "§2 invocation `mpm_decisions action record` did NOT "
+            "transform — renderer regressed to no-op",
+        )
+
+
 class CanonicalVersionMarker(unittest.TestCase):
     """The top-of-file HTML comment pins the managed-instruction
     contract version. Pinned by §C-3 of the known-debt closure pass."""
