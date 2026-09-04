@@ -71,7 +71,8 @@ Every section is self-contained enough to read in isolation.
 - **Appendix A: Shared Epistemology Implementation**
 - **Appendix B: Arc 2 (Active Dissemination) Implementation**
 - **Appendix C: Enforcement Patterns**
-- License
+- [Community & Security](#community--security)
+- [License](#license)
 
 ---
 
@@ -632,8 +633,8 @@ Five minutes from zero to first decision. Choose your depth:
 ### 5.1 Try it (CLI only — no daemons)
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/mpm
-cd ~/mpm
+git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
+cd ~/projects/mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 ```
 
@@ -644,8 +645,8 @@ The single binary lives at `bin/mpm`. Try it without installing anything — no 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm
-cd mpm
+git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
+cd ~/projects/mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 make install         # optional — verifies/syncs all five to $HOME/.mpm/bin (no sudo)
 ```
@@ -666,20 +667,23 @@ systemctl --user status mpm-telemetry               # verify
 journalctl --user -u mpm-telemetry -f              # follow logs
 ```
 
-> **Lazy-Start Architecture (encrypted `/home`).** When `/home` is eCryptfs-encrypted,
-> both the scheduler and telemetry daemons are **designed to stay dead at boot**.
-> The lockfile and socket path live inside the encrypted tree; starting before
-> `/home` is decrypted would either fail (inaccessible path) or risk writing to the
-> wrong location. The architecture treats *boot + locked home* as the SAFE state
-> and expects the agent's first wake context (`AGENTS.md` Session Startup step 2)
-> to spin both daemons up *after* decryption is complete. This isolates each
-> daemon's first write to a moment when the substrate is verifiably writable.
-> **It is a security feature, not a bug.** Lesson `24be03ec71a5981f` codifies the
-> rationale.
+> **eCryptfs encrypted-home autostart workaround.** When `/home` is eCryptfs-encrypted
+> AND `loginctl enable-linger` is set, the user manager boots at ~08:01 (before
+> PAM unwraps eCryptfs on the first login at ~08:17). Unit files inside the
+> encrypted tree are invisible at that point — `default.target` is reached before
+> `Wants=mpm-scheduler.service` can be evaluated, so `Restart=` does not help.
+> The fix is a `~/.config/autostart/mpm-post-decrypt.desktop` entry that runs
+> `systemctl --user daemon-reload && systemctl --user start mpm-scheduler.service`
+> on every graphical login (post-decrypt). `scripts/install.sh` detects this case
+> via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
+> autostart entry automatically; `scripts/install.sh --uninstall` removes it.
+> Lesson `071911bc` codifies the rationale and the lesson ID stamped into the
+> `.desktop` Comment= line.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
-> headless deployments) can opt out via the drop-ins documented in docs/INSTALL.md
-> Troubleshooting.
+> headless deployments) can opt out by removing the autostart entry and instead
+> adding `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'`
+> to `mpm-scheduler.service` via `systemctl --user edit`.
 
 The default unit assumes `~/projects/mpm` layout. Override via either:
 
@@ -983,7 +987,7 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
-Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The 14 aggregator tools in the surface above (`mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`) collectively cover the agent's daily workflow: read/write memory and the memory feedback loop (mpm_memory actions: `save`/`query`/`shred`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), and system maintenance + health. Plus two standalone tools: `explain_retrieval` (per-node BM25 diagnostic with 3-stage trace) and `log_to_changelog`.
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The 14 aggregator tools in the surface above (`mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`) collectively cover the agent's daily workflow: read/write memory and the memory feedback loop (mpm_memory actions: `save`/`query`/`shred`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), and system maintenance + health. Plus three standalone tools: `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `log_to_changelog` (self-report agent work tied to a git commit SHA), and `request_review` (concurrent multi-component review).
 
 A handful of CLI commands are intentionally **NOT** exposed via MCP/call because they are operationally distinct (destructive, cron-friendly, or human-gated):
 

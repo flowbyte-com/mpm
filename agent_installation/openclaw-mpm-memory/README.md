@@ -135,7 +135,7 @@ plugins: {
         // "mpm" (PATH-resolved) fails at runtime with `spawn mpm ENOENT`.
         // install.sh detects and writes the absolute path automatically
         // on this host — see the systemd gotcha note below.
-        mpmBin: "/home/v/.local/bin/mpm",
+        mpmBin: "$HOME/.mpm/bin/mpm",
         timeoutMs: 5000,           // subprocess timeout; default 5000
         scope: "all",              // "all" | "local" | "shared"; default "all"
         limitDefault: 6            // default memory_search limit; 1-50

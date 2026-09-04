@@ -118,19 +118,23 @@ into the database. Re-running is safe — local edits are preserved.
 
 ---
 
-> **Lazy-Start Architecture (encrypted `/home`).** When `/home` is eCryptfs-encrypted,
-> the scheduler daemon is **designed to stay dead at boot**. The lockfile lives inside
-> the encrypted tree (`~/.mpm/scheduler.lock`); starting the daemon before `/home`
-> is decrypted would either fail (inaccessible path) or risk writing to the wrong
-> location. The architecture treats *boot + locked home* as the SAFE state and expects
-> the agent's first wake context (`AGENTS.md` Session Startup step 2) to spin the
-> daemon up *after* decryption is complete. This isolates the daemon's first write
-> to a moment when the substrate is verifiably writable. **It is a security feature,
-> not a bug.** Lesson `24be03ec71a5981f` codifies the rationale.
+> **eCryptfs encrypted-home autostart workaround.** When `/home` is eCryptfs-encrypted
+> AND `loginctl enable-linger` is set, the user manager boots at ~08:01 (before
+> PAM unwraps eCryptfs on the first login at ~08:17). Unit files inside the
+> encrypted tree are invisible at that point — `default.target` is reached before
+> `Wants=mpm-scheduler.service` can be evaluated, so `Restart=` does not help.
+> The fix is a `~/.config/autostart/mpm-post-decrypt.desktop` entry that runs
+> `systemctl --user daemon-reload && systemctl --user start mpm-scheduler.service`
+> on every graphical login (post-decrypt). `scripts/install.sh` detects this case
+> via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
+> autostart entry automatically; `scripts/install.sh --uninstall` removes it.
+> Lesson `071911bc` codifies the rationale and is stamped into the `.desktop`
+> `Comment=` line as the canonical reference.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
-> headless deployments) can opt out by adding the drop-in documented in the
-> Troubleshooting row below.
+> headless deployments) can opt out by removing the autostart entry and instead
+> adding `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'`
+> to `mpm-scheduler.service` via `systemctl --user edit mpm-scheduler`.
 
 ## 2. Agentic Cron (recurring tasks, optional)
 
@@ -262,11 +266,16 @@ why pre-compute `next_run_at`) documented in [README §9.3](../README.md#agentic
 
 ## 3. Wire to your host
 
-> **Pick one.** OpenClaw and Hermes are the two supported hosts as of
-> 2026-07-18. The recommended install (Section 1) handles OpenClaw
-> automatically. Re-run `./scripts/install.sh` after switching hosts.
-> No `sudo` is required at any point — every command below runs in
-> the user's context.
+> **Pick one.** MPM supports five host adapters — Claude Code, OpenCode,
+> Pi, Hermes, and OpenClaw — each pinned by a managed-section install of
+> the canonical MPM behavioral protocol (`~/.mpm/agent_installation/
+> mpm-agent-protocol.md`). See `agent_installation/INSTALL.md` for the
+> per-host install/verify/uninstall walkthroughs. The recommended
+> install (Section 1) auto-wires the OpenClaw adapter when it detects
+> the `openclaw` binary; the other four adapters ship their own
+> `./install.sh` and Python snippet installers. Re-run the host adapter
+> installer after switching hosts. No `sudo` is required at any point —
+> every command below runs in the user's context.
 
 ### 3a. OpenClaw (auto-wired by install script)
 
@@ -398,7 +407,7 @@ without losing agent state; runtime data persists across `git pull`.
 | Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` | `chown -R $USER:$USER ~/.mpm` |
 | Service won't start after reboot on encrypted home | `findmnt /home` | Use `./scripts/install.sh` (full install flow handles linger + drop-in); or manually `systemctl --user edit mpm-scheduler` to add the post-decrypt delay described below. |
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
-| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` (this is expected) | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | This is **expected behaviour** under the Lazy-Start Architecture — see the blockquote after §1d. The daemon is designed to stay dead at boot when `/home` is encrypted (the lockfile inside the encrypted tree would be inaccessible otherwise). On the next agent wake, `AGENTS.md` Session Startup step 2 detects the dead daemon and starts it post-decryption. If your workload runs unattended with no agent wake path (cron / system timers only), opt out by adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. |
+| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./scripts/install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Lesson `071911bc` documents the original detection/wiring. |
 | CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` | Re-run `./scripts/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 $(which mpm)` | The `mpm` binary must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
