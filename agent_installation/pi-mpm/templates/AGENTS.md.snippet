@@ -25,7 +25,7 @@ that this host adapter inherits:
    MPM tool (`mpm_memory`, `mpm_decisions`, `mpm_lessons`,
    `mpm_topics`, `mpm_references`) for any durable knowledge a future
    session would otherwise have to rediscover. The `pi-mpm` extension
-   registers the **adapter's 16-tool subset** as typed Pi tools (13
+   registers the **adapter's 17-tool subset** as typed Pi tools (14
    Domain Tools via Fat RPC + 3 Standalones: `mpm_retrieval_diagnose`,
    `log_to_changelog`, `request_review`); the full MPM registry exposes
    22 tools, and tools not registered here remain reachable via the
@@ -65,7 +65,7 @@ that this host adapter inherits:
    `work_id`, `status`, `note`) to track the work item itself. The agent
    decides when work is done — host session termination does NOT
    auto-complete a work item. See protocol §4.1: `session ended !=
-   work completed != work verified`. The Pi adapter exposes 16 typed
+   work completed != work verified`. The Pi adapter exposes 17 typed
    tools; `mpm_work` reaches the full registry via the `mpm call
    mpm_work --payload '<json>'` CLI fallback.
 
