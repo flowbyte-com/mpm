@@ -46,9 +46,24 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def banner() -> str:
+# Match the existing `<!-- generated: ... -->` comment so re-installs can
+# preserve the original timestamp instead of bumping it every run. Without
+# this, two consecutive installs (e.g. CI smoke + manual re-run) produce
+# different bytes and trip the idempotency test.
+_GENERATED_RE = re.compile(r"<!-- generated: (\d{8}T\d{6}Z) -->")
+
+
+def _existing_generated(content: str) -> str | None:
+    """Return the `<!-- generated: ... -->` timestamp from content's first
+    managed block, or None if no managed block is present."""
+    m = _GENERATED_RE.search(content)
+    return m.group(1) if m else None
+
+
+def banner(existing_ts: str | None = None) -> str:
+    ts = existing_ts or now_iso()
     return f"""<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->
-<!-- generated: {now_iso()} -->
+<!-- generated: {ts} -->
 <!-- source: ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet -->"""
 
 
@@ -56,14 +71,25 @@ def footer() -> str:
     return "<!-- END MPM-MANAGED SECTION:opencode-instructions -->"
 
 
-def build_managed_block(snippet_body: str) -> str:
-    return f"{banner()}\n{snippet_body.rstrip()}\n{footer()}\n"
+def build_managed_block(snippet_body: str, existing_ts: str | None = None) -> str:
+    return f"{banner(existing_ts=existing_ts)}\n{snippet_body.rstrip()}\n{footer()}\n"
 
 
 def install(scope: str, target: str, snippet_path: str) -> int:
     target_path = Path(target)
     snippet = Path(snippet_path).read_text()
-    managed_block = build_managed_block(snippet)
+
+    # Preserve the existing `<!-- generated: ... -->` timestamp on
+    # refresh so re-runs don't bump the timestamp every second (closes
+    # the idempotency-flake where two runs in different seconds produce
+    # different bytes). On a fresh install no existing block exists, so
+    # existing_ts is None and build_managed_block uses now_iso().
+    existing_ts = (
+        _existing_generated(target_path.read_text())
+        if target_path.exists()
+        else None
+    )
+    managed_block = build_managed_block(snippet, existing_ts=existing_ts)
     if not target_path.exists():
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(HEAD_COMMENT + "\n\n" + managed_block)

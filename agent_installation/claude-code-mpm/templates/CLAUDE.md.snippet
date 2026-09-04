@@ -1,137 +1,102 @@
 # MPM (Memory Persistence Module) — Claude Code integration.
 
-> **Managed by the claude-code-mpm plugin.** Edit the canonical protocol,
-> not this file, unless you specifically want a per-project override of
-> the protocol block. The plugin's installer regenerates this section on
-> install; manual changes outside the markers will be preserved.
+> **Managed by the claude-code-mpm plugin.** Edit the canonical
+> managed block in
+> `~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`,
+> not this file. The plugin's installer regenerates this section
+> on install; manual changes outside the managed-block markers
+> are preserved.
+<!-- BEGIN MPM MANAGED BLOCK -->
+<!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
+<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
-MPM is the persistent agent substrate for cross-session continuity on this
-machine. It exposes 20 unified domain MCP tools (`mpm__mpm_memory`,
-`mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`,
-`mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`,
-`mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`,
-`mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`,
-`mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_challenge`,
-`mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose`)
-plus 2 standalones (`mpm__log_to_changelog`, `mpm__request_review`).
+## MPM behavioural contract
 
-<BEGIN MPM-CANONICAL-BLOCK>
-The MPM behavioral contract is the host-independent agent protocol at
-`~/.mpm/agent_installation/mpm-agent-protocol.md`. Read that file for the full
-text. The non-negotiable behavioral invariants:
+You are operating with the MPM (Memory Persistence Module) substrate
+on this machine. The following are the non-negotiable MPM behavioural
+invariants that turn that capability into reliable behaviour. Edit the
+canonical protocol, not this block, for behavioural changes.
 
-1. **Wake on session start.** Before any substantive work, call
-   `mpm__mpm_context(action: "read_wake_context", params: {})` to recover
-   prior work, decisions, lessons, and pointers. Skipping wake means
-   arriving amnesic and forcing the user to re-explain.
+1. **Wake on session start.** Before any substantive work, read the
+   MPM wake context via `mpm__mpm_context` action
+   `read_wake_context`. Skipping wake means arriving amnesic and
+   forcing the user to re-explain context that is already on file.
+   The wake payload carries orientation signals (mode, persona,
+   recent memories, last handoff, open work, key decisions, active
+   lessons, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   for a small id+summary envelope — the full payload is the
+   default.
 
-2. **Persist during work, not only at the end.** Use the appropriate
-   MPM tool (`mpm__mpm_memory`, `mpm__mpm_decisions`, `mpm__mpm_lessons`,
-   `mpm__mpm_topics`, `mpm__mpm_references`) for any durable knowledge a
-   future session would otherwise have to rediscover.
+2. **Persist during work, not only at the end.** Use `mpm__mpm_memory`
+   action `save`, `mpm__mpm_decisions` action `record`,
+   `mpm__mpm_lessons` action `save`, `mpm__mpm_topics`
+   action `create`, and `mpm__mpm_references` action `add`
+   for any durable knowledge a future session would otherwise have
+   to rediscover. Heuristic: if losing this on session-end would
+   force you to rediscover it next time, persist now.
 
 3. **Skill discovery before reinventing.** When the current task
-   context suggests a previously learned procedure would apply, query
-   `mpm__mpm_context(action: "proactive_recall_hint", params: {
-   conversation_text: "<recent task summary>" })` and read each
-   surfaced skill via `mpm__mpm_skills(action: "read", params: {name})`.
-   The wake payload already includes a bounded `<available_skills>`
-   catalogue — discovery adds a context-driven filter on top. Don't
-   auto-scan every turn; invoke when context suggests a remembered
-   procedure would apply. Reactive catalog fallback via
-   `mpm__mpm_skills(action: "list", params: {scope: "all"})`.
+   context suggests a previously learned procedure would apply,
+   query `mpm__mpm_context` action `proactive_recall_hint`
+   with `params: {conversation_text: "<recent task summary>"}` and
+   read each surfaced skill via `mpm__mpm_skills` action
+   `read`. The wake payload already includes a bounded
+   `<available_skills>` catalogue — discovery adds a
+   context-driven filter on top. Reactive catalog fallback via
+   `mpm__mpm_skills` action `list` with
+   `params: {scope: "all"}`. Don't auto-scan every turn.
 
-4. **Handoff before genuine session closure.** Before sending any turn
-   that closes the session, run the handoff check. If substantial work
-   has occurred since the last handoff, write it via
-   `mpm__mpm_handoff(action: "write", params: {session_id, summary,
-   state, commitments, open_questions, note})`. Use
-   `mpm__mpm_scratchpad(action: "flush"|"read"|"discard"|"promote",
-   params: {session_id, thesis, supporting}) for in-session volatile
-   working state. Wake is how future-me starts; handoff is how
+4. **Handoff before genuine session closure.** Before any turn that
+   closes the session, write a handoff via `mpm__mpm_handoff`
+   action `write` with `params: {summary: "<required>",
+   session_id: "<optional>", state: "clean"|"crashed"|"interrupted"|"force_end",
+   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
+   `summary` is the only required field. Mid-session acknowledgements
+   (`ok`, `thanks`, `ty`, `ack`) are NOT session-closing; don't
+   write a handoff on every chat ack.
+
+   For intra-session volatile working state, use
+   `mpm__mpm_scratchpad` actions `flush`, `read`,
+   `discard`, or `promote` (params: `{session_id, thesis,
+   supporting}`). Wake is how future-me starts; handoff is how
    future-me receives the previous session.
 
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing. Do not write a handoff on every chat ack — write one
-   when substantial work has happened or a session-closing trigger fires.
+5. **Session closure is not work completion.** When work spans
+   sessions or requires verification, track it separately via
+   `mpm__mpm_work`. Lifecycle: action `create` to open,
+   `update`/`note` during, `complete` to finish. `session ended`
+   is **not** the same event as `work completed` is **not** the
+   same event as `work verified`. The agent decides when work is
+   done — host session termination does NOT auto-complete a work
+   item. Tools not exposed by your host's native transport remain
+   reachable via the CLI fallback (see #7).
 
-   **Session closure is not work completion.** When the work spans
-   sessions or requires verification, also use `mpm__mpm_work(action:
-   "create"|"update"|"note"|"complete", params: {title, content,
-   work_id, status, note})` to track the work item itself. The agent
-   decides when work is done — host session termination does NOT
-   auto-complete a work item. See protocol §4.1: `session ended !=
-   work completed != work verified`. Tools not registered as native MCP
-   tools (this Claude Code adapter exposes 20 of the 22-tool registry)
-   remain reachable via `mpm call mpm_work --payload '<json>'`.
+6. **MPM is the source of truth for cross-session continuity.**
+   Anything that should survive across sessions goes to MPM, not
+   just transient conversation context.
 
-5. **MPM is the source of truth for cross-session continuity.** Anything
-   that should survive across sessions goes to MPM, not just transient
-   conversation context.
-
-6. **Recovery / fallback.** If the mpm MCP tool group becomes unavailable
-   mid-session (any tool calls returning errors about session/connection
-   state or runtime disposal), fall back to the CLI path:
+7. **Recovery / fallback.** If the host's native MPM transport
+   becomes unavailable mid-session (MCP server down, plugin crashed,
+   `mpm__*` tools returning connection errors, etc.), fall back to
+   the documented CLI path:
    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
    Do not abandon persistence when the preferred integration breaks.
-   Runtime-recovery details specific to OpenClaw (gateway restart, bundle
-   disposal) are documented in that host's adapter, not here.
-
-7. **Beyond the core invariants.** Other MPM capabilities exist for
-   specific decision points — invoke them only when their trigger applies,
-   don't gesture at them by reflex:
-
-   - **Skill formation.** When you discover a reusable procedure that
-     isn't already a skill, save it via `mpm__mpm_skills(action:
-     "save")`. Before saving, list existing skills with action `list`
-     to avoid duplicates; prefer `mpm__mpm_skills(action: "workshop",
-     mode: "refine")` over creating parallel skills.
-   - **Pointer-native results.** When a tool returns a `mpm://` URI
-     instead of inline content, do NOT inline the full payload — use
-     `mpm__mpm_resolve` to dereference with bounded context cost. For
-     raw byte access, use `mpm__mpm_blob_read` / `mpm__mpm_blob_search`.
-     Pointer architecture exists to keep context windows clean.
-   - **Retrieval diagnosis.** If `mpm__mpm_memory(action: "query")`
-     returns zero results, unexpected ordering, or doesn't find
-     something you know is stored, use `mpm__mpm_retrieval_diagnose`
-     to inspect BM25 scores and ranking — don't reformulate blindly or
-     compensate in application logic.
-   - **Epistemic surfaces.** Choose deliberately: `mpm__mpm_decisions`
-     for architectural choices with non-obvious alternatives;
-     `mpm__mpm_lessons` for failures and hard-won insights (with
-     `flavor: warning|insight`); `mpm__mpm_theories` for testable
-     hypotheses (not guesses); `mpm__mpm_evidence` to attach proof when
-     truth requires it; `mpm__mpm_confidence` to audit trust before
-     acting on stored info; `mpm__mpm_challenge` when new evidence
-     contradicts a memory (record the contest formally rather than
-     shredding).
-   - **Wake vs scheduled wake.** Wake context is for session-start
-     recall (passive). `mpm__mpm_wakes` (`schedule` / `upsert_task`) is
-     for proactive future triggers. Don't conflate: reading wake
-     context is not consuming a scheduled wake, and a session-end
-     handoff is not the same as scheduling follow-up work.
-   - **Reference freshness.** Ingested references
-     (`mpm__mpm_references(action: "add")`) carry a freshness state.
-     Before relying on a long-ago reference, query it — the substrate
-     knows whether it has likely drifted.
-   - **Projection default.** `mpm__mpm_memory(action: "query")` defaults
-     to `summary` projection. Switch to `projection: "full"` (or use
-     `mpm__mpm_resolve` with a `mpm://memory/<id>` URI) only when you
-     need the unabridged content of a specific artifact.
-
-The full canonical protocol is in `~/.mpm/agent_installation/mpm-agent-protocol.md`.
-Host-specific rules (subprocess paths, MCP runtime quirks) belong there,
-not in this block.
-<END MPM-CANONICAL-BLOCK>
+   `mpm call` writes to the same substrate with the same
+   provenance attribution as the native transport.
+<!-- END MPM MANAGED BLOCK -->
 
 ## Session-start hook (assumed)
 
-Claude Code sessions that use this integration should be configured with a
-session-start hook that invokes wake-context ingestion. If the hook is not
-installed, run wake manually at the start of every substantive turn.
+Claude Code sessions that use this integration should be
+configured with a session-start hook that invokes wake-context
+ingestion via `mpm__mpm_context` action `read_wake_context`. If
+the hook is not installed, run wake manually at the start of
+every substantive turn.
 
 ## Framework identification
 
-If MCP tools are unavailable for any reason, the CLI path also writes
-artifacts with provenance attribution matching the MCP path. Both paths
-go through `mpm call` and stamp identical `artifact_provenance` rows.
+If MCP tools are unavailable for any reason, the CLI path also
+writes artifacts with provenance attribution matching the MCP
+path. Both paths go through `mpm call` and stamp identical
+`artifact_provenance` rows.
