@@ -57,7 +57,7 @@ BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli clean test lint help refresh-installed
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-race lint help refresh-installed
 
 all: build
 
@@ -161,6 +161,21 @@ test:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+
+# Run tests with the race detector enabled.
+# Mirrors `make test` but adds `-race`. Both flags are required:
+#   * `-race`                   — race detector for goroutine/data races
+#   * `CGO_CFLAGS=...FTS5`      — C-level compile flag enabling FTS5 in SQLite
+#   * `-tags fts5`              — Go build tag selecting the FTS5 driver path
+# Bare `go test -race ./...` (no flags) compiles go-sqlite3 without FTS5 and
+# breaks the search, pointer-resolution, and scheduler-triggers code paths
+# that unconditionally assume FTS5 is compiled in. Both flags are part of
+# the substrate's mandatory FTS5 integrity guarantee — see CLAUDE.md §3.
+test-race:
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
+	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/scheduler/...
 
 # Run golangci-lint (advisory only — does not gate CI).
 # Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
