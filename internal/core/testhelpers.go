@@ -135,3 +135,68 @@ func NewTestLocalOnlyDM(t *testing.T) *DatabaseManager {
 	t.Cleanup(func() { dm.Close() })
 	return dm
 }
+
+// OpenLegacyMemoriesDB builds a raw *sql.DB whose `memories` table
+// mirrors the pre-2026-09-04 shape: created_at is nullable,
+// INTEGER-affinity, no DEFAULT. schema_migrations is also created
+// (empty) so a migration can record its sentinel.
+//
+// Used by tests that need to exercise the legacy DB path — the
+// canonical BaseTables DDL now declares created_at NOT NULL, so any
+// test that needs to simulate a NULL row or a pre-fix schema has to
+// bypass NewTestDM (which would apply the modern shape). Returns
+// the raw *sql.DB so callers can drive migration functions
+// directly without going through DatabaseManager.
+//
+// Not a NewTestDM replacement — use NewTestDM whenever you don't
+// specifically need the legacy shape.
+func OpenLegacyMemoriesDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "file:legacy-memories-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("OpenLegacyMemoriesDB: sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Legacy-shape memories table: created_at nullable, no DEFAULT,
+	// no NOT NULL. Mirrors the pre-fix d4cfbfa outcome on a database
+	// that never inherited the canonical BaseTables DEFAULT clause.
+	_, err = db.Exec(`
+		CREATE TABLE memories (
+			id TEXT PRIMARY KEY,
+			collection TEXT,
+			content TEXT,
+			session_id TEXT,
+			tags TEXT,
+			metadata TEXT,
+			embedding BLOB,
+			weight REAL,
+			confidence REAL,
+			retrieval_priority REAL,
+			importance REAL,
+			created_at INTEGER,
+			updated_at INTEGER,
+			deleted_at INTEGER,
+			reference_id TEXT,
+			content_hash TEXT,
+			is_prime_directive INTEGER,
+			toxicity_score REAL,
+			is_long_term INTEGER,
+			reinforcement_count INTEGER,
+			last_accessed_at INTEGER,
+			expires_at INTEGER,
+			source_db TEXT,
+			source_id TEXT,
+			promoted_at REAL,
+			is_global INTEGER
+		);
+		CREATE TABLE schema_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at INTEGER NOT NULL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("OpenLegacyMemoriesDB: create legacy schema: %v", err)
+	}
+	return db
+}
