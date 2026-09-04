@@ -10,6 +10,22 @@
 > `<BEGIN/END MPM-CANONICAL-BLOCK>` excerpt. Host-specific bindings
 > (recovery commands, MCP runtime quirks, names) live in the host adapter,
 > not here.
+>
+> **Render contract:** the host-rendered instruction text that agents
+> actually read is generated from
+> [`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md),
+> not hand-edited per host. That snippets file is the **canonical source
+> for the exact wording** placed into each host's managed section; this
+> protocol file is the **principles** that wording conveys. The file-based
+> adapter snippets (one per supported host) are derived by
+> [`scripts/render_managed_blocks.py`](./scripts/render_managed_blocks.py),
+> which substitutes each host's tool prefix and inserts the host-specific
+> notes. Drift detection tests in
+> [`tests/test_render_managed_blocks.py`](./tests/test_render_managed_blocks.py)
+> verify byte-for-byte parity between the checked-in snippets and the
+> rendered output. When you change a behavioural principle here, also
+> update the canonical block in the snippets file and re-run the render
+> script — the drift test will fail otherwise.
 
 ---
 
