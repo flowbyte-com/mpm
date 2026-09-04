@@ -96,7 +96,14 @@ func (w Wake) Kind() string {
 
 // HandlerFunc executes a system wake. Returning a non-nil error marks the
 // wake fired with last_error set; it does NOT block subsequent wakes.
-type HandlerFunc func(w Wake) error
+//
+// ctx is the scheduler's dispatch context: when it is cancelled (SIGTERM,
+// shutdown deadline, or per-call timeout), handlers SHOULD observe
+// ctx.Done() and return promptly. Handlers that shell out MUST use
+// exec.CommandContext(ctx, ...) so subprocesses die when ctx is cancelled
+// (F-3, 2026-09-04 residual inventory: pre-fix the goroutine and
+// subprocess tree leaked past the dispatch boundary on cancel).
+type HandlerFunc func(ctx context.Context, w Wake) error
 
 // Scheduler is the long-running wake executor.
 type Scheduler struct {
@@ -432,7 +439,13 @@ func (s *Scheduler) executeOne(ctx context.Context, w Wake) error {
 
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- h(w) }()
+	// F-3: pass ctx through to the handler so it can observe cancellation
+	// (handlers that respect ctx.Done() return promptly) and so handlers
+	// that shell out can use exec.CommandContext(ctx, ...), which
+	// propagates cancel to the subprocess tree. Pre-fix, h(w) received
+	// no ctx and subprocesses ran with bare exec.Command, leaking the
+	// goroutine + subprocess tree past the dispatch boundary on cancel.
+	go func() { done <- h(ctx, w) }()
 	select {
 	case err := <-done:
 		elapsed := time.Since(start)
@@ -726,7 +739,7 @@ func truncate(s string, n int) string {
 // SQL string literal passed to sqlite3; an unconstrained label could
 // inject SQL or escape the path. Untrusted labels are dropped to the
 // epoch default rather than failing the snapshot.
-func SnapshotHandler(w Wake) error {
+func SnapshotHandler(ctx context.Context, w Wake) error {
 	dbPath := defaultDBPath()
 	backupDir := filepath.Join(filepath.Dir(dbPath), "..", "..", "backups", "critic-pre")
 	if env := os.Getenv("MPM_BACKUP_DIR"); env != "" {
@@ -745,13 +758,16 @@ func SnapshotHandler(w Wake) error {
 	snapshot := filepath.Join(backupDir, fmt.Sprintf("mpm_pre_critic_%s.db", label))
 
 	// sqlite3 .backup is atomic and WAL-safe; concurrent writers are not blocked.
-	cmd := exec.Command("sqlite3", dbPath, fmt.Sprintf(".backup '%s'", snapshot))
+	// F-3: use exec.CommandContext so the snapshot dies if ctx is cancelled
+	// (otherwise the subprocess keeps the SQLite DB write-locked past the
+	// daemon's exit window).
+	cmd := exec.CommandContext(ctx, "sqlite3", dbPath, fmt.Sprintf(".backup '%s'", snapshot))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sqlite3 .backup: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
 	// Verify the snapshot is sane before trusting it as rollback target.
-	integ := exec.Command("sqlite3", snapshot, "PRAGMA integrity_check;")
+	integ := exec.CommandContext(ctx, "sqlite3", snapshot, "PRAGMA integrity_check;")
 	out, err := integ.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "ok" {
 		return fmt.Errorf("integrity_check: %s: %w", strings.TrimSpace(string(out)), err)
@@ -794,13 +810,16 @@ func sanitizeSnapshotLabel(s string) string {
 // dispatcher; the critic evolves independently. If the binary isn't on
 // PATH, the handler returns an error so the wake is marked fired with
 // last_error (failure isolation).
-func CriticAuditHandler(w Wake) error {
+//
+// F-3 (2026-09-04 residual inventory): uses the dispatch ctx directly
+// (replaces the prior internal 5-minute timeout ctx that masked the
+// scheduler's cancel signal — pre-fix, on SIGTERM the subprocess kept
+// running for up to 5 minutes past daemon exit).
+func CriticAuditHandler(ctx context.Context, w Wake) error {
 	bin := os.Getenv("MPM_CRITIC_BIN")
 	if bin == "" {
 		bin = "mpm-critic"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
 	cmd.Env = append(os.Environ(), "MPM_DB_PATH="+defaultDBPath())
 	out, err := cmd.CombinedOutput()
@@ -812,7 +831,9 @@ func CriticAuditHandler(w Wake) error {
 
 // GCHandler triggers the existing gc_run sweep. Reads dry_run and aggressive
 // flags from wake metadata so per-cycle tuning is possible.
-func GCHandler(w Wake) error {
+//
+// F-3: uses exec.CommandContext so the mpm subprocess dies on cancel.
+func GCHandler(ctx context.Context, w Wake) error {
 	dryRun := "true"
 	if d, ok := w.Metadata["dry_run"].(bool); ok && !d {
 		dryRun = "false"
@@ -821,7 +842,7 @@ func GCHandler(w Wake) error {
 	if a, ok := w.Metadata["aggressive"].(bool); ok && a {
 		args[2] = `{"dry_run":false,"aggressive":true}`
 	}
-	cmd := exec.Command("mpm", args...)
+	cmd := exec.CommandContext(ctx, "mpm", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mpm call gc_run: %s: %w", strings.TrimSpace(string(out)), err)
@@ -831,7 +852,9 @@ func GCHandler(w Wake) error {
 
 // BroadcastHandler triggers an active-dissemination broadcast to receiving
 // agents via mpm ops broadcast. Used for high-priority cross-agent pushes.
-func BroadcastHandler(w Wake) error {
+//
+// F-3: uses exec.CommandContext so the mpm subprocess dies on cancel.
+func BroadcastHandler(ctx context.Context, w Wake) error {
 	target := ""
 	if t, ok := w.Metadata["target"].(string); ok {
 		target = t
@@ -840,7 +863,7 @@ func BroadcastHandler(w Wake) error {
 	if target != "" {
 		args = append(args, "--target", target)
 	}
-	cmd := exec.Command("mpm", args...)
+	cmd := exec.CommandContext(ctx, "mpm", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mpm ops broadcast: %s: %w", strings.TrimSpace(string(out)), err)
