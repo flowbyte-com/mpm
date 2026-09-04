@@ -8,6 +8,7 @@
 package scheduler
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,7 +60,7 @@ timeout_secs: 5
 	// test asserts on the framework-dispatch decision and the harness
 	// side; the audit-row assertion is gated below.
 	t.Setenv("PATH", "")
-	if err := DrillHandler(w); err != nil {
+	if err := DrillHandler(context.Background(), w); err != nil {
 		// Even with empty PATH the dispatch should record the run
 		// (the failing `mpm call` invocations are audited as errors
 		// when mpm is missing — but mpm is not invoked in test
@@ -104,7 +105,7 @@ expect:
 		},
 	}
 
-	err = DrillHandler(w)
+	err = DrillHandler(context.Background(), w)
 	if err == nil {
 		t.Fatal("DrillHandler should reject unknown framework")
 	}

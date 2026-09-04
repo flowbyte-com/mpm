@@ -98,8 +98,11 @@ func (h *CascadeDrainHandler) BatchSize() int { return h.batchSize }
 // Run is a HandlerFunc-compatible adapter. Currently unused — the handler
 // is registered via Scheduler.RegisterTickHandler — but kept for future
 // flexibility.
-func (h *CascadeDrainHandler) Run(w Wake) error {
-	return h.tickHandler(context.Background())
+//
+// F-3: forwards the dispatch ctx so HandlerFunc-style invocations honour
+// cancellation the same way TickHandler invocations do.
+func (h *CascadeDrainHandler) Run(ctx context.Context, w Wake) error {
+	return h.tickHandler(ctx)
 }
 
 // TickHandler returns a function suitable for Scheduler.RegisterTickHandler.

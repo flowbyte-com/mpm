@@ -77,7 +77,7 @@ func TestExecuteOne_LogsDurationOnCompletion(t *testing.T) {
 	s := newTestSchedulerWithCaptureLogger(t)
 
 	var called int
-	s.Register("slow_kind", func(w Wake) error {
+	s.Register("slow_kind", func(ctx context.Context, w Wake) error {
 		called++
 		time.Sleep(20 * time.Millisecond) // give us a measurable duration
 		return nil
@@ -136,7 +136,7 @@ func TestExecuteOne_LogsDurationOnCompletion(t *testing.T) {
 func TestExecuteOne_LogsErrorOnFailure(t *testing.T) {
 	s := newTestSchedulerWithCaptureLogger(t)
 
-	s.Register("fail_kind", func(w Wake) error {
+	s.Register("fail_kind", func(ctx context.Context, w Wake) error {
 		return context.DeadlineExceeded
 	})
 
