@@ -174,8 +174,34 @@ step "10. mpm config profile list" "stranger" -- \
 step "11. mpm status (after writes)" "Memories:" -- \
     "$MPM_BIN" status
 
-# 12. doctor — final health check. No substring required; just exit 0.
-step "12. mpm doctor" "" -- "$MPM_BIN" doctor
+# 12. doctor — final health check.
+#     Per cmd/mpm/handlers_doctor.go:12-18 the Wave 2 doctor encodes
+#     WARN as exit 1 by design ("This lets scripts use `mpm doctor &&
+#     proceed` reliably AND `mpm doctor || handle-warning`"). A fresh
+#     install legitimately reports warnings (no embedding provider
+#     configured, spaced-review backlog from prior tests) — these are
+#     correct signals, not failures. Exit 2 (any FAIL) is a genuine
+#     failure and still aborts the test.
+if [[ "${VERBOSE}" = "1" ]]; then
+    echo "[stranger] 12. mpm doctor"
+    echo "[stranger]   \$ $MPM_BIN doctor (expected exit 0 or 1; 2 = abort)"
+fi
+doctor_out="$("$MPM_BIN" doctor 2>&1)"
+doctor_rc=$?
+if [[ "$doctor_rc" -eq 2 ]]; then
+    echo "❌ [12. mpm doctor] unexpected exit code: got $doctor_rc (FAIL)" >&2
+    echo "  command: $MPM_BIN doctor" >&2
+    echo "  output:" >&2
+    echo "$doctor_out" | sed 's/^/    /' >&2
+    exit 1
+fi
+if [[ "$doctor_rc" -ne 0 && "$doctor_rc" -ne 1 ]]; then
+    echo "❌ [12. mpm doctor] unexpected exit code: got $doctor_rc (expected 0, 1, or 2)" >&2
+    echo "  command: $MPM_BIN doctor" >&2
+    echo "  output:" >&2
+    echo "$doctor_out" | sed 's/^/    /' >&2
+    exit 1
+fi
 
 echo
 echo "✅ stranger test passed (12 steps, scratch cleaned up)"
