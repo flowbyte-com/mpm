@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ApplyDirectives walks the SeedDirectives registry and inserts any
@@ -150,12 +151,19 @@ func insertSeedRow(db *sql.DB, sd SeedDirective) error {
 		scope = "global"
 	}
 	meta := fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`, scope)
+	// created_at / updated_at are provided explicitly so the row
+	// invariant (non-NULL created_at) holds on databases whose
+	// `memories.created_at` column lacks the canonical DEFAULT
+	// clause — see MigrateMemoriesCreatedAtBackfill for the legacy
+	// backfill. Computing the value once keeps the two timestamps
+	// consistent within a single INSERT.
+	now := time.Now().Unix()
 	_, err := db.Exec(`
 		INSERT OR IGNORE INTO memories
-		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance)
+		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance, created_at, updated_at)
 		VALUES
-		    (?, 'directives', ?, ?, ?, 1, 10, 1.0, 1.0, 1.0)`,
-		sd.StableID, sd.Content, tagsJSON, meta)
+		    (?, 'directives', ?, ?, ?, 1, 10, 1.0, 1.0, 1.0, ?, ?)`,
+		sd.StableID, sd.Content, tagsJSON, meta, now, now)
 	return err
 }
 
