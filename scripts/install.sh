@@ -694,11 +694,6 @@ mode_install() {
     log "                  mpm config profile set default api_key <key>   # writes 0600 to mpm_config.json"
     log "                  mpm config component set memory default         # bind component to profile"
     log "  the installer did NOT create, store, request, or echo any API key or secret."
-    log ""
-    log "embedding provider (OPTIONAL — BM25 keyword search works without it):"
-    log "  auto-detect:    mpm config detect-embedding [--apply]   # discovers local Ollama + nomic-embed-text"
-    log "  manual:         mpm config component set embedding <profile>"
-    log "  see also:       mpm doctor            # reports Embedding provider status as WARN when absent"
 }
 
 mode_check() {
