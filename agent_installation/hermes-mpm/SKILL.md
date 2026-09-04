@@ -9,8 +9,8 @@
 | Native mechanism | Hermes MCP client (`mcp_servers` in `config.yaml`) + Hermes Skill (`mpm` skill at `~/.hermes/skills/mpm/SKILL.md`) |
 | MPM interface used | `mpm-mcp` stdio server (22 MCP tools via JSON-RPC over stdio) |
 | Auto-load mechanism | MCP server auto-discovered via `mcp_servers` config; skill auto-loaded when task involves MPM |
-| MPM binary actually resolved | `/home/v/.mpm/bin/mpm-mcp` (canonical, absolute path) |
-| Database actually used | `/home/v/workspace/projects/mpm/src/db/mpm.db` (symlinked: `~/.mpm/src/db/mpm.db` ↔ `~/.openclaw/workspace/projects/mpm/src/db/mpm.db`) |
+| MPM binary actually resolved | `$HOME/.mpm/bin/mpm-mcp` (canonical, absolute path) |
+| Database actually used | `$HOME/projects/mpm/src/db/mpm.db` (symlinked: `~/.mpm/src/db/mpm.db` ↔ `~/.openclaw/workspace/projects/mpm/src/db/mpm.db`) |
 
 ## Architecture
 
@@ -23,27 +23,27 @@ Hermes has two MPM integration surfaces:
 ```yaml
 mcp_servers:
   mpm:
-    command: /home/v/.mpm/bin/mpm-mcp
+    command: $HOME/.mpm/bin/mpm-mcp
     args: []
     env:
-      MPM_WORKSPACE: /home/v/.mpm
+      MPM_WORKSPACE: $HOME/.mpm
     timeout: 60
     connect_timeout: 30
     enabled: true
 ```
 
-**Binary path resolution:** Absolute — `/home/v/.mpm/bin/mpm-mcp`. No PATH dependency.
+**Binary path resolution:** Absolute — `$HOME/.mpm/bin/mpm-mcp`. No PATH dependency.
 
-**Workspace resolution:** Via `MPM_WORKSPACE` env var, which the `mpm-mcp` binary uses to locate the pidfile and resolve the database. The value should be `~/.mpm` (the canonical install root), which resolves to `/home/v/workspace/projects/mpm/src/db/mpm.db` via symlink.
+**Workspace resolution:** Via `MPM_WORKSPACE` env var, which the `mpm-mcp` binary uses to locate the pidfile and resolve the database. The value should be `~/.mpm` (the canonical install root), which resolves to the project DB at `$HOME/projects/mpm/src/db/mpm.db` via symlink.
 
 **DB path invariance:** All three paths resolve to the same inode:
-- `/home/v/.mpm/src/db/mpm.db` (symlink → project source)
-- `/home/v/.openclaw/workspace/projects/mpm/src/db/mpm.db` (symlink → project source)
-- `/home/v/workspace/projects/mpm/src/db/mpm.db` (canonical project source)
+- `$HOME/.mpm/src/db/mpm.db` (symlink → project source)
+- `$HOME/.openclaw/workspace/projects/mpm/src/db/mpm.db` (symlink → project source)
+- `$HOME/projects/mpm/src/db/mpm.db` (canonical project source)
 
 The MPM_WORKSPACE in the MCP config is set to the `~/.mpm` symlink path, which is the canonical install root. This is intentional — the symlink tree is the established install layout.
 
-**Known issue:** The `mcp_servers.mpm.env.MPM_WORKSPACE` in `config.yaml` is currently set to `/home/v/.openclaw/workspace/projects/mpm` (project source, not install root). This is functionally equivalent (same DB inode) but inconsistent with the canonical install layout. The install-root path (`~/.mpm`) is preferred for future-proofing.
+**Known issue:** The `mcp_servers.mpm.env.MPM_WORKSPACE` in `config.yaml` is currently set to the legacy project-source path on this host (project source, not install root). This is functionally equivalent (same DB inode) but inconsistent with the canonical install layout. The install-root path (`~/.mpm`) is preferred for future-proofing.
 
 ### 2. Hermes MPM Skill
 
@@ -61,7 +61,7 @@ The pre-existing `mpm_hermes_loader.py` (legacy plugin loader at `~/.hermes/herm
 ```python
 from tools import mpm_plugin  # noqa: F401
 ```
-where `mpm_plugin` is a symlink pointing to `/home/v/workspace/projects/mpm/hermes-mpm-plugin` which does not exist.
+where `mpm_plugin` is a symlink pointing to `$HOME/projects/mpm/hermes-mpm-plugin` which does not exist.
 
 **This is a dead integration path.** It has no effect on the current session because:
 1. Hermes does not use the legacy plugin loader for MCP — it uses the `mcp_servers` config
@@ -110,7 +110,7 @@ The legacy plugin loader should be removed or repaired separately. It is not par
 
 2. **Legacy plugin loader is dead code:** `mpm_hermes_loader.py` imports a non-existent module. This does not affect current operation (MCP is the active integration) but should be cleaned up separately.
 
-3. **MPM_WORKSPACE path inconsistency:** `config.yaml` MCP config uses `/home/v/.openclaw/workspace/projects/mpm` rather than the canonical `/home/v/.mpm`. Functionally equivalent (same DB) but inconsistent with the established install layout.
+3. **MPM_WORKSPACE path inconsistency:** `config.yaml` MCP config uses the legacy project-source path (`$HOME/.openclaw/workspace/projects/mpm`) rather than the canonical `$HOME/.mpm`. Functionally equivalent (same DB) but inconsistent with the established install layout.
 
 ## Cleanup
 
@@ -125,4 +125,4 @@ All shredded successfully with cascade (artifact_provenance, evidence, memory_re
 
 **READY**
 
-The Hermes ↔ MPM integration is functional and verified. The MCP server (`mpm-mcp`) is correctly wired in `config.yaml`, resolves the canonical binary at `/home/v/.mpm/bin/mpm-mcp`, and converges on the same DB inode as all other agents on this host. All five end-to-end tests (discovery, write, retrieval, diagnostics, continuity) passed. The legacy plugin loader is dead code but does not interfere with current operation.
+The Hermes ↔ MPM integration is functional and verified. The MCP server (`mpm-mcp`) is correctly wired in `config.yaml`, resolves the canonical binary at `$HOME/.mpm/bin/mpm-mcp`, and converges on the same DB inode as all other agents on this host. All five end-to-end tests (discovery, write, retrieval, diagnostics, continuity) passed. The legacy plugin loader is dead code but does not interfere with current operation.

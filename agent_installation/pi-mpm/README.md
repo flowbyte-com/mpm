@@ -6,19 +6,19 @@ the CLI is reachable from Pi as a typed tool.
 
 ## Coverage
 
-**16 Pi tools registered**, in two layers:
+**17 Pi tools registered**, in two layers:
 
 | Layer | Count | Source |
 |---|---|---|
-| Unified Domain Tools ("Fat RPC") | 13 | `index.ts` (hand-written) |
+| Unified Domain Tools ("Fat RPC") | 14 | `index.ts` (hand-written) |
 | Standalone tools | 3 | `index.ts` (hand-written) |
 
-The 13 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **22 tools total** (16 domain
-tools + 3 standalones + 3 standalones grouped as `mpm_resolve`,
-`mpm_challenge`, `mpm_work`, plus the `mpm_blob_*` / `mpm_blob_search`
-pointers), so the Pi adapter is a hand-curated 16-tool subset. Tools
-not registered here (`mpm_work`, `mpm_resolve`, `mpm_challenge`,
+The 14 Domain Tools cover the **core cognitive surface** exposed by this
+adapter. The current MPM registry exposes **22 tools total** (14 domain
+tools via Fat RPC + 5 pointer/dedicated tools — `mpm_work`,
+`mpm_resolve`, `mpm_challenge`, `mpm_blob_read`, `mpm_blob_search` — +
+3 standalones), so the Pi adapter is a hand-curated 17-tool subset.
+Tools not registered here (`mpm_work`, `mpm_resolve`, `mpm_challenge`,
 `mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
 `mpm call <tool> --payload '<json>'` CLI fallback.
 
@@ -65,7 +65,7 @@ From mpm's README:
 Pi explicitly does not support MCP (`docs/usage.md` §303), so `mpm-mcp` is
 not an option. The next-best is `mpm call`, which is a plain
 `--payload '<json>'` subprocess. This extension is the smallest correct
-bridge: 13 Fat-RPC domain adapters (one per domain) plus 3 standalone
+bridge: 14 Fat-RPC domain adapters (one per domain) plus 3 standalone
 adapters.
 
 ## Why 22 tools (and not 77)
@@ -79,8 +79,8 @@ string, params: object}` and the mpm backend validates and dispatches.
 That collapses ~77 distinct tool definitions into a small set of
 near-identical ones.
 
-This Pi adapter registers a **16-tool subset** of the full 22-tool
-registry (13 Domain Tools + 3 Standalones). The remaining registry tools
+This Pi adapter registers a **17-tool subset** of the full 22-tool
+registry (14 Domain Tools + 3 Standalones). The remaining registry tools
 (`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
 `mpm_blob_search`) are reachable through the `mpm call <tool> --payload
 '<json>'` CLI fallback when needed. Adding them as typed Pi tools is

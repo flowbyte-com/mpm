@@ -51,8 +51,7 @@ If any of these fail, install MPM first:
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
-make build && make install
-./scripts/install.sh                # systemd user service + lingering
+./scripts/install.sh                # full install: build + binaries + systemd user unit + lingering
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
 
@@ -84,7 +83,7 @@ integration and inspect the `db_path` field of the health check:
 
 ```bash
 mpm call mpm_system --payload '{"action":"health_check","params":{}}'
-# {"ok":true,"db_path":"/home/v/workspace/projects/mpm/src/db/mpm.db",...}
+# {"ok":true,"db_path":"$HOME/.mpm/src/db/mpm.db",...}
 ```
 
 ---
@@ -160,8 +159,8 @@ Wires `mpm__*` native tools into OpenClaw. Edit OpenClaw's runtime
 config (NOT the MPM repo):
 
 ```bash
-openclaw config set mcp.servers.mpm.command '/home/v/.mpm/bin/mpm-mcp'
-openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE '/home/v/.mpm'
+openclaw config set mcp.servers.mpm.command "$HOME/.mpm/bin/mpm-mcp"
+openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE "$HOME/.mpm"
 openclaw gateway restart
 ```
 
@@ -236,13 +235,13 @@ After all three surfaces are wired:
 ```bash
 # 1. Confirm MCP wiring (should respond to tools/list):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | /home/v/.mpm/bin/mpm-mcp 2>/dev/null | jq '.result.tools | length'
+  | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null | jq '.result.tools | length'
 # expect: 22
 
 # 2. Confirm DB path invariance:
 mpm call mpm_system --payload '{"action":"health_check","params":{}}' \
   | jq '.db_path'
-# expect: /home/v/workspace/projects/mpm/src/db/mpm.db (or your configured path)
+# expect: $HOME/.mpm/src/db/mpm.db (or your configured MPM_DB_PATH / MPM_WORKSPACE)
 
 # 3. Confirm memory slot plugin wired correctly:
 openclaw doctor --lint --only core/doctor/memory-search --json | jq '.ok'
@@ -358,7 +357,7 @@ Manual probe (independent of `verify.py`):
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | /home/v/.mpm/bin/mpm-mcp 2>/dev/null \
+  | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
 # expect: 22
 ```
@@ -452,7 +451,7 @@ python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructio
 
 The plugin reads the binary from `$PATH` by default (`mpm`); if you
 need a deterministic absolute path, set it via the OpenCode env block
-(`MPM_BINARY=/home/v/.mpm/bin/mpm` is the plugin's recognized
+(`MPM_BINARY=$HOME/.mpm/bin/mpm` is the plugin's recognized
 override). The plugin also reads `MPM_WORKSPACE` from env (defaults to
 `<cwd>`).
 
@@ -510,10 +509,10 @@ Hermes participates in the MPM substrate via **two surfaces**:
    ```yaml
    mcp_servers:
      mpm:
-       command: /home/v/.mpm/bin/mpm-mcp
+       command: $HOME/.mpm/bin/mpm-mcp
        args: []
        env:
-         MPM_WORKSPACE: /home/v/.mpm
+         MPM_WORKSPACE: $HOME/.mpm
        timeout: 60
        connect_timeout: 30
        enabled: true
@@ -560,7 +559,7 @@ unchanged.
 ```bash
 # 1. MCP wiring works (live test):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | /home/v/.mpm/bin/mpm-mcp 2>/dev/null \
+  | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
 # expect: 22
 
@@ -612,8 +611,8 @@ would be empty, and writes a backup before mutation.
 
 Pi participates in the MPM substrate via:
 
-1. **Pi extension.** `pi-mpm/index.ts` registers a **16-tool subset**
-   of the full 22-tool MPM registry (13 Domain Tools via Fat RPC + 3
+1. **Pi extension.** `pi-mpm/index.ts` registers a **17-tool subset**
+   of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
    Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
    `request_review`). Tools in the full registry not exposed here
    (`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
