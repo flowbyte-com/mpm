@@ -470,29 +470,44 @@ func (s *Scheduler) hasHandler(kind string) bool {
 	return ok
 }
 
-// computeEarliestDeadline returns the soonest pending deadline across
-// all wake-mutation inputs:
+// computeEarliestDeadline returns the soonest pending deadline that
+// the deadline-driven dispatch path can act on.
 //
-//   - scheduled_wakes WHERE fired = 0
-//     (user-scheduled ad-hoc and not-yet-fired scheduled rows)
-//   - scheduled_tasks WHERE status = 'active'
-//     (agentic-cron latent — its next_run_at becomes a wake when due)
+// The deadline arms the timer that fires `dispatchDrainAdHocWakes`
+// (scheduler.go:572). That dispatcher only claims notification-kind
+// rows (dispatch.go:80-87), so the deadline is the next such row's
+// target_time, NOT the next "any fired=0 row" timestamp.
 //
-// Returns time.Time{} (zero) when nothing is pending. The query is
-// UNION ALL'd into a single MIN() — SQLite plans both branches
-// efficiently against the partial covering indexes
-// (idx_sw_pending, idx_st_active), keeping the cost sub-millisecond
-// at realistic queue sizes.
+// Why this filter matters: unfired scheduled_wakes rows with non-
+// notification kinds (cron-injected, cascade_summary, etc.) can pile
+// up with target_time in the past while no ad-hoc dispatcher work
+// remains. A blanket MIN(fired=0) would return a past timestamp;
+// scheduleNextDeadline clamps that to d=0; the timer fires
+// immediately; the dispatcher runs once, drains nothing, the cycle
+// repeats at zero delay. Result: 100% CPU wedge with no work
+// happening.
+//
+// The filter (`kind IS NULL OR kind='' OR kind='notification'`)
+// matches dispatchClaimNextAdHocWake's WHERE clause exactly, so the
+// deadline is the soonest moment the dispatcher could possibly
+// claim. Returns time.Time{} (zero) when nothing is pending.
 //
 // `now` is currently unused by the SQL but kept in the signature so
 // future implementations can substitute server-side clock if the
-// database clock drifts. The naive MIN(t) is correct — we want the
-// earliest absolute deadline, not one relative to now.
+// database clock drifts.
 func (s *Scheduler) computeEarliestDeadline(ctx context.Context, now time.Time) (time.Time, error) {
 	var ts sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT MIN(t) FROM (
-			SELECT target_time AS t FROM scheduled_wakes WHERE fired = 0
+			SELECT target_time AS t FROM scheduled_wakes
+			WHERE fired = 0
+			  AND (
+			    metadata IS NULL
+			    OR metadata = ''
+			    OR json_extract(metadata, '$.kind') IS NULL
+			    OR json_extract(metadata, '$.kind') = ''
+			    OR json_extract(metadata, '$.kind') = 'notification'
+			  )
 			UNION ALL
 			SELECT next_run_at AS t FROM scheduled_tasks WHERE status = 'active'
 		)
