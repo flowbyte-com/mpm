@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"net/http"
 	"os"
 	"sync"
@@ -44,8 +45,12 @@ func (NullProvider) Embed(text string) ([]float32, error) { return nil, nil }
 func (NullProvider) Name() string                         { return "null" }
 
 // OllamaProvider hits a local Ollama endpoint for embeddings.
+//
+// Ollama moved from POST /api/embeddings (body: {"model","prompt"}) to
+// POST /api/embed (body: {"model","input"}, response: {"embeddings":[[...]]}).
+// See https://github.com/ollama/ollama/blob/main/docs/api.md#generate-embeddings.
 type OllamaProvider struct {
-	Endpoint string // e.g. "http://localhost:11434/api/embeddings"
+	Endpoint string // e.g. "http://localhost:11434/api/embed"
 	Model    string // e.g. "nomic-embed-text"
 	Timeout  time.Duration
 	client   *http.Client
@@ -53,7 +58,23 @@ type OllamaProvider struct {
 
 func NewOllamaProvider(endpoint, model string) *OllamaProvider {
 	if endpoint == "" {
-		endpoint = "http://localhost:11434/api/embeddings"
+		endpoint = "http://localhost:11434/api/embed"
+	} else {
+		// Accept either:
+		//   - a bare host  ("http://localhost:11434")
+		//   - the legacy   ("http://localhost:11434/api/embeddings")
+		//   - the modern   ("http://localhost:11434/api/embed")
+		// and normalize to the modern endpoint.
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			// Fall through unchanged; Embed() will surface a clearer error.
+		} else if u.Path == "" || u.Path == "/" {
+			u.Path = "/api/embed"
+			endpoint = u.String()
+		} else if u.Path == "/api/embeddings" {
+			u.Path = "/api/embed"
+			endpoint = u.String()
+		}
 	}
 	if model == "" {
 		model = "nomic-embed-text"
@@ -70,8 +91,8 @@ func NewOllamaProvider(endpoint, model string) *OllamaProvider {
 
 func (p *OllamaProvider) Embed(text string) ([]float32, error) {
 	payload := map[string]interface{}{
-		"model":  p.Model,
-		"prompt": text,
+		"model": p.Model,
+		"input": text,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -95,14 +116,23 @@ func (p *OllamaProvider) Embed(text string) ([]float32, error) {
 		return nil, fmt.Errorf("embed: Ollama returned %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
+	// /api/embed returns {"embeddings": [[...]]} (plural, outer array). Some
+	// installations may still emit the legacy singular {"embedding": [...]}
+	// shape; accept both.
 	var result struct {
-		Embedding []float32 `json:"embedding"`
+		Embedding  []float32   `json:"embedding"`
+		Embeddings [][]float32 `json:"embeddings"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("embed: decode: %w", err)
 	}
-
-	return result.Embedding, nil
+	if len(result.Embedding) > 0 {
+		return result.Embedding, nil
+	}
+	if len(result.Embeddings) > 0 {
+		return result.Embeddings[0], nil
+	}
+	return nil, fmt.Errorf("embed: Ollama returned no embedding for model %q", p.Model)
 }
 
 func (p *OllamaProvider) Name() string {
@@ -246,7 +276,7 @@ func resolveEmbeddingConfig(cfg *config.Config) *EmbeddingConfig {
 	model := os.Getenv("OLLAMA_MODEL")
 	if endpoint != "" || model != "" {
 		if endpoint == "" {
-			endpoint = "http://localhost:11434/api/embeddings"
+			endpoint = "http://localhost:11434/api/embed"
 		}
 		if model == "" {
 			model = "nomic-embed-text"
