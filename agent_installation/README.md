@@ -14,6 +14,24 @@ here.
 > + the `mpm-mcp` stdio server) is the contract. Adapter directories
 > consume that contract — they do not import internal MPM packages.
 
+## I just want the snippets
+
+**→ [`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md)**
+
+The top of that file carries four copy/paste blocks — one per
+persistent-file host (Claude Code, OpenCode, Pi, Hermes) — with the
+exact wording to paste into your host's persistent instruction file
+(CLAUDE.md / AGENTS.md / .hermes.md). The same content is what the
+per-host installers write; the installers are a convenience, not a
+requirement.
+
+If you are using OpenClaw, you don't need a snippets file at all —
+the runtime injects the same seven invariants into the system prompt
+automatically. See the OpenClaw row in [INSTALL.md](./INSTALL.md).
+
+For installation, the rest of this README explains the architecture;
+the actual procedural manual is [INSTALL.md](./INSTALL.md).
+
 ## What this directory is
 
 A bundle of per-agent installation assets:
@@ -49,7 +67,8 @@ handoff, forcing the next session to rediscover everything.
 ## Canonical behavioral protocol
 
 [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) is the canonical
-host-independent contract. It defines five invariants:
+host-independent contract. It defines the **principles** an MPM-aware
+agent must honour:
 
 1. **Wake** at session start (read MPM context before substantive work)
 2. **Persist** during work, not only at the end
@@ -61,6 +80,38 @@ host-independent contract. It defines five invariants:
 All host adapters reference this file. They do not duplicate the
 principles; they translate them into host-native instruction surfaces
 and MCP-bundle wiring.
+
+## Canonical managed-instruction snippets
+
+[`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md)
+is the canonical source for the **exact wording** that adapters render
+into each host's managed section. It contains the canonical managed
+block (between `<!-- BEGIN MPM MANAGED BLOCK -->` and
+`<!-- END MPM MANAGED BLOCK -->` markers) with `{TOOL_PREFIX}`
+placeholders for each host's transport namespace.
+
+The four file-based adapter snippets
+(`claude-code-mpm/templates/CLAUDE.md.snippet`,
+`opencode-mpm/templates/AGENTS.md.snippet`,
+`pi-mpm/templates/AGENTS.md.snippet`,
+`hermes-mpm/templates/hermes.md.snippet`) are **generated**, not
+hand-edited. The render script
+[`scripts/render_managed_blocks.py`](./scripts/render_managed_blocks.py):
+
+1. Reads the canonical source.
+2. Extracts the canonical managed block.
+3. Substitutes each adapter's `{TOOL_PREFIX}` (e.g., `mpm__` for
+   Claude Code, `mcp__mpm__` for Hermes, empty for OpenCode and Pi).
+4. Composes each adapter's full snippet (header + rendered block +
+   host-specific notes).
+5. Writes the snippet to the adapter's `templates/` directory.
+
+**Drift detection:** the test suite
+[`tests/test_render_managed_blocks.py`](./tests/test_render_managed_blocks.py)
+verifies byte-for-byte parity between the checked-in snippets and the
+rendered output. Run `python3 scripts/render_managed_blocks.py --check`
+to verify; re-run without `--check` to regenerate after editing the
+canonical source.
 
 ## Supported hosts
 
@@ -109,7 +160,10 @@ One-line entry points (full procedure in INSTALL.md):
 |---|---|
 | [`README.md`](./README.md) | This file — orientation, supported hosts, design principle |
 | [`INSTALL.md`](./INSTALL.md) | Procedural installation manual — prerequisites, commands per host, verification, uninstall, troubleshooting |
-| [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) | Canonical behavioral protocol — wake, persist, handoff, continuity, recovery |
+| [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) | Canonical behavioral protocol — principles an MPM-aware agent honours |
+| [`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md) | Canonical managed-instruction snippets — exact wording rendered into each host's managed section |
+| [`scripts/render_managed_blocks.py`](./scripts/render_managed_blocks.py) | Renders per-adapter snippets from the canonical source |
+| [`tests/test_render_managed_blocks.py`](./tests/test_render_managed_blocks.py) | Byte-for-byte drift detection for adapter snippets |
 | `<host>/README.md` or `<host>/SKILL.md` | Host-specific deep dive (validation evidence, host quirks, recovery details) |
 
 ## Validation record
