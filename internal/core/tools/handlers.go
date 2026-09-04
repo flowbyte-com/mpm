@@ -1790,7 +1790,7 @@ func handleReadReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // the Go MCP server).
 func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, params map[string]interface{}) (interface{}, error) {
 
-	// Alpha-4 W-001: compact projection. Returns a 9-field id+summary
+	// Alpha-4 W-001: compact projection. Returns a small id+summary
 	// struct so an agent that only needs to know "who am I, what was
 	// the last handoff, what's open" can avoid pulling the heavy
 	// recent_memories / available_skills / global_rules / overdue_wakes
@@ -2022,7 +2022,7 @@ type CompactWakeContext struct {
 	RecentArtifactIDs  []string `json:"recent_artifact_ids"`
 }
 
-// handleReadWakeContextCompact (alpha-4 W-001) returns the 9-field
+// handleReadWakeContextCompact (alpha-4 W-001) returns the compact
 // compact projection. Gathers the full WakeContextData (cheap — the
 // heavy part is serialization, not collection), then projects to the
 // compact shape. Errors propagate so the caller can fall back to the

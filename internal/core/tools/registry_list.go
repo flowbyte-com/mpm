@@ -107,7 +107,7 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["record","supersede","invalidate"]},
+				"action": {"type": "string", "enum": ["record","supersede","invalidate","show","list","query"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -271,7 +271,7 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 				"params": {
 					"type": "object",
 					"properties": {
-						"projection":          {"type": "string", "enum": ["compact"], "description": "Wake-context projection. 'compact' returns a 9-field id+summary envelope; other values fall through to the full WakeContextData branch. Other canonical projection values (summary, full) belong to mpm_memory query, not mpm_context."},
+						"projection":          {"type": "string", "enum": ["compact"], "description": "Wake-context projection. 'compact' returns a small id+summary envelope; other values fall through to the full WakeContextData branch. Other canonical projection values (summary, full) belong to mpm_memory query, not mpm_context."},
 						"format":              {"type": "string", "enum": ["system-prompt"]},
 						"conversation_text":   {"type": "string"},
 						"max_hints":          {"type": "number"},
