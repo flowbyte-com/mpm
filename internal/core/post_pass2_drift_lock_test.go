@@ -243,3 +243,38 @@ func TestPass2_Protocol_Section1_WakePayloadFieldsAreAccurate(t *testing.T) {
 			"protocol §1 must not name %q as a wake payload field — decisions/lessons live behind mpm_decisions / mpm_lessons, not in WakeContextData", phrase)
 	}
 }
+
+// TestPass2_Snippets_WakePayloadFieldsAreAccurate locks the wake-payload
+// description in the canonical snippets file to the same contract the
+// protocol §1 lock enforces. The snippet file is the agent-facing copy
+// that lands in CLAUDE.md and IDENTITY.md, so it must describe what the
+// agent actually receives — not aspirational field names that the
+// WakeContextData struct does not carry.
+//
+// Pre-fix the snippet file repeated "key decisions, active lessons"
+// 5 times across the install blocks, while the actual wake payload
+// exposes RecentMemories/RecentTopics/RecentMilestones only.
+// Decisions and lessons are reachable via mpm_decisions / mpm_lessons
+// tools, not via wake.
+//
+// The fix narrows the snippet to describe the real surface ("recent
+// memories, last handoff, open work, recent topics, recent
+// milestones, overdue scheduled wakes, bounded skills catalogue")
+// — keeping the same shape the canonical protocol §1 prose now
+// uses post-fix (see TestPass2_Protocol_Section1_WakePayloadFieldsAreAccurate).
+func TestPass2_Snippets_WakePayloadFieldsAreAccurate(t *testing.T) {
+	snippets := readFile(t, filepath.Join("agent_installation", "MPM_AGENT_INTEGRATION_SNIPPETS.md"))
+
+	// The snippet must not name fields the WakeContextData struct
+	// does not carry. The §1 protocol fix (commit 5a3e2cc) added
+	// these exact phrases to the banned list; the snippet file is
+	// subject to the same contract.
+	banned := []string{
+		"key decisions",  // not a WakeContextData field
+		"active lessons", // not a WakeContextData field
+	}
+	for _, phrase := range banned {
+		assert.NotContains(t, snippets, phrase,
+			"snippets file must not name %q as a wake payload field — decisions/lessons live behind mpm_decisions / mpm_lessons, not in WakeContextData", phrase)
+	}
+}

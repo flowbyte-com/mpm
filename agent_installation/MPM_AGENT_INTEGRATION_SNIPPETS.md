@@ -59,9 +59,11 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context`. Skipping wake means arriving amnesic and
    forcing the user to re-explain context that is already on file.
    The wake payload carries orientation signals (mode, persona,
-   recent memories, last handoff, open work, key decisions, active
-   lessons, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   recent topics, recent memories, recent milestones, last handoff,
+   open work, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Decisions and lessons are
+   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
+   wake. Use `params.projection: "compact"`
    for a small id+summary envelope — the full payload is the
    default.
 
@@ -156,9 +158,11 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context`. Skipping wake means arriving amnesic and
    forcing the user to re-explain context that is already on file.
    The wake payload carries orientation signals (mode, persona,
-   recent memories, last handoff, open work, key decisions, active
-   lessons, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   recent topics, recent memories, recent milestones, last handoff,
+   open work, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Decisions and lessons are
+   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
+   wake. Use `params.projection: "compact"`
    for a small id+summary envelope — the full payload is the
    default.
 
@@ -253,9 +257,11 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context`. Skipping wake means arriving amnesic and
    forcing the user to re-explain context that is already on file.
    The wake payload carries orientation signals (mode, persona,
-   recent memories, last handoff, open work, key decisions, active
-   lessons, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   recent topics, recent memories, recent milestones, last handoff,
+   open work, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Decisions and lessons are
+   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
+   wake. Use `params.projection: "compact"`
    for a small id+summary envelope — the full payload is the
    default.
 
@@ -350,9 +356,11 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context`. Skipping wake means arriving amnesic and
    forcing the user to re-explain context that is already on file.
    The wake payload carries orientation signals (mode, persona,
-   recent memories, last handoff, open work, key decisions, active
-   lessons, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   recent topics, recent memories, recent milestones, last handoff,
+   open work, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Decisions and lessons are
+   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
+   wake. Use `params.projection: "compact"`
    for a small id+summary envelope — the full payload is the
    default.
 
@@ -491,9 +499,11 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context`. Skipping wake means arriving amnesic and
    forcing the user to re-explain context that is already on file.
    The wake payload carries orientation signals (mode, persona,
-   recent memories, last handoff, open work, key decisions, active
-   lessons, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Use `params.projection: "compact"`
+   recent topics, recent memories, recent milestones, last handoff,
+   open work, overdue scheduled wakes, and a bounded
+   `<available_skills>` catalogue). Decisions and lessons are
+   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
+   wake. Use `params.projection: "compact"`
    for a small id+summary envelope — the full payload is the
    default.
 
