@@ -3,6 +3,7 @@
 package internal
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -284,4 +285,105 @@ func TestReadDirectivesForFramework_LegacyZeroSentinelTreatedAsLive(t *testing.T
 		"directive with deleted_at = 0 (legacy live sentinel) must surface")
 	require.False(t, ids["legacy-shredded"],
 		"directive with epoch deleted_at must stay hidden")
+}
+
+// TestMigrateMemoriesCreatedAtBackfill_RepairsNullRows pins the
+// migration contract: rows whose created_at was inserted as NULL by
+// the pre-fix writer path must be repaired by
+// MigrateMemoriesCreatedAtBackfill. The repaired row must then
+// surface through ReadDirectivesForFramework without crashing the
+// Scan on a NULL string destination — proving the full wake path is
+// unblocked, not just the column value.
+//
+// Companion test:
+// TestApplyDirectives_FreshSeedPopulatesCreatedAt (seed/engine_test.go)
+// pins the writer-side fix that prevents recurrence on fresh
+// databases.
+func TestMigrateMemoriesCreatedAtBackfill_RepairsNullRows(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Simulate the pre-fix writer-path defect: insert a directive
+	// with NULL created_at (the original failure mode). Mirrors the
+	// production row shape — metadata carries is_prime_directive and
+	// scope, both required for ReadDirectivesForFramework. The
+	// column list explicitly includes created_at with a NULL value:
+	// NewTestDM initialises the canonical BaseTables which declare
+	// `created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))`,
+	// so omitting the column would silently pick up the default and
+	// fail to reproduce the defect.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories
+		    (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance, created_at, updated_at)
+		VALUES
+		    ('fixture-null-created-at', 'directives', 'legacy null created_at row', '["prime_directive"]',
+		     '{"is_prime_directive":1,"scope":"global","stable_id":"fixture-null-created-at"}',
+		     1, 10, 1.0, 1.0, 1.0, NULL, NULL)
+	`)
+	require.NoError(t, err)
+
+	// Pre-condition: row has NULL created_at, proving the fixture
+	// simulates the real defect.
+	var caBefore sql.NullInt64
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT created_at FROM memories WHERE id = 'fixture-null-created-at'`,
+	).Scan(&caBefore))
+	require.False(t, caBefore.Valid,
+		"fixture must start with NULL created_at to prove the migration repairs it")
+
+	// NewTestDM initialises the schema via initUnifiedSchema, which
+	// already invoked this migration once and recorded the sentinel
+	// row. Clear the sentinel so the explicit MigrateMemoriesCreatedAtBackfill
+	// call below actually runs the UPDATE instead of short-circuiting.
+	// This simulates the production state of a legacy database that
+	// never had the migration applied (e.g. the workspace mpm.db
+	// before 2026-09-04).
+	_, err = dm.SQLDB().Exec(
+		`DELETE FROM schema_migrations WHERE id = 'created_at_backfill_v1'`,
+	)
+	require.NoError(t, err)
+
+	// Run the migration in a tx (matches the production call site
+	// in initUnifiedSchema).
+	tx, err := dm.SQLDB().Begin()
+	require.NoError(t, err)
+	require.NoError(t, MigrateMemoriesCreatedAtBackfill(tx))
+	require.NoError(t, tx.Commit())
+
+	// Post-condition: the row's created_at is populated.
+	var caAfter sql.NullInt64
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT created_at FROM memories WHERE id = 'fixture-null-created-at'`,
+	).Scan(&caAfter))
+	require.True(t, caAfter.Valid,
+		"MigrateMemoriesCreatedAtBackfill must populate the NULL created_at")
+	require.Greater(t, caAfter.Int64, int64(0),
+		"repaired created_at must be a positive Unix epoch")
+
+	// Reader invariant: the repaired directive surfaces through the
+	// framework reader (proving the Scan target is no longer NULL).
+	got, err := dm.ReadDirectivesForFramework("")
+	require.NoError(t, err, "ReadDirectivesForFramework must succeed after backfill")
+	found := false
+	for _, d := range got {
+		if d["id"].(string) == "fixture-null-created-at" {
+			found = true
+		}
+	}
+	require.True(t, found,
+		"repaired directive must surface through the framework reader")
+
+	// Idempotency: a second invocation short-circuits on the sentinel
+	// without touching the row. Re-running the migration must be a
+	// no-op, not a destructive rewrite.
+	tx2, err := dm.SQLDB().Begin()
+	require.NoError(t, err)
+	require.NoError(t, MigrateMemoriesCreatedAtBackfill(tx2))
+	require.NoError(t, tx2.Commit())
+
+	var sentinelCount int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM schema_migrations WHERE id = 'created_at_backfill_v1'`,
+	).Scan(&sentinelCount))
+	require.Equal(t, 1, sentinelCount,
+		"sentinel row must exist exactly once after backfill + idempotent re-run")
 }
