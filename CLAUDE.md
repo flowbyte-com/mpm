@@ -6,10 +6,20 @@ Headless SQLite substrate for long-lived autonomous systems. Single-process, sin
 
 ```bash
 make build                          # bin/{mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry}
-make test                           # all Go tests, race detector on
+make test                           # all Go tests (FTS5 build flags, no race detector)
+make test-race                      # all Go tests WITH the race detector (canonical CI gate)
 ./scripts/install.sh                # canonical user-space install (build + systemd + OpenClaw)
 ./deploy.sh                         # rebuild + restart gateway + mpm-scheduler + mpm-telemetry
 ```
+
+**`make test` vs `make test-race`:** both targets carry the same FTS5 build flags.
+The race-detector variant adds `-race` for goroutine/data-race coverage. Use
+`make test-race` as the canonical pre-merge validation gate. Bare
+`go test -race ./...` (no flags) cannot work in this codebase because the
+substrate's INSTEAD OF / AFTER triggers on `scheduled_wakes` and the
+`lessons` view assume FTS5 is compiled in — see §3 (Substrate Defense
+Triad / FTS5 integrity). The `make test-race` recipe is pinned by
+`internal/core/build_config_invariants_test.go`.
 
 **Required for FTS5** (silently broken otherwise):
 
