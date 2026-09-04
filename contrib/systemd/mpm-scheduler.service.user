@@ -13,11 +13,20 @@ Description=MPM universal wake executor (USER-level, alpha default)
 # data + lock + backups. This service points at the canonical location;
 # no /usr/local copy, no /usr/bin copy, no PATH-ordering concern.
 #
-# On hosts with encrypted home, this unit may silently fail at boot
-# because user@UID.service starts via linger but cannot read binaries
-# in /home/$USER/ until login + decrypt. Restart=on-failure does not
-# recover because the failure is during initial ExecStart, not runtime
-# crash. See lesson 071911bc.
+# On hosts with encrypted home (ecryptfs, e.g. /home/.ecryptfs/$USER),
+# this unit may silently fail at boot because user@UID.service starts
+# via linger (≈08:01) before PAM unwraps ecryptfs on login (≈08:17).
+# Unit files in ~/.config/systemd/user/ are inside the encrypted tree
+# and are invisible until decrypt; default.target is reached at 08:01
+# before they appear, so Wants= are never evaluated. Restart=on-failure
+# does not recover because the failure is during initial load, not
+# runtime crash. See lesson 071911bc.
+# Fix installed by scripts/install.sh on ecryptfs hosts:
+#   ~/.config/autostart/mpm-post-decrypt.desktop runs after decrypt:
+#     systemctl --user daemon-reload; systemctl --user start mpm-scheduler
+#   plus secondary: systemctl --user add-wants graphical-session.target mpm-scheduler
+# RequiresMountsFor=%h documents the mount dependency but does not fix
+# ecryptfs invisibility (mount is present, just encrypted).
 After=default.target
 RequiresMountsFor=%h
 

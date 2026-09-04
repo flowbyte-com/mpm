@@ -28,6 +28,10 @@
 #      path has been removed.
 #   9. Registers the MCP server with OpenClaw if present
 #  10. Validates end-to-end
+#  11. On ecryptfs encrypted homes (linger + default.target invisibility),
+#      installs an XDG autostart entry ~/.config/autostart/mpm-post-decrypt.desktop
+#      that runs after login/decrypt: daemon-reload + start scheduler (and
+#      telemetry if present), plus graphical-session.target Wants as secondary.
 #
 # Multi-tenant / multi-user safety:
 #   - No root required for the default flow; everything lives in $HOME
@@ -148,6 +152,32 @@ detect_openclaw() {
     else
         echo "no"
     fi
+}
+
+# ---------- ecryptfs detection ----------
+# Ubuntu encrypted home (ecryptfs) + linger is incompatible: user@UID
+# starts at boot via linger (08:01) before PAM unwraps ecryptfs on
+# login (08:17). Unit files in ~/.config/systemd/user/ are inside the
+# encrypted tree and are invisible until decrypt. default.target is
+# reached at 08:01 before they appear, so Wants= are never evaluated
+# and Restart= does not help. Fix: post-decrypt autostart that does
+# daemon-reload + start after login. See mpm-scheduler.service.user
+# comment + lesson 071911bc. Detects via mount, findmnt, and
+# /home/.ecryptfs marker.
+is_ecryptfs_home() {
+    if mount 2>/dev/null | grep -q "on ${HOME} type ecryptfs"; then
+        return 0
+    fi
+    if findmnt -n -o FSTYPE "${HOME}" 2>/dev/null | grep -q ecryptfs; then
+        return 0
+    fi
+    if [ -d "/home/.ecryptfs/${USER_NAME}" ] || [ -d "${HOME}/.ecryptfs" ]; then
+        # marker exists but mount may not be active (e.g. after logout) — treat as ecryptfs host
+        if mount 2>/dev/null | grep -q "ecryptfs"; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # ---------- legacy detection (READ-ONLY) ----------
@@ -478,6 +508,57 @@ phase_service() {
         err "  diagnostics: journalctl --user -u $SERVICE_NAME -n 20 --no-pager"
         die "user service failed to start" 4
     fi
+
+    # Encrypted home fix: user@UID with linger starts before ecryptfs decrypt,
+    # so default.target is reached before ~/.config/systemd/user/ is visible.
+    # Install an XDG autostart entry that runs after login/decrypt and does
+    # daemon-reload + start. Idempotent — safe to re-run.
+    phase_ecryptfs_autostart
+}
+
+phase_ecryptfs_autostart() {
+    if ! is_ecryptfs_home; then
+        return 0
+    fi
+    note "ECRYPTFS POST-DECRYPT WORKAROUND"
+    log "encrypted home detected (ecryptfs on $HOME) — installing autostart fix"
+    log "  linger + ecryptfs: user@UID starts before decrypt, so"
+    log "  default.target (≈08:01) is reached before unit files in"
+    log "  ~/.config/systemd/user/ are visible (decrypt at login ≈08:17)."
+    log "  Fix: XDG autostart entry that runs after decrypt: daemon-reload + start"
+    local autostart_dir="$HOME/.config/autostart"
+    local autostart_file="$autostart_dir/mpm-post-decrypt.desktop"
+    install -d -m 0755 "$autostart_dir"
+    # Build Exec line: always scheduler, plus telemetry if its unit exists
+    local exec_cmd="sh -c \"systemctl --user daemon-reload; systemctl --user start mpm-scheduler.service"
+    if [ -f "$HOME/.config/systemd/user/mpm-telemetry.service" ]; then
+        exec_cmd="$exec_cmd; systemctl --user start mpm-telemetry.service 2>/dev/null || true"
+    fi
+    exec_cmd="$exec_cmd\""
+    cat > "$autostart_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=MPM Post-Decrypt Reload (ecryptfs fix)
+Comment=Reload systemd user manager after ecryptfs decrypt and start MPM scheduler. Installed by mpm install.sh for linger+ecryptfs hosts. See mpm-scheduler.service.user comment and lesson 071911bc.
+Exec=$exec_cmd
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+X-Cinnamon-Autostart-enabled=true
+X-MATE-Autostart-enabled=true
+EOF
+    chmod 0644 "$autostart_file"
+    log "  installed $autostart_file"
+    # Also add graphical-session wants as secondary (harmless, requires daemon-reload above to be visible)
+    if [ -f "$SERVICE_DST" ]; then
+        systemctl --user add-wants graphical-session.target "$SERVICE_NAME" 2>/dev/null || true
+        log "  also added Wants=graphical-session.target for $SERVICE_NAME (secondary, needs daemon-reload)"
+    fi
+    if [ -f "$HOME/.config/systemd/user/mpm-telemetry.service" ]; then
+        systemctl --user add-wants graphical-session.target mpm-telemetry.service 2>/dev/null || true
+        log "  also added Wants=graphical-session.target for mpm-telemetry.service"
+    fi
+    systemctl --user daemon-reload 2>/dev/null || true
 }
 
 phase_host_integration() {
@@ -638,6 +719,10 @@ mode_dry_run() {
     log "  loginctl enable-linger $USER_NAME"
     log "  install -m 0644 .../contrib/systemd/${SERVICE_NAME}.service.user -> $SERVICE_DST"
     log "  systemctl --user daemon-reload && enable --now $SERVICE_NAME"
+    if is_ecryptfs_home; then
+        log "  ecryptfs detected → install ~/.config/autostart/mpm-post-decrypt.desktop (daemon-reload + start after decrypt)"
+        log "  and: systemctl --user add-wants graphical-session.target mpm-scheduler.service (secondary)"
+    fi
     log "  openclaw mcp add/set mpm (if openclaw detected)"
     log "  validate via systemctl status + mpm health_check"
     log ""
@@ -663,6 +748,22 @@ mode_uninstall() {
         systemctl --user daemon-reload 2>/dev/null || true
         log "  removed $SERVICE_DST"
     fi
+    # Ecryptfs autostart workaround (installed by phase_ecryptfs_autostart)
+    local autostart_file="$HOME/.config/autostart/mpm-post-decrypt.desktop"
+    if [ -f "$autostart_file" ]; then
+        rm -f "$autostart_file"
+        log "  removed $autostart_file (ecryptfs autostart)"
+    fi
+    # Graphical-session wants added as secondary for ecryptfs hosts
+    if [ -L "$HOME/.config/systemd/user/graphical-session.target.wants/mpm-scheduler.service" ]; then
+        rm -f "$HOME/.config/systemd/user/graphical-session.target.wants/mpm-scheduler.service"
+        log "  removed graphical-session want for mpm-scheduler"
+    fi
+    if [ -L "$HOME/.config/systemd/user/graphical-session.target.wants/mpm-telemetry.service" ]; then
+        rm -f "$HOME/.config/systemd/user/graphical-session.target.wants/mpm-telemetry.service"
+        log "  removed graphical-session want for mpm-telemetry"
+    fi
+    systemctl --user daemon-reload 2>/dev/null || true
     # Note: loginctl enable-linger is intentionally NOT undone —
     # operator may have other user services that benefit.
 
