@@ -181,3 +181,44 @@ One-line entry points (full procedure in INSTALL.md):
 The MPM Skill Workshop (canonical protocol §3.1 "SKILL FORMATION")
 provides a guided workflow for authoring skills. Invoke it via
 `mpm call mpm_skills '{"action":"workshop","params":{...}}'`.
+
+## Maintenance
+
+### Refreshing installed managed blocks
+
+After editing `MPM_AGENT_INTEGRATION_SNIPPETS.md` (the canonical source
+for the universal managed block), the per-host rendered snippets and
+the locally installed managed blocks must be refreshed in lock-step:
+
+```bash
+make refresh-installed
+```
+
+This target runs:
+
+1. **`render_managed_blocks.py`** — regenerates each adapter's
+   `<adapter>/templates/<file>.snippet` from the canonical source.
+2. **Each persistent-file host's installer** — refreshes the user's
+   installed managed block in `~/.claude/CLAUDE.md`,
+   `~/.config/opencode/AGENTS.md`, `~/.pi/agent/AGENTS.md`. Installers
+   are content-aware: if the installed block already matches the
+   snippet, the install is a no-op (idempotent).
+3. **`render_managed_blocks.py --check`** — verifies byte-for-byte
+   parity between the canonical source and the refreshed artifacts.
+
+`make refresh-installed` is the safe re-run path when the canonical
+source has drifted from a host's installed file. It is also the
+post-edit verification step for any change to
+`MPM_AGENT_INTEGRATION_SNIPPETS.md`.
+
+Hermes is skipped here (no installed managed block in this
+environment; the `hermes-mpm/SKILL.md` documents the manual flow).
+OpenClaw uses runtime injection rather than a persistent managed file,
+so its install path is via `openclaw-mpm-memory/install.sh` — a
+separate concern (plugin wiring, not instruction-file refresh).
+
+The structural smoke test
+[`tests/test_refresh_installed.py`](./tests/test_refresh_installed.py)
+verifies the target is registered in `.PHONY`, that every referenced
+installer script and template snippet exists, and that the post-refresh
+`--check` is wired up correctly.
