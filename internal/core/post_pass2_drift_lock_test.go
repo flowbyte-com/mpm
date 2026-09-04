@@ -218,3 +218,28 @@ func TestPass2_RegistryMpmLessonsSchemaOmitsRequiredType(t *testing.T) {
 			"mpm_lessons.params.required must not list `type` (handler defaults it to insight)")
 	}
 }
+
+// TestPass2_Protocol_Section1_WakePayloadFieldsAreAccurate locks
+// protocol §1 to the actual WakeContextData struct. The §1 prose
+// describes what an agent receives on wake; if it names a field that
+// does not exist (e.g., "key decisions", "active lessons"), the agent
+// looks for a field that is not there. Decisions and lessons are
+// reachable via mpm_decisions / mpm_lessons tools, not via wake.
+func TestPass2_Protocol_Section1_WakePayloadFieldsAreAccurate(t *testing.T) {
+	root := repoRoot(t)
+	_ = root // silence unused
+	proto := readFile(t, filepath.Join("agent_installation", "mpm-agent-protocol.md"))
+
+	// §1 prose must not name fields the struct does not have.
+	// Decisions surface lives at mpm_decisions show/list/query;
+	// lessons at mpm_lessons search/list — neither is in wake.
+	banned := []string{
+		"key decisions",   // not a WakeContextData field
+		"active lessons",  // not a WakeContextData field
+		"key pointers",    // not a WakeContextData field
+	}
+	for _, phrase := range banned {
+		assert.NotContains(t, proto, phrase,
+			"protocol §1 must not name %q as a wake payload field — decisions/lessons live behind mpm_decisions / mpm_lessons, not in WakeContextData", phrase)
+	}
+}
