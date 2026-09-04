@@ -1232,7 +1232,23 @@ func isMirroredCollection(collection string) bool {
 	return mirroredCollections[collection]
 }
 
-// appendBlockedAttempt logs a blocked content attempt to the mirror file
+// appendBlockedAttempt logs a blocked content attempt to the mirror file.
+//
+// Security invariant (F-4, 2026-09-04 residual inventory): a credential
+// rejected by the secret scanner must NOT be persisted verbatim anywhere
+// in the substrate — including the audit/mirror path. The pre-fix
+// implementation stored the first 100 bytes of the blocked content in
+// `content_snippet`, which leaked the prefix bytes an attacker needs to
+// identify the secret family (ghp_, sk-ant-, BEGIN RSA PRIVATE KEY, etc.).
+//
+// The safe representation records:
+//   - content_sha256: full SHA-256 digest of the blocked content (forensic
+//     correlation by an operator who has both sides of the hash)
+//   - content_length: byte length of the blocked content
+//   - pattern_family: the matched scanner family label (no secret material)
+//
+// The full blocked content, its prefix, suffix, or any recoverable byte
+// sequence is NOT stored anywhere on disk.
 func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) error {
 	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
@@ -1240,10 +1256,22 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 	}
 	defer f.Close()
 
+	// Pattern-family extraction: the reason string passed by callers is
+	// of the form "blocked: <family>" (see logSensitiveAttempt) or just
+	// "blocked" from poison attempts. Parse defensively so a malformed
+	// reason does not leak the content into the family field.
+	family := reason
+	if idx := strings.LastIndex(reason, ": "); idx >= 0 {
+		family = strings.TrimSpace(reason[idx+2:])
+	}
+
+	digest := sha256.Sum256([]byte(content))
 	logEntry := map[string]interface{}{
 		"timestamp":       time.Now().UTC().Format(time.RFC3339),
 		"reason":          reason,
-		"content_snippet": truncate(content, 100),
+		"pattern_family":  family,
+		"content_sha256":  hex.EncodeToString(digest[:]),
+		"content_length":  len(content),
 		"action":          "blocked",
 		"type":            attemptType,
 	}
