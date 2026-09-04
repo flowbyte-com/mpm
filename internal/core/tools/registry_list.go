@@ -271,6 +271,7 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 				"params": {
 					"type": "object",
 					"properties": {
+						"projection":          {"type": "string", "enum": ["compact"], "description": "Wake-context projection. 'compact' returns a 9-field id+summary envelope; other values fall through to the full WakeContextData branch. Other canonical projection values (summary, full) belong to mpm_memory query, not mpm_context."},
 						"format":              {"type": "string", "enum": ["system-prompt"]},
 						"conversation_text":   {"type": "string"},
 						"max_hints":          {"type": "number"},
