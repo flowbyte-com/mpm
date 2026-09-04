@@ -211,7 +211,7 @@ func TestTick_SystemKindExecuted(t *testing.T) {
 	seedWake(t, s, "snap-1", now.Add(-1*time.Minute), "snapshot")
 
 	called := atomic.Int32{}
-	s.Register("snapshot", func(w Wake) error {
+	s.Register("snapshot", func(ctx context.Context, w Wake) error {
 		called.Add(1)
 		return nil
 	})
@@ -246,7 +246,7 @@ func TestTick_FailureIsolation(t *testing.T) {
 	seedWake(t, s, "succeeds", now.Add(-1*time.Minute), "snapshot")
 
 	called := atomic.Int32{}
-	s.Register("snapshot", func(w Wake) error {
+	s.Register("snapshot", func(ctx context.Context, w Wake) error {
 		called.Add(1)
 		if w.ID == "fails" {
 			return errors.New("synthetic failure")
@@ -303,7 +303,7 @@ func TestTick_ConcurrentExecution(t *testing.T) {
 
 	// Each handler sleeps 200ms. If serial, total = ~1s. If parallel, ~200ms.
 	const handlerDelay = 200 * time.Millisecond
-	s.Register("snapshot", func(w Wake) error {
+	s.Register("snapshot", func(ctx context.Context, w Wake) error {
 		time.Sleep(handlerDelay)
 		return nil
 	})
@@ -357,8 +357,8 @@ func TestRegister_Overwrite(t *testing.T) {
 	s := newTestScheduler(t)
 
 	var first, second atomic.Int32
-	s.Register("snapshot", func(w Wake) error { first.Add(1); return nil })
-	s.Register("snapshot", func(w Wake) error { second.Add(1); return nil })
+	s.Register("snapshot", func(ctx context.Context, w Wake) error { first.Add(1); return nil })
+	s.Register("snapshot", func(ctx context.Context, w Wake) error { second.Add(1); return nil })
 
 	now := time.Now()
 	seedWake(t, s, "x", now.Add(-1*time.Minute), "snapshot")
@@ -381,7 +381,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	now := time.Now()
 	seedWake(t, s, "x", now.Add(-1*time.Minute), "snapshot")
 
-	s.Register("snapshot", func(w Wake) error { return nil })
+	s.Register("snapshot", func(ctx context.Context, w Wake) error { return nil })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -594,7 +594,7 @@ func TestCascadeSummaryHandler_LogsAndReturnsNil(t *testing.T) {
 			"elapsed_ms":    float64(4521),
 		},
 	}
-	if err := h(w); err != nil {
+	if err := h(context.Background(), w); err != nil {
 		t.Fatalf("CascadeSummaryHandler: unexpected error: %v", err)
 	}
 

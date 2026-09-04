@@ -82,7 +82,7 @@ timeout_secs: 5
 			"compliant": true,
 		},
 	}
-	if err := DrillHandler(w); err != nil {
+	if err := DrillHandler(context.Background(), w); err != nil {
 		t.Fatalf("DrillHandler: %v", err)
 	}
 
