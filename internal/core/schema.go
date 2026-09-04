@@ -33,10 +33,23 @@ var BaseTables = []string{
 	);`,
 
 	// Memories table - core storage for memory content
+	//
+	// created_at is NOT NULL: the column is the durable identity
+	// timestamp for every memory, and the read paths (read_directives,
+	// HybridSearch, list_sessions, the wake-context catalogue) all
+	// assume a non-NULL value. The DEFAULT clause is preserved so any
+	// future writer that omits the column still gets a non-NULL value
+	// — the writer fix in seed/engine.go::insertSeedRow supplies
+	// created_at explicitly, and the NOT NULL constraint guarantees
+	// the contract even if a future writer regresses to omitting the
+	// column. Legacy databases that pre-date this NOT NULL clause are
+	// upgraded by EnforceMemoriesCreatedAtNotNull (see
+	// migration_memories_created_at_not_null.go), which runs after the
+	// migrations tx commits and rebuilds the table in-place.
 	`CREATE TABLE IF NOT EXISTS memories (
 		id TEXT PRIMARY KEY, collection TEXT NOT NULL, content TEXT NOT NULL,
 		session_id TEXT, tags JSON, metadata JSON, embedding BLOB,
-		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)) NOT NULL,
 		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		source_db TEXT, source_id TEXT, promoted_at REAL,
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
