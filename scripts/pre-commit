@@ -124,22 +124,32 @@ echo "[pre-commit] threshold-table gate OK"
 
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
-# as a standalone Go module. The pre-commit
-# gate now runs from inside the Core module because main/ and core/ are
-# separate Go modules (cross-module `./internal/core/...` from main/ fails).
+# as a standalone Go module. The pre-commit gate now invokes the Makefile's
+# `test-core-precommit` target rather than calling `go test` directly. This
+# gives the FTS5 flag set a single source of truth: the Makefile's
+# CGO_CFLAGS / CGO_LDFLAGS / -tags fts5 line. Running `go test` from the
+# hook bypasses that and silently breaks on a fresh checkout (no build
+# cache) because the C-level sqlite_fts5 module never gets compiled in.
 #
-# Build tag: -tags fts5 is REQUIRED for tests that exercise FTS5 (notably
-# TestHybridSearch_BM25OnlyStillWorks). Without it, the test DB is built
-# without the sqlite_fts5 module, 'bm25-strong' matches return as
-# 'bm25-fts-only', and the test fails. The production builds use this tag
-# in the Makefile; tests must match. Hit on 2026-09-02 plugin commit
-# (96e0917) — without this flag the pre-commit gate spuriously aborts
-# unrelated diffs.
-if ! (cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... \
-     -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
+# The previous direct-`go test` line is preserved as a comment for
+# archaeology; do not resurrect it.
+#
+# Hit on 2026-09-02 plugin commit (96e0917): the original direct-`go test`
+# invocation didn't set CGO_CFLAGS, so the gate spuriously aborted unrelated
+# diffs whenever the build cache was cold. Routing through Make eliminates
+# the ambient dependency on a warm cache.
+#
+# Earlier version (kept here for the historical record — DO NOT USE):
+#   if ! (cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... \
+#        -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
+if ! cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... > /tmp/pre-commit-test.log 2>&1; then
   echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
+  echo "[pre-commit] See log:" >&2
+  tail -50 /tmp/pre-commit-test.log >&2
+  rm -f /tmp/pre-commit-test.log
   exit 1
 fi
+rm -f /tmp/pre-commit-test.log
 
 echo "[pre-commit] running router linter (persona/mode frontmatter)..."
 # The linter catches YAML escape footguns and broken regex compilation
