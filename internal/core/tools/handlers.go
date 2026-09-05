@@ -3768,19 +3768,25 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 
 // handleDeleteSkill soft-deletes a skill by id. The row stays in the DB
 // for forensics (deleted_at is set); read_skill and list_skills filter
-// it out. No confirm gate — a soft-delete is recoverable from the row,
-// unlike hard shredding; if that changes, the gate mirrors
-// promote_to_global / promote_skill_to_global.
+// it out. Idempotent: deleting an unknown id is a no-op (matches
+// ShredSkill's silent-on-missing contract). No confirm gate — a
+// soft-delete is recoverable from the row, unlike hard shredding; if
+// that changes, the gate mirrors promote_to_global /
+// promote_skill_to_global.
 //
-// 2026-09-05 audit remediation residual pass §I-C.9: the handler
-// distinguishes a successful deletion from "no live row at this id".
-// The previous shape returned success:true for zero affected rows,
-// making it impossible for a caller to tell apart "deleted live
-// skill", "asked about an already-deleted id", and "asked about an
-// id that never existed". ShredSkill now returns
-// internal.ErrSkillNotFound for the latter two cases; the handler
-// translates that to a deterministic not-found error so a caller
-// can branch on it without grepping the deleted_at column.
+// 2026-09-05 audit remediation §I-C.9 was originally closed by
+// commit 45e616f (errors.Is(err, ErrSkillNotFound) translation;
+// ErrSkillNotFound removed). That fix was reverted once the
+// deliberate-design precedent surfaced: commit 0583bea explicitly
+// designed mpm_handoff.shred as idempotent on unknown id, with
+// structured shredded=false / rows_deleted=0 / success=true feedback
+// and a regression test pinning the contract. mpm_skills.delete was
+// matching that pattern from the start (the original handler comment
+// explicitly stated "matches ShredSkill's silent-on-missing
+// contract"). Reverting restores consistency with the handoff shred
+// and the project-wide soft-delete policy — see
+// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// deletes".
 //
 // Args:
 //
@@ -3795,9 +3801,6 @@ func handleDeleteSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 		return nil, err
 	}
 	if err := dm.ShredSkill(skillID); err != nil {
-		if errors.Is(err, internal.ErrSkillNotFound) {
-			return nil, fmt.Errorf("delete_skill: skill_id %q not found", skillID)
-		}
 		return nil, err
 	}
 	// Forensic log — soft-delete is recoverable, so audit-only (no "shared_db"
