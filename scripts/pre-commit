@@ -166,7 +166,7 @@ echo "[pre-commit] running synthesis / reliability / lifecycle / wake context te
 # Earlier version (kept here for the historical record — DO NOT USE):
 #   if ! (cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... \
 #        -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
-if ! cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... > /tmp/pre-commit-test.log 2>&1; then
+if ! make test-core-precommit > /tmp/pre-commit-test.log 2>&1; then
   echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
   echo "[pre-commit] See log:" >&2
   tail -50 /tmp/pre-commit-test.log >&2
