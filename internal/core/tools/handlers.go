@@ -1562,7 +1562,18 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 
 // callListLessons lists all lessons, optionally filtered by type.
 func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	lessonType := internal.ParseStringOr(p["type"], "")
+	lessonType, _ := p["type"].(string)
+	// 2026-09-05 audit remediation pass 3 defect C.8 (P2):
+	// mpm_lessons list with an invalid type silently returned an empty
+	// array, masking caller typos. The DM's ValidateLessonType is the
+	// canonical allowlist (insight|warning|practice); consult it at
+	// the public boundary. Empty string and omission remain legitimate
+	// "no filter" paths — only PRESENT-but-INVALID inputs error.
+	if lessonType != "" {
+		if err := internal.ValidateLessonType(lessonType); err != nil {
+			return nil, err
+		}
+	}
 
 	items, err := dm.ListLessonsFiltered(lessonType)
 	if err != nil {
