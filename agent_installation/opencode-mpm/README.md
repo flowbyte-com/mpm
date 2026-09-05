@@ -1,7 +1,7 @@
 # opencode-mpm
 
 OpenCode plugin that wires MPM's cognitive substrate in as **17 typed
-tools** (a curated subset of the full 22-tool MPM registry).
+tools** (a curated subset of the full 21-tool MPM registry).
 
 ## Parity with Claude Code Integration
 
@@ -27,9 +27,9 @@ The OpenCode plugin provides **automatic wake context injection** at session sta
 ### 14 Domain Tools
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **22 tools total**, so this
+adapter. The current MPM registry exposes **21 tools total**, so this
 adapter is a hand-curated 17-tool subset. Tools in the full registry not
-registered here (`mpm_work`, `mpm_resolve`, `mpm_challenge`,
+registered here (`mpm_work`, `mpm_resolve`,
 `mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
 `mpm call <tool> --payload '<json>'` CLI fallback. Each registered
 Domain Tool dispatches on an `action` enum with free-form `params`:
@@ -168,7 +168,7 @@ MPM DeriveWorkVerification derives verification status
 The legacy plugin (`agent-plugins/opencode-mpm-plugin` in pCloud) generated one tool per (action, artifact-type) pair — 18 tool definitions spanning memory / lessons / topics / references / wake / decisions / etc. It was bound to the **old 77-tool schema** that pre-dated the 13-aggregator collapse (2026-08-11). It is **dead code** and should be removed.
 
 The lightweight adapter:
-- 17 typed tools exposed by this plugin (a curated subset of the full 22-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc.)
+- 17 typed tools exposed by this plugin (a curated subset of the full 21-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc. — note: `challenge_memory` is gone from the registry, use `mpm_memory` action=`challenge` instead)
 - One Zod schema shape for the 14 Domain Tools (free-form `params` validated by mpm backend)
 - No prompt bloat — the description strings are short, and the heavy `params` documentation lives in the mpm backend where it can be evolved without disrupting the plugin
 - No domain logic — no LLM calls, no caching, no local state

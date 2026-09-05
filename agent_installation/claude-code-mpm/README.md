@@ -20,14 +20,14 @@ serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
 
 ## Coverage
 
-**22 tools**, identical to the opencode-mpm and pi-mpm agents:
+**21 tools**, identical to the opencode-mpm and pi-mpm agents:
 
 | Layer | Count | Tool names |
 |---|---|---|
-| Unified Domain Tools (Fat RPC) | 20 | `mpm__mpm_memory`, `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_challenge`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
+| Unified Domain Tools (Fat RPC) | 19 | `mpm__mpm_memory` (action: save/query/show/shred/reinforce/weaken/snooze/set_weight/patch/promote/review/synthesize/challenge/restore_challenge/commit_milestone), `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
 | Standalone tools | 2 | `mpm__log_to_changelog`, `mpm__request_review` |
 
-The 20 Domain Tools share the same `(action, params)` shape. The 2
+The 19 Domain Tools share the same `(action, params)` shape. The 2
 Standalones have their own narrower schemas. See `~/.mpm/bin/mpm-mcp`'s
 `tools/list` JSON-RPC method for the canonical schemas.
 

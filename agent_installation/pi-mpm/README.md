@@ -14,11 +14,11 @@ the CLI is reachable from Pi as a typed tool.
 | Standalone tools | 3 | `index.ts` (hand-written) |
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **22 tools total** (14 domain
-tools via Fat RPC + 5 pointer/dedicated tools — `mpm_work`,
-`mpm_resolve`, `mpm_challenge`, `mpm_blob_read`, `mpm_blob_search` — +
+adapter. The current MPM registry exposes **21 tools total** (14 domain
+tools via Fat RPC + 4 pointer/dedicated tools — `mpm_work`,
+`mpm_resolve`, `mpm_blob_read`, `mpm_blob_search` — +
 3 standalones), so the Pi adapter is a hand-curated 17-tool subset.
-Tools not registered here (`mpm_work`, `mpm_resolve`, `mpm_challenge`,
+Tools not registered here (`mpm_work`, `mpm_resolve`,
 `mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
 `mpm call <tool> --payload '<json>'` CLI fallback.
 
@@ -68,24 +68,24 @@ not an option. The next-best is `mpm call`, which is a plain
 bridge: 14 Fat-RPC domain adapters (one per domain) plus 3 standalone
 adapters.
 
-## Why 22 tools (and not 77)
+## Why 21 tools (and not 77)
 
 Until the Phase 1/2 registry refactor of mpm, `mpm-mcp` exposed 77
 granular tools (one per registry entry). The agent-facing tool definition
 prompt — every tool's name, description, and parameter schema — grew to
-~15KB of context on every turn. mpm now exposes **22 tools in the full
+~15KB of context on every turn. mpm now exposes **21 tools in the full
 registry**: the unified Domain Tools are "Fat RPC" — each takes `{action:
 string, params: object}` and the mpm backend validates and dispatches.
 That collapses ~77 distinct tool definitions into a small set of
 near-identical ones.
 
-This Pi adapter registers a **17-tool subset** of the full 22-tool
+This Pi adapter registers a **17-tool subset** of the full 21-tool
 registry (14 Domain Tools + 3 Standalones). The remaining registry tools
-(`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
-`mpm_blob_search`) are reachable through the `mpm call <tool> --payload
-'<json>'` CLI fallback when needed. Adding them as typed Pi tools is
-straightforward — the schema is identical — but each new tool increases
-the prompt payload, so the subset is curated rather than exhaustive.
+(`mpm_work`, `mpm_resolve`, `mpm_blob_read`, `mpm_blob_search`) are
+reachable through the `mpm call <tool> --payload '<json>'` CLI fallback
+when needed. Adding them as typed Pi tools is straightforward — the
+schema is identical — but each new tool increases the prompt payload,
+so the subset is curated rather than exhaustive.
 
 Because every domain tool shares the same trivial parameter schema
 (`action` + free-form `params`), the tool-definition prompt is now compact

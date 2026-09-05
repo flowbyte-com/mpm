@@ -9,13 +9,16 @@
 //   1. `mpm call mpm_memory --payload '{"action":"restore_challenge",...}'`
 //      reaches the same DatabaseManager method as `mpm challenge restore`.
 //
-//   2. `mpm call mpm_challenge --payload '{"action":"restore",...}'` is
-//      a parallel top-level entrypoint with the same behavior.
+//   2. The end state produced: weight restored to pre-challenge value,
+//      challenged flags cleared, theory marked disproven, confidence
+//      left at the challenged floor (F7.1 invariant: restoration ≠
+//      verification promotion).
 //
-//   3. Both paths produce the same end state: weight restored to
-//      pre-challenge value, challenged flags cleared, theory marked
-//      disproven, confidence left at the challenged floor (F7.1
-//      invariant: restoration ≠ verification promotion).
+// The parallel top-level `mpm_challenge` surface (commit e9e8faf, F9)
+// was retired on 2026-09-05; see docs/onboarding-mcp-native-audit-2026-09-05.md
+// Part C. The substantive F7-1 invariant is preserved by exercising the
+// action under mpm_memory; the test no longer depends on a top-level
+// surface that no longer exists.
 package tools
 
 import (
@@ -78,26 +81,6 @@ func TestF7_1_RestoreChallenge_AgentSurface_MemoryTool(t *testing.T) {
 		"challenged status flag must be cleared")
 	assert.Contains(t, metaStr, `"restored_from_challenge":true`,
 		"restoration event must be stamped in metadata for the audit trail")
-}
-
-// TestF7_1_RestoreChallenge_AgentSurface_TopLevel checks the parallel
-// `mpm call mpm_challenge {"action":"restore",...}` top-level surface.
-func TestF7_1_RestoreChallenge_AgentSurface_TopLevel(t *testing.T) {
-	dm := f6NewDM(t)
-	id, originalWeight := seedChallengedMemory(t, dm)
-
-	res, err := handleMpmChallenge(dm, mpminternal.ActiveContext{}, map[string]interface{}{
-		"action":    "restore",
-		"memory_id": id,
-	})
-	require.NoError(t, err)
-	m := res.(map[string]interface{})
-	assert.Equal(t, "restored", m["action"])
-
-	w, err := dm.GetMemory(id)
-	require.NoError(t, err)
-	weight, _ := w["weight"].(int)
-	assert.Equal(t, originalWeight, weight)
 }
 
 // TestF7_1_RestoreChallenge_NotChallenged_Rejects confirms the agent
