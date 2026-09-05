@@ -1091,13 +1091,29 @@ func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 
 func handlePatchMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["memory_id"].(string)
-	patch, _ := p["patch"]
-	// patch must be a JSON object (map). The DM layer takes a string,
-	// so marshal here. A nil/primitive patch is rejected upstream by
-	// the DM (UpdateMemoryMetadata validates the prefix).
+	// patch must be a JSON object (map[string]interface{}). The DM
+	// layer accepts any JSON string (json.Valid is permissive — null,
+	// primitives, arrays all pass), and SQLite's json_patch treats
+	// non-object patches as no-ops or undefined shapes against an
+	// object target. The 2026-09-05 audit found this allowed a `null`
+	// patch to reach JSONPatch and silently overwrite metadata with
+	// an undefined shape — the handler comment that claimed
+	// "rejected upstream by the DM" was false.
+	//
+	// Canonical contract: patch is a JSON object. Empty object is a
+	// valid no-op. Null, scalar, and array are explicit user errors
+	// and must be rejected before persistence.
+	raw, ok := p["patch"]
+	if !ok || raw == nil {
+		return nil, fmt.Errorf("patch: must be a JSON object (got null/absent)")
+	}
+	patch, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("patch: must be a JSON object (got %T, not map[string]interface{})", raw)
+	}
 	patchJSON, err := json.Marshal(patch)
 	if err != nil {
-		return nil, fmt.Errorf("patch must be JSON-marshalable: %w", err)
+		return nil, fmt.Errorf("patch: JSON-marshalable object required: %w", err)
 	}
 	return dm.PatchMemoryMetadata(id, string(patchJSON))
 }
