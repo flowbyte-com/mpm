@@ -2827,13 +2827,24 @@ func synthesiseSkillFrontmatter(name, version, author string) string {
 }
 
 // handleReadSkill fetches a skill by name (latest version) or exact id.
+// handleReadSkill returns a single skill by id. The canonical id
+// vocabulary across mpm_skills actions is `skill_id` (the composite
+// id used by the storage layer, e.g. "skill:foo-v1.0.0"). The
+// legacy `name`+`version` pair is accepted as an alias for caller
+// ergonomics; resolveSkillID normalises the alias form to the
+// canonical form before delegating to the DM.
+//
+// 2026-09-05 audit residual pass §I-C.20: the id-vocabulary drift
+// between mpm_skills actions (some expected `name`, others
+// expected `skill_id`) is closed at this boundary. Both produce
+// the canonical skill_id used downstream; a request that supplies
+// both with conflicting values errors rather than silently merging.
 func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	name := internal.ParseStringOr(p["name"], "")
-	version := internal.ParseStringOr(p["version"], "")
-	if name == "" {
-		return nil, fmt.Errorf("name is required")
+	skillID, err := resolveSkillID(p, false)
+	if err != nil {
+		return nil, err
 	}
-	skill, err := dm.ReadSkill(name, version)
+	skill, err := dm.ReadSkill(skillID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -2851,6 +2862,73 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"body":        skill.Body,
 		"is_global":   skill.IsGlobal,
 	}, nil
+}
+
+// resolveSkillID resolves a skill identifier from the params map.
+// The canonical key is `skill_id` (the composite id used by the
+// storage layer, e.g. "skill:foo-v1.0.0"). The legacy `name`+`version`
+// pair is accepted as an alias for caller ergonomics. The `requireVersion`
+// flag controls whether omitting `version` when `name` is supplied
+// is an error (used by delete/promote paths) or a "latest version"
+// lookup (used by read).
+//
+// Reject rules:
+//   - both `skill_id` and `name` supplied → ERROR (no silent merge)
+//   - neither supplied → ERROR
+//   - `name` supplied without `version` (when requireVersion) → ERROR
+//   - invalid `name` / `version` (per SkillIDForNameAndVersion) → ERROR
+//
+// Same skill resource produces the same id (the storage layer is
+// keyed on `skill_id`); resolveSkillID normalises the alias form to
+// the canonical form before returning.
+func resolveSkillID(p map[string]interface{}, requireVersion bool) (string, error) {
+	rawID, hasID := p["skill_id"]
+	rawName, hasName := p["name"]
+	rawVersion, _ := p["version"].(string)
+
+	if hasID && rawID != nil {
+		id, ok := rawID.(string)
+		if !ok {
+			return "", fmt.Errorf("skill_id must be a string, got %T", rawID)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return "", fmt.Errorf("skill_id must not be empty")
+		}
+		// Both supplied with possibly-conflicting values: reject the
+		// silent-merge class. The caller must declare intent.
+		if hasName && rawName != nil {
+			if n, _ := rawName.(string); strings.TrimSpace(n) != "" {
+				return "", fmt.Errorf("skill_id and name are both supplied; supply one or the other (got skill_id=%q, name=%q)", id, n)
+			}
+		}
+		return id, nil
+	}
+
+	// No skill_id. Fall back to name (+ version).
+	if !hasName || rawName == nil {
+		return "", fmt.Errorf("skill_id is required (or supply name+version)")
+	}
+	name, ok := rawName.(string)
+	if !ok {
+		return "", fmt.Errorf("name must be a string, got %T", rawName)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("name must not be empty")
+	}
+	if requireVersion && rawVersion == "" {
+		return "", fmt.Errorf("name supplied without version; supply either skill_id or name+version")
+	}
+	// Read accepts name without version (latest-version lookup). For
+	// that case, return the name as-is so the DM can resolve to the
+	// highest-versioned row. The DM's ReadSkill treats a bare name as
+	// "find the latest version" and a `skill:<name>-v<ver>` form as
+	// an exact id.
+	if !requireVersion && rawVersion == "" {
+		return name, nil
+	}
+	return internal.SkillIDForNameAndVersion(name, rawVersion)
 }
 
 // handleListSkills returns the latest version of each skill in scope.
@@ -3658,9 +3736,13 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 	if !confirm {
 		return nil, fmt.Errorf("promote_skill_to_global requires confirm=true; cross-project promotion should be operator-gated")
 	}
-	skillID := internal.ParseStringOr(p["skill_id"], "")
-	if skillID == "" {
-		return nil, fmt.Errorf("skill_id is required")
+	// 2026-09-05 audit residual pass §I-C.20: promote_to_global accepts
+	// the canonical skill_id (and the legacy name+version alias) through
+	// resolveSkillID. The cross-project promotion still requires the
+	// explicit confirm=true gate (above).
+	skillID, err := resolveSkillID(p, true)
+	if err != nil {
+		return nil, err
 	}
 
 	// Forward the validated confirm rather than a literal true, so the
@@ -3704,9 +3786,13 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 //
 //	--skill_id  (required) The skill id to delete (e.g. "skill:agentshell-v1.0.0")
 func handleDeleteSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	skillID := internal.ParseStringOr(p["skill_id"], "")
-	if skillID == "" {
-		return nil, fmt.Errorf("skill_id is required")
+	// 2026-09-05 audit residual pass §I-C.20: delete accepts the
+	// canonical skill_id (and the legacy name+version alias) through
+	// resolveSkillID, so callers do not need to construct the full
+	// id format themselves. Same precedence rules as handleReadSkill.
+	skillID, err := resolveSkillID(p, true)
+	if err != nil {
+		return nil, err
 	}
 	if err := dm.ShredSkill(skillID); err != nil {
 		if errors.Is(err, internal.ErrSkillNotFound) {
