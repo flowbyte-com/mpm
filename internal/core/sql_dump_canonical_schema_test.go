@@ -87,6 +87,7 @@ func scanSchemaSources(t *testing.T) (map[string]bool, error) {
 		"evidence_new":                true,  // rename target in migrateEvidenceWorkType
 		"new_session_handoffs":       true,  // rename target in MigrateSessionHandoffsOptionalSessionID (handoff-identity hardening)
 		"scheduled_tasks_new":        true,  // rename target in scheduled_tasks_migration (table-recreate pattern)
+		"confidence_history__new":    true,  // rename target in migration_confidence_history_check_widening (2026-09-05 audit P0 widening)
 	}
 
 	matches, err := filepath.Glob("*.go")
