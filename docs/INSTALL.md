@@ -128,13 +128,17 @@ into the database. Re-running is safe — local edits are preserved.
 > on every graphical login (post-decrypt). `scripts/install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
 > autostart entry automatically; `scripts/install.sh --uninstall` removes it.
-> Lesson `071911bc` is stamped into the `.desktop` `Comment=` line as the lesson
-> ID for the autostart mechanism. Lesson `24be03ec71a5981f` is the substrate
-> memory that frames the daemon-stays-dead-at-boot behaviour as a designed
-> "Lazy-Start Architecture" (memory `463fb2c8014fc1f1`, currently flagged
-> for manual review — the challenge queue's `unresolved state collision
-> (cosine=0.88)` is a stale-detection flag, not a substantive dispute of
-> the lesson's content). **Both IDs are cited because the substrate
+> The `.desktop` `Comment=` line carries the string `071911bc`. It is not a
+> lesson ID: it resolves to no row in any substrate table and to no git object in
+> this repository, and its origin is unknown. The autostart mechanism was
+> introduced by commit `14ac32b`. Separately, the substrate memory that frames the
+> daemon-stays-dead-at-boot behaviour as a designed "Lazy-Start Architecture" is
+> `463fb2c8014fc1f1`, which carries forward the reasoning from an earlier,
+> no-longer-retrievable reference `24be03ec71a5981f` — that reference is not
+> independently queryable, so query the memory ID, not the reference.
+> `463fb2c8014fc1f1` is currently flagged for manual review — the challenge
+> queue's `unresolved state collision (cosine=0.88)` is a stale-detection flag,
+> not a substantive dispute of its content. **Both are cited because the substrate
 > does not articulate how the two mechanisms relate; the relationship
 > between the wake-layer design and the autostart-layer workaround is
 > unresolved in the cited material.**
@@ -415,7 +419,7 @@ without losing agent state; runtime data persists across `git pull`.
 | Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` | `chown -R $USER:$USER ~/.mpm` |
 | Service won't start after reboot on encrypted home | `findmnt /home` | Use `./scripts/install.sh` (full install flow handles linger + drop-in); or manually `systemctl --user edit mpm-scheduler` to add the post-decrypt delay described below. |
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
-| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./scripts/install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Lesson `071911bc` documents the original detection/wiring. |
+| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./scripts/install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Commit `14ac32b` introduced the detection/wiring. |
 | CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` | Re-run `./scripts/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 $(which mpm)` | The `mpm` binary must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
