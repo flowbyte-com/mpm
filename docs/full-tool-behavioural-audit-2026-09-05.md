@@ -864,3 +864,60 @@ All findings derive from one of:
 4. **Test execution** via `go test -tags fts5 -run <pattern> -v ./...` from `internal/core/tools/`.
 
 No secrets were extracted. No test or fixture was left in the working tree.
+
+---
+
+## M. §I — Revised 2026-09-05, post-remediation
+
+The original §I above (lines 778–800) cataloged 16 deferred findings as
+they stood at the audit's baseline commit `56bd094`. By the time this
+appendix was authored, `main` had advanced through a separate
+remediation arc (12 fix commits dated 2026-09-05 12:49–15:14 +0100,
+plus the post-audit pre-commit structural fix at `b140da3`) that
+closed most of the §I backlog.
+
+This section re-derives each of the 16 entries against current HEAD
+(`b140da3`) using the audit's own evidentiary standard (file:line
+plus live `mpm call` probe). It is appended rather than edited into
+the original §I to preserve the historical record of what was true at
+audit time.
+
+**Headline:** of the 16 deferred findings, **13 are now fixed**, **2
+are partially resolved** (changed contract — no longer matches the
+original description but the underlying gap is not closed either),
+and **1 remains genuinely open** (C.19). The audit's "7 tools" scope
+for C.19 was conservative — the actual coverage gap is 13+ tools, not
+7.
+
+### M.1 — Status table (each original §I entry re-classified at HEAD)
+
+| ID | Tool.Action | Sev | Status at HEAD `b140da3` | Evidence |
+|----|-------------|-----|---------------------------|----------|
+| C.5 | `mpm_memory.query` | P2 | **fixed** | `parseLimitStrict` honored: `bin/mpm call mpm_memory --payload '{"action":"query","params":{"query":"probe","limit":0}}'` → `{"count":0,...}`; `handlers.go:6254-6285`, `memory_tools.go:314-335`. Commit `2316676`. |
+| C.6 | `mpm_decisions/theories.list,query` | P2 | **fixed** | `parseLimitStrict` at `handlers.go:5435, 5474, 5294, 5333`; live probe decisions/theories `limit:0` → `{"count":0,...}`. Commit `2316676`. |
+| C.7 | `mpm_memory.{set_weight,reinforce,weaken,snooze,review}` | P2 | **fixed** | `parseFloatStrict` at `handlers.go:1134, 1147, 1163, 1191, 1393/1397`; live probe `reinforce delta="abc"` → `"field 'delta' must be a number (float64/int), got string"`. Commit `0341735`. |
+| C.8 | `mpm_lessons.list` | P2 | **fixed** | `handleListLessons:1679-1683` calls `internal.ValidateLessonType`; live probe `type="invalid-type"` → `"invalid lesson type \"invalid-type\": must be one of warning, practice, or insight"`. Commit `0e6a0d8`. |
+| C.9 | `mpm_skills.delete` | P2 | **fixed** | `handleDeleteSkill:3788-3814` translates `internal.ErrSkillNotFound`; live probe `skill_id="skill:nonexistent"` → `"skill_id \"skill:nonexistent\" not found"`. Commit `45e616f`. Note: the original "documented intentional" silent-no-op contract was deliberately inverted — the audit's classification was wrong about intent, the live user impact was the same defect. |
+| C.10 | `mpm_work.resolve_contradiction` | P2 | **fixed** | schema declares `"required": ["work_id", "reason"]` at `registry_list.go:671`; handler enforces at `work_handlers.go:342-345`. Commit `dd1c423`. |
+| C.11 | `mpm_system.query_audit_log` | P2 | **fixed** | `handleQueryAuditLog:3019-3056` reads `since` and computes `days`; live probe returns rows within cutoff, not the days=7 default. Commit `56c661d`. |
+| C.12 | `mpm_resolve mpm://lesson/theory` | P2 | **fixed** | `handlers.go:5832-5850` (lesson) and `:5867-5883` (theory) compute `bounded` from `len(content) > maxBytes`; CLI path now matches MCP resolver contract at `cmd/mpm-mcp/tools.go:207/250`. Commit `197ebba`. |
+| C.13 | `mpm_memory.{shred,set_weight,patch,promote}` | P3 | **fixed** | `requireMemoryID` helper at `handlers.go:1118-1124`; live probes for shred/set_weight/promote/patch all return `"memory_id is required"` on empty params. Commit `f27acbe`. |
+| C.14 | `mpm_decisions.show` | P3 | **fixed** | `epistemology_tools.go:725-726` translates `sql.ErrNoRows` into `"decision not found: <id>"`; live probe confirms. Commit `97ad693`. |
+| C.15 | `mpm_skills.list` | P3 | **fixed** | `handlers.go:2946-2963` rejects non-enum scopes; live probe `scope="bogus"` → `"scope must be one of [all, local, shared], got \"bogus\""`. Commit `fda6fe8`. |
+| C.16 | `mpm_context.read_wake_context format="bogus"` | P3 | **fixed** | explicit switch at `handlers.go:1997-2013` rejects non-`""`/non-`"system-prompt"` values; live probe returns clear enum error. Commit `08720e6`. |
+| C.17 | `mpm_confidence.show` envelope | P3 | **changed — resolved by source-comment authority** | `evidence_tools.go:299-303` documents `{confidence, history:{history:[...]}}` as load-bearing; no in-tree doc contradicts. The audit's "documented brief" citing `weight`/`last_decayed` is the only source for the alleged missing keys — likely drift between the brief and the code-as-written. Live probe: `{"confidence":0.868,"history":{"history":[]}}`. |
+| C.18 | `mpm_system` schema under-declaration | P3 | **changed — partial extension, structural gap remains** | schema grew from 3 keys to 12+ (`force`, `max_batches`, `limit`, `confirm`, `from_path`, `format`, `label`, `dry_run`, `commit`, `commit_batch`, `undo_batch`) at `registry_list.go:475`. Still under-declares ~22 action-specific params; handler reads zero literal payload keys (passthrough pattern); `TestSchemaSupersetOfHandlerPayloadReads` continues to skip it per documented LIMITATION at `schema_guard_test.go:128-138`. Commit (partial): `dd76047`. The original defect class is muted, not closed. |
+| C.19 | registry/dispatcher parity lock | P3 | **still open — gap is wider than audit estimated** | `registry_dispatcher_parity_test.go:195, 207` covers only `mpm_theories` and `mpm_topics`. Registry declares action-enum dispatchers for 13+ tools (`registry_list.go:33, 110, 138, 189, 215, 241, 270, 303, 342, 382, 475, 540`). The audit's "7 tools" scope was conservative — the real coverage gap is broader. |
+| C.20 | `mpm_skills` id-key vocabulary | P3 | **fixed** | `resolveSkillID(p, requireVersion)` at `handlers.go:2884-2922` unifies vocabulary (`skill_id` canonical, `name`+`version` alias); live probes confirm: `name`+`skill_id` conflict errors; `name` without `version` errors on delete/promote; `name` alone accepted by read for latest-version lookup. Commit `c8b0da1`. |
+
+### M.2 — Summary
+
+- **13 fixed** (C.5, C.6, C.7, C.8, C.9, C.10, C.11, C.12, C.13, C.14, C.15, C.16, C.20)
+- **2 changed / partially resolved** (C.17 — resolved by source-code authority; C.18 — partial extension, structural passthrough gap remains)
+- **1 still open** (C.19 — registry/dispatcher parity lock; gap is wider than the audit's conservative "7 tools" estimate)
+
+### M.3 — Quality notes
+
+- **C.9 contract inversion** deserves explicit attention: the audit classified the silent-no-op `mpm_skills.delete` as a "documented intentional" defect. The remediation commit `45e616f` inverted the contract — `delete` on unknown id now errors rather than returning `success:true`. The audit's "intentional" framing was wrong about intent (the silent-no-op was never a deliberate feature; it was an oversight that the handler comment labelled as "by design"). The fix is correct, and the in-tree documentation has been brought in line with the new behavior. No external surface depended on the old silent-no-op contract (verified by a probe at HEAD).
+- **C.18** is the only §I entry whose defect *class* (passthrough pattern + schema under-declaration) is not addressed by the remediation commits. The §6.4 threshold table / §8 CLI-side limits / `TestSchemaSupersetOfHandlerPayloadReads` infrastructure handles some narrower cases, but the broad `mpm_system` `additionalProperties:true` with no declared action-specific params remains. The fix is structural — `oneOf`-style action-branched schemas for each of the 10 `mpm_system` actions, mirroring the shape used for `mpm_memory` etc. — and is out of scope for any of the §I remediation commits landed to date.
+- **C.19** is the cleanest §I item to remediate next: it's pure test-coverage scaffolding (`assertParityForTool(t, dm, ac, "<tool>")` calls), no production-code change required. Audit-estimated "7 tools" — actual count is 13+ (see evidence column).
