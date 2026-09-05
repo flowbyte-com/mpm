@@ -224,7 +224,7 @@ type CoreDB interface {
 	// RestoreMemoryFromChallenge resolves the challenged-theory record
 	// against memoryID and clears the memory's challenged status.
 	// F7-1 surface parity: previously CLI-only; now reachable through
-	// the canonical agent path (mpm_memory / mpm_challenge tool).
+	// the canonical agent path (mpm_memory.challenge action).
 	RestoreMemoryFromChallenge(memoryID string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	// SupersedeDecision records a replacement decision and marks the

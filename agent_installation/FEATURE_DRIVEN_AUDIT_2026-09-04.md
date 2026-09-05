@@ -103,7 +103,12 @@ session ended != work completed != work verified
 - `mpm_evidence` — attach proof when truth requires it.
 - `mpm_confidence` — audit trust before acting on stored info.
 - `mpm_challenge` — record a contest when new evidence contradicts
-  a memory (do NOT shred).
+  a memory (do NOT shred). **Surface retired 2026-09-05; the canonical
+  path is now `mpm_memory` action=`challenge`** (with companion
+  `restore_challenge`). Same handler, identical wire contract, drop
+  the parallel surface to avoid the dual-path confusion for both the
+  model and future contributors. See
+  `docs/onboarding-mcp-native-audit-2026-09-05.md` Part C.
 
 These are NOT interchangeable. Treating a theory as a fact, or a
 decision as immutable truth, silently corrupts downstream work.

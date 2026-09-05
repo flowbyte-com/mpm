@@ -608,7 +608,7 @@ retired tool names are absent from current instructions
 
 For MCP integrations, inspect the actual current tool registry where practical.
 
-The current MPM MCP surface has 22 tools according to the repository's current registry. Do not hard-code this number into new framework-specific documentation if the integration can derive tool information from the current registry.
+The current MPM MCP surface has 21 tools according to the repository's current registry (was 22 before commit removing the standalone `mpm_challenge` tool). Do not hard-code this number into new framework-specific documentation if the integration can derive tool information from the current registry.
 
 ---
 

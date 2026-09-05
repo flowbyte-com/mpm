@@ -260,7 +260,7 @@ After all three surfaces are wired:
 # 1. Confirm MCP wiring (should respond to tools/list):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null | jq '.result.tools | length'
-# expect: 22
+# expect: 21
 
 # 2. Confirm DB path invariance:
 mpm call mpm_system --payload '{"action":"health_check","params":{}}' \
@@ -371,7 +371,7 @@ What `verify.py` checks:
 
 - `~/.claude/.mcp.json` parses, contains the `mpm` entry, command is
   absolute.
-- `mpm-mcp` boots and responds to `tools/list` (expects 22 tools).
+- `mpm-mcp` boots and responds to `tools/list` (expects 21 tools).
 - `mpm_system health_check` returns `ok:true` with the canonical
   `db_path`.
 - `~/.claude/CLAUDE.md` contains exactly one managed block (count of
@@ -383,7 +383,7 @@ Manual probe (independent of `verify.py`):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 22
+# expect: 21
 ```
 
 Then **restart Claude Code** (mcpServers and CLAUDE.md are loaded at
@@ -437,7 +437,7 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 22 tools) |
+| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 21 tools) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + scripts/install.sh) | `mpm` binary on `$PATH` |
 
@@ -585,7 +585,7 @@ unchanged.
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 22
+# expect: 21
 
 # 2. .hermes.md was written with exactly one managed block:
 grep -c '<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->' /path/to/project/.hermes.md
@@ -636,10 +636,10 @@ would be empty, and writes a backup before mutation.
 Pi participates in the MPM substrate via:
 
 1. **Pi extension.** `pi-mpm/index.ts` registers a **17-tool subset**
-   of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
+   of the full 21-tool MPM registry (14 Domain Tools via Fat RPC + 3
    Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
    `request_review`). Tools in the full registry not exposed here
-   (`mpm_work`, `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`,
+   (`mpm_work`, `mpm_resolve`, `mpm_blob_read`,
    `mpm_blob_search`) remain reachable via `mpm call <tool> --payload
    '<json>'`. Pi auto-loads extensions declared in
    `~/.pi/agent/settings.json`.

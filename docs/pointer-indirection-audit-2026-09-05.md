@@ -374,3 +374,12 @@ realistic distributions, overhead cost, and verdict.
 *End of audit. No fixes applied. The five-step deliverable
 (inventory, sizes, quality, verdict, report) is complete. Awaiting a
 follow-up prompt to choose which verdict items to action.*
+
+### Follow-up (2026-09-05)
+
+The "22 tools" count and "21 of 22" framing in this document predate
+the **retirement of the standalone `mpm_challenge` tool** (commit
+pending; see `docs/onboarding-mcp-native-audit-2026-09-05.md` Part C
+follow-up). Post-retirement the registry holds **21 tools**, of which
+20 go through `mcpAdapter` (the same `route`-tool bypass ratio).
+The substantive findings of this audit are unchanged.
