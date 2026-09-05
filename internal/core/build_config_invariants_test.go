@@ -87,6 +87,111 @@ func TestBuildConfig_MakefileHasRaceDetectorTarget(t *testing.T) {
 	}
 }
 
+// TestBuildConfig_PrecommitUsesMakefileTestTarget pins the structural
+// invariant that scripts/pre-commit invokes the test runner through the
+// Makefile (which owns the FTS5 flag set) rather than calling
+// `go test` directly (which silently relies on a warm build cache to
+// have already compiled go-sqlite3 with FTS5).
+//
+// Why this matters: a fresh checkout (CI, new contributor) has no
+// build cache, so a direct `go test -tags fts5 ./...` invocation
+// compiles mattn/go-sqlite3 with whatever CGO_CFLAGS happens to be in
+// the environment — typically unset. Without FTS5 compiled in, the
+// FTS5-dependent code paths in internal/core (FTS5 table creation,
+// shared triggers, hybrid search) panic with "no such module: fts5"
+// or return bm25-fts-only when bm25-strong was expected. The error
+// surfaces in unrelated diffs and looks like a regression in the
+// change being committed.
+//
+// The fix: pre-commit invokes `make test-core-precommit`, a Makefile
+// target whose recipe inlines both CGO_CFLAGS=$(CGO_CFLAGS) and
+// -tags fts5. The Makefile is the single source of truth for the
+// flag set; TestBuildConfig_MakefileHasRaceDetectorTarget (above)
+// already pins the Makefile's test-race recipe; this test pins the
+// parallel pre-commit target AND locks the hook to use it.
+//
+// Regression target: this test fails when scripts/pre-commit
+// re-introduces a direct `go test ... -run ...` invocation, OR when
+// the Makefile loses the `test-core-precommit` target, OR when the
+// target's recipe loses CGO_CFLAGS / -tags fts5.
+func TestBuildConfig_PrecommitUsesMakefileTestTarget(t *testing.T) {
+	root := findRepoRoot(t)
+
+	// 1. The Makefile must define `test-core-precommit` with the FTS5
+	//    flag set in the recipe (mirrors `test` and `test-race`).
+	makefilePath := filepath.Join(root, "Makefile")
+	makeData, err := os.ReadFile(makefilePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", makefilePath, err)
+	}
+	makeText := string(makeData)
+
+	phonyRE := regexp.MustCompile(`(?m)^\.PHONY:[^\n]*\btest-core-precommit\b`)
+	if !phonyRE.MatchString(makeText) {
+		t.Errorf("Makefile `.PHONY` line must include `test-core-precommit` target.\n" +
+			"  Why: scripts/pre-commit invokes this target so the FTS5 flag\n" +
+			"  set (CGO_CFLAGS + -tags fts5) has a single source of truth.\n" +
+			"  Bare `go test -short -tags fts5 ./...` in pre-commit relies\n" +
+			"  on the build cache being warm; on a fresh checkout it fails\n" +
+			"  with confusing errors that look like unrelated regressions.")
+	}
+
+	recipeRE := regexp.MustCompile(
+		`(?m)^test-core-precommit:[^\n]*\n((?:^[ \t].*\n?)+)`,
+	)
+	match := recipeRE.FindStringSubmatch(makeText)
+	if len(match) < 2 {
+		t.Fatalf("Makefile must define a `test-core-precommit:` target recipe (got empty body)")
+	}
+	recipe := match[1]
+
+	if !strings.Contains(recipe, "-tags fts5") {
+		t.Errorf("`test-core-precommit` recipe must pass `-tags fts5` to go test (got: %q)", recipe)
+	}
+	if !strings.Contains(recipe, "$(CGO_CFLAGS)") &&
+		!strings.Contains(recipe, "${CGO_CFLAGS}") {
+		t.Errorf("`test-core-precommit` recipe must reference $(CGO_CFLAGS) "+
+			"so the FTS5 C-level compile flag is set (got: %q)", recipe)
+	}
+
+	// 2. scripts/pre-commit must invoke `make test-core-precommit`
+	//    AND must not contain a live `go test ... -run ...` line for
+	//    the subset (the historical pattern that this commit retires).
+	precommitPath := filepath.Join(root, "scripts", "pre-commit")
+	hookData, err := os.ReadFile(precommitPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", precommitPath, err)
+	}
+	hookText := string(hookData)
+
+	if !strings.Contains(hookText, "make test-core-precommit") {
+		t.Errorf("scripts/pre-commit must invoke `make test-core-precommit` "+
+			"so the FTS5 flag set is owned by the Makefile (got pre-commit "+
+			"without this invocation)")
+	}
+
+	// Strip comment lines (start with `#`) before scanning for live
+	// `go test` invocations. The hook intentionally documents the
+	// historical pattern in a comment block; only live code is gated.
+	var liveLines []string
+	for _, line := range strings.Split(hookText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		liveLines = append(liveLines, line)
+	}
+	liveText := strings.Join(liveLines, "\n")
+
+	if strings.Contains(liveText, "go test") && strings.Contains(liveText, "-run") {
+		t.Errorf("scripts/pre-commit contains a live `go test ... -run ...` line.\n" +
+			"  Direct `go test` in the hook bypasses the Makefile's FTS5 flag\n" +
+			"  set and silently breaks on a fresh checkout. Route the test\n" +
+			"  subset through `make test-core-precommit` instead.\n" +
+			"  (Comments documenting the historical pattern are allowed.)")
+	}
+}
+
 // findRepoRoot walks up from the test's working directory until it
 // finds the directory containing both go.mod and Makefile. The MPM
 // repository uses a non-default test working dir so the simple

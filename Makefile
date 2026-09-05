@@ -57,7 +57,7 @@ BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-race lint help refresh-installed
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-race test-core-precommit lint help refresh-installed
 
 all: build
 
@@ -161,6 +161,20 @@ test:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+
+# Run the pre-commit subset of internal/core tests with the same FTS5 flag
+# discipline as `make test`. The pre-commit hook invokes this target rather
+# than running `go test` directly so the flag set has a single source of
+# truth (the Makefile CGO_CFLAGS / CGO_LDFLAGS lines) and a fresh checkout
+# without a build cache still passes — the `-tags fts5` build tag alone is
+# not enough; the C-level FTS5 compile flag must also be set, and that flag
+# lives here, not in the hook.
+#
+# RUN takes a `-run` regex; defaults to the same set scripts/pre-commit was
+# previously invoking directly.
+test-core-precommit:
+	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 ./... \
+		-run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
 
 # Run tests with the race detector enabled.
 # Mirrors `make test` but adds `-race`. Both flags are required:
