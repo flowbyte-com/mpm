@@ -27,19 +27,26 @@ type defaultOutputPolicy struct {
 }
 
 // DefaultOutputPolicy returns an OutputPolicy with the threshold sourced from
-// MPM_MCP_MAX_RESULT_BYTES (parsed as base-10 int).  Values <= 0 trigger a
-// warning and fallback to 10240.  Zero means "no limit" (always DecisionPass).
+// MPM_MCP_MAX_RESULT_BYTES (parsed as base-10 int). Values <= 0 trigger a
+// warning and fall back to the new default of 20480. The default was
+// raised from 10240 → 20480 after the pointer-indirection audit
+// (docs/pointer-indirection-audit-2026-09-05.md Item 3b) showed that
+// 73 % of historical spills landed within 2× the 10240 boundary: the
+// old default was forcing a round-trip-and-resolve on response payloads
+// that fit comfortably in one inline return.
 func DefaultOutputPolicy() OutputPolicy {
-	threshold := 10240
+	const defaultThreshold = 20480
+	threshold := defaultThreshold
 	if e := os.Getenv("MPM_MCP_MAX_RESULT_BYTES"); e != "" {
-		if v, err := strconv.ParseInt(e, 10, 64); err == nil {
-			if v <= 0 {
-				slog.Warn("invalid MPM_MCP_MAX_RESULT_BYTES, using default", "value", e, "fallback", 10240)
-			} else {
-				threshold = int(v)
-			}
+		v, err := strconv.ParseInt(e, 10, 64)
+		if err != nil {
+			slog.Warn("invalid MPM_MCP_MAX_RESULT_BYTES, using default",
+				"value", e, "fallback", defaultThreshold)
+		} else if v <= 0 {
+			slog.Warn("non-positive MPM_MCP_MAX_RESULT_BYTES, using default",
+				"value", e, "fallback", defaultThreshold)
 		} else {
-			slog.Warn("failed to parse MPM_MCP_MAX_RESULT_BYTES, using default", "value", e, "fallback", 10240)
+			threshold = int(v)
 		}
 	}
 	return &defaultOutputPolicy{threshold: threshold}
@@ -66,11 +73,13 @@ func (p *defaultOutputPolicy) Apply(ctx context.Context, serialized []byte) (Dec
 // boundary (default 10240), so every unbounded read of a mid-size blob
 // self-spilled into a recursive pointer envelope. This helper does NOT
 // weaken the boundary — Apply remains the enforcement point.
+// (2026-09-05 pointer-audit follow-up: default raised to 20480.)
 func DefaultOutputThresholdBytes() int {
+	const fallback = 20480
 	p := DefaultOutputPolicy()
 	dp, ok := p.(*defaultOutputPolicy)
 	if !ok {
-		return 10240
+		return fallback
 	}
 	return dp.threshold
 }
