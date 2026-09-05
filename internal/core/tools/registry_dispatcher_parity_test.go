@@ -209,3 +209,45 @@ func TestParity_MpmTopics_RegistryMatchesDispatcher(t *testing.T) {
 	ac := mpminternal.ActiveContext{}
 	assertParityForTool(t, "mpm_topics", dm, ac)
 }
+
+// TestParity_AllActionTools_LockEverySurface — 2026-09-05 audit
+// remediation pass 2 (C.19 / P3). Closes the parity coverage gap
+// for every remaining public tool with an action enum.
+//
+// Pre-fix (alpha-4 era) only mpm_theories and mpm_topics were
+// locked via the per-tool tests above. The audit identified 13
+// others — without this broad lock, future schema drift (schema enum
+// shorter than dispatcher case list) is not caught at `make test`
+// time. The exact class of drift surfaced in alpha-4 D-006
+// (mpm_theories missing show/list/query) and alpha-5 D-4.1
+// (mpm_topics missing list/show).
+//
+// assertParityForTool skips tools without an enum (e.g. mpm_resolve,
+// mpm_retrieval_diagnose, mpm_blob_read, mpm_blob_search,
+// log_to_changelog, request_review) so the iteration is safe for
+// the mixed enum/non-enum registry.
+func TestParity_AllActionTools_LockEverySurface(t *testing.T) {
+	dm := newTestDMForTools(t)
+	ac := mpminternal.ActiveContext{}
+
+	toolsWithActionEnums := []string{
+		"mpm_memory",
+		"mpm_lessons",
+		"mpm_decisions",
+		"mpm_theories",  // already locked above; iterated for completeness
+		"mpm_skills",
+		"mpm_topics",    // already locked above; iterated for completeness
+		"mpm_references",
+		"mpm_evidence",
+		"mpm_confidence",
+		"mpm_context",
+		"mpm_wakes",
+		"mpm_handoff",
+		"mpm_scratchpad",
+		"mpm_system",
+		"mpm_work",
+	}
+	for _, name := range toolsWithActionEnums {
+		assertParityForTool(t, name, dm, ac)
+	}
+}
