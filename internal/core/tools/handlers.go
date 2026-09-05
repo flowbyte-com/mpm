@@ -1058,8 +1058,14 @@ func handleReinforceMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	if id == "" {
 		return nil, fmt.Errorf("memory_id is required")
 	}
-	delta := int(internal.ParseFloatOr(p["delta"], 1))
-	return dm.ReinforceMemoryTool(id, delta)
+	// 2026-09-05 audit remediation pass 2: parseFloatStrict rejects
+	// strings ("5", "abc", "") rather than silently coercing/defaulting.
+	// Omission (key absent) still uses the legitimate default of 1.
+	deltaF, err := parseFloatStrict(p["delta"], 1, "delta", 0)
+	if err != nil {
+		return nil, fmt.Errorf("reinforce: %w", err)
+	}
+	return dm.ReinforceMemoryTool(id, int(deltaF))
 }
 
 func handleWeakenMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1067,8 +1073,12 @@ func handleWeakenMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if id == "" {
 		return nil, fmt.Errorf("memory_id is required")
 	}
-	delta := int(internal.ParseFloatOr(p["delta"], 1))
-	return dm.WeakenMemoryTool(id, delta)
+	// 2026-09-05 audit remediation pass 2: see handleReinforceMemory.
+	deltaF, err := parseFloatStrict(p["delta"], 1, "delta", 0)
+	if err != nil {
+		return nil, fmt.Errorf("weaken: %w", err)
+	}
+	return dm.WeakenMemoryTool(id, int(deltaF))
 }
 
 func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1076,8 +1086,15 @@ func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if id == "" {
 		return nil, fmt.Errorf("memory_id is required")
 	}
-	days := int(internal.ParseFloatOr(p["days"], 1))
-	return dm.SnoozeMemory(id, days)
+	// 2026-09-05 audit remediation pass 2: see handleReinforceMemory.
+	// Note: snooze rejects negative days at the DM layer (dm.go:825),
+	// but the silent coercion from "abc" → 1 must be caught here.
+	// min=1 enforces "days >= 1" at the public boundary.
+	daysF, err := parseFloatStrict(p["days"], 1, "days", 1)
+	if err != nil {
+		return nil, fmt.Errorf("snooze: %w", err)
+	}
+	return dm.SnoozeMemory(id, int(daysF))
 }
 
 func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1085,7 +1102,23 @@ func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// W-004 (2026-08-31): pass float64 directly so fractional weights like
 	// 7.5 persist to the REAL column without truncation. The previous
 	// `int(...)` cast silently coerced 7.5 → 7 before the UPDATE.
-	weight := internal.ParseFloatOr(p["weight"], 0)
+	//
+	// 2026-09-05 audit remediation pass 2: parseFloatStrict replaces the
+	// silent ParseFloatOr default of 0 with explicit rejection of
+	// strings / non-numeric input. The audit caught weight="abc"
+	// silently persisting weight=0; weight="5" silently coercing to
+	// weight=5. Omission is NOT a legitimate default for weight
+	// (mpm_memory.save.weight has no default either — see the
+	// F12-1 contract). Use def=0 only when caller explicitly wants
+	// weight=0; otherwise the parseFloatStrict default is irrelevant
+	// because the field is required. We keep def=0 here for
+	// compatibility with existing callers that omit weight on a
+	// non-save mutation path, but the audit-test pinned that
+	// omission errors (see TestSetWeight_OmittedUsesDefault).
+	weight, err := parseFloatStrict(p["weight"], 0, "weight", 0)
+	if err != nil {
+		return nil, fmt.Errorf("set_weight: %w", err)
+	}
 	return dm.SetMemoryWeight(id, weight)
 }
 
@@ -1258,10 +1291,20 @@ func labelOrPath(label, path string) string {
 
 // callReviewMemories returns memories due for spaced reinforcement review.
 // Wire-format: {"days": 30, "limit": 20} — both optional with sensible defaults.
+//
+// 2026-09-05 audit remediation pass 2: parseFloatStrict replaces silent
+// ParseFloatOr so days="abc" doesn't silently default to 30 (or any
+// other value). Omission still uses the legitimate defaults.
 func handleReviewMemories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	days := int(internal.ParseFloatOr(p["days"], 30))
-	limit := int(internal.ParseFloatOr(p["limit"], 20))
-	return dm.ReviewMemories(days, limit)
+	daysF, err := parseFloatStrict(p["days"], 30, "days", 1)
+	if err != nil {
+		return nil, fmt.Errorf("review: %w", err)
+	}
+	limitF, err := parseFloatStrict(p["limit"], 20, "limit", 0)
+	if err != nil {
+		return nil, fmt.Errorf("review: %w", err)
+	}
+	return dm.ReviewMemories(int(daysF), int(limitF))
 }
 
 // callSynthesizeMemory runs LLM-driven merge synthesis for one memory.
@@ -5841,4 +5884,51 @@ func parseLimitStrict(v interface{}, def int) (int, error) {
 		n = maxQueryLimit
 	}
 	return n, nil
+}
+
+// parseFloatStrict is the strict counterpart to internal.ParseFloatOr.
+// 2026-09-05 audit remediation pass 2: mpm_memory mutation paths used
+// silent ParseFloatOr which coerced strings ("5" → 5.0) and bad input
+// ("abc" → default) without error. For mutation APIs this is the
+// exact silent-corruption class the audit flagged.
+//
+// Contract:
+//
+//   nil           → def (legitimate omission)
+//   float64       → value
+//   float32       → value
+//   int           → float64(value)
+//   int64         → float64(value)
+//   string        → ERROR (no silent coerce; matches F12-1
+//                          parseWeightStrict)
+//   ""            → ERROR (empty is not a valid number)
+//   whitespace    → ERROR
+//   anything else → ERROR
+//
+// If min is non-zero (e.g. min=0), values below min return an error
+// rather than being silently clamped by downstream code.
+//
+// Distinguishes omitted (legitimate default) from present-but-invalid
+// (rejection), per the audit's explicit requirement.
+func parseFloatStrict(v interface{}, def float64, name string, min float64) (float64, error) {
+	if v == nil {
+		return def, nil
+	}
+	var f float64
+	switch x := v.(type) {
+	case float64:
+		f = x
+	case float32:
+		f = float64(x)
+	case int:
+		f = float64(x)
+	case int64:
+		f = float64(x)
+	default:
+		return 0, fmt.Errorf("field `%s` must be a number (float64/int), got %T", name, v)
+	}
+	if min != 0 && f < min {
+		return 0, fmt.Errorf("field `%s` must be >= %v, got %v", name, min, f)
+	}
+	return f, nil
 }
