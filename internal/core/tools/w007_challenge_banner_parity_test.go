@@ -24,8 +24,11 @@ import (
 
 // seedChallengedMemoryForBanner writes a memory then patches its
 // metadata to carry `status: "challenged"`. This mirrors what
-// mpm_challenge does at runtime without pulling the entire challenge
-// workflow into this regression test.
+// mpm_memory action=challenge does at runtime (the canonical
+// challenge surface, since the standalone mpm_challenge tool was
+// retired 2026-09-05 — see onboarding-mcp-native-audit-2026-09-05.md
+// Part C) without pulling the entire challenge workflow into this
+// regression test.
 func seedChallengedMemoryForBanner(t *testing.T, dm *mpminternal.DatabaseManager, content string) string {
 	t.Helper()
 	id, err := dm.SaveMemory("memories", content, "", []string{"w007"}, nil, nil, false, 5.0)
