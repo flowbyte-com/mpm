@@ -934,9 +934,18 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	if choice == "" {
 		return nil, fmt.Errorf("choice is required")
 	}
-	tags := internal.ParseStringSliceOr(p["tags"])
-	if tags == nil {
-		tags = []string{}
+	// 2026-09-05 audit remediation pass 4 defect C.13 (P1): the schema
+	// declares `tags` as a string array (optional), but the previous
+	// shape routed every input through internal.ParseStringSliceOr,
+	// which silently returned nil for non-array scalars and silently
+	// dropped non-string elements from arrays. The caller believed the
+	// record succeeded with their tags — the persisted decision had
+	// tags=[] instead. Enforce the schema contract at the boundary:
+	// omitted/null/[] are legitimate "no tags"; any present-but-invalid
+	// shape errors with a clear message.
+	tags, err := parseStrictStringArrayOrEmpty("tags", p["tags"])
+	if err != nil {
+		return nil, err
 	}
 	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
 	if sourceIDs == nil {
@@ -952,6 +961,37 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		sourceIDs,
 		ac,
 	)
+}
+
+// parseStrictStringArrayOrEmpty is the strict counterpart to
+// internal.ParseStringSliceOr for parameters declared as
+// `"type":"array","items":{"type":"string"}` where the field is
+// OPTIONAL in the JSON-Schema. Returns:
+//
+//   - ([]string{}, nil) when the key is absent or the value is nil/[]interface{}{}
+//   - ([]string{...}, nil) when the value is a []interface{} of all strings
+//   - (nil, error) when the value is a non-array scalar (string/number/bool/...)
+//   - (nil, error) when the array contains any non-string element
+//
+// Unlike ParseStringSliceOr this never silently coerces or drops
+// malformed input — the caller learns about the shape mismatch.
+func parseStrictStringArrayOrEmpty(field string, v interface{}) ([]string, error) {
+	if v == nil {
+		return []string{}, nil
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array of strings, got %T", field, v)
+	}
+	out := make([]string, 0, len(arr))
+	for i, x := range arr {
+		s, ok := x.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // handleSupersedeDecision implements the F9 invalidation path: a corrected
