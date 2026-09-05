@@ -3610,11 +3610,19 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 
 // handleDeleteSkill soft-deletes a skill by id. The row stays in the DB
 // for forensics (deleted_at is set); read_skill and list_skills filter
-// it out. Idempotent: deleting an unknown id is a no-op (matches
-// ShredSkill's silent-on-missing contract). No confirm gate — a
-// soft-delete is recoverable from the row, unlike hard shredding; if
-// that changes, the gate mirrors promote_to_global /
-// promote_skill_to_global.
+// it out. No confirm gate — a soft-delete is recoverable from the row,
+// unlike hard shredding; if that changes, the gate mirrors
+// promote_to_global / promote_skill_to_global.
+//
+// 2026-09-05 audit remediation residual pass §I-C.9: the handler
+// distinguishes a successful deletion from "no live row at this id".
+// The previous shape returned success:true for zero affected rows,
+// making it impossible for a caller to tell apart "deleted live
+// skill", "asked about an already-deleted id", and "asked about an
+// id that never existed". ShredSkill now returns
+// internal.ErrSkillNotFound for the latter two cases; the handler
+// translates that to a deterministic not-found error so a caller
+// can branch on it without grepping the deleted_at column.
 //
 // Args:
 //
@@ -3625,6 +3633,9 @@ func handleDeleteSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 		return nil, fmt.Errorf("skill_id is required")
 	}
 	if err := dm.ShredSkill(skillID); err != nil {
+		if errors.Is(err, internal.ErrSkillNotFound) {
+			return nil, fmt.Errorf("delete_skill: skill_id %q not found", skillID)
+		}
 		return nil, err
 	}
 	// Forensic log — soft-delete is recoverable, so audit-only (no "shared_db"
