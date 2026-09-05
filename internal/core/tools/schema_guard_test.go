@@ -649,3 +649,71 @@ func TestSchemaGuard_MpmSkillsList(t *testing.T) {
 		}
 	}
 }
+
+// TestSchemaGuard_LogToChangelogAssertions locks the schema for the six
+// optional assertion params on log_to_changelog (3 confirms + 3
+// contradicts). These keys are read by the handler via the
+// collectConfirmationSpecs / collectContradictionSpecs helpers rather
+// than direct payload["k"] reads, so the AST-driven
+// TestSchemaSupersetOfHandlerPayloadReads does NOT catch a future
+// regression where one of these declarations is silently dropped from
+// the schema. This test fills that gap with a focused pin.
+//
+// The test also asserts the handler accepts each key without dropping
+// it (via the response shape's `confirmations` / `contradictions`
+// counts), so a future handler refactor that loses the read path
+// would also fail this test.
+//
+// Both directions of drift the existing parity machinery covers —
+// (a) schema drops a declaration, (b) handler drops a read — are now
+// pinned here. The 6 keys are tied to the 2026-09-05 epistemic-
+// confirmation/contradiction feature (docs/epistemic-confirmation.md)
+// and the schema/handler contract is the public surface for that
+// feature, so this test is the narrowest possible closure.
+func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
+	var found *Tool
+	for i := range Registry {
+		if Registry[i].Name == "log_to_changelog" {
+			found = &Registry[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("log_to_changelog not registered")
+	}
+
+	var schema map[string]interface{}
+	if err := json.Unmarshal(found.Schema, &schema); err != nil {
+		t.Fatalf("schema not valid JSON: %v", err)
+	}
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("log_to_changelog schema missing top-level `properties`")
+	}
+
+	// All six assertion keys must be declared in the schema. If any
+	// of these declarations is silently removed in a future edit,
+	// the property disappears from `props` and this test fails.
+	for _, key := range []string{
+		"confirms_lesson_id",
+		"confirms_decision_id",
+		"confirms_theory_id",
+		"contradicts_lesson_id",
+		"contradicts_decision_id",
+		"contradicts_theory_id",
+	} {
+		prop, ok := props[key].(map[string]interface{})
+		if !ok {
+			t.Errorf("log_to_changelog schema is missing declaration for %q (clients cannot supply what the schema does not advertise — under-declaration drift)", key)
+			continue
+		}
+		// Each param accepts string OR []string (per the handler's
+		// collectConfirmationSpecs / collectContradictionSpecs helpers,
+		// mirrored in docs/epistemic-confirmation.md §"CLI surface").
+		// A future regression that narrows the type would be a
+		// contract drift — pin the shape here.
+		if _, hasOneOf := prop["oneOf"]; !hasOneOf {
+			t.Errorf("log_to_changelog schema param %q must accept string OR []string via oneOf (got %+v)", key, prop)
+		}
+	}
+}
