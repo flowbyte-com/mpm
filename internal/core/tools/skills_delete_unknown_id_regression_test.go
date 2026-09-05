@@ -1,37 +1,33 @@
-// skills_delete_unknown_id_regression_test.go — Residual pass §I-C.9.
+// skills_delete_unknown_id_regression_test.go — Residual pass §I-C.9
+// (reverted).
 //
-// The 2026-09-05 audit found mpm_skills.delete returned success:true
-// for an unknown skill id (silent no-op via the previous ShredSkill
-// shape). The caller could not distinguish "deleted live skill" from
-// "asked about an id that never existed" — a violation of the
-// mutation-must-not-silently-noop invariant.
+// The 2026-09-05 audit originally classified the silent-no-op
+// mpm_skills.delete behavior as a defect. The remediation commit
+// (45e616f) flipped it to error-on-unknown-id. After surfacing the
+// deliberate-design precedent — commit 0583bea explicitly designed
+// mpm_handoff.shred as idempotent on unknown id with structured
+// shredded=false / rows_deleted=0 / success=true feedback and a
+// regression test pinning the contract — the C.9 fix was reverted
+// in the §N verdict cycle.
 //
-// Pre-fix reproduction (live CLI):
+// mpm_skills.delete is a SOFT delete (the row stays in the DB with
+// deleted_at set; recoverable for forensics), and it now matches
+// the project-wide soft-delete policy in
+// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// deletes". A stale-id race against another agent's earlier delete
+// is a benign collision, not a user-facing error.
 //
-//   $ mpm call mpm_skills --payload '{"action":"delete","params":{"skill_id":"skill:nonexistent-v1.0.0"}}'
-//     # wanted: error indicating not-found
-//     # actual: {"success":true,"skill_id":"skill:nonexistent-v1.0.0"}
+// Canonical contract (per the project-wide soft-delete policy):
 //
-// Canonical contract (per the residual-pass brief):
-//
-//   skill_id omitted/empty   → ERROR: skill_id is required
-//   skill_id = live row      → success, row soft-deleted (deleted_at set)
-//   skill_id = never existed → ERROR: delete_skill: skill_id ... not found
-//   skill_id = soft-deleted  → ERROR: not-found (caller sees no live row)
-//
-// The fix:
-//   1. ShredSkill returns internal.ErrSkillNotFound when 0 rows are
-//      affected (whether the row never existed or was already
-//      soft-deleted — both are "no live row at this id" from the
-//      caller's perspective).
-//   2. handleDeleteSkill translates ErrSkillNotFound to a clear
-//      not-found error envelope.
+//	skill_id omitted/empty   → ERROR: skill_id is required
+//	skill_id = live row      → success, row soft-deleted (deleted_at set)
+//	skill_id = never existed → success, no-op
+//	skill_id = soft-deleted  → success, no-op (already in terminal state)
 
 package tools
 
 import (
 	"database/sql"
-	"strings"
 	"testing"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -87,31 +83,39 @@ func TestSkillsDelete_LiveSkillSucceeds(t *testing.T) {
 	}
 }
 
-// TestSkillsDelete_NeverExistedRejected pins the headline §I-C.9
-// invariant: an unknown skill id must error rather than silently
-// succeed.
-func TestSkillsDelete_NeverExistedRejected(t *testing.T) {
+// TestSkillsDelete_NeverExistedIsSilentNoOp pins the project-wide
+// soft-delete policy: a delete against an id that has no live row
+// returns success (matching mpm_handoff.shred's structured no-op
+// envelope). See docs/tool-behavioral-contract.md and the precedent
+// at TestHandoff_DeleteHandoff_Idempotent (handoff_test.go:230).
+func TestSkillsDelete_NeverExistedIsSilentNoOp(t *testing.T) {
 	dm := newTestSharedDM(t)
 
-	_, err := handleMpmSkills(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+	res, err := handleMpmSkills(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "delete",
 		"params": map[string]interface{}{
 			"skill_id": "skill:nonexistent-v1.0.0",
 		},
 	})
-	if err == nil {
-		t.Fatal("delete of unknown id must error")
+	if err != nil {
+		t.Fatalf("delete of unknown id must be a silent no-op; got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error must mention 'not found', got: %v", err)
+	m, ok := res.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map, got %T", res)
+	}
+	if success, _ := m["success"].(bool); !success {
+		t.Errorf("unknown-id delete: expected success=true; got %v", m["success"])
 	}
 }
 
-// TestSkillsDelete_AlreadySoftDeletedRejected pins the idempotency
-// boundary: a second delete of an already-soft-deleted skill
-// surfaces the same not-found. From the caller's perspective
-// "delete a live skill" has no live work to do.
-func TestSkillsDelete_AlreadySoftDeletedRejected(t *testing.T) {
+// TestSkillsDelete_AlreadySoftDeletedIsSilentNoOp pins the
+// idempotency boundary: a second delete of an already-soft-deleted
+// skill returns the same success envelope. From the caller's
+// perspective the row is already in terminal state and there is
+// nothing to do — the soft-delete policy treats this as a benign
+// collision, not an error.
+func TestSkillsDelete_AlreadySoftDeletedIsSilentNoOp(t *testing.T) {
 	dm := newTestSharedDM(t)
 
 	// Seed + first delete.
@@ -136,23 +140,22 @@ func TestSkillsDelete_AlreadySoftDeletedRejected(t *testing.T) {
 		t.Fatalf("first delete must succeed: %v", err)
 	}
 
-	// Second delete — must error with not-found (no live row to delete).
+	// Second delete — silent no-op (already in terminal state).
 	_, err = handleMpmSkills(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "delete",
 		"params": map[string]interface{}{
 			"skill_id": "skill:twice-skill-v1.0.0",
 		},
 	})
-	if err == nil {
-		t.Fatal("second delete of soft-deleted skill must error")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error must mention 'not found', got: %v", err)
+	if err != nil {
+		t.Fatalf("second delete of soft-deleted skill must be a silent no-op; got: %v", err)
 	}
 }
 
 // TestSkillsDelete_EmptySkillIDRejected pins the existing
 // pre-check: an empty/missing skill_id errors before any DB call.
+// This is the only error path on the soft-delete boundary — see
+// docs/tool-behavioral-contract.md.
 func TestSkillsDelete_EmptySkillIDRejected(t *testing.T) {
 	dm := newTestSharedDM(t)
 
@@ -170,10 +173,10 @@ func TestSkillsDelete_EmptySkillIDRejected(t *testing.T) {
 	}
 }
 
-// TestSkillsDelete_DoesNotMutateOtherSkills pins: a not-found
-// delete does not affect any other skill row. Seed two distinct
-// skills, attempt to delete a third nonexistent id, both seeds
-// must remain intact and visible to list/read.
+// TestSkillsDelete_DoesNotMutateOtherSkills pins: a soft-delete
+// no-op (unknown id) does not affect any other skill row. Seed
+// two distinct skills, attempt to delete a third nonexistent id,
+// both seeds must remain intact and visible to list/read.
 func TestSkillsDelete_DoesNotMutateOtherSkills(t *testing.T) {
 	dm := newTestSharedDM(t)
 
@@ -191,15 +194,15 @@ func TestSkillsDelete_DoesNotMutateOtherSkills(t *testing.T) {
 		}
 	}
 
-	// Bogus delete.
+	// Bogus delete — silent no-op.
 	_, err := handleMpmSkills(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "delete",
 		"params": map[string]interface{}{
 			"skill_id": "skill:nonexistent-v1.0.0",
 		},
 	})
-	if err == nil {
-		t.Fatal("bogus delete must error")
+	if err != nil {
+		t.Fatalf("bogus delete must be a silent no-op; got: %v", err)
 	}
 
 	// Both real skills still live (deleted_at NULL).
