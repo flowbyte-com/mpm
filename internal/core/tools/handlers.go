@@ -1222,6 +1222,24 @@ func handlePromoteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // Returns a map with rows_read, rows_staged, rows_skipped, rows_rejected,
 // batch_id, and (if commit or commit_batch) rows_promoted.
 func handleMigrate(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// 2026-09-05 audit remediation pass 6 defect C.20 (P2): the migrate
+	// action alters persistent database state (stages rows in
+	// raw_memories, promotes them to memories, or rejects a batch via
+	// direct UPDATE). Previously it ran without any explicit
+	// authorization gate — an agent could call `mpm_system.migrate`
+	// with arbitrary from_path / commit_batch / undo_batch and have
+	// it execute. Mirror the record_global_rule convention
+	// (handlers.go handleRecordGlobalRule: "house rules should not be
+	// written autonomously"): require explicit `confirm=true`. Only
+	// the boolean literal `true` authorises execution; omitted,
+	// false, null, string "true", numeric 1, and every other shape
+	// is rejected before any DB call. The same handler backs both
+	// CLI and MCP surfaces via the registry, so this single boundary
+	// closes the safety invariant for every public path.
+	confirm, ok := p["confirm"].(bool)
+	if !ok || !confirm {
+		return nil, fmt.Errorf("migrate requires confirm=true; bulk database writes should not be executed autonomously")
+	}
 	fromPath, _ := p["from_path"].(string)
 	formatStr, _ := p["format"].(string)
 	if formatStr == "" {
