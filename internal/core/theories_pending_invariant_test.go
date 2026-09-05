@@ -273,6 +273,10 @@ func TestTheoriesPending_LifecycleTransition(t *testing.T) {
 	}
 
 	// Resolved row IS reachable via status=all (historical preservation).
+	// 2026-09-05 audit remediation pass 2: explicit Limit=50; the
+	// DM-level `if limit <= 0 { limit = 50 }` coercion was removed
+	// and callers that want the historical default must pass it
+	// explicitly.
 	all, err := dm.ListTheories(TheoryFilter{Status: "all", Limit: 50})
 	require.NoError(t, err)
 	var foundResolved bool
