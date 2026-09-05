@@ -665,9 +665,10 @@ Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 							"properties": {
 								"work_id":       {"type": "string"},
 								"winner_id":      {"type": "string"},
-								"winner_outcome": {"type": "string", "enum": ["open","done","cancelled"]}
+								"winner_outcome": {"type": "string", "enum": ["open","done","cancelled"]},
+								"reason":         {"type": "string", "minLength": 1, "description": "Required audit-trail explanation for resolving the contradiction. Enforced by handleResolveContradictionWork at work_handlers.go:343-345."}
 							},
-							"required": ["work_id"],
+							"required": ["work_id", "reason"],
 							"additionalProperties": true
 						}
 					},
