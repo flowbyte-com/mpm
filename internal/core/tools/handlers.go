@@ -812,9 +812,19 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if tags == nil {
 		tags = []string{}
 	}
-	dependencies := internal.ParseStringSliceOr(p["dependencies"])
-	if dependencies == nil {
-		dependencies = []string{}
+	// 2026-09-05 audit remediation pass 4 defect C.14 (P1): mirror
+	// the C.13 tags guard on dependencies. The schema declares
+	// `dependencies` as a string array of theory ids (the canonical
+	// representation persisted by encodeDependencyList). The previous
+	// shape routed the value through ParseStringSliceOr, which
+	// silently returned nil for non-array scalars and silently
+	// dropped non-string elements. The theory row was persisted with
+	// dependencies=[] and the wake-on-delete scan treated it as a
+	// standalone theory — caller intent (forward-edge declaration)
+	// was lost without any error.
+	dependencies, err := parseStrictStringArrayOrEmpty("dependencies", p["dependencies"])
+	if err != nil {
+		return nil, err
 	}
 	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
 	if sourceIDs == nil {
