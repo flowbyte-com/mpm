@@ -152,59 +152,84 @@ type ConfirmationSpec struct {
 	ArtifactType string
 }
 
-// LogChangelogEntryWithConfirmations is the confirmation variant of
-// LogChangelogEntry. It writes a changelog memory tied to a commit
-// AND, for each ConfirmationSpec, fires one evidence row + recompute
-// against the asserted artifact — all inside a single transaction so a
-// failure anywhere rolls back the entire operation.
+// ContradictionSpec is the symmetric negative-direction counterpart to
+// ConfirmationSpec. Used by LogChangelogEntryWithAssertions; the
+// artifact_type must be one of lesson / decision / theory.
 //
-// Atomicity contract: either the changelog memory AND every
-// confirmation evidence row land, or none of them do. This matches
-// docs/epistemic-confirmation.md §"What confirmation produces" +
-// §"Failure handling".
+// Like ConfirmationSpec, contradiction is explicit-only — no keyword
+// matching, no semantic inference. The caller asserts the artifact is
+// invalidated (or contradicted) by this commit; the substrate records
+// an evidence row with type='challenge' against the asserted artifact.
 //
-// The evidence row uses the registry defaults:
-//   - type='reproduction' (default strength 0.85)
-//   - source_group='git' (the confirmation is commit-anchored)
-//   - independence_factor=1.0
-//   - created_by='log_to_changelog:<commit_hash>'
-//   - notes='confirmed by changelog entry <commit_hash>'
+// CRITICAL ASYMMETRY vs ConfirmationSpec: contradiction CAN trigger
+// the invalidation cascade. A confirmation at default strength (+0.85)
+// raises confidence from 0.7 → ~0.85, which can never cross the cascade
+// floor (0.3). A contradiction at default strength (-0.6) lowers
+// confidence toward the floor; a strong contradiction (multiple
+// challenge rows, or an override-strength challenge) can cross the
+// floor and legitimately enqueue cascade intents for downstream
+// dependents. Per docs/archive/epistemic-cascades.md, threshold
+// crossing is one of three legitimate cascade triggers. The
+// contradiction path does NOT suppress this — doing so would silently
+// hide the user's intent when they assert "this artifact is wrong."
 //
-// These are deliberately not caller-tunable in this design. The
-// confirmation mechanism has one job — record an explicit assertion
-// that this commit validates the named artifact — and exposes no
-// tunable knobs (per docs/epistemic-confirmation.md §"Configuration
-// knobs"). A future arc that needs finer-grained trigger taxonomy or
-// caller-strength override is a separate design and would land in its
-// own docs.
+// Per docs/epistemic-confirmation.md §"Cascade cross-fire
+// asymmetry", this is the deliberate, documented divergence between
+// the two directions.
+type ContradictionSpec struct {
+	ArtifactID   string
+	ArtifactType string
+}
+
+// LogChangelogEntryWithAssertions is the canonical method that fires
+// the changelog memory + any number of confirmations + any number of
+// contradictions, atomically inside a single transaction.
 //
-// Cascade cross-fire check: positive-strength evidence on a
-// confidence=0.7-default lesson can never drop it below the cascade
-// threshold (0.3). RecomputeConfidence's hard-confidence invalidation
-// hook fires only on threshold-crossing transitions, so this path
-// cannot trigger any downstream re-evaluation cascade (per
-// evidence_store.go:328-340 + docs/archive/epistemic-cascades.md).
-func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
+// This is the single source of truth for "explicit assertion" wired
+// through log_to_changelog. Per docs/epistemic-confirmation.md, the
+// mechanism has two directions:
+//
+//   - Confirmation (positive evidence, type='reproduction', default
+//     strength +0.85). The cascade invalidation hook is unreachable
+//     from this path: confirmation cannot drop confidence below the
+//     0.3 floor from any 0.7+ baseline.
+//   - Contradiction (negative evidence, type='challenge', default
+//     strength -0.6). The cascade invalidation hook IS reachable:
+//     a strong contradiction (multiple challenge rows, or an override-
+//     strength challenge) can cross the 0.3 floor and legitimately
+//     enqueue cascade intents for downstream dependents. This is the
+//     deliberate, documented divergence between the two directions.
+//
+// Atomicity contract: either the changelog memory AND every assertion
+// evidence row (confirmations + contradictions) land, or none do.
+// Per docs/epistemic-confirmation.md §"Failure handling".
+//
+// Both directions reuse the same INSERT + RecomputeConfidence path
+// (via addEvidenceInTx) so the two surfaces never drift; the only
+// delta is the evidence-type/strength constants in
+// writeConfirmationInTx vs writeContradictionInTx.
+func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 	fact, commitHash string,
 	extraTags []string,
 	confirmations []ConfirmationSpec,
+	contradictions []ContradictionSpec,
 ) (string, error) {
 	// Mirror LogChangelogEntry validation so the contract surface is
-	// identical for the no-confirmations case.
+	// identical for the no-assertions case.
 	if dm == nil || dm.db == nil {
-		return "", fmt.Errorf("LogChangelogEntryWithConfirmations: database not initialized")
+		return "", fmt.Errorf("LogChangelogEntryWithAssertions: database not initialized")
 	}
 	if strings.TrimSpace(fact) == "" {
-		return "", fmt.Errorf("LogChangelogEntryWithConfirmations: fact is required")
+		return "", fmt.Errorf("LogChangelogEntryWithAssertions: fact is required")
 	}
 	if strings.TrimSpace(commitHash) == "" {
-		return "", fmt.Errorf("LogChangelogEntryWithConfirmations: commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit)")
+		return "", fmt.Errorf("LogChangelogEntryWithAssertions: commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit)")
 	}
 	if !fullSHARe.MatchString(commitHash) {
-		return "", fmt.Errorf("LogChangelogEntryWithConfirmations: commit_hash %q is not a full 40-character SHA-1; run `git rev-parse HEAD` to get the canonical form", commitHash)
+		return "", fmt.Errorf("LogChangelogEntryWithAssertions: commit_hash %q is not a full 40-character SHA-1; run `git rev-parse HEAD` to get the canonical form", commitHash)
 	}
 
-	// Validate every confirmation BEFORE any write so a partial-state
+	// Validate every assertion BEFORE any write so a partial-state
 	// batch never lands. Per docs/epistemic-confirmation.md §"Failure
 	// handling", invalid input rolls back the entire transaction.
 	for i, conf := range confirmations {
@@ -212,17 +237,26 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 		case "lesson", "decision", "theory":
 			// ok
 		default:
-			return "", fmt.Errorf("LogChangelogEntryWithConfirmations: confirmation[%d] artifact_type %q invalid (must be lesson, decision, or theory)", i, conf.ArtifactType)
+			return "", fmt.Errorf("LogChangelogEntryWithAssertions: confirmation[%d] artifact_type %q invalid (must be lesson, decision, or theory)", i, conf.ArtifactType)
 		}
 		if strings.TrimSpace(conf.ArtifactID) == "" {
-			return "", fmt.Errorf("LogChangelogEntryWithConfirmations: confirmation[%d] artifact_id is required", i)
+			return "", fmt.Errorf("LogChangelogEntryWithAssertions: confirmation[%d] artifact_id is required", i)
+		}
+	}
+	for i, contra := range contradictions {
+		switch contra.ArtifactType {
+		case "lesson", "decision", "theory":
+			// ok
+		default:
+			return "", fmt.Errorf("LogChangelogEntryWithAssertions: contradiction[%d] artifact_type %q invalid (must be lesson, decision, or theory)", i, contra.ArtifactType)
+		}
+		if strings.TrimSpace(contra.ArtifactID) == "" {
+			return "", fmt.Errorf("LogChangelogEntryWithAssertions: contradiction[%d] artifact_id is required", i)
 		}
 	}
 
 	// Build tags + body identical to LogChangelogEntry so the
-	// synthesis-engine join key is unchanged. The synthesized-engine
-	// (or any downstream consumer reading commit:<hash>) sees the
-	// same tag set whether the call carried confirmations or not.
+	// synthesis-engine join key is unchanged.
 	commitTag := CommitTagPrefix + strings.ToLower(commitHash)
 	tags := []string{ChangelogTag, commitTag}
 	seen := map[string]bool{ChangelogTag: true, commitTag: true}
@@ -245,7 +279,7 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 	var memoryID string
 	err := dm.WithTx(func(node DBNode) error {
 		// 1. Write the changelog memory inside the tx so the scanner
-		// boundary + INSERT stay atomic with the confirmation writes.
+		// boundary + INSERT stay atomic with the assertion writes.
 		// SaveMemoryNode is the tx-aware primitive that runs the same
 		// security scanners as SaveMemoryWithContext (validation +
 		// isSensitiveContent + isPoisoned).
@@ -255,13 +289,22 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 			return fmt.Errorf("write changelog memory: %w", err)
 		}
 
-		// 2. Fire one evidence row + recompute per confirmation. The
-		// in-tx helper (addEvidenceInTx) reuses the exact INSERT +
-		// RecomputeConfidence path AddEvidence uses, so the two
-		// surfaces never drift.
+		// 2. Fire one evidence row + recompute per confirmation.
+		// Positive direction; cascade hook unreachable.
 		for i, conf := range confirmations {
 			if err := writeConfirmationInTx(node, conf, commitHash); err != nil {
 				return fmt.Errorf("confirmation[%d] %s/%s: %w", i, conf.ArtifactType, conf.ArtifactID, err)
+			}
+		}
+		// 3. Fire one evidence row + recompute per contradiction.
+		// Negative direction; cascade hook reachable on threshold
+		// crossing — RecomputeConfidence's existing hard-confidence
+		// invalidation logic handles enqueue (evidence_store.go:328-340).
+		// The cascade path is the same one any other negative-evidence
+		// write would trigger; we deliberately do not gate it.
+		for i, contra := range contradictions {
+			if err := writeContradictionInTx(node, contra, commitHash); err != nil {
+				return fmt.Errorf("contradiction[%d] %s/%s: %w", i, contra.ArtifactType, contra.ArtifactID, err)
 			}
 		}
 		return nil
@@ -270,6 +313,56 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 		return "", err
 	}
 	return memoryID, nil
+}
+
+// LogChangelogEntryWithConfirmations is the back-compat thin wrapper
+// over LogChangelogEntryWithAssertions. It carries no contradictions.
+// New callers should use LogChangelogEntryWithAssertions directly.
+func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
+	fact, commitHash string,
+	extraTags []string,
+	confirmations []ConfirmationSpec,
+) (string, error) {
+	return dm.LogChangelogEntryWithAssertions(fact, commitHash, extraTags, confirmations, nil)
+}
+
+// writeContradictionInTx is the contradiction counterpart of
+// writeConfirmationInTx. Same shape, opposite evidence direction.
+//
+// Evidence row uses the registry defaults for `challenge`:
+//   - type='challenge' (default strength -0.6)
+//   - source_group='git' (the contradiction is commit-anchored)
+//   - independence_factor=1.0
+//   - created_by='log_to_changelog:<commit_hash>'
+//   - notes='contradicted by changelog entry <commit_hash>'
+//
+// ASYMMETRY vs writeConfirmationInTx: contradiction CAN trigger
+// the cascade invalidation hook via RecomputeConfidence's hard-
+// confidence crossing detector (evidence_store.go:328-340). This is
+// the intended behavior — a strong contradiction legitimately
+// invalidates the artifact and its downstream dependents. Per
+// docs/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
+// we do not gate this path.
+func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash string) error {
+	exists, err := artifactExists(node, spec.ArtifactID, spec.ArtifactType)
+	if err != nil {
+		return fmt.Errorf("artifact existence check: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("artifact %s/%s does not exist", spec.ArtifactType, spec.ArtifactID)
+	}
+	in := EvidenceInput{
+		ArtifactID:         spec.ArtifactID,
+		ArtifactType:       spec.ArtifactType,
+		Type:               "challenge",
+		SourceGroup:        "git",
+		Strength:           -0.6, // DefaultStrength("challenge") at evidence.go:24
+		IndependenceFactor: 1.0,
+		CreatedBy:          fmt.Sprintf("log_to_changelog:%s", commitHash),
+		CreatedAt:          time.Now(),
+		Notes:              fmt.Sprintf("contradicted by changelog entry %s", commitHash),
+	}
+	return addEvidenceInTx(node, GenerateID(), in, nil)
 }
 
 // writeConfirmationInTx is the tx-aware helper that inserts one

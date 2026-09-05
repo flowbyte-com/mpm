@@ -2687,23 +2687,32 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		return nil, fmt.Errorf("commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit). Run `git rev-parse HEAD` to get the canonical 40-char SHA-1")
 	}
 
-	// Parse the confirmation params (opt-in, explicit-only — see
-	// docs/epistemic-confirmation.md). Each can be a single string OR
-	// a []string. An empty/missing param is treated as no-op for that
-	// array; the other arrays still process. Per the design doc, a
-	// confirmation is an explicit assertion by the caller that this
-	// commit validates the named artifact — no keyword matching, no
+	// Parse the confirmation + contradiction params (opt-in,
+	// explicit-only — see docs/epistemic-confirmation.md). Each can be
+	// a single string OR a []string. An empty/missing param is
+	// treated as no-op for that array; the other arrays still process.
+	// Per the design doc, a confirmation OR contradiction is an
+	// explicit assertion by the caller that this commit validates or
+	// invalidates the named artifact — no keyword matching, no
 	// semantic inference.
 	confirmations := collectConfirmationSpecs(p, "confirms_lesson_id", "lesson")
 	confirmations = append(confirmations, collectConfirmationSpecs(p, "confirms_decision_id", "decision")...)
 	confirmations = append(confirmations, collectConfirmationSpecs(p, "confirms_theory_id", "theory")...)
 
+	contradictions := collectContradictionSpecs(p, "contradicts_lesson_id", "lesson")
+	contradictions = append(contradictions, collectContradictionSpecs(p, "contradicts_decision_id", "decision")...)
+	contradictions = append(contradictions, collectContradictionSpecs(p, "contradicts_theory_id", "theory")...)
+
 	var id string
 	var err error
-	if len(confirmations) > 0 {
-		id, err = dm.LogChangelogEntryWithConfirmations(
-			fact, commitHash, internal.ParseStringSliceOr(p["tags"]), confirmations)
-	} else {
+	switch {
+	case len(confirmations) > 0 || len(contradictions) > 0:
+		// Both directions route through the unified method so a
+		// mixed-direction batch is one transaction.
+		id, err = dm.LogChangelogEntryWithAssertions(
+			fact, commitHash, internal.ParseStringSliceOr(p["tags"]),
+			confirmations, contradictions)
+	default:
 		id, err = dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
 	}
 	if err != nil {
@@ -2715,6 +2724,7 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		"commit_hash":     commitHash,
 		"collection":      "changelog",
 		"confirmations":   len(confirmations),
+		"contradictions":  len(contradictions),
 	}, nil
 }
 
@@ -2755,6 +2765,47 @@ func collectConfirmationSpecs(p map[string]interface{}, paramName, artifactType 
 	out := make([]mpminternal.ConfirmationSpec, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, mpminternal.ConfirmationSpec{
+			ArtifactID:   id,
+			ArtifactType: artifactType,
+		})
+	}
+	return out
+}
+
+// collectContradictionSpecs is the negative-direction counterpart of
+// collectConfirmationSpecs. Same shape, returns
+// []ContradictionSpec. Mirrors confirms_*_id's "string or []string"
+// acceptance so callers don't have to remember the asymmetry.
+func collectContradictionSpecs(p map[string]interface{}, paramName, artifactType string) []mpminternal.ContradictionSpec {
+	v, ok := p[paramName]
+	if !ok || v == nil {
+		return nil
+	}
+	var ids []string
+	switch t := v.(type) {
+	case string:
+		if t != "" {
+			ids = []string{t}
+		}
+	case []string:
+		for _, s := range t {
+			if s != "" {
+				ids = append(ids, s)
+			}
+		}
+	case []interface{}:
+		for _, x := range t {
+			if s, ok := x.(string); ok && s != "" {
+				ids = append(ids, s)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]mpminternal.ContradictionSpec, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, mpminternal.ContradictionSpec{
 			ArtifactID:   id,
 			ArtifactType: artifactType,
 		})
