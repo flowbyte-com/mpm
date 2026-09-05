@@ -1062,7 +1062,10 @@ func handleInvalidateDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContex
 // punctuation-heavy memory ids or non-ASCII content.
 
 func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id, err := requireMemoryID(p)
+	if err != nil {
+		return nil, err
+	}
 
 	result, err := dm.ShredMemoryWithCascade(id)
 	if err != nil {
@@ -1101,6 +1104,23 @@ func memoryIDFromParams(p map[string]interface{}) string {
 		return v
 	}
 	return ""
+}
+
+// requireMemoryID resolves the canonical memory id (memory_id, then
+// id) via memoryIDFromParams and errors at the handler boundary if
+// both are missing, empty, or whitespace-only. The 2026-09-05
+// audit residual pass §I-C.13 found that shred / set_weight /
+// promote passed the raw lookup straight to the DM, allowing an
+// empty id to reach a mutation query that then silently affected
+// zero rows or surfaced an opaque SQL error. Use this helper at
+// every memory mutation boundary so callers always learn about a
+// missing id before any database write.
+func requireMemoryID(p map[string]interface{}) (string, error) {
+	id := strings.TrimSpace(memoryIDFromParams(p))
+	if id == "" {
+		return "", fmt.Errorf("memory_id is required")
+	}
+	return id, nil
 }
 
 func handleReinforceMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -1148,7 +1168,10 @@ func handleSnoozeMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 }
 
 func handleSetMemoryWeight(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id, err := requireMemoryID(p)
+	if err != nil {
+		return nil, err
+	}
 	// W-004 (2026-08-31): pass float64 directly so fractional weights like
 	// 7.5 persist to the REAL column without truncation. The previous
 	// `int(...)` cast silently coerced 7.5 → 7 before the UPDATE.
@@ -1202,7 +1225,10 @@ func handlePatchMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 }
 
 func handlePromoteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["memory_id"].(string)
+	id, err := requireMemoryID(p)
+	if err != nil {
+		return nil, err
+	}
 	return dm.PromoteMemory(id)
 }
 
