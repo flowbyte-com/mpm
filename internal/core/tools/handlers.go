@@ -2832,8 +2832,36 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 }
 
 // handleListSkills returns the latest version of each skill in scope.
+//
+// 2026-09-05 audit residual pass §I-C.15: the previous shape
+// defaulted `scope` to "all" via ParseStringOr and silently let any
+// other string through to the DM, which then ignored it via the
+// `default: scopeClause = ""` branch — equivalent to a broad "all"
+// query. An explicit `scope="bogus"` therefore returned every
+// skill, surprising callers who thought they were narrowing the
+// result. The schema's `enum: [all, local, shared]` is enforced
+// here: omitted scope defaults to "all"; an explicit scope must
+// be one of the three canonical values; anything else errors at
+// the boundary with a clear message listing the allowed values.
 func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	scope := internal.ParseStringOr(p["scope"], "all")
+	rawScope, present := p["scope"]
+	var scope string
+	if present && rawScope != nil {
+		s, ok := rawScope.(string)
+		if !ok {
+			return nil, fmt.Errorf("scope must be a string, got %T", rawScope)
+		}
+		scope = s
+	}
+	if scope == "" {
+		scope = "all"
+	}
+	switch scope {
+	case "all", "local", "shared":
+		// ok
+	default:
+		return nil, fmt.Errorf("scope must be one of [all, local, shared], got %q", scope)
+	}
 	skills, err := dm.ListSkills(scope)
 	if err != nil {
 		return nil, err
