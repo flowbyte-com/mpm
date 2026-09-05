@@ -611,7 +611,7 @@ in this file's git log.
 | `mpm_resolve` | (no `action`) | `uri: mpm://...` |
 | `mpm_blob_read` | (no `action`) | `id`, `offset`, `max_bytes` |
 | `mpm_blob_search` | (no `action`) | `id`, `query` |
-| `mpm_challenge` | (no `action`) | `memory_id`, `evidence` |
+| `mpm_memory` action=`challenge` | `memory_id`, `evidence` | Weaken a memory; creates a pending theory contesting it. Companion: `restore_challenge` action undoes. |
 | `mpm_retrieval_diagnose` | (no `action`) | `query`, `limit`, `collection`, `scope`, `trace` |
 | `mpm_system` | `gc_run`, `compact`, `health_check`, `migrate`, `query_audit_log`, `list_clusters`, `snooze_cluster`, `resolve_cluster`, `annotate_cluster`, `critic_findings` | — |
 

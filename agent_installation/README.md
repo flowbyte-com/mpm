@@ -118,10 +118,10 @@ canonical source.
 | Host | Adapter directory | Mechanism | Persistent-instruction surface |
 |---|---|---|---|
 | **OpenClaw** | [`openclaw-mpm-memory/`](./openclaw-mpm-memory/) + [`openclaw-mpm-auto-mode-persona/`](./openclaw-mpm-auto-mode-persona/) | OpenClaw plugin (`memory_search`/`memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
-| **Claude Code** | [`claude-code-mpm/`](./claude-code-mpm/) | MCP server (`~/.claude/.mcp.json`, full 22-tool registry via `mpm-mcp`) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
-| **OpenCode** | [`opencode-mpm/`](./opencode-mpm/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
-| **Hermes** | [`hermes-mpm/`](./hermes-mpm/) | Hermes MCP client (`~/.hermes/config.yaml`, 22 tools via `mpm-mcp`) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
-| **Pi** | [`pi-mpm/`](./pi-mpm/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
+| **Claude Code** | [`claude-code-mpm/`](./claude-code-mpm/) | MCP server (`~/.claude/.mcp.json`, full 21-tool registry via `mpm-mcp`) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
+| **OpenCode** | [`opencode-mpm/`](./opencode-mpm/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 21-tool registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
+| **Hermes** | [`hermes-mpm/`](./hermes-mpm/) | Hermes MCP client (`~/.hermes/config.yaml`, 21 tools via `mpm-mcp`) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
+| **Pi** | [`pi-mpm/`](./pi-mpm/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 21-tool registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
 
 ## Directory map
 
