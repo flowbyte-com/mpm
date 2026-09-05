@@ -1478,6 +1478,19 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		return nil, fmt.Errorf("query is required")
 	}
 
+	// 2026-09-05 audit remediation pass 4 defect C.9 (P2): mirror the
+	// C.8 list guard. The params schema declares `type` with the
+	// canonical lesson-type enum, but search previously did not read
+	// the field at all — passing `type: "bogus"` silently returned a
+	// full-corpus search with no signal that the filter was dropped.
+	// Validate at the boundary so caller typos fail loudly.
+	lessonType, _ := p["type"].(string)
+	if lessonType != "" {
+		if err := internal.ValidateLessonType(lessonType); err != nil {
+			return nil, err
+		}
+	}
+
 	items, err := dm.SearchLessonsLimited(query)
 	if err != nil {
 		return nil, err
