@@ -245,6 +245,111 @@ _BARE_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+# Matches the bold imperative header of a numbered item in the canonical
+# managed block, e.g. `1. **Wake on session start.**`. Captures the
+# header text inside the bold markers.
+_ITEM_HEADER_RE = re.compile(r"^\d+\.\s+\*\*([^*]+?)\*\*\.?\s*", re.MULTILINE)
+
+# Matches the first `` `mpm_X` `` tool reference inside an item, used
+# to pair each imperative header with its primary tool so the primer
+# can say "(via `mpm_X` action)" without re-stating the full sentence.
+_ITEM_TOOL_RE = re.compile(r"`(mpm_[a-z]\w*)`")
+
+
+# ---------------------------------------------------------------------------
+# Instructions primer (mpm-mcp's `WithInstructions` field).
+# ---------------------------------------------------------------------------
+#
+# The primer is the fallback contract surfaced via MCP's
+# `initialize.instructions`. It is served to hosts that auto-inject the
+# field (Claude Code, OpenCode) AND to hosts that surface it via an
+# explicit call (Pi via pi-mcp-adapter). On hosts with a managed block,
+# it is a non-duplicative pointer; on hosts without, it is a minimal
+# behavioural skeleton.
+#
+# Generated from the canonical managed block so the imperative headers
+# and primary tool references cannot drift from the canonical source.
+# Drift is caught by `render_managed_blocks.py --check`, which compares
+# the embedded `cmd/mpm-mcp/instructions_primer.txt` against this
+# function's output.
+
+# Path (relative to the repo root) of the file that mpm-mcp embeds via
+# `//go:embed`. The check mode verifies this file byte-for-byte against
+# the rendered output; the write mode writes it (in addition to the
+# per-adapter snippets).
+INSTRUCTIONS_PRIMER_PATH = Path("cmd/mpm-mcp/instructions_primer.txt")
+
+# Static header and footer for the primer. The header is the
+# fallback-aware pointer; the footer is the substrate-fallback contract.
+# These are intentionally NOT derived from the canonical block because
+# they are call-site semantics (where the managed block lives, what the
+# CLI fallback looks like) rather than behavioural principles.
+_INSTRUCTIONS_HEADER = (
+    "MPM behavioral contract loaded. If your host maintains a managed "
+    "instruction file (CLAUDE.md / AGENTS.md / .hermes.md), read it for "
+    "the full contract. Otherwise, minimally:"
+)
+_INSTRUCTIONS_FOOTER = (
+    "If MCP transport fails, fall back to "
+    "`mpm call <tool> --payload '{\"action\":\"<op>\",\"params\":{...}}'` "
+    "-- same substrate, same provenance."
+)
+
+
+def _extract_imperative_items(block: str) -> list[tuple[str, str]]:
+    """Return [(header, primary_tool), ...] for each numbered item in the
+    canonical managed block. The header is the bold imperative label
+    (e.g. 'Wake on session start'); the primary tool is the first
+    `` `mpm_X` `` backtick reference inside that item, or '' if none.
+
+    The block is split at numbered-item boundaries so the tool regex
+    does not bleed across items. Items are returned in source order.
+    """
+    items: list[tuple[str, str]] = []
+    # Split at the start of each numbered item. Use a positive
+    # look-ahead so the delimiter is preserved on the next chunk.
+    chunks = re.split(r"\n(?=\d+\.\s+\*\*)", block)
+    for chunk in chunks:
+        m = _ITEM_HEADER_RE.match(chunk)
+        if not m:
+            continue
+        header = m.group(1).strip().rstrip(".").strip()
+        tool_m = _ITEM_TOOL_RE.search(chunk)
+        tool = tool_m.group(1) if tool_m else ""
+        items.append((header, tool))
+    return items
+
+
+def render_instructions_primer(canonical_path: Path) -> str:
+    """Return the fallback primer text for mpm-mcp's `WithInstructions`
+    field, generated from the canonical managed block.
+
+    The primer has three parts:
+
+      1. A static header pointing at the managed-block file as the
+         authoritative contract and introducing the minimal fallback.
+      2. One bullet per numbered invariant in the canonical block,
+         phrased as "<imperative header> (via `<primary_tool>` action)."
+         The header text and tool name are extracted from the canonical
+         source, so a change to either updates the primer automatically.
+      3. A static footer giving the CLI fallback contract.
+
+    The primer is drift-proof: every imperative label and tool name
+    comes from the canonical block. A change to the canonical block
+    that affects the primer will be caught by `--check`.
+    """
+    text = canonical_path.read_text(encoding="utf-8")
+    block = extract_canonical_block(text)
+    items = _extract_imperative_items(block)
+    bullets = "\n".join(
+        f"- {header} (via `{tool}` action)."
+        for header, tool in items
+        if tool  # skip items with no tool reference -- they would be
+                 # uninformative as bullets and are not present in the
+                 # canonical block today; defensive only.
+    )
+    return f"{_INSTRUCTIONS_HEADER}\n\n{bullets}\n\n{_INSTRUCTIONS_FOOTER}\n"
+
 
 def render_for_host(block: str, prefix: str) -> str:
     """Return the canonical block rendered for one host.
@@ -439,6 +544,31 @@ def _print_block_for_dump(canonical_path: Path) -> int:
     return 0
 
 
+def _print_primer_for_dump(canonical_path: Path) -> int:
+    sys.stdout.write(render_instructions_primer(canonical_path))
+    return 0
+
+
+def _diff_primer(canonical_path: Path, repo_root: Path) -> list[str]:
+    """Verify `cmd/mpm-mcp/instructions_primer.txt` matches the
+    rendered primer output byte-for-byte."""
+    target = repo_root / INSTRUCTIONS_PRIMER_PATH
+    expected = render_instructions_primer(canonical_path)
+    existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    if existing == expected:
+        return []
+    diff = "".join(
+        difflib.unified_diff(
+            existing.splitlines(keepends=True),
+            expected.splitlines(keepends=True),
+            fromfile=f"checked-in:{target.name}",
+            tofile="rendered:instructions_primer",
+            n=3,
+        )
+    )
+    return [f"--- PRIMER DRIFT: {target} ---\n{diff}"]
+
+
 def _select_adapters(only: str | None) -> list[dict]:
     if not only:
         return list(ADAPTERS)
@@ -460,9 +590,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                     help="Render in memory; diff against checked-in "
                          "snippets and copy/paste examples; exit 1 on drift.")
     ap.add_argument("--only", help="Render only the named adapter.")
-    ap.add_argument("--dump", choices=("canonical",),
-                    help="Print the universal canonical managed block to "
-                         "stdout and exit.")
+    ap.add_argument("--dump", choices=("canonical", "instructions"),
+                    help="Print the universal canonical managed block, "
+                         "or the generated mpm-mcp instructions primer, "
+                         "to stdout and exit.")
     ap.add_argument("--adapter-root", type=Path,
                     default=agent_installation_root,
                     help="Path to agent_installation/ (default: alongside "
@@ -471,6 +602,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if args.dump == "canonical":
         return _print_block_for_dump(canonical_path)
+    if args.dump == "instructions":
+        return _print_primer_for_dump(canonical_path)
 
     selected = _select_adapters(args.only)
     global ADAPTERS
@@ -483,7 +616,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.check:
             diffs = _diff_snippets(rendered, args.adapter_root)
             cpdiffs = _diff_copy_paste(canonical_path)
-            all_diffs = diffs + cpdiffs
+            # Primer drift check: verify the embedded file matches.
+            repo_root = Path(__file__).resolve().parents[2]
+            pdiffs = _diff_primer(canonical_path, repo_root)
+            all_diffs = diffs + cpdiffs + pdiffs
             if all_diffs:
                 sys.stderr.write("\n\n".join(all_diffs))
                 sys.stderr.write(
@@ -494,13 +630,23 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(
                 f"[render_managed_blocks] {len(selected)} adapter(s) "
                 f"in byte-for-byte parity with canonical source; "
-                f"{len(ADAPTERS)} copy/paste example(s) in parity.",
+                f"{len(ADAPTERS)} copy/paste example(s) in parity; "
+                f"instructions primer in parity.",
             )
             return 0
 
         written = _write_all(rendered, args.adapter_root)
         for p in written:
             print(f"[render_managed_blocks] wrote {p}")
+        # Also write the embedded primer file so the go:embed includes
+        # the latest rendered text on every regeneration.
+        repo_root = Path(__file__).resolve().parents[2]
+        primer_target = repo_root / INSTRUCTIONS_PRIMER_PATH
+        primer_target.parent.mkdir(parents=True, exist_ok=True)
+        primer_target.write_text(
+            render_instructions_primer(canonical_path), encoding="utf-8",
+        )
+        print(f"[render_managed_blocks] wrote {primer_target}")
         # Also report copy/paste parity (informational only during write).
         cpdiffs = _diff_copy_paste(canonical_path)
         if cpdiffs:
