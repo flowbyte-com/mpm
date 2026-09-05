@@ -3701,6 +3701,22 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	theoryID, _ := p["theory_id"].(string)
 	recurringRule, _ := p["recurring_rule"].(string)
 
+	// 2026-09-05 audit remediation pass 4 defect C.18 (P1): the audit
+	// framed target_time and recurring_rule as a single scheduling-
+	// form contract, but they are distinct fields in the codebase.
+	// target_time is already validated by resolveTargetTime (epoch,
+	// relative duration, ISO-8601) — arbitrary strings are rejected.
+	// recurring_rule is the structured cron expression field and was
+	// previously persisted verbatim, so caller typos ("* * *", "0 25
+	// * * *") surfaced only at next-schedule time. Validate at the
+	// boundary using the existing robfig/cron parser (same parser as
+	// the scheduled_tasks path).
+	if recurringRule != "" {
+		if _, err := internal.CalculateNextRun(recurringRule, time.Now()); err != nil {
+			return nil, fmt.Errorf("recurring_rule: %w", err)
+		}
+	}
+
 	createdBy := ac.Agent
 	if createdBy == "" {
 		createdBy = ac.Model
