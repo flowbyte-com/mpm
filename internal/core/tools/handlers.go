@@ -5818,7 +5818,20 @@ func handleMpmBlobRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 	if id == "" {
 		return nil, fmt.Errorf("id is required")
 	}
-	offset, _ := payload["offset"].(float64)
+	// 2026-09-05 audit remediation pass 5 defect C.16: validate the
+	// offset at the handler boundary so both CLI and MCP paths agree.
+	// The previous shape silently coerced non-numeric and null values
+	// to 0 via a bare `.(float64)` assertion, and a negative offset
+	// produced a generic OS-level seek error. Both behaviours are
+	// non-deterministic from the caller's perspective — the same input
+	// could reach the handler via CLI or MCP with materially different
+	// downstream handling because the boundary was permissive. Use
+	// parseBlobOffset (defined just below) to enforce the four-state
+	// contract.
+	offset, err := parseBlobOffset(payload["offset"])
+	if err != nil {
+		return nil, err
+	}
 	maxBytes, _ := payload["max_bytes"].(float64)
 
 	// Server ceiling: 256 KB.
@@ -6117,4 +6130,54 @@ func parseFloatStrict(v interface{}, def float64, name string, min float64) (flo
 		return 0, fmt.Errorf("field `%s` must be >= %v, got %v", name, min, f)
 	}
 	return f, nil
+}
+
+// parseBlobOffset enforces the canonical mpm_blob_read offset contract
+// at the handler boundary. Both the CLI dispatcher
+// (cmd/mpm/call.go handleCall) and the MCP adapter
+// (cmd/mpm-mcp/tools.go mcpAdapter) feed the same payload shape into
+// handleMpmBlobRead, so a single boundary validation here gives both
+// surfaces identical semantics.
+//
+// Canonical contract:
+//
+//   omitted        → 0 (legitimate default; reads from start)
+//   nil            → 0 (null omission; same as omitted)
+//   0              → 0 (explicit; reads from start)
+//   N (positive)   → N (reads from byte N)
+//   size           → empty read at EOF (has_more=false; not an error)
+//   > size         → empty read past EOF (has_more=false; not an error)
+//   < 0            → ERROR: offset must be non-negative
+//   non-integer    → ERROR: offset must be an integer
+//   string         → ERROR: offset must be an integer
+//   bool / other   → ERROR: offset must be an integer
+//
+// The handler previously used a bare `.(float64)` assertion that
+// silently coerced non-numeric input to 0 and let negative offsets
+// reach the OS-level Seek call (which returns a generic error). Both
+// paths now share the same deterministic error envelope.
+func parseBlobOffset(v interface{}) (int64, error) {
+	if v == nil {
+		return 0, nil
+	}
+	var f float64
+	switch x := v.(type) {
+	case float64:
+		f = x
+	case float32:
+		f = float64(x)
+	case int:
+		f = float64(x)
+	case int64:
+		f = float64(x)
+	default:
+		return 0, fmt.Errorf("offset must be an integer, got %T", v)
+	}
+	if f != float64(int64(f)) {
+		return 0, fmt.Errorf("offset must be an integer, got %v", f)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("offset must be non-negative, got %v", f)
+	}
+	return int64(f), nil
 }
