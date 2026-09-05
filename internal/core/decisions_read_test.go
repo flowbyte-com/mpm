@@ -83,7 +83,7 @@ func TestDecisionRead_ListFiltersActive(t *testing.T) {
 		t.Fatalf("invalidate: %v", err)
 	}
 
-	active, err := dm.ListDecisions(DecisionFilter{Status: "active"})
+	active, err := dm.ListDecisions(DecisionFilter{Status: "active", Limit: 50})
 	if err != nil {
 		t.Fatalf("ListDecisions active: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestDecisionRead_ListFiltersActive(t *testing.T) {
 		t.Errorf("active list missing idActive=%q: %+v", idActive, active)
 	}
 
-	all, err := dm.ListDecisions(DecisionFilter{Status: "all"})
+	all, err := dm.ListDecisions(DecisionFilter{Status: "all", Limit: 50})
 	if err != nil {
 		t.Fatalf("ListDecisions all: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDecisionRead_ListFiltersActive(t *testing.T) {
 		t.Errorf("all list: want 4 rows (3 originals + 1 replacement), got %d", len(all))
 	}
 
-	superseded, err := dm.ListDecisions(DecisionFilter{Status: "superseded"})
+	superseded, err := dm.ListDecisions(DecisionFilter{Status: "superseded", Limit: 50})
 	if err != nil {
 		t.Fatalf("ListDecisions superseded: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDecisionRead_ListFiltersActive(t *testing.T) {
 		t.Errorf("superseded list id = %v, want %q", superseded[0]["id"], idSuperseded)
 	}
 
-	invalidated, err := dm.ListDecisions(DecisionFilter{Status: "invalidated"})
+	invalidated, err := dm.ListDecisions(DecisionFilter{Status: "invalidated", Limit: 50})
 	if err != nil {
 		t.Fatalf("ListDecisions invalidated: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestDecisionRead_SupersededVisibleWithFlag(t *testing.T) {
 	newID, _ := res["id"].(string)
 
 	// The original is now in the superseded bucket.
-	superseded, err := dm.ListDecisions(DecisionFilter{Status: "superseded"})
+	superseded, err := dm.ListDecisions(DecisionFilter{Status: "superseded", Limit: 50})
 	if err != nil {
 		t.Fatalf("list superseded: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestDecisionRead_InvalidatedVisibleWithFlag(t *testing.T) {
 		t.Fatalf("invalidate: %v", err)
 	}
 
-	invalidated, err := dm.ListDecisions(DecisionFilter{Status: "invalidated"})
+	invalidated, err := dm.ListDecisions(DecisionFilter{Status: "invalidated", Limit: 50})
 	if err != nil {
 		t.Fatalf("list invalidated: %v", err)
 	}

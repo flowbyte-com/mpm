@@ -87,7 +87,12 @@ func TestD006_ListTheoriesFiltersByStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	// Default = pending only.
-	pending, err := dm.ListTheories(TheoryFilter{})
+	// 2026-09-05 audit remediation pass 2: the DM-level
+	// `if limit <= 0 { limit = 50 }` coercion was removed; callers
+	// that want the historical default-50 behaviour pass 50
+	// explicitly. The CLI does this in
+	// cmd/mpm/handlers_epistemology.go.
+	pending, err := dm.ListTheories(TheoryFilter{Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, pending, 2, "default filter must be pending only")
 	for _, th := range pending {
@@ -95,17 +100,17 @@ func TestD006_ListTheoriesFiltersByStatus(t *testing.T) {
 	}
 
 	// Status=pending explicit.
-	pending2, err := dm.ListTheories(TheoryFilter{Status: "pending"})
+	pending2, err := dm.ListTheories(TheoryFilter{Status: "pending", Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, pending2, 2)
 
 	// Status=all returns all three.
-	all, err := dm.ListTheories(TheoryFilter{Status: "all"})
+	all, err := dm.ListTheories(TheoryFilter{Status: "all", Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
 
 	// Status=proven returns the resolved one.
-	proven, err := dm.ListTheories(TheoryFilter{Status: "proven"})
+	proven, err := dm.ListTheories(TheoryFilter{Status: "proven", Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, proven, 1)
 	assert.Equal(t, id3, proven[0]["id"])
@@ -143,7 +148,7 @@ func TestD006_ListTheoriesResolvedFamily(t *testing.T) {
 	_, err = dm.ProposeTheory("still-pending", "vc", nil, nil, nil)
 	require.NoError(t, err)
 
-	resolved, err := dm.ListTheories(TheoryFilter{Status: "resolved"})
+	resolved, err := dm.ListTheories(TheoryFilter{Status: "resolved", Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, resolved, 2, "resolved family must include both proven and disproven")
 

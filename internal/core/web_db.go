@@ -149,9 +149,12 @@ func (dm *DatabaseManager) QueryMemories(collection string, primeOnly bool, limi
 
 // SearchMemories searches memories using FTS5 or LIKE fallback
 func (dm *DatabaseManager) SearchMemories(q, collection string, primeOnly bool, limit, offset int) ([]map[string]interface{}, error) {
-	if limit <= 0 {
-		limit = 50
-	}
+	// 2026-09-05 audit remediation pass 2: the previous shape coerced
+	// `limit <= 0` to 50. The public handlers now validate limit via
+	// parseLimitStrict before calling this method, so any value
+	// reaching here is intentional (0 → 0, negative was already
+	// rejected upstream). Internal callers must pass an explicit
+	// limit.
 
 	escaped := strings.ReplaceAll(q, "\"", "\"\"")
 	ftsQuery := "\"" + escaped + "\"*"
