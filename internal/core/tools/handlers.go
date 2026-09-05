@@ -5266,6 +5266,14 @@ func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pay
 }
 
 // handleShowDecision (alpha-4 D-005) returns a single decision by ID.
+//
+// 2026-09-05 audit residual pass §I-C.14: the previous shape
+// wrapped any DM error (including "no rows") with a generic prefix,
+// making it impossible to distinguish a not-found from a SQL
+// failure on the wire. The DM now translates sql.ErrNoRows into
+// "decision not found: <id>"; this handler surfaces that as the
+// public not-found envelope so callers see the same shape on both
+// CLI and MCP. Other DM errors continue to wrap as before.
 func handleShowDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["id"].(string)
 	if id == "" {
@@ -5273,7 +5281,7 @@ func handleShowDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	}
 	row, err := dm.GetDecision(id)
 	if err != nil {
-		return nil, fmt.Errorf("show decision: %w", err)
+		return nil, err
 	}
 	return map[string]interface{}{"success": true, "decision": row}, nil
 }

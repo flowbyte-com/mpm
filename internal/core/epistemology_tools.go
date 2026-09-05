@@ -690,8 +690,14 @@ func (dm *DatabaseManager) ReviewMemories(daysSinceAccess, limit int) (map[strin
 
 // GetDecision returns the row for a single decision ID with metadata
 // parsed into a `metadata` sub-map. Returns a NotFound-shaped error
-// (containing "no rows") if the id is unknown — callers translate to
-// their envelope shape.
+// if the id is unknown — callers translate to their envelope shape.
+//
+// 2026-09-05 audit residual pass §I-C.14: the previous shape
+// propagated the raw sql driver error (`sql: no rows in result
+// set`) for unknown ids, leaking implementation detail into the
+// public tool response. Now translates sql.ErrNoRows into the
+// canonical "decision not found" envelope, matching GetMemory's
+// behavior at internal/core/web_db.go:281.
 func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error) {
 	if id == "" {
 		return nil, fmt.Errorf("get decision: id is required")
@@ -716,6 +722,9 @@ func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error
 		weight, reinforcement int64
 	)
 	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("decision not found: %s", id)
+		}
 		return nil, fmt.Errorf("get decision %s: %w", id, err)
 	}
 
