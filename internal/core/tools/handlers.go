@@ -3111,8 +3111,24 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// exactly the data-loss class the audit flags. EndSession already
 	// persists both columns and read-backs the row; the wake context
 	// renders open_questions for the next session.
-	commitments := internal.ParseStringSliceOr(p["commitments"])
-	openQuestions := internal.ParseStringSliceOr(p["open_questions"])
+	//
+	// 2026-09-05 audit remediation pass 4 defect C.17 (P2): the schema
+	// declares `open_questions` as array of strings, but the previous
+	// shape routed both fields through ParseStringSliceOr, which
+	// silently returned nil for non-array scalars and silently dropped
+	// non-string elements. A caller typo (e.g. open_questions=[123])
+	// produced a handoff with open_questions=[] rather than an error.
+	// Use the strict array helper so the four states — omitted,
+	// explicit [], valid array, invalid shape — produce distinct
+	// outcomes.
+	commitments, err := parseStrictStringArrayOrEmpty("commitments", p["commitments"])
+	if err != nil {
+		return nil, err
+	}
+	openQuestions, err := parseStrictStringArrayOrEmpty("open_questions", p["open_questions"])
+	if err != nil {
+		return nil, err
+	}
 
 	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
 	if err != nil {
