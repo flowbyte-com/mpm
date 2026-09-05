@@ -897,7 +897,7 @@ for C.19 was conservative — the actual coverage gap is 13+ tools, not
 | C.6 | `mpm_decisions/theories.list,query` | P2 | **fixed** | `parseLimitStrict` at `handlers.go:5435, 5474, 5294, 5333`; live probe decisions/theories `limit:0` → `{"count":0,...}`. Commit `2316676`. |
 | C.7 | `mpm_memory.{set_weight,reinforce,weaken,snooze,review}` | P2 | **fixed** | `parseFloatStrict` at `handlers.go:1134, 1147, 1163, 1191, 1393/1397`; live probe `reinforce delta="abc"` → `"field 'delta' must be a number (float64/int), got string"`. Commit `0341735`. |
 | C.8 | `mpm_lessons.list` | P2 | **fixed** | `handleListLessons:1679-1683` calls `internal.ValidateLessonType`; live probe `type="invalid-type"` → `"invalid lesson type \"invalid-type\": must be one of warning, practice, or insight"`. Commit `0e6a0d8`. |
-| C.9 | `mpm_skills.delete` | P2 | **reverted** — was fixed in `45e616f` but the fix was wrong, see below | Original "documented intentional" silent-no-op contract was the correct design. `ShredSkill` is silent-on-missing (returns `nil` on zero rows affected); `handleDeleteSkill` returns `success:true` regardless. Predecedent at commit `0583bea feat(core): mpm_session gains shred_handoff action (closes gap)` — explicitly designed `mpm_handoff.shred` as "idempotent on unknown id (n=0, no error)" with structured `shredded=false, rows_deleted=0, success=true` envelope and a regression test pinning the contract (`TestHandoff_DeleteHandoff_Idempotent` at `handoff_test.go:230`). The skills delete was matching that pattern from the start (original handler comment: "matches ShredSkill's silent-on-missing contract"). Reverted in commit `<revert-sha>` — see `docs/tool-behavioral-contract.md` "Not-found semantics for soft deletes" for the project-wide policy that now governs this path. The audit's "wrong about intent" framing (in §M's earlier draft) was the inference mistake this revert corrects: the silent-no-op was deliberate, not an oversight, and no external surface depended on the old contract. |
+| C.9 | `mpm_skills.delete` | P2 | **reverted** — was fixed in `45e616f` but the fix was wrong, see below | Original "documented intentional" silent-no-op contract was the correct design. `ShredSkill` is silent-on-missing (returns `nil` on zero rows affected); `handleDeleteSkill` returns `success:true` regardless. Predecedent at commit `0583bea feat(core): mpm_session gains shred_handoff action (closes gap)` — explicitly designed `mpm_handoff.shred` as "idempotent on unknown id (n=0, no error)" with structured `shredded=false, rows_deleted=0, success=true` envelope and a regression test pinning the contract (`TestHandoff_DeleteHandoff_Idempotent` at `handoff_test.go:230`). The skills delete was matching that pattern from the start (original handler comment: "matches ShredSkill's silent-on-missing contract"). Reverted in commit `47241b0` — see `docs/tool-behavioral-contract.md` "Not-found semantics" for the project-wide policy that now governs this path. The audit's "wrong about intent" framing (in §M's earlier draft) was the inference mistake this revert corrects: the silent-no-op was deliberate, not an oversight, and no external surface depended on the old contract. |
 | C.10 | `mpm_work.resolve_contradiction` | P2 | **fixed** | schema declares `"required": ["work_id", "reason"]` at `registry_list.go:671`; handler enforces at `work_handlers.go:342-345`. Commit `dd1c423`. |
 | C.11 | `mpm_system.query_audit_log` | P2 | **fixed** | `handleQueryAuditLog:3019-3056` reads `since` and computes `days`; live probe returns rows within cutoff, not the days=7 default. Commit `56c661d`. |
 | C.12 | `mpm_resolve mpm://lesson/theory` | P2 | **fixed** | `handlers.go:5832-5850` (lesson) and `:5867-5883` (theory) compute `bounded` from `len(content) > maxBytes`; CLI path now matches MCP resolver contract at `cmd/mpm-mcp/tools.go:207/250`. Commit `197ebba`. |
@@ -925,7 +925,7 @@ for C.19 was conservative — the actual coverage gap is 13+ tools, not
 
 ---
 
-## N. Final alpha-readiness verdict (HEAD `8d5dd8a`)
+## N. Final alpha-readiness verdict (HEAD `47241b0`)
 
 ### N.1 — Verdict
 
@@ -938,7 +938,7 @@ for C.19 was conservative — the actual coverage gap is 13+ tools, not
   - H.4 P2 (memory patch non-object wipe) — commit `f718ccc`, live probe confirms `patch:["a","b"]` now returns `"patch: must be a JSON object"`
 - **All P0/P1/P2 defects in the §I deferred backlog closed** by the 12 fix commits dated 2026-09-05 12:49–15:14 +0100: C.5–C.12 (P2) and C.13–C.16 (P3) all fixed per §M.1.
 - **The pre-commit FTS5-flag routing regression** (caught by the test the prior commit added, but the same commit's diff never actually wired through Makefile) is now fixed at `b140da3` and verified by negative-case discipline (`env -u CGO_CFLAGS -u CGO_LDFLAGS bash scripts/pre-commit` passes).
-- **`make test` and `make test-race` both pass cleanly** at HEAD `8d5dd8a` — the canonical pre-merge gates per CLAUDE.md §1.
+- **`make test` and `make test-race` both pass cleanly** at HEAD `47241b0` — the canonical pre-merge gates per CLAUDE.md §1.
 - **Remaining open items are P3 only:** C.18 (mpm_system schema passthrough) and C.19 (registry/dispatcher parity lock) — both bounded, both with clearly-defined remediation paths, neither affecting runtime correctness.
 
 ### N.2 — Historical record correction
@@ -948,7 +948,17 @@ This verdict supersedes two prior states, in this order:
 1. **"GREEN FOR ALPHA"** — the verdict issued by the prior pre-alpha audit pass (predecessor to this audit). It was **inaccurate at the time it was given**: it predated knowledge of C.1 (P0 — `mpm_decisions.supersede`/`invalidate` blocked by a 6-value CHECK constraint on the live DB; both actions were non-functional on the deployed substrate) and C.3 (P2 — `TestSchemaSupersetOfHandlerPayloadReads` already failing on `mpm_handoff` top-level `params` under-declaration). The audit at `56bd094` (this document, §C, §K) explicitly identified the prior verdict as inaccurate and replaced it with a corrected inventory of 20 proven defects.
 2. **"Stopped, awaiting clarification"** — the intermediate state from the session that attempted to remediate H.1–H.4 but discovered the task description was already satisfied. That session correctly stopped rather than re-implement shipped fixes, but produced no corrected verdict. This section closes that gap.
 
-Anyone reading the project history later should treat this section (N) as the authoritative alpha-readiness statement at HEAD `8d5dd8a`, with §M as the deferred-backlog snapshot at the same commit. Earlier verdicts in this document are preserved for historical accuracy but should not be relied on for current go/no-go decisions.
+Anyone reading the project history later should treat this section (N) as the authoritative alpha-readiness statement at HEAD `47241b0`, with §M as the deferred-backlog snapshot at the same commit. Earlier verdicts in this document are preserved for historical accuracy but should not be relied on for current go/no-go decisions.
+
+3. **"C.9 fix applied"** — the §M.1 row for C.9 originally stated the
+   `45e616f` silent-no-op → error-on-missing remediation was correct.
+   That row was wrong; commit `47241b0` reverts `45e616f` after the
+   deliberate-design precedent (commit `0583bea`'s handoff shred) was
+   surfaced. The C.9 row in §M.1 now correctly records the revert and
+   points to `docs/tool-behavioral-contract.md` for the project-wide
+   not-found semantics policy that now governs the path. Treat §M.1's
+   C.9 row as authoritative from `47241b0` onward; treat any earlier
+   draft of that row as superseded.
 
 ### N.3 — What this verdict does *not* assert
 
