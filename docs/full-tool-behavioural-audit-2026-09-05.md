@@ -921,3 +921,47 @@ for C.19 was conservative — the actual coverage gap is 13+ tools, not
 - **C.9 contract inversion** deserves explicit attention: the audit classified the silent-no-op `mpm_skills.delete` as a "documented intentional" defect. The remediation commit `45e616f` inverted the contract — `delete` on unknown id now errors rather than returning `success:true`. The audit's "intentional" framing was wrong about intent (the silent-no-op was never a deliberate feature; it was an oversight that the handler comment labelled as "by design"). The fix is correct, and the in-tree documentation has been brought in line with the new behavior. No external surface depended on the old silent-no-op contract (verified by a probe at HEAD).
 - **C.18** is the only §I entry whose defect *class* (passthrough pattern + schema under-declaration) is not addressed by the remediation commits. The §6.4 threshold table / §8 CLI-side limits / `TestSchemaSupersetOfHandlerPayloadReads` infrastructure handles some narrower cases, but the broad `mpm_system` `additionalProperties:true` with no declared action-specific params remains. The fix is structural — `oneOf`-style action-branched schemas for each of the 10 `mpm_system` actions, mirroring the shape used for `mpm_memory` etc. — and is out of scope for any of the §I remediation commits landed to date.
 - **C.19** is the cleanest §I item to remediate next: it's pure test-coverage scaffolding (`assertParityForTool(t, dm, ac, "<tool>")` calls), no production-code change required. Audit-estimated "7 tools" — actual count is 13+ (see evidence column).
+
+---
+
+## N. Final alpha-readiness verdict (HEAD `8d5dd8a`)
+
+### N.1 — Verdict
+
+**GREEN for alpha**, on the strength of:
+
+- **All 4 H.1–H.4 fixes confirmed shipped and verified at HEAD:**
+  - H.1 P0 (confidence_history CHECK widening) — commit `6514a42`, migration + 3 regression tests all pass
+  - H.2 P1 (skills save-after-delete UNIQUE) — commit `7ff9395`, 4 regression tests pass
+  - H.3 P2 (handoff schema top-level params) — commit `8ccd0cb`, `TestSchemaSupersetOfHandlerPayloadReads` passes
+  - H.4 P2 (memory patch non-object wipe) — commit `f718ccc`, live probe confirms `patch:["a","b"]` now returns `"patch: must be a JSON object"`
+- **All P0/P1/P2 defects in the §I deferred backlog closed** by the 12 fix commits dated 2026-09-05 12:49–15:14 +0100: C.5–C.12 (P2) and C.13–C.16 (P3) all fixed per §M.1.
+- **The pre-commit FTS5-flag routing regression** (caught by the test the prior commit added, but the same commit's diff never actually wired through Makefile) is now fixed at `b140da3` and verified by negative-case discipline (`env -u CGO_CFLAGS -u CGO_LDFLAGS bash scripts/pre-commit` passes).
+- **`make test` and `make test-race` both pass cleanly** at HEAD `8d5dd8a` — the canonical pre-merge gates per CLAUDE.md §1.
+- **Remaining open items are P3 only:** C.18 (mpm_system schema passthrough) and C.19 (registry/dispatcher parity lock) — both bounded, both with clearly-defined remediation paths, neither affecting runtime correctness.
+
+### N.2 — Historical record correction
+
+This verdict supersedes two prior states, in this order:
+
+1. **"GREEN FOR ALPHA"** — the verdict issued by the prior pre-alpha audit pass (predecessor to this audit). It was **inaccurate at the time it was given**: it predated knowledge of C.1 (P0 — `mpm_decisions.supersede`/`invalidate` blocked by a 6-value CHECK constraint on the live DB; both actions were non-functional on the deployed substrate) and C.3 (P2 — `TestSchemaSupersetOfHandlerPayloadReads` already failing on `mpm_handoff` top-level `params` under-declaration). The audit at `56bd094` (this document, §C, §K) explicitly identified the prior verdict as inaccurate and replaced it with a corrected inventory of 20 proven defects.
+2. **"Stopped, awaiting clarification"** — the intermediate state from the session that attempted to remediate H.1–H.4 but discovered the task description was already satisfied. That session correctly stopped rather than re-implement shipped fixes, but produced no corrected verdict. This section closes that gap.
+
+Anyone reading the project history later should treat this section (N) as the authoritative alpha-readiness statement at HEAD `8d5dd8a`, with §M as the deferred-backlog snapshot at the same commit. Earlier verdicts in this document are preserved for historical accuracy but should not be relied on for current go/no-go decisions.
+
+### N.3 — What this verdict does *not* assert
+
+- It does not assert "no P3 defects remain." Two P3 defects remain open or partially open (C.18 and C.19). They are recommended to close before GA, but do not block alpha.
+- It does not assert "no architectural debt remains." §F and §G of this audit document enumerate several non-defect architectural observations (additionalProperties:true being the dominant drift amplifier; C.19's coverage gap as an observability concern). These are surfaced for future remediation planning, not as alpha blockers.
+- It does not assert "no concurrency risk." §K Concurrency/resource risks was marked PARTIAL by the audit (single-attempt concurrency for `handleUpdateWork` was not stressed under `-race`; one transient "database is locked" was observed during a multi-action probe). `make test-race` passes, but race-detector coverage is not equivalent to a full concurrency audit.
+- It does not assert "the §6.4 / §8 / schema-guard test infrastructure covers every drift class." It catches most schema drift but does not catch passthrough-pattern under-declaration (the C.18 gap). A future arc should extend it to flagging `additionalProperties:true` schemas with zero literal key reads, or add a parallel guard for that pattern.
+
+### N.4 — Recommended next batch (out of scope for this verdict)
+
+If the project chooses to close the remaining P3 backlog before GA, the lowest-friction remediations are:
+
+1. **C.19** — extend `registry_dispatcher_parity_test.go` with `assertParityForTool(t, dm, ac, "<tool>")` calls for the 13+ tools that lack the parity lock. Pure test scaffolding, no production-code change, ~2 hours of work.
+2. **C.18** — restructure `mpm_system`'s schema from `additionalProperties:true` with 12 declared keys into action-branched `oneOf` blocks mirroring the `mpm_memory`/`mpm_work` shape. Schema and test work only, no runtime change. ~half a day.
+3. (Out of audit scope) **C.17 doc reconciliation** — if any external doc asserts `weight`/`last_decayed` on `mpm_confidence.show`, remove or update it to match the source-of-truth comment at `evidence_tools.go:299-303`.
+
+These are backlog items. The verdict above stands without them.
