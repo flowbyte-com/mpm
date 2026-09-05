@@ -191,6 +191,18 @@ func (a *callArtifactResolverAdapter) resolveLesson(ctx context.Context, p tools
 		return tools.Resolution{}, err
 	}
 	_ = a.dm.RecordRetrieval(p.ID, "lesson")
+	// 2026-09-05 audit remediation pass 3 defect C.12 (P2): honour
+	// max_bytes by computing bounded from content length, matching
+	// the MCP resolver path (cmd/mpm-mcp/tools.go) and the CLI
+	// fallback path (handlers.go).
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	bounded := len(lesson.Content) > maxBytes
+	if bounded {
+		lesson.Content = lesson.Content[:maxBytes]
+	}
 	return tools.Resolution{
 		Pointer:     "mpm://lesson/" + p.ID,
 		ContentType: "text/plain",
@@ -202,7 +214,7 @@ func (a *callArtifactResolverAdapter) resolveLesson(ctx context.Context, p tools
 			"reinforcement_count": lesson.ReinforcementCount,
 			"created":             lesson.Created,
 		},
-		Bounded: false,
+		Bounded: bounded,
 	}, nil
 }
 
@@ -243,11 +255,21 @@ func (a *callArtifactResolverAdapter) resolveTheory(ctx context.Context, p tools
 	}
 	content, _ := mem["content"].(string)
 	_ = a.dm.RecordRetrieval(p.ID, "theory")
+	// 2026-09-05 audit remediation pass 3 defect C.12 (P2): honour
+	// max_bytes — see resolveLesson for the symmetric treatment.
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	bounded := len(content) > maxBytes
+	if bounded {
+		content = content[:maxBytes]
+	}
 	return tools.Resolution{
 		Pointer:     "mpm://theory/" + p.ID,
 		ContentType: "text/plain",
 		Reader:      io.NopCloser(stringsNewReader(content)),
 		Metadata:    mem,
-		Bounded:     false,
+		Bounded:     bounded,
 	}, nil
 }
