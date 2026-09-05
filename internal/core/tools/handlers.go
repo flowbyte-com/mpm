@@ -2687,16 +2687,79 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		return nil, fmt.Errorf("commit_hash is required (strict retrospective contract: every changelog memory must reference an existing commit). Run `git rev-parse HEAD` to get the canonical 40-char SHA-1")
 	}
 
-	id, err := dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
+	// Parse the confirmation params (opt-in, explicit-only — see
+	// docs/epistemic-confirmation.md). Each can be a single string OR
+	// a []string. An empty/missing param is treated as no-op for that
+	// array; the other arrays still process. Per the design doc, a
+	// confirmation is an explicit assertion by the caller that this
+	// commit validates the named artifact — no keyword matching, no
+	// semantic inference.
+	confirmations := collectConfirmationSpecs(p, "confirms_lesson_id", "lesson")
+	confirmations = append(confirmations, collectConfirmationSpecs(p, "confirms_decision_id", "decision")...)
+	confirmations = append(confirmations, collectConfirmationSpecs(p, "confirms_theory_id", "theory")...)
+
+	var id string
+	var err error
+	if len(confirmations) > 0 {
+		id, err = dm.LogChangelogEntryWithConfirmations(
+			fact, commitHash, internal.ParseStringSliceOr(p["tags"]), confirmations)
+	} else {
+		id, err = dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
+	}
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":     true,
-		"id":          id,
-		"commit_hash": commitHash,
-		"collection":  "changelog",
+		"success":         true,
+		"id":              id,
+		"commit_hash":     commitHash,
+		"collection":      "changelog",
+		"confirmations":   len(confirmations),
 	}, nil
+}
+
+// collectConfirmationSpecs normalizes one confirmation param to a slice
+// of ConfirmationSpec. Accepts either a single string (one id) or a
+// []string (multiple ids) under the param key. Empty strings are
+// skipped — the surface rejects them at the WithTx boundary, so
+// surfacing the validation error early keeps the failure path
+// uniform. Returns nil if the param is absent entirely (the no-
+// confirmation path stays on LogChangelogEntry).
+func collectConfirmationSpecs(p map[string]interface{}, paramName, artifactType string) []mpminternal.ConfirmationSpec {
+	v, ok := p[paramName]
+	if !ok || v == nil {
+		return nil
+	}
+	var ids []string
+	switch t := v.(type) {
+	case string:
+		if t != "" {
+			ids = []string{t}
+		}
+	case []string:
+		for _, s := range t {
+			if s != "" {
+				ids = append(ids, s)
+			}
+		}
+	case []interface{}:
+		for _, x := range t {
+			if s, ok := x.(string); ok && s != "" {
+				ids = append(ids, s)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]mpminternal.ConfirmationSpec, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, mpminternal.ConfirmationSpec{
+			ArtifactID:   id,
+			ArtifactType: artifactType,
+		})
+	}
+	return out
 }
 
 // handleSaveSkill persists a new skill or updates an existing version.
