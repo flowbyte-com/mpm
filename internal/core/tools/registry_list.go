@@ -432,24 +432,12 @@ max_bytes applies a soft materialization ceiling for large results.`,
 		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|work/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"}},"required":["uri"]}`),
 		Handler:     handleMpmResolve,
 	},
-	// ── Memory primitives: domain dispatcher + top-level challenge tool ──
-
-	{
-		Name:        "mpm_challenge",
-		Description: `Weaken a memory and create a pending theory contesting it.
-Use when: a memory is contradicted by new evidence and you want to record the contest as a first-class artifact (theory row + memory weaken). The theory becomes resolvable via mpm_theories resolve once validation has played out.
-Do not use when: you want to merely mark a memory as low-quality (use mpm_memory weaken); you want to delete it (use mpm_memory shred); you want to record a learnable lesson (use mpm_lessons save).`,
-		Schema: json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"memory_id": {"type": "string", "description": "Canonical snake_case id of the memory to challenge."},
-				"evidence": {"type": "string", "description": "Free-form text describing why this memory is contested."}
-			},
-			"required": ["memory_id"],
-			"additionalProperties": true
-		}`),
-		Handler: handleMpmChallenge,
-	},
+	// ── Memory primitives ──
+	// (challenge / restore_challenge live as actions under mpm_memory —
+	//  the standalone mpm_challenge tool was retired on 2026-09-05
+	//  because it duplicated mpm_memory.challenge with the same wire
+	//  contract; see docs/onboarding-mcp-native-audit-2026-09-05.md
+	//  Part C / follow-up commit log.)
 
 	{
 		Name:        "mpm_blob_read",

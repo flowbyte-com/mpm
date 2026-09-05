@@ -688,11 +688,14 @@ class ToolReferenceStabilityContract(unittest.TestCase):
         self.assertNotIn("note", row,
                          f"mpm_handoff row still advertises stale 'note' param: {row!r}")
 
-    def test_mpm_challenge_documented(self):
-        # The challenge surface lets agents formally contest a memory
-        # when new evidence contradicts it (instead of shredding).
-        self.assertIn("mpm_challenge", self.table,
-                      "tool-reference table must document mpm_challenge")
+    def test_mpm_memory_action_challenge_documented(self):
+        # The challenge surface is reachable via mpm_memory action=challenge
+        # (the standalone mpm_challenge tool was retired 2026-09-05; see
+        # docs/onboarding-mcp-native-audit-2026-09-05.md Part C). The
+        # tool-reference table must document the action surface where
+        # agents will look for it.
+        self.assertIn("action=`challenge`", self.table,
+                      "tool-reference table must document mpm_memory action=`challenge` (the canonical challenge surface since 2026-09-05)")
 
     def test_mpm_memory_projection_default_pinned(self):
         # `mpm_memory query` defaults to `projection: "summary"`; full

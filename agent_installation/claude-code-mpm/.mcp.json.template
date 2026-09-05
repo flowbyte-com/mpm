@@ -9,7 +9,7 @@
     "",
     "Why mpm-mcp, not the opencode-mpm or pi-mpm TypeScript adapters:",
     "Claude Code's native extension surface is MCP. The mpm-mcp binary IS",
-    "the agent-facing machine interface (22 tools: 20 unified domain + 2 standalone).",
+    "the agent-facing machine interface (21 tools: 19 unified domain + 2 standalone).",
     "Re-using the same MCP server that OpenClaw wires means every agent on",
     "the host converges on the same canonical substrate with no per-agent",
     "reimplementation.",
