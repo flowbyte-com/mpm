@@ -107,9 +107,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	if err := ValidateSchemaPrefix(cfg.SchemaPrefix); err != nil {
 		return nil, err
 	}
-	if cfg.Limit <= 0 {
-		cfg.Limit = 15
-	}
+	// 2026-09-05 audit remediation pass 2: cfg.Limit is no longer
+	// silently coerced. Public callers route through parseLimitStrict
+	// at the handler boundary; any non-positive value reaching here is
+	// an honest caller request for "no results" (Limit=0) or an
+	// internal caller contract violation. The handler-level gate
+	// pins the public contract.
 	if cfg.VectorWeight < 0 || cfg.VectorWeight > 1 {
 		cfg.VectorWeight = 0.5
 	}

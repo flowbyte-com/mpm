@@ -382,10 +382,13 @@ func (dm *DatabaseManager) hybridSearchScopeShared(query string, limit int) ([]m
 //	   The 2x fetch buffer ensures a shared row promoted by the boost
 //	   doesn't get truncated at the cfg.Limit gate.
 func (dm *DatabaseManager) hybridSearchScopeAll(query, collection string, limit int) ([]map[string]interface{}, error) {
+	// 2026-09-05 audit remediation pass 2: the previous shape
+	// coerced `fetch < 10` to 10, which silently overrode the
+	// caller-supplied limit (including limit=0 from the public
+	// surface). The handler now validates limit via parseLimitStrict,
+	// so any value reaching here is intentional. fetch=0 → no rows,
+	// matching the documented "limit=0 → 0 results" contract.
 	fetch := limit * 2
-	if fetch < 10 {
-		fetch = 10
-	}
 
 	localCfg := DefaultHybridConfig()
 	localCfg.Limit = fetch

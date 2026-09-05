@@ -1095,7 +1095,12 @@ func handleDecisionsShow(dm mpminternal.CoreDB, args []string) int {
 // optional status filter. Mirrors `mpm call mpm_decisions list`.
 func handleDecisionsList(dm mpminternal.CoreDB, args []string) int {
 	status := ""
-	limit := 0
+	// 2026-09-05 audit remediation pass 2: the default is 50 (was
+	// previously 0 with a DM-side coercion to 50; the coercion is
+	// removed so the public surface's `limit=0 → 0 results` contract
+	// holds. The CLI default preserves the historical "no --limit
+	// flag → 50 results" behaviour.
+	limit := 50
 	for _, a := range args {
 		switch {
 		case strings.HasPrefix(a, "--status="):
@@ -1127,7 +1132,8 @@ func handleDecisionsQuery(dm mpminternal.CoreDB, args []string) int {
 		return respond("", "Usage: mpm decisions query <text> [--limit=N]\n", 1)
 	}
 	query := args[0]
-	limit := 0
+	// 2026-09-05 audit remediation pass 2: see handleDecisionsList.
+	limit := 50
 	for _, a := range args[1:] {
 		if strings.HasPrefix(a, "--limit=") {
 			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
