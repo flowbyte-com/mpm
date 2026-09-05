@@ -7,7 +7,6 @@
 package internal
 
 import (
-	"errors"
 	"testing"
 )
 
@@ -35,21 +34,23 @@ func TestShredSkill_HappyPath(t *testing.T) {
 	}
 }
 
-// TestShredSkill_NotFoundReturnsErrSkillNotFound covers the
-// unknown-id path: shredding an id that has no live row now
-// returns internal.ErrSkillNotFound rather than silently
-// succeeding. The 2026-09-05 audit residual pass §I-C.9 closed
-// the silent-no-op class so callers can distinguish a successful
-// deletion from "no live row at this id". Forensics: the
-// soft-delete machinery still works the same way (deleted_at
-// mark, recoverable from the row) — only the success/failure
-// classification changed.
-func TestShredSkill_NotFoundReturnsErrSkillNotFound(t *testing.T) {
+// TestShredSkill_UnknownIdIsSilentNoOp pins the contract that
+// shredding an id that has no live row is a successful no-op
+// (matching the project-wide soft-delete idempotency policy; see
+// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// deletes" and the precedent at mpm_handoff.shred —
+// TestHandoff_DeleteHandoff_Idempotent at handoff_test.go:230).
+// The §I-C.9 fix that flipped this to error-on-unknown was reverted
+// once the deliberate-design precedent surfaced (commit 0583bea
+// designed handoff shred as idempotent and verified the contract
+// end-to-end). Forensics: the soft-delete machinery still works
+// the same way on live rows (deleted_at mark, recoverable from
+// the row) — the unknown-id path just doesn't mutate anything
+// because there is no live row to mutate.
+func TestShredSkill_UnknownIdIsSilentNoOp(t *testing.T) {
 	dm := NewTestDM(t)
-	if err := dm.ShredSkill("skill:nope-v9.9.9"); err == nil {
-		t.Errorf("ShredSkill on missing id must return ErrSkillNotFound; got nil")
-	} else if !errors.Is(err, ErrSkillNotFound) {
-		t.Errorf("ShredSkill on missing id: want ErrSkillNotFound, got: %v", err)
+	if err := dm.ShredSkill("skill:nope-v9.9.9"); err != nil {
+		t.Errorf("ShredSkill on unknown id must be a silent no-op; got: %v", err)
 	}
 }
 
