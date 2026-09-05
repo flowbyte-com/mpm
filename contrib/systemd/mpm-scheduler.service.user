@@ -20,7 +20,7 @@ Description=MPM universal wake executor (USER-level, alpha default)
 # and are invisible until decrypt; default.target is reached at 08:01
 # before they appear, so Wants= are never evaluated. Restart=on-failure
 # does not recover because the failure is during initial load, not
-# runtime crash. See lesson 071911bc.
+# runtime crash. See commit 14ac32b.
 # Fix installed by scripts/install.sh on ecryptfs hosts:
 #   ~/.config/autostart/mpm-post-decrypt.desktop runs after decrypt:
 #     systemctl --user daemon-reload; systemctl --user start mpm-scheduler

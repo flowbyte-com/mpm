@@ -162,7 +162,7 @@ detect_openclaw() {
 # reached at 08:01 before they appear, so Wants= are never evaluated
 # and Restart= does not help. Fix: post-decrypt autostart that does
 # daemon-reload + start after login. See mpm-scheduler.service.user
-# comment + lesson 071911bc. Detects via mount, findmnt, and
+# comment + commit 14ac32b. Detects via mount, findmnt, and
 # /home/.ecryptfs marker.
 is_ecryptfs_home() {
     if mount 2>/dev/null | grep -q "on ${HOME} type ecryptfs"; then
@@ -539,7 +539,7 @@ phase_ecryptfs_autostart() {
 [Desktop Entry]
 Type=Application
 Name=MPM Post-Decrypt Reload (ecryptfs fix)
-Comment=Reload systemd user manager after ecryptfs decrypt and start MPM scheduler. Installed by mpm install.sh for linger+ecryptfs hosts. See mpm-scheduler.service.user comment and lesson 071911bc.
+Comment=Reload systemd user manager after ecryptfs decrypt and start MPM scheduler. Installed by mpm install.sh for linger+ecryptfs hosts. See mpm-scheduler.service.user comment and commit 14ac32b.
 Exec=$exec_cmd
 Hidden=false
 NoDisplay=false
