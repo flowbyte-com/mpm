@@ -1991,6 +1991,18 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("weight column real conversion failed: %w", err)
 	}
+	// confidence_history CHECK widening (2026-09-05 audit P0): the
+	// pre-alpha-final schema accepts only 6 trigger values; the
+	// canonical schema.go declaration accepts 9 (adds concept_drift,
+	// supersede, invalidate). Without this migration, mpm_decisions
+	// supersede/invalidate both fail on the live DB with a CHECK
+	// constraint violation because the writers attempt to insert
+	// trigger='supersede' / trigger='invalidate' rows. Idempotent via
+	// the schema_migrations sentinel.
+	if err := MigrateConfidenceHistoryCheckWidening(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("confidence_history check widening migration failed: %w", err)
+	}
 	// H-3 fix (post-M3 audit, 2026-08-31): adds the wake_scheduled
 	// column to epistemic_cascade_outbox so that a crash between
 	// markMaterialized and ScheduleWake is recoverable — the

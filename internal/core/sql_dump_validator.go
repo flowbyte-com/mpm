@@ -165,10 +165,11 @@ var CanonicalMPMSchema = []string{
 // here when a migration creates it and you want restore-db to accept
 // dumps that reference it.
 var RuntimeCanonicalSchema = []string{
-	"artifacts",       // created by extension migration
-	"legacy_weight",   // created by extension migration
-	"lessons_base",    // created by migrateLessonsToView
-	"synthesis_dlq",   // created by synthesis isolation runtime
+	"artifacts",                    // created by extension migration
+	"confidence_history__new",      // created transiently by migration_confidence_history_check_widening's table-recreate dance; dropped + renamed before commit
+	"legacy_weight",                // created by extension migration
+	"lessons_base",                 // created by migrateLessonsToView
+	"synthesis_dlq",                // created by synthesis isolation runtime
 }
 
 // NewCanonicalDumpValidator creates a validator using the canonical MPM
