@@ -340,9 +340,21 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	}
 	db := dm.SQLDB()
 
-	// Existence check — does a non-deleted row already own this id?
+	// Existence check — does ANY row own this id? The 2026-09-05
+	// audit found the existence check filtered on `deleted_at IS NULL`
+	// (hiding tombstones), which made `save → delete → save` collide
+	// with the tombstone's PK on the new-row INSERT. The id is owned
+	// regardless of deleted_at — ShredSkill is a soft-delete that
+	// preserves the row for audit, so a tombstone still occupies the
+	// PK and must be visible to this check.
+	//
+	// Lifecycle contract:
+	//   - exists (live OR tombstoned) && !force → "already exists"
+	//   - exists (live OR tombstoned) && force → UPDATE in place
+	//     (the force path also clears deleted_at to resurrect the row)
+	//   - !exists → INSERT (no PK collision possible)
 	var existing string
-	row := db.QueryRow(`SELECT id FROM memories WHERE id = ? AND deleted_at IS NULL`, id)
+	row := db.QueryRow(`SELECT id FROM memories WHERE id = ?`, id)
 	err = row.Scan(&existing)
 	exists := err == nil
 	if err != nil && err != sql.ErrNoRows {
@@ -398,6 +410,15 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		// other versions for this name, excluding the current row. Edge
 		// case: force-overwriting v1 after v2 exists must NOT stamp v1
 		// as latest — same contract as the new-row path below.
+		//
+		// Resurrection clause: deleted_at = NULL. The existence check
+		// above includes tombstoned rows (id is owned regardless of
+		// deleted_at), so a force-overwrite against a soft-deleted row
+		// both overwrites the content AND resurrects the row back to
+		// live. The 2026-09-05 audit found the previous force path was
+		// filtered on `deleted_at IS NULL`, which silently no-op'd the
+		// UPDATE and left the tombstone in place — the live row would
+		// not exist after save-after-delete.
 		prefix := "skill:" + name + "-v"
 		var (
 			otherID      string
@@ -437,12 +458,12 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		if err != nil {
 			return "", fmt.Errorf("marshal metadata: %w", err)
 		}
-
 		_, err = db.Exec(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
+			    deleted_at = NULL,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ? AND deleted_at IS NULL
+			WHERE id = ?
 		`, content, string(tagsJSON), string(metaJSON), id)
 		if err != nil {
 			return "", fmt.Errorf("update skill: %w", err)
