@@ -266,14 +266,14 @@ func TestTheoriesPending_LifecycleTransition(t *testing.T) {
 	assert.Equal(t, 0, pendingCountFromListTheories(t, dm))
 
 	// Resolved row must NOT appear in the pending list.
-	pending, err := dm.ListTheories(TheoryFilter{Status: "pending"})
+	pending, err := dm.ListTheories(TheoryFilter{Status: "pending", Limit: 50})
 	require.NoError(t, err)
 	for _, th := range pending {
 		assert.NotEqual(t, id, th["id"], "resolved theory must not appear in pending list")
 	}
 
 	// Resolved row IS reachable via status=all (historical preservation).
-	all, err := dm.ListTheories(TheoryFilter{Status: "all"})
+	all, err := dm.ListTheories(TheoryFilter{Status: "all", Limit: 50})
 	require.NoError(t, err)
 	var foundResolved bool
 	for _, th := range all {
@@ -327,7 +327,7 @@ func TestTheoriesPending_SqlMatchesHealthCheck(t *testing.T) {
 	hc := theoriesPendingFromHealthCheck(t, dm)
 	assert.Equal(t, strictCount, hc, "the health_check SQL must equal the canonical pending-population SQL")
 
-	listRows, err := dm.ListTheories(TheoryFilter{Status: "pending"})
+	listRows, err := dm.ListTheories(TheoryFilter{Status: "pending", Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, listRows, 1, "ListTheories(status=pending) must use the same strict predicate as health_check")
 	assert.Equal(t, idP, listRows[0]["id"])
@@ -388,7 +388,7 @@ func TestTheoriesPending_DocumentedAsymmetry_NullStatusIsPendingInReadButNotInSQ
 	// pins that ListTheories(status=pending) uses the strict filter,
 	// matching the health_check metric — so the OpenClaw invariant
 	// holds regardless of the read-surface default.
-	list, err := dm.ListTheories(TheoryFilter{Status: "pending"})
+	list, err := dm.ListTheories(TheoryFilter{Status: "pending", Limit: 50})
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, idAgree, list[0]["id"], "ListTheories(status=pending) uses the strict SQL filter, matching health_check")

@@ -745,10 +745,14 @@ func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error
 // value (Status="" + Tags=nil + Limit=0) defaults to active decisions
 // only with the default page size (50).
 func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]interface{}, error) {
+	// 2026-09-05 audit remediation pass 2: the previous shape
+	// coerced `limit <= 0` to 50, which silently overrode the
+	// caller-supplied limit (including limit=0 from the public
+	// surface). The handler now validates limit via parseLimitStrict,
+	// so any value reaching here is intentional. CLI callers that
+	// want the historical default-50 behaviour pass 50 explicitly
+	// (see cmd/mpm/handlers_epistemology.go).
 	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
 	status := filter.Status
 	if status == "" {
 		status = "active"
@@ -863,9 +867,7 @@ func (dm *DatabaseManager) QueryDecisions(query string, limit int) ([]map[string
 	if query == "" {
 		return nil, fmt.Errorf("query decisions: query is required")
 	}
-	if limit <= 0 {
-		limit = 50
-	}
+	// 2026-09-05 audit remediation pass 2: see ListDecisions.
 	rows, err := dm.SearchMemories(query, "decisions", false, limit, 0)
 	if err != nil {
 		return nil, fmt.Errorf("query decisions: %w", err)
@@ -974,10 +976,8 @@ func (dm *DatabaseManager) GetTheory(id string) (map[string]interface{}, error) 
 //                semantics: anything no longer pending)
 //   - all      → no extra predicate
 func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]interface{}, error) {
+	// 2026-09-05 audit remediation pass 2: see ListDecisions.
 	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
 	status := filter.Status
 	if status == "" {
 		status = "pending"
@@ -1079,9 +1079,7 @@ func (dm *DatabaseManager) QueryTheories(query string, limit int) ([]map[string]
 	if query == "" {
 		return nil, fmt.Errorf("query theories: query is required")
 	}
-	if limit <= 0 {
-		limit = 50
-	}
+	// 2026-09-05 audit remediation pass 2: see ListDecisions.
 	rows, err := dm.SearchMemories(query, "theories", false, limit, 0)
 	if err != nil {
 		return nil, fmt.Errorf("query theories: %w", err)
