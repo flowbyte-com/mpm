@@ -29,6 +29,32 @@ const (
 	RecomputeReasonManual          RecomputeReason = "manual_recompute"
 )
 
+// addEvidenceInTx is the tx-aware primitive that AddEvidence wraps with
+// its own WithTx. Extracted so callers that already hold a transaction
+// (e.g. LogChangelogEntryWithConfirmations, which needs atomicity
+// across a changelog memory write and one or more confirmation
+// evidence rows) can reuse the same INSERT + recompute path without
+// opening a nested transaction.
+//
+// The id and expiresAt arguments are computed by AddEvidence before the
+// WithTx boundary; passing them in keeps the in-tx path a pure side-
+// effect with no derived-state computation, so any caller's tx stays
+// a single INSERT + recompute.
+func addEvidenceInTx(node DBNode, id string, in EvidenceInput, expiresAt *int64) error {
+	if _, err := node.ExecTracked(`
+		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
+		                     strength, independence_factor, created_by, created_at, expires_at, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
+		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes); err != nil {
+		return fmt.Errorf("insert evidence: %w", err)
+	}
+	if err := RecomputeConfidence(node, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded); err != nil {
+		return fmt.Errorf("recompute confidence: %w", err)
+	}
+	return nil
+}
+
 // EvidenceInput is the public shape for adding evidence. The DB wrapper
 // fills in the id and created_at if not provided.
 type EvidenceInput struct {
@@ -204,18 +230,7 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// remain if the process dies between the INSERT and the recompute, or if
 	// the recompute itself fails (e.g., CHECK constraint violation).
 	if err := dm.WithTx(func(node DBNode) error {
-		if _, err := node.ExecTracked(`
-			INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
-			                     strength, independence_factor, created_by, created_at, expires_at, notes)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
-			in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes); err != nil {
-			return fmt.Errorf("insert evidence: %w", err)
-		}
-		if err := RecomputeConfidence(node, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded); err != nil {
-			return fmt.Errorf("recompute confidence: %w", err)
-		}
-		return nil
+		return addEvidenceInTx(node, id, in, expiresAt)
 	}); err != nil {
 		return err
 	}
