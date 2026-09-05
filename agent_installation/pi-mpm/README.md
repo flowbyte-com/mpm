@@ -62,11 +62,28 @@ From mpm's README:
 > interface; `mpm call` and MCP are the agent-facing tool surfaces. All
 > map to the same `internal/core/tools` registry."
 
-Pi explicitly does not support MCP (`docs/usage.md` §303), so `mpm-mcp` is
-not an option. The next-best is `mpm call`, which is a plain
-`--payload '<json>'` subprocess. This extension is the smallest correct
-bridge: 14 Fat-RPC domain adapters (one per domain) plus 3 standalone
-adapters.
+Pi's upstream (`badlogic/pi-mono`) does not ship a native MCP client, so
+`mpm-mcp` is not directly addressable from a stock Pi install. There is a
+widely-used third-party bridge, **`pi-mcp-adapter`** (currently v2.32.1,
+published 2026-09-01, maintained by `nicobailon` outside the `badlogic`
+org, listed on `pi.dev` and seeing ~761K downloads/mo — install with
+`pi install npm:pi-mcp-adapter`), which exposes MCP servers to Pi through
+a single proxy tool. It is *not* what this extension uses: MPM's bundled
+Pi integration talks to the substrate through Pi's native extension API
+(`index.ts` registered tools + `before_agent_start` hook for wake-context
+injection) and the `AGENTS.md` managed block for the behavioral contract,
+not through MCP. A Pi user who prefers the MCP route can install
+`pi-mcp-adapter` and register `mpm-mcp` as a configured server, but the
+adapter surfaces `initialize.instructions` only on explicit proxy call —
+verified by interactive probe 2026-09-05 (`docs/onboarding-mcp-native-audit-2026-09-05.md`
+Part A): the model has to actively invoke `mcp({connect:"name"})` before
+`mcp({instructions:"name"})` returns the field, and there is a same-turn
+state-isolation quirk where the `instructions` shortcut reports "no
+instructions cached" even after a successful `connect` in the same turn.
+The `AGENTS.md` managed block installed by this extension remains the
+reliable onboarding path for Pi users, since auto-injection of MCP
+`instructions` into Pi's system prompt is not how the adapter is designed
+to work — and was not observed in probing.
 
 ## Why 21 tools (and not 77)
 
