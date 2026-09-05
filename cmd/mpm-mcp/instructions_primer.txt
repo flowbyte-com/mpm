@@ -1,0 +1,9 @@
+MPM behavioral contract loaded. If your host maintains a managed instruction file (CLAUDE.md / AGENTS.md / .hermes.md), read it for the full contract. Otherwise, minimally:
+
+- Wake on session start (via `mpm_context` action).
+- Persist during work, not only at the end (via `mpm_memory` action).
+- Skill discovery before reinventing (via `mpm_context` action).
+- Handoff before genuine session closure (via `mpm_handoff` action).
+- Session closure is not work completion (via `mpm_work` action).
+
+If MCP transport fails, fall back to `mpm call <tool> --payload '{"action":"<op>","params":{...}}'` -- same substrate, same provenance.

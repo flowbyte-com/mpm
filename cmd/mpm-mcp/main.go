@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"io"
 	"log"
@@ -38,6 +39,33 @@ import (
 	"github.com/flowbyte-com/mpm-core/logging"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
+
+// instructionsPrimer is the value mpm-mcp returns in the
+// `initialize.instructions` field. The file is generated from the
+// canonical managed block by
+// `agent_installation/scripts/render_managed_blocks.py --dump
+// instructions` and committed alongside this source so the embedding
+// is deterministic across builds (no path resolution at runtime).
+//
+// Drift detection is two-sided:
+//
+//   - `render_managed_blocks.py --check` byte-compares this file
+//     against the renderer's output and fails if the canonical block
+//     has drifted away from the embedded primer.
+//   - `instructions_primer_drift_test.go` invokes the renderer at Go
+//     test time and asserts the rendered string equals this constant;
+//     that catches the inverse drift (someone hand-edits this file
+//     and forgets to re-run the renderer).
+//
+// The primer is a fallback-aware pointer, not a restatement of the
+// managed block's contract: on hosts that auto-inject the field AND
+// also maintain a managed instruction file (Claude Code, OpenCode) it
+// is one short paragraph; on hosts that surface it via an explicit
+// call (Pi via pi-mcp-adapter) it is a minimal behavioural skeleton;
+// on hosts that ignore the field (Hermes) it is inert.
+//
+//go:embed instructions_primer.txt
+var instructionsPrimer string
 
 // router is initialised once at server boot — patterns and anti-patterns
 // from all mode/*.md and persona/*.md files are compiled to regex at that
@@ -158,36 +186,15 @@ func main() {
 	outputPolicy := tools.DefaultOutputPolicy()
 
 	s := server.NewMCPServer("mpm-mcp", "0.1.0",
-		// Defense-in-depth: a short protocol summary in the initialize
-		// response. Hosts that read the .instructions field (per the
-		// MCP spec wording "Optional instructions for the client")
-		// will surface it to the model as a behavioural primer.
-		//
-		// The full MPM behavioural contract lives in the host's
-		// managed instruction file (agent_installation/
-		// MPM_AGENT_INTEGRATION_SNIPPETS.md) because that delivery
-		// channel is portable and provably-reachable on every
-		// supported host. This instructions string is intentionally
-		// short — a primer, not a substitute — and it's free to
-		// include because no host is required to surface it.
-		//
-		// Per the onboarding-mcp-native audit
-		// (docs/onboarding-mcp-native-audit-2026-09-05.md Part A),
-		// at least Hermes ignores .instructions at the client side
-		// (verified at /home/v/.hermes/hermes-agent/tools/mcp_tool.py:
-		// only .capabilities is read from initialize_result); other
-		// hosts are unknown from source/docs. So this is additive /
-		// inert on every host we know about, and a small bonus if
-		// any future host does surface it.
-		server.WithInstructions(
-			"MPM behavioural primer — full contract lives in the host's MPM-managed instruction file if installed, otherwise in $HOME/.mpm/agent_installation/mpm-agent-protocol.md. "+
-				"Wake on session start: call mpm_context read_wake_context. "+
-				"Persist during work (not only at the end): use mpm_memory save, mpm_decisions record, mpm_lessons save, mpm_topics create, mpm_references add. "+
-				"Handoff before session closure (mpm_handoff write; summary is the only required field; mid-session acks like ok/thanks/ty/ack are NOT session-closing): "+
-				"do not write a handoff in response to a chat ack. "+
-				"Session closure does NOT auto-complete work items — call mpm_work action=complete with the work_id explicitly when work is done. "+
-				"If MCP transport fails, fall back to `mpm call <tool> --payload '{\"action\":\"<op>\",\"params\":{...}}'` — same substrate, same provenance.",
-		),
+		// Defense-in-depth: ship a short behavioural primer in the
+		// initialize response. Hosts that read .instructions will
+		// surface it to the model; hosts that don't (Hermes,
+		// confirmed by source inspection) treat it as inert. The
+		// primer text is embedded from instructions_primer.txt
+		// (see the top of this file for the drift-detection
+		// contract and the audit citation
+		// docs/onboarding-mcp-native-audit-2026-09-05.md Part A).
+		server.WithInstructions(instructionsPrimer),
 	)
 	RegisterAllTools(s, dm, ac, router, blobStore, outputPolicy)
 
