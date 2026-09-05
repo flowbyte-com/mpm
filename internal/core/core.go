@@ -172,6 +172,7 @@ type CoreDB interface {
 	// ─── Changelog ──────────────────────────────────────────────
 	LogChangelogEntry(fact, commitHash string, extraTags []string) (string, error)
 	LogChangelogEntryWithConfirmations(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec) (string, error)
+	LogChangelogEntryWithAssertions(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec, contradictions []ContradictionSpec) (string, error)
 
 	// ─── Cluster Proposals ───────────────────────────────────────────
 	ActiveClusters() (known, unknown []ClusterProposal, err error)
