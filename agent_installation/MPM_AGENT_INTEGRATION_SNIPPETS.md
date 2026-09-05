@@ -617,7 +617,7 @@ in this file's git log.
 
 Companion standalones (transport-namespace may differ per host):
 
-- `log_to_changelog` (`fact`, `commit_hash`, `tags`)
+- `log_to_changelog` (`fact`, `commit_hash`, `tags`, plus optional `confirms_lesson_id`/`confirms_decision_id`/`confirms_theory_id` and `contradicts_lesson_id`/`contradicts_decision_id`/`contradicts_theory_id` for explicit epistemic assertions — see `docs/epistemic-confirmation.md`)
 - `request_review` (`components`, `prompt`)
 
 # Maintenance
