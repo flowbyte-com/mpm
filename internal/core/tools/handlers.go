@@ -2679,6 +2679,22 @@ func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		force = v
 	}
 
+	// 2026-09-05 audit remediation pass 4 defect C.15 (P2): the
+	// registry schema declares `mode` with the canonical enum
+	// [form|refine] (the workshop action's vocabulary), but save did
+	// not read the field at all — passing `mode: "bogus"` to save was
+	// silently dropped. The schema enum is also not enough on its
+	// own (per the brief: "Do not rely solely on enum if the
+	// CLI/MCP handler can bypass schema validation"). Validate at the
+	// boundary so any caller typo fails loudly, regardless of which
+	// mpm_skills action the params are bound to.
+	if rawMode, present := p["mode"]; present {
+		mode, _ := rawMode.(string)
+		if mode != "" && mode != "form" && mode != "refine" {
+			return nil, fmt.Errorf("mode must be one of [form, refine], got %q", mode)
+		}
+	}
+
 	// Aggregate ALL hard validation errors into a single payload. The
 	// aggregate path returns success:false with an errors array; the
 	// success path is the normal success envelope.
