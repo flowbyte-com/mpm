@@ -5519,11 +5519,25 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				return nil, err
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "lesson")
+			// 2026-09-05 audit remediation pass 3 defect C.12 (P2):
+			// mpm://lesson/<id> CLI fallback hard-coded bounded:false
+			// regardless of content length vs max_bytes. Compute
+			// bounded from len(content) > maxBytes to match the work
+			// case at handlers.go:5563 and the MCP resolver path.
+			lessonContent := lesson.Content
+			lessonMaxB := int(maxBytes)
+			if lessonMaxB <= 0 {
+				lessonMaxB = 512
+			}
+			lessonBounded := len(lessonContent) > lessonMaxB
+			if lessonBounded {
+				lessonContent = lessonContent[:lessonMaxB]
+			}
 			return map[string]interface{}{
-				"content":      lesson.Content,
+				"content":      lessonContent,
 				"content_type": "text/plain",
 				"pointer":      "mpm://lesson/" + ptr.ID,
-				"bounded":      false,
+				"bounded":      lessonBounded,
 				"metadata": map[string]interface{}{
 					"id":   lesson.ID,
 					"type": string(lesson.Type),
@@ -5540,11 +5554,23 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			}
 			content, _ := mem["content"].(string)
 			_ = dm.RecordRetrieval(ptr.ID, "theory")
+			// 2026-09-05 audit remediation pass 3 defect C.12 (P2):
+			// mpm://theory/<id> CLI fallback hard-coded bounded:false.
+			// Compute bounded from len(content) > maxBytes to match
+			// the lesson/work/MCP-resolver paths.
+			theoryMaxB := int(maxBytes)
+			if theoryMaxB <= 0 {
+				theoryMaxB = 512
+			}
+			theoryBounded := len(content) > theoryMaxB
+			if theoryBounded {
+				content = content[:theoryMaxB]
+			}
 			return map[string]interface{}{
 				"content":      content,
 				"content_type": "text/plain",
 				"pointer":      "mpm://theory/" + ptr.ID,
-				"bounded":      false,
+				"bounded":      theoryBounded,
 				"metadata":     mem,
 			}, nil
 		case "work":
