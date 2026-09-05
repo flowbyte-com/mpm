@@ -830,6 +830,14 @@ func backfillEpistemologyTopics() {
 	}
 }
 
+// defaultDecisionsListLimit caps the rows printed by the no-args legacy
+// `mpm decisions` listing. Mirrors `mpm ls`'s default of 20 and the
+// `mpm decisions list/query` --limit=N parsing convention so the same
+// CLI flag has the same meaning across all three paths. Set --limit=0
+// to disable the cap (0 means "no cap" in decision_filter.Limit, the
+// existing convention used by mpm_decisions list).
+const defaultDecisionsListLimit = 20
+
 // handleDecisions displays the decision ledger with context, choice, and rationale for each entry.
 func handleDecisions(args []string) int {
 	dm := getDB()
@@ -840,7 +848,10 @@ func handleDecisions(args []string) int {
 	// Alpha-4 D-005 subcommands: show / list / query.
 	// `mpm decisions` (no args) keeps the legacy listing behavior for
 	// backward compatibility with operators' muscle memory.
-	if len(args) > 0 {
+	// Flags (e.g. --limit=N) are not subcommands, so they fall through
+	// to the legacy path instead of triggering the
+	// "Unknown subcommand" rejection.
+	if len(args) > 0 && !strings.HasPrefix(args[0], "--") {
 		switch args[0] {
 		case "show":
 			return handleDecisionsShow(dm, args[1:])
@@ -864,6 +875,25 @@ func handleDecisions(args []string) int {
 
 	if len(memories) == 0 {
 		return respond("", "No decisions recorded yet. Run `mpm record_decision` to log your first decision.\n", 0)
+	}
+
+	// Pointer-indirection sweep F-S-2 (docs/pointer-indirection-sweep-2026-09-05.md):
+	// cap the legacy no-args listing so output scales linearly with
+	// displayed rows, not with the user's accumulated decisions. This
+	// path was unbounded — today 139 rows × ~250 B = ~35 KB on the
+	// live host, growing linearly without bound. Mirror the
+	// --limit=N parsing used by handleDecisionsList / handleDecisionsQuery
+	// so the flag behaves identically across the three decision paths.
+	limit := defaultDecisionsListLimit
+	for _, a := range args {
+		if strings.HasPrefix(a, "--limit=") {
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil && n >= 0 {
+				limit = n
+			}
+		}
+	}
+	if limit > 0 && len(memories) > limit {
+		memories = memories[:limit]
 	}
 
 	for _, m := range memories {
