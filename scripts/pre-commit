@@ -122,6 +122,30 @@ fi
 rm -f /tmp/pre-commit-doc-gate.log
 echo "[pre-commit] threshold-table gate OK"
 
+echo "[pre-commit] running CLI-side-limits positive-presence gate..."
+# Sibling of the §6.4 threshold-table gate above: every CLI-limit
+# constant in cmd/mpm/ (named byte/char caps on input or output,
+# plus row-count defaults for --limit flags) must have a peer row
+# in the README §8 CLI-side-limits table. The two gates are kept
+# deliberately separate — §6.4 and §8 are distinct surfaces in the
+# README's own narrative, and conflating them in tooling would blur
+# a distinction the docs intentionally keep separate.
+#
+# Adding new CLI-limit constants requires updating this gate's
+# REQUIRED_CLI_LIMITS list in lock-step — the gate is the structural
+# enforcement, not a soft suggestion.
+if ! bash scripts/doc-gate-cli-limits.sh > /tmp/pre-commit-cli-gate.log 2>&1; then
+  echo "[pre-commit] ABORTING commit: README §8 CLI-side limits table is missing rows." >&2
+  echo "[pre-commit] Either add the missing row to README.md §8, or update" >&2
+  echo "[pre-commit] scripts/doc-gate-cli-limits.sh's REQUIRED_CLI_LIMITS" >&2
+  echo "[pre-commit] if the constant has been removed from source." >&2
+  cat /tmp/pre-commit-cli-gate.log >&2
+  rm -f /tmp/pre-commit-cli-gate.log
+  exit 1
+fi
+rm -f /tmp/pre-commit-cli-gate.log
+echo "[pre-commit] CLI-side-limits gate OK"
+
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
 # as a standalone Go module. The pre-commit gate now invokes the Makefile's
