@@ -1015,6 +1015,21 @@ A handful of CLI commands are intentionally **NOT** exposed via MCP/call because
 
 If an agent needs any of these, the operator should run it explicitly. Tool calls that could damage state are intentionally kept on the human-facing CLI where the cost of a misclick is bounded by the operator's attention.
 
+#### Output policy and pointer mechanics — the four layered thresholds
+
+MCP tool results pass through several size caps as they travel outward; the four numbers below are deliberate, not duplicates, and they operate at different stages. A reader of one file alone (e.g. only `output_policy.go`) would otherwise see one cap and not realize three others exist.
+
+| Threshold | Value (default) | Where it lives | What it bounds | Override |
+|---|---|---|---|---|
+| MCP transport spill boundary | 20 480 B | `internal/core/tools/output_policy.go` (was 10240; raised 2026-09-05) | Marshalled tool result returned via `mcpAdapter`. If larger, the result is spilled to blobstore and a `mpm://blob/<id>` pointer envelope is returned. | env `MPM_MCP_MAX_RESULT_BYTES` |
+| `BoundInlineContent` field echo | 2 048 B | `internal/core/output_limits.go:23` | Truncates an inline echo (e.g. `mpm_memory save` echoing the just-saved fact) and flags `content_truncated: true` so the caller can detect the cap. | not user-overridable |
+| Pointer resolver default | 512 B | `cmd/mpm-mcp/tools.go` (`resolveMemory`, `resolveLesson`, `resolveTheory`, `resolveWork`) | Default `maxBytes` for `mpm://memory/<id>`, `mpm://lesson/<id>`, `mpm://theory/<id>`, `mpm://work/<id>` resolution via `mpm_resolve`. Caller can request more via `opts.MaxBytes`. | caller-controlled per call |
+| `mpm_blob_read` server ceiling | 256 KiB | `internal/core/tools/handlers.go:handleMpmBlobRead` | Hard ceiling on explicit `max_bytes` requests; a caller asking beyond it has the request capped to serverMax. | not user-overridable |
+| CLI `memory search/list` text snippet | 500 chars | `cmd/mpm/handlers_memory.go:527, 677` | CLI text-mode snippet cap; only present on the CLI surface, not on the MCP response. | not user-overridable |
+| `mpm_lessons`/`mpm_memory` summary projection | 256 chars | `summarize.go:SummarizeBounded(content, 256)` | Hard rune-bounded `summary` field when `projection=summary` (the default). The `pointer` field returned alongside tells callers how to fetch full content. | `projection=full` opt-in |
+
+These are not in conflict — they are layered. A tool response above 20 KiB becomes a pointer envelope; the pointer then resolves bounded to 512 B by default; an explicit `mpm_blob_read` returns up to 256 KiB in one go (still gated by the 20 KiB envelope boundary at the response layer for MCP transport). The audit that motivated the latest changes (10 K → 20 K, lesson/theory pointer bounding) is at `docs/pointer-indirection-audit-2026-09-05.md`; the per-tool historical spill distribution that calibrated the 20 K value is in the same document's §Step 2.
+
 ### 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
 
 *Federates house rules across operators via a separate DB — five layers from local cache to global arbitration, no IPC invented.*
