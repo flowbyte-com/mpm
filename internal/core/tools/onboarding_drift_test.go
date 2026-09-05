@@ -10,6 +10,36 @@
 // and pin the new home with a drift test analogous to
 // render_managed_blocks.py --check." This file is that test.
 //
+// **Brittleness notice.** These tests are INTENTIONALLY brittle
+// against the exact prose and schema facts they pin. A failure here
+// is NOT automatically a bug to route around or work around — it
+// is a gate.
+//
+// On a failure, the contributor who triggered it must stop and
+// figure out which of two cases they are in:
+//
+//   (a) You changed an onboarding-relevant prose sentence or
+//       schema branch deliberately. This is fine — the model
+//       needs the constraint, you deliberately updated it.
+//       Update the test's pinned expectation to match your new
+//       wording (or schema shape). The change goes in the same
+//       commit; the test message names which fact drifted, so the
+//       diff makes the linkage obvious.
+//
+//   (b) You did not intend the change. This is a real regression
+//       against the audited contract; back out the prose/schema
+//       change before merging.
+//
+// Do NOT loosen the substring match (e.g. by widening the search,
+// removing the assertion, or marking the test skip) to make a
+// failure go away. Loosening the gate removes the gate; the audit
+// exists because this drift is otherwise invisible.
+//
+// If you genuinely believe the prose or schema should change AND
+// the underlying onboarding contract should change too, that is a
+// separate audit + migration — not a one-line loosening of these
+// tests.
+
 // The seven facts are:
 //
 //   1.  mpm_work complete   — schema: requires work_id
