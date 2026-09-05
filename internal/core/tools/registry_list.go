@@ -379,7 +379,8 @@ Optional commitments and open_questions are persisted and round-tripped: open_qu
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["write","read","list","shred"]}
+				"action": {"type": "string", "enum": ["write","read","list","shred"]},
+				"params": {"type": "object", "description": "Action-specific params envelope. Per-action shape is constrained by the oneOf branches below; the top-level declaration here exists so the schema accurately reflects what handleMpmHandoff reads (via extractParamsOrFail)."}
 			},
 			"required": ["action"],
 			"oneOf": [
