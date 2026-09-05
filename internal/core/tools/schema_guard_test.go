@@ -124,18 +124,13 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 		// into the passthrough. Skip over-decl check to avoid false
 		// positives on the passthrough pattern. Handlers that read
 		// nothing AND the schema has no properties are fine; the
-		// under-decl pass already covered that.
-		//
-		// LIMITATION (verified 2026-07-06): in the current codebase,
-		// all zero-read handlers also have empty schemas
-		// (read_wake_context, read_directives, check_wakes,
-		// list_active_clusters, query_memory_quality). If a future
-		// tool has a non-empty schema AND reads zero keys, the over-
-		// decl check WILL skip it and a real silent-drop bug could
-		// land. The audit at the time found no such case. If one
-		// appears, either: (a) make the handler read the keys
-		// explicitly, or (b) add a passthrough detector that
-		// recognizes `return dm.X(payload[, ...])` patterns.
+		// under-decl pass already covered that. After the 2026-09-05
+		// audit C.18 closure, every aggregator (mpm_system, mpm_work,
+		// mpm_handoff, etc.) declares per-action params via oneOf —
+		// the top-level props walk stays bounded to the aggregator's
+		// own reads (`action`, `params` via passthrough), and the
+		// per-action under-decl check is enforced separately by the
+		// per-tool regression tests (mpm_system_schema_branches_*, etc.).
 		if len(reads) == 0 {
 			continue
 		}

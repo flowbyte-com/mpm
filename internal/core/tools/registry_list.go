@@ -472,7 +472,159 @@ Per-action semantics:
 - gc_run: Lifecycle decay sweep. Optional params: dry_run (default true), aggressive, max_age_hours (default 24). gc_run is NOT for epistemic compaction — it decays stale/expired artifacts by age. Use "compact" instead when epistemic_pressure.exceeded is true.
 
 - compact: Drain eligible raw memories into lessons in sequential batches of at most 50 (the LLM context safeguard); each batch is independently synthesized, validated, and committed. force=false (default) RELIEVES pressure — the drain stops as soon as raw_count <= threshold and may leave eligible raw memories remaining. force=true DRAINS everything — the threshold gate is bypassed and the drain continues until the substrate is empty or the per-invocation cap is hit. force does NOT widen the 50-item per-batch limit. Optional params: force (default false), max_batches (default 20, hard cap 100, silently clamped) — per-invocation cap on LLM calls. Result envelope: success (false ONLY on mid-drain failure), batches_processed, raw_processed, lessons_created, raw_remaining, lesson_ids, stop_reason ("no_work" | "completed" | "threshold_reached" | "max_batches_reached" | "failure"), skipped_reason (set on no_work / threshold_reached only), and failed_batch + failure_reason on "failure". Inspect stop_reason (not success) to determine whether the substrate is fully drained.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},"params":{"type":"object","properties":{"force":{"type":"boolean","description":"compact: bypass the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold."},"max_batches":{"type":"number","description":"compact: per-invocation safety cap on LLM calls. Default 20, hard cap 100."},"limit":{"type":"number","description":"For critic_findings: max rows to return (default 50)."},"confirm":{"type":"boolean","description":"migrate: explicit acknowledgement that this bulk database write is intentional. Required, must be true. Migration is not a read operation; it stages rows in raw_memories, promotes them to memories, or rejects a staged batch via UPDATE. The handler refuses any other value (omitted, false, null, string \"true\", numeric 1) so an agent cannot autonomously trigger persistent state changes."},"from_path":{"type":"string","description":"migrate: path to a markdown or json file to stage."},"format":{"type":"string","description":"migrate: file format. 'auto' (default) infers from extension; 'markdown' or 'json' explicit."},"label":{"type":"string","description":"migrate: short batch label used in the generated batch_id."},"dry_run":{"type":"boolean","description":"migrate: do not commit or undo; only stage and report stats."},"commit":{"type":"boolean","description":"migrate: after staging, promote the batch to memories."},"commit_batch":{"type":"string","description":"migrate: promote a previously-staged batch by id."},"undo_batch":{"type":"string","description":"migrate: tombstone a previously-staged batch by id."}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},
+				"params": {"type": "object", "description": "Action-specific params envelope. Per-action shape is constrained by the oneOf branches below; the top-level declaration here exists so the schema accurately reflects what handleMpmSystem reads (via extractParamsOrFail)."}
+			},
+			"required": ["action"],
+			"oneOf": [
+				{
+					"properties": {
+						"action": {"const": "gc_run"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"dry_run":           {"type": "boolean", "default": true,  "description": "Lifecycle decay sweep. Optional. Default true (safe default — no destructive work)."},
+								"aggressive":        {"type": "boolean", "default": false, "description": "Enable aggressive pruning beyond the safe default. Optional."},
+								"max_age_hours":     {"type": "number",  "default": 24,    "description": "Max age (hours) for stale artifacts. Default 24."},
+								"stale_theory_days": {"type": "number",  "default": 30,    "description": "Age threshold (days) past which theories are flagged stale. Default 30; values <0 are clamped to 0."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "compact"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"force":       {"type": "boolean", "default": false, "description": "Bypass the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold. force does NOT widen the 50-item per-batch limit."},
+								"max_batches": {"type": "number",  "default": 20,    "description": "Per-invocation safety cap on LLM calls. Default 20, hard cap 100, silently clamped."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "health_check"},
+						"params": {"type": "object", "properties": {}, "additionalProperties": false}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "migrate"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"confirm":      {"type": "boolean", "description": "Required explicit acknowledgement that this bulk database write is intentional. Must be the boolean literal true. Migration is not a read operation; it stages rows in raw_memories, promotes them to memories, or rejects a staged batch via UPDATE. The handler refuses any other value (omitted, false, null, string \"true\", numeric 1) so an agent cannot autonomously trigger persistent state changes."},
+								"from_path":    {"type": "string",  "description": "Path to a markdown or json file to stage. Required unless commit_batch or undo_batch is supplied."},
+								"format":       {"type": "string",  "description": "File format. 'auto' (default) infers from extension; 'markdown' or 'json' explicit."},
+								"label":        {"type": "string",  "description": "Short batch label used in the generated batch_id."},
+								"dry_run":      {"type": "boolean", "description": "Do not commit or undo; only stage and report stats."},
+								"commit":       {"type": "boolean", "description": "After staging, promote the batch to memories."},
+								"commit_batch": {"type": "string",  "description": "Promote a previously-staged batch by id. Mutually exclusive with from_path / undo_batch."},
+								"undo_batch":   {"type": "string",  "description": "Tombstone a previously-staged batch by id. Mutually exclusive with from_path / commit_batch."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params", "confirm"]
+				},
+				{
+					"properties": {
+						"action": {"const": "query_audit_log"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"level":         {"type": "string",  "description": "Audit level filter. Lowercase canonical values: debug/info/warn/error. Other values return 0 hits."},
+								"component":     {"type": "string",  "description": "Filter by audit component name."},
+								"artifact_id":   {"type": "string",  "description": "Filter by artifact id (memory/decision/theory/lesson/work)."},
+								"days":          {"type": "number",  "default": 7, "description": "Lookback window in days. Ignored when 'since' is supplied. Default 7."},
+								"since":         {"type": "number",  "description": "Absolute epoch-seconds cutoff. Wins over 'days' when both are present. Future values clamp to 1 day."},
+								"limit":         {"type": "number",  "default": 20, "description": "Max rows to return. Default 20."},
+								"include_stack": {"type": "boolean", "default": false, "description": "Include the audit stack trace when available. Default false."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "list_clusters"},
+						"params": {"type": "object", "properties": {}, "additionalProperties": false}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "snooze_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key":  {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"snooze_until": {"type": "string", "description": "Reactivation cutoff. ISO 8601 absolute ('2026-07-12T12:00:00Z') OR Go duration ('24h', '7d', '1h30m'). Required."},
+								"reason":       {"type": "string", "description": "Audit-friendly note. Optional."}
+							},
+							"required": ["cluster_key", "snooze_until"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "resolve_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"reason":      {"type": "string", "description": "Audit-friendly note explaining root cause. Optional."}
+							},
+							"required": ["cluster_key"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "annotate_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key (from list_clusters or remembered historical key for resolved clusters). Required."},
+								"annotation":  {"type": "string", "description": "Substantive insight text appended to the audit trail verbatim. Required."},
+								"reason":      {"type": "string", "description": "Short label (e.g. 'post-mortem', 'week-later-refinement'). Optional."}
+							},
+							"required": ["cluster_key", "annotation"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "critic_findings"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"limit": {"type": "number", "default": 50, "description": "Max rows to return. Default 50."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				}
+			]
+		}`),
 		Handler: handleMpmSystem,
 	},
 	{
