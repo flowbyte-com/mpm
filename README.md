@@ -677,13 +677,17 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > on every graphical login (post-decrypt). `scripts/install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
 > autostart entry automatically; `scripts/install.sh --uninstall` removes it.
-> Lesson `071911bc` is stamped into the `.desktop` Comment= line as the lesson ID
-> for the autostart mechanism. Lesson `24be03ec71a5981f` is the substrate
-> memory that frames the daemon-stays-dead-at-boot behaviour as a designed
-> "Lazy-Start Architecture" (memory `463fb2c8014fc1f1`, currently flagged
-> for manual review — the challenge queue's `unresolved state collision
-> (cosine=0.88)` is a stale-detection flag, not a substantive dispute of
-> the lesson's content). **Both IDs are cited because the substrate
+> The `.desktop` Comment= line carries the string `071911bc`. It is not a lesson
+> ID: it resolves to no row in any substrate table and to no git object in this
+> repository, and its origin is unknown. The autostart mechanism was introduced
+> by commit `14ac32b`. Separately, the substrate memory that frames the
+> daemon-stays-dead-at-boot behaviour as a designed "Lazy-Start Architecture" is
+> `463fb2c8014fc1f1`, which carries forward the reasoning from an earlier,
+> no-longer-retrievable reference `24be03ec71a5981f` — that reference is not
+> independently queryable, so query the memory ID, not the reference.
+> `463fb2c8014fc1f1` is currently flagged for manual review — the challenge
+> queue's `unresolved state collision (cosine=0.88)` is a stale-detection flag,
+> not a substantive dispute of its content. **Both are cited because the substrate
 > does not articulate how the two mechanisms relate; the relationship
 > between the wake-layer design and the autostart-layer workaround is
 > unresolved in the cited material.**
