@@ -304,6 +304,7 @@ type RetrievedEntryMetadata struct {
 type ProjectedMemoryEntry struct {
 	ID                 string                  `json:"id"`
 	Summary            string                  `json:"summary"`          // first 256 chars via SummarizeMemory
+	SummaryTruncated   bool                    `json:"summary_truncated"` // true when the 256-char bound cut content; pointer is the full-retrieval path
 	Pointer            string                  `json:"pointer"`          // "mpm://memory/<id>"
 	Type               string                  `json:"type"`             // always "memory"
 	Tags               []string                `json:"tags,omitempty"`
@@ -327,6 +328,7 @@ type ProjectedMemoryEntry struct {
 type ProjectedLessonEntry struct {
 	ID                 string                  `json:"id"`
 	Summary            string                  `json:"summary"`    // full (lessons are compact)
+	SummaryTruncated   bool                    `json:"summary_truncated"` // true when projection=summary cut the underlying content to 256 chars
 	Pointer            string                  `json:"pointer"`   // "mpm://lesson/<id>"
 	Type               string                  `json:"type"`      // warning/practice/insight
 	Tags               []string                `json:"tags,omitempty"`
@@ -554,7 +556,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			reinf, _ := coerceInt(mem["reinforcement_count"])
 			weight, _ := coerceFloat64(mem["weight"])
 
-			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
+			summary, summaryTruncated := internal.SummarizeMemoryWithEllipsis(content, 256)
 
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
@@ -578,6 +580,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			projected = append(projected, ProjectedMemoryEntry{
 				ID:                  id,
 				Summary:             summary,
+				SummaryTruncated:    summaryTruncated,
 				Pointer:             "mpm://memory/" + id,
 				Type:                "memory",
 				Tags:                tags,
@@ -1441,7 +1444,7 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			tags, _ := item["tags"].([]string)
 			created, _ := item["created_at"].(string)
 
-			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
+			summary, summaryTruncated := internal.SummarizeMemoryWithEllipsis(content, 256)
 
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
@@ -1467,6 +1470,7 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			projected = append(projected, ProjectedLessonEntry{
 				ID:                 id,
 				Summary:            summary,
+				SummaryTruncated:   summaryTruncated,
 				Pointer:            "mpm://lesson/" + id,
 				Type:               lessonType,
 				Tags:               tags,
@@ -1520,7 +1524,7 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 			tags, _ := item["tags"].([]string)
 			created, _ := item["created_at"].(string)
 
-			summary, _ := internal.SummarizeMemoryWithEllipsis(content, 256)
+			summary, summaryTruncated := internal.SummarizeMemoryWithEllipsis(content, 256)
 
 			var retMeta *RetrievedEntryMetadata
 			if dm != nil {
@@ -1546,6 +1550,7 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 			projected = append(projected, ProjectedLessonEntry{
 				ID:                 id,
 				Summary:            summary,
+				SummaryTruncated:   summaryTruncated,
 				Pointer:            "mpm://lesson/" + id,
 				Type:               lessonType,
 				Tags:               tags,
