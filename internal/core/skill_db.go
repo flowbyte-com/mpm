@@ -652,12 +652,23 @@ func (dm *DatabaseManager) PromoteSkillToGlobal(skillID string, confirm bool) er
 //
 // The collection='skills' guard mirrors PromoteSkillToGlobal: this
 // surface shouldn't be able to delete a non-skill row by accident.
+//
+// 2026-09-05 audit remediation residual pass §I-C.9: a zero-rows
+// affected outcome is no longer a silent success. Whether the row
+// never existed or was already soft-deleted, the caller cannot
+// distinguish "I deleted a live skill" from "I asked about an id
+// that has no live row". Return ErrSkillNotFound so the handler
+// boundary can surface a deterministic not-found; the previous
+// "false success" silenced that signal. Already-soft-deleted
+// ids are tracked by the deleted_at column and remain recoverable
+// for forensics — the caller simply learns there is nothing to
+// delete at this id.
 func (dm *DatabaseManager) ShredSkill(skillID string) error {
 	db := dm.SQLDB()
 	if db == nil {
 		return fmt.Errorf("db not initialized")
 	}
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE memories
 		SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL
@@ -665,8 +676,22 @@ func (dm *DatabaseManager) ShredSkill(skillID string) error {
 	if err != nil {
 		return fmt.Errorf("shred skill: %w", err)
 	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("shred skill rows: %w", err)
+	}
+	if affected == 0 {
+		return ErrSkillNotFound
+	}
 	return nil
 }
+
+// ErrSkillNotFound is returned by ShredSkill when the requested
+// skill id does not match a live (not soft-deleted) skill row.
+// Both "never existed" and "already soft-deleted" produce this
+// error — the caller's intent is "delete a live skill" and there
+// is none to delete at this id.
+var ErrSkillNotFound = fmt.Errorf("skill: not found")
 
 // parseJSONTags and parseJSONMeta are thin wrappers around encoding/json
 // that handle empty/nil inputs gracefully. Shared across the skill read
