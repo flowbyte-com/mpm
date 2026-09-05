@@ -61,9 +61,56 @@ func TestProjection_MemoryQuery_DefaultsToSummary(t *testing.T) {
 	if !strings.Contains(summary, truncationSuffix) {
 		t.Errorf("summary %q must end with %q", summary, truncationSuffix)
 	}
+	// Truncation flag must be a structured JSON boolean — JSON
+	// consumers must not be required to pattern-match the suffix.
+	trunc, ok := wire.Memories[0]["summary_truncated"].(bool)
+	if !ok {
+		t.Errorf("summary_truncated must be a JSON bool; got %T (%v)",
+			wire.Memories[0]["summary_truncated"], wire.Memories[0]["summary_truncated"])
+	}
+	if !trunc {
+		t.Errorf("seed memory was 4096 B (over 256-char summary bound); summary_truncated must be true")
+	}
 	ptr, _ := wire.Memories[0]["pointer"].(string)
 	if !strings.HasPrefix(ptr, "mpm://memory/") {
 		t.Errorf("summary mode must carry pointer, got %v", ptr)
+	}
+}
+
+// TestProjection_MemoryQuery_ShortMemory_NoTruncationFlag pins the
+// inverse: when the memory fits inside the 256-char summary bound, the
+// structured summary_truncated field must be present and false, not
+// omitted. JSON consumers should not have to distinguish "absent" from
+// "false" — the field is part of the schema, not a fallback.
+func TestProjection_MemoryQuery_ShortMemory_NoTruncationFlag(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	seedBigMemory(t, dm, "short fact", "proj-short")
+
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action":  "query",
+		"params": map[string]interface{}{"query": "proj-short", "limit": float64(1)},
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	raw := mustMarshalJSON(res)
+	var wire struct {
+		Mode     string                   `json:"mode"`
+		Memories []map[string]interface{} `json:"memories"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(wire.Memories) != 1 {
+		t.Fatalf("want 1 memory, got %d", len(wire.Memories))
+	}
+	if _, has := wire.Memories[0]["summary_truncated"]; !has {
+		t.Fatalf("summary_truncated field must always be present (was missing on a 10-byte memory)")
+	}
+	trunc, _ := wire.Memories[0]["summary_truncated"].(bool)
+	if trunc {
+		t.Errorf("seed memory was 'short fact' (10 B, under 256-char bound); summary_truncated must be false")
 	}
 }
 
