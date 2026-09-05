@@ -79,6 +79,30 @@ is built on. Violations will be rejected in review even when the code
 - **Foreign keys are on.** Always. Both the local DB and the shared
   DB. Foreign keys off is a bug.
 
+## Tool / action surface design
+
+Before adding or modifying a tool/action entry in
+`internal/core/tools/registry_list.go` (or any handler in
+`internal/core/tools/handlers.go` / `internal/core/tools/work_handlers.go`),
+read **[`docs/tool-behavioral-contract.md`](tool-behavioral-contract.md)**.
+It codifies the project-wide rules for not-found semantics (per-verb
+class, not per-tool), id-parameter naming (canonical `<resource>_id` +
+optional D-8.1 `id` alias), silent coercion vs explicit error (no
+silent coercion of malformed input), and idempotency (declare the
+class explicitly). Adding a tool without consulting it is how
+inconsistencies like C.9 / C.15 / C.20 of the 2026-09-05 audit
+(
+[`docs/full-tool-behavioural-audit-2026-09-05.md`](full-tool-behavioural-audit-2026-09-05.md)
+) crept in — one per-tool decision that should have been a project-wide
+policy. The contract document is the canonical answer.
+
+If your new action appears to need behaviour that doesn't fit the
+documented rules, **update the contract document first** and then
+write the action — do not silently diverge from the project-wide
+policy. New-tool authors must also add a `assertParityForTool` lock in
+`internal/core/tools/registry_dispatcher_parity_test.go` so future
+registry/dispatcher drift is caught.
+
 ## Testing
 
 - Full suite:
@@ -193,4 +217,4 @@ the full text.
 
 ---
 
-_Last updated: 2026-08-09, for the `mpm-alpha` release._
+_Last updated: 2026-09-05, post-2026-09-05 audit + tool-behavioral-contract map._
