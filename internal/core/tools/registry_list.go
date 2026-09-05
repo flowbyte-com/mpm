@@ -261,8 +261,8 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 	},
 	{
 		Name: "mpm_context",
-		Description: `Agent session state, mode routing, and directive management.
-Use when: you need to understand the current agent mode/persona; you want to trigger a mode or persona switch based on task context; you need to read active behavioral directives governing the current session; you want to query the proactive recall hint for conversation-relevant memories.
+		Description: `Agent session state, mode routing, and directive management. The action=read_wake_context is the canonical wake-up hook (call on session start); the wake payload carries a bounded <available_skills> catalogue (a subset of mpm_skills list{scope:"all"}) and supports projection="compact" for a small id+summary envelope (the full WakeContextData is the default).
+Use when: you need to wake up at session start; understand the current agent mode/persona; trigger a mode or persona switch; read active behavioral directives governing the current session; query proactive recall for conversation-relevant memories.
 Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
@@ -374,8 +374,76 @@ Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule)
 		Name: "mpm_handoff",
 		Description: `Inter-session communication: write, read, and audit handoff records.
 Use when: you are ending a session and need to leave a summary for the next session to pick up. The handoff record is the bridge between two distinct agent shifts — it carries the session summary, not the work itself.
+CRITICAL: the write action requires a non-empty summary. Mid-session acknowledgements (ok/thanks/ty/ack) are NOT session-closing events — do not write a handoff in response to a chat ack; only do so at genuine session closure.
 Optional commitments and open_questions are persisted and round-tripped: open_questions surface in the next session's wake context. Keep them short — the handoff is a bridge, not a work log (use mpm_work for tasks, mpm_theories for testable questions).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["write","read","list","shred"]},"params":{"type":"object","properties":{"session_id":{"type":"string"},"summary":{"type":"string"},"state":{"type":"string","enum":["clean","crashed","interrupted","force_end"]},"commitments":{"type":"array","items":{"type":"string"}},"open_questions":{"type":"array","items":{"type":"string"}},"unread":{"type":"boolean"},"mark_read":{"type":"boolean"},"limit":{"type":"number"},"handoff_id":{"type":"string"},"confirm":{"type":"boolean"}},"additionalProperties":false}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["write","read","list","shred"]}
+			},
+			"required": ["action"],
+			"oneOf": [
+				{
+					"properties": {
+						"action": {"const": "write"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"summary":       {"type": "string", "minLength": 1},
+								"session_id":    {"type": "string"},
+								"state":         {"type": "string", "enum": ["clean","crashed","interrupted","force_end"]},
+								"commitments":   {"type": "array", "items": {"type": "string"}},
+								"open_questions":{"type": "array", "items": {"type": "string"}}
+							},
+							"required": ["summary"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "read"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"session_id": {"type": "string"},
+								"limit":      {"type": "number"}
+							},
+							"additionalProperties": true
+						}
+					}
+				},
+				{
+					"properties": {
+						"action": {"const": "list"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"unread":     {"type": "boolean"},
+								"limit":      {"type": "number"}
+							},
+							"additionalProperties": true
+						}
+					}
+				},
+				{
+					"properties": {
+						"action": {"const": "shred"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"handoff_id": {"type": "string"},
+								"confirm":    {"type": "boolean"}
+							},
+							"required": ["handoff_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				}
+			]
+		}`),
 		Handler: handleMpmHandoff,
 	},
 
@@ -463,8 +531,149 @@ For indexed search across all memories, use mpm_memory query.`,
 		Description: `Named work items with an immutable event ledger: create, complete, cancel, or track history.
 Use when: you have made a commitment to do something that will span multiple sessions; you need to track a task's progress over time; you want to record a note or completion evidence against a specific piece of work.
 The event ledger (history) provides full provenance: who created it, when it was completed, what evidence was attached. A work item is never truly "done" until Git evidence is attached via the complete action.
+CRITICAL: the complete action requires work_id. Host session termination does NOT auto-complete a work item — the agent decides when work is done and calls action=complete explicitly.
 Do not use when: you just want to store a fact or insight (mpm_memory save).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["create","list","show","update","complete","cancel","history","note","reopen","resolve_contradiction"]},"params":{"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"session_id":{"type":"string"},"work_id":{"type":"string"},"status":{"type":"string","enum":["open","done","cancelled"]},"note":{"type":"string"}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["create","list","show","update","complete","cancel","history","note","reopen","resolve_contradiction"]}
+			},
+			"required": ["action"],
+			"oneOf": [
+				{
+					"properties": {
+						"action": {"const": "create"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"title":      {"type": "string"},
+								"content":    {"type": "string"},
+								"session_id": {"type": "string"}
+							},
+							"required": ["title"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "list"}
+					}
+				},
+				{
+					"properties": {
+						"action": {"const": "show"},
+						"params": {
+							"type": "object",
+							"properties": {"work_id": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "update"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"work_id":    {"type": "string"},
+								"title":       {"type": "string"},
+								"content":     {"type": "string"},
+								"status":      {"type": "string", "enum": ["open","done","cancelled"]}
+							},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "complete"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"work_id":    {"type": "string"},
+								"title":       {"type": "string"},
+								"content":     {"type": "string"},
+								"session_id":  {"type": "string"},
+								"note":        {"type": "string"}
+							},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "cancel"},
+						"params": {
+							"type": "object",
+							"properties": {"work_id": {"type": "string"}, "note": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "history"},
+						"params": {
+							"type": "object",
+							"properties": {"work_id": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "note"},
+						"params": {
+							"type": "object",
+							"properties": {"work_id": {"type": "string"}, "note": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "reopen"},
+						"params": {
+							"type": "object",
+							"properties": {"work_id": {"type": "string"}, "note": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "resolve_contradiction"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"work_id":       {"type": "string"},
+								"winner_id":      {"type": "string"},
+								"winner_outcome": {"type": "string", "enum": ["open","done","cancelled"]}
+							},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				}
+			]
+		}`),
 		Handler: handleMpmWork,
 	},
 }
