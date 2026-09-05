@@ -4895,10 +4895,15 @@ func handleShowTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 // pass status="all" explicitly.
 func handleListTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	status, _ := p["status"].(string)
-	limitF, _ := p["limit"].(float64)
+	// 2026-09-05 audit remediation pass 2: explicit limit validation
+	// (omitted → 50, 0 → 0, negative → error, non-integer → error).
+	limit, err := parseLimitStrict(p["limit"], 50)
+	if err != nil {
+		return nil, fmt.Errorf("list theories: %w", err)
+	}
 	filter := mpminternal.TheoryFilter{
 		Status: status,
-		Limit:  int(limitF),
+		Limit:  limit,
 	}
 	if tagsAny, ok := p["tags"].([]interface{}); ok {
 		for _, t := range tagsAny {
@@ -4930,8 +4935,12 @@ func handleQueryTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if query == "" {
 		return nil, fmt.Errorf("query theories: query is required")
 	}
-	limitF, _ := p["limit"].(float64)
-	rows, err := dm.QueryTheories(query, int(limitF))
+	// 2026-09-05 audit remediation pass 2: see handleListTheories.
+	limit, err := parseLimitStrict(p["limit"], 50)
+	if err != nil {
+		return nil, fmt.Errorf("query theories: %w", err)
+	}
+	rows, err := dm.QueryTheories(query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query theories: %w", err)
 	}
@@ -5016,10 +5025,18 @@ func handleShowDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 // optional tag filter.
 func handleListDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	status, _ := p["status"].(string)
-	limitF, _ := p["limit"].(float64)
+	// 2026-09-05 audit remediation pass 2: explicit limit validation.
+	// The previous shape silently coerced limit <= 0 to 50 inside the
+	// DM, which made limit=0 indistinguishable from limit-omitted.
+	// parseLimitStrict enforces: omitted → 50, 0 → 0, negative →
+	// error, non-integer → error.
+	limit, err := parseLimitStrict(p["limit"], 50)
+	if err != nil {
+		return nil, fmt.Errorf("list decisions: %w", err)
+	}
 	filter := mpminternal.DecisionFilter{
 		Status: status,
-		Limit:  int(limitF),
+		Limit:  limit,
 	}
 	if tagsAny, ok := p["tags"].([]interface{}); ok {
 		for _, t := range tagsAny {
@@ -5051,8 +5068,12 @@ func handleQueryDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	if query == "" {
 		return nil, fmt.Errorf("query decisions: query is required")
 	}
-	limitF, _ := p["limit"].(float64)
-	rows, err := dm.QueryDecisions(query, int(limitF))
+	// 2026-09-05 audit remediation pass 2: see handleListDecisions.
+	limit, err := parseLimitStrict(p["limit"], 50)
+	if err != nil {
+		return nil, fmt.Errorf("query decisions: %w", err)
+	}
+	rows, err := dm.QueryDecisions(query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query decisions: %w", err)
 	}
