@@ -119,6 +119,126 @@ func validateSkillStepShape(fm SkillFrontmatter) []string {
 	return out
 }
 
+// skillSemverRow carries the (id, version) pair used by the
+// semver-max helpers below. Centralises the projection so callers
+// share one row shape.
+type skillSemverRow struct {
+	id      string
+	version string
+}
+
+// highestSemver returns the row with the highest semantic version in
+// rows, using golang.org/x/mod/semver.Compare with v-prefixed strings
+// (per the SaveSkill convention). An empty input returns an empty
+// row.
+//
+// The skill ids are `skill:<name>-v<semver>`. ORDER BY id DESC was
+// the previous proxy for "highest semver" — it works for equal-width
+// semver (e.g. 1.0.0, 2.0.0, 10.0.0) because id strings sort in the
+// same order, but breaks for unequal-width semver: id-sorts
+// v1.9.0 > v1.10.0 because '9' > '1' at the version digit, while
+// semver-correctly v1.10.0 > v1.9.0. This helper replaces the id
+// proxy with proper semver comparison, which is the authoritative
+// "highest semantic version" contract.
+//
+// Legacy NULL-version rows: rows where the version field is empty
+// (pre-metadata-version-mirror rows) sort BELOW every versioned
+// row, breaking ties via id DESC. This preserves the historical
+// "newest-inserted wins when no version is recorded" behaviour
+// for the read path while still making the authoritative semver
+// comparison the primary sort key.
+func highestSemver(rows []skillSemverRow) skillSemverRow {
+	var max skillSemverRow
+	for _, r := range rows {
+		if max.id == "" {
+			max = r
+			continue
+		}
+		cmp := semver.Compare("v"+r.version, "v"+max.version)
+		switch {
+		case cmp > 0:
+			max = r
+		case cmp == 0 && r.id > max.id:
+			// Tiebreaker for equal semver (or both empty): prefer
+			// the lexically-larger id (newest inserted).
+			max = r
+		}
+	}
+	return max
+}
+
+// loadActiveSkillRows loads the (id, version) pair of every live
+// skill row whose id starts with `skill:<name>-v` AND is not the
+// excluded id. Used by SaveSkill (new-row + force-overwrite) and
+// ReadSkill's name fallback to compute the semver max without
+// relying on the broken id DESC proxy.
+//
+// excludeID is the id to skip (typically the incoming id in save
+// paths; pass "" for the read path to load every live row).
+//
+// NULL-version rows (legacy rows that pre-date the metadata.version
+// mirror) are returned with an empty version string; highestSemver
+// handles them by sorting them below every versioned row, breaking
+// ties with id DESC. This preserves the historical "newest-inserted
+// wins when no version is recorded" behaviour for legacy rows while
+// making the authoritative semver comparison the primary sort key.
+func loadActiveSkillRows(db *sql.DB, name, excludeID string) ([]skillSemverRow, error) {
+	prefix := "skill:" + name + "-v"
+	rows, err := db.Query(`
+		SELECT id, COALESCE(json_extract(metadata, '$.version'), '')
+		FROM memories
+		WHERE collection = 'skills' AND deleted_at IS NULL
+		  AND substr(id, 1, length(?)) = ?
+		  AND id != ?
+	`, prefix, prefix, excludeID)
+	if err != nil {
+		return nil, fmt.Errorf("query active skill rows for %s: %w", name, err)
+	}
+	defer rows.Close()
+	var out []skillSemverRow
+	for rows.Next() {
+		var r skillSemverRow
+		if err := rows.Scan(&r.id, &r.version); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate: %w", err)
+	}
+	return out, nil
+}
+
+// loadActiveSkillRowsTx is the transaction-scoped variant for the
+// SaveSkill new-row path. Same shape as loadActiveSkillRows but uses
+// the transaction's Query to keep the read inside the tx.
+func loadActiveSkillRowsTx(tx *sql.Tx, name, excludeID string) ([]skillSemverRow, error) {
+	prefix := "skill:" + name + "-v"
+	rows, err := tx.Query(`
+		SELECT id, COALESCE(json_extract(metadata, '$.version'), '')
+		FROM memories
+		WHERE collection = 'skills' AND deleted_at IS NULL
+		  AND substr(id, 1, length(?)) = ?
+		  AND id != ?
+	`, prefix, prefix, excludeID)
+	if err != nil {
+		return nil, fmt.Errorf("query active skill rows for %s: %w", name, err)
+	}
+	defer rows.Close()
+	var out []skillSemverRow
+	for rows.Next() {
+		var r skillSemverRow
+		if err := rows.Scan(&r.id, &r.version); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate: %w", err)
+	}
+	return out, nil
+}
+
 // ReadSkill fetches a skill by id (exact) or name (latest version).
 // version is ignored when name is given; pass exact id (skill:<name>-v<ver>)
 // to bypass version resolution.
@@ -148,18 +268,32 @@ func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 	err := row.Scan(&id, &collection, &content, &tagsJSON, &metaJSON,
 		&isGlobal, &isPrime, &weight, &createdAt, &deletedAt)
 	if err == sql.ErrNoRows {
-		// Fall back to name lookup: find the highest-versioned row.
-		row = db.QueryRow(`
-			SELECT id, collection, content, tags, metadata, is_global, is_prime_directive,
-			       weight, created_at, deleted_at
-			FROM memories
-			WHERE collection = 'skills' AND deleted_at IS NULL
-			  AND id LIKE ('skill:' || ? || '-v%')
-			ORDER BY id DESC
-			LIMIT 1
-		`, nameOrID)
-		err = row.Scan(&id, &collection, &content, &tagsJSON, &metaJSON,
-			&isGlobal, &isPrime, &weight, &createdAt, &deletedAt)
+		// Fall back to name lookup: find the semver-max row. The
+		// previous shape used ORDER BY id DESC LIMIT 1 as a proxy
+		// for "highest semver" — equal-width semver sorts in the
+		// same order, but unequal-width semver breaks the proxy
+		// (e.g. id-sort puts v1.9.0 above v1.10.0 because '9' > '1').
+		// Load the candidates and pick the semver max in Go so the
+		// name-latest lookup matches the `is_latest = highest
+		// semantic version` invariant.
+		rows, qerr := loadActiveSkillRows(db, nameOrID, "")
+		if qerr != nil {
+			return nil, qerr
+		}
+		max := highestSemver(rows)
+		if max.id == "" {
+			err = sql.ErrNoRows
+		} else {
+			row = db.QueryRow(`
+				SELECT id, collection, content, tags, metadata, is_global, is_prime_directive,
+				       weight, created_at, deleted_at
+				FROM memories
+				WHERE id = ? AND deleted_at IS NULL
+				LIMIT 1
+			`, max.id)
+			err = row.Scan(&id, &collection, &content, &tagsJSON, &metaJSON,
+				&isGlobal, &isPrime, &weight, &createdAt, &deletedAt)
+		}
 	}
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("skill %q not found", nameOrID)
@@ -265,19 +399,34 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 		return nil, fmt.Errorf("rows: %w", err)
 	}
 
-	// Deduplicate by name, keeping the highest version (lexicographic
-	// order on the id string is sufficient because semver sorts when
-	// equal-width, e.g. 1.0.0 < 2.0.0 < 10.0.0).
-	// Future-proofing note: if a future version uses unequal width, fix the parser, not the sort.
-	byName := make(map[string]parsedRow)
+	// Deduplicate by name, keeping the semver-max version. The
+	// previous shape used lexicographic id sort as a proxy for
+	// "highest semver" — equal-width semver sorts in the same
+	// order, but unequal-width semver breaks the proxy (e.g.
+	// id-sort puts v1.9.0 above v1.10.0 because '9' > '1'). Group
+	// by name, then pick the semver max in Go so the returned
+	// SkillSummary represents the actual semver-max row.
+	byName := make(map[string][]parsedRow)
 	for _, r := range all {
-		cur, ok := byName[r.name]
-		if !ok || r.id > cur.id {
-			byName[r.name] = r
+		byName[r.name] = append(byName[r.name], r)
+	}
+	merged := make(map[string]parsedRow, len(byName))
+	for name, group := range byName {
+		var candidates []skillSemverRow
+		for _, r := range group {
+			candidates = append(candidates, skillSemverRow{id: r.id, version: r.version})
+		}
+		max := highestSemver(candidates)
+		// Look up the parsedRow corresponding to the semver max.
+		for _, r := range group {
+			if r.id == max.id {
+				merged[name] = r
+				break
+			}
 		}
 	}
-	out := make([]SkillSummary, 0, len(byName))
-	for _, r := range byName {
+	out := make([]SkillSummary, 0, len(merged))
+	for _, r := range merged {
 		out = append(out, SkillSummary{
 			ID: r.id, Name: r.name, Version: r.version,
 			WhenToUse: r.whenToUse, IsGlobal: r.isGlobal, Weight: r.weight,
@@ -419,39 +568,28 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		// filtered on `deleted_at IS NULL`, which silently no-op'd the
 		// UPDATE and left the tombstone in place — the live row would
 		// not exist after save-after-delete.
-		prefix := "skill:" + name + "-v"
-		var (
-			otherID      string
-			otherVersion string
-		)
-		err = db.QueryRow(`
-			SELECT id, json_extract(metadata, '$.version')
-			FROM memories
-			WHERE collection = 'skills' AND deleted_at IS NULL
-			  AND substr(id, 1, length(?)) = ?
-			  AND id != ?
-			ORDER BY id DESC
-			LIMIT 1
-		`, prefix, prefix, id).Scan(&otherID, &otherVersion)
+		// Load all OTHER live rows for this name and find the semver
+		// max via highestSemver. The previous shape used
+		// `ORDER BY id DESC LIMIT 1` as a proxy for highest semver,
+		// which breaks for unequal-width semver (id-sort puts v1.9.0
+		// above v1.10.0 because '9' > '1' at the version digit).
+		otherRows, qerr := loadActiveSkillRows(db, name, id)
+		if qerr != nil {
+			return "", qerr
+		}
+		otherMax := highestSemver(otherRows)
 		isLatest := true
-		if err == nil {
-			cmp := semver.Compare("v"+version, "v"+otherVersion)
+		if otherMax.id != "" {
+			cmp := semver.Compare("v"+version, "v"+otherMax.version)
 			if cmp < 0 {
 				// Incoming is older than another existing version —
 				// the higher one retains is_latest=true, this one
 				// gets is_latest=false.
 				isLatest = false
 			}
-		} else if err != sql.ErrNoRows {
-			// Real query failure (not the expected "no other
-			// versions" ErrNoRows case). We can't determine
-			// isLatest correctly, so log and degrade to true
-			// (new skill appears as latest; a re-save will fix
-			// the flag if needed).
-			dm.LogAudit(AuditWarn, "skill_db", fmt.Sprintf("SaveSkill: other-version lookup failed (id=%s), defaulting isLatest=true: %v", id, err), "", AuditContext{})
 		}
-		// err == sql.ErrNoRows: no other versions, this is the only
-		// (or highest) version, is_latest=true.
+		// err == sql.ErrNoRows equivalent: no other versions, this
+		// is the only (or highest) version, is_latest=true.
 
 		metadata["is_latest"] = isLatest
 		metaJSON, err = json.Marshal(metadata)
@@ -486,34 +624,27 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	}
 	defer tx.Rollback()
 
-	// Find the current max-version row for this name. ORDER BY id DESC is
-	// a proxy for highest semver because skill ids are skill:<name>-v<semver>
-	// with equal-width semver; if v10.0.0 ever lands this needs a proper
-	// semver ORDER BY via a generated column.
+	// Load all OTHER live rows for this name and find the semver
+	// max via highestSemver. The previous shape used
+	// `ORDER BY id DESC LIMIT 1` as a proxy for highest semver,
+	// which breaks for unequal-width semver (id-sort puts v1.9.0
+	// above v1.10.0 because '9' > '1' at the version digit). With
+	// ≥2 existing versions having unequal-width semver, the proxy
+	// also picked the wrong reference for the "demote old max"
+	// UPDATE below — only the lexically-largest id was demoted,
+	// leaving the actual semver-max (e.g. v1.10.0 when v1.9.0 was
+	// the lexically-largest) still stamped is_latest=true.
 	//
-	// Prefix-match via substr() (not LIKE) because LIKE's `_` and `%`
-	// wildcards would match unintended rows if the name contains those
-	// characters. The skill name validator already rejects `-v` to keep
-	// the format unambiguous; we extend that hygiene here by avoiding
-	// the LIKE wildcard syntax entirely.
-	var (
-		existingID      string
-		existingVersion string
-	)
-	prefix := "skill:" + name + "-v"
-	err = tx.QueryRow(`
-		SELECT id, json_extract(metadata, '$.version')
-		FROM memories
-		WHERE collection = 'skills' AND deleted_at IS NULL
-		  AND substr(id, 1, length(?)) = ?
-		ORDER BY id DESC
-		LIMIT 1
-	`, prefix, prefix).Scan(&existingID, &existingVersion)
-
-	hasExisting := err == nil
-	if err != nil && err != sql.ErrNoRows {
-		return "", fmt.Errorf("lookup max version: %w", err)
+	// The flip-prior UPDATE below now iterates every row whose
+	// semver is strictly below the incoming version, not just the
+	// lexically-largest id. The whole operation stays inside the
+	// existing transaction, so the flip + INSERT remain atomic.
+	otherRows, qerr := loadActiveSkillRowsTx(tx, name, id)
+	if qerr != nil {
+		return "", qerr
 	}
+	otherMax := highestSemver(otherRows)
+	hasExisting := otherMax.id != ""
 
 	// semver.Compare requires the 'v' prefix on both arguments. The DB
 	// stores version without the prefix (YAML convention); we add it
@@ -522,21 +653,28 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// have failed upstream.
 	newIsLatest := true
 	if hasExisting {
-		cmp := semver.Compare("v"+version, "v"+existingVersion)
+		cmp := semver.Compare("v"+version, "v"+otherMax.version)
 		switch {
 		case cmp > 0:
-			// Incoming version strictly higher — flip the prior max to false.
-			_, err = tx.Exec(`
-				UPDATE memories
-				SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
-				WHERE id = ? AND deleted_at IS NULL
-			`, existingID)
-			if err != nil {
-				return "", fmt.Errorf("flip prior is_latest: %w", err)
+			// Incoming version strictly higher — flip every other
+			// row whose semver is below the incoming version to
+			// false. This handles the unequal-width case where the
+			// lexically-largest id is NOT the semver-max.
+			for _, r := range otherRows {
+				if semver.Compare("v"+r.version, "v"+version) < 0 {
+					_, err = tx.Exec(`
+						UPDATE memories
+						SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
+						WHERE id = ? AND deleted_at IS NULL
+					`, r.id)
+					if err != nil {
+						return "", fmt.Errorf("flip prior is_latest: %w", err)
+					}
+				}
 			}
 		case cmp == 0:
 			// Existence check above should have caught this. Defensive.
-			return "", fmt.Errorf("save skill: version %s already exists for %s (id=%s)", version, name, existingID)
+			return "", fmt.Errorf("save skill: version %s already exists for %s (id=%s)", version, name, otherMax.id)
 		default:
 			// cmp < 0: incoming version is older than current max — keep
 			// the higher existing row as latest, insert this one as
@@ -568,15 +706,27 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	return id, nil
 }
 
-// TODO(follow-up): force-overwrite path at line ~281 hardcodes
-// metadata.is_latest=true via the initial map. Edge case: if an older
-// version (e.g. v1) is force-overwritten AFTER a higher version (v2)
-// already exists, the overwrite will incorrectly stamp v1 as latest.
-// The fix is to call the same semver-compare logic above before the
-// UPDATE so is_latest reflects current max, not the row's identity.
-// Tracked separately because it's a different transaction shape
-// (single UPDATE vs. tx with flip+insert) and the test surface is
-// orthogonal to the out-of-order-saves test this commit ships.
+// TODO RESOLVED — the force-overwrite path now uses loadActiveSkillRows
+// + highestSemver (above) to determine is_latest from the semver max
+// across ALL active rows for the name, not from a lexically-largest
+// id DESC proxy. The same loader is used by the new-row path, the
+// force-overwrite path, and the read-by-name path (semver-correct
+// name-latest lookup). Regression tests at the bottom of this file
+// pin all four scenarios.
+//
+// Historical note: the original 2026-09-05 audit TODO worried that
+// "if an older version (e.g. v1) is force-overwritten AFTER a higher
+// version (v2) already exists, the overwrite will incorrectly stamp
+// v1 as latest". The pre-existing code already called semver.Compare
+// for the force-overwrite path (line 438 in the original file), so
+// the headline force-overwrite case was already covered. The deeper
+// defect was the id DESC proxy used to pick "the highest existing
+// version" reference, which broke for unequal-width semver (e.g.
+// id-sort puts v1.9.0 above v1.10.0 because '9' > '1'). With two or
+// more existing unequal-width semver versions, the proxy returned
+// the wrong reference and the demote UPDATE left the actual semver
+// max stamped is_latest=true (stale). All four scenarios covered by
+// the regression tests below.
 
 // contentHash returns the hex SHA-256 of s. The plan's placeholder
 // (fmt.Sprintf("%x", len(s))) is deterministic but two distinct skill

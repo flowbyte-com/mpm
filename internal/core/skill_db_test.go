@@ -747,3 +747,162 @@ func TestSaveSkillAndDeprecatePrior_PriorVersionRemainsReadable(t *testing.T) {
 		t.Errorf("v1.Metadata.deprecated = true, want false (only immediate prior is deprecated)")
 	}
 }
+
+// TestSaveSkill_SemverEdgeCasesOutOfOrder pins the semver-driven
+// is_latest contract across lexical-vs-semver traps. The save path
+// uses golang.org/x/mod/semver.Compare (with v-prefix) so 1.10.0
+// is correctly higher than 1.9.0 — a string-lexical sort would
+// produce the wrong answer. This test complements the existing
+// out-of-order regression by adding the canonical trap cases
+// from the 2026-09-05 skill_latest_todo_followup brief.
+func TestSaveSkill_SemverEdgeCasesOutOfOrder(t *testing.T) {
+	cases := []struct {
+		name             string
+		versions         []string // inserted in this order
+		expectedLatest   string   // version that must end up latest
+		expectEachIsLatest map[string]bool // version -> is_latest after all inserts
+	}{
+		{
+			name:               "1.10.0 then 1.9.0 — semver wins over lexical",
+			versions:           []string{"1.10.0", "1.9.0"},
+			expectedLatest:     "1.10.0",
+			expectEachIsLatest: map[string]bool{"1.10.0": true, "1.9.0": false},
+		},
+		{
+			name:               "1.2.10 then 1.2.9 — patch-level semver",
+			versions:           []string{"1.2.10", "1.2.9"},
+			expectedLatest:     "1.2.10",
+			expectEachIsLatest: map[string]bool{"1.2.10": true, "1.2.9": false},
+		},
+		{
+			name:               "1.0.0 then 2.0.0 then 1.5.0 — out-of-order insert",
+			versions:           []string{"1.0.0", "2.0.0", "1.5.0"},
+			expectedLatest:     "2.0.0",
+			expectEachIsLatest: map[string]bool{"1.0.0": false, "2.0.0": true, "1.5.0": false},
+		},
+		{
+			name:               "2.0.0 then 1.0.0 then 1.5.0 — descending then ascending",
+			versions:           []string{"2.0.0", "1.0.0", "1.5.0"},
+			expectedLatest:     "2.0.0",
+			expectEachIsLatest: map[string]bool{"1.0.0": false, "2.0.0": true, "1.5.0": false},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := NewTestDM(t)
+			name := "semver-edge"
+			for _, v := range tc.versions {
+				body := "---\nname: " + name + "\nversion: " + v + "\n---\nbody " + v
+				if _, err := dm.SaveSkill(name, v, body, "test-agent", false); err != nil {
+					t.Fatalf("save %s: %v", v, err)
+				}
+			}
+			for v, want := range tc.expectEachIsLatest {
+				id, _ := SkillIDForNameAndVersion(name, v)
+				row, err := dm.ReadSkill(id, "")
+				if err != nil {
+					t.Fatalf("read %s: %v", v, err)
+				}
+				if row.IsLatest != want {
+					t.Errorf("v%s IsLatest = %v, want %v", v, row.IsLatest, want)
+				}
+			}
+			// Name-latest lookup must return the semver max.
+			latest, err := dm.ReadSkill(name, "")
+			if err != nil {
+				t.Fatalf("ReadSkill by name: %v", err)
+			}
+			if latest.Version != tc.expectedLatest {
+				t.Errorf("name-latest version = %s, want %s", latest.Version, tc.expectedLatest)
+			}
+		})
+	}
+}
+
+// TestSaveSkill_ForceOverwriteHighestAfterLowerOutOfOrder pins the
+// exact edge case the residual TODO described: when an older version
+// (v1) is force-overwritten AFTER a higher version (v2) already
+// exists, the overwrite must NOT stamp v1 as latest. The
+// implementation already calls semver.Compare in the force path
+// (skill_db.go:438); this test pins the explicit assertion the
+// TODO suggested adding.
+func TestSaveSkill_ForceOverwriteHighestAfterLowerOutOfOrder(t *testing.T) {
+	dm := NewTestDM(t)
+	if _, err := dm.SaveSkill("foo", "2.0.0",
+		"---\nname: foo\nversion: 2.0.0\n---\nv2 body", "test-agent", false); err != nil {
+		t.Fatalf("save v2: %v", err)
+	}
+	if _, err := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\n---\nv1 body", "test-agent", false); err != nil {
+		t.Fatalf("save v1: %v", err)
+	}
+
+	// Force-overwrite v1 with new content. The TODO worried this
+	// would re-stamp v1 as latest. The implementation queries the
+	// OTHER version (v2) and compares semver before deciding.
+	if _, err := dm.SaveSkill("foo", "1.0.0",
+		"---\nname: foo\nversion: 1.0.0\n---\nv1 body updated", "test-agent", true); err != nil {
+		t.Fatalf("force v1: %v", err)
+	}
+
+	// Read both rows and assert the per-version is_latest flags.
+	v1, err := dm.ReadSkill("skill:foo-v1.0.0", "")
+	if err != nil {
+		t.Fatalf("read v1: %v", err)
+	}
+	v2, err := dm.ReadSkill("skill:foo-v2.0.0", "")
+	if err != nil {
+		t.Fatalf("read v2: %v", err)
+	}
+	if v1.IsLatest {
+		t.Errorf("after force-overwrite of v1 (v2 exists): v1 IsLatest = true, want false (v2 is semver max)")
+	}
+	if !v2.IsLatest {
+		t.Errorf("after force-overwrite of v1: v2 IsLatest = false, want true (untouched, semver max)")
+	}
+	if !strings.Contains(v1.Body, "updated") {
+		t.Errorf("force-overwrite did not update v1 body; got %q", v1.Body)
+	}
+}
+
+// TestSaveSkill_InsertHighestDemotesAllLowerVersions pins the save-path
+// invariant for unequal-width semver. The id DESC LIMIT 1 proxy used
+// to find "the highest existing version" picks the lexically-larger id
+// rather than the semver-max. When ≥2 existing versions have
+// unequal-width semver (e.g. v1.9.0 + v1.10.0), inserting a new max
+// (v2.0.0) compares against the wrong reference (v1.9.0 instead of
+// v1.10.0) and leaves v1.10.0 stamped is_latest=true (stale).
+func TestSaveSkill_InsertHighestDemotesAllLowerVersions(t *testing.T) {
+	dm := NewTestDM(t)
+	for _, v := range []string{"1.9.0", "1.10.0", "2.0.0"} {
+		body := "---\nname: demote-all\nversion: " + v + "\n---\nbody " + v
+		if _, err := dm.SaveSkill("demote-all", v, body, "test-agent", false); err != nil {
+			t.Fatalf("save %s: %v", v, err)
+		}
+	}
+	for _, c := range []struct {
+		version string
+		want    bool
+	}{
+		{"1.9.0", false},
+		{"1.10.0", false}, // the regression: must be demoted
+		{"2.0.0", true},
+	} {
+		id, _ := SkillIDForNameAndVersion("demote-all", c.version)
+		row, err := dm.ReadSkill(id, "")
+		if err != nil {
+			t.Fatalf("read %s: %v", c.version, err)
+		}
+		if row.IsLatest != c.want {
+			t.Errorf("%s IsLatest = %v, want %v", c.version, row.IsLatest, c.want)
+		}
+	}
+	// Name-latest must resolve to the semver max.
+	latest, err := dm.ReadSkill("demote-all", "")
+	if err != nil {
+		t.Fatalf("read by name: %v", err)
+	}
+	if latest.Version != "2.0.0" {
+		t.Errorf("name-latest version = %s, want 2.0.0", latest.Version)
+	}
+}
