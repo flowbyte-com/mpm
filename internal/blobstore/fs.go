@@ -48,6 +48,18 @@ func NewFilesystemBackend(db *sql.DB, blobDir string, ttl time.Duration) (*Files
 	if err := os.MkdirAll(blobDir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll only sets the mode on directories it actually creates; if the
+	// directory already exists (e.g. a previous version of MPM created it
+	// with looser permissions for debugging, or a restore operation copied
+	// the dir from a tarball that preserved host modes), the existing mode
+	// is left untouched. Force the intended 0o700 here so that an upgrade
+	// cannot silently preserve a permissive directory, and so a future
+	// debugging session cannot leave the directory world-readable behind.
+	// Failure to chmod is a security problem, not a usability problem:
+	// surface it rather than swallowing.
+	if err := os.Chmod(blobDir, 0o700); err != nil {
+		return nil, fmt.Errorf("blobstore: enforce dir mode on %s: %w", blobDir, err)
+	}
 	return &FilesystemBackend{db: db, blobDir: blobDir, ttl: ttl}, nil
 }
 
