@@ -194,13 +194,27 @@ func (a *artifactResolverAdapter) resolveLesson(ctx context.Context, p tools.Poi
 		return tools.Resolution{}, err
 	}
 
-	// Lessons are compact — return in full, no bounding needed.
+	// Bounded by default to match mpm://memory/<id> / mpm://work/<id>
+	// behaviour. The audit's data showed lesson spills up to 145 KB —
+	// not always compact. Caller can opt in to full content via
+	// ResolveOptions{MaxBytes: 0} returns it raw; explicit higher
+	// max_bytes overrides.
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	content := lesson.Content
+	bounded := len(content) > maxBytes
+	if bounded {
+		content = core.SummarizeBounded(content, maxBytes)
+	}
+
 	_ = a.dm.RecordRetrieval(p.ID, "lesson")
 
 	return tools.Resolution{
 		Pointer:     "mpm://lesson/" + p.ID,
 		ContentType: "text/plain",
-		Reader:     io.NopCloser(strings.NewReader(lesson.Content)),
+		Reader:     io.NopCloser(strings.NewReader(content)),
 		Metadata: map[string]interface{}{
 			"id":                 lesson.ID,
 			"type":               string(lesson.Type),
@@ -208,7 +222,7 @@ func (a *artifactResolverAdapter) resolveLesson(ctx context.Context, p tools.Poi
 			"reinforcement_count": lesson.ReinforcementCount,
 			"created":            lesson.Created,
 		},
-		Bounded: false,
+		Bounded: bounded,
 	}, nil
 }
 
@@ -222,6 +236,22 @@ func (a *artifactResolverAdapter) resolveTheory(ctx context.Context, p tools.Poi
 		return tools.Resolution{}, fmt.Errorf("mpm://theory/%s: not a theory (collection=%q)", p.ID, collection)
 	}
 	content, _ := mem["content"].(string)
+
+	// Bounded by default to match mpm://memory/<id> / mpm://lesson/<id>.
+	// Theory rows share the same blob-spill risk as lessons (audit
+	// showed mpm_resolve spilling at the 4.8K-token median), so the
+	// default opt-in path has to be bounded to avoid pushing a 145KB
+	// payload through one mpm_resolve call when the caller only wanted
+	// a pointer-preview to decide whether to resolve.
+	maxBytes := int(opts.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = 512
+	}
+	bounded := len(content) > maxBytes
+	if bounded {
+		content = core.SummarizeBounded(content, maxBytes)
+	}
+
 	_ = a.dm.RecordRetrieval(p.ID, "theory")
 
 	return tools.Resolution{
@@ -234,7 +264,7 @@ func (a *artifactResolverAdapter) resolveTheory(ctx context.Context, p tools.Poi
 			"weight":     mem["weight"],
 			"tags":       mem["tags"],
 		},
-		Bounded: false,
+		Bounded: bounded,
 	}, nil
 }
 
