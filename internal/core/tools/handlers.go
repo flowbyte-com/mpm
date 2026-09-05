@@ -1981,14 +1981,36 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		return handleReadWakeContextCompact(dm)
 	}
 
-	// format=system-prompt returns the human-readable projection instead of JSON.
-	// Same WakeContextData, different presentation — per the Projection Principle.
-	if format, _ := params["format"].(string); format == "system-prompt" {
-		text, err := dm.ReadWakeContext()
-		if err != nil {
-			return nil, fmt.Errorf("read wake context (system-prompt): %w", err)
+	// 2026-09-05 audit residual pass §I-C.16: validate `format` at
+	// the handler boundary. The schema declares
+	// `format: enum: [system-prompt]`; the previous shape only
+	// branched on `format == "system-prompt"` and let every other
+	// value silently fall through to the JSON default. A caller
+	// asking `format="bogus"` got a JSON envelope back without any
+	// indication their explicit format choice was ignored. The
+	// handler now distinguishes:
+	//
+	//   omitted / nil / ""  → default JSON envelope (preserved)
+	//   "system-prompt"     → prose envelope (preserved)
+	//   any other string    → ERROR (was silent fall-through)
+	//   non-string          → ERROR
+	if rawFormat, present := params["format"]; present && rawFormat != nil {
+		format, ok := rawFormat.(string)
+		if !ok {
+			return nil, fmt.Errorf("format must be a string, got %T", rawFormat)
 		}
-		return map[string]interface{}{"success": true, "format": "system-prompt", "content": text}, nil
+		switch format {
+		case "":
+			// Explicit empty matches omission → fall through to JSON.
+		case "system-prompt":
+			text, err := dm.ReadWakeContext()
+			if err != nil {
+				return nil, fmt.Errorf("read wake context (system-prompt): %w", err)
+			}
+			return map[string]interface{}{"success": true, "format": "system-prompt", "content": text}, nil
+		default:
+			return nil, fmt.Errorf("format must be one of [system-prompt], got %q", format)
+		}
 	}
 
 	data, err := dm.GatherWakeContext()
