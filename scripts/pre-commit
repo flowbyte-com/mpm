@@ -97,6 +97,31 @@ if git diff --cached --name-only | grep -qE '\.go$'; then
   echo "[pre-commit] mpm-lint gate OK"
 fi
 
+echo "[pre-commit] running threshold-table positive-presence gate..."
+# Every MCP-output-cap constant in production source must have a peer row
+# in the README §6.4 threshold table. Negative (no-stale-phrase) checks are
+# covered elsewhere; this is the positive check that catches future
+# threshold additions/removals that bypass the table.
+#
+# Three rows were added as part of the same arc:
+#   - mpm_blob_search serverMaxMatches (handlers.go:6119)
+#   - mpm_blob_search serverMaxBytes (handlers.go:6120)
+#   - maxQueryLimit (handlers.go:6240)
+# Adding new threshold constants requires updating this gate's
+# REQUIRED_THRESHOLDS list in lock-step — the gate is the structural
+# enforcement, not a soft suggestion.
+if ! bash scripts/doc-gate-threshold-table.sh > /tmp/pre-commit-doc-gate.log 2>&1; then
+  echo "[pre-commit] ABORTING commit: README §6.4 threshold table is missing rows." >&2
+  echo "[pre-commit] Either add the missing row to README.md §6.4, or update" >&2
+  echo "[pre-commit] scripts/doc-gate-threshold-table.sh's REQUIRED_THRESHOLDS" >&2
+  echo "[pre-commit] if the constant has been removed from source." >&2
+  cat /tmp/pre-commit-doc-gate.log >&2
+  rm -f /tmp/pre-commit-doc-gate.log
+  exit 1
+fi
+rm -f /tmp/pre-commit-doc-gate.log
+echo "[pre-commit] threshold-table gate OK"
+
 echo "[pre-commit] running synthesis / reliability / lifecycle / wake context tests..."
 # Architecture Split (2026-07-07) moved Core from ./internal/ to ./internal/core/
 # as a standalone Go module. The pre-commit
