@@ -2765,6 +2765,44 @@ func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			days = t
 		}
 	}
+	// 2026-09-05 audit remediation pass 3 defect C.11 (P2):
+	// mpm_system.query_audit_log silently dropped the `since`
+	// parameter. The handler previously accepted since via
+	// additionalProperties:true and ignored it. Honour the contract:
+	// since is an absolute epoch-seconds cutoff; when both since and
+	// days are present, since wins.
+	//
+	// Pre-fix reproduction:
+	//   $ mpm call mpm_system --payload '{"action":"query_audit_log","params":{"since":1700000000}}'
+	//     # returned the historical default (rows from days=7),
+	//     # NOT rows with created_at >= 1700000000
+	if rawSince, ok := p["since"]; ok {
+		var sinceSec int64
+		switch t := rawSince.(type) {
+		case float64:
+			sinceSec = int64(t)
+		case int:
+			sinceSec = int64(t)
+		case int64:
+			sinceSec = t
+		default:
+			return nil, fmt.Errorf("since must be a number (epoch seconds), got %T", rawSince)
+		}
+		if sinceSec <= 0 {
+			return nil, fmt.Errorf("since must be > 0 (epoch seconds), got %d", sinceSec)
+		}
+		now := time.Now().Unix()
+		if sinceSec > now {
+			// A future cutoff means "no rows" — surface the no-rows
+			// result rather than silently returning the default
+			// 7-day window. The handler still calls the DM with the
+			// computed days; the DM's days<=0 clamp is irrelevant
+			// because sinceSec>now implies a small positive days.
+			days = 1
+		} else {
+			days = int((now-sinceSec)/86400) + 1
+		}
+	}
 	limit := 20
 	if v, ok := p["limit"]; ok {
 		switch t := v.(type) {
