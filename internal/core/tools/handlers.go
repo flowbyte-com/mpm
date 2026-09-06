@@ -3605,8 +3605,13 @@ func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 //
 // Args:
 //
-//	--query  (optional) FTS5 keyword search
-//	--limit  (optional) max rows; default 50, max 500
+//	--query           (optional) FTS5 keyword search
+//	--limit           (optional) max rows; default 50, max 500
+//	--include_retired (optional, default false) when true, retired
+//	                  rules (retired_at IS NOT NULL) are included;
+//	                  the default filters them out so the agent sees
+//	                  only active rules. Forensic / post-mortem
+//	                  queries opt in.
 //
 // In local-only mode (no MPM_SHARED_DB attached) returns an empty
 // result with success=true — the agent should fall back to local
@@ -3627,17 +3632,60 @@ func handleQueryGlobalRules(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		limit = 500
 	}
 
-	items, err := dm.QueryGlobalRules(query, limit)
+	includeRetired := false
+	if v, ok := p["include_retired"]; ok {
+		switch t := v.(type) {
+		case bool:
+			includeRetired = t
+		case string:
+			includeRetired = t == "true" || t == "1" || t == "yes"
+		case float64:
+			includeRetired = t != 0
+		case int:
+			includeRetired = t != 0
+		default:
+			return nil, fmt.Errorf("include_retired must be a boolean (got %T)", v)
+		}
+	}
+
+	items, err := dm.QueryGlobalRules(query, limit, includeRetired)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":  true,
-		"source":   "shared",
-		"attached": dm.SharedAttached() != "",
-		"count":    len(items),
-		"results":  items,
+		"success":         true,
+		"source":          "shared",
+		"attached":        dm.SharedAttached() != "",
+		"include_retired": includeRetired,
+		"count":           len(items),
+		"results":         items,
 	}, nil
+}
+
+// handleRetireGlobalRule soft-retires a global rule. See
+// internal/core/db.go RetireGlobalRule for the full contract.
+//
+// Wire schema:
+//   - rule_id  (required)
+//   - confirm  (required, must be exactly true)
+//   - reason   (optional, free-form note recorded in audit)
+//
+// Idempotency: already-retired → silent success with already_retired=true.
+// Unknown id → error. Shared DB not attached → error.
+//
+// Part 1 (2026-09-06): closes the catalog §C.2 finding (global rules
+// can be added but never formally retracted).
+func handleRetireGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	ruleID, _ := p["rule_id"].(string)
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule_id is required")
+	}
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("retire_global_rule requires confirm=true; shared-DB state transitions must be operator-gated")
+	}
+	reason, _ := p["reason"].(string)
+	return dm.RetireGlobalRule(ruleID, reason, true)
 }
 
 // handleRecordGlobalRule writes a memory to the shared DB with
@@ -5755,12 +5803,14 @@ func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleQueryGlobalRules(dm, ac, params)
 	case "record_global_rule":
 		return handleRecordGlobalRule(dm, ac, params)
+	case "retire_global_rule":
+		return handleRetireGlobalRule(dm, ac, params)
 	case "promote_to_global":
 		return handlePromoteToGlobal(dm, ac, params)
 	case "route":
 		return handleRoute(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, promote_to_global, route", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route", action)
 	}
 }
 
