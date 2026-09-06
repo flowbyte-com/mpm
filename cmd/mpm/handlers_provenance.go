@@ -25,7 +25,11 @@ func handleProvenance(args []string) int {
 		return respond("", "Usage: mpm provenance <artifact_id>\n", 1)
 	}
 	artifactID := args[0]
-	asJSON := hasFlag(args, "--json")
+	// Stage S4 of the CLI refactor (2026-09-06): --json is now
+	// extracted via the canonical ExtractJSONFlag helper. The
+	// previous per-handler hasFlag helper is deleted as dead
+	// code (no remaining callers after this migration).
+	asJSON, _ := ExtractJSONFlag(args)
 
 	dm := getDB()
 	if dm == nil {
@@ -260,15 +264,6 @@ func formatInt64Null(i sql.NullInt64) string {
 		return "0"
 	}
 	return fmt.Sprintf("%d", i.Int64)
-}
-
-func hasFlag(args []string, flag string) bool {
-	for _, a := range args {
-		if a == flag {
-			return true
-		}
-	}
-	return false
 }
 
 func flagValue(args []string, flag string) string {

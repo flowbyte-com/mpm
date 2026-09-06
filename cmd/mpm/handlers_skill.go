@@ -92,9 +92,26 @@ func handleSaveSkill(args []string) int {
 }
 
 func handleListSkills(args []string) int {
+	// Stage S4 of the CLI refactor (2026-09-06): scope is now
+	// strictly validated via the canonical parseEnum helper. The
+	// pre-S4 code accepted ANY string and passed it to
+	// dm.ListSkills, which silently fell through to a default
+	// scope (returning every skill) on any unknown value —
+	// hiding operator typos as empty or full lists depending
+	// on what the DM-side default returned. The canonical
+	// vocabulary is all | local | shared (matches the help
+	// text "scope: all|local|shared"). Empty input is the
+	// "omitted" case (default to all); non-empty but invalid
+	// produces a deterministic error listing allowed values.
+	allowedScopes := []string{"all", "local", "shared"}
 	scope := "all"
 	if len(args) > 0 {
-		scope = args[0]
+		v, err := parseEnum(args[0], "scope", allowedScopes)
+		if err != nil {
+			printError("%v", err)
+			return 1
+		}
+		scope = v
 	}
 	dm := getDB()
 	if dm == nil {

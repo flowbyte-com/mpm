@@ -213,6 +213,18 @@ func handleExport(args []string) int {
 		return 1
 	}
 
+	// Stage S4 of the CLI refactor (2026-09-06): format is now
+	// strictly validated via the canonical parseEnum helper. The
+	// pre-S4 code accepted ANY string; the if/else if chain
+	// below only handled `json` and `csv` — anything else produced
+	// no output (silent no-op). The canonical vocabulary is
+	// json | csv; any other value errors with a deterministic
+	// message listing allowed values.
+	allowedFormats := []string{"json", "csv"}
+	if _, err := parseEnum(*format, "format", allowedFormats); err != nil {
+		return usererror.Error("%v", err)
+	}
+
 	dm := getDB()
 	if dm == nil {
 		return 1
