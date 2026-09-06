@@ -26,7 +26,10 @@ var Registry = []Tool{
 		Description: `Persistent memory for facts, learnings, and context the agent needs to carry across sessions.
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
-For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
+Lifecycle asymmetry: shred is permanent (hard delete — the row is removed with cascade cleanup of dependent topic_memberships, memory_revisions, and confidence_history). There is no restore path. This is deliberately different from mpm_skills.delete, which is soft and recoverable via save with force=true.
+Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight cannot drop below the safety floor of 1). reinforce and weaken accept the same delta shape but their internal mechanics differ; the user-visible contract is symmetric.`,
+
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -262,8 +265,9 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 	{
 		Name: "mpm_context",
 		Description: `Agent session state, mode routing, and directive management. The action=read_wake_context is the canonical wake-up hook (call on session start); the wake payload carries a bounded <available_skills> catalogue (a subset of mpm_skills list{scope:"all"}) and supports projection="compact" for a small id+summary envelope (the full WakeContextData is the default).
-Use when: you need to wake up at session start; understand the current agent mode/persona; trigger a mode or persona switch; read active behavioral directives governing the current session; query proactive recall for conversation-relevant memories.
-Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.`,
+Use when: you need to wake up at session start; understand the current agent mode/persona; trigger a mode or persona switch; read active behavioral directives governing the current session; query proactive recall for conversation-relevant memories; record / query / retire global house rules that every agent on the workstation should see; promote a local memory to the shared substrate.
+Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.
+Lifecycle asymmetry: promote_to_global is one-way / additive. The local memory row stays; the shared copy is created alongside (per Phase 3 of the shared-epistemology design). There is no demote operation. To "remove" a shared rule, use retire_global_rule — it stamps retired_at and the row is filtered from default queries (recoverable via query with include_retired=true).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -299,7 +303,9 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 	{
 		Name: "mpm_skills",
 		Description: `Reusable procedural knowledge stored as markdown with YAML frontmatter.
-Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.`,
+Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.
+Lifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; save with force=true resurrects the tombstoned row). This is deliberately different from mpm_memory.shred, which is permanent and irrecoverable.
+Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is preserved (Phase 3 of shared-epistemology design); there is no demote operation. To retire a globally-promoted skill, shred the local copy if you want it gone from the workstation, or rely on the shared substrate's own lifecycle.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -338,7 +344,8 @@ Use when: you develop a workflow that works well and want to固化 it as a persi
 		Name: "mpm_wakes",
 		Description: `Deferred work triggers scheduled for future execution.
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
-Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.`,
+Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
+Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
