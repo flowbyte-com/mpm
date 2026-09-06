@@ -353,7 +353,7 @@ func (dm *DatabaseManager) hybridSearchScopeLocal(query, collection string, limi
 // hybridSearchScopeShared: keyword-only retrieval against shared.memories
 // via QueryGlobalRules (existing FTS5 + LIKE fallback path).
 func (dm *DatabaseManager) hybridSearchScopeShared(query string, limit int) ([]map[string]interface{}, error) {
-	rules, err := dm.QueryGlobalRules(query, limit)
+	rules, err := dm.QueryGlobalRules(query, limit, false)
 	if err != nil {
 		return nil, fmt.Errorf("query shared.memories: %w", err)
 	}

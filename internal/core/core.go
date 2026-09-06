@@ -337,8 +337,9 @@ type CoreDB interface {
 	ScratchpadOrphansSummary() (string, error)
 
 	// ─── Global / Shared ─────────────────────────────────────────────
-	QueryGlobalRules(query string, limit int) ([]map[string]interface{}, error)
+	QueryGlobalRules(query string, limit int, includeRetired bool) ([]map[string]interface{}, error)
 	RecordGlobalRule(content string, tags []string, weight float64, provenance string) (string, error)
+	RetireGlobalRule(ruleID, reason string, confirm bool) (map[string]interface{}, error)
 	PromoteToGlobal(localID string) (string, error)
 
 	// ─── Admission ───────────────────────────────────────────────────
