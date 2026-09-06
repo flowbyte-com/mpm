@@ -173,25 +173,22 @@ BEHAVIOURAL_QUESTIONS = (
 # --- the installed surfaces under audit -------------------------------------
 
 
-CLAUDE_INSTALLED = Path("/home/v/.claude/CLAUDE.md")
-PI_INSTALLED = Path("/home/v/.pi/agent/AGENTS.md")
+CLAUDE_INSTALLED = Path(os.path.expanduser("~/.claude/CLAUDE.md"))
+PI_INSTALLED = Path(os.path.expanduser("~/.pi/agent/AGENTS.md"))
 
 # Snippets that don't have a globally installed file on this machine
 # (Hermes is per-project; OpenCode isn't installed). Audit them as the
 # authoritative source instead — that's what would be installed if/when
-# the host plugin runs.
-HERMES_SNIPPET = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/hermes-mpm/templates/hermes.md.snippet"
-)
-OPENCODE_SNIPPET = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet"
-)
-CLAUDE_SNIPPET = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/claude-code-mpm/templates/CLAUDE.md.snippet"
-)
-PI_SNIPPET = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet"
-)
+# the host plugin runs. Path is derived from the test file location so
+# the suite runs in any environment (CI, fresh clone, alternate mount).
+# Previously hardcoded to /home/v/workspace/projects/mpm — see the
+# fix-history in test_render_managed_blocks.py / test_clean_install_roundtrip.py
+# / test_cross_adapter_contract_parity.py / test_refresh_installed.py.
+AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
+HERMES_SNIPPET = AGENT_INSTALLATION / "hermes-mpm" / "templates" / "hermes.md.snippet"
+OPENCODE_SNIPPET = AGENT_INSTALLATION / "opencode-mpm" / "templates" / "AGENTS.md.snippet"
+CLAUDE_SNIPPET = AGENT_INSTALLATION / "claude-code-mpm" / "templates" / "CLAUDE.md.snippet"
+PI_SNIPPET = AGENT_INSTALLATION / "pi-mpm" / "templates" / "AGENTS.md.snippet"
 
 
 SURFACES = [
