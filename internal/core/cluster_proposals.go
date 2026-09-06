@@ -199,9 +199,18 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 		snoozeUntil = resolved.UTC().Format(time.RFC3339)
 	case ClusterStatusResolved:
 		// snoozeUntil ignored. Resolved clusters don't auto-reactivate.
+	case ClusterStatusActive:
+		// Part 2B (2026-09-06): ClusterStatusActive is now reachable via
+		// the unsnooze_cluster public action. SnoozeUntil is cleared on
+		// the transition. The existing snooze_until=0s caller path still
+		// works — it routes through the ClusterStatusSnoozed branch with
+		// a zero/negative duration that resolves to a past timestamp,
+		// which the ActiveClusters filter clause already treats as
+		// active. The two paths are independent.
+		snoozeUntil = ""
 	default:
-		return fmt.Errorf("status must be %q or %q, got %q",
-			ClusterStatusSnoozed, ClusterStatusResolved, status)
+		return fmt.Errorf("status must be %q, %q, or %q, got %q",
+			ClusterStatusActive, ClusterStatusSnoozed, ClusterStatusResolved, status)
 	}
 
 	// Verify the cluster exists before UPDATE. UPDATE-without-WHERE on
@@ -220,7 +229,9 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 	}
 
 	// Apply the transition. Snooze always updates snooze_until (reset
-	// timer on re-snooze); resolve clears snooze_until (cleanup).
+	// timer on re-snooze); resolve clears snooze_until (cleanup);
+	// active (the unsnooze_cluster path) clears snooze_until too — the
+	// row drops out of the auto-snooze-expire filter.
 	var err error
 	switch status {
 	case ClusterStatusSnoozed:
@@ -236,6 +247,16 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 			 SET status = ?, snooze_until = NULL
 			 WHERE cluster_key = ?`,
 			ClusterStatusResolved, clusterKey,
+		)
+	case ClusterStatusActive:
+		// Part 2B (2026-09-06): unsnooze_cluster path. Clear snooze_until
+		// so the ActiveClusters filter no longer needs the snooze_expired
+		// pass-through; the row is unconditionally active again.
+		_, err = dm.db.Exec(
+			`UPDATE audit_cluster_proposals
+			 SET status = ?, snooze_until = NULL
+			 WHERE cluster_key = ?`,
+			ClusterStatusActive, clusterKey,
 		)
 	}
 	if err != nil {
@@ -273,8 +294,11 @@ func (dm *DatabaseManager) SetClusterStatus(clusterKey, status, snoozeUntil, rea
 	// watchdog.jsonl and indexed by component='cluster'.
 	if c := dm.LogAudit; c != nil {
 		verb := "snoozed"
-		if status == ClusterStatusResolved {
+		switch status {
+		case ClusterStatusResolved:
 			verb = "resolved"
+		case ClusterStatusActive:
+			verb = "unsnoozed"
 		}
 		c(AuditWarn, "cluster", fmt.Sprintf("cluster %s by agent", verb),
 			"", AuditContext{"cluster_key": clusterKey, "reason": reason, "ctx_json": ctxJSON})
