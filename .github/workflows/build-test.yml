@@ -97,25 +97,25 @@ jobs:
 
       # Managed-block parity gate (Python; closes a pre-existing CI gap).
       #
-      # The 35-case unittest in agent_installation/tests/test_render_managed_blocks.py
-      # asserts byte-for-byte parity between the canonical managed-block source
-      # (agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md) and the
-      # per-adapter rendered snippets checked into
-      # agent_installation/<adapter>/templates/*.snippet. It is the
-      # authoritative drift detector — the Go side at
-      # internal/core/render_parity_test.go and the renderer-side
-      # --check mode both delegate to this same byte-for-byte comparison.
+      # Full discover over agent_installation/tests/ — 123 cases
+      # covering canonical extraction, per-host prefix substitution,
+      # copy/paste example parity, byte-for-byte rendered-vs-checked-in
+      # match, cross-adapter content invariants (each adapter's snippet
+      # must teach the agent to invoke mpm_work with create/complete
+      # actions), installer smoke tests, and live behavioural verification.
       #
-      # We invoke this test module directly (not `unittest discover tests`)
-      # because `discover` also runs test_cross_adapter_contract_parity which
-      # currently has 2 pre-existing failures (test_mentions_mpm_work_with_real_actions
-      # for Claude and Hermes) unrelated to drift — those are a separate
-      # follow-up. The drift test module alone is what the parity gate needs.
+      # The 2026-09-06 fix closed the pre-existing
+      # test_mentions_mpm_work_with_real_actions failures (Claude and
+      # Hermes) by moving the §5 prose to parens form so the renderer
+      # applies the prefix, and updated the semantic-guard test that
+      # was pinning the old behavior. With that fix, `discover tests`
+      # is fully green — both the byte-for-byte parity check and the
+      # cross-adapter contract check run in this step.
       #
-      # Verified locally: passes on clean tree (35/35 OK), fails on
-      # simulated drift (1 failure), restored on revert.
+      # Verified locally: 123/123 OK on clean tree; FAILED (1) on
+      # simulated one-character drift; restored on revert.
       - name: Renderer parity (managed-block byte-for-byte)
-        run: cd agent_installation && python3 -m unittest tests.test_render_managed_blocks
+        run: cd agent_installation && python3 -m unittest discover tests
 
       - name: Run full test suite with coverage
         run: |

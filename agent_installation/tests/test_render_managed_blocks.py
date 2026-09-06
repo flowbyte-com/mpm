@@ -601,7 +601,20 @@ class RendererSemanticGuard(unittest.TestCase):
         line contains no `action` keyword, so both tokens must remain
         bare under every host prefix. (The §2 invocation reference to
         `mpm_decisions action record` DOES still transform — that's
-        an invocation, not a prose mention, and must not regress.)"""
+        an invocation, not a prose mention, and must not regress.)
+
+        The §5 prose mention of `mpm_work` is INTENTIONALLY rewritten
+        by the host prefix — the canonical source uses parens form
+        (`mpm_work` (Lifecycle: action `create` to open, ...)) so the
+        `action` keyword lives in the same sentence as `mpm_work`,
+        making it a per-host actionable mention. The previous prose
+        form (`mpm_work`. Lifecycle: action `create` ...) had a
+        period immediately after the backtick that broke the
+        renderer's per-sentence heuristic, leaving Claude/Hermes
+        snippets with bare `mpm_work` — a real doc-quality gap. The
+        2026-09-06 fix moved the prose to parens form; this test
+        asserts the rewritten form is what shows up under prefixed
+        adapters."""
         text = CANONICAL_SOURCE.read_text(encoding="utf-8")
         block = _render.extract_canonical_block(text)
 
@@ -621,21 +634,22 @@ class RendererSemanticGuard(unittest.TestCase):
                 f"description got rewritten (D-R1 regression)",
             )
 
-        # §5 also has a prose mention of `mpm_work` ("track it
-        # separately via `mpm_work`. Lifecycle: action ...") that must
-        # stay bare — the `action` keyword is in the NEXT sentence.
-        prose_work_phrase = (
-            "track it separately via\n   `mpm_work`. Lifecycle: "
-            "action `create` to open,"
-        )
-        for prefix in ("mpm__", "mcp__mpm__"):
+        # §5: the parens form puts `action` in the same sentence as
+        # `mpm_work`, so the renderer must apply the prefix. Assert
+        # the PREFIXED form (not the bare form) for prefixed hosts,
+        # and the bare form for OpenCode/Pi (no prefix).
+        prefix_to_expected = {
+            "mpm__":      "track it separately via\n   `mpm__mpm_work` (Lifecycle:",
+            "mcp__mpm__": "track it separately via\n   `mcp__mpm__mpm_work` (Lifecycle:",
+            "":            "track it separately via\n   `mpm_work` (Lifecycle:",
+        }
+        for prefix, expected_prefix_phrase in prefix_to_expected.items():
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
-                prose_work_phrase, rendered,
-                f"§5 prose `mpm_work` drifted under prefix {prefix!r} — "
-                f"`mpm_work` in 'track it separately via' got rewritten "
-                f"(renderer treats it as invocation but `action` is in "
-                f"the next sentence)",
+                expected_prefix_phrase, rendered,
+                f"§5 prose `mpm_work` did not get the expected prefix "
+                f"under prefix {prefix!r}. Expected substring "
+                f"{expected_prefix_phrase!r} in rendered output.",
             )
 
         # Sanity: §2 invocations in the same block DO still transform.
