@@ -111,21 +111,30 @@ func handleLessonAdd(args []string) int {
 	if content == "" {
 		return respond("", "Usage: mpm lesson add <content>", 1)
 	}
+	// Validate lesson type BEFORE delegating so the error message
+	// matches the legacy contract (internal.ValidateLessonType
+	// returns a human-readable string suitable for the CLI error
+	// path). The canonical tool also validates, but rejects with a
+	// generic "invalid type" message; preserving the legacy error
+	// here keeps existing tests + operator UX stable.
 	if err := internal.ValidateLessonType(lessonType); err != nil {
 		return respond("", err.Error(), 1)
 	}
 
-	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
-	if lessonStore == nil {
-		if jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Failed to initialize lesson store: database not available"})
-			fmt.Println(string(data))
-		} else {
-			respond("", "Failed to initialize lesson store: database not available", 1)
-		}
-		return 1
-	}
-	lesson, err := lessonStore.AddLesson(content, internal.LessonType(lessonType), tags, "")
+	// Stage S5 of the CLI refactor (2026-09-06): delegate the
+	// save to the canonical mpm_lessons tool via invokeTool.
+	// Pre-S5 this handler called lessonStore.AddLesson directly,
+	// duplicating the tool's persistence path. Now the CLI is a
+	// thin adapter: parse → validate → build payload → invoke
+	// canonical tool → render.
+	result, err := invokeTool("mpm_lessons", map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact": content,
+			"type": lessonType,
+			"tags": tags,
+		},
+	})
 	if err != nil {
 		if jsonOutput {
 			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add lesson: %v", err)})
@@ -139,13 +148,15 @@ func handleLessonAdd(args []string) int {
 	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
 			"success":       true,
-			"id":            lesson.ID,
-			"type":          string(lesson.Type),
-			"reinforcement": lesson.ReinforcementCount,
+			"id":            result["id"],
+			"type":          result["type"],
+			"reinforcement": result["reinforcement_count"],
 		})
 		fmt.Println(string(data))
 	} else {
-		respond(fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", lesson.ID, lesson.ReinforcementCount), "", 0)
+		id, _ := result["id"].(string)
+		reinf, _ := result["reinforcement_count"].(int64)
+		respond(fmt.Sprintf("Lesson added with ID: %s (reinforcement: %d)\n", id, reinf), "", 0)
 	}
 	return 0
 }

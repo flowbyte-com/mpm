@@ -17,6 +17,7 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/synth"
+	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -266,13 +267,21 @@ func filterByTag(memories []map[string]interface{}, tag string) []map[string]int
 	return result
 }
 
-// mpm show <id> — Show memory details
+// mpm show <id> — Show memory details.
+//
+// Stage S5 of the CLI refactor (2026-09-06): delegates to the
+// canonical mpm_memory.show tool handler via invokeTool. The
+// pre-S5 implementation called dm.GetMemory directly and rendered
+// a custom box-drawing layout. The tool returns a richer map
+// (W-013: parsed tags + metadata; W-007: is_challenged + banner)
+// so the adapter rebuilds the legacy output from the canonical
+// fields. The delegated path also records the same audit row that
+// `mpm call mpm_memory show` records.
 func handleShow(args []string) int {
 	if len(args) < 2 {
 		usererror.Usage("mpm show <id>")
 		return 1
 	}
-
 	dm := getDB()
 	if dm == nil {
 		return 1
@@ -281,27 +290,57 @@ func handleShow(args []string) int {
 }
 
 // runShow is the injectable core of `mpm show` so tests can drive it
-// against a hermetic database.
+// against a hermetic database. Stage S5: delegates the actual read
+// to the canonical mpm_memory.show tool Handler (via tools.ByName)
+// rather than calling dm.GetMemory directly. The render layer
+// remains the legacy box-drawing format for backwards compatibility.
 func runShow(dm mpminternal.CoreDB, id string) int {
-	mem, err := dm.GetMemory(id)
-	if err != nil || mem == nil {
+	tool, ok := tools.ByName("mpm_memory")
+	if !ok {
+		usererror.Error("mpm show: mpm_memory tool not registered")
+		return 1
+	}
+	ac := mpminternal.ActiveContext{SessionID: "test-run-handler"}
+	result, err := tool.Handler(dm, ac, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id},
+	})
+	if err != nil || result == nil {
 		usererror.Error("Memory not found: %s", id)
 		return 1
 	}
+	mem, _ := result.(map[string]interface{})
+	if mem == nil {
+		usererror.Error("Memory not found: %s", id)
+		return 1
+	}
+	return renderShowFromToolResult(mem)
+}
+
+// renderShowFromToolResult converts the canonical mpm_memory.show
+// tool response into the legacy `mpm show` human-readable layout.
+//
+// Stage S5 of the CLI refactor (2026-09-06): the canonical tool
+// surface is the source of truth for memory fields; the legacy
+// output is preserved verbatim by mapping the canonical field
+// names back to the legacy labels. New fields the tool exposes
+// (`is_challenged`, `banner`) are surfaced alongside the legacy
+// fields without disturbing the existing layout.
+func renderShowFromToolResult(mem map[string]interface{}) int {
+	id, _ := mem["id"].(string)
+	collection, _ := mem["collection"].(string)
+	created, _ := mem["created_at"].(string)
 
 	fmt.Println("\n══════════════════════════════════════════")
 	fmt.Printf("ID:           %s\n", id)
-	fmt.Printf("Collection:   %s\n", mem["collection"])
-	fmt.Printf("Created:      %s\n", mem["created_at"])
+	fmt.Printf("Collection:   %s\n", collection)
+	fmt.Printf("Created:      %s\n", created)
 
-	if sess, ok := mem["session_id"].(string); ok {
+	if sess, ok := mem["session_id"].(string); ok && sess != "" {
 		fmt.Printf("Session:      %s\n", sess)
 	}
 
-	// GetMemory builds its map with Go `int` for weight (web_db.go), so an
-	// int64 assertion here silently fell back to the hardcoded 1 and
-	// `mpm debug show` printed Weight: 1 regardless of stored value.
-	// Accept every numeric shape the driver may hand us instead of defaulting.
+	// Weight type per projection contract: float64 for REAL columns.
 	w := 1
 	switch we := mem["weight"].(type) {
 	case int:
@@ -313,12 +352,19 @@ func runShow(dm mpminternal.CoreDB, id string) int {
 	}
 	fmt.Printf("Weight:       %d\n", w)
 
-	meta, _ := mem["metadata"].(string)
-	if strings.Contains(meta, `"status":"challenged"`) {
+	// Tool surface exposes is_challenged + banner (W-007); keep the
+	// legacy [CHALLENGED] label so existing tests + operators see
+	// the same indicator.
+	if challenged, _ := mem["is_challenged"].(bool); challenged {
 		fmt.Println("[CHALLENGED]")
 	}
 
-	fmt.Printf("Tags:         %s\n", mem["tags"])
+	// Tags: the tool returns []string (W-013). Render as CSV.
+	if tags, ok := mem["tags"].([]string); ok && len(tags) > 0 {
+		fmt.Printf("Tags:         %s\n", strings.Join(tags, ", "))
+	} else if s, ok := mem["tags"].(string); ok {
+		fmt.Printf("Tags:         %s\n", s)
+	}
 
 	fmt.Println("\n──────────────────────────────────────────")
 	fmt.Printf("Content:\n%s\n", mem["content"])
