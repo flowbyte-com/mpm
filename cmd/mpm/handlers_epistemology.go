@@ -138,7 +138,11 @@ func handleProposeTheory(args []string) int {
 			"id":      mem.ID,
 			"status":  status,
 		})
-		return respond("", string(out)+"\n", 0)
+		// S6 fix: JSON envelopes go to stdout (matches `mpm call`
+		// envelope destination + documented contract). The pre-fix
+		// shape `respond("", out, 0)` wrote to stderr, which broke
+		// every agent adapter that follows the stdout-only contract.
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("✅ Theory proposed: %s (status: %s)\n", mem.ID, status), 0)
 }
@@ -394,7 +398,8 @@ func handleRecordDecision(args []string) int {
 			"supersedes":  supersedes,
 			"action":      "supersede",
 		})
-		return respond("", string(out)+"\n", 0)
+		// S6 fix: JSON envelopes go to stdout (matches `mpm call`).
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
 	}
@@ -426,7 +431,8 @@ func handleRecordDecision(args []string) int {
 			"id":      mem.ID,
 			"action":  "record",
 		})
-		return respond("", string(out)+"\n", 0)
+		// S6 fix: JSON envelopes go to stdout (matches `mpm call`).
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
 }
@@ -1006,7 +1012,8 @@ func handleHint(args []string) int {
 
 	if jsonOutput {
 		out, _ := json.MarshalIndent(overlaps, "", "  ")
-		return respond("", string(out)+"\n", 0)
+		// S6 fix: JSON envelopes go to stdout (matches `mpm call`).
+		return respond(string(out)+"\n", "", 0)
 	}
 
 	// Regular mode: show first hint only, formatted
