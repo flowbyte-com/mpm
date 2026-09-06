@@ -28,6 +28,38 @@
 //   - This file is the *thin adapter layer* that delegates to the
 //     canonical tool path. It does not parse CLI argv directly
 //     (callers do); it does not render CLI output (callers do).
+//
+// DOCUMENTED INTENTIONAL ASYMMETRIES vs `mpm call` (S7 classification;
+// preserved by the final-pass regression tests in
+// d_invoke_tool_asymmetries_test.go):
+//
+//   - Mode / Persona are NOT propagated. Both `mpm call` and
+//     `invokeTool` build ActiveContext without these fields;
+//     they are package globals (CLI) or config files (MCP), used
+//     by specific handlers to stamp memory metadata. Neither
+//     surface treats them as ActiveContext fields.
+//
+//   - wireToolsGlobals is NOT called. `mpm call` wires blob store
+//     + pointer resolver adapters because the cross-process
+//     surface may invoke mpm_blob_read / mpm_resolve. The
+//     in-process cognitive-verb consumers (mpm show, mpm lesson
+//     add, mpm decide) do not touch blob/pointer. A future
+//     in-process CLI command that needs blob/pointer can call
+//     wireToolsGlobals itself before invoking; we do not
+//     install global state on every cognitive invocation.
+//
+//   - Heartbeat is NOT bumped. `mpm call` calls dm.Heartbeat
+//     because the cross-process surface is the supervision
+//     boundary; in-process CLI invocations are not a session
+//     liveness signal and must not silently mutate that view
+//     every time an operator runs a read-mostly command.
+//
+//   - CheckPendingWakes is NOT folded. `mpm call` opportunistically
+//     folds due scheduled/event wakes into the response envelope
+//     for the agent runtime wake-on-respond loop. The dedicated
+//     `mpm wake` command is the operator surface for due wakes;
+//     folding into every invokeTool would conflate two surfaces'
+//     contracts.
 package main
 
 import (
