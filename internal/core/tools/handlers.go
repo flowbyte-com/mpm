@@ -3335,6 +3335,74 @@ func handleSnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	}, nil
 }
 
+// handleUnsnoozeCluster (Part 2B, 2026-09-06) is the explicit inverse of
+// handleSnoozeCluster. Returns the cluster to status='active' and clears
+// snooze_until. The row stays in the table for forensics; the active row
+// will surface again on the next list_active_clusters call.
+//
+// Wire schema (enforced by JSON-Schema in registry_list.go):
+//   - cluster_key (required) — primary key from list_active_clusters
+//   - reason      (optional) — audit-friendly note explaining why the
+//     cluster is being reactivated
+//
+// Semantics:
+//   - Missing cluster_key: error at the boundary.
+//   - Unknown cluster_key: error (operator typing a stale id wants a
+//     diagnostic).
+//   - Already-active cluster: silent success with status="active" — the
+//     cluster is already in the desired terminal state. Matches the
+//     soft-delete idempotency class in docs/tool-behavioral-contract.md §1.
+//   - Snoozed cluster: reactivates, status="active", snooze_until=null,
+//     audit row written.
+//   - Resolved cluster: rejected — resolved is terminal; the existing
+//     resolve_cluster contract explicitly forbids auto-reactivation.
+//
+// Compatibility: callers that previously worked around with
+// snooze_cluster snooze_until=0s continue to work — that path is a
+// ClusterStatusSnoozed branch with a past timestamp that the
+// ActiveClusters filter treats as active. unsnooze_cluster is the
+// explicit value path.
+func handleUnsnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	clusterKey, _ := p["cluster_key"].(string)
+	if clusterKey == "" {
+		return nil, fmt.Errorf("cluster_key is required")
+	}
+	reason, _ := p["reason"].(string)
+
+	// Probe first so the unknown-id error envelope names the cluster,
+	// not a generic SQL error.
+	var existingStatus string
+	if err := dm.SQLDB().QueryRow(
+		`SELECT status FROM audit_cluster_proposals WHERE cluster_key = ?`,
+		clusterKey,
+	).Scan(&existingStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("cluster not found: %q", clusterKey)
+		}
+		return nil, fmt.Errorf("lookup cluster: %w", err)
+	}
+
+	// Resolved is terminal — refuse to reactivate. The reasoning is the
+	// same as in SetClusterStatus: resolved clusters never auto-reactivate,
+	// so an explicit unsnooze on a resolved row would silently violate
+	// that contract.
+	if existingStatus == internal.ClusterStatusResolved {
+		return nil, fmt.Errorf("unsnooze_cluster: cluster %q is resolved (terminal); cannot reactivate a resolved cluster", clusterKey)
+	}
+
+	// Active + Snoozed both go through SetClusterStatus(Active, "");
+	// the status diff drives the audit row and the snooze_until clear.
+	if err := dm.SetClusterStatus(clusterKey, internal.ClusterStatusActive, "", reason); err != nil {
+		return nil, fmt.Errorf("unsnooze cluster: %w", err)
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"cluster_key": clusterKey,
+		"status":      "active",
+		"reason":      reason,
+	}, nil
+}
+
 // handleResolveCluster permanently dismisses an audit-cluster proposal.
 // Sets status='resolved'; the cluster row stays in the table for
 // forensics but is filtered out of ActiveClusters forever — it can no
@@ -5886,6 +5954,11 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleListActiveClusters(dm, ac, params)
 	case "snooze_cluster":
 		return handleSnoozeCluster(dm, ac, params)
+	case "unsnooze_cluster":
+		// Part 2B (2026-09-06): explicit inverse of snooze_cluster.
+		// Routes through SetClusterStatus(ClusterStatusActive, "") which
+		// clears snooze_until. See handleUnsnoozeCluster for the contract.
+		return handleUnsnoozeCluster(dm, ac, params)
 	case "resolve_cluster":
 		return handleResolveCluster(dm, ac, params)
 	case "annotate_cluster":
@@ -5898,7 +5971,7 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// operator/agent can read them without grepping system_audit_log.
 		return handleCriticFindings(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, unsnooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
 	}
 }
 
