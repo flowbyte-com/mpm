@@ -478,7 +478,7 @@ Per-action semantics:
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},
+				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","unsnooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},
 				"params": {"type": "object", "description": "Action-specific params envelope. Per-action shape is constrained by the oneOf branches below; the top-level declaration here exists so the schema accurately reflects what handleMpmSystem reads (via extractParamsOrFail)."}
 			},
 			"required": ["action"],
@@ -577,6 +577,21 @@ Per-action semantics:
 								"reason":       {"type": "string", "description": "Audit-friendly note. Optional."}
 							},
 							"required": ["cluster_key", "snooze_until"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "unsnooze_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"reason":      {"type": "string", "description": "Audit-friendly note explaining why the cluster is being reactivated. Optional."}
+							},
+							"required": ["cluster_key"],
 							"additionalProperties": false
 						}
 					},
