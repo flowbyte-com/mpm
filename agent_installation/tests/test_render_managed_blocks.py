@@ -42,7 +42,12 @@ import unittest
 from pathlib import Path
 
 
-AGENT_INSTALLATION = Path("/home/v/workspace/projects/mpm/agent_installation")
+# Path is derived from the test file location so the suite runs in any
+# environment (CI, fresh clone, alternate mount). Previously hardcoded
+# to /home/v/workspace/projects/mpm/agent_installation, which broke in
+# every other workspace AND in the github actions runner (where the
+# checkout lands at /home/runner/work/mpm/mpm/...).
+AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
 RENDER_SCRIPT = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
 CANONICAL_SOURCE = AGENT_INSTALLATION / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
 
