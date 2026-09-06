@@ -30,7 +30,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -65,9 +64,16 @@ func handleOpsResolveContradictions(args []string) int {
 			printResolveHelp()
 			return 0
 		case strings.HasPrefix(arg, "--limit="):
-			n, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit="))
-			if err != nil || n <= 0 {
-				usererror.Error("--limit must be a positive integer")
+			// Stage S3 of the CLI refactor (2026-09-06): --limit is
+			// strictly parsed via parseBoundedInt. The previous inline
+			// explicit error message is replaced with the canonical
+			// one produced by the helper, which names the field and
+			// the bounds. Caller (this handler) was already explicit
+			// about error vs default; migration preserves that
+			// distinction.
+			n, err := parseBoundedInt(strings.TrimPrefix(arg, "--limit="), "limit", 1, 10000)
+			if err != nil {
+				usererror.Error("%v", err)
 				return 1
 			}
 			limit = n

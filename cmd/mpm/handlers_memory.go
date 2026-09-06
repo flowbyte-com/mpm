@@ -510,8 +510,16 @@ func handleMemorySearch(args []string) int {
 	// D-4.2: also strip `--limit N` / `-l N` so the limit flag doesn't
 	// pollute the FTS5 query. Default to 20 (matches prior hardcoded
 	// behaviour); explicit --limit N caps the result set.
-	limit := 20
-	cleaned, limit = extractLimitFlag(cleaned, limit)
+	//
+	// Stage S3 of the CLI refactor (2026-09-06): extractLimitFlag is
+	// now strict — invalid values error rather than silently using
+	// the default. Per the audit's G.2 silent-field-loss class.
+	var limit int = 20
+	var errLimit error
+	cleaned, limit, errLimit = extractLimitFlag(cleaned, limit)
+	if errLimit != nil {
+		return respond("", errLimit.Error()+"\n", 1)
+	}
 	query := strings.Join(cleaned, " ")
 	if strings.TrimSpace(query) == "" {
 		return respond("", "Usage: mpm memory search <query> [--limit N] [--json]", 1)
@@ -587,37 +595,51 @@ func handleMemorySearch(args []string) int {
 // parseBoundedInt in S3), reintroduce one with the same variadic
 // shape under cli_args.go or similar.
 
-// extractLimitFlag parses `--limit N` / `-l N` from args, returning the
-// remaining args and the parsed limit. D-4.2: supports both space-separated
-// (`--limit 5`) and equals-form (`--limit=5`); an unparseable value leaves
-// the default untouched. Used by `mpm memory search --limit`.
-func extractLimitFlag(args []string, defaultLimit int) (cleaned []string, limit int) {
+// extractLimitFlag parses `--limit N` / `-l N` / `--limit=N` / `-l=N`
+// from args using the canonical parseBoundedInt helper for the value.
+// Returns the remaining args, the limit (defaultLimit if omitted),
+// and a deterministic error if the value is missing, malformed, or
+// out of the canonical [1, 10000] bound.
+//
+// Stage S3 of the CLI refactor (2026-09-06): replaces the previous
+// silent-on-error implementation. Per the audit's silent-field-loss
+// class (G.2), malformed CLI numeric input is now rejected
+// explicitly. The omitted-vs-explicit-zero distinction is handled
+// by the caller: a flag that was never passed returns defaultLimit;
+// a flag that was passed with an invalid value returns an error.
+func extractLimitFlag(args []string, defaultLimit int) (cleaned []string, limit int, err error) {
 	limit = defaultLimit
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--limit" || a == "-l":
-			// Value is the next arg, if present and parseable.
-			if i+1 < len(args) {
-				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
-					limit = n
-				}
-				i++ // consume the value regardless
+			if i+1 >= len(args) {
+				return out, limit, fmt.Errorf("--limit: requires a value")
 			}
+			n, parseErr := parseBoundedInt(args[i+1], "limit", 1, 10000)
+			if parseErr != nil {
+				return out, limit, parseErr
+			}
+			limit = n
+			i++
 		case strings.HasPrefix(a, "--limit="):
-			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil && n > 0 {
-				limit = n
+			n, parseErr := parseBoundedInt(strings.TrimPrefix(a, "--limit="), "limit", 1, 10000)
+			if parseErr != nil {
+				return out, limit, parseErr
 			}
+			limit = n
 		case strings.HasPrefix(a, "-l="):
-			if n, err := strconv.Atoi(strings.TrimPrefix(a, "-l=")); err == nil && n > 0 {
-				limit = n
+			n, parseErr := parseBoundedInt(strings.TrimPrefix(a, "-l="), "limit", 1, 10000)
+			if parseErr != nil {
+				return out, limit, parseErr
 			}
+			limit = n
 		default:
 			out = append(out, a)
 		}
 	}
-	return out, limit
+	return out, limit, nil
 }
 
 // truncateSnippet is a small helper for the JSON output path so the

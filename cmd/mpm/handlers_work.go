@@ -28,7 +28,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -444,14 +443,22 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 			params["status"] = strings.TrimPrefix(a, "--status=")
 			i++
 		case a == "--limit" && i+1 < len(rest):
-			if n, err := strconv.Atoi(rest[i+1]); err == nil {
-				params["limit"] = n
+			// Stage S3 of the CLI refactor (2026-09-06): --limit is
+			// strictly parsed via parseBoundedInt. Silent-coercion
+			// behaviour on invalid input (audit's G.2 class) is
+			// replaced with a deterministic error.
+			n, err := parseBoundedInt(rest[i+1], "limit", 1, 10000)
+			if err != nil {
+				return nil, nil, err
 			}
+			params["limit"] = n
 			i += 2
 		case strings.HasPrefix(a, "--limit="):
-			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil {
-				params["limit"] = n
+			n, err := parseBoundedInt(strings.TrimPrefix(a, "--limit="), "limit", 1, 10000)
+			if err != nil {
+				return nil, nil, err
 			}
+			params["limit"] = n
 			i++
 		case a == "--note" && i+1 < len(rest):
 			params["note"] = rest[i+1]

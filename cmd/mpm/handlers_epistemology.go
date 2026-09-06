@@ -873,12 +873,20 @@ func handleDecisions(args []string) int {
 	// live host, growing linearly without bound. Mirror the
 	// --limit=N parsing used by handleDecisionsList / handleDecisionsQuery
 	// so the flag behaves identically across the three decision paths.
+	//
+	// Stage S3 of the CLI refactor (2026-09-06): --limit is now
+	// strictly parsed via parseBoundedInt. Silent-coercion behaviour
+	// on invalid input (the audit's G.2 class) is replaced with a
+	// deterministic error. Bounds [1, 10000] match the canonical
+	// limit surface.
 	limit := defaultDecisionsListLimit
 	for _, a := range args {
 		if strings.HasPrefix(a, "--limit=") {
-			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit=")); err == nil && n >= 0 {
-				limit = n
+			n, err := parseBoundedInt(strings.TrimPrefix(a, "--limit="), "limit", 1, 10000)
+			if err != nil {
+				return respond("", err.Error()+"\n", 1)
 			}
+			limit = n
 		}
 	}
 	if limit > 0 && len(memories) > limit {
@@ -1092,16 +1100,22 @@ func handleDecisionsList(dm mpminternal.CoreDB, args []string) int {
 	// removed so the public surface's `limit=0 → 0 results` contract
 	// holds. The CLI default preserves the historical "no --limit
 	// flag → 50 results" behaviour.
+	//
+	// Stage S3 of the CLI refactor (2026-09-06): --limit is now
+	// strictly parsed via parseBoundedInt. Silent-coercion behaviour
+	// on invalid input (the audit's G.2 class) is replaced with a
+	// deterministic error.
 	limit := 50
 	for _, a := range args {
 		switch {
 		case strings.HasPrefix(a, "--status="):
 			status = strings.TrimPrefix(a, "--status=")
 		case strings.HasPrefix(a, "--limit="):
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
-			if err == nil {
-				limit = n
+			n, err := parseBoundedInt(strings.TrimPrefix(a, "--limit="), "limit", 1, 10000)
+			if err != nil {
+				return respond("", err.Error()+"\n", 1)
 			}
+			limit = n
 		}
 	}
 	rows, err := dm.ListDecisions(mpminternal.DecisionFilter{Status: status, Limit: limit})
@@ -1125,13 +1139,17 @@ func handleDecisionsQuery(dm mpminternal.CoreDB, args []string) int {
 	}
 	query := args[0]
 	// 2026-09-05 audit remediation pass 2: see handleDecisionsList.
+	//
+	// Stage S3 of the CLI refactor (2026-09-06): --limit strictly
+	// parsed via parseBoundedInt.
 	limit := 50
 	for _, a := range args[1:] {
 		if strings.HasPrefix(a, "--limit=") {
-			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
-			if err == nil {
-				limit = n
+			n, err := parseBoundedInt(strings.TrimPrefix(a, "--limit="), "limit", 1, 10000)
+			if err != nil {
+				return respond("", err.Error()+"\n", 1)
 			}
+			limit = n
 		}
 	}
 	rows, err := dm.QueryDecisions(query, limit)

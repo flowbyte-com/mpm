@@ -32,6 +32,11 @@ import (
 //   --limit=5      (equals, long)
 //   -l 5           (space-separated, short)
 //   -l=5           (equals, short)
+//
+// Stage S3 of the CLI refactor (2026-09-06): the signature now
+// returns (cleaned, limit, error). Strict validation rejects
+// malformed / out-of-range values; the per-case assertions below
+//// verify both the happy paths and the strict-rejection paths.
 func TestExtractLimitFlag_AllForms(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -45,18 +50,60 @@ func TestExtractLimitFlag_AllForms(t *testing.T) {
 		{"equals-form short", []string{"foo", "-l=5", "bar"}, 5, []string{"foo", "bar"}},
 		{"only-flag", []string{"--limit", "5"}, 5, []string{}},
 		{"no flag returns default", []string{"foo", "bar"}, 20, []string{"foo", "bar"}},
-		{"missing value keeps default", []string{"foo", "--limit"}, 20, []string{"foo"}},
-		{"unparseable value keeps default", []string{"foo", "--limit", "abc"}, 20, []string{"foo"}},
-		{"negative value keeps default", []string{"foo", "--limit", "-1"}, 20, []string{"foo"}},
-		{"zero value keeps default", []string{"foo", "--limit", "0"}, 20, []string{"foo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotRest, gotLimit := extractLimitFlag(tc.args, 20)
+			gotRest, gotLimit, err := extractLimitFlag(tc.args, 20)
+			if err != nil {
+				t.Errorf("err: got %v, want nil", err)
+			}
 			if gotLimit != tc.wantLimit {
 				t.Errorf("limit: got %d, want %d", gotLimit, tc.wantLimit)
 			}
 			if !sliceEqual(gotRest, tc.wantRest) {
 				t.Errorf("rest: got %v, want %v", gotRest, tc.wantRest)
+			}
+		})
+	}
+}
+
+// TestExtractLimitFlag_StrictValidation covers the strict-validation
+// paths introduced by Stage S3. Per the audit's G.2 silent-field-
+// loss class, malformed / out-of-range numeric input must be rejected
+// with a deterministic error; the previous "keeps default" behaviour
+// is no longer supported.
+func TestExtractLimitFlag_StrictValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		errSubstr string // substring expected in the error message
+	}{
+		{"missing value", []string{"foo", "--limit"}, "requires a value"},
+		{"unparseable value", []string{"foo", "--limit", "abc"}, "invalid integer"},
+		{"negative value", []string{"foo", "--limit", "-1"}, "out of range"},
+		{"zero value", []string{"foo", "--limit", "0"}, "out of range"},
+		{"above hi", []string{"foo", "--limit", "99999"}, "out of range"},
+		{"decimal value", []string{"foo", "--limit", "1.5"}, "invalid integer"},
+		{"whitespace", []string{"foo", "--limit", " 5"}, "invalid integer"},
+		{"empty value", []string{"foo", "--limit", ""}, "empty value"},
+		{"missing value short form", []string{"foo", "-l"}, "requires a value"},
+		{"unparseable equals-form", []string{"foo", "--limit=abc"}, "invalid integer"},
+		{"negative equals-form", []string{"foo", "--limit=-1"}, "out of range"},
+		{"zero equals-form", []string{"foo", "--limit=0"}, "out of range"},
+		{"unparseable short equals", []string{"foo", "-l=abc"}, "invalid integer"},
+		{"negative short equals", []string{"foo", "-l=-1"}, "out of range"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, gotLimit, err := extractLimitFlag(tc.args, 20)
+			if err == nil {
+				t.Errorf("err = nil for %v, want error containing %q", tc.args, tc.errSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("err %q must contain %q", err.Error(), tc.errSubstr)
+			}
+			// On error, limit must be the default (caller ignores it,
+			// but the value must not be silently the parsed input).
+			if gotLimit != 20 {
+				t.Errorf("limit on error: got %d, want 20 (default)", gotLimit)
 			}
 		})
 	}
@@ -224,4 +271,77 @@ func resetGlobalDB(t *testing.T, workspace string) {
 	// Re-arm by assigning a fresh sync.Once literal — vet permits
 	// this because we are not copying an existing value.
 	dbManagerOnce = sync.Once{}
+}
+
+// TestHandleMemorySearch_StrictLimitValidation is the Stage S3
+// public-path regression: `mpm memory search --limit <invalid>` must
+// reject the input with a deterministic error. Pre-S3 the invalid
+// limit was silently ignored and the default (20) was used —
+// exactly the silent-coercion bug class the audit identified (G.2).
+func TestHandleMemorySearch_StrictLimitValidation(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+
+	savedDM := dbManager
+	savedErr := dbManagerInitErr
+	resetGlobalDB(t, ws)
+	t.Cleanup(func() {
+		if dbManager != nil {
+			_ = dbManager.Close()
+		}
+		dbManager = savedDM
+		dbManagerInitErr = savedErr
+		dbManagerOnce = sync.Once{}
+	})
+
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"negative", []string{"d42-searchterm", "--limit", "-1"}},
+		{"zero", []string{"d42-searchterm", "--limit", "0"}},
+		{"malformed", []string{"d42-searchterm", "--limit", "abc"}},
+		{"missing value", []string{"d42-searchterm", "--limit"}},
+		{"above hi", []string{"d42-searchterm", "--limit", "99999"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Capture stderr so we can assert on the error message.
+			origStderr := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe: %v", err)
+			}
+			os.Stderr = w
+			t.Cleanup(func() {
+				os.Stderr = origStderr
+				_ = r.Close()
+				_ = w.Close()
+			})
+
+			exit := handleMemorySearch(tc.args)
+			_ = w.Close()
+			if exit != 1 {
+				t.Errorf("exit: got %d, want 1 (rejected)", exit)
+			}
+
+			var buf bytes.Buffer
+			if _, err := buf.ReadFrom(r); err != nil {
+				t.Fatalf("read captured: %v", err)
+			}
+			body := buf.String()
+			if !strings.Contains(body, "--limit") {
+				t.Errorf("stderr must mention --limit, got %q", body)
+			}
+			// Pre-S3 the body would be empty (silent coercion). The
+			// presence of a deterministic error message here is the
+			// regression proof.
+		})
+	}
 }
