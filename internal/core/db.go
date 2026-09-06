@@ -4943,12 +4943,38 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 		return fmt.Errorf("ChallengeMemory: begin: %w", err)
 	}
 	defer tx.Rollback()
+	if err := challengeMemoryInTx(tx, memoryID, slashAmount, evidence); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("ChallengeMemory: commit: %w", err)
+	}
 
+	// Async watchdog log is fire-and-forget and runs only after a successful
+	// commit, so a logged entry always reflects a committed state.
+	dm.ChallengeMemoryAsync(memoryID, evidence)
+	return nil
+}
+
+// challengeMemoryInTx applies the F7.1 challenge transition (status flip,
+// prior-weight/prior-confidence capture, weight demotion, evidence
+// neutralization, confidence reset) inside a caller-supplied
+// transaction. The caller is responsible for BEGIN/COMMIT/ROLLBACK.
+//
+// This split exists so ChallengeMemoryWithTheory can wrap the F7.1
+// work, the theory row INSERT, and the challenged_theory_id link
+// UPDATE in a single transaction. The pre-D.2 implementation
+// composed the three operations across three separate transactions
+// (dm.ChallengeMemory TX + MemoryStore.AddMemory TX + raw
+// dm.SQLDB().Exec UPDATE) — a failure in any late-stage operation
+// left the memory in the challenged state without the theory row
+// or the forward link, an audit-trail-destroying partial state.
+func challengeMemoryInTx(tx *sql.Tx, memoryID string, slashAmount int, evidence string) error {
 	// Verify the memory exists and is not hard-deleted inside the transaction
 	// so a concurrent soft-delete between the check and the writes is caught
 	// by the WHERE-deleted_at-IS-NULL clause on each subsequent UPDATE.
 	var exists bool
-	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM memories WHERE id = ? AND deleted_at IS NULL)`, memoryID).Scan(&exists)
+	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM memories WHERE id = ? AND deleted_at IS NULL)`, memoryID).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("ChallengeMemory: select check: %w", err)
 	}
@@ -5016,13 +5042,6 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 		return fmt.Errorf("ChallengeMemory: drop confidence: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("ChallengeMemory: commit: %w", err)
-	}
-
-	// Async watchdog log is fire-and-forget and runs only after a successful
-	// commit, so a logged entry always reflects a committed state.
-	dm.ChallengeMemoryAsync(memoryID, evidence)
 	return nil
 }
 

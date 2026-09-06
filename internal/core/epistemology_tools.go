@@ -28,29 +28,56 @@ import (
 // without duplicating the constant.
 const DecisionInitialConfidence = 0.5
 
-// ChallengeMemoryWithTheory weakens a memory and creates a pending theory.
-// Mirrors callChallengeMemory.
+// ChallengeMemoryWithTheory weakens a memory and creates a pending
+// theory in a single transaction. The pre-D.2 implementation
+// composed three separate transactions:
+//
+//   1. dm.ChallengeMemory     (status flip, weight demotion, evidence
+//                              neutralization, confidence reset)
+//   2. MemoryStore.AddMemory  (theory row INSERT — its own TX)
+//   3. dm.SQLDB().Exec        (challenged_theory_id link UPDATE)
+//
+// A failure in step 2 or 3 left the memory in the challenged state
+// without the theory row or the forward link, an audit-trail-destroying
+// partial state. The D.2 fix wraps all three operations in a single
+// transaction so either the entire challenge transition commits or
+// none of it does.
+//
+// F7.1 invariants (status flip, prior-weight capture, weight demotion,
+// evidence neutralization, confidence reset, theory row creation,
+// forward-link update) are preserved exactly.
 func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error) {
+	// Pre-flight memory existence check (matches the legacy
+	// non-tx wrapper's behaviour: a missing id fails fast before
+	// any writes, with the canonical "memory not found: <id>"
+	// message). The check is also re-asserted inside the tx by
+	// challengeMemoryInTx so a concurrent delete between the
+	// pre-check and BEGIN still aborts cleanly.
 	mem, err := dm.GetMemory(memoryID)
 	if err != nil {
-		// GetMemory already returns the canonical "memory not found: <id>"
-		// error (F7 fix). Wrapping again would produce a doubled prefix
-		// visible to the agent caller: "memory not found: memory not found: <id>".
 		return nil, err
 	}
-	// slashAmount is a POSITIVE weight reduction (see ChallengeMemory). The
-	// historic caller passed -2 here; ChallengeMemory computes
-	// `weight = MAX(1, weight - slashAmount)`, so a negative amount silently
-	// INCREASED the disputed memory's weight (5 → 7) — the exact opposite of
-	// "weaken". Challenging knowledge must never raise its rank.
-	if err := dm.ChallengeMemory(memoryID, 2, evidence); err != nil {
-		return nil, fmt.Errorf("weaken memory: %w", err)
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("challenge with theory: begin: %w", err)
 	}
-	// A challenge is an EVENT: repeating it with identical evidence still
-	// produces a distinct theory row (the CLI path behaves the same way).
-	// Baking the wall-clock into the content keeps each challenge's
-	// identity unique under the F19 idempotency rule without special-
-	// casing theories out of dedup.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Step 1: F7.1 work inside the shared tx.
+	if err := challengeMemoryInTx(tx, memoryID, 2, evidence); err != nil {
+		return nil, fmt.Errorf("challenge with theory: weaken: %w", err)
+	}
+
+	// Step 2: theory row INSERT inside the same tx. Pre-fix this
+	// used MemoryStore.AddMemory which opened its own transaction;
+	// the direct INSERT keeps everything atomic.
+	theoryID := GenerateID()
 	theoryContent := fmt.Sprintf("CHALLENGED_MEMORY_ID: %s\nEVIDENCE: %s\nCHALLENGED_AT_NANO: %d\nORIGINAL_CONTENT: %s",
 		memoryID, evidence, time.Now().UnixNano(), mem["content"])
 	theoryMeta := map[string]interface{}{
@@ -58,36 +85,39 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 		"challenged_memory_id": memoryID,
 		"evidence":             evidence,
 	}
-	store, err := dm.getSharedStore()
-	if err != nil {
-		return nil, fmt.Errorf("get memory store: %w", err)
-	}
-	theory, err := store.AddMemory(theoryContent, "theories", []string{"challenge"}, theoryMeta, "", "call")
-	if err != nil {
-		return nil, fmt.Errorf("create theory: %w", err)
+	theoryMetaJSON, _ := json.Marshal(theoryMeta)
+	if _, err := tx.Exec(
+		`INSERT INTO memories (id, collection, content, tags, metadata, created_at, weight)
+		 VALUES (?, 'theories', ?, '["challenge"]', ?, ?, 1)`,
+		theoryID, theoryContent, string(theoryMetaJSON), time.Now().Unix(),
+	); err != nil {
+		return nil, fmt.Errorf("challenge with theory: create theory: %w", err)
 	}
 
-	// Point the memory's forward link at the REAL theory row. ChallengeMemory
-	// stashes the raw evidence text into challenged_theory_id (the arbitration
-	// paths have no theory row); now that a theory exists, replace it so
-	// `mpm challenge restore` resolves the actual theory instead of no-oping
-	// against prose. The evidence text moves to challenged_evidence.
+	// Step 3: forward-link UPDATE inside the same tx. Pre-fix this
+	// was a separate dm.SQLDB().Exec; the post-D.2 path uses the
+	// shared tx so the link can never be left dangling.
 	linkPatch, _ := json.Marshal(map[string]interface{}{
-		"challenged_theory_id": theory.ID,
+		"challenged_theory_id": theoryID,
 		"challenged_evidence":  evidence,
 	})
-	if _, err := dm.SQLDB().Exec(
+	if _, err := tx.Exec(
 		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
 		string(linkPatch), memoryID,
 	); err != nil {
-		return nil, fmt.Errorf("link challenge theory: %w", err)
+		return nil, fmt.Errorf("challenge with theory: link theory: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("challenge with theory: commit: %w", err)
+	}
+	committed = true
 
 	return map[string]interface{}{
 		"success":       true,
 		"memory_id":     memoryID,
 		"action":        "weakened",
-		"theory_id":     theory.ID,
+		"theory_id":     theoryID,
 		"theory_status": "pending",
 	}, nil
 }
