@@ -2597,13 +2597,30 @@ func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 	// and no error — the audit trail records the wrong weight. The
 	// strict parser mirrors parseWeightStrict's contract: numeric
 	// shapes pass through, wrong types error with a canonical message.
-	strength, err := parseFloatStrictOr(payload["strength"], 0.5, "strength")
-	if err != nil {
-		return nil, err
+	//
+	// S7 fix (evidence default strength): when strength is absent
+	// from the payload, pass 0 through so dm.AddEvidence's
+	// `if in.Strength == 0` registry-default lookup fires. The
+	// pre-fix code coerced absent → 0.5 here, which bypassed the
+	// per-type registry defaults (e.g. reproduction=0.85, observation=0.4)
+	// and produced 0.5 for every type. CLI callers were unaffected
+	// (parseEvidenceAddArgs consults the registry directly), but
+	// tool/MCP callers saw a flat 0.5. Mirror the CLI contract.
+	var strength float64
+	if _, present := payload["strength"]; present {
+		parsed, err := parseFloatStrictOr(payload["strength"], 0.5, "strength")
+		if err != nil {
+			return nil, err
+		}
+		strength = parsed
 	}
-	independence, err := parseFloatStrictOr(payload["independence_factor"], 1.0, "independence_factor")
-	if err != nil {
-		return nil, err
+	var independence float64
+	if _, present := payload["independence_factor"]; present {
+		parsed, err := parseFloatStrictOr(payload["independence_factor"], 1.0, "independence_factor")
+		if err != nil {
+			return nil, err
+		}
+		independence = parsed
 	}
 
 	return dm.AddEvidence(internal.EvidenceInput{

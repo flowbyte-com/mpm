@@ -28,7 +28,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
@@ -54,23 +53,18 @@ func handleAudit(args []string) int {
 
 	// Normalize level to known values; reject unknown to avoid silent
 	// no-result-filter behavior that hides typos.
+	//
+	// S7: routed through parseAuditLevel (cli_args_audit_level.go)
+	// which centralises the CLI vocab + alias mapping. The pre-S7
+	// inline switch is preserved by the helper.
 	var lvl mpminternal.AuditLevel
 	if *level != "" {
-		switch strings.ToLower(*level) {
-		case "info":
-			lvl = mpminternal.AuditInfo
-		case "warn", "warning":
-			lvl = mpminternal.AuditWarn
-		case "error":
-			lvl = mpminternal.AuditError
-		case "fatal":
-			lvl = mpminternal.AuditFatal
-		case "critical":
-			lvl = mpminternal.AuditCritical
-		default:
-			usererror.Error("audit: unknown level %q (want info|warn|error|fatal|critical)", *level)
+		parsed, err := parseAuditLevel(*level)
+		if err != nil {
+			usererror.Error("%v", err)
 			return 1
 		}
+		lvl = parsed
 	}
 
 	rows, err := dm.QueryAuditLog(lvl, *component, *artifactID, *days, *limit, *includeStack)

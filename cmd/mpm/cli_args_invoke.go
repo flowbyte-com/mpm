@@ -69,12 +69,29 @@ func invokeTool(name string, payload map[string]interface{}) (map[string]interfa
 		// a silent no-op.
 		return nil, fmt.Errorf("internal: tool %q is not registered", name)
 	}
+	// S7 fix: provenance env lookups. Read MPM_PROVENANCE_FRAMEWORK
+	// (canonical) / MPM_FRAMEWORK (legacy alias), MPM_PROVENANCE_MODEL,
+	// MPM_PROVENANCE_INVOCATION_ID, and MPM_PROVENANCE_PARENT_INVOCATION_ID
+	// so CLI-originated tool calls carry the same provenance as
+	// `mpm call` does. Pre-fix code hard-coded FrameworkName="mpm-cli"
+	// and left InvocationID empty — the audit trail lost the
+	// agent-runtime attribution when a CLI command delegated through
+	// invokeTool instead of mpm call.
+	frameworkName := os.Getenv("MPM_PROVENANCE_FRAMEWORK")
+	if frameworkName == "" {
+		frameworkName = os.Getenv("MPM_FRAMEWORK")
+	}
+	if frameworkName == "" {
+		frameworkName = "mpm-cli"
+	}
 	ac := mpminternal.ActiveContext{
-		SessionID:  getOrMakeSessionID(),
-		Agent:      resolveAgentID(),
-		Hostname:   resolveHostname(),
-		Model:      os.Getenv("MPM_PROVENANCE_MODEL"),
-		FrameworkName: "mpm-cli",
+		SessionID:           getOrMakeSessionID(),
+		Agent:               resolveAgentID(),
+		Hostname:            resolveHostname(),
+		Model:               os.Getenv("MPM_PROVENANCE_MODEL"),
+		FrameworkName:       frameworkName,
+		InvocationID:        os.Getenv("MPM_PROVENANCE_INVOCATION_ID"),
+		ParentInvocationID:  os.Getenv("MPM_PROVENANCE_PARENT_INVOCATION_ID"),
 	}
 	startedAt := time.Now()
 	result, err := tool.Handler(dm, ac, payload)
