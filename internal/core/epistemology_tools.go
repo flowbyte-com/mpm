@@ -75,11 +75,19 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 	}
 
 	// Step 2: theory row INSERT inside the same tx. Pre-fix this
-	// used MemoryStore.AddMemory which opened its own transaction;
-	// the direct INSERT keeps everything atomic.
-	theoryID := GenerateID()
+	// used MemoryStore.AddMemory which opened its own transaction
+	// and ran ScanContentForWrite on the content; the direct
+	// INSERT below restores atomicity (D.2) but must invoke
+	// the scanner explicitly so the secrets/poison pattern check
+	// is not bypassed. The CLI's runChallenge path runs the
+	// scanner too (handlers_challenge.go:92) — both surfaces
+	// must enforce it.
 	theoryContent := fmt.Sprintf("CHALLENGED_MEMORY_ID: %s\nEVIDENCE: %s\nCHALLENGED_AT_NANO: %d\nORIGINAL_CONTENT: %s",
 		memoryID, evidence, time.Now().UnixNano(), mem["content"])
+	if blocked, reason := ScanContentForWrite(theoryContent); blocked {
+		return nil, fmt.Errorf("❌ Theory blocked: %s", reason)
+	}
+	theoryID := GenerateID()
 	theoryMeta := map[string]interface{}{
 		"status":               "pending",
 		"challenged_memory_id": memoryID,
