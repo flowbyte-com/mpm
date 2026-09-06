@@ -210,12 +210,8 @@ SURFACES = [
 # always available to the agent — the installed/snippet surface
 # references both via the source-marker comment.
 
-CANONICAL_SOURCE = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md"
-)
-CANONICAL_PROTOCOL = Path(
-    "/home/v/workspace/projects/mpm/agent_installation/mpm-agent-protocol.md"
-)
+CANONICAL_SOURCE = AGENT_INSTALLATION / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
+CANONICAL_PROTOCOL = AGENT_INSTALLATION / "mpm-agent-protocol.md"
 
 
 def _canonical_source_tool_ref_table() -> str:
