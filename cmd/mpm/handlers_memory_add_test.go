@@ -290,3 +290,67 @@ func TestMemoryAdd_DashDashSeparatorStripped(t *testing.T) {
 		"single-dash leading content must still be stored verbatim (no rejection)")
 	assert.Equal(t, "-leading-single-dash", single)
 }
+
+// TestMemoryAdd_DashDashSeparatorWithFlagsBefore is the S1-era
+// strengthening of the D3 regression. Verifies that flags appearing
+// before the `--` separator are still parsed correctly, while tokens
+// after the separator are stored verbatim as content. This exercises
+// the shared `splitOnDashDash` helper end-to-end through the public
+// `handleMemoryAdd` path, not just the helper in isolation.
+func TestMemoryAdd_DashDashSeparatorWithFlagsBefore(t *testing.T) {
+	dm := setupMemoryAddTest(t)
+
+	// Recognised flags before separator + raw content after.
+	// `--weight 85` and `--tags alpha,beta` must be honoured; the
+	// remaining tokens (`--`, `---yaml-front-matter`, `--looks-like-flag`)
+	// are raw content.
+	code := handleMemoryAdd([]string{
+		"--weight", "85",
+		"--tags", "alpha,beta",
+		"--", "---yaml-front-matter", "--looks-like-flag",
+	})
+	require.Equal(t, 0, code)
+
+	// Find the row by its unique weight + tag combo to avoid matching
+	// rows left by earlier tests in this file.
+	row := dm.SQLDB().QueryRow(
+		`SELECT content, weight, tags FROM memories
+		 WHERE weight = 85 AND tags LIKE '%alpha%beta%'
+		 ORDER BY created_at DESC LIMIT 1`,
+	)
+	var gotContent string
+	var gotWeight float64
+	var gotTags string
+	require.NoError(t, row.Scan(&gotContent, &gotWeight, &gotTags),
+		"row with weight=85 and tags=alpha,beta should exist")
+	assert.Equal(t, "---yaml-front-matter --looks-like-flag", gotContent,
+		"content after `--` must be joined verbatim, with all dash-prefixed tokens preserved")
+	assert.Equal(t, 85.0, gotWeight, "--weight before separator must be honoured")
+}
+
+// TestMemoryAdd_RepeatedDashDashAfterSeparator verifies that repeated
+// `--` tokens after the first separator are kept in raw content
+// (per POSIX: only the first `--` ends option processing). The
+// pre-S1 implementation stored `-- ---yaml-front-matter` for input
+// `["--", "--", "---yaml-front-matter"]`; the S1 fix returns the
+// second `--` and the dash-prefixed token as content.
+func TestMemoryAdd_RepeatedDashDashAfterSeparator(t *testing.T) {
+	dm := setupMemoryAddTest(t)
+
+	code := handleMemoryAdd([]string{"--", "--", "---yaml-front-matter"})
+	require.Equal(t, 0, code)
+
+	// The content must be `-- ---yaml-front-matter` (both `--`
+	// tokens preserved verbatim) — NOT `---yaml-front-matter` (which
+	// would mean the second `--` was silently consumed).
+	row := dm.SQLDB().QueryRow(
+		`SELECT content FROM memories
+		 WHERE content = '-- ---yaml-front-matter'
+		 ORDER BY created_at DESC LIMIT 1`,
+	)
+	var gotContent string
+	require.NoError(t, row.Scan(&gotContent),
+		"row with content `-- ---yaml-front-matter` (both `--` tokens preserved) should exist")
+	assert.Equal(t, "-- ---yaml-front-matter", gotContent,
+		"only the FIRST `--` is the separator; subsequent `--` tokens are content")
+}

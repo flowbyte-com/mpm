@@ -149,15 +149,34 @@ func handleMemoryAdd(args []string) int {
 	// hatch printed in the help text did not work for the
 	// `mpm memory add` path.
 	//
-	// Strip the leading `--` from positional args before the
-	// pre-scan loop. Single-dash leading tokens (`-foo`) and
-	// non-flag-like content are left untouched — the pre-scan
-	// switch below still rejects ambiguous tokens, preserving the
-	// 2026-08-13 silent-failure invariant (a typo in --fact/--tags
-	// shape must NEVER silently land as content).
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
-	}
+	// D3 fix: POSIX-style `--` separator. The router-level parseFlags
+	// (router.go:474) rewrites `-h/--help` (and a handful of other
+	// names) but does NOT know about per-handler flags like --fact,
+	// --tags, --weight. If the operator's content begins with `-`
+	// (think YAML front-matter `---\nfoo: bar` or a literal flag-like
+	// token they want preserved as data), the documented escape hatch
+	// is to prefix with `--`: `mpm memory add -- ---yaml-front-matter`.
+	//
+	// Pre-fix this worked for `mpm add` (the older simple_cmds.go
+	// path uses stdlib flag, which respects `--`), but for the
+	// `mpm memory add` path the pre-scan switch below did NOT consume
+	// a standalone `--` token — it fell through into contentArgs and
+	// got joined with the rest of the content, producing rows like
+	// content=`-- ---yaml-front-matter`. The audit reported this as
+	// "mpm add rejects content beginning with `-`"; the actual defect
+	// was that the documented escape hatch printed in the help text
+	// did not work for the `mpm memory add` path.
+	//
+	// Stage S1 of the CLI refactor (2026-09-06): use the shared
+	// `splitOnDashDash` helper. Tokens before the first `--` go to
+	// the pre-scan switch (flag parsing). Tokens after the first `--`
+	// are appended verbatim to contentArgs and must not be
+	// interpreted as flags. Single-dash leading tokens (`-foo`) and
+	// non-flag-like content BEFORE the separator are still rejected
+	// at parse time as ambiguous, preserving the 2026-08-13
+	// silent-failure invariant (a typo in --fact/--tags shape must
+	// NEVER silently land as content).
+	flagsArgs, rawArgs := splitOnDashDash(args)
 
 	// Pre-scan --json, -i/--interactive, --fact, --tags, --weight, --expires-in flags.
 	// Unrecognized flags fall through to contentArgs (positional content),
@@ -176,9 +195,9 @@ func handleMemoryAdd(args []string) int {
 	tagsArg := ""    // --tags <csv>: comma-separated tags
 	weightArg := 1.0 // --weight <0-100>: weight; default 1 (matches the hardcoded value AddMemoryWithWeight substitutes)
 	weightSet := false // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
-	contentArgs := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
+	contentArgs := make([]string, 0, len(flagsArgs)+len(rawArgs))
+	for i := 0; i < len(flagsArgs); i++ {
+		switch flagsArgs[i] {
 		case "--json", "-j":
 			jsonOutput = true
 		case "-i", "--interactive":
@@ -190,40 +209,40 @@ func handleMemoryAdd(args []string) int {
 			// stored for `mpm memory add --file /tmp/p1g.txt`) or to
 			// silently truncate to ~64KB. We now reject oversized files
 			// explicitly and never silently truncate.
-			if i+1 >= len(args) {
+			if i+1 >= len(flagsArgs) {
 				return respond("", "--file requires a path\n", 1)
 			}
 			i++
-			fileArg = args[i]
+			fileArg = flagsArgs[i]
 		case "--fact":
-			if i+1 >= len(args) {
+			if i+1 >= len(flagsArgs) {
 				return respond("", "--fact requires a value\n", 1)
 			}
 			i++
-			factArg = args[i]
+			factArg = flagsArgs[i]
 		case "--tags":
-			if i+1 >= len(args) {
+			if i+1 >= len(flagsArgs) {
 				return respond("", "--tags requires a value\n", 1)
 			}
 			i++
-			tagsArg = args[i]
+			tagsArg = flagsArgs[i]
 		case "--weight":
-			if i+1 >= len(args) {
+			if i+1 >= len(flagsArgs) {
 				return respond("", "--weight requires a value\n", 1)
 			}
 			i++
-			w, parseErr := strconv.ParseFloat(args[i], 64)
+			w, parseErr := strconv.ParseFloat(flagsArgs[i], 64)
 			if parseErr != nil {
-				return respond("", fmt.Sprintf("--weight: invalid float %q\n", args[i]), 1)
+				return respond("", fmt.Sprintf("--weight: invalid float %q\n", flagsArgs[i]), 1)
 			}
 			weightArg = w
 			weightSet = true
 		case "--expires-in":
-			if i+1 >= len(args) {
+			if i+1 >= len(flagsArgs) {
 				return respond("", "--expires-in requires a value (e.g. 7d, 24h, 30m)\n", 1)
 			}
 			i++
-			expiresIn = args[i]
+			expiresIn = flagsArgs[i]
 			// F-H2: validate the duration at parse time so we don't
 			// create the memory before discovering the value is
 			// garbage (which would force a rollback row, leaving
@@ -232,9 +251,14 @@ func handleMemoryAdd(args []string) int {
 				return respond("", fmt.Sprintf("--expires-in %q: invalid duration (use Nd, Nh, Nm, or Go duration like 24h)\n", expiresIn), 1)
 			}
 		default:
-			contentArgs = append(contentArgs, args[i])
+			contentArgs = append(contentArgs, flagsArgs[i])
 		}
 	}
+
+	// S1: append rawArgs (everything after the first `--`) verbatim
+	// to contentArgs. These tokens must not be re-parsed as flags —
+	// they are positional content per POSIX `--` semantics.
+	contentArgs = append(contentArgs, rawArgs...)
 
 	var content string
 	if interactive {
