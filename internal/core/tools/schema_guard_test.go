@@ -464,6 +464,15 @@ func literalFromPayloadIndex(n ast.Node) string {
 // the idiomatic helpers used in handlers; without recognizing them the
 // post-hardening schema guard produces phantom over-declaration errors
 // for every domain dispatcher.
+//
+// Final-pass update (D.1): also recognises `collectConfirmationSpecs(p, "k", type)`
+// and `collectContradictionSpecs(p, "k", type)` calls. The 2026-09-05
+// epistemic-confirmation feature refactored these keys out of direct
+// payload["k"] reads into helper functions that take the literal key
+// as their second argument. The schema still advertises the keys
+// (TestSchemaGuard_LogToChangelogAssertions pins that); without this
+// recognition, TestSchemaSupersetOfHandlerPayloadReads would report
+// the 6 keys as over-declared.
 func literalFromGetStringCall(n ast.Node) string {
 	cl, ok := n.(*ast.CallExpr)
 	if !ok {
@@ -497,6 +506,26 @@ func literalFromGetStringCall(n ast.Node) string {
 		if idx, ok := cl.Args[0].(*ast.IndexExpr); ok {
 			return literalFromPayloadIndex(idx)
 		}
+	}
+	// Form 3: collectConfirmationSpecs(p, "k", type) /
+	//         collectContradictionSpecs(p, "k", type)
+	// The literal key is the second positional argument. The
+	// first argument must be a payload-shaped identifier (p,
+	// payload, or params) to qualify as a payload read.
+	if fn, ok := cl.Fun.(*ast.Ident); ok &&
+		(fn.Name == "collectConfirmationSpecs" || fn.Name == "collectContradictionSpecs") {
+		if len(cl.Args) < 2 {
+			return ""
+		}
+		id, ok := cl.Args[0].(*ast.Ident)
+		if !ok || (id.Name != "payload" && id.Name != "p" && id.Name != "params") {
+			return ""
+		}
+		lit, ok := cl.Args[1].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return ""
+		}
+		return strings.Trim(lit.Value, `"`)
 	}
 	return ""
 }
@@ -641,6 +670,67 @@ func TestSchemaGuard_MpmSkillsList(t *testing.T) {
 	for _, want := range []string{"local", "shared", "all"} {
 		if !strings.Contains(found.Description, want) {
 			t.Errorf("mpm_skills list action description must mention scope value %q (got: %q)", want, found.Description)
+		}
+	}
+}
+
+// TestSchemaGuard_LogToChangelogHelperBasedReadsAreDetected pins the
+// AST-extractor's recognition of the helper-based read pattern used
+// by handleLogToChangelog. The handler reads 6 keys via
+// collectConfirmationSpecs / collectContradictionSpecs rather than
+// direct p["k"] reads. If the extractor stops recognising this
+// pattern, TestSchemaSupersetOfHandlerPayloadReads would falsely
+// flag the 6 keys as over-declared (since the schema advertises
+// them but the AST sees no direct read).
+//
+// This test asserts the AST extractor picks up the helper-based
+// reads by re-running the schema/handler comparison against the
+// same canonical Read tool the schema-guard uses. If a future
+// refactor removes the helper recognition from the extractor,
+// the canonical guard's over-decl check would re-flag
+// log_to_changelog — and this focused test fails first with a
+// precise message.
+//
+// Pre-final-pass: the AST extractor only recognised
+// p["k"] / getString(p, "k") / internal.ParseStringOr(p["k"], _).
+// The collectConfirmationSpecs/collectContradictionSpecs pattern
+// was a known false positive that this test pins as now fixed.
+func TestSchemaGuard_LogToChangelogHelperBasedReadsAreDetected(t *testing.T) {
+	// Re-run the canonical schema/handler walk scoped to
+	// log_to_changelog and verify the 6 helper-based keys are
+	// detected as handler reads, not flagged as over-declared.
+	schemaProps := extractSchemaProperties(t)
+	handlerReads := extractHandlerPayloadReads(t)
+
+	toolName := "log_to_changelog"
+	props, ok := schemaProps[toolName]
+	if !ok {
+		t.Fatalf("%s: schema not found in Registry", toolName)
+	}
+	reads, ok := handlerReads["handleLogToChangelog"]
+	if !ok {
+		t.Fatalf("%s: handler not parsed from handlers.go", toolName)
+	}
+
+	// The 6 keys are read via collectConfirmationSpecs /
+	// collectContradictionSpecs. The AST extractor (after the
+	// final-pass F.2 fix) recognises these helper-based reads.
+	wantKeys := []string{
+		"confirms_lesson_id",
+		"confirms_decision_id",
+		"confirms_theory_id",
+		"contradicts_lesson_id",
+		"contradicts_decision_id",
+		"contradicts_theory_id",
+	}
+	for _, k := range wantKeys {
+		if !reads[k] {
+			t.Errorf("%s: AST extractor failed to detect helper-based read of %q (the extractor's collectConfirmationSpecs/collectContradictionSpecs recognition regressed)",
+				toolName, k)
+		}
+		// Sanity: each key must also be declared in the schema.
+		if !props[k] {
+			t.Errorf("%s: schema is missing declaration for %q (under-declaration drift; the handler reads it via helper but the schema does not advertise it)", toolName, k)
 		}
 	}
 }

@@ -50,11 +50,19 @@ import (
 	"testing"
 )
 
-// mpmSystemActionBranches pins the 10 actions the dispatcher's case
+// mpmSystemActionBranches pins the 11 actions the dispatcher's case
 // list claims (handlers.go handleMpmSystem default branch). The
 // oneOf cardinality MUST match the dispatcher — any drift surfaces
 // as either an extra branch (handler ignores it) or a missing branch
 // (the action fails schema validation before reaching the dispatcher).
+//
+// History: the original list had 10 actions. unsnooze_cluster was
+// added in the Part 2B snooze-mirroring remediation (2026-09-06) as
+// the explicit inverse of snooze_cluster. The dispatcher (handlers.go
+// handleMpmSystem) routes unsnooze_cluster to handleUnsnoozeCluster.
+// The schema (registry_list.go mpm_system entry) declares a per-action
+// oneOf branch for it. The test slice was stale at 10; this is the
+// final-pass correction.
 var mpmSystemActionBranches = []string{
 	"gc_run",
 	"compact",
@@ -63,6 +71,7 @@ var mpmSystemActionBranches = []string{
 	"query_audit_log",
 	"list_clusters",
 	"snooze_cluster",
+	"unsnooze_cluster",
 	"resolve_cluster",
 	"annotate_cluster",
 	"critic_findings",
@@ -248,6 +257,7 @@ func TestMpmSystem_SchemaDeclarationsCoverHandlerReads(t *testing.T) {
 		"query_audit_log":  {"level", "component", "artifact_id", "days", "since", "limit", "include_stack"},
 		"list_clusters":    {}, // no params
 		"snooze_cluster":   {"cluster_key", "snooze_until", "reason"},
+		"unsnooze_cluster": {"cluster_key", "reason"},
 		"resolve_cluster":  {"cluster_key", "reason"},
 		"annotate_cluster": {"cluster_key", "annotation", "reason"},
 		"critic_findings":  {"limit"},
