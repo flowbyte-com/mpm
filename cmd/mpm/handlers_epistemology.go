@@ -23,7 +23,10 @@ func handleProposeTheory(args []string) int {
 
 	if len(args) == 0 {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"Usage: mpm propose_theory [--json] <text>"}`+"\n", 1)
+			// Final-pass fix: error JSON envelopes go to stdout
+			// (matches S6 stdout-only contract; pre-fix shape
+			// wrote to stderr via the second arg of respond).
+			return respond(`{"success":false,"error":"Usage: mpm propose_theory [--json] <text>"}`+"\n", "", 1)
 		}
 		return respond("", "Usage: mpm propose_theory [--json] <text>", 1)
 	}
@@ -74,7 +77,7 @@ func handleProposeTheory(args []string) int {
 	// "   "` doesn't create an empty theories row.
 	if strings.TrimSpace(hypothesis) == "" {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"propose_theory: hypothesis is required (non-empty)"}`+"\n", 1)
+			return respond(`{"success":false,"error":"propose_theory: hypothesis is required (non-empty)"}`+"\n", "", 1)
 		}
 		return respond("", "propose_theory: hypothesis is required (non-empty)\n", 1)
 	}
@@ -107,7 +110,7 @@ func handleProposeTheory(args []string) int {
 	store := getMemoryStore()
 	if store == nil {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"memory store not available"}`+"\n", 1)
+			return respond(`{"success":false,"error":"memory store not available"}`+"\n", "", 1)
 		}
 		return respond("", "Error: memory store not available\n", 1)
 	}
@@ -119,7 +122,10 @@ func handleProposeTheory(args []string) int {
 				"success": false,
 				"error":   fmt.Sprintf("Failed to save theory: %v", err),
 			})
-			return respond("", string(out)+"\n", 1)
+			// Final-pass fix: error JSON envelopes go to stdout
+			// (matches S6 stdout-only contract; pre-fix shape
+			// wrote to stderr via the second arg of respond).
+			return respond(string(out)+"\n", "", 1)
 		}
 		return respond("", fmt.Sprintf("Failed to save theory: %v\n", err), 1)
 	}
@@ -284,7 +290,7 @@ func handleRecordDecision(args []string) int {
 
 	if len(args) == 0 {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"decision requires --choice or token form"}`+"\n", 1)
+			return respond(`{"success":false,"error":"decision requires --choice or token form"}`+"\n", "", 1)
 		}
 		return respond("", "Usage: mpm record_decision [--json] [--context <text>] [--choice <text>] [--rationale <text>] [--tags <csv>] [--supersedes <decision-id>]\n"+
 			"   or: mpm record_decision [--json] <text with CONTEXT:/CHOICE:/RATIONALE:/TAGS: tokens>\n"+
@@ -310,7 +316,7 @@ func handleRecordDecision(args []string) int {
 	// had recorded a choice; the DB got an empty record).
 	if hasDecisionFlags(args) && strings.TrimSpace(choice) == "" {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"--choice is required when using flag form"}`+"\n", 1)
+			return respond(`{"success":false,"error":"--choice is required when using flag form"}`+"\n", "", 1)
 		}
 		return respond("", "Error: --choice is required when using flag form\n", 1)
 	}
@@ -324,7 +330,7 @@ func handleRecordDecision(args []string) int {
 	// for theory hypothesis and :94 for tags.
 	if strings.TrimSpace(choice) == "" {
 		if jsonOutput {
-			return respond("", `{"success":false,"error":"decision requires a CHOICE (flag --choice or CHOICE: token)"}`+"\n", 1)
+			return respond(`{"success":false,"error":"decision requires a CHOICE (flag --choice or CHOICE: token)"}`+"\n", "", 1)
 		}
 		return respond("", "Error: decision requires a CHOICE (flag --choice or CHOICE: token)\n", 1)
 	}
@@ -411,7 +417,10 @@ func handleRecordDecision(args []string) int {
 				"success": false,
 				"error":   fmt.Sprintf("Failed to record decision: %v", err),
 			})
-			return respond("", string(out)+"\n", 1)
+			// Final-pass fix: error JSON envelopes go to stdout
+			// (matches S6 stdout-only contract; pre-fix shape
+			// wrote to stderr via the second arg of respond).
+			return respond(string(out)+"\n", "", 1)
 		}
 		return respond("", fmt.Sprintf("Failed to record decision: %v\n", err), 1)
 	}
