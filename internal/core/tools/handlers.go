@@ -1835,6 +1835,53 @@ func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}, nil
 }
 
+// handleUnlinkTopic removes the membership row linking a memory to a topic.
+// Inverse of handleLinkTopic. Per docs/tool-behavioral-contract.md §1
+// (soft-delete idempotency) and §4 (idempotent membership unlink):
+//
+//   - Missing memory_id / topic_id: error at the boundary.
+//   - Memory or topic does not exist: error "X not found" — same friendly
+//     pre-check handleLinkTopic uses, so callers learn about a typo'd
+//     endpoint before any DELETE fires.
+//   - Membership exists: removed, returns removed=true.
+//   - Membership does not exist: silent success with removed=false
+//     (idempotent; the desired terminal state already holds).
+//
+// Part 2A (2026-09-06): new public action surfacing the existing DM
+// primitive RemoveMemoryFromTopic (db.go:4112). Closes the catalog
+// §C.1 finding (link had no symmetric unlink at the public surface).
+func handleUnlinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	memoryID, _ := p["memory_id"].(string)
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	topicID, _ := p["topic_id"].(string)
+	if topicID == "" {
+		return nil, fmt.Errorf("topic_id is required")
+	}
+
+	// W-005 mirror: confirm both endpoints exist before the DELETE so
+	// callers get a precise "memory X not found" / "topic Y not found"
+	// envelope rather than an opaque FK failure.
+	if _, err := dm.GetMemory(memoryID); err != nil {
+		return nil, fmt.Errorf("memory %q not found", memoryID)
+	}
+	if _, err := dm.GetTopic(topicID); err != nil {
+		return nil, fmt.Errorf("topic %q not found", topicID)
+	}
+
+	removed, err := dm.RemoveMemoryFromTopic(memoryID, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("unlink topic: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"topic_id":  topicID,
+		"removed":   removed,
+	}, nil
+}
+
 // handleListTopics returns all active topics (matches `mpm topic list`
 // CLI surface). D-4.1: the prior MCP surface exposed only
 // create|search|link; this restores parity so an agent using MCP can
@@ -5677,6 +5724,10 @@ func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleSearchTopics(dm, ac, params)
 	case "link":
 		return handleLinkTopic(dm, ac, params)
+	case "unlink":
+		// Part 2A (2026-09-06): inverse of link. Idempotent on missing
+		// membership (removed=false, success=true). See handleUnlinkTopic.
+		return handleUnlinkTopic(dm, ac, params)
 	case "list":
 		// D-4.1: parity with `mpm topic list` CLI surface.
 		return handleListTopics(dm, ac, params)
@@ -5684,7 +5735,7 @@ func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// D-4.1: parity with `mpm topic show <id>` CLI surface.
 		return handleShowTopic(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link, list, show", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link, unlink, list, show", action)
 	}
 }
 

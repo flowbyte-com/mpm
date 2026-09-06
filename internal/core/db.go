@@ -4109,10 +4109,29 @@ func (dm *DatabaseManager) hasColumn(table, column string) bool {
 	return false
 }
 
-// RemoveMemoryFromTopic removes a memory from a topic
-func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) error {
-	_, err := dm.db.Exec(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, memoryID, topicID)
-	return err
+// RemoveMemoryFromTopic removes a memory from a topic. Returns (true, nil)
+// when a membership row was actually deleted, (false, nil) when no such
+// membership existed (idempotent silent success — matches the soft-delete
+// contract in docs/tool-behavioral-contract.md §1; the row is already in
+// the desired terminal state).
+//
+// Part 2A (2026-09-06): widened signature to return a bool so the
+// handleUnlinkTopic public surface can distinguish "removed" from
+// "already absent" without a separate probe round-trip. The existing
+// call sites that only care about errors keep the same behaviour.
+func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) (bool, error) {
+	if memoryID == "" {
+		return false, fmt.Errorf("memory_id is required")
+	}
+	if topicID == "" {
+		return false, fmt.Errorf("topic_id is required")
+	}
+	res, err := dm.db.Exec(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, memoryID, topicID)
+	if err != nil {
+		return false, fmt.Errorf("remove membership: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0, nil
 }
 
 // DeleteTopic soft-deletes a topic (memories are NOT deleted).
