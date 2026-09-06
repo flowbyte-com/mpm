@@ -81,10 +81,17 @@ func handleRecall(args []string) int {
 	}
 
 	// Go's flag.Parse stops at the first non-flag positional arg.
-	// Pre-scan for --json, --stale-days, and --token-budget since callers
-	// may place these flags after the query.
+	// Pre-scan for --json, --stale-days, --token-budget, --weight-below,
+	// --before, --projected since callers may place these flags after
+	// the query.
+	//
+	// Stage S2 of the CLI refactor (2026-09-06): --json / -j is
+	// extracted by the canonical ExtractJSONFlag helper at the start;
+	// the matching indices are marked in `removeIdxs` so the
+	// post-loop preprocessed construction drops them. The pre-scan
+	// loop below no longer carries a `--json` arm.
+	jsonFlagSeen, _ := ExtractJSONFlag(args[1:])
 	preprocessed := make([]string, 0, len(args))
-	jsonFlagSeen := false
 	projectedFlagSeen := false
 	tokenBudgetVal := 0
 	weightBelowVal := 0
@@ -92,14 +99,14 @@ func handleRecall(args []string) int {
 
 	// Collect indices to remove
 	removeIdxs := make(map[int]bool)
+	for i, a := range args[1:] {
+		if a == "--json" || a == "-j" {
+			removeIdxs[i+1] = true
+		}
+	}
 
 	for i, arg := range args[1:] {
 		realIdx := i + 1 // account for args[0] being the command name
-		if arg == "--json" || arg == "-j" {
-			jsonFlagSeen = true
-			removeIdxs[realIdx] = true
-			continue
-		}
 		if arg == "--stale-days" {
 			removeIdxs[realIdx] = true
 			if realIdx+1 < len(args) {

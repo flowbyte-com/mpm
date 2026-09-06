@@ -136,11 +136,14 @@ func handleDrillsReport(args []string) int {
 
 // parseDrillReportFlags extracts --json, --per-drill, --per-framework.
 // Unknown flags are passed back in `rest` for forward compatibility.
+//
+// Stage S2 of the CLI refactor (2026-09-06): --json is extracted by
+// the canonical ExtractJSONFlag helper. The pre-scan loop below no
+// longer carries a `--json` arm.
 func parseDrillReportFlags(args []string) (jsonOutput, perDrillOnly, perFrameworkOnly bool, rest []string) {
+	jsonOutput, args = ExtractJSONFlag(args)
 	for _, a := range args {
 		switch a {
-		case "--json":
-			jsonOutput = true
 		case "--per-drill":
 			perDrillOnly = true
 		case "--per-framework":

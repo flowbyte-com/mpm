@@ -15,17 +15,11 @@ import (
 )
 
 func handleProposeTheory(args []string) int {
-	// W-001: --json flag for machine-readable output.
-	jsonOutput := false
-	filteredArgs := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--json" {
-			jsonOutput = true
-			continue
-		}
-		filteredArgs = append(filteredArgs, args[i])
-	}
-	args = filteredArgs
+	// W-001: --json flag for machine-readable output. Stage S2 of the
+	// CLI refactor (2026-09-06): use the canonical ExtractJSONFlag
+	// helper instead of the inline scan loop. Same contract — exact
+	// match on `--json`, removed from the returned args slice.
+	jsonOutput, args := ExtractJSONFlag(args)
 
 	if len(args) == 0 {
 		if jsonOutput {
@@ -277,17 +271,12 @@ func handleResolveTheory(args []string) int {
 
 // handleRecordDecision parses structured decision text and saves to the decisions collection.
 func handleRecordDecision(args []string) int {
-	// W-001: --json flag for machine-readable output (parity with `mpm call`).
-	jsonOutput := false
-	filteredArgs := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--json" {
-			jsonOutput = true
-			continue
-		}
-		filteredArgs = append(filteredArgs, args[i])
-	}
-	args = filteredArgs
+	// W-001: --json flag for machine-readable output (parity with
+	// `mpm call`). Stage S2 of the CLI refactor (2026-09-06): use
+	// the canonical ExtractJSONFlag helper instead of the inline
+	// scan loop. Same contract — exact match on `--json`, removed
+	// from the returned args slice.
+	jsonOutput, args := ExtractJSONFlag(args)
 
 	if len(args) == 0 {
 		if jsonOutput {
@@ -939,14 +928,17 @@ func handleDecisions(args []string) int {
 // handleHint checks recent conversation context for epistemologically relevant
 // memories (theories and decisions). Supports --json and --max <n> flags.
 func handleHint(args []string) int {
-	// Parse --max and --json flags
+	// Stage S2 of the CLI refactor (2026-09-06): --json is extracted
+	// by the canonical ExtractJSONFlag helper. --max stays in the
+	// local pre-scan because it's specific to this handler. The
+	// combination preserves the previous behaviour exactly: --json
+	// is removed from the working args slice, --max consumes its
+	// value, everything else is positional content.
+	jsonOutput, args := ExtractJSONFlag(args)
 	maxHints := 1
-	jsonOutput := false
 	cleanArgs := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--json":
-			jsonOutput = true
 		case "--max":
 			if i+1 < len(args) {
 				i++

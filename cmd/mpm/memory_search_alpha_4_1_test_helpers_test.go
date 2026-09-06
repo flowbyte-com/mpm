@@ -213,10 +213,11 @@ func mkMemoryForTestInWorkspace(t *testing.T, workspace, idHint, content, tag st
 	}
 }
 
-// stripJSONFlag is the test-side mirror of the production
-// stripMemoryFlagToken. The pin here lets the F-005 test verify the
-// production scrubber's behavior without going through the full
-// handleMemorySearch path.
-func stripJSONFlag(args []string) (cleaned []string, wantJSON bool) {
-	return stripMemoryFlagToken(args, "--json", "-j")
-}
+// stripJSONFlag was the test-side mirror of the production
+// stripMemoryFlagToken. Stage S2 of the CLI refactor (2026-09-06)
+// migrated the production scrubber to the canonical ExtractJSONFlag
+// helper. The test-side mirror was dead code (no callers in the test
+// corpus) and has been removed as part of the duplicate-extraction
+// cleanup. See cli_args_json.go for the canonical --json contract
+// and cli_args_json_test.go for the test coverage that replaces this
+// pin.

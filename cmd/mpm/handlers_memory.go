@@ -177,8 +177,13 @@ func handleMemoryAdd(args []string) int {
 	// silent-failure invariant (a typo in --fact/--tags shape must
 	// NEVER silently land as content).
 	flagsArgs, rawArgs := splitOnDashDash(args)
+	// Stage S2 of the CLI refactor (2026-09-06): --json / -j is
+	// extracted by the canonical ExtractJSONFlag helper before the
+	// pre-scan switch runs. Same contract as the prior inline case
+	// (exact match, removed from the working slice, sets the bool).
+	jsonOutput, flagsArgs := ExtractJSONFlag(flagsArgs)
 
-	// Pre-scan --json, -i/--interactive, --fact, --tags, --weight, --expires-in flags.
+	// Pre-scan -i/--interactive, --fact, --tags, --weight, --expires-in flags.
 	// Unrecognized flags fall through to contentArgs (positional content),
 	// but --fact/--tags/--weight are EXPLICITLY recognized so a typo in flag
 	// shape doesn't silently land as content. Production hit 2026-08-13:
@@ -187,7 +192,8 @@ func handleMemoryAdd(args []string) int {
 	// args, the row landed with content "--fact X --weight 85 --tags a,b,c"
 	// and tags=null, weight=1. Silent failure with success return — exactly
 	// the shape the always-cross-check-with-sqlite3 rule exists to catch.
-	jsonOutput := false
+	// jsonOutput is set by ExtractJSONFlag above (S2 migration); the
+	// pre-scan switch no longer carries a `case "--json"` arm.
 	expiresIn := ""
 	interactive := false
 	factArg := ""    // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
@@ -198,8 +204,6 @@ func handleMemoryAdd(args []string) int {
 	contentArgs := make([]string, 0, len(flagsArgs)+len(rawArgs))
 	for i := 0; i < len(flagsArgs); i++ {
 		switch flagsArgs[i] {
-		case "--json", "-j":
-			jsonOutput = true
 		case "-i", "--interactive":
 			interactive = true
 		case "--file", "-f":
@@ -493,7 +497,16 @@ func handleMemorySearch(args []string) int {
 	// list before constructing the query. Pre-fix this joined the
 	// literal flag string into the FTS5 query and returned zero hits
 	// because no document contained the token "--json".
-	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+	//
+	// Stage S2 of the CLI refactor (2026-09-06): use the canonical
+	// ExtractJSONFlag helper instead of the per-handler
+	// stripMemoryFlagToken scanner. Same contract for the
+	// `--json` / `-j` exact-match forms; the stripMemoryFlagToken
+	// helper's extra `--flag=value` prefix match is dropped here
+	// because no test or document exercises that form for memory
+	// search (the F-005/W-006 regression only covered `--json`
+	// exact match). See cli_args_json.go for the canonical contract.
+	wantJSON, cleaned := ExtractJSONFlag(args)
 	// D-4.2: also strip `--limit N` / `-l N` so the limit flag doesn't
 	// pollute the FTS5 query. Default to 20 (matches prior hardcoded
 	// behaviour); explicit --limit N caps the result set.
@@ -564,34 +577,15 @@ func handleMemorySearch(args []string) int {
 	return respond(output.String(), "", 0)
 }
 
-// stripMemoryFlagToken removes one or more flag tokens (with their
-// optional `=value` form) from an argument list. Returns the cleaned
-// list plus a bool indicating whether any matching flag was found.
-// Shared by handleMemorySearch / List / Show so W-006 has a single
-// canonical flag-stripper.
-func stripMemoryFlagToken(args []string, flags ...string) (cleaned []string, found bool) {
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		stripped := false
-		for _, f := range flags {
-			if a == f {
-				found = true
-				stripped = true
-				break
-			}
-			// `--flag=value` form: drop entirely (we don't carry the value).
-			if strings.HasPrefix(a, f+"=") {
-				found = true
-				stripped = true
-				break
-			}
-		}
-		if !stripped {
-			out = append(out, a)
-		}
-	}
-	return out, found
-}
+// stripMemoryFlagToken (Stage S2 of the CLI refactor, 2026-09-06):
+// removed. The helper had a single --json / -j call site
+// (handleMemorySearch), which now uses the canonical ExtractJSONFlag
+// helper in cli_args_json.go. The `--flag=value` form that this
+// helper also handled is not exercised by any test or documented
+// caller for --json in MPM today, so the contract narrowing is safe.
+// If a future stage needs a general flag-stripper (e.g., for
+// parseBoundedInt in S3), reintroduce one with the same variadic
+// shape under cli_args.go or similar.
 
 // extractLimitFlag parses `--limit N` / `-l N` from args, returning the
 // remaining args and the parsed limit. D-4.2: supports both space-separated

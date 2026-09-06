@@ -1083,12 +1083,16 @@ func handleRefAdd(args []string) int {
 
 // handleRefList lists all reference documents
 func handleRefList(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json is extracted
+	// by the canonical ExtractJSONFlag helper before FlagSet parses
+	// the remaining args. The previous fs.Bool("json", ...) declaration
+	// was dead code — ExtractJSONFlag already strips --json before
+	// fs.Parse runs, so the FlagSet never sees it.
 	fs := flag.NewFlagSet("reference ls", flag.ContinueOnError)
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
-	if err := fs.Parse(args[1:]); err != nil {
+	jsonOutput, preprocessed := ExtractJSONFlag(args[1:])
+	if err := fs.Parse(preprocessed); err != nil {
 		return 1
 	}
-	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
 	dm := getDB()
 	if dm == nil {
@@ -1102,7 +1106,7 @@ func handleRefList(args []string) int {
 	}
 
 	if len(refs) == 0 {
-		if *jsonOutput {
+		if jsonOutput {
 			fmt.Println(`{"references": [], "message": "No references stored"}`)
 		} else {
 			fmt.Println("No references stored")
@@ -1110,7 +1114,7 @@ func handleRefList(args []string) int {
 		return 0
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		type refEntry struct {
 			ID           string `json:"id"`
 			Title        string `json:"title"`
@@ -1470,14 +1474,16 @@ func handleRefShred(args []string) int {
 // audit trail for the admission function (Phase 3) — without it, the
 // reference-to-memory path is not observable.
 func handleRefInteractions(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json is extracted
+	// by the canonical ExtractJSONFlag helper before FlagSet parses
+	// the remaining args. fs.Bool("json", ...) was dead code.
 	fs := flag.NewFlagSet("reference interactions", flag.ContinueOnError)
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	jsonOutput, preprocessed := ExtractJSONFlag(args[1:])
 	limit := fs.Int("limit", 30, "Max interactions to show")
 	docID := fs.String("doc", "", "Filter to a single reference doc id")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(preprocessed); err != nil {
 		return 1
 	}
-	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
 	dm := getDB()
 	if dm == nil {
@@ -1498,7 +1504,7 @@ func handleRefInteractions(args []string) int {
 		usererror.Error("%v", err)
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{"interactions": rows})
 		fmt.Println(string(data))
 		return 0
@@ -1548,13 +1554,14 @@ func handleRefInteractions(args []string) int {
 // count. Helps identify which references the system is leaning on, and
 // which are dormant.
 func handleRefUsed(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json via canonical
+	// ExtractJSONFlag. fs.Bool("json", ...) was dead code.
 	fs := flag.NewFlagSet("reference used", flag.ContinueOnError)
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	jsonOutput, preprocessed := ExtractJSONFlag(args[1:])
 	limit := fs.Int("limit", 20, "Max references to show")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(preprocessed); err != nil {
 		return 1
 	}
-	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
 	dm := getDB()
 	if dm == nil {
@@ -1566,7 +1573,7 @@ func handleRefUsed(args []string) int {
 		usererror.Error("%v", err)
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{"used": rows})
 		fmt.Println(string(data))
 		return 0
@@ -1606,14 +1613,15 @@ func handleRefUsed(args []string) int {
 // v is not in the loop; the audit trail (admission_log + memory metadata)
 // is the surface v reviews when v chooses to.
 func handleRefAdmit(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json via canonical
+	// ExtractJSONFlag. fs.Bool("json", ...) was dead code.
 	fs := flag.NewFlagSet("reference admit", flag.ContinueOnError)
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	jsonOutput, preprocessed := ExtractJSONFlag(args[1:])
 	limit := fs.Int("limit", 5, "Max candidates to evaluate per run")
 	dryRun := fs.Bool("dry-run", false, "Find candidates but do not call the LLM or write anything")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(preprocessed); err != nil {
 		return 1
 	}
-	*jsonOutput, _ = ExtractJSONFlag(args[1:])
 
 	// enrichCandidate takes *DatabaseManager (concrete), not the CoreDB
 	// interface. The singleton is always a *DatabaseManager.
@@ -1628,7 +1636,7 @@ func handleRefAdmit(args []string) int {
 		return 1
 	}
 	if len(candidates) == 0 {
-		if *jsonOutput {
+		if jsonOutput {
 			fmt.Println(`{"admitted":0,"rejected":0,"candidates":0}`)
 		} else {
 			fmt.Println("No admission candidates (need 3+ hits across 2+ distinct queries per chunk).")
@@ -1637,7 +1645,7 @@ func handleRefAdmit(args []string) int {
 	}
 
 	if *dryRun {
-		if *jsonOutput {
+		if jsonOutput {
 			data, _ := json.Marshal(map[string]interface{}{
 				"dry_run":    true,
 				"candidates": len(candidates),
@@ -1680,7 +1688,7 @@ func handleRefAdmit(args []string) int {
 		cancel()
 		if err != nil {
 			errs++
-			if *jsonOutput {
+			if jsonOutput {
 				results = append(results, map[string]interface{}{
 					"chunk_id": candidate.ChunkID,
 					"doc_id":   candidate.DocID,
@@ -1699,7 +1707,7 @@ func handleRefAdmit(args []string) int {
 
 		if !result.Admit {
 			rejected++
-			if *jsonOutput {
+			if jsonOutput {
 				results = append(results, map[string]interface{}{
 					"chunk_id": candidate.ChunkID,
 					"doc_id":   candidate.DocID,
@@ -1742,7 +1750,7 @@ func handleRefAdmit(args []string) int {
 			continue
 		}
 		admitted++
-		if *jsonOutput {
+		if jsonOutput {
 			results = append(results, map[string]interface{}{
 				"chunk_id":      candidate.ChunkID,
 				"doc_id":        candidate.DocID,
@@ -1763,7 +1771,7 @@ func handleRefAdmit(args []string) int {
 		}
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
 			"admitted":   admitted,
 			"rejected":   rejected,

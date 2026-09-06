@@ -1305,21 +1305,6 @@ func (r *CommandRouter) errorf(format string, args ...interface{}) {
 	usererror.Error(format, args...)
 }
 
-// ExtractJSONFlag scans args for --json or -j, removes it, returns (jsonOutput, cleanedArgs).
-// Callers may place the flag anywhere in the arg list.
-func ExtractJSONFlag(args []string) (bool, []string) {
-	jsonOutput := false
-	cleaned := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "--json" || arg == "-j" {
-			jsonOutput = true
-		} else {
-			cleaned = append(cleaned, arg)
-		}
-	}
-	return jsonOutput, cleaned
-}
-
 // handleRoute reads prompt from positional arg or stdin, evaluates against
 // the workspace's mode+persona files, and prints a <system-reminder> block
 // to stdout. Designed for the Claude Code UserPromptSubmit hook — never

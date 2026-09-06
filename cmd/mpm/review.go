@@ -15,11 +15,16 @@ import (
 // --stale --days N: show LTM/high-weight memories not accessed in N+ days
 // --json: output JSON for tool integration
 func handleReview(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json is extracted
+	// by the canonical ExtractJSONFlag helper before FlagSet parses
+	// the remaining args. The previous fs.Bool("json", ...) declaration
+	// was dead code — ExtractJSONFlag already strips --json before
+	// fs.Parse runs, so the FlagSet never sees it.
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	promoted := fs.Bool("promoted", false, "Show recently elevated/promoted memories (default)")
 	stale := fs.Bool("stale", false, "Show stale memories (LTM/high-weight not accessed in --days)")
 	days := fs.Int("days", 30, "Number of days for stale filter")
-	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	jsonOutput, preprocessed := ExtractJSONFlag(args[1:])
 	limit := fs.Int("limit", 20, "Maximum results to return")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm review [options]")
@@ -27,15 +32,8 @@ func handleReview(args []string) int {
 		fs.PrintDefaults()
 	}
 
-	// Handle --json anywhere in args (may follow command name)
-	jsonFlagSeen, preprocessed := ExtractJSONFlag(args[1:])
-
 	if err := fs.Parse(preprocessed); err != nil {
 		return 1
-	}
-
-	if jsonFlagSeen {
-		*jsonOutput = true
 	}
 
 	// Default to promoted if neither flag is set
@@ -106,7 +104,7 @@ func handleReview(args []string) int {
 	}
 
 	// JSON output
-	if *jsonOutput {
+	if jsonOutput {
 		type memoryEntry struct {
 			ID                 string `json:"id"`
 			Content            string `json:"content"`

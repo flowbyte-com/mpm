@@ -44,15 +44,18 @@ import (
 // is everything AFTER it: <memory_id>, --kind, --rationale, --to,
 // --dry-run, --json (in any order).
 func handleOpsBroadcast(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json extracted by
+	// the canonical ExtractJSONFlag helper. Same contract — exact
+	// match on `--json`, removed from the positional slice. The
+	// remaining pre-scan loop handles --dry-run, --help, and any
+	// `--key=value` flags (e.g., --kind, --rationale, --to).
+	jsonOut, args := ExtractJSONFlag(args)
 	dryRun := false
-	jsonOut := false
 	var positional []string
 	for _, a := range args {
 		switch a {
 		case "--dry-run":
 			dryRun = true
-		case "--json":
-			jsonOut = true
 		case "--help", "-h", "help":
 			fmt.Println("Usage: mpm ops broadcast <memory_id> [--kind=rule|resolution|arbitration] [--rationale=\"...\"] [--to=agent_id,...] [--dry-run] [--json]")
 			fmt.Println("")
@@ -76,11 +79,11 @@ func handleOpsBroadcast(args []string) int {
 // handleOpsActiveSessions handles `mpm ops active-sessions [--json]`.
 // The router already stripped the "active-sessions" subcommand.
 func handleOpsActiveSessions(args []string) int {
-	jsonOut := false
+	// Stage S2 of the CLI refactor (2026-09-06): --json extracted by
+	// the canonical ExtractJSONFlag helper.
+	jsonOut, args := ExtractJSONFlag(args)
 	for _, a := range args {
 		switch a {
-		case "--json":
-			jsonOut = true
 		case "--help", "-h", "help":
 			fmt.Println("Usage: mpm ops active-sessions [--json]")
 			fmt.Println("")

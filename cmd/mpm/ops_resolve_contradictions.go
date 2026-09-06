@@ -42,9 +42,13 @@ const defaultResolveLimit = 100
 // handleOpsResolveContradictions parses flags and dispatches the
 // resolution loop. See printResolveHelp for the CLI shape.
 func handleOpsResolveContradictions(args []string) int {
+	// Stage S2 of the CLI refactor (2026-09-06): --json extracted by
+	// the canonical ExtractJSONFlag helper. The remaining pre-scan
+	// loop handles --apply, --dry-run, --limit=N, --loser=, --winner=,
+	// --help.
+	jsonOutput, args := ExtractJSONFlag(args)
 	dryRun := true
 	apply := false
-	jsonOutput := false
 	limit := defaultResolveLimit
 	loserFilter := ""
 	winnerFilter := ""
@@ -57,8 +61,6 @@ func handleOpsResolveContradictions(args []string) int {
 		case arg == "--dry-run":
 			dryRun = true
 			apply = false
-		case arg == "--json":
-			jsonOutput = true
 		case arg == "--help" || arg == "help":
 			printResolveHelp()
 			return 0
