@@ -1622,7 +1622,18 @@ func (dm *DatabaseManager) SharedAttached() string {
 //   - query (optional): FTS5 keyword search scoped to the shared DB.
 //     Empty string returns all is_global rows.
 //   - limit: max rows (default 50, hard-capped at 500).
-func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[string]interface{}, error) {
+//   - includeRetired: when true, include retired rules (retired_at IS NOT
+//     NULL); when false (default), retired rules are filtered out so the
+//     query returns the active set the agent should be working with.
+//     Retired rules remain retrievable through this flag for forensic /
+//     post-mortem queries.
+//
+// Part 1 (2026-09-06): added includeRetired parameter so retired rules
+// are filterable. The retired_at column was added via SafeMigrations
+// (schema.go:1245); fresh DBs see it from the shared CREATE TABLE loop
+// (db.go:1267-1278), upgraded DBs gain it via attachShared's SafeMigrations
+// pass (db.go:1461).
+func (dm *DatabaseManager) QueryGlobalRules(query string, limit int, includeRetired bool) ([]map[string]interface{}, error) {
 	if !dm.sharedAttached {
 		return nil, nil // local-only mode; not an error
 	}
@@ -1651,14 +1662,19 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 		slog.Warn("shared FTS backfill failed; falling back to LIKE", "error", err.Error())
 	}
 
+	retiredClause := "AND retired_at IS NULL"
+	if includeRetired {
+		retiredClause = ""
+	}
+
 	var querySQL string
 	var args []interface{}
 	if query == "" {
 		querySQL = `
 			SELECT id, content, collection, tags, metadata, weight,
-			       reinforcement_count, created_at, updated_at, is_global
+			       reinforcement_count, created_at, updated_at, is_global, retired_at
 			FROM shared.memories
-			WHERE is_global = 1 AND deleted_at IS NULL
+			WHERE is_global = 1 AND deleted_at IS NULL ` + retiredClause + `
 			ORDER BY weight DESC, created_at DESC
 			LIMIT ?
 		`
@@ -1673,10 +1689,10 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 		}
 		rows, err := dm.db.Query(`
 			SELECT m.id, m.content, m.collection, m.tags, m.metadata, m.weight,
-			       m.reinforcement_count, m.created_at, m.updated_at, m.is_global
+			       m.reinforcement_count, m.created_at, m.updated_at, m.is_global, m.retired_at
 			FROM shared.memories m
 			JOIN shared.memories_fts fts ON m.rowid = fts.rowid
-			WHERE shared.memories_fts MATCH ? AND m.is_global = 1 AND m.deleted_at IS NULL
+			WHERE shared.memories_fts MATCH ? AND m.is_global = 1 AND m.deleted_at IS NULL `+retiredClause+`
 			ORDER BY m.weight DESC, m.created_at DESC
 			LIMIT ?
 		`, ftsQuery, limit)
@@ -1687,9 +1703,9 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 		// Fallback to LIKE — FTS5 virtual table not populated or error.
 		rows, err = dm.db.Query(`
 			SELECT id, content, collection, tags, metadata, weight,
-			       reinforcement_count, created_at, updated_at, is_global
+			       reinforcement_count, created_at, updated_at, is_global, retired_at
 			FROM shared.memories
-			WHERE is_global = 1 AND deleted_at IS NULL AND content LIKE ?
+			WHERE is_global = 1 AND deleted_at IS NULL AND content LIKE ? `+retiredClause+`
 			ORDER BY weight DESC, created_at DESC
 			LIMIT ?
 		`, "%"+query+"%", limit)
@@ -1710,6 +1726,11 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int) ([]map[stri
 // scanGlobalRuleRows reads the rows from a QueryGlobalRules SELECT
 // and produces the standardized result map. Extracted because two
 // query paths (no-query, FTS5-or-LIKE) need identical scan logic.
+//
+// Part 1 (2026-09-06): reads retired_at as a nullable int64. Active
+// rows surface no key for the field; retired rows surface
+// `retired_at` (epoch seconds) so callers can distinguish and the
+// display layer can render the retire timestamp.
 func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
 	for rows.Next() {
@@ -1717,11 +1738,12 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 		var tags, meta, createdAt, updatedAt sql.NullString
 		var weight sql.NullFloat64
 		var reinforcement, isGlobal sql.NullInt64
+		var retiredAt sql.NullInt64
 		if err := rows.Scan(&id, &content, &coll, &tags, &meta, &weight, &reinforcement,
-			&createdAt, &updatedAt, &isGlobal); err != nil {
+			&createdAt, &updatedAt, &isGlobal, &retiredAt); err != nil {
 			return nil, fmt.Errorf("scanning global rule row: %w", err)
 		}
-		results = append(results, map[string]interface{}{
+		row := map[string]interface{}{
 			"id":                  id.String,
 			"content":             content.String,
 			"collection":          coll.String,
@@ -1733,7 +1755,11 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 			"updated_at":          updatedAt.String,
 			"is_global":           int(isGlobal.Int64),
 			"source":              "shared",
-		})
+		}
+		if retiredAt.Valid && retiredAt.Int64 != 0 {
+			row["retired_at"] = retiredAt.Int64
+		}
+		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -6435,6 +6461,102 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 		return "", fmt.Errorf("insert shared copy: %w", err)
 	}
 	return newID, nil
+}
+
+// RetireGlobalRule soft-retires a global rule by stamping retired_at on the
+// shared.memories row. The row stays in the table for forensics; future
+// QueryGlobalRules calls without include_retired=true filter it out.
+//
+// Why a timestamp column and not a status enum / hard delete:
+//   - The shared-epistemology.md contract describes rules as "append-mostly";
+//     hard delete via deleted_at would erase the audit trail.
+//   - A timestamp column needs no CHECK constraint migration (ALTER TABLE ADD
+//     COLUMN is idempotent via SafeMigrations; see schema.go:1244).
+//   - The project's existing terminal-inactive noun is "retired" (capability
+//     state enum, schema.go:530), so the column name matches operator
+//     vocabulary without inventing a new word.
+//
+// Idempotency class (per docs/tool-behavioral-contract.md §1, §4):
+//   - Already-retired: silent success with already_retired=true in the
+//     response. No second audit row. Matches soft-delete idempotency
+//     (mpm_skills.delete, mpm_handoff.shred).
+//   - Missing rule_id / missing confirm: error.
+//   - Unknown id: error (operator typing a stale id wants a diagnostic).
+//   - Shared DB not attached: error.
+//
+// Args:
+//   - ruleID: shared.memories.id (canonical; id-typed as a global rule id).
+//   - reason: optional free-form note recorded in the audit row.
+//   - confirm: must be exactly true. Strings/numbers/other are rejected.
+func (dm *DatabaseManager) RetireGlobalRule(ruleID, reason string, confirm bool) (map[string]interface{}, error) {
+	if !dm.sharedAttached {
+		return nil, fmt.Errorf("shared DB not attached (set MPM_SHARED_DB)")
+	}
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule_id is required")
+	}
+	if !confirm {
+		return nil, fmt.Errorf("retire_global_rule requires confirm=true; shared-DB state transitions must be operator-gated")
+	}
+
+	// Probe + transition in one statement so a stale id and a concurrent
+	// retire race to a deterministic outcome. RowsAffected returns 0 when
+	// the id is unknown OR when retired_at is already set — we
+	// disambiguate below.
+	now := time.Now().Unix()
+	res, err := dm.db.Exec(`
+		UPDATE shared.memories
+		SET retired_at = ?
+		WHERE id = ? AND is_global = 1 AND deleted_at IS NULL AND retired_at IS NULL
+	`, now, ruleID)
+	if err != nil {
+		return nil, fmt.Errorf("retire global rule: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+
+	if rows == 0 {
+		// Disambiguate: unknown id (error) vs already-retired (silent success).
+		var existingRetired sql.NullInt64
+		var existingDeleted sql.NullInt64
+		err := dm.db.QueryRow(`
+			SELECT retired_at, deleted_at FROM shared.memories
+			WHERE id = ? AND is_global = 1
+		`, ruleID).Scan(&existingRetired, &existingDeleted)
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("retire global rule: rule %q not found", ruleID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("probe rule: %w", err)
+		}
+		if existingDeleted.Valid && existingDeleted.Int64 != 0 {
+			return nil, fmt.Errorf("retire global rule: rule %q is deleted (deleted_at IS NOT NULL); restore it first", ruleID)
+		}
+		// Already retired — silent success, no audit row.
+		return map[string]interface{}{
+			"success":        true,
+			"rule_id":        ruleID,
+			"already_retired": true,
+			"retired_at":     existingRetired.Int64,
+		}, nil
+	}
+
+	// Forensic audit row. The component is shared_db; the audit message
+	// names the operator transition so watchdog surfacing reads naturally.
+	dm.LogAudit(
+		AuditInfo, "shared_db",
+		fmt.Sprintf("retire_global_rule %s", ruleID), "",
+		AuditContext{
+			"rule_id": ruleID,
+			"reason":  reason,
+		},
+	)
+
+	return map[string]interface{}{
+		"success":         true,
+		"rule_id":         ruleID,
+		"retired_at":      now,
+		"already_retired": false,
+	}, nil
 }
 
 // migrateWorkEvents creates the work_events table and seeds initial created events

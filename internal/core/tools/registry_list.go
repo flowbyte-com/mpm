@@ -267,7 +267,7 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},
+				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -284,6 +284,9 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 						"weight":            {"type": "number"},
 						"provenance":        {"type": "string"},
 						"memory_id":         {"type": "string"},
+						"rule_id":           {"type": "string"},
+						"reason":            {"type": "string"},
+						"include_retired":   {"type": "boolean"},
 						"prompt":            {"type": "string"}
 					},
 					"additionalProperties": true
