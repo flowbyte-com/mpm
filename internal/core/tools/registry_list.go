@@ -160,7 +160,7 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["create","search","link","list","show"]},
+				"action": {"type": "string", "enum": ["create","search","link","unlink","list","show"]},
 				"params": {
 					"type": "object",
 					"properties": {

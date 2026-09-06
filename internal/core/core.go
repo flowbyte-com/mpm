@@ -119,7 +119,7 @@ type CoreDB interface {
 	GetTopicMemories(topicID string) ([]map[string]interface{}, error)
 	GetTopicTopMemories(topicID string, limit int) ([]MemoryRef, int, error)
 	AddMemoryToTopic(memoryID, topicID, role string) error
-	RemoveMemoryFromTopic(memoryID, topicID string) error
+	RemoveMemoryFromTopic(memoryID, topicID string) (bool, error)
 	DeleteTopic(topicID string) error
 	CreateTopicWithDescription(name, description string) (string, error)
 	GetMemoryTopics(memoryID string) ([]TopicRef, error)
