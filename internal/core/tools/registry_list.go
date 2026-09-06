@@ -553,7 +553,7 @@ Per-action semantics:
 						"params": {
 							"type": "object",
 							"properties": {
-								"level":         {"type": "string",  "description": "Audit level filter. Lowercase canonical values: debug/info/warn/error. Other values return 0 hits."},
+								"level":         {"type": "string",  "description": "Audit level filter. Lowercase canonical values: info/warn/error/fatal/critical. Other values return 0 hits. The CLI accepts a 'warning' alias for 'warn'; that alias is CLI-only and does not apply here."},
 								"component":     {"type": "string",  "description": "Filter by audit component name."},
 								"artifact_id":   {"type": "string",  "description": "Filter by artifact id (memory/decision/theory/lesson/work)."},
 								"days":          {"type": "number",  "default": 7, "description": "Lookback window in days. Ignored when 'since' is supplied. Default 7."},
