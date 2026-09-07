@@ -15,7 +15,7 @@ import (
 func TestQueryGlobalRules_LocalOnlyReturnsEmpty(t *testing.T) {
 	dm := NewTestLocalOnlyDM(t)
 
-	got, err := dm.QueryGlobalRules("", 10)
+	got, err := dm.QueryGlobalRules("", 10, false)
 	if err != nil {
 		t.Fatalf("expected nil err in local-only mode, got: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestQueryGlobalRules_AttachesAndReadsRules(t *testing.T) {
 		t.Fatalf("insert shared rule: %v", err)
 	}
 
-	got, err := dm.QueryGlobalRules("", 10)
+	got, err := dm.QueryGlobalRules("", 10, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestQueryGlobalRules_FiltersByIsGlobal(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	got, err := dm.QueryGlobalRules("", 10)
+	got, err := dm.QueryGlobalRules("", 10, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestQueryGlobalRules_FTSSearch(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	got, err := dm.QueryGlobalRules("api", 10)
+	got, err := dm.QueryGlobalRules("api", 10, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestQueryGlobalRules_LimitCap(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	got, err := dm.QueryGlobalRules("", 10000)
+	got, err := dm.QueryGlobalRules("", 10000, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}

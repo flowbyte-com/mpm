@@ -27,7 +27,11 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path("/home/v/workspace/projects/mpm")
+# Path is derived from the test file location so the suite runs in any
+# environment (CI, fresh clone, alternate mount). Previously hardcoded
+# to /home/v/workspace/projects/mpm, which broke in every other
+# workspace AND in the github actions runner.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = REPO_ROOT / "Makefile"
 AGENT_INSTALL_DIR = REPO_ROOT / "agent_installation"
 

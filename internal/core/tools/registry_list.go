@@ -26,7 +26,10 @@ var Registry = []Tool{
 		Description: `Persistent memory for facts, learnings, and context the agent needs to carry across sessions.
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
-For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
+Lifecycle asymmetry: shred is permanent (hard delete — the row is removed with cascade cleanup of dependent topic_memberships, memory_revisions, and confidence_history). There is no restore path. This is deliberately different from mpm_skills.delete, which is soft and recoverable via save with force=true.
+Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight cannot drop below the safety floor of 1). reinforce and weaken accept the same delta shape but their internal mechanics differ; the user-visible contract is symmetric.`,
+
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -160,7 +163,7 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["create","search","link","list","show"]},
+				"action": {"type": "string", "enum": ["create","search","link","unlink","list","show"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -262,12 +265,13 @@ Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp,
 	{
 		Name: "mpm_context",
 		Description: `Agent session state, mode routing, and directive management. The action=read_wake_context is the canonical wake-up hook (call on session start); the wake payload carries a bounded <available_skills> catalogue (a subset of mpm_skills list{scope:"all"}) and supports projection="compact" for a small id+summary envelope (the full WakeContextData is the default).
-Use when: you need to wake up at session start; understand the current agent mode/persona; trigger a mode or persona switch; read active behavioral directives governing the current session; query proactive recall for conversation-relevant memories.
-Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.`,
+Use when: you need to wake up at session start; understand the current agent mode/persona; trigger a mode or persona switch; read active behavioral directives governing the current session; query proactive recall for conversation-relevant memories; record / query / retire global house rules that every agent on the workstation should see; promote a local memory to the shared substrate.
+Route is especially useful: give it a user prompt and it returns the best-matching mode(s) and persona with scoring.
+Lifecycle asymmetry: promote_to_global is one-way / additive. The local memory row stays; the shared copy is created alongside (per Phase 3 of the shared-epistemology design). There is no demote operation. To "remove" a shared rule, use retire_global_rule — it stamps retired_at and the row is filtered from default queries (recoverable via query with include_retired=true).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","promote_to_global","route"]},
+				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -284,6 +288,9 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 						"weight":            {"type": "number"},
 						"provenance":        {"type": "string"},
 						"memory_id":         {"type": "string"},
+						"rule_id":           {"type": "string"},
+						"reason":            {"type": "string"},
+						"include_retired":   {"type": "boolean"},
 						"prompt":            {"type": "string"}
 					},
 					"additionalProperties": true
@@ -296,7 +303,9 @@ Route is especially useful: give it a user prompt and it returns the best-matchi
 	{
 		Name: "mpm_skills",
 		Description: `Reusable procedural knowledge stored as markdown with YAML frontmatter.
-Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.`,
+Use when: you develop a workflow that works well and want to固化 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.
+Lifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; save with force=true resurrects the tombstoned row). This is deliberately different from mpm_memory.shred, which is permanent and irrecoverable.
+Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is preserved (Phase 3 of shared-epistemology design); there is no demote operation. To retire a globally-promoted skill, shred the local copy if you want it gone from the workstation, or rely on the shared substrate's own lifecycle.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -335,7 +344,8 @@ Use when: you develop a workflow that works well and want to固化 it as a persi
 		Name: "mpm_wakes",
 		Description: `Deferred work triggers scheduled for future execution.
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
-Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.`,
+Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
+Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -472,7 +482,174 @@ Per-action semantics:
 - gc_run: Lifecycle decay sweep. Optional params: dry_run (default true), aggressive, max_age_hours (default 24). gc_run is NOT for epistemic compaction — it decays stale/expired artifacts by age. Use "compact" instead when epistemic_pressure.exceeded is true.
 
 - compact: Drain eligible raw memories into lessons in sequential batches of at most 50 (the LLM context safeguard); each batch is independently synthesized, validated, and committed. force=false (default) RELIEVES pressure — the drain stops as soon as raw_count <= threshold and may leave eligible raw memories remaining. force=true DRAINS everything — the threshold gate is bypassed and the drain continues until the substrate is empty or the per-invocation cap is hit. force does NOT widen the 50-item per-batch limit. Optional params: force (default false), max_batches (default 20, hard cap 100, silently clamped) — per-invocation cap on LLM calls. Result envelope: success (false ONLY on mid-drain failure), batches_processed, raw_processed, lessons_created, raw_remaining, lesson_ids, stop_reason ("no_work" | "completed" | "threshold_reached" | "max_batches_reached" | "failure"), skipped_reason (set on no_work / threshold_reached only), and failed_batch + failure_reason on "failure". Inspect stop_reason (not success) to determine whether the substrate is fully drained.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},"params":{"type":"object","properties":{"force":{"type":"boolean","description":"compact: bypass the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold."},"max_batches":{"type":"number","description":"compact: per-invocation safety cap on LLM calls. Default 20, hard cap 100."},"limit":{"type":"number","description":"For critic_findings: max rows to return (default 50)."},"confirm":{"type":"boolean","description":"migrate: explicit acknowledgement that this bulk database write is intentional. Required, must be true. Migration is not a read operation; it stages rows in raw_memories, promotes them to memories, or rejects a staged batch via UPDATE. The handler refuses any other value (omitted, false, null, string \"true\", numeric 1) so an agent cannot autonomously trigger persistent state changes."},"from_path":{"type":"string","description":"migrate: path to a markdown or json file to stage."},"format":{"type":"string","description":"migrate: file format. 'auto' (default) infers from extension; 'markdown' or 'json' explicit."},"label":{"type":"string","description":"migrate: short batch label used in the generated batch_id."},"dry_run":{"type":"boolean","description":"migrate: do not commit or undo; only stage and report stats."},"commit":{"type":"boolean","description":"migrate: after staging, promote the batch to memories."},"commit_batch":{"type":"string","description":"migrate: promote a previously-staged batch by id."},"undo_batch":{"type":"string","description":"migrate: tombstone a previously-staged batch by id."}},"additionalProperties":true}},"required":["action"]}`),
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","unsnooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},
+				"params": {"type": "object", "description": "Action-specific params envelope. Per-action shape is constrained by the oneOf branches below; the top-level declaration here exists so the schema accurately reflects what handleMpmSystem reads (via extractParamsOrFail)."}
+			},
+			"required": ["action"],
+			"oneOf": [
+				{
+					"properties": {
+						"action": {"const": "gc_run"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"dry_run":           {"type": "boolean", "default": true,  "description": "Lifecycle decay sweep. Optional. Default true (safe default — no destructive work)."},
+								"aggressive":        {"type": "boolean", "default": false, "description": "Enable aggressive pruning beyond the safe default. Optional."},
+								"max_age_hours":     {"type": "number",  "default": 24,    "description": "Max age (hours) for stale artifacts. Default 24."},
+								"stale_theory_days": {"type": "number",  "default": 30,    "description": "Age threshold (days) past which theories are flagged stale. Default 30; values <0 are clamped to 0."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "compact"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"force":       {"type": "boolean", "default": false, "description": "Bypass the pressure threshold gate so the drain processes every eligible row regardless of raw_count vs threshold. force does NOT widen the 50-item per-batch limit."},
+								"max_batches": {"type": "number",  "default": 20,    "description": "Per-invocation safety cap on LLM calls. Default 20, hard cap 100, silently clamped."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "health_check"},
+						"params": {"type": "object", "properties": {}, "additionalProperties": false}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "migrate"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"confirm":      {"type": "boolean", "description": "Required explicit acknowledgement that this bulk database write is intentional. Must be the boolean literal true. Migration is not a read operation; it stages rows in raw_memories, promotes them to memories, or rejects a staged batch via UPDATE. The handler refuses any other value (omitted, false, null, string \"true\", numeric 1) so an agent cannot autonomously trigger persistent state changes."},
+								"from_path":    {"type": "string",  "description": "Path to a markdown or json file to stage. Required unless commit_batch or undo_batch is supplied."},
+								"format":       {"type": "string",  "description": "File format. 'auto' (default) infers from extension; 'markdown' or 'json' explicit."},
+								"label":        {"type": "string",  "description": "Short batch label used in the generated batch_id."},
+								"dry_run":      {"type": "boolean", "description": "Do not commit or undo; only stage and report stats."},
+								"commit":       {"type": "boolean", "description": "After staging, promote the batch to memories."},
+								"commit_batch": {"type": "string",  "description": "Promote a previously-staged batch by id. Mutually exclusive with from_path / undo_batch."},
+								"undo_batch":   {"type": "string",  "description": "Tombstone a previously-staged batch by id. Mutually exclusive with from_path / commit_batch."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params", "confirm"]
+				},
+				{
+					"properties": {
+						"action": {"const": "query_audit_log"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"level":         {"type": "string",  "description": "Audit level filter. Lowercase canonical values: debug/info/warn/error. Other values return 0 hits."},
+								"component":     {"type": "string",  "description": "Filter by audit component name."},
+								"artifact_id":   {"type": "string",  "description": "Filter by artifact id (memory/decision/theory/lesson/work)."},
+								"days":          {"type": "number",  "default": 7, "description": "Lookback window in days. Ignored when 'since' is supplied. Default 7."},
+								"since":         {"type": "number",  "description": "Absolute epoch-seconds cutoff. Wins over 'days' when both are present. Future values clamp to 1 day."},
+								"limit":         {"type": "number",  "default": 20, "description": "Max rows to return. Default 20."},
+								"include_stack": {"type": "boolean", "default": false, "description": "Include the audit stack trace when available. Default false."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "list_clusters"},
+						"params": {"type": "object", "properties": {}, "additionalProperties": false}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "snooze_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key":  {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"snooze_until": {"type": "string", "description": "Reactivation cutoff. ISO 8601 absolute ('2026-07-12T12:00:00Z') OR Go duration ('24h', '7d', '1h30m'). Required."},
+								"reason":       {"type": "string", "description": "Audit-friendly note. Optional."}
+							},
+							"required": ["cluster_key", "snooze_until"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "unsnooze_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"reason":      {"type": "string", "description": "Audit-friendly note explaining why the cluster is being reactivated. Optional."}
+							},
+							"required": ["cluster_key"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "resolve_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key from list_clusters. Required."},
+								"reason":      {"type": "string", "description": "Audit-friendly note explaining root cause. Optional."}
+							},
+							"required": ["cluster_key"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "annotate_cluster"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"cluster_key": {"type": "string", "description": "Primary key (from list_clusters or remembered historical key for resolved clusters). Required."},
+								"annotation":  {"type": "string", "description": "Substantive insight text appended to the audit trail verbatim. Required."},
+								"reason":      {"type": "string", "description": "Short label (e.g. 'post-mortem', 'week-later-refinement'). Optional."}
+							},
+							"required": ["cluster_key", "annotation"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "critic_findings"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"limit": {"type": "number", "default": 50, "description": "Max rows to return. Default 50."}
+							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				}
+			]
+		}`),
 		Handler: handleMpmSystem,
 	},
 	{

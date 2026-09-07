@@ -1835,6 +1835,53 @@ func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}, nil
 }
 
+// handleUnlinkTopic removes the membership row linking a memory to a topic.
+// Inverse of handleLinkTopic. Per docs/tool-behavioral-contract.md §1
+// (soft-delete idempotency) and §4 (idempotent membership unlink):
+//
+//   - Missing memory_id / topic_id: error at the boundary.
+//   - Memory or topic does not exist: error "X not found" — same friendly
+//     pre-check handleLinkTopic uses, so callers learn about a typo'd
+//     endpoint before any DELETE fires.
+//   - Membership exists: removed, returns removed=true.
+//   - Membership does not exist: silent success with removed=false
+//     (idempotent; the desired terminal state already holds).
+//
+// Part 2A (2026-09-06): new public action surfacing the existing DM
+// primitive RemoveMemoryFromTopic (db.go:4112). Closes the catalog
+// §C.1 finding (link had no symmetric unlink at the public surface).
+func handleUnlinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	memoryID, _ := p["memory_id"].(string)
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	topicID, _ := p["topic_id"].(string)
+	if topicID == "" {
+		return nil, fmt.Errorf("topic_id is required")
+	}
+
+	// W-005 mirror: confirm both endpoints exist before the DELETE so
+	// callers get a precise "memory X not found" / "topic Y not found"
+	// envelope rather than an opaque FK failure.
+	if _, err := dm.GetMemory(memoryID); err != nil {
+		return nil, fmt.Errorf("memory %q not found", memoryID)
+	}
+	if _, err := dm.GetTopic(topicID); err != nil {
+		return nil, fmt.Errorf("topic %q not found", topicID)
+	}
+
+	removed, err := dm.RemoveMemoryFromTopic(memoryID, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("unlink topic: %w", err)
+	}
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"topic_id":  topicID,
+		"removed":   removed,
+	}, nil
+}
+
 // handleListTopics returns all active topics (matches `mpm topic list`
 // CLI surface). D-4.1: the prior MCP surface exposed only
 // create|search|link; this restores parity so an agent using MCP can
@@ -3288,6 +3335,74 @@ func handleSnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	}, nil
 }
 
+// handleUnsnoozeCluster (Part 2B, 2026-09-06) is the explicit inverse of
+// handleSnoozeCluster. Returns the cluster to status='active' and clears
+// snooze_until. The row stays in the table for forensics; the active row
+// will surface again on the next list_active_clusters call.
+//
+// Wire schema (enforced by JSON-Schema in registry_list.go):
+//   - cluster_key (required) — primary key from list_active_clusters
+//   - reason      (optional) — audit-friendly note explaining why the
+//     cluster is being reactivated
+//
+// Semantics:
+//   - Missing cluster_key: error at the boundary.
+//   - Unknown cluster_key: error (operator typing a stale id wants a
+//     diagnostic).
+//   - Already-active cluster: silent success with status="active" — the
+//     cluster is already in the desired terminal state. Matches the
+//     soft-delete idempotency class in docs/tool-behavioral-contract.md §1.
+//   - Snoozed cluster: reactivates, status="active", snooze_until=null,
+//     audit row written.
+//   - Resolved cluster: rejected — resolved is terminal; the existing
+//     resolve_cluster contract explicitly forbids auto-reactivation.
+//
+// Compatibility: callers that previously worked around with
+// snooze_cluster snooze_until=0s continue to work — that path is a
+// ClusterStatusSnoozed branch with a past timestamp that the
+// ActiveClusters filter treats as active. unsnooze_cluster is the
+// explicit value path.
+func handleUnsnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	clusterKey, _ := p["cluster_key"].(string)
+	if clusterKey == "" {
+		return nil, fmt.Errorf("cluster_key is required")
+	}
+	reason, _ := p["reason"].(string)
+
+	// Probe first so the unknown-id error envelope names the cluster,
+	// not a generic SQL error.
+	var existingStatus string
+	if err := dm.SQLDB().QueryRow(
+		`SELECT status FROM audit_cluster_proposals WHERE cluster_key = ?`,
+		clusterKey,
+	).Scan(&existingStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("cluster not found: %q", clusterKey)
+		}
+		return nil, fmt.Errorf("lookup cluster: %w", err)
+	}
+
+	// Resolved is terminal — refuse to reactivate. The reasoning is the
+	// same as in SetClusterStatus: resolved clusters never auto-reactivate,
+	// so an explicit unsnooze on a resolved row would silently violate
+	// that contract.
+	if existingStatus == internal.ClusterStatusResolved {
+		return nil, fmt.Errorf("unsnooze_cluster: cluster %q is resolved (terminal); cannot reactivate a resolved cluster", clusterKey)
+	}
+
+	// Active + Snoozed both go through SetClusterStatus(Active, "");
+	// the status diff drives the audit row and the snooze_until clear.
+	if err := dm.SetClusterStatus(clusterKey, internal.ClusterStatusActive, "", reason); err != nil {
+		return nil, fmt.Errorf("unsnooze cluster: %w", err)
+	}
+	return map[string]interface{}{
+		"success":     true,
+		"cluster_key": clusterKey,
+		"status":      "active",
+		"reason":      reason,
+	}, nil
+}
+
 // handleResolveCluster permanently dismisses an audit-cluster proposal.
 // Sets status='resolved'; the cluster row stays in the table for
 // forensics but is filtered out of ActiveClusters forever — it can no
@@ -3605,8 +3720,13 @@ func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 //
 // Args:
 //
-//	--query  (optional) FTS5 keyword search
-//	--limit  (optional) max rows; default 50, max 500
+//	--query           (optional) FTS5 keyword search
+//	--limit           (optional) max rows; default 50, max 500
+//	--include_retired (optional, default false) when true, retired
+//	                  rules (retired_at IS NOT NULL) are included;
+//	                  the default filters them out so the agent sees
+//	                  only active rules. Forensic / post-mortem
+//	                  queries opt in.
 //
 // In local-only mode (no MPM_SHARED_DB attached) returns an empty
 // result with success=true — the agent should fall back to local
@@ -3627,17 +3747,60 @@ func handleQueryGlobalRules(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		limit = 500
 	}
 
-	items, err := dm.QueryGlobalRules(query, limit)
+	includeRetired := false
+	if v, ok := p["include_retired"]; ok {
+		switch t := v.(type) {
+		case bool:
+			includeRetired = t
+		case string:
+			includeRetired = t == "true" || t == "1" || t == "yes"
+		case float64:
+			includeRetired = t != 0
+		case int:
+			includeRetired = t != 0
+		default:
+			return nil, fmt.Errorf("include_retired must be a boolean (got %T)", v)
+		}
+	}
+
+	items, err := dm.QueryGlobalRules(query, limit, includeRetired)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":  true,
-		"source":   "shared",
-		"attached": dm.SharedAttached() != "",
-		"count":    len(items),
-		"results":  items,
+		"success":         true,
+		"source":          "shared",
+		"attached":        dm.SharedAttached() != "",
+		"include_retired": includeRetired,
+		"count":           len(items),
+		"results":         items,
 	}, nil
+}
+
+// handleRetireGlobalRule soft-retires a global rule. See
+// internal/core/db.go RetireGlobalRule for the full contract.
+//
+// Wire schema:
+//   - rule_id  (required)
+//   - confirm  (required, must be exactly true)
+//   - reason   (optional, free-form note recorded in audit)
+//
+// Idempotency: already-retired → silent success with already_retired=true.
+// Unknown id → error. Shared DB not attached → error.
+//
+// Part 1 (2026-09-06): closes the catalog §C.2 finding (global rules
+// can be added but never formally retracted).
+func handleRetireGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	ruleID, _ := p["rule_id"].(string)
+	if ruleID == "" {
+		return nil, fmt.Errorf("rule_id is required")
+	}
+	confirm, _ := p["confirm"].(bool)
+	if !confirm {
+		return nil, fmt.Errorf("retire_global_rule requires confirm=true; shared-DB state transitions must be operator-gated")
+	}
+	reason, _ := p["reason"].(string)
+	return dm.RetireGlobalRule(ruleID, reason, true)
 }
 
 // handleRecordGlobalRule writes a memory to the shared DB with
@@ -5629,6 +5792,10 @@ func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleSearchTopics(dm, ac, params)
 	case "link":
 		return handleLinkTopic(dm, ac, params)
+	case "unlink":
+		// Part 2A (2026-09-06): inverse of link. Idempotent on missing
+		// membership (removed=false, success=true). See handleUnlinkTopic.
+		return handleUnlinkTopic(dm, ac, params)
 	case "list":
 		// D-4.1: parity with `mpm topic list` CLI surface.
 		return handleListTopics(dm, ac, params)
@@ -5636,7 +5803,7 @@ func handleMpmTopics(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// D-4.1: parity with `mpm topic show <id>` CLI surface.
 		return handleShowTopic(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link, list, show", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_topics. Valid actions include create, search, link, unlink, list, show", action)
 	}
 }
 
@@ -5755,12 +5922,14 @@ func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleQueryGlobalRules(dm, ac, params)
 	case "record_global_rule":
 		return handleRecordGlobalRule(dm, ac, params)
+	case "retire_global_rule":
+		return handleRetireGlobalRule(dm, ac, params)
 	case "promote_to_global":
 		return handlePromoteToGlobal(dm, ac, params)
 	case "route":
 		return handleRoute(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, promote_to_global, route", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route", action)
 	}
 }
 
@@ -5785,6 +5954,11 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleListActiveClusters(dm, ac, params)
 	case "snooze_cluster":
 		return handleSnoozeCluster(dm, ac, params)
+	case "unsnooze_cluster":
+		// Part 2B (2026-09-06): explicit inverse of snooze_cluster.
+		// Routes through SetClusterStatus(ClusterStatusActive, "") which
+		// clears snooze_until. See handleUnsnoozeCluster for the contract.
+		return handleUnsnoozeCluster(dm, ac, params)
 	case "resolve_cluster":
 		return handleResolveCluster(dm, ac, params)
 	case "annotate_cluster":
@@ -5797,7 +5971,7 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// operator/agent can read them without grepping system_audit_log.
 		return handleCriticFindings(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, unsnooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
 	}
 }
 

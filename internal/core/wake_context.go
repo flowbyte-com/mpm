@@ -429,7 +429,7 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	// every agent on the workstation sees the same house rules on
 	// wake. Skipped silently when no shared DB is attached (local-only
 	// mode is the default).
-	if rules, _ := dm.QueryGlobalRules("", 10); len(rules) > 0 {
+	if rules, _ := dm.QueryGlobalRules("", 10, false); len(rules) > 0 {
 		data.GlobalRules = make([]WakeContextRule, 0, len(rules))
 		for _, r := range rules {
 			content, _ := r["content"].(string)

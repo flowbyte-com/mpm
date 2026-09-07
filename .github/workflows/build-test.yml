@@ -95,6 +95,28 @@ jobs:
       - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context)
         run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
 
+      # Managed-block parity gate (Python; closes a pre-existing CI gap).
+      #
+      # Full discover over agent_installation/tests/ — 123 cases
+      # covering canonical extraction, per-host prefix substitution,
+      # copy/paste example parity, byte-for-byte rendered-vs-checked-in
+      # match, cross-adapter content invariants (each adapter's snippet
+      # must teach the agent to invoke mpm_work with create/complete
+      # actions), installer smoke tests, and live behavioural verification.
+      #
+      # The 2026-09-06 fix closed the pre-existing
+      # test_mentions_mpm_work_with_real_actions failures (Claude and
+      # Hermes) by moving the §5 prose to parens form so the renderer
+      # applies the prefix, and updated the semantic-guard test that
+      # was pinning the old behavior. With that fix, `discover tests`
+      # is fully green — both the byte-for-byte parity check and the
+      # cross-adapter contract check run in this step.
+      #
+      # Verified locally: 123/123 OK on clean tree; FAILED (1) on
+      # simulated one-character drift; restored on revert.
+      - name: Renderer parity (managed-block byte-for-byte)
+        run: cd agent_installation && python3 -m unittest discover tests
+
       - name: Run full test suite with coverage
         run: |
           # Run tests and write atomic coverage profile

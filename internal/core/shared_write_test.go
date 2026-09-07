@@ -34,7 +34,7 @@ func TestRecordGlobalRule_HappyPath(t *testing.T) {
 		t.Fatal("expected non-empty rule id")
 	}
 
-	rules, err := dm.QueryGlobalRules("", 10)
+	rules, err := dm.QueryGlobalRules("", 10, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPromoteToGlobal_CopiesLocalMemory(t *testing.T) {
 	}
 
 	// Shared copy has correct content + lineage.
-	rules, err := dm.QueryGlobalRules("", 10)
+	rules, err := dm.QueryGlobalRules("", 10, false)
 	if err != nil {
 		t.Fatalf("QueryGlobalRules: %v", err)
 	}
