@@ -639,7 +639,7 @@ func (dm *DatabaseManager) recordSourceCitationsNode(node DBNode, sourceIDs []st
 			// parsers and the user's intent is "ignore blanks".
 			continue
 		}
-		if err := dm.recordProvenanceNode(node, src, "", downstreamID, downstreamType, downstreamID); err != nil {
+		if err := dm.recordProvenanceNode(node, src, "", downstreamID, downstreamType, downstreamID, ""); err != nil {
 			return err
 		}
 	}

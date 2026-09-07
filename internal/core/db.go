@@ -2038,6 +2038,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("cascade wake_scheduled migration failed: %w", err)
 	}
+	// Positive-direction (constructive) cascade: polarity column on
+	// epistemic_provenance. Idempotent via the schema_migrations sentinel
+	// pattern. See migration_epistemic_provenance_polarity.go for the
+	// back-compat invariant (NULL polarity must never fire positive
+	// cascade). NOT in SafeMigrations because that list is ADD COLUMN
+	// only and doesn't support inline CHECK constraints.
+	if err := MigrateEpistemicProvenancePolarity(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("epistemic_provenance polarity migration failed: %w", err)
+	}
 	// session_handoffs.session_id → nullable. See
 	// migration_session_handoffs_optional_session_id.go for the
 	// rationale (external session identifiers are correlation metadata,

@@ -332,6 +332,15 @@ var BaseTables = []string{
 	// explicit `record_decision` citations it is the decision's own
 	// id. The pair (source_id, downstream_id, event_id) is unique
 	// so re-recording the same citation is a no-op.
+	//
+	// polarity is the positive-direction (constructive) cascade opt-in
+	// per docs/constructive-cascade-design.md. NULL means "no polarity
+	// declared" — the safe default, never fires positive cascade.
+	// 'assumes_false' means "this downstream assumes the source is
+	// false" — when the source is proven true, the dependent may
+	// warrant re-evaluation. 'assumes_true' is the symmetric reserve.
+	// The inline CHECK is the C.1 prevention discipline: drift between
+	// the doc and the discovery code is caught loudly at write time.
 	`CREATE TABLE IF NOT EXISTS epistemic_provenance (
 		id              TEXT PRIMARY KEY,
 		source_id       TEXT NOT NULL,
@@ -339,6 +348,7 @@ var BaseTables = []string{
 		downstream_id   TEXT NOT NULL,
 		downstream_type TEXT NOT NULL,
 		event_id        TEXT NOT NULL,
+		polarity        TEXT CHECK (polarity IS NULL OR polarity IN ('assumes_true', 'assumes_false')),
 		created_at      INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		UNIQUE (source_id, downstream_id, event_id)
 	);`,

@@ -250,8 +250,11 @@ type CoreDB interface {
 	// retrieval_metadata (which is observability-only and not
 	// type-filtered). Empty sourceType on RecordProvenance triggers
 	// resolution against the local memories/lessons tables so legacy
-	// untyped IDs land with the correct type column.
-	RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error
+	// untyped IDs land with the correct type column. polarity is the
+	// explicit opt-in for the positive-direction cascade feature —
+	// empty string means "no polarity", which is the safe default
+	// (NULL storage, discovery-skipped).
+	RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID, polarity string) error
 	ListDownstreamCitations(sourceID string, allowedTypes []string) ([]ProvenanceCitation, error)
 
 	// ─── Cascade outbox (Task 3) ──────────────────────────────────────

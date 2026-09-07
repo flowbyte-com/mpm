@@ -91,9 +91,18 @@ type ProvenanceCitation struct {
 // transaction (via WithTx). If either write fails, neither row
 // lands. This matches the rest of the substrate's shared-write
 // pattern (see arbitration.go's applyArbitrationResolution).
-func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID string) error {
+//
+// polarity is the explicit-only opt-in for the positive-direction
+// (constructive) cascade feature, per docs/constructive-cascade-design.md.
+// Empty string → NULL polarity; the discovery path ignores NULL and
+// no positive cascade can fire from such a citation. Pass
+// PolarityAssumesFalse to opt in. The polarity is NEVER inferred
+// from content (no keyword matching, no semantic similarity) —
+// explicit-only matches the design's stance on confirmation/contradiction
+// (see docs/epistemic-confirmation.md).
+func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID, polarity string) error {
 	return dm.WithTx(func(node DBNode) error {
-		return dm.recordProvenanceNode(node, sourceID, sourceType, downstreamID, downstreamType, eventID)
+		return dm.recordProvenanceNode(node, sourceID, sourceType, downstreamID, downstreamType, eventID, polarity)
 	})
 }
 
@@ -116,7 +125,14 @@ func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, 
 // The INSERT uses ON CONFLICT(... ) DO NOTHING so the
 // idempotency contract holds when the same citation is written
 // twice (e.g. by a noisy recall turn or a retry).
-func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceType, downstreamID, downstreamType, eventID string) error {
+//
+// polarity is normalised: empty string → NULL (the load-bearing safety
+// invariant — NULL polarity never fires positive cascade). Non-empty
+// must match the CHECK constraint on the column or this write fails
+// loudly. Drift between doc and discovery code is the failure mode the
+// C.1 prevention pattern catches at the storage boundary, same way the
+// CHECK constraint on the column does.
+func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceType, downstreamID, downstreamType, eventID, polarity string) error {
 	if sourceID == "" {
 		return fmt.Errorf("RecordProvenance: source_id is required")
 	}
@@ -125,6 +141,17 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 	}
 	if eventID == "" {
 		return fmt.Errorf("RecordProvenance: event_id is required")
+	}
+	// Normalise polarity: empty → NULL, otherwise validate against the
+	// CHECK-constrained allow-list. Drift between doc and discovery
+	// code is caught loudly here rather than at the discovery scan.
+	var polarityArg interface{} = nil
+	if polarity != "" {
+		if polarity != PolarityAssumesFalse && polarity != PolarityAssumesTrue {
+			return fmt.Errorf("RecordProvenance: polarity must be empty, %q, or %q, got %q",
+				PolarityAssumesFalse, PolarityAssumesTrue, polarity)
+		}
+		polarityArg = polarity
 	}
 
 	// Legacy untyped ID compatibility: when the caller passes
@@ -155,10 +182,10 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 	// always-on substrate.
 	if _, err := node.ExecTracked(`
 		INSERT INTO epistemic_provenance
-			(id, source_id, source_type, downstream_id, downstream_type, event_id)
-		VALUES (?, ?, ?, ?, ?, ?)
+			(id, source_id, source_type, downstream_id, downstream_type, event_id, polarity)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
-	`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID); err != nil {
+	`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
 		return fmt.Errorf("RecordProvenance local write: %w", err)
 	}
 
@@ -181,10 +208,10 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 	if dm.sharedAttached {
 		if _, err := node.ExecTracked(`
 			INSERT INTO shared.epistemic_provenance
-				(id, source_id, source_type, downstream_id, downstream_type, event_id)
-			VALUES (?, ?, ?, ?, ?, ?)
+				(id, source_id, source_type, downstream_id, downstream_type, event_id, polarity)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
-		`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID); err != nil {
+		`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
 			return fmt.Errorf("RecordProvenance shared write: %w", err)
 		}
 	}

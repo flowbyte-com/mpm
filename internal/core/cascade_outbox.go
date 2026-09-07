@@ -781,3 +781,187 @@ func (dm *DatabaseManager) PruneCascadeOutbox(retentionDays int) (int64, error) 
 	n, _ := res.RowsAffected()
 	return n, nil
 }
+// ─── Positive-direction (constructive) cascade helpers ─────────────────────
+//
+// The negative-direction cascade invalidates downstream artifacts when
+// a foundation is contradicted or shredded. The positive-direction
+// cascade is the symmetric feature: when a foundation is proven (or
+// its confidence climbs past the hard ceiling), downstream artifacts
+// that have opted in via polarity='assumes_false' are observed but
+// NOT mutated automatically — the materializer still requires explicit
+// reason and trust-coupling context to decide what "foundation
+// proven" means for the dependent.
+//
+// Explicit-only opt-in: the polarity column on epistemic_provenance
+// is the gate. NULL polarity is the safe default and never fires any
+// positive cascade. PolarityAssumesFalse means "this downstream
+// artifact assumes the source is false" — when the source is proven
+// TRUE, the dependent may need re-evaluation (e.g. a hypothesis that
+// tests the negation of a theorem becomes interesting only AFTER the
+// theorem is proven). PolarityAssumesTrue is reserved for the
+// symmetric case and is currently unused by the trigger surfaces but
+// is part of the storage contract for forward compatibility.
+
+// PolarityAssumesTrue / PolarityAssumesFalse / HardConfidenceProvenThreshold
+// are part of the positive-direction cascade contract. They live
+// alongside the cascade enqueue helpers (this file) because the
+// discovery path uses them at enqueue time, not at write time. The
+// CHECK constraint on epistemic_provenance.polarity enforces these
+// strings at the storage boundary (see
+// migration_epistemic_provenance_polarity.go).
+const (
+	PolarityAssumesTrue  = "assumes_true"
+	PolarityAssumesFalse = "assumes_false"
+)
+
+// HardConfidenceProvenThreshold is the confidence crossing that
+// triggers a positive cascade via the RecomputeConfidence hook in
+// evidence_store.go. Set to 0.8 — chosen empirically: 0.7 is the
+// "high confidence" boundary used elsewhere (lessons, decisions),
+// 0.8 marks the transition into "near-certain" territory where a
+// foundation's downstream dependents can plausibly be considered
+// "built on solid ground". Crossing DOWN is invalidation (existing
+// behavior in evidence_store.go); crossing UP at this threshold is
+// foundation_proven (new behavior).
+const HardConfidenceProvenThreshold = 0.8
+
+// Reason labels for positive cascade intents. Distinct from the
+// invalidation reasons (which live in evidence_store.go and
+// cascade_outbox.go's existing helpers) so the materializer can
+// branch on direction without ambiguity.
+const (
+	ReasonFoundationProven  = "foundation_proven"
+	ReasonConfidenceCeiling = "confidence_ceiling"
+)
+
+// discoverPositiveCascadeTargets returns the deduplicated list of
+// downstream artifacts whose citation to sourceArtifactID carries
+// polarity='assumes_false' (i.e. the downstream ASSUMES the source
+// is false). When the source is proven true, these are the artifacts
+// whose "the source is false" assumption has flipped — the cascade
+// materializer may want to flag them for re-evaluation depending on
+// the per-type policy.
+//
+// Same contract as discoverCascadeTargets: only artifacts of type
+// decision or theory are eligible (lessons and global rules are
+// excluded — the cascade materializer only acts on cascading-eligible
+// types). tx is read-through when non-nil to honor the in-flight
+// state of the surrounding cascade enqueue tx.
+func (dm *DatabaseManager) discoverPositiveCascadeTargets(tx *sql.Tx, sourceArtifactID string) ([]ProvenanceTarget, error) {
+	out := make([]ProvenanceTarget, 0)
+	if sourceArtifactID == "" {
+		return out, nil
+	}
+
+	queryFn := dm.db.Query
+	if tx != nil {
+		queryFn = tx.Query
+	}
+	rows, err := queryFn(`
+		SELECT DISTINCT ep.downstream_id, ep.downstream_type
+		FROM epistemic_provenance ep
+		WHERE ep.source_id = ?
+		  AND ep.polarity = ?
+		ORDER BY ep.downstream_id ASC
+	`, sourceArtifactID, PolarityAssumesFalse)
+	if err != nil {
+		return nil, fmt.Errorf("discoverPositiveCascadeTargets: %w", err)
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var id, typ string
+		if err := rows.Scan(&id, &typ); err != nil {
+			return nil, fmt.Errorf("discoverPositiveCascadeTargets scan: %w", err)
+		}
+		if !isEligibleCascadeType(typ) {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, ProvenanceTarget{ArtifactID: id, ArtifactType: typ})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("discoverPositiveCascadeTargets rows: %w", err)
+	}
+	return out, nil
+}
+
+// EnqueueCascadeFoundationProven is the mirror of
+// EnqueueCascadeInvalidation for the positive direction. Triggered
+// when a foundation is observed as "proven" — either via explicit
+// theory resolution to status='proven' or via RecomputeConfidence
+// crossing HardConfidenceProvenThreshold upward.
+//
+// Sequence mirrors EnqueueCascadeInvalidation:
+//
+//  1. Mint the event ID via CreateInvalidationEvent (the helper is
+//     direction-agnostic; the reason string distinguishes the two
+//     directions downstream).
+//  2. Discover polarity-tagged downstream targets via
+//     discoverPositiveCascadeTargets (the same sourceArtifactID is
+//     used for both — for a positive cascade the "dead" side is
+//     the previously-uncertain foundation, which is now proven).
+//  3. Enqueue intents via EnqueueCascadeIntents under the supplied
+//     tx.
+//
+// Returns the count of NEW outbox rows that landed (zero is a clean
+// no-op when no downstream dependents opted in or the dedup key
+// collapsed every target). Errors propagate to the caller's tx.
+func (dm *DatabaseManager) EnqueueCascadeFoundationProven(
+	tx *sql.Tx,
+	sourceArtifactID, sourceArtifactType, reason, triggerEvidenceID string,
+	depth int,
+) (int, error) {
+	if tx == nil {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: tx is required")
+	}
+	if sourceArtifactID == "" {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: sourceArtifactID is required")
+	}
+	if sourceArtifactType == "" {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: sourceArtifactType is required")
+	}
+	if reason != ReasonFoundationProven && reason != ReasonConfidenceCeiling {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: reason must be %q or %q, got %q",
+			ReasonFoundationProven, ReasonConfidenceCeiling, reason)
+	}
+
+	// Step 1: mint the event ID. The event ID is shared across all
+	// intents for this single trigger — the materializer uses it to
+	// trace causally when more than one downstream is involved.
+	eventID, err := dm.CreateInvalidationEvent(tx, sourceArtifactID, sourceArtifactType, triggerEvidenceID, reason, depth)
+	if err != nil {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: create event: %w", err)
+	}
+
+	// Step 2: discover positive-direction downstream targets — the
+	// ones that opted in via polarity='assumes_false'. NULL polarity
+	// rows are excluded by the WHERE clause, which is the load-bearing
+	// safety invariant: pre-existing citations (none of which have
+	// polarity set) never participate in positive cascades.
+	targets, err := dm.discoverPositiveCascadeTargets(tx, sourceArtifactID)
+	if err != nil {
+		return 0, fmt.Errorf("EnqueueCascadeFoundationProven: discover targets: %w", err)
+	}
+
+	// Step 3: enqueue intents under the supplied tx. Same shape as
+	// the negative-direction path; the reason label is the
+	// disambiguator (foundation_proven / confidence_ceiling vs the
+	// invalidation reasons).
+	written, err := dm.EnqueueCascadeIntents(tx, CascadeInvalidation{
+		EventID:           eventID,
+		DeadArtifactID:    sourceArtifactID,
+		DeadArtifactType:  sourceArtifactType,
+		Reason:            reason,
+		CascadeDepth:      depth,
+		TriggerEvidenceID: triggerEvidenceID,
+	}, targets)
+	if err != nil {
+		return written, fmt.Errorf("EnqueueCascadeFoundationProven: enqueue intents: %w", err)
+	}
+	return written, nil
+}

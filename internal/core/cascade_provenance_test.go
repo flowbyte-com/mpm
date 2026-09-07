@@ -150,6 +150,7 @@ func TestProvenance_RecordAndListRoundtrip(t *testing.T) {
 		fx.memID, "memory",
 		fx.decID, "decision",
 		"evt-1",
+		"",
 	))
 
 	citations, err := fx.dm.ListDownstreamCitations(fx.memID, []string{"decision"})
@@ -182,6 +183,7 @@ func TestProvenance_IdempotentUniqueKey(t *testing.T) {
 			fx.memID, "memory",
 			fx.decID, "decision",
 			"evt-idem",
+			"",
 		), "RecordProvenance must be idempotent on iteration %d", i)
 	}
 
@@ -214,10 +216,12 @@ func TestProvenance_ListFiltersByDownstreamType(t *testing.T) {
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.decID, "decision", "evt-d",
+		"",
 	))
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.theoryID, "theory", "evt-t",
+		"",
 	))
 
 	// Asking for decisions: only the decision citation surfaces.
@@ -259,10 +263,12 @@ func TestProvenance_MultipleCitationsForOneSource(t *testing.T) {
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.decID, "decision", "evt-fan-d",
+		"",
 	))
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.theoryID, "theory", "evt-fan-t",
+		"",
 	))
 
 	// When the caller asks for both downstream types, both must
@@ -332,7 +338,7 @@ func TestProvenance_ValidationRejectsEmptyFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := fx.dm.RecordProvenance(tc.src, "memory", tc.dst, "decision", tc.ev)
+			err := fx.dm.RecordProvenance(tc.src, "memory", tc.dst, "decision", tc.ev, "")
 			require.Error(t, err, "RecordProvenance must reject empty %s", tc.name)
 			// We do not pin the exact error message — the validation
 			// contract is "no row is written", not "specific text".
@@ -372,6 +378,7 @@ func TestProvenance_LegacyUntypedSourceIDResolution(t *testing.T) {
 		fx.decID, "",            // empty type forces resolution
 		fx.theoryID, "theory",
 		"evt-resolve",
+		"",
 	))
 
 	// The row landed with the resolved type — 'decision', not 'memory'.
@@ -410,6 +417,7 @@ func TestProvenance_DownstreamIDIsUnknownAccepted(t *testing.T) {
 		fx.memID, "memory",
 		"dec-doesnotexist", "decision",
 		"evt-unknown",
+		"",
 	))
 
 	citations, err := fx.dm.ListDownstreamCitations(fx.memID, []string{"decision"})
@@ -592,6 +600,7 @@ func TestProvenance_SharedWritePropagation(t *testing.T) {
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.decID, "decision", "evt-shared-write",
+		"",
 	))
 
 	// Local row exists.
@@ -637,6 +646,7 @@ func TestProvenance_SharedWriteIdempotent(t *testing.T) {
 		require.NoError(t, fx.dm.RecordProvenance(
 			fx.memID, "memory",
 			fx.decID, "decision", "evt-shared-idem",
+			"",
 		), "RecordProvenance must be idempotent on iteration %d", i)
 	}
 
@@ -675,6 +685,7 @@ func TestProvenance_SharedListFederation(t *testing.T) {
 	require.NoError(t, fx.dm.RecordProvenance(
 		fx.memID, "memory",
 		fx.decID, "decision", "evt-fed",
+		"",
 	))
 
 	// Manually delete the shared row so the citation exists ONLY
@@ -845,7 +856,7 @@ func TestProvenance_ValidationFailureLeavesNoRows(t *testing.T) {
 	// public RecordProvenance wraps the same node call in its
 	// own WithTx, but the validation has to fail before any
 	// INSERT runs.
-	err := fx.dm.recordProvenanceNode(fx.dm, "", "memory", fx.decID, "decision", "evt-bad")
+	err := fx.dm.recordProvenanceNode(fx.dm, "", "memory", fx.decID, "decision", "evt-bad", "")
 	require.Error(t, err)
 
 	// Both local and shared must be untouched.
