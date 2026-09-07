@@ -379,7 +379,15 @@ func main() {
 	// Default-to-recall: `mpm token budget` → `mpm recall token budget`
 	// Only triggers for a single bare positional string that isn't a flag, +/- feedback shortcut,
 	// or known command.
+	//
+	// RE1 polish: smartRecallToken is non-empty only when the smart-recall
+	// fallback rewrote the argv. runSmartRecallWithHint uses it to emit a
+	// "did you mean?" hint if recall yields zero results and the token is
+	// close to a known command name. The hint is additive; the original
+	// recall result (and exit code) is preserved.
+	smartRecallToken := ""
 	if len(args) == 1 && args[0] != "" && args[0][0] != '-' && args[0][0] != '+' && router.resolveCommand(args[0]) == nil {
+		smartRecallToken = args[0]
 		args = []string{"recall", args[0]}
 	}
 
@@ -425,8 +433,16 @@ func main() {
 		}
 	}
 
-	// Execute via router
-	exitCode := router.Execute(args)
+	// Execute via router. When the smart-recall fallback rewrote the argv,
+	// intercept and run handleRecall directly so we can inspect its stdout
+	// for the empty-results marker and append a "did you mean?" hint when
+	// the token is close to a known command name.
+	var exitCode int
+	if smartRecallToken != "" {
+		exitCode = runSmartRecallWithHint(smartRecallToken, args, router)
+	} else {
+		exitCode = router.Execute(args)
+	}
 	os.Exit(exitCode)
 }
 
@@ -1880,4 +1896,171 @@ func printGatewayHelp() int {
 
 	fmt.Print(b.String() + "\n\n")
 	return 0
+}
+
+// ============================================================================
+// Smart-recall "did you mean?" hint — RE1 polish
+// ============================================================================
+//
+// When `mpm <single-token>` falls through to the smart-recall fallback
+// AND recall produces zero results, emit a lightweight hint suggesting
+// the closest router command name. Smart-recall semantics are otherwise
+// unchanged: known commands dispatch normally, multi-token args bypass
+// the hint, and recall results (with their exit code) are preserved.
+//
+// Contract:
+//   - handleRecall's exit code is preserved (currently 0 for empty results).
+//   - The hint is additive; it never auto-executes the suggestion.
+//   - Hint is suppressed whenever recall finds any results.
+//   - Hint is suppressed when no command name is close enough (bounded
+//     Levenshtein; see didYouMeanThreshold for the bound).
+func runSmartRecallWithHint(token string, args []string, router *CommandRouter) int {
+	// Capture handleRecall's stdout via an os.Pipe so we can scan for the
+	// empty-results marker without modifying handleRecall's internals.
+	//
+	// We intentionally do NOT spawn a goroutine to drain the pipe. The
+	// pipe write end is closed synchronously after handleRecall returns;
+	// all bytes handleRecall emitted (small in this code path — empty
+	// results are one line, with-results are bounded by --limit) are
+	// buffered in the pipe and read to EOF in the same goroutine. This
+	// satisfies the mpm-lint go-detached check (no orphan goroutines).
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		// Pipe creation failed; fall back to a plain invocation so the
+		// user still gets smart-recall behavior.
+		return handleRecall(args)
+	}
+	os.Stdout = w
+
+	exitCode := handleRecall(args)
+
+	// Close the write end so the read side sees EOF.
+	_ = w.Close()
+	// Restore the real stdout BEFORE reading from the pipe (the read
+	// itself doesn't need stdout, but doing it now means subsequent
+	// writes via origStdout won't be clobbered by a delayed close).
+	os.Stdout = origStdout
+
+	captured, _ := io.ReadAll(r)
+	_ = r.Close()
+	output := string(captured)
+
+	// Always replay the captured output first so the user sees exactly
+	// what smart-recall would have shown.
+	if output != "" {
+		_, _ = io.WriteString(origStdout, output)
+	}
+
+	// Hint logic only fires when recall produced zero results. The
+	// "No memories found for:" marker is emitted by both recall.go
+	// paths (semantic and keyword).
+	if strings.Contains(output, "No memories found for:") {
+		if suggestion := suggestCommandName(token, router); suggestion != "" {
+			fmt.Fprintf(origStdout,
+				"Unknown command %q. Did you mean %q? Try `mpm %s --help`.\n",
+				token, suggestion, suggestion)
+		} else {
+			fmt.Fprintf(origStdout, "Unknown command %q.\n", token)
+		}
+	}
+
+	return exitCode
+}
+
+// didYouMeanThreshold returns the maximum Levenshtein distance at which
+// `token` is still considered a possible typo for some command name.
+// The threshold grows slowly with token length (so longer tokens get a
+// proportionally wider window), but it never drops below 2 — that keeps
+// short common-command typos in range (e.g., "ad" → "add", "lss" → "ls") —
+// and never exceeds 4, to avoid matching unrelated words.
+func didYouMeanThreshold(tokenLen int) int {
+	if tokenLen <= 0 {
+		return 0
+	}
+	t := tokenLen / 3
+	if t < 2 {
+		t = 2
+	}
+	if t > 4 {
+		t = 4
+	}
+	return t
+}
+
+// suggestCommandName returns the closest command name from the canonical
+// router.Commands map to `token`, or "" if no candidate is within the
+// bounded Levenshtein threshold. Aliases are intentionally excluded so
+// we recommend canonical names. Ties are broken by command name length
+// (shorter wins), then alphabetically for stability.
+func suggestCommandName(token string, router *CommandRouter) string {
+	if token == "" {
+		return ""
+	}
+	threshold := didYouMeanThreshold(len(token))
+	bestName := ""
+	bestDist := -1
+	for name := range router.Commands {
+		if name == "recall" || name == "help" || name == "version" {
+			// Don't suggest built-in meta-commands; the user almost
+			// certainly didn't typo into them.
+			continue
+		}
+		d := levenshtein(token, name)
+		if d > threshold {
+			continue
+		}
+		if bestDist == -1 || d < bestDist ||
+			(d == bestDist && (len(name) < len(bestName) ||
+				(len(name) == len(bestName) && name < bestName))) {
+			bestDist = d
+			bestName = name
+		}
+	}
+	return bestName
+}
+
+// levenshtein computes the edit distance between two strings using the
+// classic two-row DP. O(len(a)*len(b)) time, O(min) space. Iterates by
+// rune so multi-byte characters count correctly.
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	ra, rb := []rune(a), []rune(b)
+	la, lb := len(ra), len(rb)
+	if la > lb {
+		ra, rb = rb, ra
+		la, lb = lb, la
+	}
+	prev := make([]int, la+1)
+	curr := make([]int, la+1)
+	for i := 0; i <= la; i++ {
+		prev[i] = i
+	}
+	for j := 1; j <= lb; j++ {
+		curr[0] = j
+		for i := 1; i <= la; i++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			m := prev[i-1] + cost
+			if del := prev[i] + 1; del < m {
+				m = del
+			}
+			if ins := curr[i-1] + 1; ins < m {
+				m = ins
+			}
+			curr[i] = m
+		}
+		prev, curr = curr, prev
+	}
+	return prev[la]
 }
