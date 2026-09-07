@@ -10,6 +10,21 @@ to build now, build after empirical evidence, or hold entirely.
 
 ---
 
+> **Update 2026-09-07: proceeding to build despite 0% corpus prevalence.**
+> The corpus read measured whether *existing* theories show
+> contingent-on-uncertainty reasoning — but no mechanism has ever existed
+> to make that reasoning structurally visible or useful, so its absence in
+> historical text is not strong evidence against the underlying pattern
+> occurring. Operator decision to build now rather than wait for organic
+> evidence that the current design can't surface. This is a deliberate,
+> named exception to the empirical-gate process used elsewhere in this
+> project, not a silent override. The HOLD recommendation below and the
+> corpus read result above are preserved as the original recommendation;
+> the implementation that proceeds is recorded against this deviation note
+> rather than against the HOLD rationale.
+
+---
+
 ## Step 1: Polarity schema design
 
 ### The problem with the current schema
