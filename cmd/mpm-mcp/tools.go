@@ -179,13 +179,38 @@ func (a *artifactResolverAdapter) resolveMemory(ctx context.Context, p tools.Poi
 	// Fire-and-forget retrieval telemetry.
 	_ = a.dm.RecordRetrieval(p.ID, "memory")
 
+	// stripUnboundedContent projects the stored row into a safe
+	// resolution shape: the bounded content above is the only place
+	// the full payload can appear. The raw `content` key is dropped
+	// from the metadata projection so handleMpmResolve cannot echo it
+	// via resp["metadata"].content. Stored state in the memories
+	// table is NOT mutated — only the response projection is.
 	return tools.Resolution{
 		Pointer:     "mpm://memory/" + p.ID,
 		ContentType: "text/plain",
 		Reader:     io.NopCloser(strings.NewReader(content)),
-		Metadata:   mem,
+		Metadata:   stripUnboundedContent(mem),
 		Bounded:    bounded,
 	}, nil
+}
+
+// stripUnboundedContent returns a shallow copy of mem with the
+// `content` key removed. Stored state is not mutated. See
+// resolveMetadataFor in the tools package for the matching handler-
+// side projection — both call sites must agree so neither CLI nor
+// MCP can leak the full body via metadata.content.
+func stripUnboundedContent(mem map[string]interface{}) map[string]interface{} {
+	if mem == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(mem))
+	for k, v := range mem {
+		if k == "content" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func (a *artifactResolverAdapter) resolveLesson(ctx context.Context, p tools.Pointer, opts tools.ResolveOptions) (tools.Resolution, error) {

@@ -6106,8 +6106,12 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				"pointer":      "mpm://memory/" + ptr.ID,
 				"bounded":      bounded,
 			}
+			// resolveMetadataFor strips the unbounded `content` field so
+			// the bounded top-level content is the only place the full
+			// payload can appear in the response. See the launch-block
+			// fix in docs/CONTEXT_ECONOMICS.md (Sept 2026 launch).
 			if mem != nil {
-				resp["metadata"] = mem
+				resp["metadata"] = resolveMetadataFor(mem)
 			}
 			// W-007: surface challenge status with parity to handleShowMemory.
 			// The stored `content` string is intentionally untouched — the
@@ -6180,7 +6184,10 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				"content_type": "text/plain",
 				"pointer":      "mpm://theory/" + ptr.ID,
 				"bounded":      theoryBounded,
-				"metadata":     mem,
+				// resolveMetadataFor strips the unbounded `content` field
+				// so the bounded top-level content is the only place the
+				// full payload can appear in the response.
+				"metadata": resolveMetadataFor(mem),
 			}, nil
 		case "work":
 			work, err := dm.GetWork(ptr.ID)
@@ -6230,8 +6237,12 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		"pointer":      result.Pointer,
 		"bounded":      result.Bounded,
 	}
+	// resolveMetadataFor strips the unbounded `content` field so the
+	// bounded top-level content is the only place the full payload can
+	// appear in the response. See the launch-block fix in
+	// docs/CONTEXT_ECONOMICS.md (Sept 2026 launch).
 	if result.Metadata != nil {
-		resp["metadata"] = result.Metadata
+		resp["metadata"] = resolveMetadataFor(result.Metadata)
 	}
 	// W-007: surface challenge banner with parity to handleShowMemory.
 	// The resolver-driven path is what CLI `mpm call mpm_resolve` uses;
@@ -6262,6 +6273,40 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 // parsePointerURI is a local copy of pointer.Parse for use by the tools
 // package, which cannot import the main module's internal/pointer package.
 // This implementation must stay in sync with pointer.Parse.
+
+// resolveMetadataFor projects a stored artifact row into the safe
+// metadata shape returned by mpm_resolve. The CRITICAL invariant is:
+//
+//   top-level `content`  = bounded content (already capped to max_bytes)
+//   `metadata.content`   = MUST NOT echo the original unbounded content
+//
+// Before this projection existed, handleMpmResolve's CLI fallback set
+// resp["metadata"] = mem verbatim, and the MCP-resolver path set
+// resp["metadata"] = result.Metadata verbatim. Both pass-throughs
+// leaked the full stored content via metadata.content even when the
+// top-level content was bounded, defeating the pointer architecture's
+// model-facing context bound. This helper strips the unbounded content
+// field at the response boundary; stored state in the memories table
+// is NOT mutated.
+//
+// All other keys (id, collection, tags, weight, metadata, created_at,
+// pointer, etc.) are preserved so legitimate metadata flows through
+// unchanged. The result is a NEW map — the input is not mutated.
+func resolveMetadataFor(mem map[string]interface{}) map[string]interface{} {
+	if mem == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(mem))
+	for k, v := range mem {
+		if k == "content" {
+			// Drop the unbounded content; the bounded slice is already
+			// exposed at resp["content"]. This is the fix site.
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
 //
 // Key invariants shared with pointer.Parse:
 //   - Rejects URIs containing '?' or '#' (query/fragment components)
