@@ -128,10 +128,15 @@ func handleConfig(args []string) int {
 // The wizard writes to Profiles["default"] (canonical). The legacy
 // `synth` block is preserved on disk if present (one-way compatibility)
 // but new code does not create it.
+//
+// On JSON parse failure, prints an actionable hint pointing the
+// operator at the file path and a JSON validation tool. Doesn't pull
+// in a JSON parser dependency.
 func loadOrInitConfig() *config.Config {
 	c, err := config.LoadConfig()
 	if err != nil {
-		usererror.Error("loading config: %v", err)
+		usererror.Error("failed to load %s: %v\nCheck mpm_config.json with:\n  python3 -m json.tool %s",
+			config.ConfigPath(), err, config.ConfigPath())
 		os.Exit(1)
 	}
 	return c
@@ -376,9 +381,15 @@ func handleConfigValidate(c *config.Config) int {
 				continue
 			}
 			if _, ok := c.Profiles[bound]; !ok {
-				// Fall back to "default" profile if one exists.
+				// Distinguish "explicit binding broken" from "binding
+				// resolves via default fallback". The runtime silently
+				// falls through to Profiles["default"] when an
+				// explicit binding points at a missing profile; that's
+				// a UX footgun. Surface the broken binding even when
+				// default exists so operators can fix it.
 				if _, hasDefault := c.Profiles["default"]; hasDefault {
-					componentOK++
+					fmt.Printf("  ⚠ component %q explicitly bound to missing profile %q (runtime would fall back to default)\n", comp, bound)
+					fmt.Printf("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`\n", bound, comp)
 					continue
 				}
 				fmt.Printf("  ✗ component %q bound to missing profile %q\n", comp, bound)
@@ -484,16 +495,63 @@ func pluralForN(n int) string {
 // Interactive wizard
 // ---------------------------------------------------------------------------
 
+// wizardPresets enumerates the canned provider presets the wizard offers.
+// Each preset carries the canonical base_url + model that an operator can
+// accept by default or override per-field. "custom" is the no-default
+// fallback for operators who know what they're doing.
+var wizardPresets = []choice{
+	{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.Profile{
+		Provider: "minimax",
+		Model:    "MiniMax-M2.7",
+		BaseURL:  "https://api.minimax.io/anthropic/v1",
+	}},
+	{id: "openai", label: "OpenAI", defaults: config.Profile{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		BaseURL:  "https://api.openai.com/v1",
+	}},
+	{id: "ollama", label: "Ollama (local)", defaults: config.Profile{
+		Provider: "ollama",
+		Model:    "llama3",
+		BaseURL:  "http://localhost:11434/v1",
+	}},
+	{id: "anthropic", label: "Anthropic direct", defaults: config.Profile{
+		Provider: "anthropic",
+		Model:    "claude-3-5-sonnet",
+		BaseURL:  "https://api.anthropic.com/v1",
+	}},
+	{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.Profile{}},
+}
+
+// presetIDForProvider maps an existing provider string to a preset id,
+// or "custom" when the provider does not match a known preset.
+func presetIDForProvider(provider string) string {
+	for _, p := range wizardPresets {
+		if p.id == provider {
+			return p.id
+		}
+	}
+	return "custom"
+}
+
 // handleConfigInteractive runs the wizard. Each prompt uses stdin;
 // defaults are accepted by hitting enter. The wizard is non-TTY-safe
 // (refuses to run with stdin redirected, points operator at the
 // scripting interface).
 //
-// The wizard writes to Profiles["default"] (the canonical surface for the
-// default LLM profile). The legacy top-level `synth` block is no longer
-// created or updated by the wizard; it remains readable for backward
-// compatibility (ProfileFor falls through to it as a one-way migration
-// path), but new installs should configure Profiles["default"].
+// The wizard is state-aware: it reads the current configuration first
+// and only asks about missing or operator-changed fields. Existing
+// non-empty values are preserved unless the operator explicitly
+// replaces them. The wizard does not erase component bindings,
+// capability overrides, embedding configuration, the synthesis flag,
+// or unrelated profiles.
+//
+// The wizard writes to Profiles["default"] (the canonical surface for
+// the default LLM profile). The legacy top-level `synth` block is no
+// longer created or updated by the wizard; it remains readable for
+// backward compatibility (ProfileFor falls through to it as a one-way
+// migration path), but new installs should configure
+// Profiles["default"].
 func handleConfigInteractive(c *config.Config) int {
 	if !isatty(os.Stdin) {
 		fmt.Println("Configure MPM")
@@ -511,9 +569,23 @@ func handleConfigInteractive(c *config.Config) int {
 
 	fmt.Println("Configure MPM")
 	fmt.Println()
-	fmt.Println("Each preset fills in the right default base_url + model")
-	fmt.Println("for that provider. You'll be asked to confirm before saving.")
-	fmt.Println()
+
+	// State-aware preamble: surface current configuration so the
+	// operator sees what is already set before any prompt runs.
+	wizardShowCurrentState(c)
+
+	// Detect legacy-only configurations and offer a one-line
+	// explanation so the operator knows a new profiles.default will
+	// be created alongside the legacy block (compatibility is
+	// preserved; modern takes precedence at runtime).
+	if isLegacyOnlyConfig(c) {
+		fmt.Println()
+		fmt.Println("Legacy configuration detected.")
+		fmt.Println("Your existing provider will be used as the default.")
+		fmt.Println("Saving will create modern profiles.default configuration;")
+		fmt.Println("the legacy synth block remains readable for compatibility.")
+		fmt.Println()
+	}
 
 	// Ensure Profiles["default"] exists. The wizard writes here; the
 	// legacy top-level `synth` block is no longer written by the wizard.
@@ -521,66 +593,64 @@ func handleConfigInteractive(c *config.Config) int {
 		c.Profiles = map[string]config.Profile{}
 	}
 	prof := c.Profiles["default"]
-	if prof.Name == "" {
-		prof.Name = "default"
-	}
 
-	// Preset choice.
-	preset := promptChoice(rwFromStdin(), "Provider", []choice{
-		{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.Profile{
-			Provider: "minimax",
-			Model:    "MiniMax-M2.7",
-			BaseURL:  "https://api.minimax.io/anthropic/v1",
-		}},
-		{id: "openai", label: "OpenAI", defaults: config.Profile{
-			Provider: "openai",
-			Model:    "gpt-4o",
-			BaseURL:  "https://api.openai.com/v1",
-		}},
-		{id: "ollama", label: "Ollama (local)", defaults: config.Profile{
-			Provider: "ollama",
-			Model:    "llama3",
-			BaseURL:  "http://localhost:11434/v1",
-		}},
-		{id: "anthropic", label: "Anthropic direct", defaults: config.Profile{
-			Provider: "anthropic",
-			Model:    "claude-3-5-sonnet",
-			BaseURL:  "https://api.anthropic.com/v1",
-		}},
-		{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.Profile{}},
-	})
+	// Preset choice: default to the preset matching the existing
+	// provider (or "custom" if no preset matches). This avoids the
+	// silent-overwrite behaviour of always-defaulting-to-MiniMax.
+	defaultPresetID := "custom"
+	if prof.Provider != "" {
+		defaultPresetID = presetIDForProvider(prof.Provider)
+	}
+	preset := promptChoiceDefault(rwFromStdin(), "Provider", wizardPresets, defaultPresetID)
 	if preset == nil {
 		fmt.Println("Aborted.")
 		return 0
 	}
 
-	// Apply preset defaults to the profile (filling empty fields only —
-	// operators can override per-field in the prompts below).
+	// Snapshot the existing profile BEFORE applying preset defaults.
+	// We use this snapshot to detect which fields the operator
+	// already populated so the wizard doesn't silently overwrite a
+	// custom base_url when only the provider matched a preset.
+	existing := prof
+	hadBaseURL := existing.BaseURL != ""
+	hadKey := existing.APIKey != ""
+
+	// Apply preset defaults ONLY to fields the operator hasn't set.
+	// Existing values win; preset defaults fill empty fields.
 	mergeProfileDefaults(&prof, preset.defaults)
 
-	// Model prompt.
+	// Model prompt — preserve existing model on empty input.
 	model := promptString(rwFromStdin(), "Model", prof.Model)
 	if model != "" {
 		prof.Model = strings.TrimSpace(model)
 	}
 
-	// Base URL prompt.
+	// Base URL prompt — preserve the operator's existing URL when
+	// non-empty, even if the chosen preset has a different default.
+	// This is the silent-overwrite fix: a custom endpoint must not
+	// be replaced by the preset base_url just because the provider
+	// name happens to match.
 	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
 	if baseURL != "" {
 		prof.BaseURL = strings.TrimSpace(baseURL)
+	} else if hadBaseURL {
+		// Restore the original URL — empty input keeps existing.
+		prof.BaseURL = existing.BaseURL
 	}
 
 	// API key prompt — only if preset needs it (skip for Ollama).
-	needsKey := preset.id != "ollama"
+	// Also skip when the provider is "ollama" by existing config.
+	needsKey := preset.id != "ollama" && prof.Provider != "ollama"
 	if needsKey {
-		existing := prof.APIKey
-		var labelDefault string
-		if existing != "" {
-			labelDefault = "(unchanged)"
+		var keyDefault string
+		if hadKey {
+			keyDefault = "(unchanged)"
 		}
-		key := promptSecret(rwFromStdin(), "API key", labelDefault)
+		key := promptSecret(rwFromStdin(), "API key", keyDefault)
 		if key != "" {
 			prof.APIKey = strings.TrimSpace(key)
+		} else if hadKey {
+			prof.APIKey = existing.APIKey
 		}
 	}
 
@@ -590,17 +660,49 @@ func handleConfigInteractive(c *config.Config) int {
 		if n, err := strconvAtoi(tokens); err == nil && n > 0 {
 			prof.MaxTokens = n
 		}
+	} else if existing.MaxTokens > 0 {
+		prof.MaxTokens = existing.MaxTokens
 	}
 	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
 	if timeout != "" {
 		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
 			prof.TimeoutSecs = n
 		}
+	} else if existing.TimeoutSecs > 0 {
+		prof.TimeoutSecs = existing.TimeoutSecs
 	}
+
+	// If the operator had no provider set AND the preset didn't supply
+	// one (custom), the wizard is in a degenerate state — refuse to
+	// save and tell the operator what they need to do.
+	if prof.Provider == "" && preset.id == "custom" {
+		fmt.Println()
+		fmt.Println("A provider is required. Use `mpm config profile set default provider <name>` for non-interactive configuration, or re-run the wizard and choose a preset.")
+		return 1
+	}
+
+	// Embedding step: surface the embedding subsystem, default to
+	// "leave unchanged" when already configured.
+	fmt.Println()
+	wizardEmbeddingStep(c)
+
+	// Specialist (critic) step: optional, default to "no" when the
+	// operator hasn't already configured a critic profile.
+	fmt.Println()
+	wizardCriticStep(c)
+
+	// Capability informational block.
+	fmt.Println()
+	wizardShowCapabilities()
+
+	// Synthesis state.
+	fmt.Println()
+	wizardShowSynthesis(c)
 
 	// Confirm + save.
 	fmt.Println()
 	fmt.Println("Preview (profile \"default\"):")
+	fmt.Printf("  provider   : %s\n", prof.Provider)
 	fmt.Printf("  model      : %s\n", prof.Model)
 	fmt.Printf("  base url   : %s\n", prof.BaseURL)
 	fmt.Printf("  api key    : %s\n", redactAPIKey(prof.APIKey))
@@ -619,6 +721,172 @@ func handleConfigInteractive(c *config.Config) int {
 	fmt.Println()
 	fmt.Println("✓ Configuration saved to " + config.ConfigPath())
 	return 0
+}
+
+// isLegacyOnlyConfig returns true when the only provider configuration
+// is a legacy top-level `synth` block (no Profiles["default"], no other
+// profiles). Used to surface a migration note in the wizard.
+func isLegacyOnlyConfig(c *config.Config) bool {
+	if c == nil {
+		return false
+	}
+	if c.Synth == nil || c.Synth.Model == "" {
+		return false
+	}
+	hasProfiles := len(c.Profiles) > 0
+	return !hasProfiles
+}
+
+// wizardShowCurrentState prints a one-paragraph preamble of the
+// current configuration so the operator sees what is already set
+// before any prompt runs.
+func wizardShowCurrentState(c *config.Config) {
+	if c == nil {
+		return
+	}
+	if def, ok := c.Profiles["default"]; ok {
+		fmt.Println("Current state:")
+		fmt.Printf("  default profile : %s/%s\n",
+			displayProviderOrEmpty(def.Provider), displayModelOrEmpty(def.Model))
+		if def.BaseURL != "" {
+			fmt.Printf("  base url       : %s\n", def.BaseURL)
+		}
+		if def.APIKey != "" {
+			fmt.Printf("  api key        : %s\n", redactAPIKey(def.APIKey))
+		}
+	} else if c.Synth != nil && c.Synth.Model != "" {
+		fmt.Println("Current state:")
+		fmt.Printf("  legacy synth   : %s/%s\n",
+			displayProviderOrEmpty(c.Synth.BaseURL), c.Synth.Model)
+	} else {
+		fmt.Println("No configuration found.")
+	}
+	if len(c.Profiles) > 1 {
+		fmt.Printf("  profiles       : %s\n", strings.Join(sortedKeysForConfig(c.Profiles), ", "))
+	}
+	if emb, ok := c.Profiles["embedding"]; ok {
+		fmt.Printf("  embedding       : %s/%s\n", displayProviderOrEmpty(emb.Provider), displayModelOrEmpty(emb.Model))
+	}
+	if c.SynthesisEnabled != nil && !*c.SynthesisEnabled {
+		fmt.Println("  synthesis       : disabled")
+	}
+	fmt.Println()
+}
+
+func displayProviderOrEmpty(p string) string {
+	if p == "" {
+		return "(unset)"
+	}
+	return p
+}
+
+func displayModelOrEmpty(m string) string {
+	if m == "" {
+		return "(unset)"
+	}
+	return m
+}
+
+// wizardEmbeddingStep presents the embedding subsystem in the wizard
+// without re-implementing detect-embedding. When embedding is already
+// configured, defaults to "leave unchanged". Offers auto-detect as a
+// sub-prompt that delegates to the same Ollama probe used by
+// `mpm config detect-embedding`.
+func wizardEmbeddingStep(c *config.Config) {
+	fmt.Println("Embedding")
+	embedCfg := mpminternal.DefaultEmbeddingConfig()
+	if embedCfg.IntentionallyDisabled {
+		fmt.Println("  current: intentionally disabled")
+	} else if embedCfg.Source == mpminternal.EmbeddingSourceProfile {
+		fmt.Printf("  current: %s/%s (profile: %s)\n",
+			embedCfg.ProviderName, embedCfg.ProfileName, embedCfg.ProfileName)
+	} else if embedCfg.Source == mpminternal.EmbeddingSourceEnvFallback {
+		fmt.Println("  current: env (OLLAMA_ENDPOINT/OLLAMA_MODEL)")
+	} else {
+		fmt.Println("  current: not configured")
+	}
+	fmt.Println("  1. Leave unchanged")
+	fmt.Println("  2. Detect local Ollama embedding model")
+	fmt.Println("  3. Configure manually (`mpm config profile ...` + `mpm config component set embedding <name>`)")
+	fmt.Println("  4. Disable embedding")
+	choice := promptString(rwFromStdin(), "Choice", "1")
+	switch strings.TrimSpace(choice) {
+	case "2":
+		// Delegate to the canonical detect-embedding probe.
+		cmd := &DetectEmbeddingCmd{}
+		cmd.Run()
+	case "4":
+		if c.Components == nil {
+			c.Components = map[string]string{}
+		}
+		c.Components["embedding"] = "disabled"
+		fmt.Println("Embedding disabled.")
+	default:
+		fmt.Println("Embedding unchanged.")
+	}
+}
+
+// wizardCriticStep presents the only specialist model that matters in
+// v0.1: critic. When the operator already has a critic profile bound,
+// defaults to "no change". When the operator accepts, configures
+// profiles.critic and binds components.critic = "critic".
+func wizardCriticStep(c *config.Config) {
+	boundName, hasCriticBinding := c.Components["critic"]
+	_, hasCriticProfile := c.Profiles["critic"]
+	fmt.Println("Specialised models")
+	if hasCriticBinding && hasCriticProfile {
+		fmt.Printf("  critic profile  : %s/%s\n",
+			displayProviderOrEmpty(c.Profiles[boundName].Provider),
+			displayModelOrEmpty(c.Profiles[boundName].Model))
+		fmt.Println("  Configure a separate critic model? [y/N]")
+	} else {
+		fmt.Println("  critic profile  : (using default model)")
+		fmt.Println("  Configure a separate critic model? [y/N]")
+	}
+	answer := promptString(rwFromStdin(), "", "N")
+	if strings.EqualFold(strings.TrimSpace(answer), "y") {
+		fmt.Println("  Profile name [critic]:")
+		name := strings.TrimSpace(promptString(rwFromStdin(), "", "critic"))
+		if name == "" {
+			name = "critic"
+		}
+		if c.Profiles == nil {
+			c.Profiles = map[string]config.Profile{}
+		}
+		c.Profiles[name] = config.Profile{Name: name}
+		if c.Components == nil {
+			c.Components = map[string]string{}
+		}
+		c.Components["critic"] = name
+		fmt.Printf("Created empty profile %q. Use `mpm config profile set %s provider ...` to fill.\n", name, name)
+		fmt.Println("(Component bound. Run `mpm config validate` after filling the profile.)")
+	} else {
+		fmt.Println("Critic unchanged.")
+	}
+}
+
+// wizardShowCapabilities prints the built-in capability mappings so
+// the operator understands the semantic-routing layer without having
+// to discover it through `mpm config capability list`.
+func wizardShowCapabilities() {
+	fmt.Println("Capabilities (built-in routing defaults)")
+	keys := sortedKeysForConfig(config.DefaultCapabilities)
+	for _, k := range keys {
+		fmt.Printf("  %-9s → %s\n", k, config.DefaultCapabilities[k])
+	}
+	fmt.Println("Use `mpm config capability ...` to override.")
+}
+
+// wizardShowSynthesis displays the current synthesis state and points
+// at `mpm config set synthesis_enabled` for changes. The wizard does
+// not force a synthesis decision on every run.
+func wizardShowSynthesis(c *config.Config) {
+	state := "enabled"
+	if c.SynthesisEnabled != nil && !*c.SynthesisEnabled {
+		state = "disabled"
+	}
+	fmt.Printf("Background synthesis: %s\n", state)
+	fmt.Println("Use `mpm config set synthesis_enabled true|false` to change.")
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +944,7 @@ func configLookup(c *config.Config, key string) (string, error) {
 			return intToStr(c.Synth.TimeoutSecs), nil
 		}
 	}
-	return "", fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
+	return "", fmt.Errorf("mpm config get: unknown key %q (valid keys: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
 }
 
 // configApply mutates the loaded config in place. Pure mutation
@@ -726,7 +994,7 @@ func configApply(c *config.Config, key, val string) error {
 		}
 		prof.TimeoutSecs = n
 	default:
-		return fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
+		return fmt.Errorf("mpm config set: unknown key %q (valid keys: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
 	}
 	c.Profiles["default"] = prof
 	return nil
@@ -847,15 +1115,31 @@ func rwFromStdin() *bufio.Reader {
 
 // promptChoice prints a numbered list and reads a selection.
 func promptChoice(rw *bufio.Reader, header string, choices []choice) *choice {
+	return promptChoiceDefault(rw, header, choices, "1")
+}
+
+// promptChoiceDefault is promptChoice with a configurable default
+// choice. The default choice is shown in the prompt and used when the
+// operator presses enter. State-aware wizards pass the preset id that
+// matches the existing configuration so re-running the wizard doesn't
+// silently switch the operator's provider.
+func promptChoiceDefault(rw *bufio.Reader, header string, choices []choice, defaultID string) *choice {
+	defaultIdx := 1
+	for i, c := range choices {
+		if c.id == defaultID {
+			defaultIdx = i + 1
+			break
+		}
+	}
 	fmt.Printf("\n  %s\n", header)
 	for i, c := range choices {
 		fmt.Printf("    %d. %s\n", i+1, c.label)
 	}
-	fmt.Printf("\n  Choose [%d-%d] (default: 1): ", 1, len(choices))
+	fmt.Printf("\n  Choose [%d-%d] (default: %d): ", 1, len(choices), defaultIdx)
 	raw, _ := rw.ReadString('\n')
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		raw = "1"
+		raw = strconv.Itoa(defaultIdx)
 	}
 	n, err := strconvAtoi(raw)
 	if err != nil || n < 1 || n > len(choices) {

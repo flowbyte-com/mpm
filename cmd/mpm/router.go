@@ -4,6 +4,7 @@ import (
 	"fmt"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+	"golang.org/x/sys/unix"
 	"os"
 )
 
@@ -1418,13 +1419,27 @@ func isBlankActive(active *mpminternal.ActiveState) bool {
 	return active.Persona == "" && len(active.Modes) == 0
 }
 
-// isatty returns true if f is a terminal. Used to gate stderr noise.
+// isatty returns true if f is a real interactive terminal.
+//
+// Uses unix.IoctlGetTermios on the file descriptor. The previous
+// implementation used os.ModeCharDevice, which incorrectly returns
+// true for /dev/null (a character special file on Linux but not an
+// interactive TTY). Scripts that pipe stdin from /dev/null or a
+// regular file would otherwise bypass the wizard's non-TTY guard.
+//
+// Returns false for:
+//   - regular files (e.g. `mpm config < some-file.json`)
+//   - pipes (e.g. `echo q | mpm config`)
+//   - /dev/null (a character device but not a terminal)
+//   - missing file descriptors
+//
+// Returns true only for an actual interactive terminal session.
 func isatty(f *os.File) bool {
-	fi, err := f.Stat()
-	if err != nil {
+	if f == nil {
 		return false
 	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	return err == nil
 }
 
 // handleOpsInit dispatches `mpm ops init <subcommand>`. Currently
