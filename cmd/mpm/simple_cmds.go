@@ -47,9 +47,17 @@ func handleAdd(args []string) int {
 		fmt.Println("Example: mpm add --tag personal,important 'Remember to call mom'")
 	}
 
+	// Pre-scan: Go's flag.Parse switches to positional-only mode once a
+	// positional argument is seen. This means `mpm add "hello" --weight 5`
+	// would silently absorb `--weight 5` as content. The same pattern is
+	// used in handleMemoryAdd (handlers_memory.go) — pull all known
+	// flags out before the positional content so flag.Parse sees them.
+	cleaned := reorderFlagsBeforePositionals(args[1:],
+		"--collection", "--tag", "--session", "--weight", "--ttl", "--json")
+
 	// Parse with standard flag parser, which handles arbitrary argument ordering.
 	// After parsing, fs.Args() contains the positional arguments (the content).
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(cleaned); err != nil {
 		// On error (e.g., unknown flag), fs.HasError() is true; error already printed
 		return 1
 	}
@@ -171,6 +179,63 @@ func handleAdd(args []string) int {
 }
 
 // mpm ls — List memories
+// reorderFlagsBeforePositionals rewrites argv so all named flags (and
+// their values) appear before the first positional argument. Go's
+// standard library flag.Parse switches to positional-only mode once
+// any positional argument is seen, so a flag written AFTER the
+// positional content (e.g. `mpm add "hello" --weight 5`) is silently
+// absorbed as content. This helper extracts the named flags and
+// reorders argv so flag.Parse sees them in the expected order.
+//
+// Two flags that take values are recognized: those in flagNames take
+// the immediately following argv entry as their value. Single-token
+// boolean flags (currently only --json) have no value and are
+// extracted whole. Unknown flags are passed through unchanged so
+// flag.Parse can emit its own error.
+//
+// This is intentionally narrow: callers must list every flag their
+// flag.NewFlagSet knows about. The function does not attempt to
+// be a general-purpose flag rewriter.
+func reorderFlagsBeforePositionals(argv []string, flagNames ...string) []string {
+	boolFlags := map[string]bool{}
+	valueFlags := map[string]bool{}
+	for _, f := range flagNames {
+		if f == "--json" {
+			boolFlags[f] = true
+		} else {
+			valueFlags[f] = true
+		}
+	}
+
+	var flags, positionals []string
+	i := 0
+	for i < len(argv) {
+		a := argv[i]
+		if boolFlags[a] {
+			flags = append(flags, a)
+			i++
+			continue
+		}
+		if valueFlags[a] {
+			// Take this flag and its value (if present).
+			flags = append(flags, a)
+			if i+1 < len(argv) {
+				flags = append(flags, argv[i+1])
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		positionals = append(positionals, a)
+		i++
+	}
+	out := make([]string, 0, len(argv))
+	out = append(out, flags...)
+	out = append(out, positionals...)
+	return out
+}
+
 func handleLs(args []string) int {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	collection := fs.String("collection", "", "Filter by collection")
