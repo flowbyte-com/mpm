@@ -276,24 +276,68 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 // materializeTheory creates one pending theory through the normal
 // SaveMemoryNode write path (scanner + FTS). The theory's hypothesis
 // states that the downstream artifact requires re-evaluation because
-// its cited foundation collapsed. The dead artifact is included in
+// its cited foundation collapsed (negative cascade) or because a
+// previously-uncertain foundation is now proven (positive cascade —
+// any downstream that opted in via polarity='assumes_false' may have
+// been running on a stale negation). The dead artifact is included in
 // the theory's dependencies list so the cascade chain can continue
 // if the theory itself is later invalidated.
+//
+// Direction branches on intent.Reason: the negative-direction reasons
+// (theory_disproven, memory_shredded, confidence_floor, etc.) produce
+// "foundation invalidated" wording; the positive-direction reasons
+// (foundation_proven, confidence_ceiling — see cascade_outbox.go)
+// produce "foundation proven" wording. The reason string is part of
+// the outbox row so this branch is a pure read — no schema change
+// needed beyond the reason itself.
 func (cm *CascadeMaterializer) materializeTheory(ctx context.Context, intent CascadeIntent) (string, error) {
-	// Validation criteria per the design spec.
+	// Validation criteria per the design spec. Same shape for both
+	// directions — the dependent artifact is what needs review, not
+	// the foundation. Direction-specific phrasing belongs in the
+	// hypothesis, not the criteria.
 	validationCriteria := "independent review of whether the downstream artifact remains valid without that foundation, followed by binary resolution as proven or disproven"
 
-	// Hypothesis: concise human-readable statement.
+	// Hypothesis: concise human-readable statement. Branched on
+	// direction so the human reviewer sees the right framing the
+	// moment they open the theory. The reason string is preserved
+	// verbatim in the message so the audit trail can reconstruct the
+	// trigger later.
 	reason := intent.Reason
-	if reason == "" {
-		reason = "foundation invalidated"
+	var hypothesis string
+	switch reason {
+	case ReasonFoundationProven, ReasonConfidenceCeiling:
+		// Positive-direction cascade: the foundation is now PROVEN.
+		// Downstream artifacts that opted in via polarity='assumes_false'
+		// were assuming the foundation was false; that assumption has
+		// flipped. The fair hypothesis is "your foundation is solid;
+		// re-check whether your conclusion still follows" — NOT
+		// "your foundation collapsed; rebuild from scratch". The
+		// reason label is included so the audit trail distinguishes
+		// the two positive triggers (explicit theory resolve vs
+		// confidence-ceiling crossing).
+		hypothesis = fmt.Sprintf(
+			"The artifact '%s' (%s) may need re-evaluation because its cited foundation '%s' (%s) has now been proven (%s). When this theory was originally formed, the foundation was uncertain; review whether the downstream artifact's conclusion still holds given the foundation is now established.",
+			intent.DownstreamArtifactID, intent.DownstreamArtifactType,
+			intent.DeadArtifactID, intent.DeadArtifactType,
+			reason,
+		)
+	default:
+		// Negative-direction cascade (default branch — covers
+		// theory_disproven, memory_shredded, confidence_floor, and
+		// any future reason not in the positive set). Wording is
+		// preserved verbatim from the prior version to keep the
+		// existing materializer tests' hypothesis-text assertions
+		// valid without churn.
+		if reason == "" {
+			reason = "foundation invalidated"
+		}
+		hypothesis = fmt.Sprintf(
+			"The artifact '%s' (%s) requires re-evaluation because its cited foundation '%s' (%s) has been invalidated (%s). Please review whether the downstream artifact's conclusions still hold without this foundation.",
+			intent.DownstreamArtifactID, intent.DownstreamArtifactType,
+			intent.DeadArtifactID, intent.DeadArtifactType,
+			reason,
+		)
 	}
-	hypothesis := fmt.Sprintf(
-		"The artifact '%s' (%s) requires re-evaluation because its cited foundation '%s' (%s) has been invalidated (%s). Please review whether the downstream artifact's conclusions still hold without this foundation.",
-		intent.DownstreamArtifactID, intent.DownstreamArtifactType,
-		intent.DeadArtifactID, intent.DeadArtifactType,
-		reason,
-	)
 
 	// Build dependencies list: the dead artifact is always included per
 	// the design spec's metadata contract.
