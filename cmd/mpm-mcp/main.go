@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/flowbyte-com/mpm/internal/blobstore"
@@ -39,6 +40,56 @@ import (
 	"github.com/flowbyte-com/mpm-core/logging"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
+
+// defaultCoreTools is the canonical initial MCP surface for MPM. Tools
+// outside this set are filtered out of tools/list AND tools/call by
+// the server.WithToolFilter option below; they remain registered in
+// the substrate (so `mpm call <tool>` continues to work) but are not
+// initially exposed to the model. The mpm_help discovery tool lets an
+// agent reach specialists by name via the host shell. The full set is
+// restored by setting MPM_EXPOSE_ALL_TOOLS=1.
+//
+// The set is derived from the seven MPM behavioural invariants in
+// agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md: every invariant
+// maps to one tool. Specialists (work, theory, evidence, skills,
+// references, operations, blobs) are reachable but not initial.
+//
+//  wake        → mpm_context   (read_wake_context, read_directives)
+//  persist     → mpm_memory    (save, query, show)
+//  skills      → mpm_skills    (list, read) + mpm_help (discovery)
+//  handoff     → mpm_handoff   (write, read)
+//  closure     → mpm_work      (NOT initial — discoverable)
+//  source-of-truth → mpm_memory (already listed)
+//  recovery    → mpm_help      (lists mpm call escape hatch)
+//
+// mpm_scratchpad is added because it is the documented
+// volatile-thinking substrate for active reasoning.
+var defaultCoreTools = map[string]bool{
+	"mpm_memory":     true,
+	"mpm_context":    true,
+	"mpm_handoff":    true,
+	"mpm_scratchpad": true,
+	"mpm_help":       true,
+}
+
+// coreToolFilter is the actual filter function passed to
+// server.WithToolFilter. It honors the MPM_EXPOSE_ALL_TOOLS escape
+// hatch for hosts that need the legacy full surface. The filter is
+// applied at both tools/list and tools/call time (mcp-go enforces
+// the latter); a tool that fails the filter is invisible AND
+// uncallable through the MCP surface.
+func coreToolFilter(_ context.Context, registered []mcp.Tool) []mcp.Tool {
+	if os.Getenv("MPM_EXPOSE_ALL_TOOLS") != "" {
+		return registered
+	}
+	out := make([]mcp.Tool, 0, len(defaultCoreTools))
+	for _, t := range registered {
+		if defaultCoreTools[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // instructionsPrimer is the value mpm-mcp returns in the
 // `initialize.instructions` field. The file is generated from the
@@ -195,6 +246,12 @@ func main() {
 		// contract and the audit citation
 		// docs/onboarding-mcp-native-audit-2026-09-05.md Part A).
 		server.WithInstructions(instructionsPrimer),
+		// Initial-surface filter: expose only the default core set at
+		// tools/list time. Specialists are reachable via the
+		// mpm_help discovery tool + `mpm call <tool>` escape hatch.
+		// MPM_EXPOSE_ALL_TOOLS=1 reverts to the legacy full surface.
+		// See docs/CONTEXT_EXPOSURE.md for the architecture.
+		server.WithToolFilter(coreToolFilter),
 	)
 	RegisterAllTools(s, dm, ac, router, blobStore, outputPolicy)
 

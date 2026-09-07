@@ -14,8 +14,10 @@ exact commit SHA in `summary.json["environment"]["commit"]`.
 
 | Quantity                                          | Bytes   | Tokens (cl100k_base) |
 | ------------------------------------------------- | ------: | -------------------: |
+| **Default initial MCP surface (filtered + compact)** | **4,477** | **~1,119** |
+| Full surface (MPM_EXPOSE_ALL_TOOLS=1) — legacy     |  66,359 |              ~16,600 |
 | Tool schemas + descriptions, all 21 tools, sum    |  42,580 |                  ~10K |
-| `tools/list` wire payload (single JSON body)      |  66,359 |               ~16.5K |
+| `tools/list` wire payload (single JSON body) — full |  66,359 |               ~16.5K |
 | `mpm wake --compact` (the smallest wake surface)  |     386 |                  118 |
 | `mpm wake --json`  with 53 memories + open work   |   1,467 |                  423 |
 | `mpm recall --json --limit 15` of 30 memories     |   4,933 |                1,557 |
@@ -33,6 +35,12 @@ The trade-off: pointer projection also requires a follow-up
 `mpm_resolve` to actually read the content. A bounded resolve call
 (`max_bytes=512`) costs **~299 tokens total** to read 512 bytes of
 content — a much better trade than 221,000 tokens for 1.1 MB.
+
+**Initial MCP surface reduction**: the default initial surface
+(5 tools: `mpm_memory`, `mpm_context`, `mpm_handoff`, `mpm_scratchpad`,
+`mpm_help`) is **~93% smaller** than the legacy 21-tool surface.
+Specialists are reachable via `mpm_help list` + `mpm call <tool>`.
+See `docs/CONTEXT_EXPOSURE.md` for the full architecture.
 
 ---
 
@@ -201,17 +209,26 @@ that leak is fixed at the response/projection boundary in commit
 ### F. Tool/schema overhead
 
 Schema + description sizes, measured by the Go probe at
-`internal/core/tools/tool_size_probe`. This is what ships in
-`tools/list` at session start — a **fixed cost** paid once per MCP
-session.
+`internal/core/tools/tool_size_probe`. Two surfaces are measured:
 
 ```
-21 tools registered, all schemas hand-written JSON-Schema strings.
-TOTAL descriptions bytes:    14,756  (~3,700 tokens)
-TOTAL schemas bytes:         27,824  (~6,950 tokens)
-TOTAL descriptions+schemas:  42,580  (~10,650 tokens)
-JSON-serialised tools/list:  66,359  (~16,600 tokens) ← measured wire payload
+FULL surface (MPM_EXPOSE_ALL_TOOLS=1) — legacy behaviour, 22 tools:
+  TOTAL descriptions bytes:    15,099  (~3,775 tokens)
+  TOTAL schemas bytes:         28,028  (~7,007 tokens)
+  TOTAL descriptions+schemas:  43,127  (~10,782 tokens)
+  JSON-serialised tools/list:  66,359  (~16,600 tokens) ← measured wire payload
+
+DEFAULT initial surface (filtered + compact) — production behaviour, 5 tools:
+  desc+schema bytes (raw):     3,456
+  JSON wire payload:           4,477 bytes
+  cl100k_base tokens (est):     ~1,119  ← measured, 93% reduction from full
 ```
+
+The full surface remains canonical in `tools.Registry` for the CLI
+`mpm call` substrate, but the MCP server exposes only the 5-tool
+default to the model. Hosts that need the legacy surface can set
+`MPM_EXPOSE_ALL_TOOLS=1` to revert. See `docs/CONTEXT_EXPOSURE.md`
+for the architecture and rationale.
 
 Largest individual tools:
 - `mpm_system` (lifecycle / governance) — 9,894 bytes total

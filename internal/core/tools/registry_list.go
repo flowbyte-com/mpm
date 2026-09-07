@@ -875,6 +875,17 @@ func ByName(name string) (Tool, bool) {
 	return Tool{}, false
 }
 
+// MustByName is the panicking form of ByName. Use only at server
+// boot when wiring closures, where a missing entry is a programming
+// error and the alternative (silent empty handler) is worse.
+func MustByName(name string) Tool {
+	t, ok := ByName(name)
+	if !ok {
+		panic("tools.MustByName: registry has no entry for " + name)
+	}
+	return t
+}
+
 // Names returns every registered tool name in registry order.
 // Used by `mpm call --help` and the MCP ListTools handler.
 func Names() []string {

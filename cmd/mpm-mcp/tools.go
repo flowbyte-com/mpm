@@ -320,6 +320,13 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 		if tool.Name == "route" {
 			continue // registered below with the live router closure
 		}
+		if defaultCoreTools[tool.Name] {
+			// core tools are registered as compact versions via
+			// closures below — the registry entry stays for CLI /
+			// substrate use but is NOT registered with the MCP
+			// server. Skipping here prevents name collisions.
+			continue
+		}
 		s.AddTool(
 			mcp.NewToolWithRawSchema(tool.Name, tool.Description, tool.Schema),
 			mcpAdapter(dm, ac, tool.Handler),
@@ -344,6 +351,152 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 			),
 		),
 		makeRouteHandler(router),
+	)
+
+	// Core surface — registered as compact closures with terse
+	// descriptions and minimal schemas. The full Registry entries
+	// remain canonical for CLI / substrate use; the MCP server
+	// exposes the compact versions. WithToolFilter (set in main.go)
+	// keeps only these from the registered set, so specialists from
+	// the Registry above are filtered out of tools/list and
+	// tools/call entirely. See docs/CONTEXT_EXPOSURE.md.
+
+	// mpm_help: capability discovery. Registered as a closure
+	// (not in tools.Registry) to avoid the init-order cycle that
+	// arises when a registry entry's handler references the
+	// registry itself.
+	s.AddTool(
+		mcp.NewTool("mpm_help",
+			mcp.WithDescription(
+				"Capability discovery. Returns every registered MPM tool "+
+					"name with a terse one-liner. Use when: an agent wants to "+
+					"know what specialist tools are reachable but not initially "+
+					"exposed. Specialists are reachable via the host shell: "+
+					"mpm call <tool> --payload. Use action=list for the full "+
+					"catalogue; action=show with params.tool=<name> for one tool."),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description("list or show."),
+			),
+			mcp.WithString("tool",
+				mcp.Description("Required for action=show. The tool name to inspect."),
+			),
+		),
+		makeHelpHandler(dm, ac),
+	)
+
+	// mpm_memory: compact surface. Full schema lives in
+	// tools.Registry (used by CLI and substrate); the MCP server
+	// exposes a minimal contract — enough for correct invocation.
+	s.AddTool(
+		mcp.NewTool("mpm_memory",
+			mcp.WithDescription(
+				"Persistent memory. Save facts/learnings; query by text/id; "+
+					"show one row; shred (hard delete); reinforce/weaken; "+
+					"snooze/promote; patch metadata; review. Required params: action. "+
+					"For broad queries projection defaults to summary (256 chars + pointer); "+
+					"use projection=full or mpm_resolve for unabridged content. "+
+					"shred is permanent — no restore path. Call mpm_help show "+
+					"mpm_memory for the full schema."),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description("save | query | show | shred | reinforce | weaken | snooze | patch | promote."),
+			),
+			mcp.WithObject("params",
+				mcp.Description(
+					"Per-action params. Common keys: fact (string), "+
+						"query (string), id (string), memory_id (string), "+
+						"tags (string[]), weight (number), limit (number), "+
+						"projection (summary|full), scope (all|local|shared), "+
+						"ttl (duration like 7d/24h). "+
+						"See tools/full-schema/mpm_memory.json via mpm_help "+
+						"for the complete contract."),
+			),
+		),
+		mcpAdapter(dm, ac, tools.MustByName("mpm_memory").Handler),
+	)
+	// mpm_context: compact surface. The wake-context action
+	// (read_wake_context) is the most common; the other actions
+	// (read_directives, proactive_recall_hint, query_global_rules,
+	// record_global_rule, promote_to_global, route) remain
+	// reachable via the full schema in tools.Registry.
+	s.AddTool(
+		mcp.NewTool("mpm_context",
+			mcp.WithDescription(
+				"Session context. read_wake_context (browses recent "+
+					"memories, handoffs, overdue wakes); read_directives; "+
+					"proactive_recall_hint (suggests context-relevant "+
+					"memories); route (auto-selects mode/persona); "+
+					"query_global_rules / record_global_rule. Required "+
+					"params: action. For read_wake_context use "+
+					"projection=compact for ~130 token bounded output."),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description(
+					"read_wake_context | read_directives | proactive_recall_hint | "+
+						"query_global_rules | record_global_rule | route."),
+			),
+			mcp.WithObject("params",
+				mcp.Description(
+					"Per-action params. read_wake_context accepts "+
+						"projection: compact | full. route accepts prompt "+
+						"(string). See tools/full-schema/mpm_context.json "+
+						"via mpm_help."),
+			),
+		),
+		mcpAdapter(dm, ac, tools.MustByName("mpm_context").Handler),
+	)
+
+	// mpm_handoff: compact surface. Most common actions are
+	// write (session-end summary) and read (next-session pickup).
+	s.AddTool(
+		mcp.NewTool("mpm_handoff",
+			mcp.WithDescription(
+				"Session handoff. write: persist summary at session "+
+					"end (REQUIRED: summary; optional commitments, "+
+					"open_questions, state). read: fetch handoff for "+
+					"next session. list/shred: manage the handoff "+
+					"ledger. summary must be non-empty; chat acks are "+
+					"NOT session-close events. Required params: action."),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description("write | read | list | shred."),
+			),
+			mcp.WithObject("params",
+				mcp.Description(
+					"Per-action params. write accepts summary "+
+						"(string, required), state (clean|crashed|"+
+						"interrupted|force_end), commitments "+
+						"(string[]), open_questions (string[]). "+
+						"read/list accept session_id (string)."),
+			),
+		),
+		mcpAdapter(dm, ac, tools.MustByName("mpm_handoff").Handler),
+	)
+
+	// mpm_scratchpad: compact surface. Used for volatile working
+	// state within a session; promote to mpm_memory when complete.
+	s.AddTool(
+		mcp.NewTool("mpm_scratchpad",
+			mcp.WithDescription(
+				"Volatile within-session working state. flush: write "+
+					"a partial thought; read: list active scratchpads; "+
+					"discard: drop one; promote: turn a scratchpad into a "+
+					"permanent memory (mpm_memory save). Not cross-session "+
+					"— promoted items become memories; unpromoted items "+
+					"are lost at session end. Required params: action."),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description("flush | read | discard | promote."),
+			),
+			mcp.WithObject("params",
+				mcp.Description(
+					"flush accepts thesis (string, required), "+
+						"supporting (string). read/discard/promote "+
+						"accept id (string)."),
+			),
+		),
+		mcpAdapter(dm, ac, tools.MustByName("mpm_scratchpad").Handler),
 	)
 }
 
@@ -520,6 +673,59 @@ func makeRouteHandler(router *core.Router) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("prompt is required"), nil
 		}
 		return jsonResult(router.Evaluate(prompt)), nil
+	}
+}
+
+// makeHelpHandler wires the mpm_help discovery tool. It iterates the
+// live tools.Registry (the canonical source of truth) and emits a
+// terse JSON catalog. Specialists that the default initial surface
+// hides from tools/list are still listed here, with reach_via_cli
+// pointing at the mpm call escape hatch — so agents that need a
+// specialist tool have a deterministic discovery path that does not
+// depend on host-side listChanged support.
+func makeHelpHandler(dm *core.DatabaseManager, ac core.ActiveContext) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		action, _ := args["action"].(string)
+		switch action {
+		case "list":
+			rows := make([]map[string]interface{}, 0, len(tools.Registry))
+			for _, t := range tools.Registry {
+				short := t.Description
+				if i := strings.Index(short, "\n"); i >= 0 {
+					short = short[:i]
+				}
+				rows = append(rows, map[string]interface{}{
+					"name":          t.Name,
+					"one_liner":     short,
+					"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
+				})
+			}
+			return jsonResult(map[string]interface{}{
+				"success":           true,
+				"tool_count":        len(rows),
+				"tools":             rows,
+				"discovery_hint":    "Specialist tools not initially exposed via tools/list are still registered and reachable via the host shell using `mpm call <tool>` (see reach_via_cli per row).",
+				"compatibility_mode": "Set MPM_EXPOSE_ALL_TOOLS=1 to revert to the full surface for hosts that need it.",
+			}), nil
+		case "show":
+			toolName, _ := args["tool"].(string)
+			if toolName == "" {
+				return mcp.NewToolResultError("mpm_help show: 'tool' param required"), nil
+			}
+			t, ok := tools.ByName(toolName)
+			if !ok {
+				return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown tool %q", toolName)), nil
+			}
+			return jsonResult(map[string]interface{}{
+				"success":       true,
+				"name":          t.Name,
+				"description":   t.Description,
+				"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
+			}), nil
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown action %q (valid: list, show)", action)), nil
+		}
 	}
 }
 
