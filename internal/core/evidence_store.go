@@ -352,6 +352,27 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 				return fmt.Errorf("confidence cascade enqueue: %w", err)
 			}
 		}
+
+		// Positive-direction cascade: confidence crosses UPWARD past
+		// the proven threshold (HardConfidenceProvenThreshold).
+		// Mirror image of the invalidation crossing above: old below
+		// threshold AND new >= threshold. Downstream artifacts that
+		// opted in via polarity='assumes_false' (i.e. they were
+		// running on the assumption the foundation was uncertain)
+		// are surfaced to the materializer so a reviewer can decide
+		// whether their conclusions still hold given the foundation
+		// is now solid.
+		ceilingCrossed := (!hasOldConf || oldConf < HardConfidenceProvenThreshold) &&
+			conf >= HardConfidenceProvenThreshold
+		if ceilingCrossed {
+			if _, err := node.DM().EnqueueCascadeFoundationProven(
+				tx,
+				artifactID, artifactType,
+				ReasonConfidenceCeiling, "", 0,
+			); err != nil {
+				return fmt.Errorf("confidence positive cascade enqueue: %w", err)
+			}
+		}
 	}
 
 	return nil

@@ -317,10 +317,19 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 		rows, _ := res.RowsAffected()
 		transitioned = rows > 0
 
-		// Cascade hook: only enqueue on a real transition to
-		// disproven. A proven transition (or a repeated disprove on
-		// an already-disproven theory) updates zero rows above and
-		// skipped the cascade.
+		// Cascade hook: only enqueue on a real transition.
+		//
+		// Negative direction (disproven) enqueues a standard
+		// invalidation cascade — any downstream citing this theory
+		// gets a "your foundation collapsed" intent.
+		//
+		// Positive direction (proven) enqueues a foundation_proven
+		// cascade — downstream artifacts that opted in via
+		// polarity='assumes_false' get a "your previously-uncertain
+		// foundation is now solid; re-check your conclusion" intent.
+		// NULL-polarity downstreams are silently skipped by
+		// discoverPositiveCascadeTargets, so pre-existing citations
+		// (none of which carry polarity) never fire this path.
 		if transitioned && newStatus == "disproven" {
 			if _, err := dm.EnqueueCascadeInvalidation(
 				node.Tx(), // see DBNode extension below
@@ -328,6 +337,15 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 				"theory_disproven", "", 0,
 			); err != nil {
 				return fmt.Errorf("cascade enqueue: %w", err)
+			}
+		}
+		if transitioned && newStatus == "proven" {
+			if _, err := dm.EnqueueCascadeFoundationProven(
+				node.Tx(),
+				theoryID, "theory",
+				ReasonFoundationProven, "", 0,
+			); err != nil {
+				return fmt.Errorf("positive cascade enqueue: %w", err)
 			}
 		}
 		return nil
