@@ -206,6 +206,104 @@ Only downstream artifacts of type **`decision`** or **`theory`** are eligible. L
 
 A cascade fires only when confidence **crosses** the threshold (not just decreases toward it). Once below the threshold, further recomputes do not re-trigger cascades.
 
+## Why positive resolutions don't cascade (known, deliberate gap)
+
+Cascades fire on **three events, all negative-direction**: theory disproven,
+memory/artifact shred, confidence crossing the 0.3 hard floor downward.
+There is no trigger for theory **proven**, or confidence crossing a high
+threshold upward. This is a known gap, deliberately not implemented —
+recording it here so the next person who notices it doesn't assume it's a
+bug.
+
+### The concrete failure mode that this gap could miss
+
+A downstream decision or theory reasoned or written *contingent on* a
+foundation being **false, uncertain, or unresolved**. If that foundation
+later gets proven true (positive resolution), the downstream artifact's
+reasoning may now be stale in the opposite direction — not because
+something broke, but because a live question got answered and nobody
+told the dependent artifact.
+
+This is the positive-direction mirror of the invalidation cascade: the
+existing trigger says "foundation got disproven, re-evaluate downstream";
+the missing trigger would say "foundation got proven, re-evaluate any
+downstream that was reasoning against it."
+
+### Why no trigger today
+
+1. **No polarity in the dependency graph.** `memories.dependencies` is
+   a JSON array of artifact IDs with no information about the type of
+   dependency (does the dependent assume the foundation is true, false,
+   or unknown?). `epistemic_provenance` rows have `source_id` →
+   `downstream_id` direction but no polarity either. Adding a
+   positive-direction cascade that fires on every proven theory would
+   re-evaluate **every** dependent regardless of whether the dependent
+   was actually reasoning against the foundation — almost certainly
+   producing alert-fatigue-style noise, which is its own failure mode
+   (cascade fatigue undermining the mechanism the same way alert
+   fatigue undermines monitoring).
+
+2. **No observed instance of the failure mode.** Audit of the
+   recently-proven set (2026-08-01 onward, 26 theories) showed **0 of
+   26** had any downstream dependent cited via either `dependencies`
+   JSON or `epistemic_provenance` rows. The substrate does not currently
+   produce the substrate state where this gap would matter — proving a
+   theory is rarer than disproving one, and the theories that get
+   proven are typically operational facts about the substrate itself
+   (bug fixes, fixes to scheduler behavior, audit results) that few
+   other artifacts depend on. Until the dependency graph starts to
+   include downstream artifacts whose reasoning explicitly *contradicts*
+   a candidate foundation, the failure mode is theoretical.
+
+3. **Consistent with `docs/epistemic-confirmation.md` design.** The
+   confirmation/contradiction evidence hooks (`log_to_changelog`
+   `confirms_*_id` / `contradicts_*_id`) shipped explicitly opt-in for
+   the same reason: "operators reviewing substrate state should be able
+   to trust that an evidence row… reflects an explicit assertion by
+   whoever wrote that changelog entry." A positive-direction cascade
+   would be the negative-space mirror of that asymmetry — *more*
+   automation rather than less, in the same area where the upstream
+   side is deliberately not automatic. The `epistemic-confirmation.md`
+   doc chose explicit on purpose, and that choice should propagate to
+   the cascade layer, not be silently undone.
+
+### What would need to exist before adding this trigger
+
+A future implementation would need, at minimum:
+
+- **Polarity on dependencies.** Either change `dependencies` from a
+  flat JSON array of IDs to a JSON array of `{id, assumed_state}`
+  records (where `assumed_state` is one of `true` / `false` / `unknown`),
+  or add an `epistemic_provenance.polarity` column. Backwards
+  compatibility for unannotated rows would need an opt-in upgrade path.
+
+- **Operator signal.** Even with polarity metadata, the cascade
+  shouldn't auto-fire on every prove — operators need to opt in
+  per-artifact (e.g., a flag on the dependent declaring "my reasoning
+  is contingent on this foundation's status"). This matches the
+  upstream confirmation/contradiction pattern: explicit, not automatic.
+
+- **Empirical validation.** The trigger should be gated on a real
+  observed case (a stale downstream artifact whose reasoning was
+  contingent on the proven foundation), not on the theoretical
+  failure mode alone.
+
+### Re-investigation trigger
+
+Re-open this section when any of the following is true:
+
+- A real-world incident of stale downstream reasoning is observed and
+  traced to a proven foundation (the gap caused actual harm).
+- The dependency graph's typical density grows past the current
+  "rare, mostly foundational facts" profile (proving a theory that
+  has dependents).
+- Operator workflow surveys report "I have to manually check whether my
+  downstream artifacts depend on this foundation" as a recurring cost.
+
+Until any of those, leave cascades negative-direction-only. If a new
+operator hits the gap, the right move is to record the instance and
+re-investigate — not to build a feature for symmetry.
+
 ## Federation (shared DB)
 
 When `MPM_SHARED_DB` is attached, cascade intents are written to both local and shared `epistemic_cascade_outbox` tables atomically. The materializer processes the local outbox; the shared outbox is available to cross-agent shared-materializer instances. The `epistemic_provenance` federated read path surfaces citations from both DBs.
