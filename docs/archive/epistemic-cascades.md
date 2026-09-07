@@ -1,25 +1,48 @@
 # Epistemic Cascades — Operator Guide
 
 **Feature added:** 2026-08-04  
+**Positive-direction cascade added:** 2026-09-07  
 **MPM version:** post-2026-07-16 (security audit baseline)
 
 ## Overview
 
 When a foundational artifact (memory, decision, or theory) is explicitly invalidated, downstream decisions and theories that relied on it remain structurally intact. Epistemic cascades automatically generate re-evaluation theories for every downstream reasoning artifact so the agent can consciously re-assess rather than operating on a now-invalid foundation.
 
-Cascades fire only on explicit invalidation events:
+The negative-direction cascade fires only on explicit invalidation events:
 
-- **Theory disproval** — `ResolveTheory` with `status="disproven"`  
-- **Memory shred** — `ShredMemory` or `ShredMemoryWithCascade`  
+- **Theory disproval** — `ResolveTheory` with `status="disproven"`
+- **Memory shred** — `ShredMemory` or `ShredMemoryWithCascade`
 - **Hard confidence crossing** — `RecomputeConfidence` drops confidence below `HardConfidenceInvalidationThreshold` (default: `0.3`)
 
-Ordinary confidence decreases that stay above the threshold do **not** trigger cascades.
+The positive-direction (constructive) cascade is the symmetric feature: it fires when a previously-uncertain foundation is observed as **proven**, surfacing downstream artifacts that opted in via `polarity='assumes_false'` for re-evaluation:
+
+- **Theory proven** — `ResolveTheory` with `status="proven"` enqueues one `foundation_proven` intent per dependent with `polarity='assumes_false'` (NULL-polarity dependents are silently filtered out).
+- **Confidence ceiling crossing** — `RecomputeConfidence` climbs above `HardConfidenceProvenThreshold` (default: `0.8`) enqueues one `confidence_ceiling` intent per opted-in dependent.
+
+The two directions share the same outbox table, the same materializer, and the same atomicity guarantees. They differ only in the `reason` field of the outbox row (`foundation_proven` / `confidence_ceiling` for positive; `theory_disproven` / `memory_shredded` / `confidence_floor` for negative) and the hypothesis text the materializer generates.
+
+### Polarity — explicit-only opt-in for positive cascades
+
+The `epistemic_provenance` table has a `polarity` column with a CHECK constraint restricting values to NULL, `'assumes_true'`, or `'assumes_false'`:
+
+- **NULL polarity** (the safe default; every pre-migration row and every new call without an explicit polarity) **never fires** a positive cascade. This is the load-bearing back-compat invariant: pre-existing citations are inert.
+- **`'assumes_false'`** — opt-in: "this downstream artifact assumes the source is false". When the source is proven true, the dependent surfaces for re-evaluation.
+- **`'assumes_true'`** — symmetric reserve, currently unused by trigger surfaces but part of the storage contract for forward compatibility.
+
+The polarity is **never inferred** from citation content (no keyword matching, no semantic similarity). The design is explicit-only — same stance as confirmation/contradiction (see `docs/epistemic-confirmation.md`). A downstream that explicitly negates its foundation in plain English must still pass `polarity='assumes_false'` to opt in.
+
+Ordinary confidence decreases that stay above the negative threshold do **not** trigger cascades. Confidence increases that stay below the proven threshold do **not** trigger positive cascades.
 
 ## What cascades produce
 
-Each invalidation event creates one **cascade intent** per downstream decision/theory. The materializer (running as `mpm cascade materialize`) converts each intent into a **pending re-evaluation theory** with metadata identifying the dead foundation, the affected downstream, and the trigger reason.
+Each cascade event (negative or positive direction) creates one **cascade intent** per downstream decision/theory. The materializer (running as `mpm cascade materialize`) converts each intent into a **pending re-evaluation theory** with metadata identifying the dead foundation, the affected downstream, and the trigger reason.
 
-The generated theory's hypothesis states that the downstream artifact requires re-evaluation. Its validation criteria require independent review followed by binary resolution as proven or disproven.
+The generated theory's hypothesis is direction-aware:
+
+- **Negative cascade** (default): "The artifact X requires re-evaluation because its cited foundation Y has been invalidated. Please review whether X's conclusions still hold without this foundation."
+- **Positive cascade** (`foundation_proven` / `confidence_ceiling` reason): "The artifact X may need re-evaluation because its cited foundation Y has now been proven. When this theory was originally formed, the foundation was uncertain; review whether X's conclusion still holds given the foundation is now established."
+
+The validation criteria are the same for both directions — the dependent artifact is what needs review, not the foundation. Direction-specific phrasing belongs in the hypothesis, not the criteria.
 
 ## Outbox table schema
 
@@ -204,7 +227,11 @@ Only downstream artifacts of type **`decision`** or **`theory`** are eligible. L
 
 `HardConfidenceInvalidationThreshold = 0.3`
 
-A cascade fires only when confidence **crosses** the threshold (not just decreases toward it). Once below the threshold, further recomputes do not re-trigger cascades.
+A negative cascade fires only when confidence **crosses** the threshold (not just decreases toward it). Once below the threshold, further recomputes do not re-trigger cascades.
+
+`HardConfidenceProvenThreshold = 0.8` (positive direction)
+
+A positive cascade fires only when confidence **crosses upward** past the proven threshold. The detector is the mirror image of the negative crossing: old below threshold AND new >= threshold. NULL-polarity downstreams are filtered out by `discoverPositiveCascadeTargets`, so the cascade only fires for opted-in citations.
 
 ## Federation (shared DB)
 
@@ -220,6 +247,9 @@ When `MPM_SHARED_DB` is attached, cascade intents are written to both local and 
 | `CascadeMaterializerOptions.WakeDelay` | `1s` | Delay before scheduling cascade wake after materialization |
 | `CascadeMaterializerOptions.BatchSize` | `10` | Intents claimed per `MaterializeBatch` call |
 | `HardConfidenceInvalidationThreshold` | `0.3` | Confidence floor for cascade trigger |
+| `HardConfidenceProvenThreshold` | `0.8` | Confidence ceiling for positive-cascade trigger (mirror of the floor; same crossing-detector shape) |
+| `PolarityAssumesTrue` | `"assumes_true"` | Symmetric reserve polarity value; not currently fired by any trigger surface |
+| `PolarityAssumesFalse` | `"assumes_false"` | Opt-in polarity for foundation_proven / confidence_ceiling cascades |
 
 All are constants in `internal/core/`; the materializer options are also settable via `NewCascadeMaterializer(dm, opts)`.
 
