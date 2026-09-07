@@ -79,7 +79,38 @@ systemctl --user status mpm-scheduler                    # expect: active
 journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler running"
 ```
 
-### 1c. Bootstrap cognitive state
+### 1c. Configure the LLM provider
+
+After installation, run:
+
+```bash
+~/.mpm/bin/mpm config
+```
+
+The wizard prompts for the default LLM provider/model and saves to
+`profiles["default"]` in `mpm_config.json`. The wizard is state-aware:
+it reads existing configuration first, preserves non-empty fields, and
+never overwrites components, capabilities, embedding configuration,
+or the synthesis flag.
+
+For non-interactive configuration (CI, scripts, agent-managed hosts):
+
+```bash
+mpm config profile add default --provider openai --model gpt-4o --base-url https://api.openai.com/v1
+mpm config profile set default api_key "$OPENAI_API_KEY"
+mpm config component set memory default
+```
+
+Embedding and specialised models can be configured later — see
+[CONFIGURATION.md](CONFIGURATION.md) for the full reference.
+
+API keys are stored in `mpm_config.json` (file mode 0600). `mpm config show`
+redacts them; `mpm config get api_key` returns the full key for the
+operator's own use. Environment variables (`MINIMAX_API_KEY`,
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`) work as a non-persisted
+alternative.
+
+### 1d. Bootstrap cognitive state
 
 ```bash
 ~/.mpm/bin/mpm ops init directives          # seed prime directives (idempotent)
@@ -91,7 +122,7 @@ journalctl --user -u mpm-scheduler -n 20 --no-pager     # expect: "scheduler run
 install. It seeds prime directives (wake protocol, canonical DB path, etc.)
 into the database. Re-running is safe — local edits are preserved.
 
-### 1d. Script modes reference
+### 1e. Script modes reference
 
 | Mode | Purpose |
 |------|---------|
