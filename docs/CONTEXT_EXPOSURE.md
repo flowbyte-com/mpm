@@ -178,16 +178,18 @@ the env get the compact surface.
 
 ## 4. Before / after
 
-| Measure                      |  Before | After |
-| ---------------------------- | ------: | ----: |
-| Tools exposed initially      |      21 |     3 |
-| `tools/list` bytes (raw)     |  42,580 | 1,650 |
-| `tools/list` bytes (wire)    |  66,359 | 2,268 |
-| `tools/list` tokens (~cl100k)| ~16,600 |   ~567 |
-| Initial MPM footprint (3 core + wake) | ~16,718 |  ~685 |
-| Internal Registry (unchanged)|      21 |    22 |
-| Specialists reachable via CLI|      21 |    21 |
-| MPM_EXPOSE_ALL_TOOLS=1 fallback |   n/a | works |
+Three-tier progression (legacy → 5-tool intermediate → 3-tool launch):
+
+| Measure                      | Legacy (pre-42aeb19) | Intermediate (42aeb19, 5 tools) | Launch (60c59b4, 3 tools) |
+| ---------------------------- | -------------------: | ------------------------------: | ------------------------: |
+| Tools exposed initially      |                   21 |                               5 |                         3 |
+| `tools/list` bytes (raw)     |               42,580 |                           3,456 |                     1,650 |
+| `tools/list` bytes (wire)    |               66,359 |                           4,477 |                     2,268 |
+| `tools/list` tokens (~cl100k)|               ~16,600 |                          ~1,119 |                     ~567 |
+| Initial MPM footprint (core + wake) |         ~16,718 |                          ~1,237 |                     ~685 |
+| Internal Registry (unchanged)|                   21 |                              22 |                        22 |
+| Specialists reachable via CLI|                   21 |                              21 |                        21 |
+| MPM_EXPOSE_ALL_TOOLS=1 fallback |                n/a |                            works |                      works |
 
 ---
 
