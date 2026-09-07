@@ -344,13 +344,16 @@ func TestProcessDueTasks_PausesOnPoisonCron(t *testing.T) {
 
 func TestProcessDueTasks_SkipsPaused(t *testing.T) {
 	dm := newScheduledTaskDM(t)
-	past := time.Now().UTC().Add(-1 * time.Minute)
+	// Use .Unix() for INTEGER columns — passing time.Time directly
+	// would round-trip through RFC3339 text and SQLite would coerce it
+	// to 0/NaN on storage, defeating the test's intent.
+	pastUnix := time.Now().UTC().Add(-1 * time.Minute).Unix()
 	_, err := dm.db.Exec(`
 		INSERT INTO scheduled_tasks
 		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "paused-task", "Paused", "0 3 * * *", "mpm-seed-pp", ScheduledTaskPaused,
-		past, past, past)
+		pastUnix, pastUnix, pastUnix)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -360,6 +363,110 @@ func TestProcessDueTasks_SkipsPaused(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("paused task should not be processed, got %d", n)
+	}
+}
+
+// TestProcessDueTasks_RespectsFutureNextRun is the regression test for
+// the SQL type-coercion bug discovered on 2026-09-07.
+//
+// Before the fix, ProcessScheduledTasks passed a time.Time value as the
+// `next_run_at <= ?` query parameter. go-sqlite3 serialized it as
+// RFC3339 TEXT; SQLite's INTEGER-affinity column compared against the
+// unparseable TEXT evaluated TRUE regardless of the integer value, so
+// the poll matched every active task on every tick. In production this
+// caused cron tasks (epistemic-compaction, daily at 03:00 UTC) to fire
+// every 60 seconds, accumulating 9407 cron wakes over six days.
+//
+// The regression test seeds a future-scheduled task (next_run_at one
+// hour ahead) and a past-scheduled task (next_run_at one minute
+// behind) into the same DB, calls ProcessDueTasks, and asserts the
+// future task is NOT processed while the past task IS. The future-task
+// half is what the bug breaks: with the bug, both are matched; with the
+// fix, only the past one.
+func TestProcessDueTasks_RespectsFutureNextRun(t *testing.T) {
+	dm := newScheduledTaskDM(t)
+	now := time.Now().UTC()
+	futureUnix := now.Add(1 * time.Hour).Unix()
+	pastUnix := now.Add(-1 * time.Minute).Unix()
+
+	// Seed two tasks with explicit Unix-epoch next_run_at values so the
+	// poll comparison is against real INTEGER column data, not freshly-
+	// built schema with zero rows — that's the precondition the bug
+	// specifically required to manifest.
+	for _, row := range []struct {
+		id        string
+		nextRunAt int64
+		cronExpr  string
+	}{
+		{"future-task", futureUnix, "0 3 * * *"},
+		{"past-task", pastUnix, "0 3 * * *"},
+	} {
+		_, err := dm.db.Exec(`
+			INSERT INTO scheduled_tasks
+			(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.id, row.id, row.cronExpr, "mpm-seed-reg", ScheduledTaskActive,
+			row.nextRunAt, now.Unix(), now.Unix())
+		if err != nil {
+			t.Fatalf("seed %s: %v", row.id, err)
+		}
+	}
+
+	beforeWakes := countWakes(t, dm)
+
+	n, err := dm.ProcessDueTasks()
+	if err != nil {
+		t.Fatalf("ProcessDueTasks: %v", err)
+	}
+
+	// Only the past-due task should match — the future task is exactly
+	// the case the bug broke. With the bug present, both matched and n
+	// would be 2 (the regression failure mode).
+	if n != 1 {
+		t.Errorf("expected exactly 1 task processed (past only), got %d — future-scheduled task was incorrectly matched", n)
+	}
+
+	// Exactly one new wake should have been injected, and it must
+	// reference the past task. The future task's row should have no
+	// wake and its next_run_at should be unchanged.
+	afterWakes := countWakes(t, dm)
+	if afterWakes != beforeWakes+1 {
+		t.Errorf("expected wake count delta +1, got before=%d after=%d", beforeWakes, afterWakes)
+	}
+
+	var reason string
+	if err := dm.db.QueryRow(`
+		SELECT reason FROM scheduled_wakes
+		WHERE created_by = ? ORDER BY rowid DESC LIMIT 1
+	`, CronCreatedBy).Scan(&reason); err != nil {
+		t.Fatalf("QueryRow for newest wake: %v", err)
+	}
+	if !strings.Contains(reason, "past-task") {
+		t.Errorf("newest wake should reference past-task, got %q", reason)
+	}
+	if strings.Contains(reason, "future-task") {
+		t.Errorf("future-task should not have been processed; wake reason references it: %q", reason)
+	}
+
+	// future-task.next_run_at must be untouched.
+	var futureNextRun int64
+	if err := dm.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"future-task").Scan(&futureNextRun); err != nil {
+		t.Fatalf("QueryRow for future-task: %v", err)
+	}
+	if futureNextRun != futureUnix {
+		t.Errorf("future-task.next_run_at should be untouched: got %d, want %d", futureNextRun, futureUnix)
+	}
+
+	// past-task.next_run_at should have rolled forward to a future time
+	// (the next 03:00 UTC occurrence from `now`).
+	var pastNextRun int64
+	if err := dm.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"past-task").Scan(&pastNextRun); err != nil {
+		t.Fatalf("QueryRow for past-task: %v", err)
+	}
+	if pastNextRun <= now.Unix() {
+		t.Errorf("past-task.next_run_at should have rolled to a future time, got %d (now=%d)", pastNextRun, now.Unix())
 	}
 }
 

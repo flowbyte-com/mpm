@@ -188,11 +188,22 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 
 	now := time.Now().UTC()
 
+	// Compare next_run_at (INTEGER) against now as int64, not as a
+	// time.Time. go-sqlite3 serializes time.Time as RFC3339 TEXT by
+	// default; SQLite then compares the INTEGER column to unparseable
+	// TEXT and (per SQLite type-affinity rules) coerces the TEXT to
+	// numeric — which fails silently and the comparison evaluates TRUE
+	// for every positive integer. The bug manifested on 2026-09-07 as
+	// every active cron task being matched on every tick (9407 wakes
+	// over six days from a `0 3 * * *` task). Pass Unix epoch seconds
+	// to match how UpsertScheduledTask and the rollover UPDATE write
+	// this column.
+	nowUnix := now.Unix()
 	rows, err := tx.Query(`
 		SELECT id, cron_expr, directive_id
 		FROM scheduled_tasks
 		WHERE status = ? AND next_run_at <= ?
-	`, ScheduledTaskActive, now)
+	`, ScheduledTaskActive, nowUnix)
 	if err != nil {
 		return 0, fmt.Errorf("fetch due tasks: %w", err)
 	}
