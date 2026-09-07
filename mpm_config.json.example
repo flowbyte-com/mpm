@@ -132,28 +132,12 @@
   // │  Set to false to disable background synthesis entirely.
   // │  Default: true (synthesis enabled)
   // └────────────────────────────────────────────────────────────────────
-  "synthesis_enabled": true,
+  "synthesis_enabled": true
 
-  // ┌────────────────────────────────────────────────────────────────────
-  // │  LEGACY SYNTH BLOCK
-  // │
-  // │  Still supported for backward compatibility, but profiles +
-  // │  components above are the preferred surface for new installs.
-  // └────────────────────────────────────────────────────────────────────
-  "synth": {
-    "model": "MiniMax-M2.7",
-    "api_key": "your-api-key-here",
-    "base_url": "https://api.minimax.io/anthropic/v1",
-    "max_tokens": 1024,
-    "timeout_seconds": 300,
-    "vendors": [
-      {
-        "name": "openai",
-        "api_key": "your-openai-key-here",
-        "model": "gpt-4o",
-        "base_url": "https://api.openai.com/v1",
-        "timeout_sec": 60
-      }
-    ]
-  }
+  // The legacy top-level "synth" block (model/api_key/base_url at the
+  // root of mpm_config.json) is supported as a one-way compatibility
+  // read for pre-profiles installs. New code does not write to it;
+  // ProfileFor() falls through to it as the last-resort step in its
+  // resolution chain. To migrate, copy those fields into
+  // Profiles["default"] and remove the synth block.
 }

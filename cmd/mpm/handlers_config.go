@@ -121,17 +121,18 @@ func handleConfig(args []string) int {
 	}
 }
 
-// loadOrInitConfig returns the loaded config, creating an empty
-// SynthConfig if missing so the wizard / set / get paths always
-// operate on a non-nil struct. nil-check happens in the helpers.
+// loadOrInitConfig returns the loaded config. The wizard / set / get paths
+// always operate on the loaded struct; helpers nil-check before writing.
+//
+// Note: this no longer auto-initialises the legacy top-level `synth` block.
+// The wizard writes to Profiles["default"] (canonical). The legacy
+// `synth` block is preserved on disk if present (one-way compatibility)
+// but new code does not create it.
 func loadOrInitConfig() *config.Config {
 	c, err := config.LoadConfig()
 	if err != nil {
 		usererror.Error("loading config: %v", err)
 		os.Exit(1)
-	}
-	if c.Synth == nil {
-		c.Synth = &config.SynthConfig{}
 	}
 	return c
 }
@@ -278,10 +279,12 @@ func handleConfigGet(c *config.Config, key string) int {
 	return 0
 }
 
+// handleConfigSet writes a single canonical key to Profiles["default"].
+// The legacy top-level `synth` block is no longer written by this
+// command — operators migrating an old install run
+// `mpm config profile add default` once, then continue with `set` for
+// per-field updates.
 func handleConfigSet(c *config.Config, key, val string) int {
-	if c.Synth == nil {
-		c.Synth = &config.SynthConfig{}
-	}
 	if err := configApply(c, key, val); err != nil {
 		usererror.Error("%v", err)
 		return 1
@@ -485,6 +488,12 @@ func pluralForN(n int) string {
 // defaults are accepted by hitting enter. The wizard is non-TTY-safe
 // (refuses to run with stdin redirected, points operator at the
 // scripting interface).
+//
+// The wizard writes to Profiles["default"] (the canonical surface for the
+// default LLM profile). The legacy top-level `synth` block is no longer
+// created or updated by the wizard; it remains readable for backward
+// compatibility (ProfileFor falls through to it as a one-way migration
+// path), but new installs should configure Profiles["default"].
 func handleConfigInteractive(c *config.Config) int {
 	if !isatty(os.Stdin) {
 		fmt.Println("Configure MPM")
@@ -492,9 +501,9 @@ func handleConfigInteractive(c *config.Config) int {
 		fmt.Println("Non-interactive mode detected (stdin isn't a terminal).")
 		fmt.Println("Use the scriptable interface instead:")
 		fmt.Println()
-		fmt.Println("  mpm config set api_key $OPENAI_API_KEY")
-		fmt.Println("  mpm config set model gpt-5.5")
-		fmt.Println("  mpm config set base_url https://api.openai.com/v1")
+		fmt.Println("  mpm config profile add default --provider <name> --model <model> --base-url <url>")
+		fmt.Println("  mpm config profile set default api_key <key>")
+		fmt.Println("  mpm config component set memory default")
 		fmt.Println()
 		fmt.Println("Or run `mpm config` interactively from a real terminal.")
 		return 0
@@ -506,94 +515,103 @@ func handleConfigInteractive(c *config.Config) int {
 	fmt.Println("for that provider. You'll be asked to confirm before saving.")
 	fmt.Println()
 
-	// Ensure synth block exists.
-	if c.Synth == nil {
-		c.Synth = &config.SynthConfig{}
+	// Ensure Profiles["default"] exists. The wizard writes here; the
+	// legacy top-level `synth` block is no longer written by the wizard.
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	prof := c.Profiles["default"]
+	if prof.Name == "" {
+		prof.Name = "default"
 	}
 
 	// Preset choice.
 	preset := promptChoice(rwFromStdin(), "Provider", []choice{
-		{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.SynthConfig{
-			Model:   "MiniMax-M2.7",
-			BaseURL: "https://api.minimax.io/anthropic/v1",
+		{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.Profile{
+			Provider: "minimax",
+			Model:    "MiniMax-M2.7",
+			BaseURL:  "https://api.minimax.io/anthropic/v1",
 		}},
-		{id: "openai", label: "OpenAI", defaults: config.SynthConfig{
-			Model:   "gpt-4o",
-			BaseURL: "https://api.openai.com/v1/v1",
+		{id: "openai", label: "OpenAI", defaults: config.Profile{
+			Provider: "openai",
+			Model:    "gpt-4o",
+			BaseURL:  "https://api.openai.com/v1",
 		}},
-		{id: "ollama", label: "Ollama (local)", defaults: config.SynthConfig{
-			Model:   "llama3",
-			BaseURL: "http://localhost:11434/v1",
+		{id: "ollama", label: "Ollama (local)", defaults: config.Profile{
+			Provider: "ollama",
+			Model:    "llama3",
+			BaseURL:  "http://localhost:11434/v1",
 		}},
-		{id: "anthropic", label: "Anthropic direct", defaults: config.SynthConfig{
-			Model:   "claude-3-5-sonnet",
-			BaseURL: "https://api.anthropic.com/v1",
+		{id: "anthropic", label: "Anthropic direct", defaults: config.Profile{
+			Provider: "anthropic",
+			Model:    "claude-3-5-sonnet",
+			BaseURL:  "https://api.anthropic.com/v1",
 		}},
-		{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.SynthConfig{}},
+		{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.Profile{}},
 	})
 	if preset == nil {
 		fmt.Println("Aborted.")
 		return 0
 	}
 
-	// Apply preset defaults to the struct (filling empty fields
-	// only — operators can override per-field in the prompts
-	// below).
-	mergeDefaults(c.Synth, preset.defaults)
+	// Apply preset defaults to the profile (filling empty fields only —
+	// operators can override per-field in the prompts below).
+	mergeProfileDefaults(&prof, preset.defaults)
 
 	// Model prompt.
-	model := promptString(rwFromStdin(), "Model", c.Synth.Model)
+	model := promptString(rwFromStdin(), "Model", prof.Model)
 	if model != "" {
-		c.Synth.Model = strings.TrimSpace(model)
+		prof.Model = strings.TrimSpace(model)
 	}
 
 	// Base URL prompt.
-	baseURL := promptString(rwFromStdin(), "Base URL", c.Synth.BaseURL)
+	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
 	if baseURL != "" {
-		c.Synth.BaseURL = strings.TrimSpace(baseURL)
+		prof.BaseURL = strings.TrimSpace(baseURL)
 	}
 
 	// API key prompt — only if preset needs it (skip for Ollama).
 	needsKey := preset.id != "ollama"
 	if needsKey {
-		existing := c.Synth.APIKey
+		existing := prof.APIKey
 		var labelDefault string
 		if existing != "" {
 			labelDefault = "(unchanged)"
 		}
 		key := promptSecret(rwFromStdin(), "API key", labelDefault)
 		if key != "" {
-			c.Synth.APIKey = strings.TrimSpace(key)
+			prof.APIKey = strings.TrimSpace(key)
 		}
 	}
 
 	// Max tokens + timeout (rarely customised, default-only).
-	tokens := promptString(rwFromStdin(), "Max tokens", intToStr(c.Synth.MaxTokens))
+	tokens := promptString(rwFromStdin(), "Max tokens", intToStr(prof.MaxTokens))
 	if tokens != "" {
 		if n, err := strconvAtoi(tokens); err == nil && n > 0 {
-			c.Synth.MaxTokens = n
+			prof.MaxTokens = n
 		}
 	}
-	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(c.Synth.TimeoutSecs))
+	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
 	if timeout != "" {
 		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
-			c.Synth.TimeoutSecs = n
+			prof.TimeoutSecs = n
 		}
 	}
 
 	// Confirm + save.
 	fmt.Println()
-	fmt.Println("Preview:")
-	fmt.Printf("  model      : %s\n", c.Synth.Model)
-	fmt.Printf("  base url   : %s\n", c.Synth.BaseURL)
-	fmt.Printf("  api key    : %s\n", redactAPIKey(c.Synth.APIKey))
-	fmt.Printf("  max tokens : %d\n", c.Synth.MaxTokens)
-	fmt.Printf("  timeout    : %d\n", c.Synth.TimeoutSecs)
+	fmt.Println("Preview (profile \"default\"):")
+	fmt.Printf("  model      : %s\n", prof.Model)
+	fmt.Printf("  base url   : %s\n", prof.BaseURL)
+	fmt.Printf("  api key    : %s\n", redactAPIKey(prof.APIKey))
+	fmt.Printf("  max tokens : %d\n", prof.MaxTokens)
+	fmt.Printf("  timeout    : %d\n", prof.TimeoutSecs)
 	fmt.Println()
 	if !confirmPrompt(rwFromStdin(), "Save?") {
 		fmt.Println("Aborted.")
 		return 0
 	}
+	c.Profiles["default"] = prof
 	if err := config.SaveConfig(c); err != nil {
 		usererror.Error("saving config: %v", err)
 		return 1
@@ -609,33 +627,68 @@ func handleConfigInteractive(c *config.Config) int {
 
 // configLookup resolves a key (incl. aliases) against the loaded
 // config and returns the canonical display value.
+//
+// Read path: Profiles["default"] is canonical. The legacy top-level
+// `synth` block is consulted as a last-resort fallback for old
+// installs that haven't migrated yet.
 func configLookup(c *config.Config, key string) (string, error) {
-	if c == nil || c.Synth == nil {
-		return "", fmt.Errorf("no synth block configured")
+	if c == nil {
+		return "", fmt.Errorf("no config loaded")
 	}
 	canon := configCanonicalKey(key)
-	switch canon {
-	case "model":
-		return c.Synth.Model, nil
-	case "api_key":
-		return c.Synth.APIKey, nil
-	case "base_url":
-		return c.Synth.BaseURL, nil
-	case "max_tokens":
-		return intToStr(c.Synth.MaxTokens), nil
-	case "timeout_seconds":
-		return intToStr(c.Synth.TimeoutSecs), nil
+	// Top-level keys — synthesis kill switch.
+	if canon == "synthesis_enabled" {
+		if c.SynthesisEnabled == nil {
+			return "true", nil
+		}
+		if *c.SynthesisEnabled {
+			return "true", nil
+		}
+		return "false", nil
 	}
-	return "", fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds)", key)
+	// Profile-scoped keys — read from Profiles["default"].
+	if prof, ok := c.Profiles["default"]; ok {
+		switch canon {
+		case "model":
+			return prof.Model, nil
+		case "api_key":
+			return prof.APIKey, nil
+		case "base_url":
+			return prof.BaseURL, nil
+		case "max_tokens":
+			return intToStr(prof.MaxTokens), nil
+		case "timeout_seconds":
+			return intToStr(prof.TimeoutSecs), nil
+		}
+	}
+	// Legacy fallback — Synth block when Profiles["default"] is missing.
+	if c.Synth != nil {
+		switch canon {
+		case "model":
+			return c.Synth.Model, nil
+		case "api_key":
+			return c.Synth.APIKey, nil
+		case "base_url":
+			return c.Synth.BaseURL, nil
+		case "max_tokens":
+			return intToStr(c.Synth.MaxTokens), nil
+		case "timeout_seconds":
+			return intToStr(c.Synth.TimeoutSecs), nil
+		}
+	}
+	return "", fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
 }
 
 // configApply mutates the loaded config in place. Pure mutation
 // helper; persistence happens in handleConfigSet via SaveConfig.
+//
+// Write path: Profiles["default"] is the canonical destination for
+// LLM-related keys. The legacy top-level `synth` block is no longer
+// written by this command — operators with pre-profiles installs
+// should run `mpm config profile add default` once.
 func configApply(c *config.Config, key, val string) error {
 	canon := configCanonicalKey(key)
-	// Top-level keys (not inside Synth) — handle before the synth
-	// nil-check so callers can disable synthesis even when the
-	// legacy synth block is missing.
+	// Top-level keys (not inside a profile).
 	switch canon {
 	case "synthesis_enabled":
 		b, err := strconv.ParseBool(val)
@@ -645,31 +698,37 @@ func configApply(c *config.Config, key, val string) error {
 		c.SynthesisEnabled = &b
 		return nil
 	}
-	if c.Synth == nil {
-		return fmt.Errorf("synth block missing")
+	// Profile-scoped keys — write to Profiles["default"].
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	prof := c.Profiles["default"]
+	if prof.Name == "" {
+		prof.Name = "default"
 	}
 	switch canon {
 	case "model":
-		c.Synth.Model = val
+		prof.Model = val
 	case "api_key":
-		c.Synth.APIKey = val
+		prof.APIKey = val
 	case "base_url":
-		c.Synth.BaseURL = val
+		prof.BaseURL = val
 	case "max_tokens":
 		n, err := strconvAtoi(val)
 		if err != nil || n <= 0 {
 			return fmt.Errorf("max_tokens must be a positive integer (got %q)", val)
 		}
-		c.Synth.MaxTokens = n
+		prof.MaxTokens = n
 	case "timeout_seconds":
 		n, err := strconvAtoi(val)
 		if err != nil || n <= 0 {
 			return fmt.Errorf("timeout_seconds must be a positive integer (got %q)", val)
 		}
-		c.Synth.TimeoutSecs = n
+		prof.TimeoutSecs = n
 	default:
 		return fmt.Errorf("unknown key %q (try: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
 	}
+	c.Profiles["default"] = prof
 	return nil
 }
 
@@ -751,6 +810,24 @@ func mergeDefaults(target *config.SynthConfig, src config.SynthConfig) {
 	}
 }
 
+// mergeProfileDefaults fills empty fields in target with values from src.
+// Non-empty fields in target are preserved. The Profile-aware counterpart
+// of mergeDefaults; the wizard uses it when writing to Profiles["default"].
+func mergeProfileDefaults(target *config.Profile, src config.Profile) {
+	if target == nil {
+		return
+	}
+	if target.Provider == "" {
+		target.Provider = src.Provider
+	}
+	if target.Model == "" {
+		target.Model = src.Model
+	}
+	if target.BaseURL == "" {
+		target.BaseURL = src.BaseURL
+	}
+}
+
 // ---------------------------------------------------------------------------
 // stdin prompts (numbered-choice + line-reader)
 // ---------------------------------------------------------------------------
@@ -759,7 +836,7 @@ func mergeDefaults(target *config.SynthConfig, src config.SynthConfig) {
 type choice struct {
 	id       string
 	label    string
-	defaults config.SynthConfig
+	defaults config.Profile
 }
 
 // rwFromStdin returns a buffered reader around stdin. Used by
@@ -884,13 +961,43 @@ func splitProviderModel(s string) (provider, model string) {
 func printConfigHelp() {
 	fmt.Println(`mpm config — Configure the AI provider
 
+Configuration model (v0.1):
+
+  profiles        Named execution profiles (provider, model, base_url,
+                  api_key, ...). profiles["default"] is the canonical
+                  fallback for every component that has no explicit binding.
+
+  components      Optional component → profile bindings.
+                  components["embedding"] identifies the embedding profile.
+
+  capabilities    Optional capability → component bindings. Skills and
+                  capability-shaped callers address capabilities; the
+                  canonical v0.1 defaults are:
+                    reviewer  → critic
+                    reflect   → critic
+                    planner   → memory
+                    summarise → memory
+                  Use 'mpm config capability set <cap> <component>' to override.
+
+  legacy synth    Top-level 'synth' block from pre-profiles installs is
+                  read for backward compatibility but never written by
+                  new code. Migrate by running
+                  'mpm config profile add default'.
+
+API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show'
+redacts them; 'mpm config get api_key' returns the full key for the operator's
+own use.
+
 Usage:
-  mpm config                       Interactive wizard
+  mpm config                       Interactive wizard (writes profiles.default)
   mpm config show | list            Show current configuration
   mpm config get <key>             Get one value
-  mpm config set <key> <value>     Set one value
+  mpm config set <key> <value>     Set one value on profiles.default
   mpm config edit                  Open mpm_config.json in $EDITOR
   mpm config validate              Validate configuration shape
+  mpm config profile ...           Add / list / get / set / remove profiles
+  mpm config component ...         list / get / set component → profile bindings
+  mpm config capability ...        list / get / set capability → component bindings
   mpm config detect-embedding [--apply <name>] [--force]
                                 Probe Ollama for embedding-capable
                                 models; --apply writes a profile and
@@ -900,12 +1007,13 @@ Usage:
 
 Keys (canonical names; aliases accepted):
   model, api_key (alias: token), base_url (alias: endpoint),
-  max_tokens, timeout_seconds
+  max_tokens, timeout_seconds, synthesis_enabled
 
 Examples:
   mpm config set api_key $OPENAI_API_KEY
   mpm config set model gpt-4o
   mpm config set endpoint https://api.openai.com/v1
+  mpm config set synthesis_enabled false
 
 Config file: ~/.mpm/mpm_config.json (path resolved via the
 workspace; $EDITOR is opened on this file for 'mpm config edit'.)`)
@@ -1332,29 +1440,22 @@ func handleConfigCapability(args []string) int {
 	}
 }
 
-// defaultCapabilities are the v0.1 capability → component
-// defaults. Loaded once when Capabilities is nil (first-run),
-// can be overridden by the operator via 'capability set'.
-var defaultCapabilities = map[string]string{
-	"planner":   "memory",
-	"reviewer":  "critic",
-	"reflect":   "critic",
-	"summarise": "memory",
-}
-
+// handleCapabilityList renders the capability registry. The CLI uses
+// Config.CapabilityFor (which falls back to config.DefaultCapabilities)
+// so explicit overrides and defaults render consistently.
 func handleCapabilityList(c *config.Config) int {
 	fmt.Println("Capability registry")
 	fmt.Println(strings.Repeat("─", 60))
 	if c.Capabilities == nil {
-		fmt.Println("  (no capabilities configured — defaults loaded on first use)")
+		fmt.Println("  (no explicit capabilities — defaults loaded on first use)")
 		fmt.Println()
-		for cap, comp := range defaultCapabilities {
-			fmt.Printf("  default  %-12s → %s\n", cap, comp)
+		for _, cap := range sortedKeysForConfig(config.DefaultCapabilities) {
+			fmt.Printf("  default  %-12s → %s\n", cap, config.DefaultCapabilities[cap])
 		}
 		return 0
 	}
 	for _, cap := range sortedKeysForConfig(c.Capabilities) {
-		bound := c.Capabilities[cap]
+		bound := c.CapabilityFor(cap)
 		if bound == "" {
 			bound = "(unbound)"
 		}
@@ -1366,11 +1467,6 @@ func handleCapabilityList(c *config.Config) int {
 func handleCapabilityGet(c *config.Config, capability string) int {
 	bound := c.CapabilityFor(capability)
 	if bound == "" {
-		// Fall back to defaults so operators see the canonical binding.
-		if def, ok := defaultCapabilities[capability]; ok {
-			fmt.Printf("  %s → %s (default; not explicitly bound)\n", capability, def)
-			return 0
-		}
 		fmt.Printf("  %s → (unbound)\n", capability)
 		return 0
 	}

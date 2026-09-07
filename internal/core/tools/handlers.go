@@ -5239,9 +5239,17 @@ func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load substrate config: %w", err)
 	}
+	// Translate capability names to component names before dispatch.
+	// Skills/skills-shaped callers address capabilities (reviewer,
+	// reflect, planner, summarise) — ResolveComponents walks the
+	// explicit Config.Capabilities map then falls back to the
+	// canonical DefaultCapabilities. Names that aren't capabilities
+	// pass through unchanged as component names (preserves direct
+	// calls like `components=["memory","critic"]`).
+	resolvedComponents := cfg.ResolveComponents(components)
 	coord := orchestration.NewDefaultReviewCoordinator(cfg, orchestration.DefaultModelFactory())
 	req := orchestration.ReviewRequest{
-		Components:  components,
+		Components:  resolvedComponents,
 		Prompt:      prompt,
 		ContextData: contextData.String(),
 		Strategy:    orchestration.StrategyParallel,

@@ -54,9 +54,20 @@ type SynthClient struct {
 	Wire wireShape
 }
 
-// NewSynthClient reads LLM configuration from mpm_config.json (synth block)
-// and env vars, returning a ready-to-use SynthClient. Defaults to MiniMax.
-// Missing values fall back to defaults or env vars.
+// NewSynthClient reads LLM configuration from mpm_config.json, returning a
+// ready-to-use SynthClient. Defaults to MiniMax.
+//
+// Resolution order (canonical first, legacy last):
+//
+//  1. Profiles["default"] (canonical surface — what the wizard writes)
+//  2. Components["synth"] binding → Profiles[<binding>] (canonical routing)
+//  3. Legacy Synth block (one-way migration path for pre-profiles configs)
+//  4. Hardcoded defaults + env-var API key (last-resort)
+//
+// Precedence: when both a profile and a legacy Synth block are present,
+// the profile wins. The legacy Synth block is a compatibility read for
+// installs that haven't migrated yet; modern configs configure
+// Profiles["default"] (or bind Components["synth"] to a named profile).
 func NewSynthClient() *SynthClient {
 	cfg, err := config.LoadConfig()
 	sc := &SynthClient{
@@ -65,7 +76,9 @@ func NewSynthClient() *SynthClient {
 		MaxTokens: 1024,
 		Timeout:   300 * time.Second,
 	}
-	if err == nil && cfg.Synth != nil {
+	// 1. Legacy Synth block first — sets the baseline. Modern profiles
+	// below override the legacy fields.
+	if err == nil && cfg != nil && cfg.Synth != nil {
 		if cfg.Synth.Model != "" {
 			sc.Model = cfg.Synth.Model
 		}
@@ -82,25 +95,26 @@ func NewSynthClient() *SynthClient {
 			sc.APIKey = cfg.Synth.APIKey
 		}
 	}
-	// Profile fallback (added 2026-08-13). The legacy synth block was
-	// the original single-source for LLM credentials, but the
-	// canonical path operators are encouraged to use is the
-	// Profiles map (Profiles["default"] or any binding via the
-	// Components map). If cfg.Synth.APIKey is empty — a common
-	// drift because the two locations are easy to forget to keep
-	// in sync — fall back to the resolved profile's APIKey. This
-	// aligns the synth client with the rest of the substrate
-	// (admission, planner, reviewer, etc) which already route
-	// through cfg.ProfileFor(component). Without this fallback,
-	// every install that configured profiles correctly but left
-	// the legacy synth block empty would hit
-	// "no API key configured" on compact_epistemology and the
-	// rest of the synthesis surface — a silent-failure class
-	// that was masked by an invisible env-var fallback when a
-	// developer happened to have MINIMAX_API_KEY in their shell.
-	if sc.APIKey == "" {
-		if prof := cfg.ProfileFor("synth"); prof != nil && prof.APIKey != "" {
-			sc.APIKey = prof.APIKey
+	// 2. Canonical: Profiles["default"] (resolved through ProfileFor so an
+	// explicit Components["synth"] binding also wins). Overrides the
+	// legacy Synth block above.
+	if err == nil && cfg != nil {
+		if prof := cfg.ProfileFor("synth"); prof != nil {
+			if prof.Model != "" {
+				sc.Model = prof.Model
+			}
+			if prof.BaseURL != "" {
+				sc.BaseURL = prof.BaseURL
+			}
+			if prof.MaxTokens > 0 {
+				sc.MaxTokens = prof.MaxTokens
+			}
+			if prof.TimeoutSecs > 0 {
+				sc.Timeout = time.Duration(prof.TimeoutSecs) * time.Second
+			}
+			if prof.APIKey != "" {
+				sc.APIKey = prof.APIKey
+			}
 		}
 	}
 	if sc.APIKey == "" {
@@ -132,28 +146,24 @@ func NewSynthClient() *SynthClient {
 		// from BaseURL the same way.
 		sc.Wire = inferWire(sc.BaseURL)
 	}
-	// Loud, structured failure signal (added 2026-08-13). Every
-	// source of credentials the synth client knows about — the
-	// legacy cfg.Synth block, the resolved cfg.ProfileFor(synth)
-	// profile, and the env-var fallbacks MINIMAX_API_KEY /
-	// OPENAI_API_KEY / OPENROUTER_API_KEY — has been exhausted
-	// without finding an API key. Without this log, the failure
-	// surfaces only at request time when the LLM call returns a
-	// 401, well after the substrate has been alive long enough to
-	// appear healthy. Compaction and admission both spin on
-	// "no API key configured" errors silently otherwise. Loud
-	// failure beats silent spinning.
+	// Loud, structured failure signal. Every source of credentials the
+	// synth client knows about — Profiles["default"] (canonical),
+	// cfg.Synth (legacy migration), and the env-var fallbacks — has
+	// been exhausted without finding an API key. Without this log, the
+	// failure surfaces only at request time when the LLM call returns
+	// a 401. Loud failure beats silent spinning.
 	if sc.APIKey == "" {
 		slog.Error("synth: no API key configured",
 			"component", "synth",
 			"surface_exhausted", []string{
-				"cfg.Synth.api_key",
-				"cfg.ProfileFor(synth).api_key",
+				"cfg.Profiles[default].api_key (canonical)",
+				"cfg.Profiles[<Components[synth] binding>].api_key (canonical)",
+				"cfg.Synth.api_key (legacy migration)",
 				"env MINIMAX_API_KEY (default wire)",
 				"env OPENAI_API_KEY (openai wire)",
 				"env OPENROUTER_API_KEY (any wire)",
 			},
-			"remediation", "set api_key on cfg.Profiles[default] (canonical) or cfg.Synth.api_key (legacy) or one of the env vars above; do not commit the secret to version control — inject at runtime",
+			"remediation", "set api_key on cfg.Profiles[default] (canonical) or cfg.Synth.api_key (legacy migration) or one of the env vars above; do not commit the secret to version control — inject at runtime",
 		)
 	}
 	return sc

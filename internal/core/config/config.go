@@ -276,15 +276,37 @@ func (c *Config) DefaultComponentProfile(component string) string {
 	return c.Components[component]
 }
 
+// DefaultCapabilities are the v0.1 capability → component bindings
+// shipped when an operator hasn't customised the layer. Used as a
+// fallback when Config.Capabilities[capability] is unset, so the
+// canonical operator-meaningful vocabulary (reviewer/reflect → critic,
+// planner/summarise → memory) works without explicit configuration.
+//
+// Operators override individual entries via `mpm config capability set`.
+// This map is intentionally a package-level var (not a Config field)
+// so the canonical defaults survive even when an operator wipes the
+// Capabilities map from their config file.
+var DefaultCapabilities = map[string]string{
+	"planner":   "memory",
+	"reviewer":  "critic",
+	"reflect":   "critic",
+	"summarise": "memory",
+}
+
 // CapabilityFor resolves a capability name to its bound substrate
 // component. Capabilities are the operator-meaningful vocabulary
 // that skills and runtime code address; components are the
 // substrate-specific functions that fulfil them.
 //
-// Resolution: returns Components[capability] when bound, or ""
-// when no binding exists. Callers should fall through to a
-// conventional default component (e.g. "memory" for memory
-// operations) when the capability isn't bound.
+// Resolution:
+//
+//  1. Explicit Config.Capabilities[capability] binding (operator-set).
+//  2. DefaultCapabilities fallback (canonical v0.1 defaults:
+//     reviewer/reflect → critic; planner/summarise → memory).
+//  3. Returns "" when no binding exists at any level.
+//
+// Callers should treat "" as "not a capability; pass through as a
+// component name" (see ResolveComponents for the canonical helper).
 //
 // Why this layer exists:
 //
@@ -304,10 +326,51 @@ func (c *Config) DefaultComponentProfile(component string) string {
 //   - A capability could fulfil multiple components (e.g.
 //     'synthesizer' → both 'memory' and 'critic').
 func (c *Config) CapabilityFor(capability string) string {
-	if c == nil || c.Capabilities == nil {
+	if capability == "" {
 		return ""
 	}
-	return c.Capabilities[capability]
+	if c != nil && c.Capabilities != nil {
+		if v, ok := c.Capabilities[capability]; ok && v != "" {
+			return v
+		}
+	}
+	if def, ok := DefaultCapabilities[capability]; ok {
+		return def
+	}
+	return ""
+}
+
+// ResolveComponents translates a list of capability-or-component
+// names through the capability layer. Names that match a capability
+// (explicit binding or DefaultCapabilities fallback) are mapped to
+// their bound component. Names that don't match any capability pass
+// through unchanged as component names.
+//
+// Used by callers (e.g. request_review) that accept either skill-
+// vocabulary capability names or direct substrate component names.
+// Preserves explicit component calls:
+//
+//	components=["memory","critic"]      → ["memory","critic"]  (no translation)
+//	components=["reviewer"]            → ["critic"]            (default cap → critic)
+//	components=["reviewer"] (cfg.override reviewer=memory)
+//	                                 → ["memory"]            (explicit override wins)
+//
+// Returns a defensive copy. Order preserved. Empty input → empty
+// output. Names are not de-duplicated; downstream ProfileFor handles
+// resolution idempotently.
+func (c *Config) ResolveComponents(names []string) []string {
+	if len(names) == 0 {
+		return names
+	}
+	out := make([]string, len(names))
+	for i, name := range names {
+		if comp := c.CapabilityFor(name); comp != "" {
+			out[i] = comp
+		} else {
+			out[i] = name
+		}
+	}
+	return out
 }
 
 // inferProviderFromURL heuristically maps a base URL to a vendor
