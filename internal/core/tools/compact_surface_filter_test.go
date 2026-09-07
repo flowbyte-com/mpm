@@ -3,9 +3,12 @@
 // Pins the contract of the default initial MCP surface that
 // mpm-mcp exposes when MPM_EXPOSE_ALL_TOOLS is unset:
 //
-//   - Exactly 5 tools in the default initial surface
+//   - Exactly 3 tools in the default initial surface
+//     (mpm_memory, mpm_context, mpm_help) — mpm_handoff is reachable
+//     via mpm_context action=write_handoff/read_handoff, and
+//     mpm_scratchpad is reachable via the mpm call escape hatch.
 //   - The full Registry (22 tools) remains intact internally
-//   - All 5 default tools are present and callable via their
+//   - All 3 default tools are present and callable via their
 //     HandlerFunc (mcpAdapter wraps the Registry's Handler —
 //     not a stub)
 //   - MPM_EXPOSE_ALL_TOOLS=1 reveals the legacy 22-tool surface
@@ -24,23 +27,19 @@ import (
 // defaultCoreTools mirrors cmd/mpm-mcp/main.go defaultCoreTools.
 // Keep in sync — drift here misrepresents the actual filtered surface.
 var defaultCoreTools = map[string]bool{
-	"mpm_memory":     true,
-	"mpm_context":    true,
-	"mpm_handoff":    true,
-	"mpm_scratchpad": true,
-	"mpm_help":       true,
+	"mpm_memory":  true,
+	"mpm_context": true,
+	"mpm_help":    true,
 }
 
-// TestCompactSurface_DefaultCoreHasFiveTools pins the default
-// initial surface to exactly the 5-tool canonical set. If a tool
+// TestCompactSurface_DefaultCoreHasThreeTools pins the default
+// initial surface to exactly the 3-tool canonical set. If a tool
 // is added to or removed from defaultCoreTools without updating
 // the docs/CONTEXT_EXPOSURE.md measurements, this test fires.
-func TestCompactSurface_DefaultCoreHasFiveTools(t *testing.T) {
+func TestCompactSurface_DefaultCoreHasThreeTools(t *testing.T) {
 	expected := []string{
 		"mpm_memory",
 		"mpm_context",
-		"mpm_handoff",
-		"mpm_scratchpad",
 		"mpm_help",
 	}
 	if len(defaultCoreTools) != len(expected) {

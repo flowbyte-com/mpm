@@ -14,7 +14,7 @@ exact commit SHA in `summary.json["environment"]["commit"]`.
 
 | Quantity                                          | Bytes   | Tokens (cl100k_base) |
 | ------------------------------------------------- | ------: | -------------------: |
-| **Default initial MCP surface (filtered + compact)** | **4,477** | **~1,119** |
+| **Default initial MCP surface (filtered + compact)** | **2,268** | **~567** |
 | Full surface (MPM_EXPOSE_ALL_TOOLS=1) — legacy     |  66,359 |              ~16,600 |
 | Tool schemas + descriptions, all 21 tools, sum    |  42,580 |                  ~10K |
 | `tools/list` wire payload (single JSON body) — full |  66,359 |               ~16.5K |
@@ -37,9 +37,10 @@ The trade-off: pointer projection also requires a follow-up
 content — a much better trade than 221,000 tokens for 1.1 MB.
 
 **Initial MCP surface reduction**: the default initial surface
-(5 tools: `mpm_memory`, `mpm_context`, `mpm_handoff`, `mpm_scratchpad`,
-`mpm_help`) is **~93% smaller** than the legacy 21-tool surface.
-Specialists are reachable via `mpm_help list` + `mpm call <tool>`.
+(3 tools: `mpm_memory`, `mpm_context`, `mpm_help`) is **~97% smaller**
+than the legacy 21-tool surface. `mpm_handoff` is reachable as
+`mpm_context action=write_handoff/read_handoff`; `mpm_scratchpad` and
+other specialists are reachable via `mpm_help list` + `mpm call <tool>`.
 See `docs/CONTEXT_EXPOSURE.md` for the full architecture.
 
 ---
@@ -218,14 +219,14 @@ FULL surface (MPM_EXPOSE_ALL_TOOLS=1) — legacy behaviour, 22 tools:
   TOTAL descriptions+schemas:  43,127  (~10,782 tokens)
   JSON-serialised tools/list:  66,359  (~16,600 tokens) ← measured wire payload
 
-DEFAULT initial surface (filtered + compact) — production behaviour, 5 tools:
-  desc+schema bytes (raw):     3,456
-  JSON wire payload:           4,477 bytes
-  cl100k_base tokens (est):     ~1,119  ← measured, 93% reduction from full
+DEFAULT initial surface (filtered + compact) — production behaviour, 3 tools:
+  desc+schema bytes (raw):     1,650
+  JSON wire payload:           2,268 bytes
+  cl100k_base tokens (est):     ~567  ← measured, ~97% reduction from full
 ```
 
 The full surface remains canonical in `tools.Registry` for the CLI
-`mpm call` substrate, but the MCP server exposes only the 5-tool
+`mpm call` substrate, but the MCP server exposes only the 3-tool
 default to the model. Hosts that need the legacy surface can set
 `MPM_EXPOSE_ALL_TOOLS=1` to revert. See `docs/CONTEXT_EXPOSURE.md`
 for the architecture and rationale.
@@ -309,10 +310,12 @@ The fixed cost of MPM integration has three components:
 3. **Per-call envelope (~95 tokens)** — `success`, `mode`, `query`,
    `count` plus MCP `TextContent` wrapper.
 
-**Total substrate floor**: roughly **17,000 tokens** before any useful
-memory is returned. This is comparable to a non-trivial system prompt
-extension and is the cost an alpha user is paying for **persistent
-cross-session state**.
+**Total substrate floor (3-tool default)**: roughly **685 tokens**
+before any useful memory is returned (~567 tool wire + ~118 compact
+wake). This is well below a single non-trivial system prompt extension
+and is the cost an alpha user is paying for **persistent cross-session
+state**. With the legacy 22-tool surface (MPM_EXPOSE_ALL_TOOLS=1) the
+floor is roughly **16,700 tokens**.
 
 ### What scales?
 
@@ -380,10 +383,10 @@ Concretely:
 
 ### Fair conclusion
 
-MPM introduces a **~17,000-token substrate floor** (schema + compact
-wake) and a **~95-token per-call envelope**, and offers a **~1,000×
-context reduction on large artifacts** via pointer projection. The
-cost is dominated by the schema floor (one-time per session); the
+MPM introduces a **~685-token substrate floor** (3-tool schema wire +
+compact wake) and a **~95-token per-call envelope**, and offers a
+**~1,000× context reduction on large artifacts** via pointer projection.
+The cost is dominated by the schema floor (one-time per session); the
 benefit is dominated by pointer projection on large artifacts. For
 typical small-memory workflows the cost is comparable to a system
 prompt extension; for large-artifact workflows the benefit is dramatic.

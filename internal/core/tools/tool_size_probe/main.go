@@ -24,51 +24,48 @@ import (
 )
 
 // defaultCoreTools mirrors cmd/mpm-mcp/main.go defaultCoreTools.
+// 3-tool compact surface (post Sept-2026 final polish):
+//   mpm_memory  persist/recall/show/shred (and reinforce/weaken/...)
+//   mpm_context wake/directives/route/handoff (write/read)
+//   mpm_help    capability discovery
 // Keep in sync — drift here misrepresents the actual filtered surface.
 var defaultCoreTools = map[string]bool{
-	"mpm_memory":     true,
-	"mpm_context":    true,
-	"mpm_handoff":    true,
-	"mpm_scratchpad": true,
-	"mpm_help":       true,
+	"mpm_memory":  true,
+	"mpm_context": true,
+	"mpm_help":    true,
 }
 
 // mpmHelpDescription is the description as registered via the
 // cmd/mpm-mcp closure (NOT in tools.Registry — kept here only so
 // the probe can measure it).
-const mpmHelpDescription = "Capability discovery. Returns every registered MPM tool name with a terse one-liner. Use when: an agent wants to know what specialist tools are reachable but not initially exposed. Specialists are reachable via the host shell: mpm call <tool> --payload. Use action=list for the full catalogue; action=show with params.tool=<name> for one tool."
+const mpmHelpDescription = "Capability discovery. action=list: every MPM tool name + reach_via_cli. action=show tool=<name>: full description. Specialists via 'mpm call <tool>'."
 
 // mpmHelpSchema is the schema as registered via the cmd/mpm-mcp
 // closure (mcp.WithString / mcp.WithDescription). We compute its
 // byte length by serialising to a comparable JSON shape.
-const mpmHelpSchema = `{"type":"object","properties":{"action":{"type":"string","description":"list or show."},"tool":{"type":"string","description":"Required for action=show. The tool name to inspect."}},"required":["action"]}`
+const mpmHelpSchema = `{"type":"object","properties":{"action":{"type":"string","description":"list or show."},"tool":{"type":"string","description":"Required for action=show."}},"required":["action"]}`
 
-// compactCoreToolSpecs is the actual MCP wire surface for the four
+// compactCoreToolSpecs is the actual MCP wire surface for the
 // non-help core tools. The full schemas remain in tools.Registry
 // (used by CLI / substrate); the MCP server registers these compact
 // versions via closures. Keep in sync with cmd/mpm-mcp/tools.go.
+//
+// 3-tool surface (post Sept-2026 final polish):
+//   mpm_memory  persist/recall/show/shred
+//   mpm_context wake/directives/route + write_handoff/read_handoff
+//   mpm_help    capability discovery (registered separately)
 var compactCoreToolSpecs = []struct {
 	name, description, schema string
 }{
 	{
 		"mpm_memory",
-		"Persistent memory. Save facts/learnings; query by text/id; show one row; shred (hard delete); reinforce/weaken; snooze/promote; patch metadata; review. Required params: action. For broad queries projection defaults to summary (256 chars + pointer); use projection=full or mpm_resolve for unabridged content. shred is permanent — no restore path. Call mpm_help show mpm_memory for the full schema.",
-		`{"type":"object","properties":{"action":{"type":"string","description":"save | query | show | shred | reinforce | weaken | snooze | patch | promote."},"params":{"type":"object","description":"Per-action params. Common keys: fact (string), query (string), id (string), memory_id (string), tags (string[]), weight (number), limit (number), projection (summary|full), scope (all|local|shared), ttl (duration like 7d/24h). See tools/full-schema/mpm_memory.json via mpm_help for the complete contract."}},"required":["action"]}`,
+		"Persistent memory: save/query/show facts across sessions. Required: action. Use projection=summary (default, ~256 chars + pointer) for recall; projection=full for unabridged content. shred is permanent. Call mpm_help show mpm_memory for the full schema.",
+		`{"type":"object","properties":{"action":{"type":"string","description":"save | query | show | shred | reinforce | weaken | snooze | patch | promote."},"params":{"type":"object","description":"save: fact (string). query: query (string), projection (summary|full), limit (number). show: id (string). shred: id (string). reinforce/weaken: id (string), delta (number). See mpm_help."}},"required":["action"]}`,
 	},
 	{
 		"mpm_context",
-		"Session context. read_wake_context (browses recent memories, handoffs, overdue wakes); read_directives; proactive_recall_hint (suggests context-relevant memories); route (auto-selects mode/persona); query_global_rules / record_global_rule. Required params: action. For read_wake_context use projection=compact for ~130 token bounded output.",
-		`{"type":"object","properties":{"action":{"type":"string","description":"read_wake_context | read_directives | proactive_recall_hint | query_global_rules | record_global_rule | route."},"params":{"type":"object","description":"Per-action params. read_wake_context accepts projection: compact | full. route accepts prompt (string). See tools/full-schema/mpm_context.json via mpm_help."}},"required":["action"]}`,
-	},
-	{
-		"mpm_handoff",
-		"Session handoff. write: persist summary at session end (REQUIRED: summary; optional commitments, open_questions, state). read: fetch handoff for next session. list/shred: manage the handoff ledger. summary must be non-empty; chat acks are NOT session-close events. Required params: action.",
-		`{"type":"object","properties":{"action":{"type":"string","description":"write | read | list | shred."},"params":{"type":"object","description":"Per-action params. write accepts summary (string, required), state (clean|crashed|interrupted|force_end), commitments (string[]), open_questions (string[]). read/list accept session_id (string)."}},"required":["action"]}`,
-	},
-	{
-		"mpm_scratchpad",
-		"Volatile within-session working state. flush: write a partial thought; read: list active scratchpads; discard: drop one; promote: turn a scratchpad into a permanent memory (mpm_memory save). Not cross-session — promoted items become memories; unpromoted items are lost at session end. Required params: action.",
-		`{"type":"object","properties":{"action":{"type":"string","description":"flush | read | discard | promote."},"params":{"type":"object","description":"flush accepts thesis (string, required), supporting (string). read/discard/promote accept id (string)."}},"required":["action"]}`,
+		"Session state: read_wake_context, write_handoff, read_handoff, read_directives, route. Required: action. Use projection=compact (~130 tokens) for read_wake_context. write_handoff requires summary; chat acks are NOT session-close events.",
+		`{"type":"object","properties":{"action":{"type":"string","description":"read_wake_context | write_handoff | read_handoff | read_directives | proactive_recall_hint | query_global_rules | record_global_rule | route."},"params":{"type":"object","description":"read_wake_context: projection (compact|full). write_handoff: summary (string, required). read_handoff: session_id (string). route: prompt (string)."}},"required":["action"]}`,
 	},
 }
 

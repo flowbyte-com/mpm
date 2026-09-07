@@ -49,10 +49,18 @@ import (
 // agent reach specialists by name via the host shell. The full set is
 // restored by setting MPM_EXPOSE_ALL_TOOLS=1.
 //
-// The set is derived from the seven MPM behavioural invariants in
-// agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md: every invariant
-// maps to one tool. Specialists (work, theory, evidence, skills,
-// references, operations, blobs) are reachable but not initial.
+// 3-tool surface (post Sept-2026 launch polish):
+//   mpm_memory   persist/recall/show/shred (and reinforce/weaken/snooze/patch/promote)
+//   mpm_context  wake/directives/route/handoff (write/read) — absorbs mpm_handoff
+//   mpm_help     capability discovery (lists all 22 tools + per-tool reach_via_cli)
+//
+// Specialists reachable via mpm_help + mpm call:
+//   mpm_work, mpm_theories, mpm_decisions, mpm_lessons, mpm_topics,
+//   mpm_references, mpm_evidence, mpm_confidence, mpm_skills, mpm_wakes,
+//   mpm_scratchpad, mpm_resolve, mpm_blob_read, mpm_blob_search,
+//   mpm_retrieval_diagnose, log_to_changelog, request_review,
+//   mpm_system, mpm_handoff (standalone access — preferred path is
+//   through mpm_context action=write_handoff/read_handoff)
 //
 //  wake        → mpm_context   (read_wake_context, read_directives)
 //  persist     → mpm_memory    (save, query, show)
@@ -62,14 +70,14 @@ import (
 //  source-of-truth → mpm_memory (already listed)
 //  recovery    → mpm_help      (lists mpm call escape hatch)
 //
-// mpm_scratchpad is added because it is the documented
-// volatile-thinking substrate for active reasoning.
+// 3-tool initial surface — see the docstring above. Handoff is
+// reachable via mpm_context action=write_handoff/read_handoff; the
+// standalone mpm_handoff tool remains in the substrate for CLI /
+// direct access but is not in the initial surface.
 var defaultCoreTools = map[string]bool{
-	"mpm_memory":     true,
-	"mpm_context":    true,
-	"mpm_handoff":    true,
-	"mpm_scratchpad": true,
-	"mpm_help":       true,
+	"mpm_memory":  true,
+	"mpm_context": true,
+	"mpm_help":    true,
 }
 
 // coreToolFilter is the actual filter function passed to

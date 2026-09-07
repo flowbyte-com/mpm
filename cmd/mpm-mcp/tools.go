@@ -368,18 +368,15 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	s.AddTool(
 		mcp.NewTool("mpm_help",
 			mcp.WithDescription(
-				"Capability discovery. Returns every registered MPM tool "+
-					"name with a terse one-liner. Use when: an agent wants to "+
-					"know what specialist tools are reachable but not initially "+
-					"exposed. Specialists are reachable via the host shell: "+
-					"mpm call <tool> --payload. Use action=list for the full "+
-					"catalogue; action=show with params.tool=<name> for one tool."),
+				"Capability discovery. action=list: every MPM tool "+
+					"name + reach_via_cli. action=show tool=<name>: "+
+					"full description. Specialists via 'mpm call <tool>'."),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description("list or show."),
 			),
 			mcp.WithString("tool",
-				mcp.Description("Required for action=show. The tool name to inspect."),
+				mcp.Description("Required for action=show."),
 			),
 		),
 		makeHelpHandler(dm, ac),
@@ -391,26 +388,23 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	s.AddTool(
 		mcp.NewTool("mpm_memory",
 			mcp.WithDescription(
-				"Persistent memory. Save facts/learnings; query by text/id; "+
-					"show one row; shred (hard delete); reinforce/weaken; "+
-					"snooze/promote; patch metadata; review. Required params: action. "+
-					"For broad queries projection defaults to summary (256 chars + pointer); "+
-					"use projection=full or mpm_resolve for unabridged content. "+
-					"shred is permanent — no restore path. Call mpm_help show "+
-					"mpm_memory for the full schema."),
+				"Persistent memory: save/query/show facts across "+
+					"sessions. Required: action. Use projection=summary "+
+					"(default, ~256 chars + pointer) for recall; "+
+					"projection=full for unabridged content. shred is "+
+					"permanent. Call mpm_help show mpm_memory for the "+
+					"full schema."),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description("save | query | show | shred | reinforce | weaken | snooze | patch | promote."),
 			),
 			mcp.WithObject("params",
 				mcp.Description(
-					"Per-action params. Common keys: fact (string), "+
-						"query (string), id (string), memory_id (string), "+
-						"tags (string[]), weight (number), limit (number), "+
-						"projection (summary|full), scope (all|local|shared), "+
-						"ttl (duration like 7d/24h). "+
-						"See tools/full-schema/mpm_memory.json via mpm_help "+
-						"for the complete contract."),
+					"save: fact (string). query: query (string), "+
+						"projection (summary|full), limit (number). "+
+						"show: id (string). shred: id (string). "+
+						"reinforce/weaken: id (string), delta (number). "+
+						"See mpm_help."),
 			),
 		),
 		mcpAdapter(dm, ac, tools.MustByName("mpm_memory").Handler),
@@ -424,80 +418,39 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 		mcp.NewTool("mpm_context",
 			mcp.WithDescription(
 				"Session context. read_wake_context (browses recent "+
-					"memories, handoffs, overdue wakes); read_directives; "+
-					"proactive_recall_hint (suggests context-relevant "+
-					"memories); route (auto-selects mode/persona); "+
-					"query_global_rules / record_global_rule. Required "+
-					"params: action. For read_wake_context use "+
-					"projection=compact for ~130 token bounded output."),
+					"memories, overdue wakes); write_handoff / "+
+					"read_handoff (session continuity); read_directives; "+
+					"route (auto-selects mode/persona); query_global_rules. "+
+					"For read_wake_context use projection=compact for "+
+					"~130 token bounded output."),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description(
-					"read_wake_context | read_directives | proactive_recall_hint | "+
+					"read_wake_context | write_handoff | read_handoff | "+
+						"read_directives | proactive_recall_hint | "+
 						"query_global_rules | record_global_rule | route."),
 			),
 			mcp.WithObject("params",
 				mcp.Description(
 					"Per-action params. read_wake_context accepts "+
-						"projection: compact | full. route accepts prompt "+
-						"(string). See tools/full-schema/mpm_context.json "+
-						"via mpm_help."),
+						"projection (compact|full). write_handoff "+
+						"requires summary (string); read_handoff accepts "+
+						"session_id (string). route accepts prompt (string)."),
 			),
 		),
-		mcpAdapter(dm, ac, tools.MustByName("mpm_context").Handler),
+		mcpAdapter(dm, ac, contextAdapter(dm, ac)),
 	)
 
-	// mpm_handoff: compact surface. Most common actions are
-	// write (session-end summary) and read (next-session pickup).
-	s.AddTool(
-		mcp.NewTool("mpm_handoff",
-			mcp.WithDescription(
-				"Session handoff. write: persist summary at session "+
-					"end (REQUIRED: summary; optional commitments, "+
-					"open_questions, state). read: fetch handoff for "+
-					"next session. list/shred: manage the handoff "+
-					"ledger. summary must be non-empty; chat acks are "+
-					"NOT session-close events. Required params: action."),
-			mcp.WithString("action",
-				mcp.Required(),
-				mcp.Description("write | read | list | shred."),
-			),
-			mcp.WithObject("params",
-				mcp.Description(
-					"Per-action params. write accepts summary "+
-						"(string, required), state (clean|crashed|"+
-						"interrupted|force_end), commitments "+
-						"(string[]), open_questions (string[]). "+
-						"read/list accept session_id (string)."),
-			),
-		),
-		mcpAdapter(dm, ac, tools.MustByName("mpm_handoff").Handler),
-	)
-
-	// mpm_scratchpad: compact surface. Used for volatile working
-	// state within a session; promote to mpm_memory when complete.
-	s.AddTool(
-		mcp.NewTool("mpm_scratchpad",
-			mcp.WithDescription(
-				"Volatile within-session working state. flush: write "+
-					"a partial thought; read: list active scratchpads; "+
-					"discard: drop one; promote: turn a scratchpad into a "+
-					"permanent memory (mpm_memory save). Not cross-session "+
-					"— promoted items become memories; unpromoted items "+
-					"are lost at session end. Required params: action."),
-			mcp.WithString("action",
-				mcp.Required(),
-				mcp.Description("flush | read | discard | promote."),
-			),
-			mcp.WithObject("params",
-				mcp.Description(
-					"flush accepts thesis (string, required), "+
-						"supporting (string). read/discard/promote "+
-						"accept id (string)."),
-			),
-		),
-		mcpAdapter(dm, ac, tools.MustByName("mpm_scratchpad").Handler),
-	)
+	// mpm_help: capability discovery. Registered as a closure
+	// (not in tools.Registry) to avoid the init-order cycle that
+	// arises when a registry entry's handler references the
+	// registry itself. Also covers handoff write/read so the model
+	// has a single context surface for session state.
+	//
+	// (mpm_handoff and mpm_scratchpad removed from the initial
+	// surface — handoff is reachable via mpm_context.write_handoff /
+	// read_handoff; scratchpad is reachable via `mpm call
+	// mpm_scratchpad` for sessions that need volatile state.)
 }
 
 // mcpAdapter wraps a registry HandlerFunc as an MCP server.ToolHandlerFunc.
@@ -511,6 +464,33 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 //   - opportunistically fold any due scheduled_wakes into the response
 //
 // No arg-rewriting, no type assertions, no per-tool boilerplate. The
+// contextAdapter is the closure used by the mpm_context MCP tool.
+// It dispatches most actions to handleMpmContext, but routes the
+// handoff sub-actions (write_handoff / read_handoff) to handleMpmHandoff
+// — so the model has a single session-state surface covering wake,
+// directives, route, and handoff in one tool. The full mpm_handoff
+// tool (write/read/list/shred) remains in the substrate for direct
+// access via `mpm call mpm_handoff`.
+func contextAdapter(dm *core.DatabaseManager, ac core.ActiveContext) tools.HandlerFunc {
+	handoffHandler := tools.MustByName("mpm_handoff").Handler
+	contextHandler := tools.MustByName("mpm_context").Handler
+	return func(_ core.CoreDB, _ core.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+		action, _ := payload["action"].(string)
+		switch action {
+		case "write_handoff", "read_handoff":
+			// Re-shape the action to what handleMpmHandoff expects.
+			reshaped := map[string]interface{}{}
+			for k, v := range payload {
+				reshaped[k] = v
+			}
+			reshaped["action"] = strings.TrimPrefix(action, "_handoff")
+			return handoffHandler(dm, ac, reshaped)
+		default:
+			return contextHandler(dm, ac, payload)
+		}
+	}
+}
+
 // 30+ previous handle*() functions collapsed to this single closure.
 func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.HandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

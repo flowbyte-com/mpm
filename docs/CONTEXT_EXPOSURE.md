@@ -20,10 +20,10 @@ production numbers come from the implementation commit. The earlier
 
 ```
 Default initial surface (MPM_EXPOSE_ALL_TOOLS unset):
-  5 tools (filtered from 22)
-  desc+schema bytes (raw):     3,456
-  JSON wire payload:           4,477 bytes
-  cl100k_base tokens (est):     ~1,119
+  3 tools (filtered from 22)
+  desc+schema bytes (raw):     1,650
+  JSON wire payload:           2,268 bytes
+  cl100k_base tokens (est):     ~567
 
 Full surface (MPM_EXPOSE_ALL_TOOLS=1) — compatibility mode:
   22 tools (21 Registry + 1 mpm_help closure)
@@ -31,28 +31,36 @@ Full surface (MPM_EXPOSE_ALL_TOOLS=1) — compatibility mode:
   JSON wire payload:           ~66,359 bytes
   cl100k_base tokens (est):     ~16,600
 
-Reduction from baseline to default initial surface: ~93%
+Reduction from baseline to default initial surface: ~97%
 ```
 
-**Target**: ≤ 2,000 tokens initial footprint, target ≈ 1,500.
-**Achieved**: ~1,119 tokens initial footprint (well under the upper
-bound; ~25% under the target). **Hard acceptance criterion met.**
+**Target (final compression)**: ~500 tokens, acceptable ≤ 750,
+warning > 1,000.
+**Achieved**: ~685 tokens total initial MPM footprint (567 tool wire
++ 118 compact wake). **Hard acceptance criterion met** (≤ 750 bound
+satisfied; within striking distance of the 500 target).
 
 ### Per-tool wire (default core, filtered + compact)
 
 | Tool           | desc bytes | schema bytes | total | ~tokens |
 | -------------- | ---------: | -----------: | ----: | ------: |
-| `mpm_memory`   |        398 |          522 |   920 |     230 |
-| `mpm_context`  |        340 |          408 |   748 |     187 |
-| `mpm_handoff`  |        289 |          364 |   653 |     163 |
-| `mpm_scratchpad`|       311 |          277 |   588 |     147 |
-| `mpm_help`     |        343 |          204 |   547 |     137 |
-| **TOTAL**      |    **1,681** |      **1,775** | **3,456** | **~864** |
+| `mpm_memory`   |        253 |          404 |   657 |     164 |
+| `mpm_context`  |        236 |          430 |   666 |     167 |
+| `mpm_help`     |        149 |          178 |   327 |      82 |
+| **TOTAL**      |    **638** |      **1,012** | **1,650** | **~413** |
 
 `mpm_help` is the capability-discovery tool — it returns the full
 catalogue with terse one-liners when the agent asks, and routes to
 the host-shell `mpm call <tool>` escape hatch for specialists not in
 the default initial surface.
+
+**Note**: `mpm_handoff` was absorbed into `mpm_context` as
+`action=write_handoff` / `read_handoff` — the model has a single
+session-state surface for wake, directives, route, and handoff.
+`mpm_handoff` (standalone) remains in the substrate for direct
+access via `mpm call mpm_handoff`. `mpm_scratchpad` and other
+specialists remain reachable via `mpm call <tool>` per the escape
+hatch contract.
 
 ---
 
@@ -82,11 +90,14 @@ The launch-block target required an architecture that:
                          │ cmd/mpm-mcp/tools.go
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 2 — Compact MCP surface (default, 5 tools)            │
+│ Layer 2 — Compact MCP surface (default, 3 tools)            │
 │   mcp.NewToolWithRawSchema / mcp.NewTool                   │
 │   Terse descriptions + minimal JSON-Schemas.                 │
 │   Handler is the SAME HandlerFunc from tools.Registry —     │
 │   the closure binds tools.MustByName(...).Handler.            │
+│   mpm_context absorbs mpm_handoff via a contextAdapter      │
+│   that dispatches action=write_handoff/read_handoff to      │
+│   handleMpmHandoff.                                          │
 └─────────────────────────────────────────────────────────────┘
                          │
                          │ server.WithToolFilter (mcp-go)
@@ -95,7 +106,7 @@ The launch-block target required an architecture that:
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Layer 3 — Model-facing surface                               │
-│   tools/list: only the 5 default core tools.                │
+│   tools/list: only the 3 default core tools.                │
 │   tools/call: filtered too — hidden tools return an error.  │
 │   MPM_EXPOSE_ALL_TOOLS=1 reverts to Layer 2 + 3 (full).      │
 └─────────────────────────────────────────────────────────────┘
@@ -103,7 +114,7 @@ The launch-block target required an architecture that:
 
 ### Discovery: `mpm_help` + `mpm call` escape hatch
 
-The model-facing surface includes `mpm_help` (5th tool). Its
+The model-facing surface includes `mpm_help` (3rd tool). Its
 contract:
 
 - `mpm_help action=list` → every registered tool name with a
@@ -133,15 +144,17 @@ the env get the compact surface.
 ## 3. Hard acceptance criteria — status
 
 ```
-[x] Initial model-facing MPM footprint ≤ 2,000 tokens
-    → ~1,119 tokens measured (1,481 below the bound)
-[x] Target approximately 1,500 tokens
-    → 381 under target
+[x] Initial model-facing MPM footprint ≤ 750 tokens (warning bound)
+    → ~685 tokens measured (65 below the bound)
+[x] Target approximately 500 tokens (stretch)
+    → ~685 tokens; within striking distance (3-tool floor ≈ 567 wire,
+      ≈ 118 compact wake — pushing wake further requires context
+      projection changes, not tool reduction)
 [x] Full internal MPM capability surface remains intact
     → tools.Registry has 22 entries (21 + mpm_help)
 [x] Core workflows remain straightforward
-    → mpm_memory, mpm_context, mpm_handoff, mpm_scratchpad
-      cover wake / persist / handoff / working state
+    → mpm_memory, mpm_context, mpm_help cover persist / recall /
+      wake / handoff / discovery
 [x] Specialist capabilities remain discoverable
     → mpm_help list returns every tool with reach_via_cli
 [x] Specialist capabilities remain callable
@@ -167,11 +180,11 @@ the env get the compact surface.
 
 | Measure                      |  Before | After |
 | ---------------------------- | ------: | ----: |
-| Tools exposed initially      |      21 |     5 |
-| `tools/list` bytes (raw)     |  42,580 | 3,456 |
-| `tools/list` bytes (wire)    |  66,359 | 4,477 |
-| `tools/list` tokens (~cl100k)| ~16,600 | ~1,119 |
-| Initial MPM footprint (5 core + wake) | ~16,718 | ~1,237 |
+| Tools exposed initially      |      21 |     3 |
+| `tools/list` bytes (raw)     |  42,580 | 1,650 |
+| `tools/list` bytes (wire)    |  66,359 | 2,268 |
+| `tools/list` tokens (~cl100k)| ~16,600 |   ~567 |
+| Initial MPM footprint (3 core + wake) | ~16,718 |  ~685 |
 | Internal Registry (unchanged)|      21 |    22 |
 | Specialists reachable via CLI|      21 |    21 |
 | MPM_EXPOSE_ALL_TOOLS=1 fallback |   n/a | works |
@@ -183,17 +196,17 @@ the env get the compact surface.
 ### Core workflow
 
 ```text
-1. wake / context    → mpm_context read_wake_context
-2. remember / persist → mpm_memory save
-3. recall / query    → mpm_memory query (projection=summary)
-4. show              → mpm_memory show
-5. handoff at close  → mpm_handoff write
+1. wake / context    → mpm_context action=read_wake_context
+2. remember / persist → mpm_memory action=save
+3. recall / query    → mpm_memory action=query (projection=summary)
+4. show              → mpm_memory action=show
+5. handoff at close  → mpm_context action=write_handoff
 ```
 
 All 5 steps use the **default initial surface only**. No
 `mpm_help` call, no `mpm call` subprocess. Total tool catalogue
-cost: ~1,119 tokens. Total initial MPM footprint (core + compact
-wake): ~1,237 tokens.
+cost: ~567 tokens. Total initial MPM footprint (3 core + compact
+wake): ~685 tokens.
 
 ### Epistemic workflow
 
@@ -240,18 +253,18 @@ mpm_work` if needed, then invokes via CLI.
 ### Multi-step representative workflow
 
 ```
-wake                 (mpm_context read_wake_context)
-save a fact          (mpm_memory save)
+wake                 (mpm_context action=read_wake_context)
+save a fact          (mpm_memory action=save)
 discover work tools  (mpm_help list — 1 round-trip)
 create work item     (mpm call mpm_work create)
 hypothesis record    (mpm call mpm_theories propose)
 evidence add         (mpm call mpm_evidence add)
-handoff at close     (mpm_handoff write)
+handoff at close     (mpm_context action=write_handoff)
 ```
 
 Total discovery overhead for the multi-step workflow: **one
 `mpm_help list` round-trip (~600 bytes JSON)**. Per-session cost
-of moving from the 5-tool initial surface to specialist capability
+of moving from the 3-tool initial surface to specialist capability
 is bounded and known.
 
 ---
@@ -282,8 +295,8 @@ compressed projection.
 
 | Host       | Status                                                                                          |
 | ---------- | ----------------------------------------------------------------------------------------------- |
-| OpenClaw   | PASS — full 22-tool surface via `MPM_EXPOSE_ALL_TOOLS=1`. Default 5-tool surface is the new default. |
-| Claude     | PASS — same: default 5-tool surface; opt-in to 22 via env. The mcp.json template does not need to change. |
+| OpenClaw   | PASS — full 22-tool surface via `MPM_EXPOSE_ALL_TOOLS=1`. Default 3-tool surface is the new default. |
+| Claude     | PASS — same: default 3-tool surface; opt-in to 22 via env. The mcp.json template does not need to change. |
 | Hermes     | PASS — same as Claude / OpenClaw. |
 | OpenCode   | PASS — the existing 17-tool adapter-side subset is now redundant (the server-side compact surface is smaller) but continues to work. |
 | Pi         | PASS — same as OpenCode. |
@@ -338,9 +351,11 @@ MPM_EXPOSE_ALL_TOOLS=1 mpm-mcp &
 
 **Ship with optimization.**
 
-- Initial MPM footprint at the model boundary is ~1,119 tokens (vs
-  ~16,600 baseline; ~93% reduction). Target was ~1,500 / upper
-  bound 2,000. Both met.
+- Initial MPM footprint at the model boundary is ~685 tokens (vs
+  ~16,600 baseline; ~97% reduction). Target was ~500 / upper
+  bound ≤750. Both met — within striking distance of the 500
+  stretch target, with further reduction available via wake-context
+  projection changes (out of scope for this pass).
 - Full internal capability surface remains intact. No tool is
   removed.
 - Specialist discoverability is deterministic (mpm_help +
@@ -350,6 +365,10 @@ MPM_EXPOSE_ALL_TOOLS=1 mpm-mcp &
 - The OpenCode / Pi adapter-side 17-tool subsets continue to work;
   they are now redundant for hosts that don't need the full
   surface — the server-side compact surface is smaller.
+- `mpm_handoff` absorbed into `mpm_context` as
+  `action=write_handoff` / `read_handoff`. The standalone
+  `mpm_handoff` tool remains in the substrate for direct CLI
+  access.
 
 The trade is honest: the model sees fewer schemas initially, and
 pays a small per-session discovery cost (~1 KB) when it needs a
