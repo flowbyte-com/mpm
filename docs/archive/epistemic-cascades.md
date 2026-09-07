@@ -214,6 +214,15 @@ Two edge sources are combined when discovering downstream targets:
 
 Only downstream artifacts of type **`decision`** or **`theory`** are eligible. Lessons and global rules are explicitly excluded.
 
+> **Positive cascades can only originate from path 2.** Bare `dependencies`
+> JSON entries have no polarity field and are structurally excluded from
+> the positive-direction discovery path — not merely NULL-defaulted.
+> `discoverPositiveCascadeTargets` only queries `epistemic_provenance`
+> rows where `polarity='assumes_false'`; the JSON path is not consulted
+> at all. This is stronger than relying on the NULL default to keep
+> pre-existing JSON entries inert — there is no field at all to carry
+> the opt-in, so opt-in is impossible.
+
 ## Failure handling
 
 | Failure | Behavior |
