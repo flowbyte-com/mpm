@@ -1,48 +1,82 @@
 # Epistemic Cascades — Operator Guide
 
-**Feature added:** 2026-08-04  
-**Positive-direction cascade added:** 2026-09-07  
+**Feature added:** 2026-08-04
+**Positive-direction cascade added:** 2026-09-07
 **MPM version:** post-2026-07-16 (security audit baseline)
 
-## Overview
+## Conceptual model
 
-When a foundational artifact (memory, decision, or theory) is explicitly invalidated, downstream decisions and theories that relied on it remain structurally intact. Epistemic cascades automatically generate re-evaluation theories for every downstream reasoning artifact so the agent can consciously re-assess rather than operating on a now-invalid foundation.
+When the epistemic status of a foundational artifact crosses a hard boundary, MPM preserves downstream artifacts and emits explicit re-evaluation intents rather than silently rewriting downstream conclusions.
 
-The negative-direction cascade fires only on explicit invalidation events:
+Cascades are a **safety mechanism**, not a propagation mechanism. They never overwrite downstream content; they generate a pending re-evaluation theory that a human or an agent must resolve.
 
-- **Theory disproval** — `ResolveTheory` with `status="disproven"`
-- **Memory shred** — `ShredMemory` or `ShredMemoryWithCascade`
-- **Hard confidence crossing** — `RecomputeConfidence` drops confidence below `HardConfidenceInvalidationThreshold` (default: `0.3`)
+Cascade operates in two directions. The two directions share the outbox table, the materializer, the wake machinery, and the atomicity guarantees. They differ in their trigger surfaces, their polarity contract, and the hypothesis text the materializer emits.
 
-The positive-direction (constructive) cascade is the symmetric feature: it fires when a previously-uncertain foundation is observed as **proven**, surfacing downstream artifacts that opted in via `polarity='assumes_false'` for re-evaluation:
+| | negative cascade | positive cascade |
+|---|---|---|
+| foundation event | becomes invalid / disproven | becomes proven / crosses confidence ceiling |
+| trigger reasons | `theory_disproven`, `memory_shredded`, `confidence_floor` | `foundation_proven`, `confidence_ceiling` |
+| discovery path | `dependencies` JSON **OR** `epistemic_provenance` rows (any polarity, including NULL) | `epistemic_provenance` rows **only**, filtered to `polarity='assumes_false'` |
+| downstream eligibility | decisions and theories | decisions and theories that have explicitly opted in via `polarity='assumes_false'` |
+| hypothesis framing | "foundation invalidated; review whether downstream conclusion still holds" | "foundation proven; review whether downstream conclusion still holds given the foundation is now established" |
 
-- **Theory proven** — `ResolveTheory` with `status="proven"` enqueues one `foundation_proven` intent per dependent with `polarity='assumes_false'` (NULL-polarity dependents are silently filtered out).
-- **Confidence ceiling crossing** — `RecomputeConfidence` climbs above `HardConfidenceProvenThreshold` (default: `0.8`) enqueues one `confidence_ceiling` intent per opted-in dependent.
-
-The two directions share the same outbox table, the same materializer, and the same atomicity guarantees. They differ only in the `reason` field of the outbox row (`foundation_proven` / `confidence_ceiling` for positive; `theory_disproven` / `memory_shredded` / `confidence_floor` for negative) and the hypothesis text the materializer generates.
-
-### Polarity — explicit-only opt-in for positive cascades
-
-The `epistemic_provenance` table has a `polarity` column with a CHECK constraint restricting values to NULL, `'assumes_true'`, or `'assumes_false'`:
-
-- **NULL polarity** (the safe default; every pre-migration row and every new call without an explicit polarity) **never fires** a positive cascade. This is the load-bearing back-compat invariant: pre-existing citations are inert.
-- **`'assumes_false'`** — opt-in: "this downstream artifact assumes the source is false". When the source is proven true, the dependent surfaces for re-evaluation.
-- **`'assumes_true'`** — symmetric reserve, currently unused by trigger surfaces but part of the storage contract for forward compatibility.
-
-The polarity is **never inferred** from citation content (no keyword matching, no semantic similarity). The design is explicit-only — same stance as confirmation/contradiction (see `docs/epistemic-confirmation.md`). A downstream that explicitly negates its foundation in plain English must still pass `polarity='assumes_false'` to opt in.
-
-Ordinary confidence decreases that stay above the negative threshold do **not** trigger cascades. Confidence increases that stay below the proven threshold do **not** trigger positive cascades.
+The trigger surfaces are **not identical**. Negative cascades fire from the full discovery path. Positive cascades fire only from the explicit provenance path with `assumes_false` polarity. Bare `dependencies` JSON entries cannot trigger positive cascades because they carry no polarity field and are structurally excluded from the positive discovery path (not merely NULL-defaulted).
 
 ## What cascades produce
 
-Each cascade event (negative or positive direction) creates one **cascade intent** per downstream decision/theory. The materializer (running as `mpm cascade materialize`) converts each intent into a **pending re-evaluation theory** with metadata identifying the dead foundation, the affected downstream, and the trigger reason.
+Every cascade event (negative or positive direction) creates one **cascade intent** per downstream decision/theory. The materializer (running inside `cascade_drain` on `mpm-scheduler`, or directly via `mpm cascade materialize`) converts each intent into a **pending re-evaluation theory** with metadata identifying the foundation, the affected downstream, and the trigger reason.
 
-The generated theory's hypothesis is direction-aware:
+The generated theory is written via `ProposeTheoryWithExtras` (the standard theory write path — scanner + FTS), not a parallel write surface.
 
-- **Negative cascade** (default): "The artifact X requires re-evaluation because its cited foundation Y has been invalidated. Please review whether X's conclusions still hold without this foundation."
-- **Positive cascade** (`foundation_proven` / `confidence_ceiling` reason): "The artifact X may need re-evaluation because its cited foundation Y has now been proven. When this theory was originally formed, the foundation was uncertain; review whether X's conclusion still holds given the foundation is now established."
+## Operational model
 
-The validation criteria are the same for both directions — the dependent artifact is what needs review, not the foundation. Direction-specific phrasing belongs in the hypothesis, not the criteria.
+### Normal operation: scheduler-driven drain
+
+```
+NORMAL OPERATION
+mpm-scheduler
+   -> cascade_drain handler (registered tick handler)
+   -> claim pending intents (atomic claim in BEGIN IMMEDIATE)
+   -> materialize each intent into a re-evaluation theory
+   -> schedule cascade wakes for the agent
+```
+
+`cascade_drain` is registered as a tick handler in `cmd/mpm-scheduler/main.go`. There is no auto-starting background goroutine on the DatabaseManager. There is no second scheduling mechanism; the doc's previous reference to a cron entry is stale.
+
+### Foreground escape hatch: `mpm cascade materialize`
+
+`mpm cascade materialize` runs the same materializer with no time budget — the operator has chosen to wait. Use it when:
+
+- You don't want to run `mpm-scheduler` for a one-shot drain.
+- You need to drain a backlog outside the scheduler's tick cycle (post-incident catch-up, manual cleanup, CI smoke test).
+
+```bash
+mpm cascade materialize [flags]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--once` | `false` | Run one batch and exit |
+| `--max-iterations N` | `0` (unbounded) | Bound the number of batches; exits code `2` on timeout |
+| `--poll-interval T` | `5s` | Sleep between empty-queue polls (minimum `1s`) |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Queue drained successfully |
+| `1` | Runtime error |
+| `2` | `--max-iterations` exceeded |
+
+```bash
+# Drain once (single batch)
+mpm cascade materialize --once
+
+# Run with operator oversight: stop after 10 iterations
+mpm cascade materialize --max-iterations 10
+```
 
 ## Outbox table schema
 
@@ -103,49 +137,6 @@ WHERE collection = 'theories'
   AND json_extract(metadata, '$.cascade') = 1;
 ```
 
-## CLI usage
-
-### `mpm cascade materialize`
-
-Drains the outbox by repeatedly claiming pending intents, materializing each into a re-evaluation theory, and scheduling a cascade wake for the agent.
-
-```bash
-mpm cascade materialize [flags]
-```
-
-**Flags:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--once` | `false` | Run one batch and exit |
-| `--max-iterations N` | `0` (unbounded) | Bound the number of batches; exits code `2` on timeout |
-| `--poll-interval T` | `5s` | Sleep between empty-queue polls (minimum `1s`) |
-
-**Exit codes:**
-
-| Code | Meaning |
-|------|---------|
-| `0` | Queue drained successfully |
-| `1` | Runtime error |
-| `2` | `--max-iterations` exceeded |
-
-```bash
-# Drain once (single batch)
-mpm cascade materialize --once
-
-# Run with operator oversight: stop after 10 iterations
-mpm cascade materialize --max-iterations 10
-
-# Continuous drain (use in systemd timer or cron)
-mpm cascade materialize
-```
-
-**Cron scheduling example** — run every 5 minutes to drain the queue:
-
-```cron
-*/5 * * * * $HOME/.mpm/bin/mpm cascade materialize --poll-interval 30s
-```
-
 ### `mpm cascade list-dead-letters`
 
 Inspects failed (dead-letter) intents that exhausted retries or were suppressed at depth limit.
@@ -167,6 +158,71 @@ intent-abc123                      evt-xyz    memory     decision    abc123456  
 Outbox summary — pending=2 processing=0 materialized=15 failed=1
 ```
 
+## Generated cascade-theory provenance
+
+Every materialised cascade intent becomes a pending theory with:
+
+### Subject of review
+
+The downstream artifact. The generated theory's hypothesis and validation criteria are written about the downstream (`intent.DownstreamArtifactID`, `intent.DownstreamArtifactType`). The foundation is mentioned as the cited dependency, not as the subject.
+
+### How the foundation is represented
+
+The foundation (`intent.DeadArtifactID`) is included in **two** distinct places:
+
+1. **Theory `dependencies` column** — JSON array; contains `[intent.DeadArtifactID]`. This is the discoverable citation for subsequent cascade discovery.
+2. **Theory `metadata.cascade.*` fields** — top-level cascade metadata blob:
+   - `cascade: true`
+   - `cascade_version: 1`
+   - `dead_artifact_id: <intent.DeadArtifactID>`
+   - `dead_artifact_type: <intent.DeadArtifactType>`
+   - `downstream_artifact_id: <intent.DownstreamArtifactID>`
+   - `downstream_artifact_type: <intent.DownstreamArtifactType>`
+   - `cascade_depth: <intent.CascadeDepth>`
+   - `generated_at: <RFC3339>`
+   - `trigger_evidence_id: <optional, only when `intent.TriggerEvidenceID.Valid`>`
+
+The theory also carries a provenance row in `artifact_provenance` via `WithProvenanceOverride(provenanceWithParent(dead_artifact_id))`. That row records `parent_artifact_id = intent.DeadArtifactID` for forensic walking of the causal chain.
+
+### Citation behaviour
+
+The generated theory does **not** cite the downstream artifact. It is generated FOR the downstream, but the dependency link runs in the opposite direction (foundation → theory). The `epistemic_provenance` row written for the cascade theory has `parent_artifact_id = dead_artifact_id`; it does not add a polarity-bearing citation of the downstream.
+
+### Polarity
+
+The generated cascade theory does **NOT** carry a polarity-bearing provenance row. `WithProvenanceOverride` writes the `artifact_provenance` row (parent/causality lineage), but the polarity-aware table is `epistemic_provenance`, which is not written by the materializer. Effectively:
+
+> Generated cascade theories have NULL polarity on the path that the positive-cascade discovery queries. They are **invisible** to the positive-direction discovery query (`SELECT ... FROM epistemic_provenance WHERE polarity='assumes_false'`).
+
+This is a deliberate safety property: even if a future code change introduced a positive cascade trigger that defaulted to `assumes_true`, a generated cascade theory would not be discovered through the polarity path because the row simply does not exist.
+
+The polarity of a generated cascade theory in the storage sense is **NULL**, and the discovery paths respect that. It is not "inferred to assume_true" or "inferred to assume_false" — it is absent.
+
+### Recursive cascade participation
+
+A generated cascade theory **can** participate in subsequent cascades via the negative-direction discovery path:
+
+- The theory's `dependencies` JSON contains the foundation ID.
+- The negative discovery path queries `dependencies` JSON (`WHERE json_each.value = ?`).
+- Therefore, if the foundation is **further** invalidated, the generated cascade theory will be discovered as a downstream and a fresh intent will be created for it (subject to `cascade_depth` limit).
+
+A generated cascade theory **cannot** participate in subsequent positive cascades through the polarity path because no `epistemic_provenance` row exists for it.
+
+The `cascade_depth` field on each intent bounds recursion: depth 0 is the root event, depth 1 is a direct cascade, depth `MaxCascadeDepth` is the final permitted cascade, depth `> MaxCascadeDepth` is suppressed with a `CRITICAL` audit event.
+
+### Outbox row fields used by the materializer
+
+The materializer reads from the outbox row:
+
+| Field | Used for |
+|-------|----------|
+| `invalidation_event_id` | Stable causal trace id; also written into the theory's tags as `"cascade:<event_id>"`. |
+| `dead_artifact_id` / `dead_artifact_type` | Identifies the foundation. |
+| `downstream_artifact_id` / `downstream_artifact_type` | Identifies the subject of the re-evaluation. |
+| `trigger_evidence_id` | Optional; only set when the cascade was triggered by an evidence-driven `RecomputeConfidence`. Forwarded into `metadata.cascade.trigger_evidence_id`. |
+| `cascade_depth` | Bounded by `MaxCascadeDepth`. |
+| `reason` | Branches the hypothesis text (positive vs negative wording). |
+
 ## Cascade depth limit
 
 Maximum recursion depth: **`MaxCascadeDepth = 3`** (configurable via `CascadeMaterializerOptions.MaxCascadeDepth`).
@@ -179,11 +235,72 @@ Maximum recursion depth: **`MaxCascadeDepth = 3`** (configurable via `CascadeMat
 | 3 | Final permitted recursive cascade |
 | 4+ | Suppressed; CRITICAL audit event emitted; intent enters dead-letter state |
 
-The depth is embedded in each outbox row (`cascade_depth`) and in the materialized theory's metadata (`cascade_depth`).
+The depth is embedded in each outbox row (`cascade_depth`) and in the materialised theory's metadata (`cascade_depth`).
+
+## Polarity — explicit-only opt-in for positive cascades
+
+Polarity is a **safety invariant**, not merely an implementation detail. The `epistemic_provenance` table has a `polarity` column with a CHECK constraint restricting values to NULL, `'assumes_true'`, or `'assumes_false'`:
+
+| Polarity value | Behaviour for positive cascade |
+|---|---|
+| **NULL** | Inert for positive cascades. Pre-existing citations and every call without an explicit polarity land here. |
+| **`'assumes_false'`** | Explicit opt-in: "this downstream artifact assumes the source is false". When the source is proven true, the dependent surfaces for re-evaluation. |
+| **`'assumes_true'`** | Stored (storage contract) but currently unused by any trigger surface. Reserved for forward compatibility. |
+
+**Safety invariant:**
+
+> Polarity is **never inferred** from citation content (no keyword matching), from natural-language wording (no "negation" detection), from semantic similarity, or from dependency structure. The design is explicit-only — same stance as confirmation/contradiction (see `docs/archive/epistemic-confirmation.md`).
+
+A downstream that explicitly negates its foundation in plain English text but does not pass `polarity='assumes_false'` to `RecordProvenance` will not fire a positive cascade when the foundation is proven. That is the intended behavior, not a bug.
+
+## Confidence threshold-crossing detectors
+
+The cascade triggers on the **crossing event**, not on arbitrary changes in confidence. Mere decreases or increases do not trigger; the transition itself does.
+
+### Negative threshold-crossing detector
+
+```
+old >= HardConfidenceInvalidationThreshold (0.3)
+new <  HardConfidenceInvalidationThreshold (0.3)
+```
+
+The trigger fires only when both conditions hold: the artifact was at-or-above the threshold on the previous recompute, AND the new recompute puts it below. Once below the threshold, subsequent recomputes that continue to be below it do **not** re-trigger the cascade. The detector is implemented at `internal/core/evidence_store.go:344-345`:
+
+```go
+crossed := (!hasOldConf || oldConf >= HardConfidenceInvalidationThreshold) &&
+    conf < HardConfidenceInvalidationThreshold
+```
+
+The `!hasOldConf` clause treats a brand-new confidence record as if its prior value were at-or-above the threshold (the safe side for first-time invalidation).
+
+### Positive threshold-crossing detector
+
+```
+old <  HardConfidenceProvenThreshold (0.8)
+new >= HardConfidenceProvenThreshold (0.8)
+```
+
+Mirror image: the artifact was below the threshold on the previous recompute AND the new recompute climbs to at-or-above. Confidence increases that stay below the proven threshold do **not** trigger. Implemented at `internal/core/evidence_store.go:365-366`:
+
+```go
+ceilingCrossed := (!hasOldConf || oldConf < HardConfidenceProvenThreshold) &&
+    conf >= HardConfidenceProvenThreshold
+```
+
+### Constants
+
+| Constant | Default |
+|---|---|
+| `HardConfidenceInvalidationThreshold` | `0.3` |
+| `HardConfidenceProvenThreshold` | `0.8` |
 
 ## Wake delivery cap
 
-`CheckPendingWakes` applies a per-call cap of **`MaxCascadeWakePerCheck = 3`** cascade wakes. Notification and cron wakes are unaffected. Rows beyond the cap remain pending for the next call.
+`CheckPendingWakes` applies a per-call cap of **`MaxCascadeWakePerCheck = 3`** cascade wakes. The cap limits **delivery** per `check_wakes` call, not cascade-intent creation.
+
+> The wake cap throttles delivery/notification. It does not discard, suppress, or silently coalesce pending cascade intents. Cascade intents live in `epistemic_cascade_outbox`; the cap only affects how many cascade-flavoured wake rows are surfaced to the agent in a single `check_wakes` call.
+
+Notification and cron wakes are unaffected. Cascade wakes beyond the cap remain pending for the next call.
 
 ```sql
 -- Verify the cap constant
@@ -192,8 +309,25 @@ WHERE metadata LIKE '%"kind":"cascade"%'
 ORDER BY target_time ASC;
 ```
 
-**Pagination example:**
-- 9 cascade wakes pending → three calls to `check_wakes` with `kinds=["cascade"]` returns 3, 3, 3.
+**Pagination example:** 9 cascade wakes pending → three calls to `check_wakes` with `kinds=["cascade"]` returns 3, 3, 3.
+
+## Scheduler drain budget semantics
+
+The `cascade_drain` handler runs on every scheduler tick under a per-tick wall-clock budget (default 30s). The handler yields on **four** distinct reasons and logs each with the `yield_reason` field:
+
+| `yield_reason` | Operational meaning |
+|---|---|
+| `queue_empty` | Outbox drained, normal completion. No more pending intents. Handler exits cleanly until next tick. |
+| `budget_exhausted` | Per-tick budget consumed before the queue drained. More pending intents remain. Expected under load — the next tick will resume. |
+| `context_cancelled` | Scheduler shutdown mid-tick (e.g. `mpm-scheduler` stopped). Expected on daemon shutdown; the next start picks up where it left off. |
+| `error` | Actual handler or DB failure during a batch. Investigate logs. The handler logs an `AuditWarn` and a structured `Error` line. |
+
+`budget_exhausted` is **not** a failure. It is a normal scheduling-yield condition: the handler does what it can within its budget and yields to the next tick. An operator who sees `budget_exhausted` consistently should consider:
+
+- Increasing `CascadeDrainOptions.Budget` (the per-tick ceiling).
+- Investigating the outbox for unusually large backlogs (`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status='pending'`).
+
+The scheduler's 60s tick has 30s of headroom for the cascade_drain budget by default.
 
 ## Retry and backoff
 
@@ -207,40 +341,32 @@ After `MaxRetries = 3` attempts, the intent enters **dead-letter state** (`statu
 
 ## Dependency discovery
 
-Two edge sources are combined when discovering downstream targets:
+Two edge sources are combined when discovering downstream targets for **negative** cascades:
 
-1. **Explicit `dependencies` JSON** — theories that list the dead artifact ID in their `dependencies` column
-2. **Typed provenance citations** — `epistemic_provenance` rows linking source → downstream (created when `source_ids` are passed to `RecordDecision` or `ProposeTheory`)
+1. **Explicit `dependencies` JSON** — theories that list the dead artifact ID in their `dependencies` column.
+2. **Typed provenance citations** — `epistemic_provenance` rows linking source → downstream (created when `source_ids` are passed to `RecordDecision` or `ProposeTheory`).
 
-Only downstream artifacts of type **`decision`** or **`theory`** are eligible. Lessons and global rules are explicitly excluded.
+Only downstream artifacts of type **`decision`** or **`theory`** are eligible. Lessons and global rules are explicitly excluded (`isEligibleCascadeType` filter).
 
-> **Positive cascades can only originate from path 2.** Bare `dependencies`
-> JSON entries have no polarity field and are structurally excluded from
-> the positive-direction discovery path — not merely NULL-defaulted.
-> `discoverPositiveCascadeTargets` only queries `epistemic_provenance`
-> rows where `polarity='assumes_false'`; the JSON path is not consulted
-> at all. This is stronger than relying on the NULL default to keep
-> pre-existing JSON entries inert — there is no field at all to carry
-> the opt-in, so opt-in is impossible.
+**Positive cascades can only originate from path 2.** Bare `dependencies` JSON entries have no polarity field and are structurally excluded from the positive-direction discovery path — not merely NULL-defaulted. `discoverPositiveCascadeTargets` queries only `epistemic_provenance` rows where `polarity='assumes_false'`; the JSON path is not consulted at all.
 
-## Failure handling
+> This is stronger than relying on the NULL default to keep pre-existing JSON entries inert — there is no field at all to carry the opt-in, so opt-in via JSON is impossible by construction.
 
-| Failure | Behavior |
-|---------|----------|
-| Outbox INSERT fails | Root mutation rolls back (atomicity: no divergence) |
-| Theory creation fails | Exponential backoff retry; after 3 attempts → dead-letter + CRITICAL audit |
-| Depth exceeds limit | Intent suppressed; dead-letter + CRITICAL audit |
-| Materializer crashes | Restart recovery: `status='processing'` rows with `updated_at > 5 minutes ago` reset to `status='pending'` |
+## Failure handling and atomicity guarantees
 
-## Hard confidence threshold
+| Failure | Behaviour |
+|---------|-----------|
+| Outbox INSERT fails | Root mutation rolls back (atomicity: no divergence between invalidation and outbox). |
+| Theory creation fails | Exponential backoff retry; after `MaxRetries = 3` attempts → dead-letter + `CRITICAL` audit event. |
+| Depth exceeds limit | Intent suppressed at materialisation; dead-letter + `CRITICAL` audit event. |
+| Materializer crashes mid-batch | Restart recovery: `status='processing'` rows with `updated_at > 5 minutes ago` (the staleness window) are reset to `status='pending'` on the next `claimCascadeIntents`. `attempt_count` is preserved across recoveries (a poison pill that gets SIGKILL'd mid-process must accumulate retries across crashes; otherwise the dead-letter cap never trips). |
+| Wake insert fails after materialisation | The `wake_scheduled` flag stays `0` on the outbox row; the reconcile pass (`ReconcileUnscheduledCascadeWakes`) re-schedules the wake on the next sweep. The theory is durable; only the wake-booking is recoverable. |
 
-`HardConfidenceInvalidationThreshold = 0.3`
+These guarantees are the post-M3 audit H-2/H-3 fixes (2026-08-31) and are regression-pinned by `internal/core/cascade_materializer_durability_test.go`.
 
-A negative cascade fires only when confidence **crosses** the threshold (not just decreases toward it). Once below the threshold, further recomputes do not re-trigger cascades.
+### Idempotent dedup
 
-`HardConfidenceProvenThreshold = 0.8` (positive direction)
-
-A positive cascade fires only when confidence **crosses upward** past the proven threshold. The detector is the mirror image of the negative crossing: old below threshold AND new >= threshold. NULL-polarity downstreams are filtered out by `discoverPositiveCascadeTargets`, so the cascade only fires for opted-in citations.
+The outbox carries `UNIQUE(dead_artifact_id, downstream_artifact_id, invalidation_event_id)`. The same root invalidation cannot produce duplicate intents for the same downstream within one event. `markMaterialized` is also idempotent: re-running on an already-materialised row produces the same theory (theory identity = `invalidation_event_id + downstream_artifact_id`).
 
 ## Federation (shared DB)
 
@@ -250,37 +376,25 @@ When `MPM_SHARED_DB` is attached, cascade intents are written to both local and 
 
 | Knob | Default | Notes |
 |------|---------|-------|
-| `MaxCascadeDepth` | `3` | Storage-level ceiling on `cascade_depth` |
-| `MaxCascadeWakePerCheck` | `3` | Wake delivery cap per `check_wakes` call |
-| `MaxRetries` | `3` | Retries before dead-letter |
-| `CascadeMaterializerOptions.WakeDelay` | `1s` | Delay before scheduling cascade wake after materialization |
-| `CascadeMaterializerOptions.BatchSize` | `10` | Intents claimed per `MaterializeBatch` call |
-| `HardConfidenceInvalidationThreshold` | `0.3` | Confidence floor for cascade trigger |
-| `HardConfidenceProvenThreshold` | `0.8` | Confidence ceiling for positive-cascade trigger (mirror of the floor; same crossing-detector shape) |
-| `PolarityAssumesTrue` | `"assumes_true"` | Symmetric reserve polarity value; not currently fired by any trigger surface |
-| `PolarityAssumesFalse` | `"assumes_false"` | Opt-in polarity for foundation_proven / confidence_ceiling cascades |
+| `MaxCascadeDepth` | `3` | Storage-level ceiling on `cascade_depth`. |
+| `MaxCascadeWakePerCheck` | `3` | Wake delivery cap per `check_wakes` call. |
+| `MaxRetries` | `3` | Retries before dead-letter. |
+| `CascadeMaterializerOptions.WakeDelay` | `1s` | Delay before scheduling cascade wake after materialisation. Set to `0` to disable. |
+| `CascadeMaterializerOptions.BatchSize` | `10` | Intents claimed per `MaterializeBatch` call. |
+| `CascadeDrainOptions.Budget` | `30s` | Per-tick wall-clock budget for `cascade_drain`. |
+| `CascadeDrainOptions.BatchSize` | `10` | Claim size per inner-loop iteration. |
+| `HardConfidenceInvalidationThreshold` | `0.3` | Confidence floor for negative-cascade trigger. |
+| `HardConfidenceProvenThreshold` | `0.8` | Confidence ceiling for positive-cascade trigger. |
+| `PolarityAssumesTrue` | `"assumes_true"` | Storage contract; not currently fired by any trigger surface. |
+| `PolarityAssumesFalse` | `"assumes_false"` | Opt-in polarity for `foundation_proven` / `confidence_ceiling` cascades. |
 
 All are constants in `internal/core/`; the materializer options are also settable via `NewCascadeMaterializer(dm, opts)`.
 
-## Operational notes — scheduler-driven cascade drain
+## Confirm draining is happening
 
-Cascade intent draining is now driven exclusively by the `cascade_drain`
-handler in `mpm-scheduler`. There is no longer an auto-starting
-background goroutine on the DatabaseManager.
+`mpm-scheduler` logs a `cascade drain yielded` line on every tick where the handler runs, with one of the four `yield_reason` values above.
 
-### Confirm draining is happening
-
-`mpm-scheduler` logs a `cascade drain yielded` line on every tick where
-the handler runs, with one of four `yield_reason` values:
-
-| reason              | meaning                                              |
-|---------------------|------------------------------------------------------|
-| `queue_empty`       | outbox drained, normal exit                          |
-| `budget_exhausted`  | budget (default 30s) ran out, more pending           |
-| `context_cancelled` | scheduler shutdown mid-tick, expected on `mpm stop`  |
-| `error`             | DB-level error during a batch, investigate logs      |
-
-### "I shredded a root directive but the cascade hasn't materialized"
+### "I shredded a root directive but the cascade hasn't materialised"
 
 1. Is `mpm-scheduler` running? Look for `cascade drain yielded` log lines.
 2. Is the outbox non-empty?
@@ -293,12 +407,18 @@ the handler runs, with one of four `yield_reason` values:
    you need faster drain after large blasts.
 4. Are intents in `status='failed'`? Inspect with `mpm cascade list-dead-letters`.
 
-### Foreground escape hatch
+## Terminology
 
-If you don't want to run `mpm-scheduler`, use `mpm cascade materialize`.
-No time budget — the operator chose to wait.
-
-### Tuning the budget
-
-`CascadeDrainOptions.Budget` defaults to 30s. The handler yields when
-the budget runs out; the scheduler's 60s tick has 30s of headroom.
+| Term | Meaning |
+|---|---|
+| foundation | The artifact whose epistemic state changed. Named `dead_artifact_id` in the outbox row even when the change is positive (foundation becomes proven). The naming reflects the historical negative-direction origin. |
+| foundation invalidation | Negative direction event: a foundation becomes invalid / disproven. |
+| foundation proven | Positive direction event: a foundation crosses the proven threshold. |
+| foundation_proven reason | Positive-direction reason label; emitted by `EnqueueCascadeFoundationProven`. |
+| downstream artifact | The artifact that cited (or depended on) the foundation and is now subject to re-evaluation. Named `downstream_artifact_id` in the outbox row. |
+| dependent | Used interchangeably with "downstream artifact" in the negative-direction surface. |
+| cascade intent | One row in `epistemic_cascade_outbox`. Pending → processing → materialised/failed. |
+| cascade theory | The pending theory materialised from a cascade intent. Identified by `cascade=true` in metadata and a unique id. |
+| re-evaluation theory | Same as "cascade theory". The naming reflects that the downstream requires conscious re-assessment, not automatic rewriting. |
+| cascade wake | A wake row with `metadata.kind='cascade'`; surfaces the re-evaluation theory to the agent. |
+| invalidation event | The causal event id shared by all intents produced from one trigger surface invocation. Stable across the cascade chain. |
