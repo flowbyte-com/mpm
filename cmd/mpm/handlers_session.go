@@ -61,6 +61,13 @@ Examples:
 }
 
 func handleSessionAdd(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleSessionHelp()
+		}
+	}
 	if len(args) == 0 {
 		return respond("", "Usage: mpm session add <content>", 1)
 	}

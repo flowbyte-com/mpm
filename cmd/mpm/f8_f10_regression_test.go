@@ -107,7 +107,7 @@ func TestF8_DebugShowReportsStoredWeight(t *testing.T) {
 			}
 
 			out := captureStdout(t, func() {
-				runShow(dm, id)
+				runShow(dm, id, false)
 			})
 			idx := strings.Index(out, "Weight:")
 			if idx < 0 {

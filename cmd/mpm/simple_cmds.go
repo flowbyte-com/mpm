@@ -243,10 +243,13 @@ func handleLs(args []string) int {
 	limit := fs.Int("limit", 20, "Maximum results")
 	since := fs.String("since", "", "Since date (YYYY-MM-DD)")
 	until := fs.String("until", "", "Until date (YYYY-MM-DD)")
+	jsonOutput := fs.Bool("json", false, "Emit JSON array of memory rows on stdout (LF1 reorder still applies for positional content)")
 	fs.Usage = func() {
-		fmt.Println("Usage: mpm ls [options]")
+		fmt.Println("Usage: mpm ls [options] [--json]")
 		fmt.Println("\nList options:")
 		fs.PrintDefaults()
+		fmt.Println("\nWhen --json is set, output is a single JSON array of memory")
+		fmt.Println("rows on stdout. Diagnostics stay on stderr.")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return 1
@@ -270,6 +273,24 @@ func handleLs(args []string) int {
 
 	if len(filtered) > *limit {
 		filtered = filtered[:*limit]
+	}
+
+	if *jsonOutput {
+		// JSON path: emit a single array on stdout. Diagnostics must
+		// NOT land here (R2 — agent integrations would otherwise see
+		// unparseable mixed output). Use os.Stdout directly via fmt so
+		// usererror warnings on stderr stay separate.
+		rows := make([]map[string]interface{}, 0, len(filtered))
+		for _, m := range filtered {
+			rows = append(rows, lsMemoryRow(m))
+		}
+		data, mErr := json.Marshal(rows)
+		if mErr != nil {
+			usererror.Error("ls --json: marshal failed: %v", mErr)
+			return 1
+		}
+		fmt.Println(string(data))
+		return 0
 	}
 
 	if len(filtered) == 0 {
@@ -317,6 +338,18 @@ func handleLs(args []string) int {
 	return 0
 }
 
+// lsMemoryRow normalizes a memory map into the JSON-friendly shape used
+// by `mpm ls --json`. Kept consistent with the field names emitted by
+// `mpm show --json` so an agent can rely on the same keys across the
+// list and show surfaces.
+func lsMemoryRow(m map[string]interface{}) map[string]interface{} {
+	row := map[string]interface{}{}
+	for k, v := range m {
+		row[k] = v
+	}
+	return row
+}
+
 func filterByTag(memories []map[string]interface{}, tag string) []map[string]interface{} {
 	var result []map[string]interface{}
 	for _, m := range memories {
@@ -333,8 +366,27 @@ func filterByTag(memories []map[string]interface{}, tag string) []map[string]int
 
 // mpm show <id> — Show memory details
 func handleShow(args []string) int {
-	if len(args) < 2 {
-		usererror.Usage("mpm show <id>")
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "Emit single JSON object to stdout; diagnostics stay on stderr")
+	fs.Usage = func() {
+		fmt.Println("Usage: mpm show [--json] <id>")
+		fmt.Println("\nShow options:")
+		fs.PrintDefaults()
+		fmt.Println("\nWhen --json is set, the memory row is emitted as a single")
+		fmt.Println("JSON object. Without --json the human-readable card is printed.")
+	}
+	// LF1 parity: Go's flag.Parse switches to positional-only mode once
+	// a positional argument is seen. `mpm show <id> --json` would silently
+	// absorb "--json" as part of the ID and fail to look up the memory.
+	// reorderFlagsBeforePositionals pulls --json out before the positional
+	// ID so flag.Parse sees them in the expected order.
+	cleaned := reorderFlagsBeforePositionals(args[1:], "--json")
+	if err := fs.Parse(cleaned); err != nil {
+		return 1
+	}
+	id := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if id == "" {
+		usererror.Usage("mpm show [--json] <id>")
 		return 1
 	}
 
@@ -342,16 +394,38 @@ func handleShow(args []string) int {
 	if dm == nil {
 		return 1
 	}
-	return runShow(dm, args[1])
+	return runShow(dm, id, *jsonOutput)
 }
 
 // runShow is the injectable core of `mpm show` so tests can drive it
-// against a hermetic database.
-func runShow(dm mpminternal.CoreDB, id string) int {
+// against a hermetic database. The jsonOutput parameter routes through
+// the JSON envelope when true; otherwise the human-readable card is
+// emitted as before.
+func runShow(dm mpminternal.CoreDB, id string, jsonOutput bool) int {
 	mem, err := dm.GetMemory(id)
 	if err != nil || mem == nil {
 		usererror.Error("Memory not found: %s", id)
 		return 1
+	}
+
+	if jsonOutput {
+		// JSON envelope shape: id, collection, created_at, session_id,
+		// weight, tags, content, metadata. Kept consistent with the
+		// row shape `mpm ls --json` emits (each row in `ls --json` has
+		// the same keys), so an agent iterating `ls --json` then
+		// `show --json <id>` sees a stable schema.
+		row := map[string]interface{}{}
+		for k, v := range mem {
+			row[k] = v
+		}
+		row["id"] = id
+		data, mErr := json.Marshal(row)
+		if mErr != nil {
+			usererror.Error("show --json: marshal failed: %v", mErr)
+			return 1
+		}
+		fmt.Println(string(data))
+		return 0
 	}
 
 	fmt.Println("\n══════════════════════════════════════════")
@@ -943,6 +1017,15 @@ func handleShredMem(args []string) int {
 
 // handleRefAdd ingests a file as a reference document
 func handleRefAdd(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix. Without this, `mpm reference
+	// add --help` would attempt to open a file named "help" and surface
+	// "File not found" instead of printing reference help.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return printRefHelp()
+		}
+	}
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	tag := fs.String("tag", "", "Tags for the reference")

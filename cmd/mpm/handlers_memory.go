@@ -126,6 +126,19 @@ func handlePrimeDirectives() int {
 }
 
 func handleMemoryAdd(args []string) int {
+	// R3: --help / -h / "help" at any position triggers help. Without this,
+	// the trailing help token (router.parseFlags rewrites --help to the
+	// literal token "help" before this handler runs) falls through as
+	// DATA — manual validation surfaced this as `mpm memory add --help`
+	// actually adding a memory with content "help" instead of printing
+	// help. Same defect in handleMemorySearch/List/Show; each shares this
+	// short-circuit. handleWorkItem (handlers_work.go) has had the
+	// pattern since the original subcommand-help fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleMemoryHelp()
+		}
+	}
 	if len(args) == 0 {
 		return respond("", "Usage: mpm memory add [--fact <text>] [--tags <csv>] [--weight <0-100>] [--expires-in <duration>] [-i|--interactive] [--json] <content>", 1)
 	}
@@ -461,6 +474,13 @@ func handleMemoryAdd(args []string) int {
 }
 
 func handleMemorySearch(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleMemoryHelp()
+		}
+	}
 	if len(args) == 0 {
 		return respond("", "Usage: mpm memory search <query> [--limit N] [--json]", 1)
 	}
@@ -612,6 +632,13 @@ func truncateSnippet(s string, max int) string {
 }
 
 func handleMemoryShow(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleMemoryHelp()
+		}
+	}
 	if len(args) == 0 {
 		return respond("", "Usage: mpm memory show <id>", 1)
 	}
@@ -657,6 +684,13 @@ func handleMemoryShred(args []string) int {
 }
 
 func handleMemoryList(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleMemoryHelp()
+		}
+	}
 	store := getMemoryStore()
 
 	memories, err := store.GetRecent(20)

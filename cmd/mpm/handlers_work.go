@@ -114,6 +114,16 @@ func workCommonFlags(rest []string, hasJSON bool) (sessionID string, jsonOutput 
 // handleWorkStatus shows a one-line status: session_id, thesis preview,
 // age, expiry. Uses StatusRenderer.
 func handleWorkStatus(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix. Without this, `mpm work
+	// status --help` would render the working-context status block
+	// instead of printing work help.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printWorkHelp()
+			return 0
+		}
+	}
 	sessionID, _ := workCommonFlags(args, false)
 	dm := getDBConcrete()
 	if dm == nil {

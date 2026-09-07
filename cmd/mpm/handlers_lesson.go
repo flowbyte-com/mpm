@@ -64,6 +64,13 @@ Lesson types:
 }
 
 func handleLessonAdd(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleLessonHelp()
+		}
+	}
 	if len(args) == 0 {
 		return respond("", "Usage: mpm lesson add <content> [--type warning|practice|insight] [--tags tags] [--json]", 1)
 	}
