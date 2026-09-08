@@ -87,8 +87,15 @@ const MPM_FRAMEWORK_ID = "openclaw";
 /** @type {Map<string, Promise<string>>} */
 const wakeContextCache = new Map();
 
-function sessionKeyFor(event) {
-  return event?.sessionKey || event?.session?.sessionKey || "default";
+function sessionKeyFor(event, ctx) {
+  // OpenClaw hook contexts split the session identifier across `event`
+  // and `ctx` depending on the hook. The `agent_turn_prepare` event
+  // does NOT carry sessionKey (it has prompt/messages/queuedInjections
+  // only) — that field lives on the ctx argument instead. Preferring
+  // ctx first makes the cache key match what session_start stored, so
+  // the agent_turn_prepare handler actually finds the cached wake
+  // promise and returns prependContext.
+  return ctx?.sessionKey || event?.sessionKey || event?.session?.sessionKey || "default";
 }
 
 // --------------------------------------------------------------------------
@@ -473,10 +480,15 @@ export default definePluginEntry({
     // OpenClaw hook type: PluginHookSessionStartEvent
     // Fields: sessionId, sessionKey?, resumedFrom?
     // ------------------------------------------------------------------
-    api.on("session_start", (event) => {
-      const sessionKey = event?.sessionKey || "default";
+    api.on("session_start", (event, ctx) => {
+      const sessionKey = sessionKeyFor(event, ctx);
       // Avoid duplicate fetches for the same sessionKey
-      if (wakeContextCache.has(sessionKey)) return;
+      if (wakeContextCache.has(sessionKey)) {
+        if (typeof log.info === "function") {
+          log.info(`openclaw-mpm-memory: session_start for ${sessionKey} (cached, skipped fetch)`);
+        }
+        return;
+      }
 
       // Start async fetch (non-blocking — don't await here)
       const promise = fetchWakeContext({
@@ -484,11 +496,27 @@ export default definePluginEntry({
         timeoutMs,
         frameworkId: MPM_FRAMEWORK_ID,
         sessionKey,
+      }).then((ctx2) => {
+        if (typeof log.info === "function") {
+          log.info(
+            `openclaw-mpm-memory: session_start wake fetched for ${sessionKey} ` +
+            `(length=${typeof ctx2 === "string" ? ctx2.length : 0})`
+          );
+        }
+        return ctx2;
+      }).catch((err) => {
+        if (typeof log.warn === "function") {
+          log.warn(`openclaw-mpm-memory: session_start wake fetch failed for ${sessionKey} — ${err?.message || err}`);
+        }
+        return "";
       });
       wakeContextCache.set(sessionKey, promise);
 
-      if (typeof log.debug === "function") {
-        log.debug(`openclaw-mpm-memory: session_start for ${sessionKey}${event?.resumedFrom ? ` (resumedFrom=${event.resumedFrom})` : ""}`);
+      if (typeof log.info === "function") {
+        log.info(
+          `openclaw-mpm-memory: session_start for ${sessionKey}` +
+          (event?.resumedFrom ? ` (resumedFrom=${event.resumedFrom})` : "")
+        );
       }
     });
 
@@ -505,12 +533,12 @@ export default definePluginEntry({
     // Fields: sessionId, sessionKey?, reason?, messageCount, durationMs?,
     //         transcriptArchived?, nextSessionId?, nextSessionKey?
     // ------------------------------------------------------------------
-    api.on("session_end", (event) => {
-      const sessionKey = event?.sessionKey || "default";
+    api.on("session_end", (event, ctx) => {
+      const sessionKey = sessionKeyFor(event, ctx);
       wakeContextCache.delete(sessionKey);
 
-      if (typeof log.debug === "function") {
-        log.debug(
+      if (typeof log.info === "function") {
+        log.info(
           `openclaw-mpm-memory: session_end for ${sessionKey} ` +
           `(reason=${event?.reason ?? "?"}, messages=${event?.messageCount ?? "?"})`
         );
@@ -531,23 +559,52 @@ export default definePluginEntry({
     //
     // OpenClaw hook type: PluginAgentTurnPrepareEvent
     // Returns: {prependContext?, appendContext?}
+    //
+    // Belt-and-braces: if no cached promise exists (e.g. session_start was
+    // never delivered, or the cache was cleared), fetch synchronously with
+    // the same race ceiling. This handles the OpenClaw lifecycle race where
+    // agent_turn_prepare fires for a session before session_start lands.
     // ------------------------------------------------------------------
-    api.on("agent_turn_prepare", async (event) => {
-      const sessionKey = event?.sessionKey || "default";
-      const cached = wakeContextCache.get(sessionKey);
+    api.on("agent_turn_prepare", async (event, ctx) => {
+      const sessionKey = sessionKeyFor(event, ctx);
+      let cached = wakeContextCache.get(sessionKey);
 
-      if (!cached) return; // No fetch was started for this session
+      if (!cached) {
+        // Fallback: synchronous fetch with race ceiling. The cache will be
+        // populated for any subsequent turns in the same session.
+        if (typeof log.info === "function") {
+          log.info(`openclaw-mpm-memory: agent_turn_prepare for ${sessionKey} (no cached wake, fetching)`);
+        }
+        cached = fetchWakeContext({
+          mpmBin,
+          timeoutMs,
+          frameworkId: MPM_FRAMEWORK_ID,
+          sessionKey,
+        });
+        wakeContextCache.set(sessionKey, cached);
+      }
 
-      // Await even if already resolved (safe for already-resolved promises)
+      // Race the fetch against a tighter ceiling (1500 ms — wake is meant
+      // to be cheap; a slow mpm should not stall the first turn).
       let wakeContext = "";
       try {
         wakeContext = await Promise.race([
           cached,
-          new Promise((resolve) => setTimeout(() => resolve(""), timeoutMs)),
+          new Promise((resolve) => setTimeout(() => resolve(""), 1500)),
         ]);
       } catch {
         // On any error, inject nothing — never block the agent turn
+        if (typeof log.warn === "function") {
+          log.warn(`openclaw-mpm-memory: agent_turn_prepare wake race failed for ${sessionKey}`);
+        }
         return;
+      }
+
+      if (typeof log.info === "function") {
+        log.info(
+          `openclaw-mpm-memory: agent_turn_prepare for ${sessionKey} ` +
+          `(cached=${wakeContextCache.has(sessionKey)}, wakeLength=${wakeContext?.length ?? 0})`
+        );
       }
 
       if (wakeContext && wakeContext.length > 0) {
@@ -567,9 +624,9 @@ export default definePluginEntry({
     // Fields: sessionKey?, agentId?, heartbeatName?
     // Returns: {prependContext?, appendContext?}
     // ------------------------------------------------------------------
-    api.on("heartbeat_prompt_contribution", async (event) => {
+    api.on("heartbeat_prompt_contribution", async (event, ctx) => {
       // Fetch a lightweight MPM status for heartbeat context
-      const sessionKey = event?.sessionKey || "default";
+      const sessionKey = sessionKeyFor(event, ctx);
       let statusText = "";
 
       try {
@@ -606,14 +663,17 @@ export default definePluginEntry({
     // Fields: sessionKey?, toolName?, host?
     // Returns: Record<string, string> — env vars to merge
     // ------------------------------------------------------------------
-    api.on("resolve_exec_env", (event) => {
+    api.on("resolve_exec_env", (event, ctx) => {
       const env = {
         MPM_PROVENANCE_FRAMEWORK: MPM_FRAMEWORK_ID,
       };
       // OpenClaw sessionKey is the closest equivalent to Claude Code's
-      // CLAUDE_SESSION_ID. Pass it when available.
-      if (event?.sessionKey) {
-        env.MPM_PROVENANCE_SESSION_KEY = event.sessionKey;
+      // CLAUDE_SESSION_ID. Prefer ctx.sessionKey (the actual location
+      // for this hook too) and fall back to event.sessionKey for any
+      // caller that mirrors it on the event.
+      const sessionKey = ctx?.sessionKey || event?.sessionKey;
+      if (sessionKey) {
+        env.MPM_PROVENANCE_SESSION_KEY = sessionKey;
       }
       // Model name is not available in the OpenClaw hook context.
       // MPM_PROVENANCE_MODEL is intentionally omitted rather than
@@ -739,6 +799,19 @@ export default definePluginEntry({
         },
         resolveMemoryBackendConfig() {
           return { backend: "mpm", mpm: { bin: mpmBin, scope } };
+        },
+        // OpenClaw's automatic BOOTSTRAP.md / USER.md memory-context path
+        // (resolveIneligibleAutomaticMemoryFiles) calls this on the chosen
+        // memory slot's runtime. Without it, the gateway logs
+        //   "excluding automatic memory context: selected memory runtime does
+        //    not support provenance classification"
+        // and excludes MPM from automatic injection. Returning an empty
+        // classification list is the safe default — MPM's primary wake path
+        // is session_start + agent_turn_prepare hooks, not this bootstrap
+        // path. Once the method exists, the gateway stops excluding the
+        // plugin and treats it as a first-class runtime.
+        async classifyWorkspaceMemoryPaths(_params) {
+          return [];
         },
       },
       publicArtifacts: { async listArtifacts() { return []; } },

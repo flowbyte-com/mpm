@@ -69,7 +69,7 @@ _render = _load_render_module()
 # The seven behavioural-invariant label strings the canonical block must
 # teach. Order is the order they appear in the canonical block.
 INVARIANT_LABELS = (
-    "Wake on session start",
+    "Wake is auto-injected on session start",
     "Persist during work",
     "Skill discovery before reinventing",
     "Handoff before genuine session closure",
@@ -169,10 +169,20 @@ class CanonicalBlockExtraction(unittest.TestCase):
     def test_block_omits_stale_note_param(self):
         """Regression for the 2026-09-04 audit finding: the canonical
         block must NOT teach agents to pass `note` to `mpm_handoff
-        write` — the schema removed `note`, the snippet must agree."""
-        # The handoff write section must list its params without `note`.
+        write` — the schema removed `note`, the snippet must agree.
+
+        Sept 2026 update: the canonical block now teaches the compact
+        MCP path (`mpm_context action=write_handoff`) as the primary
+        reference and the substrate path (`mpm_handoff action=write`)
+        only via the `mpm call` CLI escape hatch. The handoff params
+        block is now written under the compact path; the test accepts
+        either form and asserts neither teaches the stale `note` field.
+        """
+        # The handoff write/read section lists its params without `note`.
+        # Accept either the compact-surface MCP form (`write_handoff` /
+        # `read_handoff`) or the substrate `mpm_handoff` form.
         m = re.search(
-            r"action `write` with `params:\s*\{([^}]+)\}",
+            r"action `(?:write_handoff|write)` with\s+`params:\s*\{([^}]+)\}",
             self.block,
         )
         self.assertIsNotNone(m, "handoff write params block not found")
@@ -596,12 +606,12 @@ class RendererSemanticGuard(unittest.TestCase):
         closes D-R1.
 
         Locks on the specific §1 prose context — the wake-payload
-        description line that says "Decisions and lessons are reachable
-        via `mpm_decisions` / `mpm_lessons`, not carried in wake." That
-        line contains no `action` keyword, so both tokens must remain
-        bare under every host prefix. (The §2 invocation reference to
-        `mpm_decisions action record` DOES still transform — that's
-        an invocation, not a prose mention, and must not regress.)
+        description line that says "Decisions live in `mpm_decisions`;
+        lessons in `mpm_lessons`." That line contains no `action`
+        keyword, so both tokens must remain bare under every host
+        prefix. (The §2 invocation reference to `mpm_decisions action
+        record` DOES still transform — that's an invocation, not a
+        prose mention, and must not regress.)
 
         The §5 prose mention of `mpm_work` is INTENTIONALLY rewritten
         by the host prefix — the canonical source uses parens form
@@ -622,8 +632,8 @@ class RendererSemanticGuard(unittest.TestCase):
         # `mpm_decisions` / `mpm_lessons` in the wake-payload
         # description. It must remain bare under every host prefix.
         prose_phrase = (
-            "reachable via `mpm_decisions` / `mpm_lessons`, not "
-            "carried in"
+            "Decisions live in `mpm_decisions`; lessons in "
+            "`mpm_lessons`."
         )
         for prefix in ("mpm__", "mcp__mpm__"):
             rendered = _render.render_for_host(block, prefix)
@@ -666,6 +676,99 @@ class RendererSemanticGuard(unittest.TestCase):
             "`mpm__mpm_decisions` action `record`", rendered_claude,
             "§2 invocation `mpm_decisions action record` did NOT "
             "transform — renderer regressed to no-op",
+        )
+
+
+class InstructionsPrimerContract(unittest.TestCase):
+    """Pin the `instructions_primer` output that mpm-mcp embeds via
+    //go:embed and ships in the MCP `initialize.instructions` field.
+    Pinned 2026-09-08 after the OpenClaw integration observed the
+    agent attempt `mcp__mpm__mpm_handoff` (a non-existent tool on the
+    default 3-tool surface). The pre-fix primer said only "via
+    `mpm_context` action"; an agent that saw `mpm_handoff` in
+    `mpm_help list` output could not connect the two. The fix is to
+    pin the exact action name in the primer so the contract is
+    unambiguous.
+
+    These tests assert the rendered primer's behavioral contract.
+    Drift against the embedded `cmd/mpm-mcp/instructions_primer.txt`
+    is caught separately by the Go drift test (`TestInstructionsPrimerDrift`)
+    and by `python3 scripts/render_managed_blocks.py --check`.
+    """
+
+    _PRIMER_PATH = AGENT_INSTALLATION.parent / "cmd" / "mpm-mcp" / "instructions_primer.txt"
+
+    def _primer_text(self) -> str:
+        return _render.render_instructions_primer(CANONICAL_SOURCE)
+
+    def test_primer_is_text(self):
+        primer = self._primer_text()
+        self.assertIsInstance(primer, str)
+        self.assertGreater(len(primer), 0)
+
+    def test_primer_names_handoff_action_explicitly(self):
+        """The OpenClaw 2026-09-08 regression. The primer must name
+        the exact action (`write_handoff`) so an agent that reads it
+        does not attempt the substrate tool name
+        (`mcp__mpm__mpm_handoff`) instead."""
+        primer = self._primer_text()
+        self.assertIn(
+            "Handoff before genuine session closure",
+            primer,
+            "primer must carry the Handoff bullet",
+        )
+        # The bullet MUST name the action explicitly:
+        #   "(via `mpm_context` action `write_handoff`)."
+        self.assertRegex(
+            primer,
+            r"Handoff before genuine session closure \(via `mpm_context` action `write_handoff`\)\.",
+            "primer's handoff bullet must explicitly name the "
+            "write_handoff action — the pre-fix primer said only "
+            "'via `mpm_context` action' which let agents confuse it "
+            "with the substrate mpm_handoff tool. See OpenClaw "
+            "2026-09-08 final-session regression.",
+        )
+
+    def test_primer_omits_substrate_handoff_tool_name(self):
+        """The primer's MCP `instructions` field must not advertise
+        the substrate `mpm_handoff` tool — it is not in the default
+        3-tool surface. If this fails, a future contributor has
+        reintroduced the substrate path as an MCP option, which would
+        silently allow agents to call a tool the OpenClaw runtime
+        filters out."""
+        primer = self._primer_text()
+        # The primer may mention `mpm_handoff` only in the CLI fallback
+        # footer context. We assert the bullet lines themselves do not
+        # name the tool as an MCP option.
+        for line in primer.splitlines():
+            if line.startswith("- "):
+                self.assertNotIn(
+                    "`mpm_handoff`",
+                    line,
+                    f"primer bullet must not advertise substrate "
+                    f"`mpm_handoff` as an MCP option: {line!r}",
+                )
+
+    def test_primer_embedded_file_byte_matches_renderer(self):
+        """The file mpm-mcp embeds via //go:embed must byte-match
+        the renderer's output. Drift between the two is also caught
+        by the Go-side drift test, but pinning it from Python too
+        catches renderer-side regressions that the Go test cannot
+        (e.g. the renderer being invoked with a stale canonical
+        source)."""
+        self.assertTrue(
+            self._PRIMER_PATH.exists(),
+            f"embedded primer missing at {self._PRIMER_PATH}",
+        )
+        rendered = self._primer_text()
+        embedded = self._PRIMER_PATH.read_text(encoding="utf-8")
+        self.assertEqual(
+            rendered,
+            embedded,
+            "rendered primer does not match embedded "
+            "cmd/mpm-mcp/instructions_primer.txt; re-run "
+            "`python3 scripts/render_managed_blocks.py --dump "
+            "instructions > cmd/mpm-mcp/instructions_primer.txt`",
         )
 
 

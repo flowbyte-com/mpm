@@ -86,7 +86,7 @@ class TestInstallerContract(unittest.TestCase):
         self.assertEqual(text.count("<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->"), 1)
         self.assertEqual(text.count("<!-- END MPM-MANAGED BLOCK:hermes-mpm -->"), 1)
         # Snippet body present:
-        self.assertIn("Wake on session start", text)
+        self.assertIn("Wake is auto-injected on session start", text)
         self.assertIn("Handoff before genuine session closure", text)
 
     def test_idempotent_double_install_is_noop(self):

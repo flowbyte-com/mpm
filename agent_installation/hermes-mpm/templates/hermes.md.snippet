@@ -17,18 +17,24 @@ on this machine. The following are the non-negotiable MPM behavioural
 invariants that turn that capability into reliable behaviour. Edit the
 canonical protocol, not this block, for behavioural changes.
 
-1. **Wake on session start.** Before any substantive work, read the
-   MPM wake context via `mcp__mpm__mpm_context` action
-   `read_wake_context`. Skipping wake means arriving amnesic and
-   forcing the user to re-explain context that is already on file.
-   The wake payload carries orientation signals (mode, persona,
-   recent topics, recent memories, recent milestones, last handoff,
-   open work, overdue scheduled wakes, and a bounded
-   `<available_skills>` catalogue). Decisions and lessons are
-   reachable via `mpm_decisions` / `mpm_lessons`, not carried in
-   wake. Use `params.projection: "compact"`
-   for a small id+summary envelope — the full payload is the
-   default.
+1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
+   OpenCode, and Pi. Each of these hosts installs a session-start
+   hook that fetches MPM wake context and injects it into the
+   system prompt before the first model turn. Hermes has no such
+   hook — on Hermes, the agent must call `mcp__mpm__mpm_context` action
+   `read_wake_context` once at the start of its first turn to
+   obtain the wake payload. Arriving amnesic on a host that should
+   be auto-injecting wake means the host integration is broken —
+   diagnose the host adapter, not call `read_wake_context`. As a
+   manual refresh path (mid-session, explicit refresh, or when the
+   host integration is unavailable), `mcp__mpm__mpm_context` action
+   `read_wake_context` is available. The wake payload carries
+   orientation signals (mode, persona, recent topics, recent
+   memories, recent milestones, last handoff, open work, overdue
+   scheduled wakes, and a bounded `<available_skills>` catalogue).
+   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
+   "compact"` for a small id+summary envelope — the full payload
+   is the default.
 
 2. **Persist during work, not only at the end.** Use `mcp__mpm__mpm_memory`
    action `save`, `mcp__mpm__mpm_decisions` action `record`,
@@ -50,19 +56,26 @@ canonical protocol, not this block, for behavioural changes.
    `params: {scope: "all"}`. Don't auto-scan every turn.
 
 4. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff via `mcp__mpm__mpm_handoff`
-   action `write` with `params: {summary: "<required>",
-   session_id: "<optional>", state: "clean"|"crashed"|"interrupted"|"force_end",
+   closes the session, write a handoff. On hosts using the default
+   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
+   is `mcp__mpm__mpm_context` action `write_handoff` with
+   `params: {summary: "<required>", session_id: "<optional>",
+   state: "clean"|"crashed"|"interrupted"|"force_end",
    commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   `summary` is the only required field. Mid-session acknowledgements
-   (`ok`, `thanks`, `ty`, `ack`) are NOT session-closing; don't
-   write a handoff on every chat ack.
+   The substrate path `mcp__mpm__mpm_handoff` action `write` with the same
+   `params` shape remains valid via `mpm call mpm_handoff --payload
+   '{"action":"write","params":{...}}'` and on hosts running with
+   `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block (which restores
+   the full 22-tool surface). `summary` is the only required field.
+   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
+   session-closing; don't write a handoff on every chat ack.
 
-   For intra-session volatile working state, use
+   For intra-session volatile working state, the substrate tool is
    `mcp__mpm__mpm_scratchpad` actions `flush`, `read`,
    `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`). Wake is how future-me starts; handoff is how
-   future-me receives the previous session.
+   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
+   using the compact MCP surface. Wake is how future-me starts;
+   handoff is how future-me receives the previous session.
 
 5. **Session closure is not work completion.** When work spans
    sessions or requires verification, track it separately via
@@ -95,6 +108,16 @@ operational surface (wiring, registry, prime directives). This
 `.hermes.md` covers the **behavioral** layer the skill does not
 own — the skill is loaded on task relevance, not at session
 start.
+
+Hermes does **not** have a native session-start
+wake-injection hook. The `.hermes.md` file is loaded by Hermes
+at session start, but it carries protocol guidance only —
+**not** the dynamic wake payload. The first agent turn must
+call `mcp__mpm__mpm_context` action `read_wake_context` to
+obtain wake (see protocol item 1 in the managed block above).
+On the other supported hosts (ClaudeCode, OpenClaw, OpenCode,
+Pi) the host fires the fetch automatically; Hermes is the
+exception.
 
 Hermes's `load_soul_md` reads the entire `SOUL.md` file with
 no managed-block convention; do not duplicate the MPM

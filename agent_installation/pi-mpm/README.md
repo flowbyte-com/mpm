@@ -14,13 +14,14 @@ the CLI is reachable from Pi as a typed tool.
 | Standalone tools | 3 | `index.ts` (hand-written) |
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **21 tools total** (14 domain
-tools via Fat RPC + 4 pointer/dedicated tools — `mpm_work`,
-`mpm_resolve`, `mpm_blob_read`, `mpm_blob_search` — +
-3 standalones), so the Pi adapter is a hand-curated 17-tool subset.
-Tools not registered here (`mpm_work`, `mpm_resolve`,
+adapter. The current MPM registry exposes **22 tools total** (21
+Registry entries + the `mpm_help` discovery closure registered via
+`cmd/mpm-mcp`), so the Pi adapter is a hand-curated 17-tool subset.
+Tools not registered here as typed tools (`mpm_work`, `mpm_resolve`,
 `mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
-`mpm call <tool> --payload '<json>'` CLI fallback.
+`mpm call <tool> --payload '<json>'` CLI fallback, and the compact
+MCP surface (where applicable) exposes `mpm_memory`, `mpm_context`,
+`mpm_help` for hosts that use MCP.
 
 Each Domain Tool dispatches on an `action` enum with free-form
 `params`:
@@ -28,7 +29,7 @@ Each Domain Tool dispatches on an `action` enum with free-form
 | Domain | Actions |
 |---|---|
 | `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
-| `mpm_handoff` | write, read, list, shred |
+| `mpm_handoff` | write, read, list, shred — substrate-direct typed tool. On hosts that use the compact MCP surface (ClaudeCode, Hermes, OpenClaw), the same operation is `mpm_context` action `write_handoff` / `read_handoff`. On Pi, the typed `mpm_handoff` tool is the primary path. |
 | `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |
 | `mpm_theories` | propose, resolve |
@@ -85,18 +86,18 @@ reliable onboarding path for Pi users, since auto-injection of MCP
 `instructions` into Pi's system prompt is not how the adapter is designed
 to work — and was not observed in probing.
 
-## Why 21 tools (and not 77)
+## Why 22 (and not 77)
 
 Until the Phase 1/2 registry refactor of mpm, `mpm-mcp` exposed 77
 granular tools (one per registry entry). The agent-facing tool definition
 prompt — every tool's name, description, and parameter schema — grew to
-~15KB of context on every turn. mpm now exposes **21 tools in the full
+~15KB of context on every turn. mpm now exposes **22 tools in the full
 registry**: the unified Domain Tools are "Fat RPC" — each takes `{action:
 string, params: object}` and the mpm backend validates and dispatches.
 That collapses ~77 distinct tool definitions into a small set of
 near-identical ones.
 
-This Pi adapter registers a **17-tool subset** of the full 21-tool
+This Pi adapter registers a **17-tool subset** of the full 22-tool
 registry (14 Domain Tools + 3 Standalones). The remaining registry tools
 (`mpm_work`, `mpm_resolve`, `mpm_blob_read`, `mpm_blob_search`) are
 reachable through the `mpm call <tool> --payload '<json>'` CLI fallback
@@ -116,7 +117,8 @@ enough that code generation would be an anti-pattern.
 ## Install
 
 The canonical source lives at `~/.mpm/agent_installation/pi-mpm/index.ts`.
-Auto-loading is enabled by adding the path to `~/.pi/agent/settings.json`:
+There is no shell `install.sh` for this adapter; auto-loading is enabled
+by adding the path to `~/.pi/agent/settings.json`:
 
 ```json
 {

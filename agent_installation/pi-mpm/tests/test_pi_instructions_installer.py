@@ -92,7 +92,7 @@ class TestInstallerContract(unittest.TestCase):
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->"), 1)
         self.assertEqual(text.count("<!-- END MPM-MANAGED SECTION:pi-instructions -->"), 1)
-        self.assertIn("Wake on session start", text)
+        self.assertIn("Wake is auto-injected on session start", text)
         self.assertIn("Handoff before genuine session closure", text)
 
     def test_fresh_install_project_scope(self):

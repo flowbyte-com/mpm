@@ -1,7 +1,7 @@
 # opencode-mpm
 
 OpenCode plugin that wires MPM's cognitive substrate in as **17 typed
-tools** (a curated subset of the full 21-tool MPM registry).
+tools** (a curated subset of the full 22-tool MPM registry).
 
 ## Parity with Claude Code Integration
 
@@ -9,11 +9,11 @@ This plugin achieves functional parity with the [Claude Code integration](agent_
 
 | Claude Code Mechanism | OpenCode Equivalent |
 |---|---|
-| `SessionStart` hook → `mpm-wake.sh` | `experimental.chat.system.transform` hook → injects wake context into system prompt |
+| `SessionStart` hook → `~/.claude/hooks/mpm-session-start` | `experimental.chat.system.transform` hook → push into `output.system` |
 | `MPM_PROVENANCE_*` env vars from `CLAUDE_*` runtime vars | `shell.env` hook + per-call provenance in `callMpmWithProvenance` |
 | Session End ≠ Claimed Complete (semantic contract) | Same contract applies — use `mpm_work complete` explicitly |
 
-The OpenCode plugin provides **automatic wake context injection** at session start (via `experimental.chat.system.transform`) and **provenance tracking** for all MPM calls (via `shell.env` hook and per-call env vars), matching the Claude Code integration's behavior.
+The OpenCode plugin provides **automatic wake context injection** at session start (via `experimental.chat.system.transform`) and **provenance tracking** for all MPM calls (via `shell.env` hook and per-call env vars). The lifecycle surface is host-specific (ClaudeCode's `SessionStart` vs. OpenCode's `experimental.chat.system.transform`); the *behavior* — wake context delivered before the first model turn — is shared.
 
 ## Coverage
 
@@ -27,17 +27,28 @@ The OpenCode plugin provides **automatic wake context injection** at session sta
 ### 14 Domain Tools
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **21 tools total**, so this
-adapter is a hand-curated 17-tool subset. Tools in the full registry not
-registered here (`mpm_work`, `mpm_resolve`,
-`mpm_blob_read`, `mpm_blob_search`) remain reachable via the canonical
-`mpm call <tool> --payload '<json>'` CLI fallback. Each registered
-Domain Tool dispatches on an `action` enum with free-form `params`:
+adapter. The current MPM registry exposes **22 tools total** (21
+Registry entries + the `mpm_help` discovery closure registered via
+`cmd/mpm-mcp`), so this adapter is a hand-curated 17-tool subset.
+Tools in the full registry not registered here (`mpm_work`,
+`mpm_resolve`, `mpm_blob_read`, `mpm_blob_search`) remain reachable
+via the canonical `mpm call <tool> --payload '<json>'` CLI fallback.
+Each registered Domain Tool dispatches on an `action` enum with
+free-form `params`:
+
+> The default initial MCP surface that hosts receive at session start
+> is the compact 3-tool surface (`mpm_memory`, `mpm_context`,
+> `mpm_help`); `MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block restores
+> the full 22-tool surface. The OpenCode plugin's typed tools
+> (`mpm__mpm_handoff`, `mpm__mpm_scratchpad`, etc.) are exposed
+> directly regardless of the MCP filter because the OpenCode plugin
+> registers its own typed tools via Pi's extension API, not via
+> `mpm-mcp`'s `tools/list`.
 
 | Domain | Actions |
 |---|---|
 | `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
-| `mpm_handoff` | write, read, list, shred |
+| `mpm_handoff` | write, read, list, shred | (also reachable on the default compact MCP surface as `mpm_context action=write_handoff` / `read_handoff`) |
 | `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |
 | `mpm_theories` | propose, resolve |
@@ -113,11 +124,11 @@ Triggers DEGRADED on:
 
 ### `experimental.chat.system.transform` — Wake Context Injection
 
-This hook runs at the start of each chat session and injects the MPM wake context into the system prompt. It calls `mpm_context.read_wake_context` with `format: "system-prompt"` and adds the returned context to the system prompt array.
+This hook runs as part of OpenCode's chat-prompt preparation, before the first model turn. It calls `mpm_context.read_wake_context` with `format: "system-prompt"` and pushes the returned context into the `output.system` array that OpenCode ships as the model-facing system prompt.
 
 - Only injects once per session (cached by `sessionID`)
-- Mirrors the Claude Code `SessionStart` hook that runs `mpm-wake.sh`
-- The wake context includes: active mode, persona, pending work, and recent memories
+- This is OpenCode's native lifecycle surface — it is **not** equivalent to ClaudeCode's `SessionStart` hook or `mpm-wake.sh`. The behaviour is the same (wake before first turn); the implementation is host-specific.
+- The wake context includes: active mode, persona, pending work, recent memories, recent milestones, last handoff, overdue wakes, and the bounded `<available_skills>` catalogue.
 
 ### `shell.env` — Provenance Environment Variables
 
@@ -129,7 +140,7 @@ Variables set:
 | `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
 | `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
 
-Additionally, **every programmatic tool call** (via the 16 registered tools) includes provenance env vars via `callMpmWithProvenance`:
+Additionally, **every programmatic tool call** (via the 17 registered typed tools) includes provenance env vars via `callMpmWithProvenance`:
 | Variable | Value |
 |---|---|
 | `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
@@ -168,7 +179,7 @@ MPM DeriveWorkVerification derives verification status
 The legacy plugin (`agent-plugins/opencode-mpm-plugin` in pCloud) generated one tool per (action, artifact-type) pair — 18 tool definitions spanning memory / lessons / topics / references / wake / decisions / etc. It was bound to the **old 77-tool schema** that pre-dated the 13-aggregator collapse (2026-08-11). It is **dead code** and should be removed.
 
 The lightweight adapter:
-- 17 typed tools exposed by this plugin (a curated subset of the full 21-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc. — note: `challenge_memory` is gone from the registry, use `mpm_memory` action=`challenge` instead)
+- 17 typed tools exposed by this plugin (a curated subset of the full 22-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc. — note: `challenge_memory` is gone from the registry, use `mpm_memory` action=`challenge` instead)
 - One Zod schema shape for the 14 Domain Tools (free-form `params` validated by mpm backend)
 - No prompt bloat — the description strings are short, and the heavy `params` documentation lives in the mpm backend where it can be evolved without disrupting the plugin
 - No domain logic — no LLM calls, no caching, no local state
@@ -188,8 +199,14 @@ python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructio
     --target ~/.config/opencode/AGENTS.md \
     --snippet ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
 
-# 4. (re)start opencode — the plugin will register and emit the boot health check
+# 4. (re)start opencode — the plugin will register, emit the boot health check,
+#    and fire `experimental.chat.system.transform` on the first session turn.
 ```
+
+There is no shell-based `install.sh` for this adapter — the installer is
+`scripts/install_agents_instructions.py`. Manual `ln -s` is required for the
+plugin symlink because OpenCode's plugin loader does not auto-link from
+arbitrary paths; it reads `~/.config/opencode/plugin/*` directly.
 
 The plugin reads `MPM_BINARY` from env (defaults to the literal string
 `"mpm"`, resolved via `$PATH`) and `MPM_WORKSPACE` from env
@@ -209,8 +226,8 @@ delivers the rest of the protocol.
 ## Verification
 
 ```bash
-# Plugin loaded? List its commands in an OpenCode session:
-#   :commands — expect mpm__mpm_memory, mpm__mpm_handoff, mpm__mpm_scratchpad, ...
+# Plugin loaded? List its typed tools in an OpenCode session:
+#   :tools — expect 17 mpm__ prefixed tool registrations
 
 # AGENTS.md has exactly one managed block:
 grep -c '<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->' \

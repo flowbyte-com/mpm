@@ -16,7 +16,7 @@ exact commit SHA in `summary.json["environment"]["commit"]`.
 | ------------------------------------------------- | ------: | -------------------: |
 | **Default initial MCP surface (filtered + compact)** | **2,268** | **~567** |
 | Full surface (MPM_EXPOSE_ALL_TOOLS=1) — legacy     |  66,359 |              ~16,600 |
-| Tool schemas + descriptions, all 21 tools, sum    |  42,580 |                  ~10K |
+| Tool schemas + descriptions, all 22 tools, sum   |  42,580 |                  ~10K |
 | `tools/list` wire payload (single JSON body) — full |  66,359 |               ~16.5K |
 | `mpm wake --compact` (the smallest wake surface)  |     386 |                  118 |
 | `mpm wake --json`  with 53 memories + open work   |   1,467 |                  423 |
@@ -38,10 +38,11 @@ content — a much better trade than 221,000 tokens for 1.1 MB.
 
 **Initial MCP surface reduction**: the default initial surface
 (3 tools: `mpm_memory`, `mpm_context`, `mpm_help`) is **~97% smaller**
-than the legacy 21-tool surface. `mpm_handoff` is reachable as
-`mpm_context action=write_handoff/read_handoff`; `mpm_scratchpad` and
-other specialists are reachable via `mpm_help list` + `mpm call <tool>`.
-See `docs/CONTEXT_EXPOSURE.md` for the full architecture.
+than the legacy 22-tool surface (restored via `MPM_EXPOSE_ALL_TOOLS=1`).
+`mpm_handoff` is reachable as `mpm_context action=write_handoff` /
+`read_handoff`; `mpm_scratchpad` and other specialists are reachable
+via `mpm_help list` + `mpm call <tool>`. See `docs/CONTEXT_EXPOSURE.md`
+for the full architecture.
 
 ---
 

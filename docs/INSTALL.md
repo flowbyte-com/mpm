@@ -382,7 +382,7 @@ mcp_servers:
 **Validate:**
 
 ```bash
-hermes mcp test mpm                    # expect: Connected, 21 tools discovered
+hermes mcp test mpm                    # expect: Connected, 3 tools discovered (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
 hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ```
 

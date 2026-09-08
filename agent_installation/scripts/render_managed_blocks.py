@@ -82,13 +82,22 @@ ADAPTERS: list[dict] = [
         ),
         "footer": (
             "\n"
-            "## Session-start hook (assumed)\n"
+            "## Session-start hook (auto-injected wake)\n"
             "\n"
-            "Claude Code sessions that use this integration should be\n"
-            "configured with a session-start hook that invokes wake-context\n"
-            "ingestion via `mpm__mpm_context` action `read_wake_context`. If\n"
-            "the hook is not installed, run wake manually at the start of\n"
-            "every substantive turn.\n"
+            "The `claude-code-mpm` installer wires a `SessionStart` hook\n"
+            "into `~/.claude/settings.json` and materializes the hook\n"
+            "command at `~/.claude/hooks/mpm-session-start`. The hook\n"
+            "fetches wake context via `mpm__mpm_context` action\n"
+            "`read_wake_context` and emits the required\n"
+            "`hookSpecificOutput.additionalContext` JSON envelope on\n"
+            "stdout — ClaudeCode injects the envelope's `additionalContext`\n"
+            "into the system prompt **before** the first model turn.\n"
+            "Plain-prose stdout is silently dropped.\n"
+            "\n"
+            "This managed section is **not** the dynamic wake delivery\n"
+            "mechanism — it documents the protocol only. If the hook is\n"
+            "missing or disabled, call `mpm__mpm_context` action\n"
+            "`read_wake_context` manually at session start as a fallback.\n"
             "\n"
             "## Framework identification\n"
             "\n"
@@ -190,6 +199,16 @@ ADAPTERS: list[dict] = [
             "own — the skill is loaded on task relevance, not at session\n"
             "start.\n"
             "\n"
+            "Hermes does **not** have a native session-start\n"
+            "wake-injection hook. The `.hermes.md` file is loaded by Hermes\n"
+            "at session start, but it carries protocol guidance only —\n"
+            "**not** the dynamic wake payload. The first agent turn must\n"
+            "call `mcp__mpm__mpm_context` action `read_wake_context` to\n"
+            "obtain wake (see protocol item 1 in the managed block above).\n"
+            "On the other supported hosts (ClaudeCode, OpenClaw, OpenCode,\n"
+            "Pi) the host fires the fetch automatically; Hermes is the\n"
+            "exception.\n"
+            "\n"
             "Hermes's `load_soul_md` reads the entire `SOUL.md` file with\n"
             "no managed-block convention; do not duplicate the MPM\n"
             "behavioral contract into SOUL.md. Persona stays in SOUL.md;\n"
@@ -255,6 +274,20 @@ _ITEM_HEADER_RE = re.compile(r"^\d+\.\s+\*\*([^*]+?)\*\*\.?\s*", re.MULTILINE)
 # can say "(via `mpm_X` action)" without re-stating the full sentence.
 _ITEM_TOOL_RE = re.compile(r"`(mpm_[a-z]\w*)`")
 
+# Matches an explicit action name in an item, used to refine the
+# primer bullet from the generic "(via `mpm_X` action)" to the
+# specific "(via `mpm_X` action `Y`)". The shape we look for is
+# `<tool> action \`<name>\`` (e.g. `mpm_context` action `write_handoff`).
+# If absent, the primer falls back to the generic form so an item that
+# uses the tool but does not pin a particular action still gets a
+# bullet. Pinned 2026-09-08 so the OpenClaw MCP `instructions` field
+# unambiguously names the handoff action — without it, an agent can
+# confuse `mpm_context` (exposed on the compact surface) with the
+# substrate `mpm_handoff` tool (not exposed on the default surface).
+_ITEM_ACTION_RE = re.compile(
+    r"`(mpm_[a-z]\w*)`\s+action\s+`([a-z][a-z_]*[a-z])`"
+)
+
 
 # ---------------------------------------------------------------------------
 # Instructions primer (mpm-mcp's `WithInstructions` field).
@@ -296,16 +329,19 @@ _INSTRUCTIONS_FOOTER = (
 )
 
 
-def _extract_imperative_items(block: str) -> list[tuple[str, str]]:
-    """Return [(header, primary_tool), ...] for each numbered item in the
-    canonical managed block. The header is the bold imperative label
-    (e.g. 'Wake on session start'); the primary tool is the first
-    `` `mpm_X` `` backtick reference inside that item, or '' if none.
+def _extract_imperative_items(block: str) -> list[tuple[str, str, str]]:
+    """Return [(header, primary_tool, action), ...] for each numbered
+    item in the canonical managed block. The header is the bold
+    imperative label (e.g. 'Wake on session start'); the primary tool
+    is the first `` `mpm_X` `` backtick reference inside that item, or
+    '' if none; the action is the explicit action name when the item
+    pins one (e.g. `` `mpm_context` action `write_handoff` ``), or '' if
+    the item only references the tool generically.
 
     The block is split at numbered-item boundaries so the tool regex
     does not bleed across items. Items are returned in source order.
     """
-    items: list[tuple[str, str]] = []
+    items: list[tuple[str, str, str]] = []
     # Split at the start of each numbered item. Use a positive
     # look-ahead so the delimiter is preserved on the next chunk.
     chunks = re.split(r"\n(?=\d+\.\s+\*\*)", block)
@@ -316,7 +352,11 @@ def _extract_imperative_items(block: str) -> list[tuple[str, str]]:
         header = m.group(1).strip().rstrip(".").strip()
         tool_m = _ITEM_TOOL_RE.search(chunk)
         tool = tool_m.group(1) if tool_m else ""
-        items.append((header, tool))
+        # Prefer the explicit `<tool> action \`<name>\`` shape; fall
+        # back to '' (generic form) when absent.
+        action_m = _ITEM_ACTION_RE.search(chunk)
+        action = action_m.group(2) if action_m else ""
+        items.append((header, tool, action))
     return items
 
 
@@ -329,21 +369,37 @@ def render_instructions_primer(canonical_path: Path) -> str:
       1. A static header pointing at the managed-block file as the
          authoritative contract and introducing the minimal fallback.
       2. One bullet per numbered invariant in the canonical block,
-         phrased as "<imperative header> (via `<primary_tool>` action)."
-         The header text and tool name are extracted from the canonical
-         source, so a change to either updates the primer automatically.
+         phrased as "<imperative header> (via `<primary_tool>`
+         action).". When the canonical block pins a specific action
+         (e.g. `mpm_context` action `write_handoff`), the bullet
+         is refined to "(via `<primary_tool>` action `<action>`)."
+         so the agent does not have to guess which action to use.
+         The header text, tool name, and action are all extracted
+         from the canonical source so a change updates the primer
+         automatically.
       3. A static footer giving the CLI fallback contract.
 
-    The primer is drift-proof: every imperative label and tool name
-    comes from the canonical block. A change to the canonical block
-    that affects the primer will be caught by `--check`.
+    The primer is drift-proof: every imperative label, tool name,
+    and pinned action comes from the canonical block. A change to
+    the canonical block that affects the primer will be caught by
+    `--check`.
     """
     text = canonical_path.read_text(encoding="utf-8")
     block = extract_canonical_block(text)
     items = _extract_imperative_items(block)
+
+    def _bullet(header: str, tool: str, action: str) -> str:
+        # Refined form when the canonical block pins a specific
+        # action. The generic form is preserved for items that only
+        # reference the tool (e.g. wake context, which is a single-
+        # action tool).
+        if action:
+            return f"- {header} (via `{tool}` action `{action}`)."
+        return f"- {header} (via `{tool}` action)."
+
     bullets = "\n".join(
-        f"- {header} (via `{tool}` action)."
-        for header, tool in items
+        _bullet(header, tool, action)
+        for header, tool, action in items
         if tool  # skip items with no tool reference -- they would be
                  # uninformative as bullets and are not present in the
                  # canonical block today; defensive only.

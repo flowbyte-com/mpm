@@ -91,51 +91,46 @@ These are set by Claude Code in the subprocess environment when hooks execute:
 
 ### 3.1 Hook Script
 
-Create `~/.claude/scripts/mpm-wake.sh` (or any path you prefer):
+The installer (`./install.sh`) materializes the canonical SessionStart hook
+at `~/.claude/hooks/mpm-session-start` and wires it into
+`~/.claude/settings.json` automatically — no manual script creation needed.
 
-```bash
-#!/bin/bash
-# mpm-wake.sh — inject MPM wake context into Claude Code at session start
-# MPM_WORKSPACE is inherited from the Claude Code subprocess environment.
+If you want to install the hook by hand, copy
+`agent_installation/claude-code-mpm/scripts/mpm-session-start` to
+`~/.claude/hooks/mpm-session-start` and `chmod +x` it. The hook:
 
-set -euo pipefail
+1. Calls `mpm call mpm_context --payload '{"action":"read_wake_context","params":{"format":"system-prompt"}}'`.
+2. Extracts the JSON envelope's `content` field (the system-prompt formatted wake text).
+3. Emits `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<escaped wake>"}}` on stdout.
 
-# Export MPM provenance from Claude Code runtime variables.
-# Use existing CLAUDE_* vars where available; fall back to safe defaults.
-export MPM_PROVENANCE_FRAMEWORK=claude-code
-export MPM_PROVENANCE_MODEL="${CLAUDE_MODEL:-unknown}"
-export MPM_PROVENANCE_INVOCATION_ID="${CLAUDE_INVOCATION_ID:-}"
-export MPM_PROVENANCE_PARENT_INVOCATION_ID="${CLAUDE_SESSION_ID:-}"
+**The hook must emit a JSON envelope.** Plain prose on stdout is silently
+dropped by ClaudeCode — verified empirically from the working superpowers
+plugin at `~/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/hooks/session-start`,
+whose `printf '{ "hookSpecificOutput": ... }'` is what makes its
+`<EXTREMELY-IMPORTANT>` content reach the model. The MPM hook uses the
+exact same envelope shape.
 
-# Retrieve and print the wake context. Claude Code captures stdout and injects
-# it into the session prompt. JSON success envelope is printed to stderr (or
-# suppressed); the human-readable context is on stdout.
-exec mpm call mpm_context \
-  --payload '{"action":"read_wake_context","params":{"format":"system-prompt"}}' \
-  2>/dev/null
-```
-
-Make it executable:
-
-```bash
-chmod +x ~/.claude/scripts/mpm-wake.sh
-```
+The hook also exports `MPM_PROVENANCE_FRAMEWORK=claude-code` and (where
+Claude Code provides them) `MPM_PROVENANCE_MODEL`,
+`MPM_PROVENANCE_INVOCATION_ID`, `MPM_PROVENANCE_PARENT_INVOCATION_ID` from
+`$CLAUDE_MODEL` / `$CLAUDE_SESSION_ID` / `$CLAUDE_INVOCATION_ID`. These
+populate MPM's audit trail with the calling framework's identity.
 
 ### 3.2 Settings Configuration
 
-Add to `~/.claude/settings.json`:
+The installer merges the SessionStart hook into `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup",
         "hooks": [
           {
             "type": "command",
-            "command": "/home/user/.claude/scripts/mpm-wake.sh",
-            "timeout": 30,
-            "shell": "bash"
+            "command": "/home/user/.claude/hooks/mpm-session-start",
+            "timeout": 10
           }
         ]
       }
@@ -145,7 +140,8 @@ Add to `~/.claude/settings.json`:
 ```
 
 If you use a project-level settings file (`.claude/settings.json` at the repo
-root), this hook runs only for that project.
+root), this hook runs only for that project. Unrelated `UserPromptSubmit`
+hooks (e.g. `mpm route --apply`) are preserved across install/uninstall.
 
 ### 3.3 Semantic Contract: Session End ≠ Claimed Complete
 

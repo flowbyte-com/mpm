@@ -407,7 +407,15 @@ They are not interchangeable.
 
 Inspect both README files and manifests before installing.
 
-For the agent's behavioral instruction surface, ensure the current OpenClaw setup has the MPM behavioral instructions in the `SOUL.md` path used by the running agent. Also inspect the current OpenClaw adapter documentation for any `AGENTS.md` material it expects.
+**Wake context** is delivered by `openclaw-mpm-memory` via the
+`session_start` → `agent_turn_prepare` typed-hook chain (returning
+`prependContext`). This is automatic and **does not** require any
+persistent MPM instruction block in `SOUL.md` or `AGENTS.md`. The
+sessionKey used to correlate the cache write (in `session_start`) with
+the cache read (in `agent_turn_prepare`) comes from the hook context
+(`ctx.sessionKey`), not from the event payload. The
+`openclaw-mpm-memory/tests/runtime_injection.test.js` regression guard
+pins this contract.
 
 For OpenClaw's gateway, remember that plugin subprocesses may not inherit the user's interactive PATH. Use the adapter's supported `mpmBin` configuration when required.
 
@@ -448,11 +456,16 @@ Do **not** revive retired `mpm_session` instructions.
 The current session-boundary surfaces are split across:
 
 ```text
-mpm_handoff
-mpm_scratchpad
+mpm_handoff   (substrate + full MCP surface)
+mpm_scratchpad (substrate only)
 ```
 
-according to the current tool contract.
+On the **default initial MCP surface** (Claude Code / Hermes / OpenClaw),
+`mpm_handoff` write/read is reached via `mpm_context action=write_handoff`
+/ `read_handoff`, and `mpm_scratchpad` is reachable only via the
+`mpm call mpm_scratchpad` CLI fallback. Both remain directly callable on
+hosts that set `MPM_EXPOSE_ALL_TOOLS=1`, and as substrate tools via
+`mpm call` on every host.
 
 ---
 
@@ -608,7 +621,7 @@ retired tool names are absent from current instructions
 
 For MCP integrations, inspect the actual current tool registry where practical.
 
-The current MPM MCP surface has 21 tools according to the repository's current registry (was 22 before commit removing the standalone `mpm_challenge` tool). Do not hard-code this number into new framework-specific documentation if the integration can derive tool information from the current registry.
+The current default initial MCP surface (the model-facing one at session start, with `MPM_EXPOSE_ALL_TOOLS` unset) exposes **3 tools**: `mpm_memory`, `mpm_context`, `mpm_help`. The full internal substrate surface is **22 tools** (21 Registry entries + the `mpm_help` discovery closure registered via cmd/mpm-mcp); reachable on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block, or via the universal `mpm call <tool> --payload '…'` CLI fallback. Do not hard-code either number into new framework-specific documentation if the integration can derive tool information from the current registry.
 
 ---
 
@@ -748,7 +761,7 @@ retired mpm_session tool registrations
 obsolete lifecycle hooks
 ```
 
-The runtime's current session continuity contract uses the split handoff/scratchpad surfaces.
+The runtime's current session continuity contract uses the split handoff/scratchpad surfaces at the substrate layer. On the model-facing MCP surface, handoff is reached through `mpm_context action=write_handoff` (the substrate `mpm_handoff` tool is no longer in the default initial 3-tool surface; see `docs/CONTEXT_EXPOSURE.md` for the compact-surface architecture).
 
 The old `mpm_session` name may still exist in compatibility/history code. That is not a reason to expose it as a current agent tool.
 

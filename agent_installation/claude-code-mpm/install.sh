@@ -11,11 +11,14 @@
 #   ./install.sh --uninstall # remove
 #   ./install.sh --verify    # run validation tests
 #
-# Non-destructive: never edits ~/.claude/settings.json. The MCP server is
-# configured via the standard Claude Code .mcp.json side-channel, which is the
-# same mechanism that Claude Code's marketplace plugins use (telegram, serena,
-# firebase, etc.). Settings.json is not the canonical wire location for MCP
-# server entries in the current Claude Code release.
+# Edits ~/.claude/settings.json to install the SessionStart hook that injects
+# MPM wake context before the first model turn. This is the only ClaudeCode
+# native mechanism that delivers wake automatically (MCP `instructions` is
+# guidance-only; CLAUDE.md/AGENTS.md asking the model to call
+# `mpm_context.read_wake_context` is a first-turn tool call, not automatic
+# injection). The hook is named `mpm-session-start` and writes a
+# `hookSpecificOutput.additionalContext` JSON envelope — plain-prose stdout
+# is silently dropped by Claude Code.
 
 set -euo pipefail
 
@@ -102,6 +105,50 @@ PY
   else
     echo "ℹ️  $MCP_TARGET does not exist; nothing to uninstall"
   fi
+
+  # Remove the SessionStart hook from settings.json (preserve other hooks).
+  HOOK_SCRIPT_DST="${CLAUDE_DIR}/hooks/mpm-session-start"
+  SETTINGS_JSON="${CLAUDE_DIR}/settings.json"
+  if [ -f "$SETTINGS_JSON" ]; then
+    python3 - "$SETTINGS_JSON" "$HOOK_SCRIPT_DST" <<'PY'
+import json, sys, os
+path, hook = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+hooks = cfg.get("hooks", {})
+ss = hooks.get("SessionStart")
+if isinstance(ss, list):
+    filtered = []
+    for entry in ss:
+        if not isinstance(entry, dict):
+            filtered.append(entry)
+            continue
+        inner = entry.get("hooks") or []
+        if any(isinstance(h, dict) and h.get("command") == hook for h in inner):
+            continue
+        filtered.append(entry)
+    if filtered:
+        hooks["SessionStart"] = filtered
+    elif "SessionStart" in hooks:
+        del hooks["SessionStart"]
+if not hooks:
+    cfg.pop("hooks", None)
+if cfg:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.chmod(path, 0o600)
+PY
+    echo "✅ SessionStart hook removed from $SETTINGS_JSON"
+  fi
+  if [ -f "$HOOK_SCRIPT_DST" ]; then
+    rm -f "$HOOK_SCRIPT_DST"
+    echo "✅ removed $HOOK_SCRIPT_DST"
+  fi
+
   exit 0
 fi
 
@@ -171,7 +218,11 @@ PY
 # root, so we cd there before launching it. Without this, the probe fails
 # with `open ./mode: no such file or directory` whenever the script is
 # invoked from a different cwd.
-PROBE=$(cd "$MPM_CANONICAL_WS" && echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mpm_system","arguments":{"action":"health_check","params":{}}}}' \
+#
+# Uses mpm_context.read_wake_context (always in the default 3-tool surface)
+# rather than mpm_system.health_check, which only exists when
+# MPM_EXPOSE_ALL_TOOLS=1 is set in the MCP env block.
+PROBE=$(cd "$MPM_CANONICAL_WS" && echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mpm_context","arguments":{"action":"read_wake_context","params":{"projection":"compact"}}}}' \
   | /usr/bin/timeout 3 "$MPM_CANONICAL_BIN" 2>/dev/null \
   | python3 -c '
 import json, sys
@@ -190,8 +241,15 @@ while start != -1:
         start = raw.rfind("{", 0, start)
 print("{}")
 ')
-OK=$(echo "$PROBE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok"))')
-DB_PATH=$(echo "$PROBE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("db_path",""))')
+OK=$(echo "$PROBE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))')
+DB_PATH=$(echo "$PROBE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("context",{}).get("session_id","") if json.load(open("/dev/stdin")).get("context") else "")' 2>/dev/null || echo "")
+# DB_PATH lookup: read_wake_context returns context.session_id; that is just
+# proof of life. Probe success is what matters.
+if [ "$OK" != "True" ]; then
+  echo "❌ mpm-mcp probe returned success=$OK" >&2
+  echo "   probe: $PROBE" >&2
+  exit 1
+fi
 if [ "$OK" != "True" ]; then
   echo "❌ mpm-mcp health_check returned ok=$OK" >&2
   echo "   probe: $PROBE" >&2
@@ -200,6 +258,68 @@ fi
 
 echo "✅ mpm-mcp probe ok:true"
 echo "   db_path: $DB_PATH"
+
+# ---------------------------------------------------------------------------
+# Install SessionStart hook — automatic MPM wake injection.
+#
+# ClaudeCode loads ~/.claude/settings.json at session start. A SessionStart
+# hook is the ONLY native mechanism that injects content into the model-facing
+# system prompt BEFORE the first turn (the MCP `instructions` field is
+# guidance-only). The hook must emit a JSON envelope of shape
+#   { "hookSpecificOutput": { "hookEventName": "SessionStart",
+#                            "additionalContext": "<wake text>" } }
+# on stdout; plain-prose stdout is silently dropped.
+# ---------------------------------------------------------------------------
+HOOK_SCRIPT_SRC="${SCRIPT_DIR}/scripts/mpm-session-start"
+HOOK_SCRIPT_DST="${CLAUDE_DIR}/hooks/mpm-session-start"
+SETTINGS_JSON="${CLAUDE_DIR}/settings.json"
+if [ -f "$HOOK_SCRIPT_SRC" ]; then
+  echo ""
+  echo "🪝 installing SessionStart hook for automatic wake injection..."
+  mkdir -p "${CLAUDE_DIR}/hooks"
+  cp -p "$HOOK_SCRIPT_SRC" "$HOOK_SCRIPT_DST"
+  chmod +x "$HOOK_SCRIPT_DST"
+
+  if [ ! -f "$SETTINGS_JSON" ] || [ ! -s "$SETTINGS_JSON" ]; then
+    printf '{}\n' > "$SETTINGS_JSON"
+  fi
+  python3 - "$SETTINGS_JSON" "$HOOK_SCRIPT_DST" <<'PY'
+import json, sys, os
+path, hook = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (OSError, json.JSONDecodeError):
+    cfg = {}
+hooks = cfg.setdefault("hooks", {})
+ss = hooks.get("SessionStart")
+if not isinstance(ss, list):
+    ss = []
+# Idempotent: drop any prior mpm hook entry (we own this namespace).
+ss = [h for h in ss if not (
+    isinstance(h, dict) and any(
+        isinstance(inner, dict) and inner.get("command") == hook
+        for inner in (h.get("hooks") or [])
+    )
+)]
+ss.append({
+    "matcher": "startup",
+    "hooks": [{
+        "type": "command",
+        "command": hook,
+        "timeout": 10,
+    }],
+})
+hooks["SessionStart"] = ss
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.chmod(path, 0o600)
+print(f"✅ SessionStart hook wired at {hook}")
+PY
+else
+  echo "ℹ️  ${HOOK_SCRIPT_SRC} not found — skipping SessionStart hook install"
+fi
 
 # ---------------------------------------------------------------------------
 # Install CLAUDE.md with the MPM behavioral protocol (host-independent)

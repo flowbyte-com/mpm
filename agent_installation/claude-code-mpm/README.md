@@ -1,9 +1,17 @@
 # claude-code-mpm
 
 Claude Code ↔ MPM integration. Wires the full MPM cognitive substrate into
-Claude Code as **22 native MCP tools** (20 unified domain tools plus 2
-standalones: `mpm__mpm_memory`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`,
-`mpm__mpm_retrieval_diagnose`, `mpm__mpm_wakes`, …).
+Claude Code via the canonical `mpm-mcp` stdio MCP server.
+
+**Default initial MCP surface** (the one Claude Code sees at session
+start with `MPM_EXPOSE_ALL_TOOLS` unset): **3 tools** — `mpm__mpm_memory`,
+`mpm__mpm_context`, `mpm__mpm_help`. Handoff write/read is reachable
+through `mpm__mpm_context` action `write_handoff` / `read_handoff`; the
+substrate `mpm__mpm_handoff` and `mpm__mpm_scratchpad` tools remain in
+the registry and are reachable via `mpm call` / `mpm_help list` +
+subsequent `mpm call`. **Full surface** (legacy, 22 tools): set
+`MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block of `~/.claude/.mcp.json`.
+See `~/.mpm/docs/CONTEXT_EXPOSURE.md` for the architecture.
 
 ## Why this exists
 
@@ -20,25 +28,41 @@ serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
 
 ## Coverage
 
-**21 tools**, identical to the opencode-mpm and pi-mpm agents:
+**Full internal substrate surface**: 22 tools (21 Registry entries + the
+`mpm_help` discovery closure registered via `cmd/mpm-mcp`). The
+canonical Registry is the single source of truth for every tool the
+substrate implements; it is shared verbatim with `mpm call` and the
+MCP server.
+
+**Default initial MCP surface** (what Claude Code sees at session
+start with `MPM_EXPOSE_ALL_TOOLS` unset): 3 tools — `mpm__mpm_memory`,
+`mpm__mpm_context`, `mpm__mpm_help`. The full 22-tool surface is
+restored when the MCP env block sets `MPM_EXPOSE_ALL_TOOLS=1`. The
+adapters below describe the **full** substrate surface for operators;
+Claude Code's per-turn MCP tool list is determined by the
+`server.WithToolFilter` policy in `cmd/mpm-mcp/main.go`.
 
 | Layer | Count | Tool names |
 |---|---|---|
-| Unified Domain Tools (Fat RPC) | 19 | `mpm__mpm_memory` (action: save/query/show/shred/reinforce/weaken/snooze/set_weight/patch/promote/review/synthesize/challenge/restore_challenge/commit_milestone), `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
+| Default initial MCP surface | 3 | `mpm__mpm_memory`, `mpm__mpm_context`, `mpm__mpm_help` |
+| Full internal substrate surface (Registry) | 21 | `mpm__mpm_memory` (action: save/query/show/shred/reinforce/weaken/snooze/set_weight/patch/promote/review/synthesize/challenge/restore_challenge/commit_milestone), `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
 | Standalone tools | 2 | `mpm__log_to_changelog`, `mpm__request_review` |
 
 The 19 Domain Tools share the same `(action, params)` shape. The 2
 Standalones have their own narrower schemas. See `~/.mpm/bin/mpm-mcp`'s
-`tools/list` JSON-RPC method for the canonical schemas.
+`tools/list` JSON-RPC method for the canonical schemas (the filtered
+default surface — 3 tools — is what Claude Code actually receives;
+set `MPM_EXPOSE_ALL_TOOLS=1` to see the full 22-tool surface).
 
 ## Install
 
 ```bash
-# 1. Materialize the wiring into ~/.claude/.mcp.json
+# 1. Materialize the wiring into ~/.claude/.mcp.json + the SessionStart hook
 ./install.sh
 
-# 2. Restart Claude Code (mcpServers are loaded at session start)
-#    Without restart, the `mpm__*` tools will not appear in the tool list.
+# 2. Restart Claude Code (mcpServers AND the SessionStart hook are loaded at
+#    session start). Without restart, the `mpm__*` tools will not appear and
+#    the next session will not receive automatic wake context.
 
 # 3. Verify
 ./install.sh --verify   # or directly: ./verify.py
@@ -48,10 +72,16 @@ The install script:
 - Backs up any existing `~/.claude/.mcp.json` to `~/.claude/backups/claude-code-mpm-<TS>/`
 - Materializes `.mcp.json.template` into `~/.claude/.mcp.json` with `${HOME}` substituted
 - **Merges** with any existing `mcpServers` — never clobbers other servers
-- Sanity-probes the wiring by booting `mpm-mcp` and calling `mpm_system health_check`
-
-It does **not** touch `~/.claude/settings.json`. The `.mcp.json` side-channel
-is the canonical Claude Code wire location for MCP server entries.
+- Sanity-probes the wiring by booting `mpm-mcp` and calling `mpm_context`
+  action `read_wake_context` (always in the default 3-tool surface)
+- **Installs the SessionStart hook** at `~/.claude/hooks/mpm-session-start`
+  and merges a `SessionStart` entry into `~/.claude/settings.json`. This is
+  the only ClaudeCode native mechanism that delivers MPM wake context
+  automatically — the hook fetches wake via `mpm_context.read_wake_context`
+  and emits the required `hookSpecificOutput.additionalContext` JSON envelope
+  on stdout (plain-prose stdout is silently dropped by ClaudeCode). CLAUDE.md
+  carries the persistent behavioural protocol only; it is not the dynamic
+  wake delivery mechanism.
 
 ## Uninstall
 
@@ -153,7 +183,7 @@ live `mpm-mcp` binary. Tests:
 
 | Test | What it proves |
 |---|---|
-| A — MPM discovery | `mpm_system health_check` returns `ok:true` |
+| A — MPM discovery | `mpm_context.read_wake_context` returns `success:true` (probe uses the always-on 3-tool surface) |
 | B — Durable memory write | `mpm_memory save` persists a uniquely-tagged probe |
 | C — Memory retrieval | `mpm_memory query` finds the probe by ID |
 | D — Retrieval diagnostics | `mpm_retrieval_diagnose` returns structured per-node breakdown |
@@ -163,6 +193,7 @@ live `mpm-mcp` binary. Tests:
 | H — Non-zero exit semantics | Malformed JSON-RPC produces a non-zero exit |
 | I — PATH independence | A clean env (HOME only) resolves and runs the integration |
 | J — Shared substrate | The DB the agent uses is the same inode as the canonical DB |
+| K — SessionStart hook | `~/.claude/hooks/mpm-session-start` exists, is executable, and emits a valid `hookSpecificOutput.additionalContext` envelope on stdout |
 
 Cleanup is automatic: probe memories and the test handoff are removed via
 the supported `mpm_memory shred` and `mpm_handoff(action: "shred")`

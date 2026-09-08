@@ -483,7 +483,14 @@ func contextAdapter(dm *core.DatabaseManager, ac core.ActiveContext) tools.Handl
 			for k, v := range payload {
 				reshaped[k] = v
 			}
-			reshaped["action"] = strings.TrimPrefix(action, "_handoff")
+			// Strip the "_handoff" suffix — write_handoff → write,
+			// read_handoff → read. TrimSuffix, not TrimPrefix (the
+			// latter was a typo that silently forwarded the model-
+			// facing name unchanged into the substrate handler,
+			// which then rejected it). 2026-09-08 regression guard:
+			// TestContextAdapter_HandoffDispatchRewritesSuffix
+			// pins this contract.
+			reshaped["action"] = strings.TrimSuffix(action, "_handoff")
 			return handoffHandler(dm, ac, reshaped)
 		default:
 			return contextHandler(dm, ac, payload)

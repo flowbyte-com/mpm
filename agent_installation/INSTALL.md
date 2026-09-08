@@ -172,7 +172,7 @@ the same MPM install and database.
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/extensions/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare`) — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
+| **Memory slot plugin** | `~/.openclaw/extensions/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
 | **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
@@ -212,8 +212,9 @@ disposes on mid-session gateway restart — recovery is to fall back to
 ```bash
 cd openclaw-mpm-memory
 openclaw plugins install ./openclaw-mpm-memory --link
-./install.sh                                               # idempotent bootstrap
+./install.sh                                               # idempotent bootstrap; persists allowConversationAccess=true
 openclaw config set plugins.entries.openclaw-mpm-memory.enabled true
+openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowPromptInjection true   # required for agent_turn_prepare
 openclaw config set plugins.slots.memory openclaw-mpm-memory
 openclaw gateway restart
 openclaw doctor --lint --only core/doctor/memory-search --json   # expect ok:true
@@ -260,7 +261,7 @@ After all three surfaces are wired:
 # 1. Confirm MCP wiring (should respond to tools/list):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null | jq '.result.tools | length'
-# expect: 21
+# expect: 3   (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
 
 # 2. Confirm DB path invariance:
 mpm call mpm_system --payload '{"action":"health_check","params":{}}' \
@@ -275,6 +276,42 @@ openclaw doctor --lint --only core/doctor/memory-search --json | jq '.ok'
 mpm add "openclaw-mpm integration smoke test"
 mpm recall --semantic "smoke test"
 ```
+
+#### Wake-context delivery is automatic
+
+The `openclaw-mpm-memory` plugin uses the OpenClaw typed-hook chain
+(`session_start` → `agent_turn_prepare` returning `prependContext`) to
+inject MPM wake context into the agent prompt **without** any persistent
+instruction block in `SOUL.md` or `AGENTS.md`. The sessionKey used to
+match `session_start`'s cache write to `agent_turn_prepare`'s cache read
+comes from `ctx.sessionKey` (OpenClaw's `PluginAgentTurnPrepareEvent`
+does not carry `sessionKey` on the event payload itself). This contract
+is pinned by `tests/runtime_injection.test.js` (regression guard) so a
+future change that drops the `ctx` argument cannot silently disable
+wake-context delivery. To exercise the hook chain manually, run
+`node --test tests/runtime_injection.test.js` from inside the plugin
+directory.
+
+**Both typed-hook permission flags are required** for `agent_turn_prepare`:
+`hooks.allowConversationAccess=true` (required for non-bundled plugins)
+and `hooks.allowPromptInjection=true` (required because `agent_turn_prepare`
+falls in OpenClaw's `promptInjectionHookNameSet`). The bundled
+`install.sh` sets `allowConversationAccess` automatically; set
+`allowPromptInjection` if your operator config does not already include
+it.
+
+**First-turn fallback race.** The plugin also includes a synchronous
+fetch fallback in `agent_turn_prepare` for sessions where the cache is
+empty — e.g. when `agent_turn_prepare` fires before `session_start`
+lands. The cache still wins on subsequent turns in the same session.
+
+**Runtime classification contract.** The plugin's `runtime` exposes
+`classifyWorkspaceMemoryPaths` (returns `[]`). This stops the gateway's
+separate automatic BOOTSRAP.md / USER.md memory-context pipeline from
+excluding the MPM slot for "missing provenance classification" — see
+the openclaw-mpm-memory README for the failure mode this prevents.
+
+### Uninstall
 
 ### Uninstall
 
@@ -354,12 +391,18 @@ The install script:
 3. **Merges** with any existing `mcpServers` — never clobbers other
    servers.
 4. Sanity-probes the wiring by booting `mpm-mcp` and calling
-   `mpm_system health_check`.
+   `mpm_context` action `read_wake_context` (always in the default
+   3-tool surface).
 5. Writes the CLAUDE.md managed section via the Python installer.
-
-It does **not** touch `~/.claude/settings.json`. The `.mcp.json`
-side-channel is the canonical Claude Code wire location for MCP server
-entries.
+6. **Installs the SessionStart hook** for automatic MPM wake injection.
+   This is the only ClaudeCode native mechanism that injects wake context
+   before the first model turn. The hook command
+   (`~/.claude/hooks/mpm-session-start`) fetches wake via
+   `mpm_context.read_wake_context` and emits the required
+   `hookSpecificOutput.additionalContext` JSON envelope. Plain-prose
+   stdout is silently dropped by ClaudeCode. CLAUDE.md is **not** the
+   dynamic wake delivery mechanism; it carries the persistent behavioural
+   protocol only.
 
 ### Verification
 
@@ -371,11 +414,20 @@ What `verify.py` checks:
 
 - `~/.claude/.mcp.json` parses, contains the `mpm` entry, command is
   absolute.
-- `mpm-mcp` boots and responds to `tools/list` (expects 21 tools).
-- `mpm_system health_check` returns `ok:true` with the canonical
-  `db_path`.
+- `mpm-mcp` boots and responds to `tools/list` (default initial
+  surface expects 3 tools: `mpm_memory`, `mpm_context`, `mpm_help`;
+  set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the
+  legacy 22-tool surface).
+- `mpm_context` action `read_wake_context` returns `success:true`
+  with a populated wake payload (this is the always-on 3-tool probe —
+  `mpm_system.health_check` is not in the default surface and requires
+  `MPM_EXPOSE_ALL_TOOLS=1`).
 - `~/.claude/CLAUDE.md` contains exactly one managed block (count of
   `BEGIN MPM-MANAGED SECTION:claude-code-instructions` markers == 1).
+- `~/.claude/settings.json` contains the MPM `SessionStart` hook
+  entry pointing at `~/.claude/hooks/mpm-session-start`. The next fresh
+  ClaudeCode session will receive wake context automatically — restart
+  Claude Code if you want to confirm immediately.
 
 Manual probe (independent of `verify.py`):
 
@@ -383,7 +435,7 @@ Manual probe (independent of `verify.py`):
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 21
+# expect: 3   (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
 ```
 
 Then **restart Claude Code** (mcpServers and CLAUDE.md are loaded at
@@ -424,9 +476,12 @@ regenerate.
 - The Claude Code runtime may dispose the MCP bundle mid-session after
   a gateway restart. The canonical protocol §5 fallback applies — use
   `mpm call` from a subprocess.
-- `~/.claude/settings.json` is NOT touched by `install.sh`. If you
-  have a stale MCP server entry there from an older Claude Code
-  version, remove it manually; the canonical wire location is the
+- `~/.claude/settings.json` is touched by `install.sh` — it merges the
+  MPM `SessionStart` hook entry and (on uninstall) removes only the
+  MPM hook, preserving any unrelated `UserPromptSubmit` hooks you may
+  have configured (e.g. `mpm route --apply`). If you have a stale MCP
+  server entry there from an older Claude Code version, remove it
+  manually; the canonical wire location for MCP server entries is the
   side-channel `.mcp.json`.
 
 ---
@@ -437,7 +492,7 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 21 tools) |
+| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + scripts/install.sh) | `mpm` binary on `$PATH` |
 
@@ -482,8 +537,8 @@ override). The plugin also reads `MPM_WORKSPACE` from env (defaults to
 ### Verification
 
 ```bash
-# Plugin loaded? List its commands in an OpenCode session:
-opencode # then :commands — expect mpm__mpm_memory, mpm__mpm_handoff, mpm__mpm_scratchpad, ...
+# Plugin loaded? List its typed tools in an OpenCode session:
+opencode # then :tools — expect 17 mpm__ prefixed tool registrations
 
 # AGENTS.md has exactly one managed block:
 grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
@@ -494,6 +549,18 @@ grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
 # (in OpenCode): "use mpm__mpm_memory action=save to remember that opencode-mpm integration smoke test passed"
 mpm recall --semantic "opencode-mpm integration smoke test"
 ```
+
+### Wake-context delivery — `experimental.chat.system.transform`
+
+The OpenCode plugin delivers MPM wake context automatically at session
+start via OpenCode's `experimental.chat.system.transform` hook. It
+calls `mpm_context.read_wake_context` with `format: "system-prompt"`
+through a subprocess and pushes the returned context into the
+`output.system` array that OpenCode ships as the model-facing system
+prompt. The wake context lands in the system prompt of the first turn;
+subsequent turns hit the cache by `sessionID`. Manual refresh path
+is `mpm call mpm_context --payload '{"action":"read_wake_context",…}'`
+(or `mpm_context` typed tool action `read_wake_context`).
 
 ### Build (only needed if you edit the plugin source)
 
@@ -560,6 +627,20 @@ Hermes participates in the MPM substrate via **two surfaces**:
    managed-block convention). The behavioral protocol goes in
    `.hermes.md` via the installer in this directory.
 
+### Wake-context delivery — Hermes has no native session-start hook
+
+Unlike ClaudeCode, OpenClaw, OpenCode, and Pi, **Hermes does not have a
+session-start hook that injects MPM wake payload into the system prompt**.
+The `.hermes.md` file Hermes loads at session start carries the static
+behavioural protocol only — not the dynamic wake payload (no mode,
+persona, recent memories, handoff summary, etc.). The first agent turn
+must call `mcp__mpm__mpm_context` action `read_wake_context` once
+to obtain the wake payload before doing substantive work. On the other
+four supported hosts the host fires that fetch automatically; Hermes is
+the explicit-call exception. The wake payload can be refreshed manually
+at any point in a session via the same `mcp__mpm__mpm_context` action
+`read_wake_context` call.
+
 ### Installation
 
 The MCP wiring and the MPM skill are pre-existing (assumed already
@@ -585,7 +666,7 @@ unchanged.
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | "$HOME/.mpm/bin/mpm-mcp" 2>/dev/null \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["tools"]))'
-# expect: 21
+# expect: 3   (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
 
 # 2. .hermes.md was written with exactly one managed block:
 grep -c '<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->' /path/to/project/.hermes.md
@@ -636,7 +717,7 @@ would be empty, and writes a backup before mutation.
 Pi participates in the MPM substrate via:
 
 1. **Pi extension.** `pi-mpm/index.ts` registers a **17-tool subset**
-   of the full 21-tool MPM registry (14 Domain Tools via Fat RPC + 3
+   of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
    Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
    `request_review`). Tools in the full registry not exposed here
    (`mpm_work`, `mpm_resolve`, `mpm_blob_read`,
@@ -654,6 +735,24 @@ Pi participates in the MPM substrate via:
    into `AGENTS.md` using the same managed-marker convention as
    Claude Code / OpenCode. Disable with `--no-context-files` / `-nc`
    for sessions that should bypass the MPM behavioral contract.
+
+### Wake-context delivery — `session_start` → `before_agent_start`
+
+The Pi extension delivers MPM wake context automatically at session
+start via two Pi lifecycle hooks:
+
+- `pi.on("session_start", ...)` — fires on the first turn of each
+  Pi session; spawns `mpm call mpm_context --payload '{"action":
+  "read_wake_context","params":{}}'` and caches the parsed payload.
+- `pi.on("before_agent_start", ...)` — fires immediately before each
+  model call; on the first turn only, concatenates the cached wake
+  payload onto `event.systemPrompt`. Subsequent turns short-circuit
+  on the module-scoped `wakeDelivered` flag.
+
+The wake context lands in the system prompt of the first turn. Manual
+refresh path is the typed `mpm_context` tool action
+`read_wake_context` (or `mpm call mpm_context --payload
+'{"action":"read_wake_context","params":…}'`).
 
 ### Installation
 

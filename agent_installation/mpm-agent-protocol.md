@@ -239,8 +239,14 @@ work verified
 ```
 
 - **Session closure** ends the conversational loop. It emits a handoff
-  via `mpm_handoff` (action `write`). A handoff is **observation**,
-  not a claim of completion.
+  via `mpm_context` action `write_handoff` on the default compact MCP
+  surface (the surface exposed by `mpm-mcp` to Claude Code, OpenCode, Pi,
+  Hermes, OpenClaw — see `docs/CONTEXT_EXPOSURE.md`). On the substrate
+  the same record is reached as `mpm_handoff` (action `write`) via the
+  `mpm call mpm_handoff` CLI escape hatch; this is for hosts that have
+  not opted into the compact surface (`MPM_EXPOSE_ALL_TOOLS=1` or
+  CLI-only invocation). A handoff is **observation**, not a claim of
+  completion.
 - **Work completion** is an explicit agent action via `mpm_work` (action
   `complete`) for a specific `work_id`. The agent decides when work is
   done — the host runtime terminating the session does **not** decide
@@ -255,7 +261,9 @@ When work spans sessions, the agent must:
 2. Update it via `mpm_work` (action `update`, `note`) during the session.
 3. Mark it complete only when the agent decides it is done
    (`mpm_work` action `complete` with `work_id`).
-4. Write the handoff separately via `mpm_handoff` (action `write`).
+4. Write the handoff separately via `mpm_context` action `write_handoff`
+   on the compact MCP surface, or `mpm call mpm_handoff --payload '{"action":"write",...}'`
+   via the substrate CLI.
 
 **Do not** tell the agent that a closing session has completed any work.
 **Do not** infer `mpm_work` completion from `session_end` hooks. Host
@@ -439,15 +447,20 @@ consult-and-verify.
 
 ## What this protocol does NOT claim
 
-- It does **not** claim MPM wakes the agent by itself. The host runtime
-  must wire wake-context delivery (SessionStart hook, system-prompt
-  injection, plugin startup handler, etc.).
+- It does **not** claim MPM wakes the agent by itself. The host
+  runtime owns wake-context delivery — each adapter ships its own
+  host-specific lifecycle integration (ClaudeCode `SessionStart`
+  hook, OpenClaw typed `session_start` → `agent_turn_prepare` chain,
+  OpenCode chat-hook, Pi extension hook pair). **Hermes has no
+  session-start wake hook** — on Hermes the agent must call
+  `mcp__mpm__mpm_context` action `read_wake_context` itself at
+  the start of its first turn.
 - It does **not** claim MPM provides any specific behavior beyond
   durability, retrieval, and write-shape contracts. Capabilities outside
   this list are host- or tool-specific.
 - It does **not** require any particular host. OpenClaw, Claude Code,
-  OpenCode, and any host that can call `mpm` (MCP, CLI, plugin) can
-  satisfy this protocol.
+  OpenCode, Pi, Hermes, and any host that can call `mpm` (MCP, CLI,
+  plugin) can satisfy this protocol.
 
 ---
 
