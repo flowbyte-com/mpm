@@ -51,26 +51,26 @@ Every section is self-contained enough to read in isolation.
 
 ### Table of Contents
 
-1. What is MPM?
-2. Why this isn't a memory system
-3. The Cognitive Model
-4. Belief Lifecycle
-5. Quick Start
-6. System Architecture
-   - 6.1 Core vs Runtime
-   - 6.2 Confidence Engine
-   - 6.3 Retrieval Architecture
-   - 6.4 MCP Integration
-   - 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
-   - 6.6 Telemetry Sidecar (mpm-telemetry)
-7. Core Stability
-8. CLI Reference
-9. Runtime Services
-10. Reliability
-11. Glossary
-- **Appendix A: Shared Epistemology Implementation**
-- **Appendix B: Arc 2 (Active Dissemination) Implementation**
-- **Appendix C: Enforcement Patterns**
+1. [What is MPM?](#1-what-is-mpm)
+2. [Why this isn't a memory system](#2-why-this-isnt-a-memory-system)
+3. [The Cognitive Model](#3-the-cognitive-model)
+4. [Belief Lifecycle](#4-belief-lifecycle)
+5. [Quick Start](#5-quick-start)
+6. [System Architecture](#6-system-architecture)
+   - 6.1 [Core vs Runtime](#61-core-vs-runtime)
+   - 6.2 [Confidence Engine](#62-confidence-engine)
+   - 6.3 [Retrieval Architecture](#63-retrieval-architecture)
+   - 6.4 [MCP Integration](#64-mcp-integration)
+   - 6.5 [Multi-Agent Shared Epistemology (Layers 0–4)](#65-multi-agent-shared-epistemology-layers-04)
+   - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
+7. [Core Stability](#7-core-stability)
+8. [CLI Reference](#8-cli-reference)
+9. [Runtime Services](#9-runtime-services)
+10. [Reliability](#10-reliability)
+11. [Glossary](#11-glossary)
+- [Appendix A: Shared Epistemology Implementation](#appendix-a-shared-epistemology-implementation)
+- [Appendix B: Arc 2 (Active Dissemination) Implementation](#appendix-b-arc-2-active-dissemination-implementation)
+- [Appendix C: Enforcement Patterns](#appendix-c-enforcement-patterns)
 - [Community & Security](#community--security)
 - [License](#license)
 
@@ -78,7 +78,7 @@ Every section is self-contained enough to read in isolation.
 
 ## 1. What is MPM?
 
-MPM is a unified substrate deployed as a primary CLI (`mpm`) with companion daemon binaries (`mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) — everything stored in one SQLite database with FTS5 full-text search. Zero external services.
+MPM is a unified substrate deployed as a primary CLI (`mpm`) with companion daemon binaries (`mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) — everything stored in one SQLite database with FTS5 full-text search. The persistent cognitive substrate is a single SQLite file; no separate vector database, no distributed infrastructure, no remote SaaS service is required. Semantic embeddings can be delegated to a locally running **Ollama** inference provider (the default model is `nomic-embed-text`); Ollama performs inference, it is not the MPM persistence layer.
 
 It is the reasoning layer for AI agents. It tracks not just *what* the agent knows, but *why* it decided to act, *how* it chose to act, and *what it believes but hasn't proven yet*.
 
@@ -93,7 +93,7 @@ At the implementation level, the exclusions are concrete:
 - **Not an HTTP server.** No request/response REST surface; machine integration is stdio-only via `mpm-mcp`. The CLI is for operators, not for serving web traffic.
 - **Not generic storage.** Built for AI agent cognition: weighted recall, decay, epistemology, proactive hints.
 - **Three surfaces, one substrate.** The CLI is the human-facing cognitive interface (`mpm remember`, `mpm learn`, `mpm decide`, ...); `mpm call` and MCP are the agent-facing tool surfaces. All map to the same `internal/core/tools` registry.
-- **Not a vector database.** A SQLite-native ANN index handles semantic recall. No Pinecone, no Qdrant, no embeddings service.
+- **Not a vector database.** A SQLite-native ANN index handles semantic recall. No Pinecone, no Qdrant, no MPM-managed embeddings service (a locally running Ollama instance may be used as the embedding inference provider — see §6.3).
 - **Not a knowledge graph.** Relationships are first-class artifacts (decisions, theories, evidence, lessons), not edges in a graph store.
 
 ---
@@ -147,6 +147,7 @@ Every persistent object inside MPM exists because it answers a different cogniti
 | Work | A tracked unit of work with immutable event history |
 | Reference | External material for the agent to consult |
 | Lesson | Reusable knowledge |
+| Skill | A reusable procedure ("how to act") |
 | Evidence | Information supporting or challenging another artifact |
 
 The distinction matters.
@@ -642,6 +643,8 @@ The single binary lives at `bin/mpm`. Try it without installing anything — no 
 
 ### 5.2 Run it as a daemon
 
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./scripts/install.sh` instead — it does all of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, baseline directive seeding, and OpenClaw wiring) in one idempotent step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
@@ -677,20 +680,6 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > on every graphical login (post-decrypt). `scripts/install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
 > autostart entry automatically; `scripts/install.sh --uninstall` removes it.
-> The `.desktop` Comment= line carries the string `071911bc`. It is not a lesson
-> ID: it resolves to no row in any substrate table and to no git object in this
-> repository, and its origin is unknown. The autostart mechanism was introduced
-> by commit `14ac32b`. Separately, the substrate memory that frames the
-> daemon-stays-dead-at-boot behaviour as a designed "Lazy-Start Architecture" is
-> `463fb2c8014fc1f1`, which carries forward the reasoning from an earlier,
-> no-longer-retrievable reference `24be03ec71a5981f` — that reference is not
-> independently queryable, so query the memory ID, not the reference.
-> `463fb2c8014fc1f1` is currently flagged for manual review — the challenge
-> queue's `unresolved state collision (cosine=0.88)` is a stale-detection flag,
-> not a substantive dispute of its content. **Both are cited because the substrate
-> does not articulate how the two mechanisms relate; the relationship
-> between the wake-layer design and the autostart-layer workaround is
-> unresolved in the cited material.**
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
 > headless deployments) can opt out by removing the autostart entry and instead
@@ -934,7 +923,7 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 > **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=query` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
-> **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The embedding model is `nomic-embed-text`; the 768-dim vectors are what the shared IVF index (§6.5 Layer 1) partitions into Voronoi cells.
+> **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The default embedding model is `nomic-embed-text` (768-dim), served by a **locally running Ollama instance** as the supported embedding inference provider. Ollama performs inference and returns vectors to MPM — the vectors are then persisted in the same SQLite database (alongside the memories they describe), partitioned into Voronoi cells by the shared IVF index (§6.5 Layer 1). Ollama is an inference dependency, not a separate persistence substrate or vector database; the configured embedding component can also be set to `"disabled"` (NullProvider) when semantic recall is not required.
 
 **Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing the FTS5 terms that matched, the cosine similarity (when vector search contributed), and the stored weight / reinforcement_count metadata. The metadata fields are surfaced for **provenance / display only** — they are not part of the ranking score, so changes in `reinforcement_count` do not move a memory up or down the list. Useful for "why did the agent pick this memory?" introspection without re-running the search.
 
@@ -959,7 +948,7 @@ When a drifting memory triggers this signature, the engine quarantines the memor
 
 ### 6.4 MCP Integration
 
-*Bridges JSON-RPC from any host (OpenClaw, Hermes, Claude Code) to the CoreDB contract — agents see tools, not SQL.*
+*Bridges JSON-RPC from any MCP-aware host (Claude Code, OpenClaw, Hermes — and Pi/OpenCode via their typed subprocess adapters) to the CoreDB contract — agents see tools, not SQL.*
 
 MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`bin/mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. No plugin layer, no Node/TypeScript wrapper, no Python shim — one binary speaking MCP.
 
@@ -970,6 +959,8 @@ For a step-by-step recipe for connecting Claude Code to MPM — including the Se
 #### MCP tool surface
 
 The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
+
+The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help`. Hosts receive this on session start; the model sees a small, stable surface that covers the daily cognitive workflow (memorise / recall / skill lookup / wake refresh / handoff / scratchpad / directive management). The block below lists the **21 Registry entries** — the internal substrate. The full MCP surface seen on the wire is 22 tools: those 21 entries plus the `mpm_help` discovery closure (registered at server init by `cmd/mpm-mcp`). The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions, and operators who need the entire surface exposed to the model set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block.
 
 ```
 <!-- tools:begin — auto-generated by `go generate ./internal/tools/`. Do not edit by hand. -->
@@ -985,6 +976,20 @@ mpm_blob_read            mpm_blob_search          mpm_work
 
 Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The server binary is at `bin/mpm-mcp` relative to the MPM repo root.
 
+#### Supported integrations at a glance
+
+MPM ships first-party integration adapters for five agent hosts. Each one delivers MPM wake context before the first model turn — using whatever lifecycle mechanism the host exposes — except where noted:
+
+| Host | Mechanism | Wake delivery |
+|---|---|---|
+| **Claude Code** | MCP server + SessionStart hook | Automatic (host fires `mpm_context` action `read_wake_context` and injects the result as `hookSpecificOutput.additionalContext`) |
+| **OpenClaw** | MCP server + typed `session_start` → `agent_turn_prepare` plugin | Automatic (`prependContext` on the first turn) |
+| **OpenCode** | TypeScript plugin (typed tools) + `experimental.chat.system.transform` | Automatic (push into the system prompt before the first model call) |
+| **Pi** | TypeScript extension (typed tools) + `pi.on("session_start")` → `pi.on("before_agent_start")` | Automatic (concatenated onto the system prompt once per session) |
+| **Hermes** | MCP server (no host plugin layer) | **Manual** — Hermes has no session-start hook; the agent calls `mcp__mpm__mpm_context` action `read_wake_context` once at the start of its first turn |
+
+The mechanism details, installation steps, and host-specific constraints live in each adapter's directory under `agent_installation/`. Compact handoff uses `mpm_context` action `write_handoff` on every host; the substrate `mpm_handoff` tool remains reachable via `mpm call mpm_handoff --payload '…'` when the MCP transport is unavailable or `MPM_EXPOSE_ALL_TOOLS=1` is set.
+
 #### Single source of truth: `internal/core/tools/registry.go`
 
 Both the CLI (`mpm call <tool>`) and the MCP server iterate the same registry — a package-level `[]Tool` slice in `internal/core/tools/registry_list.go`. Each entry holds:
@@ -998,7 +1003,10 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
-Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The 14 aggregator tools in the surface above (`mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`) collectively cover the agent's daily workflow: read/write memory and the memory feedback loop (mpm_memory actions: `save`/`query`/`shred`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), and system maintenance + health. Plus three standalone tools: `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `log_to_changelog` (self-report agent work tied to a git commit SHA), and `request_review` (concurrent multi-component review).
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The full Registry has **21 entries** (the MCP surface is 22 — those 21 plus the `mpm_help` discovery closure registered at server init by `cmd/mpm-mcp`). Of those 21:
+
+- **15 aggregator tools** (`{action, params}` shape): `mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`, `mpm_work`. These cover the daily cognitive workflow: read/write memory and the memory feedback loop (`mpm_memory` actions `save`/`query`/`shred`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), work tracking (`mpm_work` — same Fat-RPC pattern), and system maintenance + health.
+- **6 standalone tools** (each with its own narrower schema): `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `mpm_resolve` (resolves `mpm://memory/<id>` / `mpm://lesson/<id>` / `mpm://theory/<id>` / `mpm://work/<id>` URI pointers with a default 512-byte cap, caller-controllable via `opts.MaxBytes`), `mpm_blob_read` (raw blob fetch by id, 256 KiB server ceiling), `mpm_blob_search` (pointer search across the blobstore), `log_to_changelog` (self-report agent work tied to a git commit SHA), and `request_review` (concurrent multi-component review).
 
 A handful of CLI commands are intentionally **NOT** exposed via MCP/call because they are operationally distinct (destructive, cron-friendly, or human-gated):
 
@@ -2084,6 +2092,8 @@ Proactive defense against the silent-failure class of bugs where hand-curated fr
 *Auto-embeds on save so retrieval works without manual prep — no batch-of-one-by-one friction.*
 
 Auto-embed on `mpm add` and on one-shot ingestion via `mpm ops ingest`. `mpm ops backfill-embeddings` provides batched, resume-safe backfill for existing memories. tiktoken (`cl100k_base`) drives token-aware chunking.
+
+**Provider architecture.** Embeddings are generated by a configured embedding provider — the supported implementation is a locally running **Ollama** instance (default model `nomic-embed-text`, 768-dim). Ollama performs inference only; the resulting vectors are persisted inside MPM's SQLite substrate (no separate vector database, no remote service). The embedding component can also be set to `"disabled"` to opt out of semantic recall entirely. Resolution precedence is documented in `internal/core/embeddings.go` (profile → OLLAMA_* env fallback → null).
 #### Memory Versioning
 
 *Append-only revisions with `--as-of` time travel so claims are auditable, not silently rewritten.*
@@ -2329,15 +2339,13 @@ The conceptual vocabulary of MPM. Implementation-specific terms (decay, wake, LT
 
 ---
 
-# Appendices
-
-The appendices are part of this document. They hold the implementation detail that contributors and curious readers will reach for. The narrative above stays focused on architecture and philosophy; the details live below.
-
 If you only care about *what* MPM is and *how to use it*, stop at §10. If you are extending MPM, writing tests, or reviewing invariants, continue.
 
 ---
 
-# Appendix A: Shared Epistemology Implementation
+## Appendices
+
+## Appendix A: Shared Epistemology Implementation
 
 **Cross-references:** §6.5 Layers 0-3, §10 (audit cluster proposals, where applicable).
 
@@ -2569,7 +2577,7 @@ The asymmetry: local contradictions are NOT written to `shared.contradiction_log
 
 ---
 
-# Appendix B: Arc 2 (Active Dissemination) Implementation
+## Appendix B: Arc 2 (Active Dissemination) Implementation
 
 **Cross-references:** §6.5 Layer 4, §9 "Event Wakes."
 
@@ -2742,7 +2750,7 @@ Documented in the Arc 2 implementation lesson:
 
 ---
 
-# Appendix C: Enforcement Patterns
+## Appendix C: Enforcement Patterns
 
 **Cross-references:** §3.2 (Design Principles), §6.2 (Confidence Engine), §10 (Reliability, audit cluster proposals, self-heal).
 
