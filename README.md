@@ -643,7 +643,7 @@ The single binary lives at `bin/mpm`. Try it without installing anything — no 
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./scripts/install.sh` instead — it does all of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, baseline directive seeding, and OpenClaw wiring) in one idempotent step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./scripts/install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see [§5.2 step "Seed the baseline cognitive directives"](#seed-the-baseline-cognitive-directives-recommended-once-after-install)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
@@ -1884,7 +1884,7 @@ scope = "global" | "framework:<id>"
 - `"framework:<id>"` — only the named framework receives it. Standard ids: `openclaw`, `opencode`, `pi`, `claude-code`, `hermes`
 - empty / unset — treated as `"global"` at materialisation time (legacy-row backward compat — rows seeded before scope existed match the same predicate)
 
-How a framework identifies itself: the MCP host exports `MPM_FRAMEWORK=<id>` on the `mpm-mcp` child process env (same pattern as `MPM_ACTIVE_MODE`/`MPM_ACTIVE_PERSONA`). `mpmcli.ActiveContextFromEnv` reads it and populates `ActiveContext.FrameworkName`. The MCP `handleReadDirectives` uses that to filter via `ReadDirectivesForFramework(fw)`. When `MPM_FRAMEWORK` is unset, `FrameworkName` defaults to `"mcp"` — existing single-MCP callers see no behaviour change.
+How a framework identifies itself: the MCP host exports `MPM_PROVENANCE_FRAMEWORK=<id>` on the `mpm-mcp` child process env (the canonical name, same pattern as `MPM_ACTIVE_MODE`/`MPM_ACTIVE_PERSONA`). `mpmcli.ActiveContextFromEnv` reads `MPM_PROVENANCE_FRAMEWORK` first and falls back to the legacy alias `MPM_FRAMEWORK` (used by all five `agent_installation/` adapters for backward compatibility), populating `ActiveContext.FrameworkName` in either case. The MCP `handleReadDirectives` uses that to filter via `ReadDirectivesForFramework(fw)`. When both env vars are unset, `FrameworkName` defaults to `"mcp"` — existing single-MCP callers see no behaviour change.
 
 Resolution model (additive union, evaluated by MPM):
 

@@ -133,11 +133,15 @@ response carries the resolved `db_path` so operators can verify convergence:
 
 ## Framework identification (provenance contract)
 
-Claude Code identifies itself to the MPM substrate via the canonical
-framework-id env var **`MPM_FRAMEWORK=claude-code`**. This is documented
-in MPM's `README.md` §1827 as the wire contract that `mpm-mcp` reads
-through `mpmcli.ActiveContextFromEnv` → `ActiveContext.FrameworkName`
-→ `tool_invocations.framework_name` and `artifact_provenance.framework_name`.
+Claude Code identifies itself to the MPM substrate via the
+framework-id env var `MPM_PROVENANCE_FRAMEWORK=claude-code` (canonical;
+read first by `mpmcli.ActiveContextFromEnv`) with the legacy alias
+`MPM_FRAMEWORK=claude-code` (read second) — `MPM_FRAMEWORK` is what
+this adapter's `.mcp.json` template sets, so existing installs continue
+to work without modification, while new callers should prefer the
+canonical `MPM_PROVENANCE_FRAMEWORK` name. The env value populates
+`ActiveContext.FrameworkName` → `tool_invocations.framework_name` and
+`artifact_provenance.framework_name`.
 
 Without this var, `mpm-mcp` falls through to the default
 `framework_name=mcp` and Claude Code-originated artifacts are
@@ -148,7 +152,7 @@ misattributed (they look like unattributed MCP-server calls).
 | Var | Value | Static? | Rationale |
 |---|---|---|---|
 | `MPM_WORKSPACE` | `${HOME}/.mpm` | yes | Canonical install root; portable across machines |
-| `MPM_FRAMEWORK` | `claude-code` | yes | Claude Code is the calling agent framework for the entire MCP session |
+| `MPM_FRAMEWORK` | `claude-code` | yes | Claude Code is the calling agent framework for the entire MCP session (legacy alias — `MPM_PROVENANCE_FRAMEWORK` is now the canonical name read by `mpmcli.ActiveContextFromEnv`; this template keeps `MPM_FRAMEWORK` so existing installs continue to attribute correctly without materialization churn) |
 
 **What we deliberately do NOT set, and why:**
 

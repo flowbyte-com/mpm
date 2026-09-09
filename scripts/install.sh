@@ -645,7 +645,7 @@ phase_validate() {
     # 5. Prime directives seeded (warn-only — install does not auto-seed)
     local directives_count=0
     local directives_json
-    directives_json=$("$PREFIX/bin/mpm" call read_directives --payload '{}' 2>/dev/null \
+    directives_json=$("$PREFIX/bin/mpm" call mpm_context --payload '{"action":"read_directives","params":{}}' 2>/dev/null \
         | grep -oE '"count":[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
     if [ -n "$directives_json" ]; then
         directives_count="$directives_json"

@@ -92,3 +92,50 @@ func TestInstallSh_AcceptsMPMWorkspaceOverride(t *testing.T) {
 		t.Errorf("install.sh must honour MPM_WORKSPACE env override via ${MPM_WORKSPACE:-<default>}; not found")
 	}
 }
+
+// TestInstallSh_ReadDirectivesValidationForm pins the canonical command
+// line used by install.sh's prime-directive presence check (the
+// `phase_validate` step). The canonical form is:
+//
+//	"$PREFIX/bin/mpm" call mpm_context --payload '{"action":"read_directives","params":{}}'
+//
+// Pre-fix this was `mpm call read_directives --payload '{}'` — but
+// `read_directives` is an action of the `mpm_context` aggregator
+// tool, not a top-level tool name. The dispatcher rejects it with
+// "unknown tool: read_directives" (verified empirically), and the
+// `2>/dev/null || true` masking means the directive-presence check
+// always misfired (warning "no prime directives found" even after the
+// operator had run `mpm ops init directives`). This test fails on
+// either the missing canonical form or any reintroduction of the
+// pre-fix form, mirroring the D-3.1 health-check pin in the same file.
+func TestInstallSh_ReadDirectivesValidationForm(t *testing.T) {
+	data, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	body := string(data)
+
+	// Required: the canonical mpm_context --payload form. Allow either
+	// `mpm` or `"$PREFIX/bin/mpm"` so a future variable-name refactor
+	// does not fail this pin (matches the D-3.1 test's permissiveness).
+	canonical := []string{
+		`call mpm_context --payload '{"action":"read_directives","params":{}}'`,
+	}
+	for _, want := range canonical {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh must contain %q (canonical read_directives form); not found", want)
+		}
+	}
+
+	// Negative: the pre-fix form `call read_directives` MUST NOT appear.
+	// If a future refactor reintroduces it without the mpm_context
+	// aggregator prefix, the validation silently regresses.
+	preFix := []string{
+		`call read_directives --payload`,
+	}
+	for _, bad := range preFix {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains pre-fix form %q; must use mpm_context --payload '{\"action\":\"read_directives\",...}' instead", bad)
+		}
+	}
+}
