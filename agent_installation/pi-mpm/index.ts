@@ -2,13 +2,20 @@
  * pi-mpm — Pi extension that wires MPM's cognitive substrate into Pi.
  *
  * Static, hand-maintained bridge to a curated **17-tool subset** of the
- * current 21-tool MPM registry (14 unified Domain Tools + 3 standalone
+ * current 22-tool MPM registry (21 Registry entries + the mpm_help
+ * discovery closure registered via cmd/mpm-mcp; 14 unified Domain
+ * Tools + 3 standalone tools exposed by this adapter)
  * tools). This is a deliberate replacement for the previous ~1,500-line,
  * build-generated file (scripts/gen.py + scripts/build.sh + header/footer.ts
  * are gone).
  *
  * Until the Phase 1/2 refactor, mpm-mcp exposed 77 granular tools. The
- * current registry exposes 21 tools total; this Pi adapter registers 17
+ * current registry exposes 22 tools total (21 Registry entries + the
+ * mpm_help discovery closure registered via cmd/mpm-mcp); this Pi adapter
+ * registers 17 typed tools. The default initial MCP surface that hosts
+ * receive at session start is the compact 3-tool surface
+ * (mpm_memory, mpm_context, mpm_help); MPM_EXPOSE_ALL_TOOLS=1 restores
+ * the full 22-tool surface.
  * of them. The 14 Domain Tools are "Fat RPC" — they take {action: string,
  * params: object} and the backend dispatches. That collapses ~77 distinct
  * tool definitions into 14 near-identical ones, permanently resolving
@@ -220,7 +227,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		);
 	}
 	lines.push(
-		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 14 Domain Tools + 3 Standalones (17 typed tools total); tools in the full 21-tool MPM registry not exposed here remain reachable via `mpm call <tool> --payload '<json>'`.",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 14 Domain Tools + 3 Standalones (17 typed tools total); tools in the full 22-tool MPM registry (21 Registry + the mpm_help discovery closure) not exposed here remain reachable via `mpm call <tool> --payload '<json>'`. On hosts using the default compact MCP surface, handoff is reached through `mpm_context action=write_handoff`; set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env to restore the full 22-tool surface.",
 	);
 	return lines.join("\n");
 }
