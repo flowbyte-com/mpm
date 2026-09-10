@@ -832,6 +832,56 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 	return out, rows.Err()
 }
 
+// ListEvidence returns all non-expired evidence rows across every
+// artifact, ordered by created_at descending (newest first). Used by
+// the CLI `mpm evidence list` (unfiltered) and the tool path's
+// equivalent.
+//
+// 2026-09-10 regression repair (T45): added because the CLI
+// regression repair wanted bare `mpm evidence list` to work
+// alongside the existing `--artifact <id>` filtered form. The
+// filtered path uses ListEvidenceForArtifact (above); the unfiltered
+// path uses this function. Both apply the same expiry filter so
+// the surface parity holds.
+func ListEvidence(dm *DatabaseManager) ([]Evidence, error) {
+	rows, err := dm.QueryTracked(`
+		SELECT id, artifact_id, artifact_type, type, source_group,
+		       strength, independence_factor, created_by, created_at, expires_at, notes
+		FROM evidence
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list evidence: %w", err)
+	}
+	defer rows.Close()
+
+	now := time.Now().Unix()
+	var out []Evidence
+	for rows.Next() {
+		var e Evidence
+		var createdAt int64
+		var expiresAt sql.NullInt64
+		var notes sql.NullString
+		if err := rows.Scan(&e.ID, &e.ArtifactID, &e.ArtifactType, &e.Type, &e.SourceGroup,
+			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if notes.Valid {
+			e.Notes = notes.String
+		}
+		e.CreatedAt = time.Unix(createdAt, 0)
+		if expiresAt.Valid && expiresAt.Int64 <= now {
+			continue
+		}
+		if expiresAt.Valid {
+			exp := time.Unix(expiresAt.Int64, 0)
+			e.ExpiresAt = &exp
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ConfidenceSnapshot is a point-in-time view of an artifact's confidence state.
 type ConfidenceSnapshot struct {
 	ArtifactID   string                `json:"artifact_id"`

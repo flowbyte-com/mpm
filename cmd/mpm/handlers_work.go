@@ -398,6 +398,14 @@ func handleWorkItem(args []string) int {
 		}
 		action = "note"
 		params["work_id"] = positional[0]
+		// 2026-09-10 regression repair (T56): the natural
+		// positional form `mpm work item note <id> "note text"`
+		// must work alongside `--note "note text"`. Pre-fix the
+		// positional form silently dropped the note text. The
+		// flag form continues to work via parseWorkItemArgs.
+		if len(positional) > 1 {
+			params["note"] = strings.Join(positional[1:], " ")
+		}
 	case "reopen":
 		if len(positional) < 1 {
 			usererror.Error("mpm work item reopen requires a work_id positional arg")

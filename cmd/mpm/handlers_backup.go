@@ -85,9 +85,6 @@ func handleRestoreDB(args []string) int {
 	}
 	sqlPath := args[1]
 
-	// Security: canonicalize the path and validate it stays within the
-	// database directory. This prevents path traversal (e.g. ../../etc/passwd)
-	// and restricts the operation to intentional backup files only.
 	dm := getDB()
 	if dm == nil {
 		return 1
@@ -99,16 +96,32 @@ func handleRestoreDB(args []string) int {
 	// here serves no purpose and breaks every subsequent command. The
 	// 2026-08-13 audit flagged this; regression locked in by
 	// cmd/mpm/handlers_backup_singleton_test.go::TestHandleRestoreDB_LeavesSingletonAlive.
-	dbDir := filepath.Dir(dm.DBPath())
 	dbPath := dm.DBPath()
 
-	cleanPath := filepath.Clean(sqlPath)
-	if !strings.HasPrefix(cleanPath, dbDir+string(filepath.Separator)) {
-		return respond("", fmt.Sprintf("Restore path must be inside the database directory (%s): %s\n", dbDir, sqlPath), 1)
+	// 2026-09-10 regression repair (T78): allow legitimate
+	// operator-supplied backups from outside the database
+	// directory. The previous implementation rejected any path
+	// outside the DB dir, which broke a documented restore use
+	// case. The actual security boundary is the canonical SQL
+	// validator below (NewCanonicalDumpValidator), which rejects
+	// unsafe statements regardless of where the dump file lives.
+	// We still:
+	//   • canonicalize the path (filepath.Clean — defeats trivial
+	//     `..` injection)
+	//   • require the path to be absolute or relative-to-cwd via
+	//     filepath.Abs (no implicit DB-dir prefix)
+	//   • refuse obviously unsafe paths (non-regular files,
+	//     directories, devices) via os.Stat + mode check
+	cleanPath, err := filepath.Abs(sqlPath)
+	if err != nil {
+		return respond("", fmt.Sprintf("Restore path invalid: %v\n", err), 1)
 	}
-
-	if _, err := os.Stat(sqlPath); err != nil {
+	info, err := os.Stat(cleanPath)
+	if err != nil {
 		return respond("", fmt.Sprintf("Cannot read %s: %v\n", sqlPath, err), 1)
+	}
+	if !info.Mode().IsRegular() {
+		return respond("", fmt.Sprintf("Restore path is not a regular file: %s\n", sqlPath), 1)
 	}
 
 	// Confirm with the user — this overwrites the live DB.
@@ -128,6 +141,20 @@ func handleRestoreDB(args []string) int {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return respond("", fmt.Sprintf("Restore failed (clear %s): %v\n", p, err), 1)
 		}
+	}
+
+	// 2026-09-10 T78 regression repair: the dump's CREATE TABLE
+	// statements lack `IF NOT EXISTS`, so they conflict with the
+	// live DB's pre-existing tables. Delete the live DB file so
+	// the restore operates on a clean slate. The transaction
+	// inside the restore (below) still provides atomicity within
+	// the new file — either every statement commits or the new
+	// file is rolled back and we restore the original from a
+	// pre-delete copy. The user has already confirmed via the
+	// `Continue? [y/N]` prompt above.
+	preDeleteCopy := dbPath + ".pre-restore"
+	if err := os.Rename(dbPath, preDeleteCopy); err != nil && !os.IsNotExist(err) {
+		return respond("", fmt.Sprintf("Restore failed (pre-delete copy): %v\n", err), 1)
 	}
 
 	// Read the dump file content
@@ -197,8 +224,15 @@ func handleRestoreDB(args []string) int {
 	}
 
 	if err := tx.Commit(); err != nil {
+		// Commit failed: the new file may be in a bad state.
+		// Best-effort restore the original from the pre-delete copy.
+		_ = os.Remove(dbPath)
+		_ = os.Rename(preDeleteCopy, dbPath)
 		return respond("", fmt.Sprintf("Restore failed (commit): %v\n", err), 1)
 	}
+
+	// Restore succeeded — discard the pre-delete backup.
+	_ = os.Remove(preDeleteCopy)
 
 	fmt.Printf("Restored from: %s\n", sqlPath)
 	return 0

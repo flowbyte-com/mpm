@@ -151,13 +151,10 @@ func handleEvidence(args []string) int {
 
 func parseEvidenceListArgs(args []string) (map[string]interface{}, error) {
 	fs := flag.NewFlagSet("evidence-list", flag.ContinueOnError)
-	artifactID := fs.String("artifact", "", "artifact id (required)")
-	artifactType := fs.String("artifact-type", "memory", "artifact type")
+	artifactID := fs.String("artifact", "", "optional artifact id (omit for unfiltered list)")
+	artifactType := fs.String("artifact-type", "memory", "artifact type (used only with --artifact)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
-	}
-	if *artifactID == "" {
-		return nil, fmt.Errorf("--artifact is required")
 	}
 	return map[string]interface{}{
 		"artifact_id":   *artifactID,
@@ -177,7 +174,17 @@ func handleEvidenceList(args []string) int {
 		return 1
 	}
 	dm := getDB().(*mpminternal.DatabaseManager)
-	rows, err := mpminternal.ListEvidenceForArtifact(dm, artifactID, artifactType)
+
+	// 2026-09-10 regression repair (T45): bare `mpm evidence list`
+	// (no --artifact) now returns all evidence; `--artifact <id>`
+	// narrows to a single artifact. Both apply the same expiry
+	// filter via the substrate helpers, so parity holds.
+	var rows []mpminternal.Evidence
+	if artifactID == "" {
+		rows, err = mpminternal.ListEvidence(dm)
+	} else {
+		rows, err = mpminternal.ListEvidenceForArtifact(dm, artifactID, artifactType)
+	}
 	if err != nil {
 		printError("list evidence: %v", err)
 		return 1
@@ -190,13 +197,16 @@ func handleEvidenceList(args []string) int {
 	if rows == nil {
 		rows = []mpminternal.Evidence{}
 	}
-	out, _ := json.Marshal(map[string]interface{}{
-		"success":       true,
-		"artifact_id":   artifactID,
-		"artifact_type": artifactType,
-		"count":         len(rows),
-		"evidence":      rows,
-	})
+	resp := map[string]interface{}{
+		"success": true,
+		"count":   len(rows),
+		"evidence": rows,
+	}
+	if artifactID != "" {
+		resp["artifact_id"] = artifactID
+		resp["artifact_type"] = artifactType
+	}
+	out, _ := json.Marshal(resp)
 	respond(string(out), "", 0)
 	return 0
 }

@@ -17,10 +17,16 @@ func TestEvidenceList_ParsesArgs(t *testing.T) {
 	assert.Equal(t, "mem-1", payload["artifact_id"])
 }
 
-func TestEvidenceList_RequiresArtifact(t *testing.T) {
-	_, err := parseEvidenceListArgs([]string{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--artifact")
+// TestEvidenceList_BareArgs_ParseSuccessfully pins the 2026-09-10
+// T45 regression repair: bare `mpm evidence list` (no --artifact)
+// is now valid. The parser returns an empty `artifact_id` and the
+// handler dispatches to ListEvidence (unfiltered). Previously this
+// returned `--artifact is required`; the smoke probe flagged that
+// as a regression and it has been restored.
+func TestEvidenceList_BareArgs_ParseSuccessfully(t *testing.T) {
+	payload, err := parseEvidenceListArgs([]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "", payload["artifact_id"])
 }
 
 // TestEvidenceList_EndToEnd exercises the full path: in-memory DatabaseManager
