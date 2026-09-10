@@ -464,6 +464,15 @@ func literalFromPayloadIndex(n ast.Node) string {
 // the idiomatic helpers used in handlers; without recognizing them the
 // post-hardening schema guard produces phantom over-declaration errors
 // for every domain dispatcher.
+//
+// 2026-09-10 hardening update: also recognises `collectConfirmationSpecs(p, "k", type)`
+// and `collectContradictionSpecs(p, "k", type)` style reads. These
+// helpers (handlers.go handleLogToChangelog) take the payload key as a
+// string-literal second argument, so the body of the helper does
+// `p[paramName]` — a direct IndexExpr read that this detector cannot
+// see from the call site. Recognising the call-site literal prevents
+// the schema guard from flagging those keys as over-declared when the
+// handler does read them via the helper.
 func literalFromGetStringCall(n ast.Node) string {
 	cl, ok := n.(*ast.CallExpr)
 	if !ok {
@@ -497,6 +506,26 @@ func literalFromGetStringCall(n ast.Node) string {
 		if idx, ok := cl.Args[0].(*ast.IndexExpr); ok {
 			return literalFromPayloadIndex(idx)
 		}
+	}
+	// Form 3: collectConfirmationSpecs(p, "k", type) / collectContradictionSpecs(p, "k", type).
+	// The helper takes the payload key as a string-literal second argument
+	// and reads p[paramName] inside. From the call site the read is hidden
+	// behind a helper indirection; this detector recognises the literal so
+	// the schema-guard over-decl check doesn't phantom-flag the key.
+	if fn, ok := cl.Fun.(*ast.Ident); ok &&
+		(fn.Name == "collectConfirmationSpecs" || fn.Name == "collectContradictionSpecs") {
+		if len(cl.Args) < 2 {
+			return ""
+		}
+		id, ok := cl.Args[0].(*ast.Ident)
+		if !ok || (id.Name != "payload" && id.Name != "p" && id.Name != "params") {
+			return ""
+		}
+		lit, ok := cl.Args[1].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return ""
+		}
+		return strings.Trim(lit.Value, `"`)
 	}
 	return ""
 }

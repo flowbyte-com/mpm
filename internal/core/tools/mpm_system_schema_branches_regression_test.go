@@ -50,11 +50,18 @@ import (
 	"testing"
 )
 
-// mpmSystemActionBranches pins the 10 actions the dispatcher's case
+// mpmSystemActionBranches pins the 11 actions the dispatcher's case
 // list claims (handlers.go handleMpmSystem default branch). The
 // oneOf cardinality MUST match the dispatcher — any drift surfaces
 // as either an extra branch (handler ignores it) or a missing branch
 // (the action fails schema validation before reaching the dispatcher).
+//
+// 2026-09-10 alpha-cleanup: unsnooze_cluster added to the canonical
+// list. The dispatcher (handlers.go:6072) and schema (registry_list.go
+// oneOf branch) both advertise it; this list is the audit-closure
+// pin that closes the over-declaration drift between dispatcher +
+// schema. Without the entry here, the test reports a phantom
+// "extra branch" failure every run.
 var mpmSystemActionBranches = []string{
 	"gc_run",
 	"compact",
@@ -63,6 +70,7 @@ var mpmSystemActionBranches = []string{
 	"query_audit_log",
 	"list_clusters",
 	"snooze_cluster",
+	"unsnooze_cluster",
 	"resolve_cluster",
 	"annotate_cluster",
 	"critic_findings",
@@ -241,16 +249,17 @@ func TestMpmSystem_SchemaDeclarationsCoverHandlerReads(t *testing.T) {
 	// Sourced from handlers.go handlers (see comment above). Update
 	// when adding new handler reads; this list IS the audit closure.
 	handlerParams := map[string][]string{
-		"gc_run":           {"dry_run", "aggressive", "max_age_hours", "stale_theory_days"},
-		"compact":          {"force", "max_batches"},
-		"health_check":     {}, // no params
-		"migrate":          {"confirm", "from_path", "format", "label", "dry_run", "commit", "commit_batch", "undo_batch"},
-		"query_audit_log":  {"level", "component", "artifact_id", "days", "since", "limit", "include_stack"},
-		"list_clusters":    {}, // no params
-		"snooze_cluster":   {"cluster_key", "snooze_until", "reason"},
-		"resolve_cluster":  {"cluster_key", "reason"},
-		"annotate_cluster": {"cluster_key", "annotation", "reason"},
-		"critic_findings":  {"limit"},
+		"gc_run":            {"dry_run", "aggressive", "max_age_hours", "stale_theory_days"},
+		"compact":           {"force", "max_batches"},
+		"health_check":      {}, // no params
+		"migrate":           {"confirm", "from_path", "format", "label", "dry_run", "commit", "commit_batch", "undo_batch"},
+		"query_audit_log":   {"level", "component", "artifact_id", "days", "since", "limit", "include_stack"},
+		"list_clusters":     {}, // no params
+		"snooze_cluster":    {"cluster_key", "snooze_until", "reason"},
+		"unsnooze_cluster":  {"cluster_key", "reason"},
+		"resolve_cluster":   {"cluster_key", "reason"},
+		"annotate_cluster":  {"cluster_key", "annotation", "reason"},
+		"critic_findings":   {"limit"},
 	}
 
 	// Index branches by action const.
