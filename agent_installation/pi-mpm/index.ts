@@ -2,29 +2,32 @@
  * pi-mpm — Pi extension that wires MPM's cognitive substrate into Pi.
  *
  * Static, hand-maintained bridge to a curated **17-tool subset** of the
- * current 22-tool MPM registry (21 Registry entries + the mpm_help
- * discovery closure registered via cmd/mpm-mcp; 14 unified Domain
- * Tools + 3 standalone tools exposed by this adapter)
- * tools). This is a deliberate replacement for the previous ~1,500-line,
- * build-generated file (scripts/gen.py + scripts/build.sh + header/footer.ts
- * are gone).
+ * current MPM Registry (21 Registry entries + the mpm_help discovery
+ * closure registered via cmd/mpm-mcp = 22 tools total; 14 unified Domain
+ * Tools + 3 standalone tools exposed by this adapter).
  *
  * Until the Phase 1/2 refactor, mpm-mcp exposed 77 granular tools. The
- * current registry exposes 22 tools total (21 Registry entries + the
- * mpm_help discovery closure registered via cmd/mpm-mcp); this Pi adapter
- * registers 17 typed tools. The default initial MCP surface that hosts
- * receive at session start is the compact 3-tool surface
- * (mpm_memory, mpm_context, mpm_help); MPM_EXPOSE_ALL_TOOLS=1 restores
- * the full 22-tool surface.
- * of them. The 14 Domain Tools are "Fat RPC" — they take {action: string,
- * params: object} and the backend dispatches. That collapses ~77 distinct
- * tool definitions into 14 near-identical ones, permanently resolving
- * the ~15KB prompt bloat the old surface caused.
+ * current Registry exposes 22 tools total. This Pi adapter registers 17
+ * typed tools. The default initial MCP surface that hosts receive at
+ * session start is the compact 3-tool surface (mpm_memory, mpm_context,
+ * mpm_help); `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block restores the
+ * full 22-tool surface.
  *
- * Tools in the full registry not registered here (`mpm_work`,
- * `mpm_resolve`, `mpm_challenge`, `mpm_blob_read`, `mpm_blob_search`)
- * remain reachable via `mpm call <tool> --payload '<json>'` from a
- * subprocess.
+ * The 14 Domain Tools are "Fat RPC" — they take `{action, params}` and
+ * the backend dispatches. That collapses ~77 distinct tool definitions
+ * into 14 near-identical ones, permanently resolving the ~15KB prompt
+ * bloat the old surface caused.
+ *
+ * Tools in the full Registry not registered here (`mpm_work`,
+ * `mpm_resolve`, `mpm_blob_read`, `mpm_blob_search`) remain reachable via
+ * `mpm call <tool> --payload '<json>'` from a subprocess.
+ *
+ * Provenance: every spawn inherits
+ * `MPM_PROVENANCE_FRAMEWORK=pi` (see ./src/workspace.ts:buildProvenanceEnv)
+ * so `artifact_provenance.framework_name="pi"` is stamped on every
+ * memory, decision, lesson, handoff, and tool_invocation this extension
+ * writes. Framework-scoped directives resolve correctly via
+ * `mpm_context.read_directives` because of this attribution.
  *
  * Transport: each tool spawns `mpm call <tool> --payload '<json>'` as a
  * subprocess. mpm emits one zap-style log line to stderr and one JSON
@@ -36,7 +39,7 @@
 import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { withWorkspace } from "./src/workspace.js";
+import { withProvenance } from "./src/workspace.js";
 
 // --------------------------------------------------------------------------
 // Subprocess adapter — `mpm call <tool> --payload '<json>'`
@@ -83,7 +86,7 @@ function callMpm(
 		try {
 			child = spawn(bin, ["call", tool, "--payload", json], {
 				stdio: ["ignore", "pipe", "pipe"],
-				env: withWorkspace(),
+				env: withProvenance(),
 			});
 		} catch (err) {
 			finish({
@@ -181,6 +184,17 @@ function jsonToText(payload: unknown): string {
 
 // --------------------------------------------------------------------------
 // Wake-context payload shape (subset of mpm_context/read_wake_context output)
+//
+// The shared-core wake_context.go readActiveState populates `active_mode`
+// from active.json → ResolveActiveMode (which falls back to "default" when
+// the requested mode .md file is missing) and `active_persona` from
+// ResolveActivePersona (same fallback). However, when active.json has no
+// `modes` key at all, `active_mode` is left empty in the JSON payload
+// (known shared-core asymmetry — see the canonical agent protocol and the
+// integration report). The renderer here applies the same "default"
+// fallback the substrate's human-readable formatWakeContext applies, so
+// Pi agents always see an explicit mode/persona in wake regardless of
+// shared-core state.
 // --------------------------------------------------------------------------
 
 interface WakeContext {
@@ -200,6 +214,9 @@ interface WakeContext {
 	active_persona?: string;
 }
 
+const DEFAULT_MODE = "default";
+const DEFAULT_PERSONA = "default";
+
 function renderWakeBlock(wake: WakeContext): string {
 	const lines: string[] = ["## MPM Wake Context"];
 	if (wake.last_handoff) {
@@ -214,9 +231,17 @@ function renderWakeBlock(wake: WakeContext): string {
 	} else {
 		lines.push("\n(no prior handoff)");
 	}
-	if (wake.active_persona) {
-		lines.push(`\nActive persona: \`${wake.active_persona}\``);
-	}
+	// mode/persona: render explicit values when set; default to "default"
+	// when absent so the agent always has a concrete identity pair. The
+	// hardcoded safe default for both is "default" — see
+	// internal/core/active_state.go:resolveActiveComponent defaultName
+	// parameter, and the canonical mpm-agent-protocol.md mode/persona
+	// contract.
+	const mode = wake.active_mode && wake.active_mode.trim() !== "" ? wake.active_mode : DEFAULT_MODE;
+	const persona =
+		wake.active_persona && wake.active_persona.trim() !== "" ? wake.active_persona : DEFAULT_PERSONA;
+	lines.push(`\nActive mode: \`${mode}\``);
+	lines.push(`\nActive persona: \`${persona}\``);
 	if (wake.epistemic_pressure?.exceeded) {
 		const ep = wake.epistemic_pressure;
 		const ratioStr = typeof ep.ratio === "number" ? ep.ratio.toFixed(2) : "?";
@@ -227,7 +252,7 @@ function renderWakeBlock(wake: WakeContext): string {
 		);
 	}
 	lines.push(
-		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 14 Domain Tools + 3 Standalones (17 typed tools total); tools in the full 22-tool MPM registry (21 Registry + the mpm_help discovery closure) not exposed here remain reachable via `mpm call <tool> --payload '<json>'`. On hosts using the default compact MCP surface, handoff is reached through `mpm_context action=write_handoff`; set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env to restore the full 22-tool surface.",
+		"\nUse the mpm_memory tool to query prior memories and persist new ones, mpm_handoff (action \"write\") to record a handoff at the end of meaningful work, and mpm_scratchpad (actions \"flush\"/\"read\"/\"discard\"/\"promote\") for intra-session working state. The pi-mpm adapter registers 14 Domain Tools + 3 Standalones (17 typed tools total); tools in the full 22-tool MPM Registry (21 Registry entries + the mpm_help discovery closure) not exposed here remain reachable via `mpm call <tool> --payload '<json>'`. On hosts using the default compact 3-tool MCP surface, handoff is reached through `mpm_context` action `write_handoff`; set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env to restore the full 22-tool surface.",
 	);
 	return lines.join("\n");
 }
@@ -622,7 +647,7 @@ function callMpmCli(
 		try {
 			child = spawn(bin, [subcommand, ...args], {
 				stdio: ["ignore", "pipe", "pipe"],
-				env: withWorkspace(),
+				env: withProvenance(),
 			});
 		} catch (err) {
 			finish({
