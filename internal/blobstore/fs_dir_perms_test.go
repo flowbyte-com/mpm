@@ -20,7 +20,7 @@ import (
 // (e.g. 0o755 or 0o775, written by an older release or by a debug
 // `chmod` for inspecting contents) survived across upgrades, leaving
 // blob files readable to any local user on the box. See
-// `docs/security/blob-dir-permissions-incident-2026-09-05.md`.
+// `docs/archive/blob-dir-permissions-incident-2026-09-05.md`.
 func TestNewFilesystemBackend_EnforcesDirMode(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
