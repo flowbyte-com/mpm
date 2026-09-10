@@ -87,6 +87,15 @@ func handleMemory(args []string) int {
 		return handleMemoryHelp()
 	case "add":
 		return handleMemoryAdd(args[1:])
+	case "save":
+		// 2026-09-10 cleanup: align `mpm memory <verb>` with the
+		// substrate action vocabulary. `save` is the canonical tool
+		// action (`mpm_memory action=save`); `add` is the human-
+		// friendly CLI verb. Both now route through the same code
+		// path so the CLI help text's promise ("matches the
+		// mpm_memory action=save contract") is also true at the
+		// dispatch level, not just at the field-shape level.
+		return handleMemoryAdd(args[1:])
 	case "search":
 		return handleMemorySearch(args[1:])
 	case "show":
@@ -135,6 +144,8 @@ Usage:
                   [--expires-in <duration>] [-i|--interactive] [--json]
                   <content>
                   Add a new memory (returns ID)
+  mpm memory save <args>...       Alias for 'add' — matches the
+                                  mpm_memory action=save verb
   mpm memory search <query>      Search memories
   mpm memory search-term <term>  List memories matching term (500 char snippets)
   mpm memory show <id>           Show memory by ID
@@ -144,18 +155,26 @@ Usage:
   mpm memory list                List recent memories
   mpm memory wipe                Wipe all memories (requires -f)
 
-Flags for "mpm memory add":
+Flags for "mpm memory add" / "mpm memory save":
   --fact <text>         Memory content (alternative to positional arg;
                         matches the mpm_memory action=save contract)
   --tags <csv>          Comma-separated tags, e.g. --tags alpha,beta
-  --weight <0-100>      Weight (default 1)
+  --weight <0-100>      Weight (canonical default matches mpm_memory save
+                        — same default as 'mpm call mpm_memory save')
   --expires-in <dur>    Time-to-live (e.g. 7d, 24h)
   -i, --interactive     Compose content via draft prompt
   --json, -j            Emit JSON output including tags + weight for
                         verification
 
+Notes:
+  • 'mpm memory add' is the CLI front door for 'mpm_memory save'
+    (the canonical substrate action). Same payload shape, same default
+    weight, same lifecycle. The 'save' CLI verb is provided as an alias
+    for tooling that prefers the substrate action verb.
+
 Examples:
   mpm memory add "Remember to call mom"
+  mpm memory save "Same call via the substrate action verb"
   mpm memory add --fact "Project: alpha is shipped" --tags alpha,shipped --weight 50
   mpm memory add --fact "Expires in 7 days" --expires-in 7d
   mpm memory search "mom"

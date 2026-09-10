@@ -188,7 +188,7 @@ func handleMemoryAdd(args []string) int {
 	factArg := ""    // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
 	fileArg := ""    // --file <path>: read content from file (F-A3 fix — no silent 64KB truncation)
 	tagsArg := ""    // --tags <csv>: comma-separated tags
-	weightArg := 1.0 // --weight <0-100>: weight; default 1 (matches the hardcoded value AddMemoryWithWeight substitutes)
+	weightArg := float64(mpminternal.DefaultMemoryWeight) // --weight <0-100>: weight; default matches mpm_memory save (canonical)
 	weightSet := false // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
 	contentArgs := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {

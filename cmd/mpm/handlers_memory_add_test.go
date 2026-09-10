@@ -110,8 +110,8 @@ func TestMemoryAdd_PositionalContentBackwardCompat(t *testing.T) {
 	)
 	require.NoError(t, row.Scan(&dbContent, &dbWeight, &dbTagsJSON))
 	assert.Equal(t, "plain positional content", dbContent)
-	assert.InDelta(t, 1.0, dbWeight, 0.001,
-		"no --weight → default 1.0 (normalized to 1 in the column via the legacy *10 conversion rule; pre-fix this silently became 10)")
+	assert.InDelta(t, 5.0, dbWeight, 0.001,
+		"no --weight → default 0.5 (legacy float scale), normalized to 5 in the column via normalizeWeightToColumn's *10 conversion; the 2026-09-10 cleanup unified this with mpm_memory save's default of 0.5")
 	assert.NotContains(t, dbTagsJSON, "alpha", "no --tags → tags null, not empty string")
 }
 

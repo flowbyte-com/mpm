@@ -139,7 +139,7 @@ For broad queries, projection defaults to 'summary' to keep context bounded. Use
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","search","list"]},
+				"action": {"type": "string", "enum": ["save","search","list","delete","shred"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -147,6 +147,8 @@ For broad queries, projection defaults to 'summary' to keep context bounded. Use
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},
+						"id":        {"type": "string", "description": "Canonical id (used by delete/shred)."},
+						"lesson_id": {"type": "string", "description": "Backward-compat alias for id on delete/shred."},
 						"projection": {"type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Output detail level. Defaults to summary."}
 					},
 					"additionalProperties": true

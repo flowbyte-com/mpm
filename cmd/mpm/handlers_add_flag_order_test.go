@@ -62,7 +62,14 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			name:        "--tag after content",
 			args:        []string{"add", "tagged test", "--tag", "foo,bar"},
 			wantContent: "tagged test",
-			wantWeight:  1,
+			// 2026-09-10 cleanup: the canonical save default is 0.5
+			// (legacy float scale), which normalizeWeightToColumn
+			// resolves to a column value of 5. Pre-fix the CLI
+			// defaulted to 1.0 (column=1) which diverged from the
+			// tool path's 0.5 (column=5). Both surfaces now agree at
+			// 5. Tests that exercised the divergent CLI default
+			// (this one) are updated to the canonical value.
+			wantWeight:  5,
 			wantTags:    `["foo","bar"]`,
 		},
 		{
@@ -81,7 +88,11 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			name:        "no flag, plain content",
 			args:        []string{"add", "plain test"},
 			wantContent: "plain test",
-			wantWeight:  1,
+			// 2026-09-10 cleanup: see the note on `--tag after
+			// content` above — the canonical CLI default is now
+			// column=5 (via 0.5 float scale), matching the tool
+			// surface.
+			wantWeight:  5,
 		},
 	}
 

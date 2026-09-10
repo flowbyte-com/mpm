@@ -31,7 +31,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -71,16 +73,24 @@ func handleTheorize(args []string) int {
 }
 
 // handleDecision routes the top-level `mpm decision <sub>` family.
-// The substrate has record_decision but no decision-resolve (the
-// analog of theory-resolve). So:
+// The substrate has record_decision, supersede, invalidate, show, list,
+// query — the CLI front door mirrors that vocabulary:
 //
-//   mpm decision add       → record_decision
-//   mpm decision show      → fetch a single decision by id (mirrors mpm call mpm_decisions show)
-//   mpm decision resolve   → print a friendly message pointing at
-//                            the (currently absent) resolution path;
-//                            no decision-resolve exists yet, so this
-//                            is currently a stub. Future substrate
-//                            work would add the missing primitive.
+//   mpm decision add         → record_decision
+//   mpm decision supersede   → supersede an existing decision with a replacement
+//   mpm decision invalidate  → retire a decision without a replacement
+//   mpm decision show        → fetch a single decision by id (mirrors mpm call mpm_decisions show)
+//   mpm decision resolve     → (deprecated 2026-09-10) use 'supersede' instead
+//   mpm decision list        → list decisions (mirrors mpm decisions)
+//   mpm decision search      → keyword search (F-A2)
+//
+// The `supersede` and `invalidate` subcommands route through the
+// substrate's mpm_decisions tool, which is the canonical source of
+// truth for the decision lifecycle — the CLI is a thin shim that
+// builds the payload and delegates. Field vocabulary is canonical
+// snake_case: `id` for the decision being acted upon, `choice` /
+// `context` / `rationale` / `tags` for the replacement (supersede),
+// `reason` for invalidate.
 //
 // Note: `mpm decisions` (plural) is the ledger-listing command and
 // remains on its own dispatch — singular `decision` introduces the
@@ -95,6 +105,18 @@ func handleDecision(args []string) int {
 	switch sub {
 	case "add":
 		return handleRecordDecision(rest)
+	case "supersede":
+		// 2026-09-10 cleanup: expose the substrate's mpm_decisions
+		// supersede action as a first-class CLI subcommand. Routes
+		// through `mpm call mpm_decisions` so the CLI and tool share
+		// one implementation, one envelope, one field vocabulary.
+		return handleDecisionSupersede(rest)
+	case "invalidate":
+		// 2026-09-10 cleanup: same pattern as supersede. The CLI
+		// previously had no surface for invalidate; only the tool
+		// did. Mirrors `mpm call mpm_decisions --payload
+		// '{"action":"invalidate","params":{"id":"<id>","reason":"<text>"}}'`.
+		return handleDecisionInvalidate(rest)
 	case "show":
 		// W-003: parity with `mpm call mpm_decisions show`. Routes through
 		// handleDecisionsShow so the CLI and MCP surfaces share the same
@@ -105,7 +127,13 @@ func handleDecision(args []string) int {
 		}
 		return handleDecisionsShow(dm, rest)
 	case "resolve":
-		usererror.Warn("decision resolution is not yet a substrate primitive — for now, record the alternative as another `mpm decide` call rather than superseding")
+		// 2026-09-10 cleanup: `resolve` was a guidance-only stub
+		// (printed "decision resolution is not yet a substrate
+		// primitive" and returned 0). The substrate actually has
+		// TWO distinct resolution paths — supersede (with replacement)
+		// and invalidate (retire). Point operators at the right one
+		// instead of leaving the stub in place.
+		usererror.Warn("`mpm decision resolve` is deprecated — use `mpm decision supersede <id>` (record a replacement) or `mpm decision invalidate <id>` (retire without replacement)")
 		return 0
 	case "list", "ls", "all":
 		// Singular `mpm decision list` ≡ plural `mpm decisions`. The
@@ -120,7 +148,7 @@ func handleDecision(args []string) int {
 		printDecisionHelp()
 		return 0
 	default:
-		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, show, resolve (reserved), list, search", sub)
+		usererror.Error("mpm decision: unknown subcommand %q\n  available subcommands: add, supersede, invalidate, show, list, search", sub)
 		return 1
 	}
 }
@@ -228,18 +256,159 @@ func printDecisionHelp() {
 	usererror.Notice(`mpm decision — Decision ledger
 
 Subcommands:
-  add      Record a new decision (alias for record_decision / mpm decide)
-  show     Show a single decision by id (mirrors mpm call mpm_decisions show)
-  resolve  Reserved for future decision-resolution primitive
-  list     List all decisions (alias for "mpm decisions")
-  search   Search decisions by keyword
+  add         Record a new decision (alias for record_decision / mpm decide)
+  supersede   Supersede an existing decision with a replacement (canonical field: id)
+  invalidate  Retire a decision without a replacement (canonical field: id, reason)
+  show        Show a single decision by id (mirrors mpm call mpm_decisions show)
+  list        List all decisions (alias for "mpm decisions")
+  search      Search decisions by keyword
 
 Examples:
   mpm decision add context="..." choice="..." rationale="..."
+  mpm decision supersede <decision-id> --choice "new choice" --context "new context" --rationale "why"
+  mpm decision invalidate <decision-id> --reason "context changed"
   mpm decision show <decision-id>
   mpm decision list
   mpm decide context="..." choice="..." rationale="..."
-  mpm call mpm_decisions --payload '{"action":"record","params":{"context":"...","choice":"...","rationale":"..."}}'`)
+  mpm call mpm_decisions --payload '{"action":"record","params":{"context":"...","choice":"...","rationale":"..."}}'
+  mpm call mpm_decisions --payload '{"action":"supersede","params":{"id":"<decision-id>","choice":"new choice"}}'
+  mpm call mpm_decisions --payload '{"action":"invalidate","params":{"id":"<decision-id>","reason":"context changed"}}'`)
+}
+
+// handleDecisionSupersede (2026-09-10 cleanup) is the CLI front door
+// for the mpm_decisions supersede action. It accepts flag-style args
+// (--choice / --context / --rationale / --tags) and the decision id
+// as a positional, then delegates to the canonical substrate call.
+//
+// Routes through dm.SupersedeDecision (the same call `mpm decision add
+// --supersedes <id>` makes) so the CLI surface and the tool surface
+// share one implementation, one audit trail, one supersedes-link
+// column. The CLI flag form is purely a syntactic convenience over the
+// substrate payload — no second implementation path.
+func handleDecisionSupersede(args []string) int {
+	jsonOutput := false
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			jsonOutput = true
+			continue
+		}
+		filtered = append(filtered, args[i])
+	}
+	args = filtered
+
+	if len(args) == 0 {
+		return respond("", "Usage: mpm decision supersede <decision-id> [--choice <text>] [--context <text>] [--rationale <text>] [--tags <csv>] [--json]\n", 1)
+	}
+	id := args[0]
+	if strings.TrimSpace(id) == "" {
+		return respond("", "Usage: mpm decision supersede <decision-id> ...\n", 1)
+	}
+	rest := args[1:]
+
+	choice, _ := extractFlag(rest, "--choice")
+	contextText, _ := extractFlag(rest, "--context")
+	rationale, _ := extractFlag(rest, "--rationale")
+	tagsStr, _ := extractFlag(rest, "--tags")
+	if strings.TrimSpace(choice) == "" {
+		return respond("", "Error: --choice is required (the replacement decision)\n", 1)
+	}
+
+	var tags []string
+	if tagsStr != "" {
+		for _, t := range strings.Split(tagsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+
+	dm := getDBConcrete()
+	if dm == nil {
+		return respond("", "Error: database not available\n", 1)
+	}
+
+	res, err := dm.SupersedeDecision(id, contextText, choice, rationale, "", tags, nil, internal.ActiveContext{})
+	if err != nil {
+		if jsonOutput {
+			out, _ := json.Marshal(map[string]interface{}{"success": false, "id": id, "error": err.Error()})
+			return respond("", string(out)+"\n", 1)
+		}
+		return respond("", fmt.Sprintf("Failed to supersede decision: %v\n", err), 1)
+	}
+	newID, _ := res["id"].(string)
+	if jsonOutput {
+		out, _ := json.Marshal(map[string]interface{}{
+			"success":    true,
+			"id":         newID,
+			"supersedes": id,
+			"action":     "supersede",
+		})
+		return respond("", string(out)+"\n", 0)
+	}
+	return respond("", fmt.Sprintf("Superseded %s with %s\n", id, newID), 0)
+}
+
+// handleDecisionInvalidate (2026-09-10 cleanup) is the CLI front door
+// for the mpm_decisions invalidate action. Accepts the decision id
+// as a positional arg and an optional --reason flag, then delegates
+// to dm.InvalidateDecision. Same substrate call as the tool, same
+// audit row.
+func handleDecisionInvalidate(args []string) int {
+	jsonOutput := false
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			jsonOutput = true
+			continue
+		}
+		filtered = append(filtered, args[i])
+	}
+	args = filtered
+
+	if len(args) == 0 {
+		return respond("", "Usage: mpm decision invalidate <decision-id> [--reason <text>] [--json]\n", 1)
+	}
+	id := args[0]
+	if strings.TrimSpace(id) == "" {
+		return respond("", "Usage: mpm decision invalidate <decision-id> ...\n", 1)
+	}
+	rest := args[1:]
+	reason, _ := extractFlag(rest, "--reason")
+
+	dm := getDBConcrete()
+	if dm == nil {
+		return respond("", "Error: database not available\n", 1)
+	}
+
+	if _, err := dm.InvalidateDecision(id, reason); err != nil {
+		if jsonOutput {
+			out, _ := json.Marshal(map[string]interface{}{"success": false, "id": id, "error": err.Error()})
+			return respond("", string(out)+"\n", 1)
+		}
+		return respond("", fmt.Sprintf("Failed to invalidate decision: %v\n", err), 1)
+	}
+	if jsonOutput {
+		out, _ := json.Marshal(map[string]interface{}{"success": true, "id": id, "action": "invalidate"})
+		return respond("", string(out)+"\n", 0)
+	}
+	return respond("", fmt.Sprintf("Invalidated decision %s\n", id), 0)
+}
+
+// extractFlag returns the value following the named flag, or "" if the
+// flag is absent. Helper for the 2026-09-10 supersede/invalidate CLI
+// surface so they don't duplicate extractFlagValue's parsing logic.
+func extractFlag(args []string, name string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == name {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true
+		}
+	}
+	return "", false
 }
 
 // printTheoryHelp prints the mpm theory help block.

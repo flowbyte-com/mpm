@@ -127,7 +127,7 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	//   - absent    → use default (0.5)
 	//   - wrong type → return a clear error (NOT silent default)
 	//   - right type → use the value
-	weight, weightErr := parseWeightStrict(p["weight"], 0.5)
+	weight, weightErr := parseWeightStrict(p["weight"], mpminternal.DefaultMemoryWeight)
 	if weightErr != nil {
 		return nil, weightErr
 	}
@@ -913,6 +913,14 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 
 // callResolveTheory marks a theory as proven or disproven.
 //
+// Field vocabulary (2026-09-10 cleanup): canonical names are `id`
+// (the theory being resolved) and `status` (the outcome enum).
+// Aliases `theoryId` / `theory_id` (the pre-cleanup camelCase /
+// snake_case id) and `newStatus` / `new_status` are retained as
+// backward-compat shims for historical callers. `status` accepts only
+// `proven` or `disproven` — anything else is rejected loudly with
+// the same message so the operator/agent self-corrects.
+//
 // Arc 1 closure: if winnerId is provided in the params, the theory
 // is treated as an arbitration theory (created by the close-call
 // path of `mpm ops resolve-contradictions`). The system routes to
@@ -921,15 +929,26 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // marks the queue row resolved. If winnerId is absent, the legacy
 // path runs (just mark the theory resolved; no slash).
 func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	theoryID, _ := p["theoryId"].(string)
+	// Canonical: `id`. Backward-compat: `theoryId`, `theory_id`.
+	theoryID, _ := p["id"].(string)
 	if theoryID == "" {
-		return nil, fmt.Errorf("theoryId is required")
+		theoryID, _ = p["theoryId"].(string)
+	}
+	if theoryID == "" {
+		theoryID, _ = p["theory_id"].(string)
+	}
+	if theoryID == "" {
+		return nil, fmt.Errorf("resolve theory: id is required — the id of the theory being resolved")
 	}
 	conclusion, _ := p["conclusion"].(string)
 	if conclusion == "" {
-		return nil, fmt.Errorf("conclusion is required")
+		return nil, fmt.Errorf("resolve theory: conclusion is required")
 	}
-	winnerID, _ := p["winnerId"].(string)
+	// Canonical: `winner_id`. Backward-compat: `winnerId`.
+	winnerID, _ := p["winner_id"].(string)
+	if winnerID == "" {
+		winnerID, _ = p["winnerId"].(string)
+	}
 
 	// Arc 1 closure: arbitration auto-slash path.
 	if winnerID != "" {
@@ -958,25 +977,36 @@ func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		return result, nil
 	}
 
-	newStatus, _ := p["newStatus"].(string)
+	// Canonical: `status`. Backward-compat: `new_status`, `newStatus`.
+	// Conflict detection (D-008 / W-006): if multiple status keys are
+	// supplied with conflicting values, reject explicitly so a typo
+	// doesn't silently bind. Mirrors the alpha-4.1.1 conflict guard.
 	status, _ := p["status"].(string)
-	// D-008 (alpha-4.1.1): prefer the natural `status` key (the
-	// vocabulary already used for theories propose+resolve in
-	// human-facing contexts). `newStatus` retained as a backward-
-	// compatible alias. If both are supplied with conflicting
-	// values, reject explicitly so a typo doesn't silently bind.
-	if status == "" && newStatus == "" {
-		return nil, fmt.Errorf("resolve_theory: status (or newStatus) is required and must be 'proven' or 'disproven'")
+	newStatus, _ := p["newStatus"].(string)
+	newStatusSnake, _ := p["new_status"].(string)
+	if status == "" && newStatusSnake != "" {
+		status = newStatusSnake
 	}
-	if status != "" && newStatus != "" && status != newStatus {
-		return nil, fmt.Errorf("resolve_theory: conflicting status=%q and newStatus=%q — supply only one", status, newStatus)
+	if status == "" && newStatus != "" {
+		status = newStatus
 	}
-	if status != "" {
-		newStatus = status
+	if status == "" {
+		return nil, fmt.Errorf("resolve theory: status is required and must be 'proven' or 'disproven'")
 	}
-	if newStatus != "proven" && newStatus != "disproven" {
-		return nil, fmt.Errorf("newStatus must be 'proven' or 'disproven'")
+	// Conflict: caller supplied two distinct keys with different values.
+	if newStatus != "" && newStatus != status {
+		return nil, fmt.Errorf("resolve theory: conflicting status=%q and newStatus=%q — supply only one", status, newStatus)
 	}
+	if newStatusSnake != "" && newStatusSnake != status && newStatus == "" {
+		return nil, fmt.Errorf("resolve theory: conflicting status=%q and new_status=%q — supply only one", status, newStatusSnake)
+	}
+	if status != "proven" && status != "disproven" {
+		return nil, fmt.Errorf("resolve theory: status %q is invalid — must be 'proven' or 'disproven'", status)
+	}
+	// At this point `status` is the validated canonical value.
+	// Re-bind into `newStatus` so the downstream dm.ResolveTheory call
+	// (and the audit row below) keep their existing parameter name.
+	newStatus = status
 
 	result, err := dm.ResolveTheory(theoryID, conclusion, newStatus)
 	if err != nil {
@@ -1066,14 +1096,28 @@ func parseStrictStringArrayOrEmpty(field string, v interface{}) ([]string, error
 
 // handleSupersedeDecision implements the F9 invalidation path: a corrected
 // or superseding decision that is distinguishable from stale knowledge.
+//
+// Field vocabulary (2026-09-10 cleanup): canonical name is `id` (the
+// decision being superseded). `original_id` is retained as a narrow
+// backward-compat alias so the existing CLI/agent callers that used the
+// historical semantic-role name keep working. The superseding replacement
+// content arrives as `choice`/`context`/`rationale`/`outcome`/`tags`
+// (same shape as a fresh `record` call) — there is no
+// `superseding_decision_id` because the replacement IS the new decision
+// row, returned in the response.
 func handleSupersedeDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	originalID, _ := p["original_id"].(string)
+	originalID, _ := p["id"].(string)
 	if originalID == "" {
-		return nil, fmt.Errorf("original_id is required")
+		// Backward-compat alias: callers that historically passed
+		// `original_id` (the F9-era semantic-role name) still work.
+		originalID, _ = p["original_id"].(string)
+	}
+	if originalID == "" {
+		return nil, fmt.Errorf("supersede decision: id (or original_id) is required — the id of the decision being superseded")
 	}
 	choice, _ := p["choice"].(string)
 	if choice == "" {
-		return nil, fmt.Errorf("choice is required (the replacement decision)")
+		return nil, fmt.Errorf("supersede decision: choice is required (the replacement decision)")
 	}
 	tags := internal.ParseStringSliceOr(p["tags"])
 	if tags == nil {
@@ -1096,10 +1140,19 @@ func handleSupersedeDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 }
 
 // handleInvalidateDecision retires a decision without a replacement.
+//
+// Field vocabulary (2026-09-10 cleanup): canonical name is `id`
+// (matching the rest of the API — primary object identifier for the
+// action). `decision_id` is retained as a narrow backward-compat alias
+// for callers that historically used the explicit semantic-role name.
 func handleInvalidateDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	id, _ := p["decision_id"].(string)
+	id, _ := p["id"].(string)
 	if id == "" {
-		return nil, fmt.Errorf("decision_id is required")
+		// Backward-compat alias: pre-cleanup callers passed `decision_id`.
+		id, _ = p["decision_id"].(string)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("invalidate decision: id is required")
 	}
 	reason, _ := p["reason"].(string)
 	return dm.InvalidateDecision(id, reason)
@@ -5640,14 +5693,15 @@ func handleMpmTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 	case "propose":
 		return handleProposeTheory(dm, ac, params)
 	case "resolve":
-		// Normalize snake_case to camelCase for the underlying handler.
-		// Routed through the named helper so the schema-guard AST walker
-		// doesn't false-positive on dispatcher body as "unread payload keys".
-		normalizeCamelCaseKeys(params, map[string]string{
-			"theory_id":  "theoryId",
-			"new_status": "newStatus",
-			"winner_id":  "winnerId",
-		})
+		// 2026-09-10 cleanup: handleResolveTheory now reads canonical
+		// snake_case fields directly (`id`, `status`, `winner_id`) and
+		// retains `theoryId`/`theory_id` and `newStatus`/`new_status`
+		// as backward-compat aliases. The pre-cleanup dispatcher had
+		// a normalizeCamelCaseKeys step that mutated `theory_id` →
+		// `theoryId` before the handler read it; with the handler now
+		// accepting both, the dispatcher no longer needs the rewrite.
+		// Keeping the handler canonical-first prevents the rewrite
+		// from masking alias acceptance during testing.
 		return handleResolveTheory(dm, ac, params)
 	// alpha-4 audit D-006: read symmetry. Previously the only actions
 	// were propose/resolve — agents using `mpm call mpm_theories` had no
@@ -5767,9 +5821,43 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleSearchLessons(dm, ac, params)
 	case "list":
 		return handleListLessons(dm, ac, params)
+	case "delete", "shred":
+		// 2026-09-10 cleanup: align tool surface with the CLI's
+		// `mpm lesson shred <id>` lifecycle. The CLI advertises lessons
+		// as CRUD; before this fix the tool side had no delete action,
+		// leaving any agent that called `mpm call mpm_lessons ...`
+		// unable to remove a lesson. `delete` and `shred` both route
+		// to the same irreversible lesson deletion (the substrate's
+		// lessons table has no soft-delete column — see `lessons` view
+		// in internal/core/db.go).
+		return handleDeleteLesson(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, shred", action)
 	}
+}
+
+// handleDeleteLesson (2026-09-10 cleanup) implements the missing
+// delete lifecycle on the mpm_lessons tool surface, bringing parity
+// with the CLI's `mpm lesson shred <id>` and matching the CRUD
+// vocabulary advertised in handlers_lesson.go help text.
+//
+// Field vocabulary: canonical `id`. `lesson_id` retained as a narrow
+// backward-compat alias (callers that passed it explicitly still work).
+// The deletion is irreversible — lesson rows have no soft-delete
+// tombstone and the schema's INSTEAD OF DELETE trigger cascades to
+// lessons_fts.
+func handleDeleteLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		id, _ = p["lesson_id"].(string)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("delete lesson: id is required")
+	}
+	if err := dm.DeleteLesson(id); err != nil {
+		return nil, fmt.Errorf("delete lesson: %w", err)
+	}
+	return map[string]interface{}{"success": true, "id": id}, nil
 }
 
 func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

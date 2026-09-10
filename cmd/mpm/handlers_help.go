@@ -101,9 +101,8 @@ var cognitiveHelpSections = []cogHelpSection{
 	{
 		title: "Need more?",
 		cmds: []helpCmd{
-			{"mpm help observability", "doctor / why / milestones / broadcast / changelog / self-heal", false},
+			{"mpm help reflection", "doctor / why / milestones / broadcast / changelog / self-heal", false},
 			{"mpm help maintenance", "engine-room maintenance surface (ops gc / maintain / restore-db / backup)", false},
-			{"mpm help advanced", "the mpm ops namespace — scripting and operator workflows", false},
 			{"mpm help knowledge", "expanded view of knowledge (memory|lesson|skill|topic|reference)", false},
 			{"mpm help work", "Working Context subcommands (status|show|clear|promote)", false},
 			{"mpm tour", "interactive walkthrough of the cognitive verbs", false},
@@ -183,7 +182,7 @@ func printHelpAll() {
 		}
 		fmt.Println()
 		fmt.Println("Use `mpm help <section>` for progressive disclosure.")
-		fmt.Println("Sections: knowledge, runtime, maintenance, observability, advanced, work, debug.")
+		fmt.Println("Sections: knowledge, runtime, maintenance, reflection, work, explain.")
 	}
 }
 

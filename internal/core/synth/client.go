@@ -146,14 +146,17 @@ func NewSynthClient() *SynthClient {
 		// from BaseURL the same way.
 		sc.Wire = inferWire(sc.BaseURL)
 	}
-	// Loud, structured failure signal. Every source of credentials the
-	// synth client knows about — Profiles["default"] (canonical),
-	// cfg.Synth (legacy migration), and the env-var fallbacks — has
-	// been exhausted without finding an API key. Without this log, the
-	// failure surfaces only at request time when the LLM call returns
-	// a 401. Loud failure beats silent spinning.
+	// 2026-09-10 cleanup: synthesis is OPTIONAL — a successful memory
+	// save must not be reported as ERROR-level failure just because the
+	// operator hasn't configured an LLM provider. Distinguish:
+	//   • provider not configured → warn (informational; safe default)
+	//   • provider configured but request failed → error (real failure)
+	// Pre-fix this logged at ERROR, which made `mpm remember` / `mpm
+	// memory add` look broken even when the save itself succeeded.
+	// The same structural info is preserved (every surface exhausted,
+	// remediation hint) but at a severity that matches the situation.
 	if sc.APIKey == "" {
-		slog.Error("synth: no API key configured",
+		slog.Warn("synth: no API key configured — synthesis is optional and will be skipped; memory save itself is unaffected",
 			"component", "synth",
 			"surface_exhausted", []string{
 				"cfg.Profiles[default].api_key (canonical)",

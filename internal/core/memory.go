@@ -433,6 +433,21 @@ func (s *MemoryStore) AddMemory(content string, collection string, tags []string
 // [1.0, 100.0] to match the column constraint. The return type is
 // float64 (W-004, 2026-08-31) so fractional weights like 7.5 survive
 // the round-trip into the REAL column without truncation.
+
+// DefaultMemoryWeight is the canonical memory-save default weight
+// shared by every save surface — `mpm call mpm_memory save`,
+// `mpm memory add`, and `mpm remember` (via `mpm add`). The value
+// 0.5 sits in the legacy 0.0-1.0 float scale and is normalized to a
+// column value of 5 on the 0-100 scale by normalizeWeightToColumn.
+// Pinning a single constant prevents the cross-surface drift the
+// 2026-09-10 manual CLI probe surfaced: the CLI used to default to
+// 1.0 (column=1) while the tool defaulted to 0.5 (column=5). They
+// now agree. Both paths reach this constant through their respective
+// package aliases — the constant lives here (not in tools/handlers.go)
+// because the tools/ sub-package has its own go.mod and cmd/mpm
+// cannot import it.
+const DefaultMemoryWeight = 0.5
+
 func normalizeWeightToColumn(weight float64) float64 {
 	if weight <= 0 {
 		return 5.0 // historical default (0.5 * 10)

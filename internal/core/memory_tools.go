@@ -95,6 +95,10 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 		collection = "memories"
 	}
 	if weight <= 0 {
+		// 2026-09-10 cleanup: align the substrate default with the
+		// canonical `DefaultMemoryWeight` constant in tools/handlers.go
+		// so all three save surfaces (tool, `mpm memory add`, `mpm add`)
+		// produce identical column values when no weight is supplied.
 		weight = 0.5
 	}
 

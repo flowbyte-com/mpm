@@ -31,14 +31,14 @@ func handleAdd(args []string) int {
 	collection := fs.String("collection", "memories", "Collection name")
 	tag := fs.String("tag", "", "Tag to add (can specify multiple)")
 	session := fs.String("session", "", "Session ID to associate")
-	weight := fs.Float64("weight", 1, "Initial weight (1-100, fractional allowed)")
+	weight := fs.Float64("weight", float64(mpminternal.DefaultMemoryWeight), "Initial weight (canonical default matches mpm_memory save)")
 	ttl := fs.String("ttl", "", "Time to live (e.g., 7d, 24h)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm add [flags] <content>")
 		fmt.Println("Flags:")
 		fmt.Println("  --tag <a,b,c>     Comma-separated tags")
-		fmt.Println("  --weight <1-100> Initial weight (default 1)")
+		fmt.Println("  --weight <0-100> Initial weight (canonical default matches mpm_memory save)")
 		fmt.Println("  --collection <c> Collection name (default memories)")
 		fmt.Println("  --ttl <duration> Time to live (e.g. 7d, 24h)")
 		fmt.Println("Notes:")
@@ -69,8 +69,8 @@ func handleAdd(args []string) int {
 	}
 	content := strings.Join(fs.Args(), " ")
 
-	if *weight < 1 || *weight > 100 {
-		usererror.Error("--weight must be 1-100 (got %v)", *weight)
+	if *weight < 0 || *weight > 100 {
+		usererror.Error("--weight must be 0-100 (got %v) — 0 means use the canonical default; fractional values <1 are the legacy 0-1.0 float scale", *weight)
 		return 1
 	}
 
@@ -111,13 +111,30 @@ func handleAdd(args []string) int {
 	// save the memory with NULL embedding so the operator never loses
 	// data, then surface the error so they can run
 	// `mpm ops backfill-embeddings` later.
-	embedding, embedErr := mpminternal.EmbedText(content)
-	isLongTerm := *weight >= 10
+	_, embedErr := mpminternal.EmbedText(content)
+	// 2026-09-10 cleanup: route through AddMemoryWithWeight (not
+	// SaveMemory directly) so the legacy-float → 0-100 column
+	// normalization is applied uniformly. Pre-fix, `mpm add` skipped
+	// normalization — a default weight of 0.5 (legacy float) landed
+	// in the column as 0.5 instead of 5, while `mpm memory add`
+	// (which goes through AddMemoryWithWeight) stored 5. The two CLI
+	// surfaces now agree: default weight 0.5 → column 5.
+	//
+	// AddMemoryWithWeight runs its own embedding call internally; the
+	// local embedErr is kept only so we can surface the same warning
+	// if embedding failed at the pre-store step.
 
-	id, err := dm.SaveMemory(*collection, content, *session, tags, metadata, embedding, isLongTerm, *weight)
+	// Wrap in a MemoryStore backed by dm to call AddMemoryWithWeight.
+	store := &mpminternal.MemoryStore{
+		DB:         &mpminternal.SQLiteConnection{DB: dm.SQLDB()},
+		DM:         dm,
+		MirrorFile: filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl"),
+	}
+	mem, err, _ := store.AddMemoryWithWeight(content, *collection, tags, metadata, *session, "human", *weight)
 	if err != nil {
 		return usererror.Errorf(fmt.Sprintf("save memory: %v", err))
 	}
+	id := mem.ID
 	if embedErr != nil {
 		cfg := mpminternal.DefaultEmbeddingConfig()
 		usererror.Warn("Memory saved (id %s) with NULL embedding.\n"+
