@@ -133,6 +133,8 @@ type CoreDB interface {
 	ListLessons(lessonType string) ([]*Lesson, error)
 	SearchLessons(query string, limit int) ([]*Lesson, error)
 	DeleteLesson(id string) error
+	RestoreLesson(id string) error
+	ShredLesson(id string) error
 	GetLessonStats() (map[string]interface{}, error)
 	SaveLesson(fact, lessonType string, tags []string) (map[string]interface{}, *Lesson, error)
 	SearchLessonsLimited(query string) ([]map[string]interface{}, error)

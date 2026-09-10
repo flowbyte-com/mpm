@@ -139,9 +139,13 @@ var BaseTables = []string{
 	// that key both count as raw (the conservative default — better to
 	// over-count than to assume compaction that never happened).
 	//
-	// Lessons are hard-deleted (no deleted_at column on lessons_base),
-	// so COUNT(*) on the lessons view naturally excludes shredded
-	// lessons — no filter needed.
+	// Lessons are soft-deletable since the 2026-09-10 lifecycle fix;
+	// the count here intentionally includes soft-deleted rows (they
+	// remain persisted). Shredded rows are gone from lessons_base
+	// entirely. The view must reference the `lessons` view (not
+	// lessons_base) so it remains valid both before and after the
+	// migrateLessonsToView rename that turns the `lessons` table into
+	// the `lessons` view.
 	//
 	// Used by internal.GatherWakeContext to surface the
 	// epistemic_pressure block on every wake. Cheap: two indexed
@@ -1250,6 +1254,13 @@ var SafeMigrations = [][3]string{
 	{"memories", "last_synthesized_at", "INTEGER"},
 	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
 	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
+	// Note: 2026-09-10 lesson lifecycle fix adds a deleted_at tombstone
+	// to lessons_base. The column is added inline during
+	// migrateLessonsToView (line 2443 area) for fresh DBs and via a
+	// dedicated post-migration ALTER in initUnifiedSchema for existing
+	// DBs. The "lessons_base" SafeMigrations entry would run BEFORE
+	// migrateLessonsToView, when the table doesn't exist yet, so it's
+	// deliberately absent here.
 	{"reference_docs", "import_reason", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
 	{"reference_chunks", "embedding",     "BLOB"},

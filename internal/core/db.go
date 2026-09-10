@@ -2075,6 +2075,20 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// Safe to call on every startup — idempotent if lessons_base already exists.
 	dm.migrateLessonsToView()
 
+	// 2026-09-10 lesson lifecycle fix: deleted_at tombstone on
+	// lessons_base. The SafeMigrations loop runs BEFORE this
+	// migrateLessonsToView call, when lessons_base doesn't exist
+	// yet — so the inline ADD COLUMN inside migrateLessonsToView
+	// covers fresh DBs, and this ALTER covers existing databases
+	// whose lessons_base was created by an earlier boot. Idempotent
+	// via isDuplicateColumnError.
+	if _, err := dm.db.Exec(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`); err != nil {
+		if !isDuplicateColumnError(err) {
+			slog.Warn("migrateLessonsToView: post-add deleted_at failed",
+				"error", err.Error())
+		}
+	}
+
 	// Column-affinity rebuild: flip legacy DATETIME/TEXT timestamp
 	// columns on `memories` (and `shared.memories`) to INTEGER so
 	// mattn/go-sqlite3 returns integer-shaped values that scan
@@ -2446,6 +2460,11 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		{"retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 		{"importance", "REAL NOT NULL DEFAULT 0.5"},
 		{"confidence", "REAL NOT NULL DEFAULT 0.7"},
+		// 2026-09-10 lesson lifecycle fix: the deleted_at tombstone
+		// lets `delete` be reversible. Inline here for fresh DBs;
+		// existing DBs pick it up via the post-migrateLessonsToView
+		// ALTER in initUnifiedSchema.
+		{"deleted_at", "INTEGER"},
 	} {
 		dm.db.Exec(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def))
 	}
@@ -2609,6 +2628,19 @@ func createLessonsViewAndTriggers(q execQuerier) error {
 func (dm *DatabaseManager) finishOrRepairLessonsView() {
 	for _, old := range []string{"lessons_ai", "lessons_ad", "lessons_au"} {
 		dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old))
+	}
+
+	// 2026-09-10 lesson lifecycle fix: ensure deleted_at exists on
+	// the already-migrated lessons_base. Fresh DBs pick this up via
+	// the inline ADD COLUMN at the top of migrateLessonsToView; this
+	// branch covers the case where lessons_base already existed
+	// (and was renamed from `lessons` by a prior boot) without the
+	// tombstone. Idempotent via isDuplicateColumnError.
+	if _, err := dm.db.Exec(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`); err != nil {
+		if !isDuplicateColumnError(err) {
+			slog.Warn("migrateLessonsToView: repair add deleted_at failed",
+				"error", err.Error())
+		}
 	}
 
 	// What object is `lessons` today?
@@ -4562,14 +4594,23 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	}, nil
 }
 
-// GetLesson retrieves a lesson by ID
+// GetLesson retrieves a lesson by ID. Soft-deleted lessons (deleted_at
+// set on lessons_base) are excluded — callers asking for a deleted
+// lesson by id see "not found", which matches the visible-state
+// semantics they expect. Use a separate administrative path (or
+// inspect lessons_base directly) to read soft-deleted rows.
+//
+// Implementation note: queries lessons_base directly (not the
+// `lessons` view) because the view doesn't expose deleted_at and
+// we want a single column to filter on. The view is reserved for
+// write paths (INSERT/UPDATE/DELETE fire the INSTEAD OF triggers).
 func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {
 	var lesson Lesson
 	var tagsJSON string
 	err := dm.db.QueryRow(`
 		SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
 		       source_session_id, created
-		FROM lessons WHERE id = ?
+		FROM lessons_base WHERE id = ? AND deleted_at IS NULL
 	`, id).Scan(&lesson.ID, &lesson.Type, &lesson.Content, &tagsJSON, &lesson.ReinforcementCount, &lesson.SourceSessionID, &lesson.Created)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("lesson not found: %s", id)
@@ -4583,16 +4624,20 @@ func (dm *DatabaseManager) GetLesson(id string) (*Lesson, error) {
 	return &lesson, nil
 }
 
-// ListLessons returns all lessons, optionally filtered by type
+// ListLessons returns all lessons, optionally filtered by type.
+// Soft-deleted lessons are excluded (same tombstone contract as
+// GetLesson / SearchLessons). Reads lessons_base directly for the
+// same reason as GetLesson — the `lessons` view doesn't expose
+// deleted_at.
 func (dm *DatabaseManager) ListLessons(lessonType string) ([]*Lesson, error) {
 	// COALESCE at the SQL boundary: legacy lessons rows commonly carry
 	// NULL tags / source_session_id; scanning a database NULL into string
 	// aborts the whole listing (Stage 8 RC audit, same class as F3).
 	query := `SELECT id, type, content, COALESCE(tags,'[]'), reinforcement_count,
-	          source_session_id, created FROM lessons`
+	          source_session_id, created FROM lessons_base WHERE deleted_at IS NULL`
 	var args []interface{}
 	if lessonType != "" {
-		query += ` WHERE type = ?`
+		query += ` AND type = ?`
 		args = append(args, lessonType)
 	}
 	query += ` ORDER BY reinforcement_count DESC, created DESC`
@@ -4656,8 +4701,8 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 		SELECT l.id, l.type, l.content, COALESCE(l.tags,'[]'), l.reinforcement_count,
 		       COALESCE(l.source_session_id,''), l.created
 		FROM lessons_fts fts
-		JOIN lessons l ON l.rowid = fts.rowid
-		WHERE lessons_fts MATCH ?
+		JOIN lessons_base l ON l.rowid = fts.rowid
+		WHERE lessons_fts MATCH ? AND l.deleted_at IS NULL
 		ORDER BY bm25(lessons_fts), l.reinforcement_count DESC, l.created DESC
 		LIMIT ?
 	`, ftsQuery, limit)
@@ -4707,10 +4752,10 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 	rows, err := dm.db.Query(`
 		SELECT DISTINCT l.id, l.type, l.content, COALESCE(l.tags,'[]'),
 		       l.reinforcement_count, l.source_session_id, l.created
-		FROM lessons l
+		FROM lessons_base l
 		LEFT JOIN json_each(COALESCE(l.tags,'[]')) je
-		WHERE LOWER(l.content) LIKE ?
-		   OR LOWER(je.value) LIKE ?
+		WHERE l.deleted_at IS NULL
+		  AND (LOWER(l.content) LIKE ? OR LOWER(je.value) LIKE ?)
 		ORDER BY l.reinforcement_count DESC
 		LIMIT ?
 	`, q, q, limit)
@@ -4735,10 +4780,81 @@ func (dm *DatabaseManager) searchLessonsLike(query string, limit int) ([]*Lesson
 	return lessons, rows.Err()
 }
 
-// DeleteLesson removes a lesson
+// DeleteLesson soft-deletes a lesson by setting its deleted_at
+// tombstone on lessons_base. The row remains persisted (history +
+// content intact); list/search/get all skip it. RestoreLesson
+// clears the tombstone and brings the lesson back. ShredLesson is
+// the irreversible hard delete.
+//
+// 2026-09-10 lifecycle fix: this used to be a hard delete via
+// the lessons view (which fires the INSTEAD OF DELETE trigger).
+// The behavior change matches the CLI/Tool contract —
+// `mpm_lessons delete` is now reversible; `mpm_lessons shred` is
+// the destructive path.
+//
+// Implementation note: writes directly to lessons_base because the
+// `lessons` view doesn't expose deleted_at (the view's column list
+// is locked by createLessonsViewAndTriggers). INSTEAD OF triggers
+// still fire on insert/update/delete through the view from
+// callers that use the view; the soft-delete path takes the
+// direct base-table route to keep the tombstone semantics
+// isolated from the trigger machinery.
 func (dm *DatabaseManager) DeleteLesson(id string) error {
-	_, err := dm.db.Exec(`DELETE FROM lessons WHERE id = ?`, id)
-	return err
+	now := time.Now().UTC().Unix()
+	res, err := dm.db.Exec(
+		`UPDATE lessons_base SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		now, id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("lesson not found or already deleted: %s", id)
+	}
+	return nil
+}
+
+// RestoreLesson clears the deleted_at tombstone on a soft-deleted
+// lesson. Idempotent on an already-visible lesson (returns a clean
+// "not deleted" error rather than silently succeeding). A shredded
+// lesson (hard-deleted) cannot be restored — its row is gone from
+// lessons_base entirely and this function reports "not found".
+func (dm *DatabaseManager) RestoreLesson(id string) error {
+	res, err := dm.db.Exec(`UPDATE lessons_base SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("lesson not found or not deleted: %s", id)
+	}
+	return nil
+}
+
+// ShredLesson is the irreversible hard delete. Removes the row
+// from lessons_base and lessons_fts (bypassing the soft-delete
+// filter on the lessons view). A shredded lesson cannot be
+// restored.
+func (dm *DatabaseManager) ShredLesson(id string) error {
+	// Direct base-table delete so soft-deleted rows are also
+	// reachable (the view's deleted_at filter would skip them).
+	// FTS row removal is best-effort; if the FTS row was already
+	// absent (FTS5 out-of-sync repair), the lesson is still
+	// shredded correctly.
+	_, err := dm.db.Exec(`DELETE FROM lessons_fts WHERE rowid IN (SELECT rowid FROM lessons_base WHERE id = ?)`, id)
+	if err != nil {
+		return err
+	}
+	res, err := dm.db.Exec(`DELETE FROM lessons_base WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("lesson not found: %s", id)
+	}
+	return nil
 }
 
 // =============================================================================

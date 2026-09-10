@@ -64,12 +64,30 @@ func (s *LessonStore) SearchLessons(query string, limit int) ([]*Lesson, error) 
 	return s.dm.SearchLessons(query, limit)
 }
 
-// DeleteLesson delegates to DatabaseManager.DeleteLesson
+// DeleteLesson delegates to DatabaseManager.DeleteLesson (soft delete).
 func (s *LessonStore) DeleteLesson(id string) error {
 	if s.dm == nil {
 		return fmt.Errorf("lesson store: database not initialized")
 	}
 	return s.dm.DeleteLesson(id)
+}
+
+// RestoreLesson delegates to DatabaseManager.RestoreLesson (clear tombstone).
+// Only meaningful on a previously soft-deleted lesson; shredded lessons
+// cannot be restored.
+func (s *LessonStore) RestoreLesson(id string) error {
+	if s.dm == nil {
+		return fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.RestoreLesson(id)
+}
+
+// ShredLesson delegates to DatabaseManager.ShredLesson (irreversible hard delete).
+func (s *LessonStore) ShredLesson(id string) error {
+	if s.dm == nil {
+		return fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.ShredLesson(id)
 }
 
 // GetLessonStats delegates to DatabaseManager.GetLessonStats

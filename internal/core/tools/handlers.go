@@ -5821,31 +5821,27 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleSearchLessons(dm, ac, params)
 	case "list":
 		return handleListLessons(dm, ac, params)
-	case "delete", "shred":
-		// 2026-09-10 cleanup: align tool surface with the CLI's
-		// `mpm lesson shred <id>` lifecycle. The CLI advertises lessons
-		// as CRUD; before this fix the tool side had no delete action,
-		// leaving any agent that called `mpm call mpm_lessons ...`
-		// unable to remove a lesson. `delete` and `shred` both route
-		// to the same irreversible lesson deletion (the substrate's
-		// lessons table has no soft-delete column — see `lessons` view
-		// in internal/core/db.go).
+	case "delete":
+		// Soft delete: sets deleted_at tombstone; row + history +
+		// content remain persisted. Reversible via `restore`.
 		return handleDeleteLesson(dm, ac, params)
+	case "restore":
+		// Clears the deleted_at tombstone; lesson reappears in
+		// list/search/get. Idempotent on an already-visible lesson.
+		return handleRestoreLesson(dm, ac, params)
+	case "shred":
+		// Irreversible hard delete. Removes the row from
+		// lessons_base + lessons_fts. No restore path.
+		return handleShredLesson(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, shred", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore, shred", action)
 	}
 }
 
-// handleDeleteLesson (2026-09-10 cleanup) implements the missing
-// delete lifecycle on the mpm_lessons tool surface, bringing parity
-// with the CLI's `mpm lesson shred <id>` and matching the CRUD
-// vocabulary advertised in handlers_lesson.go help text.
-//
+// handleDeleteLesson implements the soft-delete action on the
+// mpm_lessons tool surface. Reversible — see handleRestoreLesson.
 // Field vocabulary: canonical `id`. `lesson_id` retained as a narrow
-// backward-compat alias (callers that passed it explicitly still work).
-// The deletion is irreversible — lesson rows have no soft-delete
-// tombstone and the schema's INSTEAD OF DELETE trigger cascades to
-// lessons_fts.
+// backward-compat alias.
 func handleDeleteLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["id"].(string)
 	if id == "" {
@@ -5857,7 +5853,41 @@ func handleDeleteLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err := dm.DeleteLesson(id); err != nil {
 		return nil, fmt.Errorf("delete lesson: %w", err)
 	}
-	return map[string]interface{}{"success": true, "id": id}, nil
+	return map[string]interface{}{"success": true, "id": id, "action": "delete", "reversible": true}, nil
+}
+
+// handleRestoreLesson undoes a soft-delete. Idempotent on an
+// already-visible lesson (returns a clean error). A shredded lesson
+// (hard-deleted) cannot be restored — its row is gone from
+// lessons_base entirely and this handler reports "not found".
+func handleRestoreLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		id, _ = p["lesson_id"].(string)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("restore lesson: id is required")
+	}
+	if err := dm.RestoreLesson(id); err != nil {
+		return nil, fmt.Errorf("restore lesson: %w", err)
+	}
+	return map[string]interface{}{"success": true, "id": id, "action": "restore"}, nil
+}
+
+// handleShredLesson implements the irreversible hard-delete action.
+// No restore path. Field vocabulary matches handleDeleteLesson.
+func handleShredLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, _ := p["id"].(string)
+	if id == "" {
+		id, _ = p["lesson_id"].(string)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("shred lesson: id is required")
+	}
+	if err := dm.ShredLesson(id); err != nil {
+		return nil, fmt.Errorf("shred lesson: %w", err)
+	}
+	return map[string]interface{}{"success": true, "id": id, "action": "shred", "reversible": false}, nil
 }
 
 func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

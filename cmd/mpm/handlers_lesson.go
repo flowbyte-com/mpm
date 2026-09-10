@@ -25,6 +25,15 @@ func handleLesson(args []string) int {
 		return handleLessonSearch(args[1:])
 	case "get":
 		return handleLessonGet(args[1:])
+	case "delete":
+		// 2026-09-10 lifecycle fix: `delete` is now a reversible soft
+		// delete (sets deleted_at tombstone; row + history retained).
+		// `shred` remains the irreversible hard delete.
+		return handleLessonDelete(args[1:])
+	case "restore":
+		// Undoes a prior soft-delete. Idempotent on an
+		// already-visible lesson (returns a clean error).
+		return handleLessonRestore(args[1:])
 	case "shred":
 		return handleLessonShred(args[1:])
 	case "stats":
@@ -42,8 +51,18 @@ Usage:
   mpm lesson list [--type warning|practice|insight]
   mpm lesson search <query>
   mpm lesson get <id>
-  mpm lesson shred <id>
+  mpm lesson delete <id>     Soft-delete (reversible via restore)
+  mpm lesson restore <id>    Restore a soft-deleted lesson
+  mpm lesson shred <id>      Permanent hard delete (irreversible)
   mpm lesson stats
+
+Lifecycle:
+  delete  → soft/reversible — row + history retained, hidden from
+            list/search/get. Reversible via 'restore'.
+  restore → clear the deleted_at tombstone; lesson reappears in
+            normal queries. Idempotent on an already-visible lesson.
+  shred   → permanent/irreversible — row removed from lessons_base
+            + lessons_fts; no restore path.
 
 Examples:
   mpm lesson add "Check file extensions before executing" --type warning --tags safety,files
@@ -52,6 +71,8 @@ Examples:
   mpm lesson list --type warning
   mpm lesson search "safety"
   mpm lesson get abc123
+  mpm lesson delete abc123
+  mpm lesson restore abc123
   mpm lesson shred abc123
   mpm lesson stats
 
@@ -323,6 +344,42 @@ func handleLessonGet(args []string) int {
 	return respond(output.String(), "", 0)
 }
 
+func handleLessonDelete(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm lesson delete <id>", 1)
+	}
+
+	id := args[0]
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
+	}
+	err := lessonStore.DeleteLesson(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to delete lesson: %v", err), 1)
+	}
+
+	return respond(fmt.Sprintf("Lesson deleted (soft): %s — use 'mpm lesson restore %s' to undo.\n", id, id), "", 0)
+}
+
+func handleLessonRestore(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm lesson restore <id>", 1)
+	}
+
+	id := args[0]
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
+	}
+	err := lessonStore.RestoreLesson(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to restore lesson: %v", err), 1)
+	}
+
+	return respond(fmt.Sprintf("Lesson restored: %s\n", id), "", 0)
+}
+
 func handleLessonShred(args []string) int {
 	if len(args) == 0 {
 		return respond("", "Usage: mpm lesson shred <id>", 1)
@@ -333,12 +390,18 @@ func handleLessonShred(args []string) int {
 	if lessonStore == nil {
 		return respond("", "Failed to initialize lesson store: database not available", 1)
 	}
-	err := lessonStore.DeleteLesson(id)
+	// 2026-09-10 lifecycle fix: `mpm lesson shred` is now the
+	// irreversible hard-delete path. Previously it called
+	// DeleteLesson (which was already destructive); with the new
+	// contract DeleteLesson is the soft delete, ShredLesson is the
+	// hard delete. Without this split, `mpm lesson shred` would
+	// silently become a soft delete.
+	err := lessonStore.ShredLesson(id)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to shred lesson: %v", err), 1)
 	}
 
-	return respond(fmt.Sprintf("Lesson shredded: %s\n", id), "", 0)
+	return respond(fmt.Sprintf("Lesson shredded (permanent): %s\n", id), "", 0)
 }
 
 func handleLessonStats() int {
