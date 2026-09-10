@@ -147,6 +147,21 @@ func TestDrillE2E_ClaudeCode(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
+	// (0) Model-capability gate: Claude Code rejects an unrecognized
+	// model at startup with a stderr warning. Without an officially
+	// supported model Claude falls back to a path that bypasses MCP,
+	// so the audit-row framework_name check below will spuriously
+	// fail ("claude-code" instead of "mcp"). The harness's DebugOutput
+	// captures the child's stderr; surface a clean skip instead of
+	// failing the test in environments where the harness model isn't
+	// supported. Set MPM_E2E_CLAUDE=1 to bypass this gate and force
+	// the test to run (CI use only — the assertion is strict there).
+	if os.Getenv("MPM_E2E_CLAUDE") != "1" {
+		if strings.Contains(h.DebugOutput(), "claude-code:unrecognized_model") {
+			t.Skipf("Claude Code rejected the harness model (unrecognized_model on stderr); set MPM_E2E_CLAUDE=1 to bypass this gate")
+		}
+	}
+
 	// (1) Audibility: the audit table must have at least 2 rows for
 	// the harness's session_id. If the count is zero, Claude did
 	// not actually invoke mpm — the drill engine cannot prove what

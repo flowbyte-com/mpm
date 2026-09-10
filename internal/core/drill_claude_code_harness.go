@@ -34,6 +34,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -42,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,7 +61,8 @@ type ClaudeCodeHarness struct {
 	claudePath  string
 	mpmMcpPath  string
 	workspace   string
-	debugLog    io.Writer // optional; typically os.Stderr for diagnostics
+	debugLog    io.Writer   // tee target for human-visible diagnostics (typically os.Stderr)
+	debugBuf    *syncBuf    // captured child output for programmatic inspection (DebugOutput)
 
 	// session_id is generated at Begin; every tool_invocations row the
 	// agent emits carries this. Set as MPM_SESSION_ID env so mpm-mcp
@@ -87,12 +90,49 @@ func NewClaudeCodeHarness(workspace, claudePath, mpmMcpPath string) *ClaudeCodeH
 			mpmMcpPath = p
 		}
 	}
+	// debugBuf mirrors everything written to debugLog. Callers inspect
+	// the buffer via DebugOutput to detect failure modes that surface
+	// only on the child's stderr (e.g. `claude-code:unrecognized_model`
+	// when the harness model isn't supported by Claude Code).
+	buf := &syncBuf{}
 	return &ClaudeCodeHarness{
 		claudePath: claudePath,
 		mpmMcpPath: mpmMcpPath,
 		workspace:  workspace,
-		debugLog:   os.Stderr,
+		debugLog:   io.MultiWriter(os.Stderr, buf),
+		debugBuf:   buf,
 	}
+}
+
+// DebugOutput returns the harness's captured child-process output
+// (claude stdout + stderr prefixed + harness-side notes). Used by
+// tests to detect failure modes that surface on the child's stderr
+// but aren't reflected in the audit table (e.g. unrecognized_model).
+func (h *ClaudeCodeHarness) DebugOutput() string {
+	if h.debugBuf == nil {
+		return ""
+	}
+	return h.debugBuf.String()
+}
+
+// syncBuf is a minimal goroutine-safe bytes.Buffer. The Go stdlib
+// bytes.Buffer is NOT goroutine-safe; claude's stdout/stderr writers
+// can race against the harness reading the buffer in Finish.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 // SessionID returns the session_id minted at Launch. Callers use this
