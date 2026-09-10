@@ -173,10 +173,19 @@ func (h *ClaudeCodeHarness) Launch(ctx context.Context, drill DrillSpec) (string
 
 	// Pin the workspace and pass the session_id through the env so
 	// mpm-mcp can tag every audit row.
+	//
+	// MPM_FRAMEWORK=mcp is the contract the E2E test asserts against
+	// (drill_e2e_claude_code_test.go framework_name check). mpm-mcp's
+	// audit hook reads MPM_FRAMEWORK and stamps it on every
+	// tool_invocation row; without this env the row falls back to the
+	// "mpm-cli" default and the test's strict equality fails. Setting
+	// it here is the harness's job — mpm-mcp doesn't know whether it's
+	// invoked by Claude Code, the CLI REPL, or a long-lived agent.
 	h.claudeCmd.Dir = h.workspace
 	h.claudeCmd.Env = append(os.Environ(),
 		"MPM_SESSION_ID="+h.sessionID,
 		"MPM_WORKSPACE="+h.workspace,
+		"MPM_FRAMEWORK=mcp",
 	)
 	// Capture stdout/stderr for diagnostics — not persisted by
 	// default; logging to debugLog keeps the drill invocation
