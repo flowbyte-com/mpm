@@ -451,10 +451,24 @@ phase_symlinks() {
 phase_data_dir() {
     note "DATA DIRECTORY"
     # Runtime perms enforced by the binary at startup (AssertUserDirPerms0700
-    # + TightenFilePerms0600). Here we just create the structure; the binary
-    # tightens perms before opening the DB.
-    install -d -m 0755 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
-    log "  created $DATA_ROOT/{src/db,backups/critic-pre}"
+    # + TightenFilePerms0600 sweep on the data root). Here we create the
+    # structure at 0700 so the disclosure surface is closed at install time
+    # — the runtime sweep is defence in depth, not the primary gate.
+    #
+    # Both `src/db` (the SQLite database + WAL/SHM sidecars + audit
+    # mirror) and `backups/` (the backup tree, including `critic-pre`
+    # snapshot dumps) hold confidential cognitive data per
+    # `docs/SECURITY.md` §"A note specifically about memory contents".
+    # 0755 would let other local users enumerate the database filename
+    # and probe sidecars even when the parent data root is 0700.
+    #
+    # The chmod after install -d mirrors the canonical blobstore
+    # pattern (`internal/blobstore/fs.go` MkdirAll + os.Chmod): a
+    # pre-existing permissive directory is corrected on re-install,
+    # so idempotence does not preserve an insecure state.
+    install -d -m 0700 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
+    chmod 0700 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
+    log "  created $DATA_ROOT/{src/db,backups/critic-pre} (mode 0700)"
 
     if [ ! -f "$DATA_ROOT/src/db/mpm.db" ]; then
         log "  no database at $DATA_ROOT/src/db/mpm.db"
@@ -715,7 +729,7 @@ mode_dry_run() {
     log "  write wrapper $PREFIX/bin/mpm"
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"
-    log "  mkdir -p $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre"
+    log "  install -d -m 0700 $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre  (and chmod 0700 to harden pre-existing dirs)"
     log "  loginctl enable-linger $USER_NAME"
     log "  install -m 0644 .../contrib/systemd/${SERVICE_NAME}.service.user -> $SERVICE_DST"
     log "  systemctl --user daemon-reload && enable --now $SERVICE_NAME"

@@ -7,8 +7,9 @@
 
 Install the MPM cognitive substrate in your user context. Result: a
 production-grade agent stack with everything in `$HOME`, isolated from
-other users on the host, secured at 0700/0600 by the binary's startup
-gate.
+other users on the host, secured at 0700/0600 by the installer at
+provisioning time and re-tightened by the binary's startup gate on every
+boot (defence in depth).
 
 For background and design rationale, see [README.md](../README.md).
 
@@ -55,8 +56,11 @@ What the script does, in order:
 3. **Binaries** — installs `mpm-scheduler`, `mpm-critic`, `mpm-mcp`, `mpm-telemetry` to
    `$HOME/.mpm/bin/`. Installs `mpm.real` and a workspace wrapper at
    `$HOME/.mpm/bin/mpm`
-4. **Data directory** — creates `$HOME/.mpm/{src/db,backups/critic-pre}`.
-   Runtime perms are tightened to 0700/0600 by the binary's startup gate
+4. **Data directory** — creates `$HOME/.mpm/{src/db,backups/critic-pre}` at
+   mode 0700 (installer-enforced; a pre-existing permissive directory is
+   hardened on re-install). The binary's startup gate additionally
+   tightens the data root to 0700 and files inside `src/db/` and
+   `backups/` to 0600 — defence in depth.
 5. **Systemd service (user)** — installs
    `$HOME/.config/systemd/user/mpm-scheduler.service`, enables lingering
    via `loginctl enable-linger`, enables and starts the service

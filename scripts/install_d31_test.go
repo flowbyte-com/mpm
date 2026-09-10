@@ -139,3 +139,77 @@ func TestInstallSh_ReadDirectivesValidationForm(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSh_DataDirMode0700 pins the D-3.3 fix: install.sh's
+// `phase_data_dir` step must create the runtime data directories
+// (`$DATA_ROOT/src/db` and `$DATA_ROOT/backups/critic-pre`) at mode
+// 0700, not 0755. These directories hold the SQLite database
+// (`mpm.db` + WAL/SHM sidecars), the audit mirror, and the backup
+// tree — all treated as confidential application data per
+// `docs/SECURITY.md` §"A note specifically about memory contents".
+//
+// The runtime layer already enforces 0700/0600 via
+// `AssertUserDirPerms0700` + `TightenFilePerms0600` on the data root,
+// and the SQLite file modes are auto-tightened to 0600. But the
+// enclosing directory traversal mode (the `0755` that the installer's
+// `install -d` had been creating) was not addressed — a permissive
+// `src/db/` allows other local users to enumerate the database
+// filename and probe sidecars even when the parent data root is 0700.
+//
+// The fix mirrors the canonical blobstore pattern
+// (`internal/blobstore/fs.go`): MkdirAll + explicit `chmod 0700` so a
+// pre-existing permissive directory is corrected on re-install
+// (idempotence must not preserve an insecure state).
+//
+// This test fails if the installer uses any of the known-pre-fix
+// `0755` patterns for the data directories, or if it omits the
+// `0700` enforcement required by the new contract.
+func TestInstallSh_DataDirMode0700(t *testing.T) {
+	data, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	body := string(data)
+
+	// Negative: the pre-fix `install -d -m 0755 "$DATA_ROOT/src/db"`
+	// (or the two-arg variant that bundles both data dirs) MUST NOT
+	// appear. The test accepts any of several equivalent positive
+	// forms; the negative pin keeps a refactor honest — if someone
+	// quietly widens the mode back to 0755 (e.g., copy-pasting from
+	// the `install -d -m 0755 "$PREFIX/bin"` line above), this test
+	// will fail.
+	preFixPatterns := []string{
+		`install -d -m 0755 "$DATA_ROOT/src/db"`,
+		`install -d -m 0755 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"`,
+	}
+	for _, bad := range preFixPatterns {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains pre-fix data-dir mode %q; runtime data dirs must be 0700", bad)
+		}
+	}
+
+	// Positive: at least one of the documented secure forms must be
+	// present. The canonical install-time fix is `install -d -m 0700
+	// "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"`. We also
+	// accept a defensive chmod-after-mkdir variant (`chmod 0700` on
+	// the same paths) so a refactor that splits create + harden into
+	// two phases (mirroring the blobstore `os.MkdirAll` + `os.Chmod`
+	// pattern) does not break this pin.
+	positive := []string{
+		`install -d -m 0700 "$DATA_ROOT/src/db"`,
+		`install -d -m 0700 "$DATA_ROOT/backups/critic-pre"`,
+		`chmod 0700 "$DATA_ROOT/src/db"`,
+		`chmod 0700 "$DATA_ROOT/backups/critic-pre"`,
+	}
+	found := false
+	for _, want := range positive {
+		if strings.Contains(body, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("install.sh must enforce 0700 on $DATA_ROOT/src/db and $DATA_ROOT/backups/critic-pre; "+
+			"none of the canonical forms found: %v", positive)
+	}
+}
