@@ -260,15 +260,30 @@ func EnforceSizeLimit(data *WakeContextData) ([]byte, error) {
 // pointing at a deleted .md file falls back to system/standard with
 // an audit-log entry, instead of booting the agent with a blank
 // context window. dm is passed through so the fallback path can log.
+//
+// Work item 8ffa1c070b7a6793 (2026-09-10): the caller is symmetric now.
+// Previously mode resolution was gated on `len(active.Modes) > 0`, so an
+// active.json without a `modes` field produced `active_mode=""` while
+// `active_persona` still fell back to "default" via the resolver. The
+// resolver already handles empty input the same way as persona
+// resolution does (active_state_test.go::TestResolveActivePersona_Empty_FallsBackToDefault
+// / TestResolveActiveMode_RequestedMissing_FallsBackToDefault), so we
+// drop the gate and let the resolver be the single authoritative
+// fallback path. Symmetry contract:
+//
+//	requested value exists and is valid  → use requested
+//	requested is empty/unset/invalid     → try "default"
+//	"default" exists                     → return "default"
+//	"default" missing                    → return "" silently
+//
+// applies identically to mode and persona.
 func readActiveState(dm *DatabaseManager) (mode, persona string) {
 	active, err := LoadActiveJSON()
 	if err != nil {
 		return "", ""
 	}
-	if len(active.Modes) > 0 {
-		rawMode := strings.Join(active.Modes, ", ")
-		mode = ResolveActiveMode(dm, rawMode)
-	}
+	rawMode := strings.Join(active.Modes, ", ")
+	mode = ResolveActiveMode(dm, rawMode)
 	persona = ResolveActivePersona(dm, active.Persona)
 	return mode, persona
 }
