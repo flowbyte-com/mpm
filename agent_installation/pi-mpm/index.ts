@@ -581,6 +581,12 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	// ---------- Hooks --------------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Reset the once-per-session delivery flag so /new, /resume, and
+		// /fork all get their own wake injection. Without this reset the
+		// flag would persist across sessions in the same extension
+		// instance, and only the very first session would receive the
+		// wake banner.
+		wakeDelivered = false;
 		try {
 			const r = await callMpm("mpm_context", {
 				action: "read_wake_context",

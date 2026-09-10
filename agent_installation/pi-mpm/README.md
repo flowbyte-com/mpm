@@ -140,9 +140,14 @@ every artifact write:
 Pi's session-start path delivers MPM wake context automatically:
 
 1. `session_start` event fires (reason: `startup` | `reload` |
-   `new` | `resume` | `fork`). The handler calls
+   `new` | `resume` | `fork`). The handler resets the
+   `wakeDelivered` flag, then calls
    `mpm call mpm_context --payload '{"action":"read_wake_context"}'`
-   and caches the JSON payload.
+   and caches the JSON payload. Resetting the flag on every
+   session_start ensures that /new, /resume, /fork, and reload each
+   get their own wake injection rather than being silently skipped
+   because an earlier session already flipped the once-per-session
+   gate.
 2. The cached wake payload is **injected exactly once** into the
    system prompt on the first `before_agent_start` of the session
    (`wakeDelivered` flag). The injected block renders the last
@@ -155,10 +160,6 @@ The dynamic wake context is fetched via the canonical mechanism
 host uses). The fetch does not create an MPM session and does not
 start the scheduler. On fetch failure, the `session_start` banner
 is skipped with a UI warning only; the session continues.
-
-If the `before_agent_start` hook needs a refresh (e.g., after
-`session_shutdown` + `session_start` reason=resume), the extension
-re-registers the wake on the next session start.
 
 A manual refresh path remains available at any point: any
 `mpm_context` action `read_wake_context` call returns the current

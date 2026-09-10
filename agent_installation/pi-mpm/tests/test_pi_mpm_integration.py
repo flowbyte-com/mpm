@@ -242,6 +242,39 @@ class TestWakeIntegrationContract(unittest.TestCase):
         self.assertIn("wakeDelivered", text)
         self.assertIn("cachedWake", text)
 
+    def test_session_start_resets_wake_delivered_flag(self):
+        """The wake injection is gated by `wakeDelivered` to deliver
+        exactly once per session. The flag MUST be reset on every
+        `session_start` event so that /new, /resume, /fork, and reload
+        all get their own wake injection. Without this reset the
+        flag would persist across sessions in the same extension
+        instance and only the very first session would receive the
+        wake banner.
+
+        Regression: before this fix, /new after the first session
+        silently skipped wake injection.
+        """
+        text = _read(INDEX_TS)
+        # The session_start handler must reset wakeDelivered.
+        # Find the wake-related session_start handler — the one that
+        # also fetches read_wake_context and updates cachedWake. Use
+        # that as the anchor so we don't accidentally match the inner
+        # db-path-invariant session_start notification handler.
+        import re
+        ss_match = re.search(
+            r'pi\.on\(\s*[\"\']session_start[\"\'][\s\S]*?cachedWake\s*=[\s\S]*?\n\t\}\);',
+            text,
+        )
+        self.assertIsNotNone(ss_match, "wake session_start handler not found")
+        ss_body = ss_match.group(0)
+        # Must assign false to wakeDelivered inside the handler.
+        self.assertRegex(
+            ss_body,
+            r'wakeDelivered\s*=\s*false',
+            "session_start must reset wakeDelivered=false so /new /resume "
+            "/fork all get their own wake injection",
+        )
+
     def test_no_removed_watcher_architecture(self):
         """The old Pi integration used a "watcher" pattern that was
         retired before 2026-09. The current implementation uses Pi's
