@@ -44,6 +44,10 @@ func handleTopicHelp() int {
 
 Usage:
   mpm topic add <name> [description]    Add a new topic
+  mpm topic add --name <name> [--description <text>]
+                                        Same, with explicit flags (2026-09-10
+                                        fix — --name X no longer creates a
+                                        topic literally named "--name")
   mpm topic search <query>            Search topics
   mpm topic show <id>                  Show topic by ID
   mpm topic promote <id>               Promote topic to memory
@@ -52,6 +56,7 @@ Usage:
 
 Examples:
   mpm topic add "golang patterns" "Things to remember about Go"
+  mpm topic add --name "alpha" --description "alpha project topics"
   mpm topic search "golang"
   mpm topic show abc123
   mpm topic promote abc123
@@ -68,21 +73,22 @@ func handleTopicAdd(args []string) int {
 		}
 	}
 	if len(args) == 0 {
-		return respond("", "Usage: mpm topic add <name> [description] [--json]", 1)
+		return respond("", "Usage: mpm topic add <name> [description] [--json]\n"+
+			"   or: mpm topic add --name <name> [--description <text>] [--json]", 1)
 	}
 
-	name := args[0]
+	// 2026-09-10 fix: recognize --name <X> and --description <Y>
+	// explicitly so `mpm topic add --name X` no longer creates a
+	// topic literally named "--name". Pre-fix, `args[0]` was
+	// blindly assigned as the topic name — the flag-style token
+	// bypassed positional parsing and was stored verbatim.
+	jsonOutput, cleanedArgs := ExtractJSONFlag(args)
+	name, description, err := parseTopicAddArgs(cleanedArgs)
+	if err != nil {
+		return respond("", err.Error(), 1)
+	}
 	if strings.TrimSpace(name) == "" {
 		return respond("", "topic name cannot be empty", 1)
-	}
-	description := ""
-	jsonOutput, cleanedArgs := ExtractJSONFlag(args)
-
-	// Extract description from non-flag args
-	for _, arg := range cleanedArgs[1:] {
-		if !strings.HasPrefix(arg, "-") {
-			description = arg
-		}
 	}
 
 	store := getMemoryStore()
@@ -90,17 +96,17 @@ func handleTopicAdd(args []string) int {
 
 	// Add to topics table
 	id := internal.GenerateID()
-	_, err := db.Exec(`
+	_, execErr := db.Exec(`
 		INSERT INTO topics (id, name, description)
 		VALUES (?, ?, ?)
 	`, id, name, description)
 
-	if err != nil {
+	if execErr != nil {
 		if jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add topic: %v", err)})
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add topic: %v", execErr)})
 			fmt.Println(string(data))
 		} else {
-			respond("", fmt.Sprintf("Failed to add topic: %v", err), 1)
+			respond("", fmt.Sprintf("Failed to add topic: %v", execErr), 1)
 		}
 		return 1
 	}
@@ -117,6 +123,52 @@ func handleTopicAdd(args []string) int {
 		respond(fmt.Sprintf("Topic added: %s\n", name), "", 0)
 	}
 	return 0
+}
+
+// parseTopicAddArgs extracts (name, description) from the cleaned
+// (--json-stripped) args slice. Supports both the positional form
+// (`topic add <name> [description]`) and the flag form
+// (`topic add --name <name> [--description <text>]`), including the
+// mixed form (`--name X <positional description>`). The flag form
+// takes precedence when both are present.
+//
+// Returns a clean validation error rather than silently swallowing
+// unknown flags so a typo (e.g. `--naem X`) fails loudly with the
+// flag name surfaced.
+func parseTopicAddArgs(args []string) (name, description string, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--name":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--name requires a value")
+			}
+			name = args[i+1]
+			i++
+		case "--description":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--description requires a value")
+			}
+			description = args[i+1]
+			i++
+		default:
+			if strings.HasPrefix(arg, "-") {
+				// Unknown flag — fail loudly rather than
+				// silently dropping it. The caller surfaces the
+				// message via the usererror path.
+				return "", "", fmt.Errorf("unknown flag %q (supported: --name, --description)", arg)
+			}
+			// First non-flag arg is the name; second is the
+			// description. Both are positional fallbacks when
+			// --name hasn't been seen yet.
+			if name == "" {
+				name = arg
+			} else if description == "" {
+				description = arg
+			}
+		}
+	}
+	return name, description, nil
 }
 
 func handleTopicSearch(args []string) int {

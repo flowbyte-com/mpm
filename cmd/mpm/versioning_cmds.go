@@ -103,7 +103,20 @@ func handleDiff(args []string) int {
 	return 0
 }
 
-// mpm diff-lines <v1-content> <v2-content> — Compute unified diff of two text blocks (used for testing)
+// mpm diff-lines <v1-content> <v2-content> — Compute line-oriented diff of two text blocks (used for testing)
+//
+// 2026-09-10 fix: the previous shape used DiffPrettyText on a
+// character-level diff, which collapsed short inputs ("alpha" vs
+// "beta") into a single concatenated line with ANSI color codes
+// rather than a readable line diff. The fix uses the library's
+// line-mode encoding (DiffLinesToChars → DiffMain → DiffCharsToLines)
+// and renders the result with explicit `+`/`-`/` ` per-line prefixes,
+// so each input line is identified as unchanged, removed, or
+// inserted.
+//
+// The character-level DiffPrettyText path is preserved in handleDiff
+// (above), which is for memory version diffs where the content is
+// typically a full document and semantic cleanup is meaningful.
 func handleDiffLines(args []string) int {
 	if len(args) < 3 {
 		usererror.Usage("mpm diff-lines <v1-content> <v2-content>")
@@ -111,8 +124,34 @@ func handleDiffLines(args []string) int {
 	}
 
 	dmp := diffmatchpatch.New()
-	diffs := dmp.DiffMain(args[1], args[2], true)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-	fmt.Print(dmp.DiffPrettyText(diffs))
+	// Encode each input line as a single rune so DiffMain operates
+	// at line granularity; the returned lineArray maps runes back to
+	// the original line strings (one entry per unique line across
+	// both inputs).
+	chars1, chars2, lineArray := dmp.DiffLinesToChars(args[1], args[2])
+	diffs := dmp.DiffMain(chars1, chars2, false)
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
+
+	// Render the line-mode diff with explicit prefixes. Unchanged
+	// lines get a leading space; inserted lines get `+`; deleted
+	// lines get `-`. Empty input on either side produces a
+	// well-defined all-insert or all-delete output rather than the
+	// previous concatenated-character garbage.
+	var b []byte
+	for _, d := range diffs {
+		prefix := byte(' ')
+		switch d.Type {
+		case diffmatchpatch.DiffInsert:
+			prefix = '+'
+		case diffmatchpatch.DiffDelete:
+			prefix = '-'
+		}
+		for i := 0; i < len(d.Text); i++ {
+			c := d.Text[i]
+			b = append(b, prefix)
+			b = append(b, c)
+		}
+	}
+	fmt.Print(string(b))
 	return 0
 }
