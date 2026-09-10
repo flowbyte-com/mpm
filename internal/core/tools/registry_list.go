@@ -28,12 +28,13 @@ Use when: you learn something worth remembering (a fact, a lesson, a decision co
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
 For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
 Lifecycle asymmetry: shred is permanent (hard delete — the row is removed with cascade cleanup of dependent topic_memberships, memory_revisions, and confidence_history). There is no restore path. This is deliberately different from mpm_skills.delete, which is soft and recoverable via save with force=true.
+Lifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; action=restore brings it back). Reversible via action=restore.
 Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight cannot drop below the safety floor of 1). reinforce and weaken accept the same delta shape but their internal mechanics differ; the user-visible contract is symmetric.`,
 
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","query","show","shred","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
+				"action": {"type": "string", "enum": ["save","query","show","shred","delete","restore","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
 				"params": {
 					"type": "object",
 					"properties": {

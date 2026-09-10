@@ -527,7 +527,24 @@ challenge ───────────────────────�
 
 **Duplicate saves are deterministic, not background-magic.** Identity for a memory is the tuple *(collection, SHA-256 of content, tags, stable metadata)* — write-path stamps (`created`, `timestamp`, `source`, tag mirrors) and observation telemetry (`_epistemic_snapshot`, `weight_intent`) are excluded. An identical re-save returns the **existing row's id** with `duplicate: true` instead of writing a second indistinguishable row; the same identity rule is enforced inside both low-level insert paths. Content that differs in provenance metadata (human vs model capture) remains legitimately distinct — that distinction feeds the contradiction workflows.
 
-**Agent-facing payloads are bounded by design.** `mpm_memory save` echoes content up to 2 KB (override with `MPM_MAX_INLINE_CONTENT_BYTES`), flags larger echoes with `content_truncated: true` + `content_bytes`, and always returns an `mpm://memory/<id>` pointer; the full payload is persisted unchanged and retrievable by id or via `full_content: true`. Memory query bounds each hit the same way. Truncation is always explicit — a bounded echo can never be mistaken for complete content.
+**Agent-facing payloads are bounded by design.** `mpm_memory save` echoes content up to 2 KB (override with `MPM_MAX_INLINE_CONTENT_BYTES`), flags larger echoes with `content_truncated: true` + `content_bytes`, and always returns an `mpm://memory/<id>` pointer; the full payload is persisted unchanged and retrievable by id or via `projection: "full"` (or `full_content: true` on the legacy `mode` alias). Memory query and show each honor the same `projection: "summary" | "full"` parameter — default `"summary"` keeps the wire echo bounded, `"full"` returns the complete stored body. Truncation is always explicit — a bounded echo can never be mistaken for complete content.
+
+### 4.5.2 Memory lifecycle: delete vs shred, weaken floor, projection
+
+The memory surface exposes four lifecycle verbs whose names and effects must stay distinct:
+
+| Verb | Effect | Reversible? | Distinct from |
+|---|---|---|---|
+| `mpm memory delete <id>` (CLI) / `mpm_memory action=delete` (tool) | Soft-delete: sets `deleted_at`. Row stays in substrate with full content + history preserved. | **Yes** — `mpm memory restore <id>` / `mpm_memory action=restore` clears the tombstone and re-adds the FTS5 entry. | `shred` (permanent) |
+| `mpm memory restore <id>` (CLI) / `mpm_memory action=restore` (tool) | Reverse a soft-delete. Idempotent on live rows (errors with "not soft-deleted"). | n/a | `mpm challenge restore` (only clears the `challenged` status flag, not the `deleted_at` tombstone) |
+| `mpm memory shred <id>` (CLI) / `mpm_memory action=shred` (tool) | Permanent destruction. Broad sweep across topic_memberships, memory_revisions, evidence, confidence_history, artifact_provenance, synth_runs. | **No.** | `delete` (soft, reversible) |
+| `mpm shred <id>` (CLI, no `memory` subcommand) | Same as `mpm memory shred` — hard delete with cascade. | **No.** | `delete` (soft, reversible) |
+
+**Weaken floor.** `mpm memory weaken <id>` / `mpm_memory action=weaken` uses the symmetric formula `weight_loss = (delta+1)/2`, decrements `reinforcement_count` by `delta`, and floors weight at **1** — repeated weaken calls can never drive weight negative or below 1. The response payload includes `weight_loss`, `reinforcement_delta`, `weight`, `reinforcement_count`, and `floor_hit: true` when the call landed at the floor.
+
+**Projection semantics.** `projection: "summary"` (default on save/show / query) bounds the inline content echo and flags `content_truncated: true` for the larger-than-bound case. `projection: "full"` returns the complete stored body and clears the truncation markers. Projection is a wire-format choice — the stored content is **never** mutated by projection. Unknown projection values are rejected at the handler boundary with the canonical-list error `[summary, full]`.
+
+**Save response.** The save response distinguishes persisted content from inline preview: `content` is the bounded echo, `content_bytes` is the stored size (truthful even when bounded), and `content_truncated: true` means only the *returned* representation was bounded — the stored memory is complete. Re-call `show` with `projection: "full"` (or resolve the `pointer`) for the unabridged body.
 
 ### 4.6 Proactive Recall
 

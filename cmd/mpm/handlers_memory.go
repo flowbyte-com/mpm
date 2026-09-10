@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -668,19 +669,114 @@ func handleMemoryShow(args []string) int {
 }
 
 func handleMemoryShred(args []string) int {
+	// Alpha cleanup (2026-09-10): `mpm memory shred` now matches the
+	// `mpm_memory action=shred` contract — irreversible hard delete with
+	// broad sweep across topic_memberships, memory_revisions,
+	// evidence, confidence_history, etc. The pre-fix path called
+	// `store.DeleteMemory` (a soft delete via deleted_at), which left
+	// the row recoverable in the substrate — a silent contract drift
+	// between "shred" and the user's mental model of permanent
+	// destruction. For reversible (soft) deletion, use
+	// `mpm memory delete <id>` instead.
 	if len(args) == 0 {
-		return respond("", "Usage: mpm memory shred <id>", 1)
+		return respond("", "Usage: mpm memory shred <id>\n\nPermanent, irreversible destruction. Use `mpm memory delete <id>` for reversible soft delete.\n", 1)
 	}
 
 	id := args[0]
-	store := getMemoryStore()
 
-	err := store.DeleteMemory(id, "memories")
-	if err != nil {
-		return respond("", fmt.Sprintf("Failed to shred memory: %v", err), 1)
+	dm := getDB()
+	if dm == nil {
+		return respond("", "Error: database manager not available\n", 1)
 	}
 
-	return respond(fmt.Sprintf("Memory shredded: %s\n", id), "", 0)
+	// Route through the substrate's ShredMemoryWithCascade so the CLI
+	// and the MCP path share the same broad-sweep + cascade behaviour.
+	result, err := dm.ShredMemoryWithCascade(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to shred memory: %v\n", err), 1)
+	}
+
+	output := fmt.Sprintf("⚡ Memory shredded: %s\n", id)
+	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {
+		output += fmt.Sprintf("  theory purged: %s\n", theoryID)
+	}
+	if sweep, ok := result["sweep"].(map[string]int64); ok && len(sweep) > 0 {
+		// Stable ordering so the output is reproducible across runs.
+		tables := make([]string, 0, len(sweep))
+		for t := range sweep {
+			tables = append(tables, t)
+		}
+		sort.Strings(tables)
+		output += "  sweep:\n"
+		for _, t := range tables {
+			output += fmt.Sprintf("    - %s: %d rows\n", t, sweep[t])
+		}
+	}
+	return respond(output, "", 0)
+}
+
+// handleMemoryDelete soft-deletes a memory by ID (sets deleted_at).
+// Reversible via handleMemoryRestore. Distinct from handleMemoryShred
+// (hard delete — irreversible). The CLI mirrors the mpm_memory
+// action=delete tool contract.
+func handleMemoryDelete(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return respond("", "Usage: mpm memory delete <id>\n\nSoft-delete (reversible). Memory hidden from recall; restore via `mpm memory restore <id>`. For permanent destruction, use `mpm memory shred <id>`.\n", 0)
+		}
+	}
+	if len(args) == 0 {
+		return respond("", "Usage: mpm memory delete <id>\n\nSoft-delete (reversible). Memory hidden from recall; restore via `mpm memory restore <id>`. For permanent destruction, use `mpm memory shred <id>`.\n", 1)
+	}
+
+	id := args[0]
+	dm := getDB()
+	if dm == nil {
+		return respond("", "Error: database manager not available\n", 1)
+	}
+
+	result, err := dm.SoftDeleteMemory(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to delete memory: %v\n", err), 1)
+	}
+
+	output := fmt.Sprintf("🗑️  Memory soft-deleted: %s\n", id)
+	if note, ok := result["note"].(string); ok && note != "" {
+		output += fmt.Sprintf("  %s\n", note)
+	}
+	return respond(output, "", 0)
+}
+
+// handleMemoryRestore reverses a prior soft-delete (clears deleted_at).
+// Distinct from `mpm challenge restore`, which only clears the
+// challenged-status flag, not the deleted_at tombstone. The CLI
+// mirrors the mpm_memory action=restore tool contract.
+func handleMemoryRestore(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return respond("", "Usage: mpm memory restore <id>\n\nReverse a prior `mpm memory delete` by clearing the deleted_at tombstone. Memory becomes visible in recall and FTS search again.\n", 0)
+		}
+	}
+	if len(args) == 0 {
+		return respond("", "Usage: mpm memory restore <id>\n\nReverse a prior `mpm memory delete` by clearing the deleted_at tombstone. Memory becomes visible in recall and FTS search again.\n", 1)
+	}
+
+	id := args[0]
+	dm := getDB()
+	if dm == nil {
+		return respond("", "Error: database manager not available\n", 1)
+	}
+
+	result, err := dm.RestoreMemory(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to restore memory: %v\n", err), 1)
+	}
+
+	output := fmt.Sprintf("♻️  Memory restored: %s\n", id)
+	if note, ok := result["note"].(string); ok && note != "" {
+		output += fmt.Sprintf("  %s\n", note)
+	}
+	return respond(output, "", 0)
 }
 
 func handleMemoryList(args []string) int {

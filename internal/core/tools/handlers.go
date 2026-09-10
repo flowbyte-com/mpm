@@ -109,6 +109,17 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, fmt.Errorf("fact is required")
 	}
 
+	// Alpha cleanup (2026-09-10): projection parity across save/show/query.
+	// Default "summary" keeps the bounded-preview behavior (F4 audit
+	// finding — bounded echoes prevent context-bloat on large saves).
+	// "full" returns the complete stored fact in the response without a
+	// second query. Projection is a wire-format choice only; the stored
+	// memory is NEVER mutated by projection.
+	projection, err := normalizeProjection(p)
+	if err != nil {
+		return nil, err
+	}
+
 	// F12-1: explicit type guard on `weight` at the agent boundary.
 	// ParseFloatOr silently coerces strings ("5" -> 5.0), which the
 	// alpha audit flagged as silent type coercion. The contract at this
@@ -193,6 +204,22 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	}
 	result["memory_persisted"] = true
 	result["memory_id"] = out["id"]
+
+	// Projection: summary (default) keeps the bounded preview + the
+	// content_truncated/content_bytes metadata. "full" returns the
+	// complete stored fact and clears the truncation markers so a
+	// downstream consumer doesn't have to inspect them. Stored content
+	// is unchanged by either projection — the fact variable above IS
+	// the stored content at this point in the flow.
+	if projection == "full" {
+		result["content"] = fact
+		delete(result, "content_truncated")
+		// content_bytes is informational (size of stored content) and
+		// remains useful even under full projection, so keep it.
+		result["projection"] = "full"
+	} else {
+		result["projection"] = "summary"
+	}
 	return result, nil
 }
 
@@ -647,6 +674,15 @@ func handleShowMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 		return nil, fmt.Errorf("id is required")
 	}
 
+	// Alpha cleanup (2026-09-10): projection parity with query. Default
+	// "summary" bounds the inline content echo to keep responses small;
+	// "full" returns the complete stored body. Projection never mutates
+	// the stored content — it's a wire-format choice only.
+	projection, err := normalizeProjection(p)
+	if err != nil {
+		return nil, err
+	}
+
 	mem, err := dm.GetMemory(id)
 	if err != nil {
 		return nil, err
@@ -665,6 +701,30 @@ func handleShowMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if rawMeta, ok := mem["metadata"].(string); ok {
 		mem["metadata"] = parseMetadataColumn(rawMeta)
 	}
+
+	// Projection: bound the inline content echo unless the caller asked
+	// for "full". The stored content is NEVER mutated; the projection
+	// only affects what gets returned on the wire. content_truncated +
+	// content_bytes mark bounded responses so callers can detect the
+	// preview vs. full distinction without a second query.
+	content, _ := mem["content"].(string)
+	if projection == "summary" {
+		bounded, truncated := mpminternal.BoundInlineContent(content)
+		mem["content"] = bounded
+		if truncated {
+			mem["content_truncated"] = true
+			mem["content_bytes"] = len(content)
+			mem["note"] = "content stored in full; inline echo bounded — re-call with projection=full for complete body"
+		}
+	} else {
+		// projection == "full": return the stored content verbatim.
+		// Don't add content_truncated/content_bytes — a full projection
+		// by definition is not bounded.
+		if len(content) > 0 {
+			mem["content"] = content
+		}
+	}
+	mem["projection"] = projection
 
 	// W-007: surface challenge status as top-level fields so callers
 	// can branch on `is_challenged` without re-querying the metadata
@@ -1087,6 +1147,41 @@ func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 			fmt.Sprintf("shred_memory %s", memoryID), "",
 			ctx,
 		)
+	}
+	return result, nil
+}
+
+// handleDeleteMemory soft-deletes a memory row (sets deleted_at). Reversible
+// via handleRestoreMemory. Distinct from handleShredMemory (hard delete with
+// broad sweep — irreversible). Distinct from handleRestoreChallengeMemory
+// (which only clears the challenged-status flag).
+//
+// Required params: memory_id (or id).
+func handleDeleteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, err := requireMemoryID(p)
+	if err != nil {
+		return nil, err
+	}
+	result, err := dm.SoftDeleteMemory(id)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// handleRestoreMemory reverses a prior soft-delete by clearing deleted_at.
+// The memories_au_content trigger re-adds the FTS5 entry on the transition
+// so the memory is searchable again.
+//
+// Required params: memory_id (or id).
+func handleRestoreMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	id, err := requireMemoryID(p)
+	if err != nil {
+		return nil, err
+	}
+	result, err := dm.RestoreMemory(id)
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -5416,6 +5511,18 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleShowMemory(dm, ac, params)
 	case "shred":
 		return handleShredMemory(dm, ac, params)
+	case "delete":
+		// Alpha cleanup (2026-09-10): explicit soft-delete verb. Reversible
+		// via the "restore" action below. Distinct from "shred" (hard,
+		// irreversible, broad sweep). See internal/core/memory_tools.go
+		// SoftDeleteMemory for the full contract.
+		return handleDeleteMemory(dm, ac, params)
+	case "restore":
+		// Reverses a prior soft-delete by clearing deleted_at. Distinct
+		// from "restore_challenge" (which only clears the challenged-
+		// status flag, not the deleted_at tombstone). See
+		// RestoreMemory for the full contract.
+		return handleRestoreMemory(dm, ac, params)
 	case "reinforce":
 		return handleReinforceMemory(dm, ac, params)
 	case "weaken":
@@ -5445,7 +5552,7 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, shred, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
 	}
 }
 

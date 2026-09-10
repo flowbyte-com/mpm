@@ -92,6 +92,8 @@ type CoreDB interface {
 	WeakenMemoryTool(memoryID string, delta int) (map[string]interface{}, error)
 	AdjustMemoryWeight(id string, delta int) error
 	SetMemoryWeight(memoryID string, weight float64) (map[string]interface{}, error)
+	SoftDeleteMemory(memoryID string) (map[string]interface{}, error)
+	RestoreMemory(memoryID string) (map[string]interface{}, error)
 	ChallengeMemory(memoryID string, slashAmount int, evidence string) error
 	ChallengeMemoryAsync(memoryID string, evidence string)
 	ChallengeAndReinforce(id string, delta int) error

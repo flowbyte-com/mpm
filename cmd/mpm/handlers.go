@@ -93,6 +93,17 @@ func handleMemory(args []string) int {
 		return handleMemoryShow(args[1:])
 	case "shred":
 		return handleMemoryShred(args[1:])
+	case "delete":
+		// Alpha cleanup (2026-09-10): explicit soft-delete verb.
+		// Reversible via `mpm memory restore <id>`. Distinct from
+		// `mpm memory shred` (hard delete — irreversible).
+		return handleMemoryDelete(args[1:])
+	case "restore":
+		// Alpha cleanup (2026-09-10): reverses a prior `mpm memory delete`
+		// by clearing the deleted_at tombstone. Distinct from
+		// `mpm challenge restore` (which only clears the challenged
+		// status flag, not the deleted_at tombstone).
+		return handleMemoryRestore(args[1:])
 	case "list":
 		return handleMemoryList(args[1:])
 	case "search-term":
@@ -127,7 +138,9 @@ Usage:
   mpm memory search <query>      Search memories
   mpm memory search-term <term>  List memories matching term (500 char snippets)
   mpm memory show <id>           Show memory by ID
-  mpm memory shred <id>          Secure delete memory by ID
+  mpm memory delete <id>         Soft-delete memory by ID (reversible via restore)
+  mpm memory restore <id>        Restore a soft-deleted memory by ID
+  mpm memory shred <id>          Permanent destruction of memory by ID (irreversible)
   mpm memory list                List recent memories
   mpm memory wipe                Wipe all memories (requires -f)
 

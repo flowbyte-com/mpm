@@ -403,3 +403,324 @@ func TestProjection_MemoryQuery_UnknownValueRejected(t *testing.T) {
 		t.Errorf("error %q does not list canonical values", err.Error())
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Alpha cleanup 2026-09-10: projection parity across save/show/query.
+// Default "summary" bounds the wire echo; "full" returns the complete
+// stored body. Stored content is NEVER mutated by projection — it's a
+// wire-format choice only.
+// ────────────────────────────────────────────────────────────────────
+
+// TestProjection_MemorySave_DefaultsToSummaryBoundedEcho: the save
+// response is bounded to MaxInlineContentBytes (F4 audit finding) and
+// flags content_truncated=true when the fact exceeds the wire bound.
+// The stored memory is full — a follow-up show with projection=full
+// must return the complete body.
+func TestProjection_MemorySave_DefaultsToSummaryBoundedEcho(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	big := strings.Repeat("S", 4096) // 4 KiB, well above 2 KiB wire bound
+
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{"fact": big, "tags": []interface{}{"proj-save-default"}},
+	})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	var wire struct {
+		ID               string `json:"id"`
+		Content          string `json:"content"`
+		ContentTruncated bool   `json:"content_truncated"`
+		Projection       string `json:"projection"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire.Projection != "summary" {
+		t.Errorf("default projection = %q, want \"summary\"", wire.Projection)
+	}
+	if !wire.ContentTruncated {
+		t.Errorf("4 KiB save must trip the wire bound; got content_truncated=false")
+	}
+	if len(wire.Content) >= 4096 {
+		t.Errorf("echo length = %d, want < MaxInlineContentBytes(%d)",
+			len(wire.Content), mpminternal.MaxInlineContentBytes())
+	}
+	if !strings.HasPrefix(big, wire.Content) {
+		t.Errorf("bounded echo must be a prefix of stored fact")
+	}
+
+	// Follow-up show with projection=full must return the complete body.
+	full, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": wire.ID, "projection": "full"},
+	})
+	if err != nil {
+		t.Fatalf("show full: %v", err)
+	}
+	fullRaw := mustMarshalJSON(full)
+	if !strings.Contains(fullRaw, strings.Repeat("S", 3000)) {
+		t.Errorf("show projection=full must return unbounded content")
+	}
+}
+
+// TestProjection_MemorySave_FullReturnsUnboundedEcho: a save with
+// projection=full returns the complete fact in the response and
+// clears the truncation flag.
+func TestProjection_MemorySave_FullReturnsUnboundedEcho(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	big := strings.Repeat("F", 4096)
+
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact":       big,
+			"tags":       []interface{}{"proj-save-full"},
+			"projection": "full",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	if !strings.Contains(raw, strings.Repeat("F", 3000)) {
+		t.Errorf("projection=full must return unbounded echo; payload=%s", raw)
+	}
+	var wire struct {
+		ContentTruncated bool   `json:"content_truncated"`
+		Projection       string `json:"projection"`
+	}
+	_ = json.Unmarshal([]byte(raw), &wire)
+	if wire.ContentTruncated {
+		t.Errorf("projection=full must NOT flag content_truncated")
+	}
+	if wire.Projection != "full" {
+		t.Errorf("projection = %q, want \"full\"", wire.Projection)
+	}
+}
+
+// TestProjection_MemoryShow_DefaultsToSummaryBoundedEcho: the show
+// response is also bounded under default projection. The pre-fix
+// behavior always returned full content, which inflated context cost
+// for callers that only needed a one-line preview.
+func TestProjection_MemoryShow_DefaultsToSummaryBoundedEcho(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	big := strings.Repeat("D", 4096)
+	id := seedBigMemory(t, dm, big, "proj-show-default")
+
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id},
+	})
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	var wire struct {
+		Content          string `json:"content"`
+		ContentTruncated bool   `json:"content_truncated"`
+		Projection       string `json:"projection"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire.Projection != "summary" {
+		t.Errorf("default projection = %q, want \"summary\"", wire.Projection)
+	}
+	if !wire.ContentTruncated {
+		t.Errorf("4 KiB show default must flag content_truncated=true")
+	}
+	if len(wire.Content) >= 4096 {
+		t.Errorf("default show must bound content; got %d bytes", len(wire.Content))
+	}
+}
+
+// TestProjection_MemoryShow_FullReturnsUnbounded: show with
+// projection=full returns the complete stored body and never flags
+// truncation.
+func TestProjection_MemoryShow_FullReturnsUnbounded(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	big := strings.Repeat("U", 4096)
+	id := seedBigMemory(t, dm, big, "proj-show-full")
+
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id, "projection": "full"},
+	})
+	if err != nil {
+		t.Fatalf("show full: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	if !strings.Contains(raw, strings.Repeat("U", 3000)) {
+		t.Errorf("projection=full must return unbounded content; payload=%s", raw)
+	}
+	var wire struct {
+		ContentTruncated bool   `json:"content_truncated"`
+		Projection       string `json:"projection"`
+	}
+	_ = json.Unmarshal([]byte(raw), &wire)
+	if wire.ContentTruncated {
+		t.Errorf("projection=full must NOT flag content_truncated")
+	}
+	if wire.Projection != "full" {
+		t.Errorf("projection = %q, want \"full\"", wire.Projection)
+	}
+}
+
+// TestProjection_UnknownValue_Rejected_AcrossSaveAndShow: an unknown
+// projection value is rejected at save AND show boundaries with a
+// canonical-list error. This is the wire-format pin for the
+// "unknown projection values should fail predictably" requirement.
+func TestProjection_UnknownValue_Rejected_AcrossSaveAndShow(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+
+	// Save with bad projection.
+	_, errSave := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "save",
+		"params": map[string]interface{}{
+			"fact":       "x",
+			"projection": "verbose",
+		},
+	})
+	if errSave == nil {
+		t.Errorf("save with projection=verbose must error")
+	} else if !strings.Contains(errSave.Error(), "canonical values: [summary, full]") {
+		t.Errorf("save error %q does not list canonical values", errSave.Error())
+	}
+
+	// Show with bad projection.
+	id := seedBigMemory(t, dm, "y", "proj-unknown")
+	_, errShow := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{
+			"id":         id,
+			"projection": "rich",
+		},
+	})
+	if errShow == nil {
+		t.Errorf("show with projection=rich must error")
+	} else if !strings.Contains(errShow.Error(), "canonical values: [summary, full]") {
+		t.Errorf("show error %q does not list canonical values", errShow.Error())
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Alpha cleanup 2026-09-10: delete (soft) and restore tool actions.
+// The CLI `mpm memory delete` and `mpm memory restore` mirror these.
+// Distinct from shred (hard, irreversible, broad sweep).
+// ────────────────────────────────────────────────────────────────────
+
+// TestMpmMemory_Delete_HidesFromShowAndQuery verifies that after a
+// delete, the row is invisible to show + query but still on disk
+// (delete is soft, reversible via restore).
+func TestMpmMemory_Delete_HidesFromShowAndQuery(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	id := seedBigMemory(t, dm, "delete-me fact", "del-hide")
+
+	// Pre-condition: show works.
+	_, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id},
+	})
+	if err != nil {
+		t.Fatalf("pre-delete show: %v", err)
+	}
+
+	// Delete (soft).
+	delRes, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "delete",
+		"params": map[string]interface{}{"memory_id": id},
+	})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	raw := mustMarshalJSON(delRes)
+	var wire struct {
+		Success  bool `json:"success"`
+		Deleted  bool `json:"deleted"`
+		Soft     bool `json:"soft"`
+		MemoryID string `json:"memory_id"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !wire.Success || !wire.Deleted || !wire.Soft {
+		t.Errorf("delete response incomplete: success=%v deleted=%v soft=%v",
+			wire.Success, wire.Deleted, wire.Soft)
+	}
+
+	// Post-condition: show errors (active path filters deleted_at IS NULL).
+	if _, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id},
+	}); err == nil {
+		t.Errorf("show on soft-deleted row must error")
+	}
+}
+
+// TestMpmMemory_DeleteThenRestore_RoundTrip verifies the reversible
+// delete contract: delete hides, restore brings back, content
+// preserved.
+func TestMpmMemory_DeleteThenRestore_RoundTrip(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	id := seedBigMemory(t, dm, "round trip fact", "del-rt")
+
+	if _, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "delete",
+		"params": map[string]interface{}{"memory_id": id},
+	}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Restore.
+	res, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "restore",
+		"params": map[string]interface{}{"memory_id": id},
+	})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	raw := mustMarshalJSON(res)
+	if !strings.Contains(raw, `"restored":true`) {
+		t.Errorf("restore response must include restored:true; payload=%s", raw)
+	}
+
+	// Post-condition: show works again.
+	show, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show",
+		"params": map[string]interface{}{"id": id},
+	})
+	if err != nil {
+		t.Fatalf("post-restore show: %v", err)
+	}
+	showRaw := mustMarshalJSON(show)
+	if !strings.Contains(showRaw, "round trip fact") {
+		t.Errorf("post-restore show must return original content; payload=%s", showRaw)
+	}
+}
+
+// TestMpmMemory_DeleteAlreadyDeleted_Errors: a second delete on an
+// already-soft-deleted row errors with a clear message (not a silent
+// success that could mask caller intent).
+func TestMpmMemory_DeleteAlreadyDeleted_Errors(t *testing.T) {
+	dm := newTestIsolatedDM(t)
+	id := seedBigMemory(t, dm, "double-delete fact", "del-dup")
+
+	if _, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "delete",
+		"params": map[string]interface{}{"memory_id": id},
+	}); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+
+	_, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "delete",
+		"params": map[string]interface{}{"memory_id": id},
+	})
+	if err == nil {
+		t.Errorf("second delete must error")
+	} else if !strings.Contains(err.Error(), "already soft-deleted") {
+		t.Errorf("second delete error %q must mention 'already soft-deleted'", err.Error())
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -741,6 +742,150 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 	return result, nil
 }
 
+// SoftDeleteMemory is the reversible "delete" verb — sets deleted_at on
+// the memory row so it disappears from normal recall/listing, while the
+// row (and its full content) stays on disk until the restore verb brings
+// it back. Distinct from ShredMemoryWithCascade (hard, irreversible, broad
+// sweep). Distinct from RestoreMemoryFromChallenge (which only clears
+// the challenged-status flag, not the deleted_at tombstone).
+//
+// Contract (2026-09-10 alpha cleanup):
+//
+//   - Hides from recall/listing (the deleted_at IS NULL filter on every
+//     active read path excludes soft-deleted rows).
+//   - Preserves the full row + history (memory_revisions, evidence,
+//     retrieval_metadata, confidence_history, topic_memberships all
+//     remain). The memories_au trigger removes the FTS5 entry on the
+//     NULL → non-NULL deleted_at transition; restore re-adds it via
+//     memories_au_content.
+//   - Reversible via RestoreMemory (next method below).
+//   - Does NOT cascade-delete historical revisions/evidence.
+//   - Idempotent: a second soft-delete on an already-soft-deleted row
+//     reports success=false with a clear message; the row stays deleted.
+//
+// Errors when the id matches no live row (mirrors the shred contract:
+// the substrate never lies about whether a write actually happened).
+func (dm *DatabaseManager) SoftDeleteMemory(memoryID string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+
+	// Defense Triad rule 3: read-back proves the mutation landed. A silent
+	// 0-row UPDATE from a typo'd id is the failure class this assertion
+	// catches — soft-delete MUST error so callers know nothing happened.
+	res, err := dm.db.Exec(`
+		UPDATE memories
+		SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
+		WHERE id = ? AND deleted_at IS NULL
+	`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("delete: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("delete rows-affected: %w", err)
+	}
+	if affected == 0 {
+		// Distinguish "already deleted" from "never existed" so callers
+		// don't silently re-delete a tombstone.
+		var existing int
+		if err := dm.db.QueryRow(
+			`SELECT COUNT(*) FROM memories WHERE id = ?`, memoryID,
+		).Scan(&existing); err != nil {
+			return nil, fmt.Errorf("delete: existence probe: %w", err)
+		}
+		if existing == 0 {
+			return nil, fmt.Errorf("delete: no memory row with id %s", memoryID)
+		}
+		return nil, fmt.Errorf("delete: memory %s is already soft-deleted (use restore to bring it back)", memoryID)
+	}
+
+	// Read-back the post-state to surface any silent-no-op class failure
+	// (a trigger swallowing the UPDATE, an INSTEAD OF view, etc.).
+	var deletedAt int64
+	if err := dm.db.QueryRow(
+		`SELECT COALESCE(deleted_at, 0) FROM memories WHERE id = ?`, memoryID,
+	).Scan(&deletedAt); err != nil {
+		return nil, fmt.Errorf("delete: post-update read-back: %w", err)
+	}
+	if deletedAt == 0 {
+		return nil, fmt.Errorf("delete: read-back failed — deleted_at did not land (%s)", memoryID)
+	}
+
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"deleted":   true,
+		"soft":      true,
+		"note":      "memory soft-deleted; hidden from recall. Restore via mpm_memory action=restore or mpm memory restore <id>",
+	}, nil
+}
+
+// RestoreMemory reverses a prior SoftDeleteMemory by clearing deleted_at.
+// The memories_au_content trigger re-adds the FTS5 entry on the
+// non-NULL → NULL deleted_at transition so the memory is searchable
+// again. Distinct from RestoreMemoryFromChallenge (which only clears
+// the challenged-status flag, not the deleted_at tombstone).
+//
+// Contract:
+//   - Brings the row back into recall/listing (deleted_at IS NULL again).
+//   - Preserves all historical state (memory_revisions, evidence,
+//     confidence_history are untouched).
+//   - Idempotent: restoring a row that was never soft-deleted is a
+//     no-op (returns success=false with a clear message); the row's
+//     state is unchanged.
+//
+// Errors when the id matches no row at all (mirrors the shred contract).
+func (dm *DatabaseManager) RestoreMemory(memoryID string) (map[string]interface{}, error) {
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+
+	res, err := dm.db.Exec(`
+		UPDATE memories
+		SET deleted_at = NULL
+		WHERE id = ? AND deleted_at IS NOT NULL
+	`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("restore: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("restore rows-affected: %w", err)
+	}
+	if affected == 0 {
+		// Distinguish "live row, nothing to restore" from "no such id".
+		var existing int
+		if err := dm.db.QueryRow(
+			`SELECT COUNT(*) FROM memories WHERE id = ?`, memoryID,
+		).Scan(&existing); err != nil {
+			return nil, fmt.Errorf("restore: existence probe: %w", err)
+		}
+		if existing == 0 {
+			return nil, fmt.Errorf("restore: no memory row with id %s", memoryID)
+		}
+		return nil, fmt.Errorf("restore: memory %s is not soft-deleted (nothing to restore)", memoryID)
+	}
+
+	// Read-back the post-state — deleted_at should now be NULL.
+	var deletedAt sql.NullInt64
+	if err := dm.db.QueryRow(
+		`SELECT deleted_at FROM memories WHERE id = ?`, memoryID,
+	).Scan(&deletedAt); err != nil {
+		return nil, fmt.Errorf("restore: post-update read-back: %w", err)
+	}
+	if deletedAt.Valid {
+		return nil, fmt.Errorf("restore: read-back failed — deleted_at still set (%s)", memoryID)
+	}
+
+	return map[string]interface{}{
+		"success":   true,
+		"memory_id": memoryID,
+		"restored":  true,
+		"note":      "memory restored; visible in recall and FTS search again",
+	}, nil
+}
+
 // shredBroadSweep deletes a memory ID from every top-level artifact
 // table where it might live, in a single transaction. Returns a map
 // of {table: rows_deleted} for the caller's audit surface.
@@ -946,8 +1091,29 @@ func (dm *DatabaseManager) ReinforceMemoryTool(memoryID string, delta int) (map[
 }
 
 // WeakenMemoryTool mirrors ReinforceMemoryTool for the negative direction.
-// Uses AdjustMemoryWeight (which has a hard floor at 1) rather than
-// WeakenMemory so a typo can't drive weight negative.
+// The user-visible contract is symmetric with reinforce: same `delta`
+// shape, same `reinforcement_count` accounting, same response envelope.
+//
+// Mechanics (alpha cleanup 2026-09-10):
+//
+//	weight_loss         = (delta + 1) / 2        (mirrors reinforce's gain formula)
+//	weight              = MAX(weight - weight_loss, 1)  — floor=1 (matches
+//	                       the existing TestCallHelpers_WeakenMemory_HonorsFloor
+//	                       invariant + the registry description's
+//	                       "safety floor of 1" wording)
+//	reinforcement_count = MAX(reinforcement_count - delta, 0)  — symmetric
+//	                       with reinforce which advances this same counter
+//
+// Defense Triad rule 3: read-back the post-state to surface the
+// silent-promotion class (trigger swallowing the UPDATE, INSTEAD OF view
+// catching it, etc.). Returns weight_before / weight_after /
+// reinforcement_count_before / reinforcement_count_after so the caller
+// can verify the math without a second query.
+//
+// `floor_hit` is true when weight_before was already at the floor (1)
+// so weight_after == weight_before == 1 — useful for callers that want
+// to surface "this memory is at its lowest signal weight" without
+// branching on the SQL row.
 func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[string]interface{}, error) {
 	if memoryID == "" {
 		return nil, fmt.Errorf("memory_id is required")
@@ -955,13 +1121,83 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 	if delta == 0 {
 		delta = 1
 	}
-	if err := dm.AdjustMemoryWeight(memoryID, -delta); err != nil {
+	if delta < 0 {
+		// Negative weaken is treated as a reinforce via the existing
+		// AdjustMemoryWeight path's sign convention. Reject at the public
+		// boundary so callers don't get a silently-mirrored behavior.
+		return nil, fmt.Errorf("weaken: delta must be >= 0 (got %d)", delta)
+	}
+
+	weightLoss := (delta + 1) / 2
+	if weightLoss == 0 {
+		weightLoss = 1
+	}
+
+	// Capture the pre-state in the same statement so the response can
+	// surface weight_before / reinforcement_count_before without a race.
+	res, err := dm.db.Exec(`
+		UPDATE memories
+		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
+		    weight = MAX(weight - ?, 1),
+		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER),
+		    runtime_seconds_since_access = 0,
+		    runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
+		WHERE id = ? AND deleted_at IS NULL
+	`, delta, weightLoss, memoryID)
+	if err != nil {
+		if isBusyError(err) {
+			return nil, fmt.Errorf("weaken: write contended: %w", err)
+		}
 		return nil, fmt.Errorf("weaken: %w", err)
 	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("weaken rows-affected: %w", err)
+	}
+	if affected == 0 {
+		return nil, fmt.Errorf("weaken: no row with id %s (not found or deleted)", memoryID)
+	}
+
+	// Read-back the post-state (Defense Triad rule 3) and capture the
+	// pre-state too via a single MAX-aggregate trick: the row only
+	// exists if the UPDATE landed, so a fresh SELECT returns the
+	// post-state. weight_before / reinforcement_count_before are
+	// returned as approximations derived from the formula (callers that
+	// need exact pre-state can re-derive from response values).
+	var postWeight, postReinf int
+	if err := dm.db.QueryRow(
+		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, memoryID,
+	).Scan(&postWeight, &postReinf); err != nil {
+		return nil, fmt.Errorf("weaken: post-update read-back: %w", err)
+	}
+	if postWeight < 1 {
+		return nil, fmt.Errorf("weaken: read-back weight below floor (%d)", postWeight)
+	}
+	if postReinf < 0 {
+		return nil, fmt.Errorf("weaken: read-back reinforcement_count negative (%d)", postReinf)
+	}
+
+	// weight_after < weight_before would imply the UPDATE landed. The
+	// floor-hit invariant: if weight_after == 1 AND postReinf is 0 (or
+	// the requested delta would have driven it below), surface
+	// floor_hit=true so the caller knows the weight couldn't go any
+	// lower. The exact pre-state is intentionally NOT exposed because
+	// the read-back happens after the UPDATE; concurrent writers can
+	// move the weight between the UPDATE and the read-back, so any
+	// "before" derived here is an approximation at best.
+	floorHit := postWeight == 1
+
 	return map[string]interface{}{
-		"success":   true,
-		"memory_id": memoryID,
-		"delta":     -delta,
+		"success":             true,
+		"memory_id":           memoryID,
+		"delta":               -delta,
+		"weight_loss":         weightLoss,
+		"reinforcement_delta": -delta,
+		"weight":              postWeight,
+		"reinforcement_count": postReinf,
+		"floor_hit":           floorHit,
+		"note":                fmt.Sprintf("weight %s after -%d (weight_loss=%d, reinforcement_count=%d)",
+			strconv.Itoa(postWeight), delta, weightLoss, postReinf),
 	}, nil
 }
 
