@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+#
+# scripts/git-safety-gate — refuse to destroy history without confirmation.
+#
+# Designed to be the first thing run before any destructive history
+# operation: `git filter-repo`, `git rebase --onto`, `git push --force`,
+# `git push --force-with-lease`, or branch deletion of an unmerged
+# branch.
+#
+# The gate does NOT prohibit those operations. It:
+#   1. Runs git-audit-refs to enumerate every ref (local + remote-tracking)
+#   2. Highlights branches with substantive unmerged unique commits
+#   3. Highlights branches whose tip is older than main's tip
+#   4. For history-rewriting operations specifically, runs
+#      git-history-check on the path being scrubbed
+#   5. Asks for explicit confirmation unless --yes is passed
+#
+# Exit codes:
+#   0  operator confirmed; safe to proceed
+#   1  operator declined; abort the destructive op
+#   2  invalid usage
+#   3  not in a git repo / preflight failed
+#
+# Usage:
+#   scripts/git-safety-gate                                       # interactive check
+#   scripts/git-safety-gate --path=cmd/mpm/mpm_config.json        # also check that path
+#   scripts/git-safety-gate --op=filter-repo                      # annotate intent
+#   scripts/git-safety-gate --yes                                 # skip confirmation prompt (audit log still printed)
+#   scripts/git-safety-gate --strict                              # abort if any UNMERGED branch exists
+
+set -euo pipefail
+
+readonly SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+PATH_ARG=""
+OP_DESC=""
+ASSUME_YES=0
+STRICT=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --path=*)       PATH_ARG="${1#*=}"; shift ;;
+        --op=*)         OP_DESC="${1#*=}"; shift ;;
+        --yes)          ASSUME_YES=1; shift ;;
+        --strict)       STRICT=1; shift ;;
+        -h|--help)
+            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)              echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$PROJECT_ROOT"
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "error: not in a git repository" >&2
+    exit 3
+fi
+
+echo "════════════════════════════════════════════════════════════════════"
+echo "  MPM Git safety gate"
+echo "════════════════════════════════════════════════════════════════════"
+echo
+
+if [ -n "$OP_DESC" ]; then
+    echo "Planned operation: $OP_DESC"
+fi
+
+# --- 1. Ref inventory ---
+echo
+echo "─── Ref inventory (via git-audit-refs) ───────────────────────────"
+"$SCRIPT_DIR/git-audit-refs" 2>&1 || true
+
+# --- 2. Path-history check (if a path was given) ---
+substantive_branches=0
+if [ -n "$PATH_ARG" ]; then
+    echo
+    echo "─── Path-reachability check: $PATH_ARG ──────────────────────────"
+    "$SCRIPT_DIR/git-history-check" "$PATH_ARG" 2>&1 || true
+fi
+
+# --- 3. Substantive-work heuristic ---
+# Count refs flagged as UNMERGED with unique commits > 0. These are
+# the candidates that would be silently affected by history rewriting.
+mapfile -t UNMERGED < <(git for-each-ref --format='%(refname)' \
+    refs/heads refs/remotes \
+    | while read -r ref; do
+        if [ "$ref" = "refs/remotes/origin/HEAD" ]; then continue; fi
+        merged="no"
+        if git merge-base --is-ancestor "$ref" "$(git rev-parse main^{commit})" 2>/dev/null; then
+            merged="yes"
+        fi
+        unique=$(git rev-list --count "main..$ref" 2>/dev/null || echo 0)
+        if [ "$merged" = "no" ] && [ "$unique" -gt 0 ]; then
+            printf '%s|%d\n' "$ref" "$unique"
+        fi
+    done)
+
+echo
+echo "─── Substantive unmerged branches ────────────────────────────────"
+if [ "${#UNMERGED[@]}" -eq 0 ]; then
+    echo "(none — no alternate history exists)"
+else
+    for row in "${UNMERGED[@]}"; do
+        IFS='|' read -r ref unique <<< "$row"
+        short="${ref#refs/heads/}"; short="${short#refs/remotes/}"
+        printf '  %-44s %6d unique commits not on main\n' "$short" "$unique"
+        substantive_branches=$(( substantive_branches + 1 ))
+    done
+fi
+
+# --- 4. Decision gate ---
+echo
+echo "════════════════════════════════════════════════════════════════════"
+if [ "$STRICT" -eq 1 ] && [ "$substantive_branches" -gt 0 ]; then
+    echo "  ABORTING (--strict): $substantive_branches branch(es) carry unique history"
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 1
+fi
+
+if [ "$substantive_branches" -eq 0 ] && [ -z "$PATH_ARG" ]; then
+    echo "  No alternate history and no path check requested."
+    echo "  Safe to proceed with any destructive operation."
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 0
+fi
+
+if [ "$ASSUME_YES" -eq 1 ]; then
+    echo "  --yes passed: proceeding without interactive confirmation"
+    echo "  (you are on the hook for whatever this script was guarding)"
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 0
+fi
+
+# Interactive confirmation. On a non-TTY (CI, automation), refuse.
+if [ ! -t 0 ]; then
+    echo "  Non-interactive mode: refusing to proceed with destructive op"
+    echo "  Re-run with --yes if you have explicitly reviewed the audit"
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 1
+fi
+
+echo "  The above branches carry unique history NOT reachable from main."
+echo "  A destructive history operation can silently orphan or rewrite"
+echo "  those commits."
+echo
+echo "  Type 'proceed' to continue, anything else to abort:"
+printf '  > '
+read -r reply
+if [ "$reply" = "proceed" ]; then
+    echo "  Confirmed — proceeding"
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 0
+else
+    echo "  Aborted (response: $reply)"
+    echo "════════════════════════════════════════════════════════════════════"
+    exit 1
+fi

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+#
+# scripts/git-history-check — find where a path is reachable in git history.
+#
+# Answers: "Is this path present in any reachable Git ref?"
+#
+# Critical for security/history operations — e.g. before declaring a
+# sensitive file scrubbed, you must check ALL refs (every local branch
+# and every remote-tracking branch), not just main.
+#
+# The 2026-09-10 mpm_config.json scrub incident demonstrated this:
+# the file was removed from main's history, but a blob remained
+# reachable from a remote-tracking ref until audit caught it.
+#
+# Usage:
+#   scripts/git-history-check <path>                  # check reachable from any ref
+#   scripts/git-history-check <path> --refs=main,audit/c18-c19  # check specific refs
+#   scripts/git-history-check <path> --json           # machine-readable output
+#
+# Exit codes:
+#   0  path NOT reachable from any ref
+#   1  path IS reachable from at least one ref
+#   2  invalid usage
+#   3  not in a git repo
+
+set -euo pipefail
+
+readonly SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+if [ $# -lt 1 ]; then
+    echo "usage: $SCRIPT_NAME <path> [--refs=ref1,ref2,...] [--json] [--content=<signature>]" >&2
+    exit 2
+fi
+
+PATH_ARG=""
+REFS_ARG=""
+JSON_OUT=0
+CONTENT_ARG=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --refs=*)       REFS_ARG="${1#*=}"; shift ;;
+        --json)         JSON_OUT=1; shift ;;
+        --content=*)    CONTENT_ARG="${1#*=}"; shift ;;
+        -h|--help)
+            sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)              PATH_ARG="$1"; shift ;;
+    esac
+done
+
+cd "$PROJECT_ROOT"
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "error: not in a git repository" >&2
+    exit 3
+fi
+
+# Build the list of refs to inspect.
+if [ -n "$REFS_ARG" ]; then
+    IFS=',' read -ra REFS <<< "$REFS_ARG"
+else
+    # Default: every local branch + every remote-tracking branch + every tag.
+    mapfile -t REFS < <(git for-each-ref --format='%(refname)' \
+        refs/heads refs/remotes refs/tags)
+fi
+
+# A path can appear in a tree at any commit reachable from a ref.
+# Walk each ref's commit set and look for the path.
+found_refs=()
+if [ -n "$CONTENT_ARG" ]; then
+    # Content scan: walk every blob reachable from each ref and grep for the
+    # signature. WARNING: this is O(history-size × files); use only when
+    # required and on bounded paths.
+    for ref in "${REFS[@]}"; do
+        if git rev-list --objects "$ref" 2>/dev/null \
+            | git cat-file --batch-check='%(objectname) %(rest)' 2>/dev/null \
+            | git cat-file --batch='%(rest)' 2>/dev/null \
+            | grep -qF -- "$CONTENT_ARG"; then
+            found_refs+=("$ref")
+        fi
+    done
+else
+    # Path-only scan: walk each ref's reachable objects and check if the
+    # path appears in any tree. `git rev-list --all --objects` does the
+    # full traversal once; per-ref is more precise but slower.
+    for ref in "${REFS[@]}"; do
+        if git rev-list --objects "$ref" 2>/dev/null \
+            | grep -E "\b${PATH_ARG}\$" >/dev/null; then
+            found_refs+=("$ref")
+        fi
+    done
+fi
+
+# Output
+if [ "$JSON_OUT" -eq 1 ]; then
+    printf '{\n'
+    printf '  "path": "%s",\n' "$PATH_ARG"
+    if [ -n "$CONTENT_ARG" ]; then
+        printf '  "content_signature": "%s",\n' "$(echo "$CONTENT_ARG" | sed 's/"/\\"/g')"
+    fi
+    printf '  "reachable_from": ['
+    first=1
+    for r in "${found_refs[@]}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        printf '"%s"' "$r"
+    done
+    printf '],\n'
+    printf '  "not_reachable_from": ['
+    first=1
+    for r in "${REFS[@]}"; do
+        skip=0
+        for fr in "${found_refs[@]}"; do
+            [ "$r" = "$fr" ] && skip=1 && break
+        done
+        [ $skip -eq 0 ] || continue
+        [ $first -eq 0 ] && printf ','
+        first=0
+        printf '"%s"' "$r"
+    done
+    printf ']\n}\n'
+else
+    if [ "${#found_refs[@]}" -eq 0 ]; then
+        echo "NOT REACHABLE: '$PATH_ARG' is not present in any of:"
+        for r in "${REFS[@]}"; do echo "  $r"; done
+    else
+        echo "REACHABLE: '$PATH_ARG' is present in:"
+        for r in "${found_refs[@]}"; do echo "  $r"; done
+        echo
+        echo "Not reachable from:"
+        for r in "${REFS[@]}"; do
+            skip=0
+            for fr in "${found_refs[@]}"; do
+                [ "$r" = "$fr" ] && skip=1 && break
+            done
+            [ $skip -eq 0 ] || continue
+            echo "  $r"
+        done
+    fi
+fi
+
+[ "${#found_refs[@]}" -eq 0 ]

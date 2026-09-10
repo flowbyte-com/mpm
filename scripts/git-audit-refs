@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# scripts/git-audit-refs — read-only branch / ref inventory.
+#
+# Lists every local and remote-tracking ref with:
+#   * merged-into-main status
+#   * unique-commit count vs main (commits not reachable from main)
+#   * last-commit date
+#   * suggested action (RELEASE / ACTIVE WIP / STALE / REVIEW)
+#
+# Read-only. Safe to run repeatedly. Designed to be the first thing
+# invoked before any destructive history operation (filter-repo,
+# force-push of a branch, etc.).
+#
+# Usage:
+#   scripts/git-audit-refs                # full report (default)
+#   scripts/git-audit-refs --json         # machine-readable output
+#   scripts/git-audit-refs --main=other   # compare against a different ref
+
+set -euo pipefail
+
+readonly SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+MAIN_REF="main"
+JSON_OUT=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json)         JSON_OUT=1; shift ;;
+        --main=*)       MAIN_REF="${1#*=}"; shift ;;
+        -h|--help)
+            sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)              echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+
+cd "$PROJECT_ROOT"
+
+# Refuse to operate if there are uncommitted changes — auditing during
+# an in-flight commit is misleading.
+if ! git status --porcelain | grep -q .; then :; else
+    echo "warning: working tree has uncommitted changes; results may not reflect a clean state" >&2
+fi
+
+# Resolve main SHA
+if ! git rev-parse --verify --quiet "$MAIN_REF^{commit}" >/dev/null; then
+    echo "error: main ref '$MAIN_REF' does not resolve to a commit" >&2
+    exit 3
+fi
+MAIN_SHA=$(git rev-parse "$MAIN_REF^{commit}")
+
+# Collect all refs we care about: local branches + remote-tracking branches.
+# Tags are intentionally excluded — release markers are documented elsewhere.
+mapfile -t REFS < <(git for-each-ref --format='%(refname)' \
+    refs/heads refs/remotes)
+
+# Build report rows in memory
+declare -a ROWS
+for ref in "${REFS[@]}"; do
+    # Skip origin/HEAD if present (default-branch pointer, not real content)
+    if [ "$ref" = "refs/remotes/origin/HEAD" ]; then continue; fi
+
+    sha=$(git rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null || echo "")
+    [ -z "$sha" ] && continue
+
+    # Unique commits vs main
+    unique=$(git rev-list --count "$MAIN_REF..$ref" 2>/dev/null || echo 0)
+
+    # Merged-into-main?
+    merged="no"
+    if git merge-base --is-ancestor "$ref" "$MAIN_REF" 2>/dev/null; then
+        merged="yes"
+    fi
+
+    # Last commit info
+    last_date=$(git log -1 --format='%ai' "$ref" 2>/dev/null | cut -d' ' -f1)
+    last_subj=$(git log -1 --format='%s' "$ref" 2>/dev/null)
+
+    # Classify. The script is INFORMATIONAL — it surfaces facts. It does
+    # not pre-judge whether an unmerged branch should be deleted. Final
+    # disposition is the operator's call, informed by unique-commit count,
+    # tip age, and how the tip compares to main's tip.
+    #
+    # Categories:
+    #   RELEASE                 — main or origin/main
+    #   MERGED                   — fully reachable from main; local copy safe to delete
+    #   UNMERGED — REVIEW        — has unique commits; operator decides
+    #     suffix hints:
+    #       "(tip newer than main)"     active WIP
+    #       "(tip older than main Nd)"  main has progressed past this branch
+    #       "(tip aged Nd)"             tip is N days old regardless of main
+    short="${ref#refs/heads/}"; short="${short#refs/remotes/}"
+    main_date=$(git log -1 --format='%ai' "$MAIN_REF" 2>/dev/null | cut -d' ' -f1)
+    main_epoch=$(date -d "$main_date" +%s 2>/dev/null || echo 0)
+    last_epoch=$(date -d "$last_date" +%s 2>/dev/null || echo 0)
+    age_days=$(( ( $(date +%s) - "$last_epoch" ) / 86400 ))
+    days_behind_main=$(( ( "$main_epoch" - "$last_epoch" ) / 86400 ))
+
+    if [ "$ref" = "refs/heads/$MAIN_REF" ] || [ "$ref" = "refs/remotes/origin/$MAIN_REF" ]; then
+        action="RELEASE"
+    elif [ "$merged" = "yes" ]; then
+        action="MERGED — local copy safe to delete"
+    elif [ "$unique" -ge 1 ]; then
+        hint=""
+        if [ "$last_epoch" -gt "$main_epoch" ]; then
+            hint="tip newer than main (active WIP)"
+        elif [ "$days_behind_main" -gt 0 ]; then
+            hint="tip ${days_behind_main}d older than main"
+        fi
+        if [ "$age_days" -ge 30 ]; then
+            hint="$hint; tip aged ${age_days}d"
+        fi
+        action="UNMERGED — REVIEW${hint:+ ($hint)}"
+    else
+        action="UNMERGED — empty"
+    fi
+
+    ROWS+=("$short|$sha|$unique|$merged|$last_date|$action|$last_subj")
+done
+
+# Output
+if [ "$JSON_OUT" -eq 1 ]; then
+    printf '{\n'
+    printf '  "main": "%s",\n' "$MAIN_SHA"
+    printf '  "refs": [\n'
+    first=1
+    for row in "${ROWS[@]}"; do
+        IFS='|' read -r short sha unique merged last_date action last_subj <<< "$row"
+        [ $first -eq 0 ] && printf ',\n'
+        first=0
+        printf '    {"ref":"%s","sha":"%s","unique_commits":%s,"merged":"%s","last_commit":"%s","action":"%s","subject":"%s"}' \
+            "$short" "$sha" "$unique" "$merged" "$last_date" "$action" \
+            "$(echo "$last_subj" | sed 's/"/\\"/g')"
+    done
+    printf '\n  ]\n}\n'
+else
+    printf 'main: %s\n\n' "$MAIN_SHA"
+    printf '%-44s %-12s %8s %8s %-12s %-30s %s\n' \
+        "REF" "SHA" "UNIQUE" "MERGED" "LAST_COMMIT" "ACTION" "SUBJECT"
+    printf '%-44s %-12s %8s %8s %-12s %-30s %s\n' \
+        "--------------------------------------------" \
+        "------------" "--------" "--------" "------------" \
+        "------------------------------" "------------"
+    for row in "${ROWS[@]}"; do
+        IFS='|' read -r short sha unique merged last_date action last_subj <<< "$row"
+        printf '%-44s %-12s %8s %8s %-12s %-30s %s\n' \
+            "$short" "${sha:0:12}" "$unique" "$merged" "$last_date" "$action" "$last_subj"
+    done
+fi

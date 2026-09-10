@@ -194,6 +194,82 @@ enough if the tests do not actually exercise the feature through a
 real call path. If the PR description says "users can now do X",
 the stranger test or a sibling test should show X happening.
 
+## Git workflow and branch policy
+
+`main` is the canonical release line. Any work claimed to be part of the
+current release must eventually be reachable from `main`.
+
+### Branch categories
+
+| Category | Meaning | Action |
+|---|---|---|
+| `RELEASE` | `main`, `origin/main` | authoritative |
+| `MERGED` | fully reachable from `main` | local copy safe to delete |
+| `UNMERGED — REVIEW` | has unique commits not on `main` | operator decides; do not auto-delete |
+
+The script [`scripts/git-audit-refs`](../scripts/git-audit-refs) renders
+the full ref inventory with merged/unmerged state, unique-commit counts,
+and tip-age hints. Run it before any branch-deletion decision.
+
+### Audit / WIP branches
+
+Audit branches (e.g. `audit/*`) may exist when they contain genuinely
+independent or in-progress work. They must not be mistaken for release
+history. When retaining an audit branch, document its status (in the
+branch's last commit subject or a separate `docs/` note) so future
+contributors do not assume its content is on `main`.
+
+### Required all-ref inspection before history rewrites
+
+Before any destructive history operation (`git filter-repo`, `git rebase
+--onto`, `git push --force`, `git push --force-with-lease`, or branch
+deletion of an unmerged branch), inspect **every ref** — local and
+remote-tracking. A blob can be reachable from a remote-tracking branch
+even after it has been removed from `main`'s history. The
+2026-09-10 `cmd/mpm/mpm_config.json` scrub demonstrated this: a
+test-fixture blob survived main's filter-repo pass because the
+remote-tracking `origin/audit/...` ref still pointed to a pre-filter
+commit. The audit caught it before force-push.
+
+[`scripts/git-safety-gate`](../scripts/git-safety-gate) is the canonical
+guardrail. It enumerates refs, highlights substantive unmerged history,
+runs a path-reachability check, and requires explicit confirmation
+before destructive operations proceed. Use it; do not bypass it.
+
+```bash
+# Standard pre-destructive workflow:
+scripts/git-safety-gate --op=filter-repo --path=cmd/mpm/mpm_config.json
+```
+
+For path-specific checks (e.g. "is this sensitive file present in any
+ref?"), use [`scripts/git-history-check`](../scripts/git-history-check):
+
+```bash
+scripts/git-history-check cmd/mpm/mpm_config.json
+scripts/git-history-check mpm_config.json --content="sk-cp-"
+```
+
+### Force-push expectations
+
+- `main` may be force-pushed only when a security or correctness
+  operation requires it (e.g. scrubbing leaked secrets). Use
+  `git-safety-gate` first; document the rationale in the commit message.
+- Audit branches should never be force-pushed unilaterally. They may
+  carry unmerged WIP; rewriting their history orphans that work.
+- Remote branch deletion requires explicit authorisation — never
+  scripted without a human-reviewed list.
+
+### How to determine whether work is actually on `main`
+
+```bash
+git log --oneline main..<branch>          # commits on <branch> not on main
+git log --oneline <branch>..main          # commits on main not on <branch>
+git merge-base --is-ancestor <branch> main && echo "merged" || echo "not merged"
+```
+
+If the first command produces output, the branch has unique work not on
+`main`. Decide explicitly whether to merge, archive, or delete.
+
 ## Issues
 
 - Use the issue templates under `.github/ISSUE_TEMPLATE/` if one
