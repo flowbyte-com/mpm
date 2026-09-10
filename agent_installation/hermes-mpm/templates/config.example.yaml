@@ -1,0 +1,44 @@
+# Canonical MCP wiring for Hermes ↔ MPM.
+#
+# Source of truth for the Hermes runtime: edit `~/.hermes/config.yaml` so the
+# `mcp_servers.mpm` block matches this snippet. The Hermes-side integration
+# reads MCP server entries from this location; there is no separate `.mcp.json`
+# side-channel like Claude Code uses.
+#
+# Why this lives here (and not at install time):
+# Hermes's `mcp_servers` block is hand-managed in `~/.hermes/config.yaml`.
+# There is no Hermes installer that materialises an MCP config — only the
+# `.hermes.md` behavioural-section installer in
+# `scripts/install_hermes_instructions.py`. This file is the *reference* the
+# operator applies to their `~/.hermes/config.yaml`.
+#
+# Why MPM_WORKSPACE=$HOME/.mpm: the canonical install root. mpm-mcp resolves
+# the workspace from this env var, finds `src/db/mpm.db` under it (or via the
+# symlink-equivalent under the project source tree), and the
+# `mpm_required_db_path` boot-time check enforces DB-path invariance across
+# all five supported hosts on this machine.
+#
+# Why MPM_PROVENANCE_FRAMEWORK=hermes (canonical):
+# `mpmcli.ActiveContextFromEnv` (internal/core/mpmcli/mpmcli.go) reads
+# MPM_PROVENANCE_FRAMEWORK first, then falls back to the legacy MPM_FRAMEWORK
+# alias, then defaults to "mcp". The canonical var populates
+# `ActiveContext.FrameworkName` -> `tool_invocations.framework_name` and
+# `artifact_provenance.framework_name`. Without it, Hermes writes are
+# attributed to the wrong framework and Hermes does not receive
+# framework-scoped directives via `mpm_context.read_directives`.
+#
+# Why MPM_FRAMEWORK is NOT set here: the legacy alias is redundant when the
+# canonical var is set, and the canonical name is preferred for new installs.
+# Existing installs that already set MPM_FRAMEWORK=hermes continue to work
+# unchanged because of the read-order precedence in ActiveContextFromEnv.
+
+mcp_servers:
+  mpm:
+    command: $HOME/.mpm/bin/mpm-mcp
+    args: []
+    env:
+      MPM_WORKSPACE: $HOME/.mpm
+      MPM_PROVENANCE_FRAMEWORK: hermes
+    timeout: 60
+    connect_timeout: 30
+    enabled: true

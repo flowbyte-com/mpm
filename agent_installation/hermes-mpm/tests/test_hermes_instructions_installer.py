@@ -213,5 +213,214 @@ class TestHermesPersonaUntouched(unittest.TestCase):
         self.assertIn("Hermes-specific notes", snippet)
 
 
+# Path constants for the new contract tests.
+SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
+CONFIG_EXAMPLE = (
+    Path(__file__).resolve().parent.parent
+    / "templates"
+    / "config.example.yaml"
+)
+
+
+class TestProvenanceContract(unittest.TestCase):
+    """The Hermes integration must identify itself to MPM via the
+    canonical MPM_PROVENANCE_FRAMEWORK env var.
+
+    These tests pin the integration's prose and the operator-facing
+    config example; behaviour is verified separately by the live
+    acceptance tests against mpm-mcp.
+    """
+
+    def test_canonical_env_var_documented_in_skill(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("MPM_PROVENANCE_FRAMEWORK", text)
+
+    def test_canonical_env_var_value_is_hermes(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The canonical identifier must appear with the value `hermes`.
+        self.assertIn("MPM_PROVENANCE_FRAMEWORK: hermes", text)
+
+    def test_canonical_env_var_present_in_config_example(self):
+        text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("MPM_PROVENANCE_FRAMEWORK: hermes", text)
+
+    def test_legacy_alias_described_as_legacy_only(self):
+        """`MPM_FRAMEWORK` (legacy alias) must be referenced, but only as
+        a fallback — not the primary variable in the example."""
+        text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
+        # The config example must set the canonical var, not the legacy one.
+        self.assertIn("MPM_PROVENANCE_FRAMEWORK: hermes", text)
+        self.assertNotIn("MPM_FRAMEWORK: hermes", text)
+        # The legacy alias may be mentioned in the explanatory comments.
+        self.assertIn("MPM_FRAMEWORK", text)
+
+    def test_no_static_provenance_model_or_invocation(self):
+        """`MPM_PROVENANCE_MODEL`, `MPM_PROVENANCE_INVOCATION_ID`, and
+        `MPM_PROVENANCE_PARENT_INVOCATION_ID` are populated by the
+        runtime/call path. They must not be hardcoded in the static
+        config example or in the documented MCP env block."""
+        text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
+        # Config example env block must not include these:
+        self.assertNotIn("MPM_PROVENANCE_MODEL", text)
+        self.assertNotIn("MPM_PROVENANCE_INVOCATION_ID", text)
+        self.assertNotIn("MPM_PROVENANCE_PARENT_INVOCATION_ID", text)
+        # SKILL.md prose may mention them as "not set" but the env block
+        # in the SKILL.md recommendation must not include them either.
+        skill_text = SKILL.read_text(encoding="utf-8")
+        # Extract the documented config block (between ```yaml fences).
+        import re
+        blocks = re.findall(r"```yaml\n(.*?)\n```", skill_text, re.DOTALL)
+        self.assertTrue(blocks, "SKILL.md must include a yaml config example")
+        block = blocks[0]
+        self.assertNotIn("MPM_PROVENANCE_MODEL:", block)
+        self.assertNotIn("MPM_PROVENANCE_INVOCATION_ID:", block)
+        self.assertNotIn(
+            "MPM_PROVENANCE_PARENT_INVOCATION_ID:", block
+        )
+
+    def test_workspace_var_documented(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("MPM_WORKSPACE", text)
+        text2 = CONFIG_EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("MPM_WORKSPACE: $HOME/.mpm", text2)
+
+
+class TestMcpSurfaceContract(unittest.TestCase):
+    """The SKILL.md must accurately describe the MCP surface (compact
+    3-tool) and the broader substrate Registry separately.
+
+    The old claim of "22 MCP tools" was incorrect — the MCP server's
+    default `tools/list` returns 3 tools; the 21 substrate Registry
+    entries + 2 Standalones are reachable via the CLI fallback.
+    """
+
+    def test_no_stale_22_mcp_tools_claim(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The stale wording "22 MCP tools" must be gone.
+        self.assertNotIn("22 MCP tools", text)
+
+    def test_compact_three_tool_surface_documented(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # Must name the three compact tools.
+        self.assertIn("mcp__mpm__mpm_memory", text)
+        self.assertIn("mcp__mpm__mpm_context", text)
+        self.assertIn("mcp__mpm__mpm_help", text)
+
+    def test_substrate_registry_distinct_from_mcp(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The substrate Registry should be named, with the actual count
+        # of Registry entries (21) + 2 Standalones. The CLI fallback
+        # (`mpm call`) must be the documented way to reach them.
+        self.assertIn("mpm call", text)
+        self.assertIn("Registry", text)
+
+    def test_full_surface_expose_all_tools_override(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The legacy full-surface exposure is gated by
+        # MPM_EXPOSE_ALL_TOOLS=1. The env var must be mentioned.
+        self.assertIn("MPM_EXPOSE_ALL_TOOLS", text)
+
+
+class TestDocAccuracy(unittest.TestCase):
+    """The SKILL.md must not contain stale operational claims or refer
+    to files outside the MPM repository as if they were current
+    integration components.
+    """
+
+    def test_no_phantom_fts5_corruption_claim(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The old "phantom FTS5 corruption" operational guidance must be
+        # gone from the Hermes skill document.
+        self.assertNotIn("FTS5 corruption", text)
+        self.assertNotIn("fts5: checksum mismatch", text)
+        self.assertNotIn("integrity_status", text)
+
+    def test_no_reference_to_external_hermes_loader(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The external `mpm_hermes_loader.py` is outside the MPM repo
+        # and must not be documented as a current integration component.
+        self.assertNotIn("mpm_hermes_loader.py", text)
+
+    def test_db_path_described_accurately(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # The canonical install-root path must be present and named
+        # canonical, not described as legacy/inconsistent.
+        self.assertIn("$HOME/.mpm/src/db/mpm.db", text)
+        # The "legacy / inconsistent" framing of the symlink-equivalent
+        # paths must be gone.
+        self.assertNotIn("legacy project-source path", text)
+        self.assertNotIn("Functionally equivalent", text)
+
+    def test_wake_flow_explicit_first_turn_call(self):
+        """Hermes has no native wake hook — the SKILL.md must say so
+        and document the first-turn explicit read_wake_context call.
+        """
+        text = SKILL.read_text(encoding="utf-8")
+        # The "no native session-start hook" framing must be present.
+        self.assertIn("no native session-start hook", text)
+        # The explicit first-turn call shape must be present.
+        self.assertIn("read_wake_context", text)
+        self.assertIn("first turn", text)
+
+
+class TestModePersonaDefaults(unittest.TestCase):
+    """The SKILL.md must accurately document the mode/persona default
+    contract: when Hermes does not explicitly set MPM_ACTIVE_MODE /
+    MPM_ACTIVE_PERSONA, MPM defaults to "default" for both.
+    """
+
+    def test_default_documented(self):
+        text = SKILL.read_text(encoding="utf-8")
+        # Must mention the "default" fallback for mode and persona.
+        self.assertIn("default", text)
+        # Specifically document the default-mode and default-persona
+        # fallback semantics.
+        self.assertIn("ResolveActiveMode", text)
+        self.assertIn("ResolveActivePersona", text)
+
+    def test_active_mode_active_persona_env_vars_documented(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("MPM_ACTIVE_MODE", text)
+        self.assertIn("MPM_ACTIVE_PERSONA", text)
+
+
+class TestSnippetInstructionContract(unittest.TestCase):
+    """The .hermes.md snippet must use the current tool namespace
+    (mcp__mpm__) and reference the current canonical contract surface.
+    """
+
+    def test_snippet_namespace_is_mcp_mpm(self):
+        text = SNIPPET.read_text(encoding="utf-8")
+        self.assertIn("mcp__mpm__mpm_context", text)
+        self.assertIn("mcp__mpm__mpm_memory", text)
+        self.assertIn("read_wake_context", text)
+
+    def test_snippet_documents_first_turn_wake_call(self):
+        text = SNIPPET.read_text(encoding="utf-8")
+        # The managed block in the snippet explicitly tells the agent
+        # to call read_wake_context on the first turn.
+        self.assertIn("read_wake_context", text)
+        self.assertIn("first turn", text)
+
+    def test_snippet_does_not_claim_auto_wake_for_hermes(self):
+        """The snippet must NOT claim that wake is auto-injected on
+        Hermes (unlike ClaudeCode, OpenClaw, OpenCode, Pi).
+        """
+        text = SNIPPET.read_text(encoding="utf-8")
+        # Hermes must be explicitly named as the exception to the
+        # auto-inject pattern. The canonical managed-block prose
+        # wraps this across two lines ("Hermes has no such\n   hook").
+        self.assertIn("Hermes has no such", text)
+        # And it must not list Hermes among the hosts that auto-inject.
+        # The canonical wake item lists ClaudeCode, OpenClaw, OpenCode,
+        # Pi — and must exclude Hermes from that auto-inject list.
+        # Easiest pin: the snippet must NOT contain a literal
+        # "ClaudeCode, OpenClaw, OpenCode, Pi, and Hermes" auto-inject
+        # claim (Hermes is the exception).
+        self.assertNotIn(
+            "ClaudeCode, OpenClaw, OpenCode, Pi, and Hermes", text
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
