@@ -196,6 +196,12 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 	// backlog drains over multiple ticks without ever blocking a
 	// single tick. See wake_expiration.go for the full contract.
 	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db))
+	// Register the cron-retention sweep (also wake_expiration.go)
+	// for the bounded retirement of cron-kind bookkeeping rows.
+	// This sweep is cadence-gated (every 60min) inside its own
+	// handler, so registering it on every tick is cheap — most
+	// calls return immediately without touching the DB.
+	s.RegisterTickHandler("cron_retention", CronRetentionTickHandler(context.Background(), db))
 	return s, nil
 }
 
