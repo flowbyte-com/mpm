@@ -365,8 +365,16 @@ export default definePluginEntry({
       return;
     }
 
-    if (typeof log.info === "function") {
-      log.info(
+    // The "registered" lifecycle event is informational only — there is
+    // exactly one plugin instance per id, and the gateway may invoke
+    // register() multiple times during a single doctor run (separate
+    // detect + run phases) without that meaning anything is wrong. We
+    // log it at debug so a healthy boot stays operationally quiet; the
+    // substantive health metric (memories_active / theories_pending /
+    // wakes_overdue) is logged below at info from the async health
+    // check, which is the line operators actually want.
+    if (typeof log.debug === "function") {
+      log.debug(
         `openclaw-mpm-memory: registered ` +
         `(mpmBin=${mpmBin}, scope=${scope}, timeout=${timeoutMs}ms, limit=${limitDefault})`
       );

@@ -292,4 +292,113 @@ test("(C) plugin source must not reference MPM_BIN as a configurable env var", (
     "MPM_BIN was a fabricated documentation reference; the plugin uses cfg.mpmBin only");
 });
 
+// --------------------------------------------------------------------------
+// (F) doctor log noise — the "registered" lifecycle event must be logged
+// at debug level (not info) so OpenClaw doctor's natural double-register
+// (one for the detect phase, one for the run phase) does not produce
+// duplicate "registered" lines suggesting multiple plugin installs.
+//
+// Substrate: OpenClaw doctor --lint invokes noteMemorySearchHealth (the
+// memory-search doctor contribution) twice per doctor run, each via
+// ensureMemoryRuntime → loadPluginRegistryHandle → runPluginRegisterSync.
+// The plugin's register() therefore runs twice per doctor invocation.
+// The plugin's boot-time health_check IIFE fires once per register().
+//
+// What the plugin owns:
+//   - log.debug for the "registered" line — invisible at default log
+//     level so healthy doctor runs stay operationally quiet.
+//   - log.info for the "health_check ok (memories=... theories=...
+//     wakes_overdue=...)" line — the substantive metric operators want.
+//
+// What the plugin does NOT own:
+//   - OpenClaw's double-register lifecycle. The plugin cannot suppress
+//     that without inventing stateful dedup, which the integration
+//     contract explicitly forbids (one register() = one plugin instance,
+//     even when called twice).
+//
+// Verified live: instrumenting register() in the plugin shows
+// `register() call #1` and `register() call #2` from the same Node.js
+// process when `openclaw doctor --lint` runs — see the 2026-09-11
+// doctor investigation notes.
+// --------------------------------------------------------------------------
+
+test("(F) registration log uses log.debug, not log.info (doctor noise guard)", () => {
+  const src = readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  // Locate the register() body block. It is bounded by the `register(api) {`
+  // opener and the closing brace before the next "// Session extension:"
+  // comment that begins the next section in the plugin source.
+  const startIdx = src.indexOf("register(api) {");
+  const sessionExtIdx = src.indexOf("// Session extension:");
+  assert.ok(startIdx > 0, "register(api) opener must exist in plugin source");
+  assert.ok(sessionExtIdx > startIdx, "// Session extension: comment must follow register() body");
+  const body = src.slice(startIdx, sessionExtIdx);
+
+  // The "registered" lifecycle line must be at debug, not info.
+  assert.ok(
+    body.includes("openclaw-mpm-memory: registered"),
+    "register() must log a 'registered' lifecycle line"
+  );
+  // Find the call site for that line. It must be guarded by
+  // `log.debug` (not `log.info`).
+  const registeredIdx = body.indexOf("openclaw-mpm-memory: registered");
+  const precedingSlice = body.slice(Math.max(0, registeredIdx - 200), registeredIdx);
+  assert.ok(
+    /log\.debug\s*\(\s*$/.test(precedingSlice) ||
+    /log\.debug\s*\(\s*\n/.test(precedingSlice) ||
+    /log\.debug[^\(]*$/.test(precedingSlice) ||
+    /typeof\s+log\.debug\s*===\s*"function"\s*\)[\s\S]{0,20}log\.debug/.test(precedingSlice),
+    "the 'registered' line must be emitted via log.debug, not log.info"
+  );
+  // Belt and braces: the literal string 'log.info' must not appear
+  // directly before the registered line in the source.
+  const lastInfoBefore = precedingSlice.lastIndexOf("log.info");
+  const lastDebugBefore = precedingSlice.lastIndexOf("log.debug");
+  assert.ok(
+    lastDebugBefore > lastInfoBefore || lastInfoBefore < 0,
+    "log.debug must be the most recent logger call before the 'registered' line"
+  );
+});
+
+test("(F) health_check ok line uses log.info (substantive metric stays visible)", () => {
+  const src = readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const okIdx = src.indexOf("openclaw-mpm-memory: health_check ok");
+  assert.ok(okIdx > 0, "the health_check ok log line must exist");
+  // The immediately preceding log.X call must be log.info.
+  const precedingSlice = src.slice(Math.max(0, okIdx - 200), okIdx);
+  assert.ok(
+    precedingSlice.includes("log.info"),
+    "the 'health_check ok' line must be emitted at log.info level — it's the substantive metric operators want"
+  );
+});
+
+test("(F) registration line at debug, but boot-time health_check at info — net behaviour preserved", () => {
+  // Cross-check: count log.info sites in the boot block vs log.debug
+  // sites. The health-check body should have a clear info signal; the
+  // registration line should not contribute one.
+  const src = readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const bootBlock = src.slice(
+    src.indexOf("register(api)"),
+    src.indexOf("// Session extension"),
+  );
+  const infoCount = (bootBlock.match(/log\.info/g) || []).length;
+  const debugCount = (bootBlock.match(/log\.debug/g) || []).length;
+  assert.ok(
+    debugCount >= 1,
+    "register() body must use log.debug at least once (registration is at debug)"
+  );
+  assert.ok(
+    infoCount >= 1,
+    "register() body must use log.info at least once (health_check ok stays visible)"
+  );
+});
+
 console.log("regression.test.js loaded.");
