@@ -358,6 +358,32 @@ func handleRestoreDB(args []string) int {
 // by the dump format — `sqlite3 .dump` writes many statements per line
 // for compactness — so we use a line-by-line pass for the safe
 // rewrites that always start at the beginning of a line).
+//
+// FTS5 shadow tables ('<base>_fts_data', '_fts_content', '_fts_config',
+// '_fts_docsize', '_fts_idx') are CREATE TABLE statements emitted by
+// `sqlite3 .dump` for every FTS5 virtual table in the schema. They are
+// NOT legal SQL when the corresponding `<base>_fts` virtual table is
+// recreated from scratch — SQLite's CREATE VIRTUAL TABLE for fts5
+// creates its own internal shadow tables, and any pre-existing ones
+// with the same names block the recreate with "table '<base>_fts_data'
+// already exists". The dump format does not separate the shadow-table
+// INSERT INTO sqlite_schema rows from their CREATE TABLE triples
+// (because mattn/go-sqlite3 rejects INSERT INTO sqlite_master), and
+// we cannot runnable execute the virtual-table registration. So the
+// ONLY clean fix is to drop the FTS shadow-table CREATE statements
+// from the dump entirely: the new DB's own initFTSTables path will
+// recreate the virtual table from scratch (driving CREATE VIRTUAL
+// TABLE which creates fresh shadow tables). This is forward-only — it
+// does not preserve shadow table contents, but the shadow tables hold
+// ONLY a search projection; the canonical base-table data they project
+// survives, and initFTSTables' backfill reindexes it.
+//
+// This is the Stage 0 (Pi alpha) follow-on's actual root-cause fix:
+// without it, every restore leaves the new DB with stale FTS shadow
+// tables and no virtual tables, broken silently on the next init.
+// Skipping only the shadow-table CREATE statements (not the
+// `<base>_fts` view, which sqlite emits as no CREATE because virtual
+// tables are not first-class sql) is sufficient.
 func preprocessDumpForRestore(content []byte) []byte {
 	var b strings.Builder
 	b.Grow(len(content))
@@ -368,6 +394,17 @@ func preprocessDumpForRestore(content []byte) []byte {
 			strings.HasPrefix(upper, "INSERT INTO SQLITE_MASTER") ||
 			strings.HasPrefix(upper, "INSERT INTO SQLITE_TEMP_SCHEMA") ||
 			strings.HasPrefix(upper, "INSERT INTO SQLITE_TEMP_MASTER") {
+			continue
+		}
+		// Skip FTS5 shadow-table CREATE TABLE statements. The dump emits
+		// these for every FTS5 module; replaying them creates plain
+		// CREATE TABLE entries with the shadow-table names, which then
+		// blocks the new DB's `CREATE VIRTUAL TABLE IF NOT EXISTS` with
+		// "table '<base>_fts_<suffix>' already exists" (orphaned shadow
+		// tables — see fts_recovery.go). The new DB's init path drives
+		// the canonical FTS virtual-table creation from initFTSTables,
+		// which generates fresh shadow tables.
+		if isFTS5ShadowCreate(upper) {
 			continue
 		}
 		// Promote `CREATE TABLE <name>` to `CREATE TABLE IF NOT EXISTS <name>`.
@@ -394,6 +431,55 @@ func preprocessDumpForRestore(content []byte) []byte {
 		b.WriteByte('\n')
 	}
 	return []byte(b.String())
+}
+
+// isFTS5ShadowCreate reports whether a line beginning with `CREATE TABLE`
+// (possibly IF NOT EXISTS-promoted already) is the CREATE statement for
+// an FTS5 shadow table. We match by suffix only; the prefix (`<base>`)
+// is not checked against the canonical allow-list — the upstream
+// validator already enforces that. We do NOT match the virtual table
+// itself (it would not appear here anyway because `sqlite3 .dump` does
+// not emit CREATE VIRTUAL TABLE statements).
+//
+// `sqlite3 .dump` writes the shadow-table names as quoted identifiers
+// (`'sessions_fts_data'`); after our uppercase pass the quotes remain.
+// We strip quotes for the suffix match.
+func isFTS5ShadowCreate(upper string) bool {
+	if !strings.HasPrefix(upper, "CREATE TABLE") {
+		return false
+	}
+	// Capture the part after CREATE TABLE [IF NOT EXISTS], up to the
+	// first whitespace. The dump always quotes the table name.
+	const createTable = "CREATE TABLE"
+	rest := strings.TrimSpace(upper[len(createTable):])
+	// Drop optional "IF NOT EXISTS"
+	if strings.HasPrefix(rest, "IF NOT EXISTS ") {
+		rest = rest[len("IF NOT EXISTS "):]
+	}
+	// Take the first token — possibly bracketed or quoted.
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return false
+	}
+	name := rest
+	if sp := strings.IndexAny(rest, " \t("); sp >= 0 {
+		name = rest[:sp]
+	}
+	// Strip surrounding quote/brackets used by `sqlite3 .dump`.
+	name = strings.Trim(name, "'\"[]`")
+	// Suffix match against the canonical five-shadow-table set.
+	for _, suffix := range []string{"_FTS_DATA", "_FTS_CONTENT", "_FTS_CONFIG", "_FTS_DOCSIZE", "_FTS_IDX"} {
+		if strings.HasSuffix(name, suffix) {
+			// `<base>` must itself end with `_FTS` — otherwise this is a
+			// regular table whose name accidentally ends with, say,
+			// `_review_data`. SQLite reserves the `_fts_<...>` shadow
+			// tables for fts5 virtual tables, but a strict suffix check
+			// without the `_FTS` qualifier would mis-fire.
+			without := strings.TrimSuffix(name, suffix)
+			return strings.HasSuffix(without, "_FTS")
+		}
+	}
+	return false
 }
 
 // restoreFromBackup undoes a destructive restore attempt by moving

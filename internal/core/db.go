@@ -2944,11 +2944,44 @@ func (dm *DatabaseManager) initFTSTables() error {
 		}
 	}
 
+	// Stage 0 (Pi alpha) follow-on: an existing MPM database can enter a
+	// partially-initialized FTS5 state in which the base tables remain
+	// intact but the FTS virtual tables are missing while their shadow
+	// tables remain (orphan state). The Round 6 backup/restore pipeline
+	// silently created that state by stripping both `CREATE VIRTUAL TABLE`
+	// (rejected by validator) and `INSERT INTO sqlite_master VALUES(...,
+	// 'CREATE VIRTUAL TABLE ...')` (rejected by mattn driver-compat),
+	// while still replaying the FTS shadow tables as plain CREATE TABLE.
+	// repairOrphanedFTS5 detects that state, drops the orphaned shadow
+	// tables (which are disposable projections), recreates the virtual
+	// tables, reattaches the canonical sync triggers, and rebuilds the
+	// indices from canonical base-table data. It is a no-op on clean DBs.
+	if repaired, err := dm.repairOrphanedFTS5(); err != nil {
+		// Repair errors are non-fatal — recovery is best-effort, the
+		// CREATE VIRTUAL TABLE IF NOT EXISTS loop below will still try
+		// to create whatever can be created.
+		slog.Warn("initFTSTables: fts_recovery reported errors (continuing)", "repaired", repaired, "error", err.Error())
+	} else if repaired > 0 {
+		slog.Info("initFTSTables: fts_recovery repaired orphan FTS state", "domains", repaired)
+	}
+
 	for _, sqlQuery := range ftsStatements {
 		if _, err := dm.db.Exec(sqlQuery); err != nil {
-			// FTS5 creation failed — log and return error so we know search will use LIKE fallback
-			fmt.Fprintf(os.Stderr, "FTS5 init error (search will use LIKE): %v\nSQL: %s\n", err, sqlQuery)
-			return fmt.Errorf("FTS5 table/trigger creation failed: %v (search will use LIKE fallback)", err)
+			// FTS5 init is best-effort: never let one failed CREATE block
+			// the others. Each statement targets a different FTS module
+			// and they don't depend on each other (the triggers fire on
+			// INSERT not on init). Triggers that reference a missing
+			// virtual table here are unreachable to a writer until that
+			// virtual table exists, so a partial-failure state leaves
+			// writes broken on the failed domains but not on the others.
+			//
+			// Pre-fix behavior was `return error` here, which made one
+			// failed domain leave triggers active on every other domain
+			// referencing modules that the live DB does not have (Pi alpha
+			// Finding A/B/C root cause).
+			fmt.Fprintf(os.Stderr, "FTS5 init error (continuing, search will use LIKE for this domain): %v\nSQL: %s\n", err, sqlQuery)
+			slog.Warn("initFTSTables: FTS5 statement failed", "error", err.Error())
+			continue
 		}
 	}
 	return nil
