@@ -396,6 +396,20 @@ func preprocessDumpForRestore(content []byte) []byte {
 			strings.HasPrefix(upper, "INSERT INTO SQLITE_TEMP_MASTER") {
 			continue
 		}
+		// Round 10 T78 fix: strip the `PRAGMA writable_schema=ON;` /
+		// `PRAGMA writable_schema=OFF;` brackets that `sqlite3 .dump`
+		// emits around the `INSERT INTO sqlite_schema` lines. Pre-fix
+		// these slipped through and the validator rejected the dump
+		// (`PRAGMA writable_schema not allowed`) even though the
+		// operations they bracket had already been stripped. Round 7
+		// orphan-prevention work (Round 8 follow-up) removed the
+		// INSERT INTO sqlite_schema rows but missed the wrapping
+		// PRAGMAs, leaving every dump-blocking-rejection route still
+		// visible to the validator. After this strip the dump
+		// round-trips through the canonical validator end-to-end.
+		if strings.HasPrefix(upper, "PRAGMA WRITABLE_SCHEMA") {
+			continue
+		}
 		// Skip FTS5 shadow-table CREATE TABLE statements. The dump emits
 		// these for every FTS5 module; replaying them creates plain
 		// CREATE TABLE entries with the shadow-table names, which then
