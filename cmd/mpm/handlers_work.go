@@ -348,19 +348,60 @@ func handleWorkItem(args []string) int {
 		usererror.Error("mpm work item %s: %v", sub, err)
 		return 1
 	}
+	// Round 9 T57: validate --status against the canonical work
+	// lifecycle (open|done|cancelled). The substrate silently coerces
+	// any unknown value to "open" via AddWork's hardcoded INSERT,
+	// which masks operator error — `mpm work item create --status
+	// typo` produces an `open` work without any signal. Reject
+	// non-canonical values at the CLI boundary. The canonical set is
+	// the persisted-state vocabulary (internal/core/work.go); we do
+	// NOT add `in_progress` as a stored lifecycle value because it
+	// does not appear in isValidWorkTransition's switch.
+	if s, ok := params["status"].(string); ok && s != "" {
+		switch s {
+		case "open", "done", "cancelled":
+			// canonical, ok
+		default:
+			usererror.Error("mpm work item: --status %q is not a canonical lifecycle state (use open|done|cancelled)", s)
+			return 1
+		}
+	}
 
 	var action string
 	switch sub {
 	case "create":
-		if len(positional) < 1 {
-			usererror.Error("mpm work item create requires a title positional arg")
+		// Round 9 T54b: --title is the ergonomic flag form,
+		// positional is the muscle-memory form; both are supported.
+		// Pre-fix this branch required a positional title AND
+		// ignored the parsed --title flag, so `mpm work item
+		// create --title "X"` (and `mpm work item --title X create`)
+		// got "requires a title positional arg". Honor --title
+		// when set; fall through to the positional on the
+		// canonical `create <title>` form.
+		switch {
+		case len(positional) >= 1:
+			params["title"] = positional[0]
+		case params["title"] != nil:
+			// already parsed by parseWorkItemArgs; honor it.
+		default:
+			usererror.Error("mpm work item create requires a title (positional <title> or --title <text>)")
 			return 1
 		}
-		action = "create"
-		params["title"] = positional[0]
+		// Conflict: both positional and --title supplied.
+		// The positional form wins on the canonical `create
+		// <title>` shape; if BOTH are present, the positional
+		// value overrode --title above (and --title is
+		// silently shadowed). Surface a notice on stderr but
+		// do not error — `create --title "x" "y"` is
+		// sometimes used by tooling that bulk-applies a title
+		// shell-escape pattern.
+		if len(positional) >= 1 && cmdLineHasFlag(rest, "--title") {
+			usererror.Notice("--title flag supplied alongside positional title; positional value wins.")
+		}
 		if len(positional) > 1 {
 			params["content"] = strings.Join(positional[1:], " ")
 		}
+		action = "create"
 	case "list":
 		action = "list"
 	case "show":
@@ -448,6 +489,19 @@ func handleWorkItem(args []string) int {
 // parseWorkItemArgs extracts --status / --limit / --note / --content flags
 // from rest and returns the remaining positional args. --note and --content
 // can be supplied as --key=value or --key value.
+// cmdLineHasFlag reports whether a flag token appears verbatim or
+// in `--key=value` form anywhere in args. Round 9 T54b uses this to
+// detect a positional + --title coexistence so the conflict notice
+// can surface without rejecting the call.
+func cmdLineHasFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) {
 	params := map[string]interface{}{}
 	positional := []string{}
@@ -515,7 +569,11 @@ Usage:
   mpm work item <subcommand> [args]
 
 Subcommands:
-  create <title> [content]   Create a new work item
+  create <title> [content]
+       [--title <title>] [--content <text>] [--note <text>]
+                              Create a new work item (Round 9 T54b: --title
+                              and positional are both supported; positional
+                              wins on conflict)
   list [--status <s>] [--limit <n>]
                               List work items (status: open|done|cancelled|all; default open)
   show <work_id>              Show a single work item by id

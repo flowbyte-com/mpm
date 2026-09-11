@@ -2172,8 +2172,32 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// the last handoff, what's open" can avoid pulling the heavy
 	// recent_memories / available_skills / global_rules / overdue_wakes
 	// surfaces into the boot prompt. Default behavior unchanged.
-	if projection, _ := params["projection"].(string); projection == "compact" {
-		return handleReadWakeContextCompact(dm)
+	//
+	// Round 9 T21: validate `projection` at the handler boundary. The
+	// pre-fix shape only branched on `projection == "compact"` and let
+	// every other value silently fall through to the default full
+	// projection. A caller asking `projection="bogus"` got the full
+	// envelope back without any indication their explicit projection
+	// was ignored. The handler now distinguishes:
+	//
+	//   omitted / nil / ""  → default full projection (preserved)
+	//   "compact"           → compact projection (preserved)
+	//   any other string    → ERROR (was silent fall-through)
+	//   non-string          → ERROR
+	if rawProjection, present := params["projection"]; present && rawProjection != nil {
+		projection, ok := rawProjection.(string)
+		if !ok {
+			return nil, fmt.Errorf("projection must be a string, got %T", rawProjection)
+		}
+		switch projection {
+		case "":
+			// Empty string is treated as omitted (matches the `format`
+			// validation pattern below; explicit empty ≠ invalid value).
+		case "compact":
+			return handleReadWakeContextCompact(dm)
+		default:
+			return nil, fmt.Errorf("unknown projection %q; canonical values: [compact]", projection)
+		}
 	}
 
 	// 2026-09-05 audit residual pass §I-C.16: validate `format` at

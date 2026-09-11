@@ -417,6 +417,7 @@ func (r *CommandRouter) Execute(args []string) int {
 			fmt.Println("Usage: mpm provenance <artifact_id>")
 			fmt.Println("       mpm provenance inspect --invocation <id>")
 			fmt.Println("       mpm provenance model-yield [--days N]")
+			fmt.Println("       mpm provenance <artifact_id> --framework <name>  (filter by framework)")
 			fmt.Println("       mpm provenance help")
 			return 0
 		}
@@ -431,6 +432,7 @@ func (r *CommandRouter) Execute(args []string) int {
 			fmt.Println("Usage: mpm provenance <artifact_id>")
 			fmt.Println("       mpm provenance inspect --invocation <id>")
 			fmt.Println("       mpm provenance model-yield [--days N]")
+			fmt.Println("       mpm provenance <artifact_id> --framework <name>  (filter by framework)")
 			return 0
 		default:
 			// Bare artifact ID.
@@ -719,6 +721,12 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "resolve_theory":
 		printResolveTheoryHelp()
 		return 0
+	case "save-skill", "skill":
+		// Round 9 T52: dedicated help page documents the required
+		// `version` frontmatter field and --version CLI flag.
+		// `skill` is the cognitive-verb alias for `save-skill`; both
+		// route through handleSaveSkill.
+		return handleSaveSkillHelp()
 	}
 	if helpFunc != nil {
 		helpFunc()

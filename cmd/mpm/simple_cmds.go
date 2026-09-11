@@ -188,7 +188,15 @@ func handleAdd(args []string) int {
 		})
 		fmt.Println(string(data))
 	} else if isNew {
-		fmt.Printf("Added memory %s to %s (weight=%v)\n", id, *collection, *weight)
+		// Round 9 T34: echo the post-normalized weight that landed in
+		// the column, not the raw --weight arg. Pre-fix this printed
+		// `*weight` verbatim — but the substrate's
+		// AddMemoryWithWeight normalizes legacy-float 0.0-1.0 input
+		// (×10) and re-emits the canonical 0-100 column scale. A user
+		// passing `--weight 0.5` saw `(weight=0.5)` in stdout while
+		// the DB stored 5.0 — a user-visible contradiction. `mem.Weight`
+		// is the canonical column value (memory.go:543), so we use it.
+		fmt.Printf("Added memory %s to %s (weight=%d)\n", id, *collection, mem.Weight)
 	} else {
 		fmt.Printf("Memory already exists: %s (idempotent save — no new row written)\n", id)
 	}

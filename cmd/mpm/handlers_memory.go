@@ -457,7 +457,16 @@ func handleMemoryAdd(args []string) int {
 	}
 
 	// Human output mode
-	output := fmt.Sprintf("✅ Memory added: %s\n", mem.ID)
+	//
+	// Round 9 T34: emit the post-normalized weight (mem.Weight) so the
+	// human echo agrees with the stored column. Pre-fix the JSON
+	// envelope echoed `weightArg` (raw --weight) while DB stored the
+	// ×10-normalized value; the `mpm remember` alias had a different
+	// bug (human format echoed raw, JSON envelope echoed raw, DB
+	// stored ×10). Both surfaces now publish the column-truthful
+	// value in human mode and the raw arg in JSON for backward
+	// compatibility with substrate-machine consumers.
+	output := fmt.Sprintf("✅ Memory added: %s (weight=%d)\n", mem.ID, mem.Weight)
 	if len(suggestions) > 0 {
 		var parts []string
 		for _, s := range suggestions {

@@ -426,9 +426,14 @@ Subcommands:
   disproven List disproven theories only
   search   Search theories by keyword
 
+Resolution vocabulary (canonical conclusion keywords):
+  Proven outcome (status="proven"):     confirmed, proven
+  Disproven outcome (status="disproven"): disproven, refuted, invalidated
+
 Examples:
   mpm theory add hypothesis_id=... validation="..."
   mpm theory resolve <hypothesis_id> confirmed
+  mpm theory resolve <hypothesis_id> refuted --note "see lesson #abc"
   mpm theory show <theory-id>
   mpm theory list
   mpm theory pending
@@ -537,15 +542,42 @@ Examples:
 
 // printResolveTheoryHelp prints the mpm resolve_theory help block.
 // W-002: previously `mpm help resolve_theory` returned "no help available".
+//
+// T43 round 9: align the help text with the canonical conclusion
+// vocabulary. The parser at handlers_epistemology.go acceptConclusionEnum
+// accepts five values that all map to one of two stored statuses
+// (canonical list: `confirmed|proven` → status="proven";
+// `disproven|refuted|invalidated` → status="disproven"). The pre-fix
+// help only documented two of these, leaving the other three as
+// hidden-aliases. Smoke tests that used the documented-shortcut list
+// (or canonical-only) would silently alias the un-documented
+// keywords; smoke tests that referenced the underlying state
+// machine directly would see inconsistent vocabulary. The help now
+// lists all five.
 func printResolveTheoryHelp() {
 	usererror.Notice(`mpm resolve_theory — Resolve a theory
 
 Usage:
-  mpm resolve_theory <hypothesis_id> confirmed|disproven [--note "..."] [--json]
-  mpm resolve_theory <hypothesis_id> arbitration --winner <id> [--json]
+  mpm resolve_theory <hypothesis_id> <conclusion> [--winner=<memory_id>] [--json]
+
+Conclusion (canonical vocabulary; aliases that map to the same
+stored status are documented for muscle memory):
+
+  Proven outcome (status="proven"):
+    confirmed, proven
+
+  Disproven outcome (status="disproven"):
+    disproven, refuted, invalidated
+
+The legacy stored value "resolved" (from pre-2026-09-10 writes) is
+honored as a read-only value on existing rows but is no longer
+written by this handler — see handlers_epistemology.go acceptConclusionEnum.
 
 Examples:
   mpm resolve_theory wal-better confirmed
-  mpm resolve_theory wal-better disproven --note "latency regression"
-  mpm call mpm_theories --payload '{"action":"resolve","params":{"theoryId":"...","conclusion":"...","newStatus":"proven"}}'`)
+  mpm resolve_theory wal-better disproven
+  mpm resolve_theory wal-better refuted --note "latency regression"
+  mpm resolve_theory wal-better invalidated --note "supersedes #abc123"
+  mpm resolve_theory wal-better proven --json
+  mpm resolve_theory wal-better --winner=abc123 confirmed  (arbitration slash)`)
 }

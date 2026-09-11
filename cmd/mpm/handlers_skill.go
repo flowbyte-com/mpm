@@ -16,6 +16,17 @@ import (
 )
 
 func handleSaveSkill(args []string) int {
+	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
+	// the rationale; same defect, same fix. Round 9 T52: the help text
+	// documents that the schema requires a `version` field (either
+	// via the YAML frontmatter `version:` key, or via --version on
+	// the CLI) — the canonical skill id is `skill:<name>-v<version>`,
+	// so a missing version yields an unambiguous error.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleSaveSkillHelp()
+		}
+	}
 	var path string
 	force := false
 	name := ""
@@ -88,6 +99,42 @@ func handleSaveSkill(args []string) int {
 		return 1
 	}
 	fmt.Printf("Saved skill %s (id=%s)\n", name, id)
+	return 0
+}
+
+// handleSaveSkillHelp prints the canonical usage for the save-skill
+// CLI surface. Round 9 T52: documents the schema-required `version`
+// field (either via YAML frontmatter or `--version`) so operators
+// discover why their save failed when version is missing.
+//
+// Architectural note: the skill id is `skill:<name>-v<version>` — the
+// `-v<version>` suffix disambiguates edits over time, but it requires
+// a non-empty version string. We deliberately do NOT default to
+// "0.0.0" or a content hash, because both obscure the authoring
+// intent and break downstream tooling that parses the id suffix. The
+// schema contract is "version is required"; the help advertises that
+// explicitly.
+func handleSaveSkillHelp() int {
+	fmt.Println(`mpm save-skill — Save a skill from a markdown file
+
+Usage:
+  mpm save-skill --file <path> [--name <name>] [--version <version>] [--force]
+  mpm skill add --file <path> [--name <name>] [--version <version>] [--force]
+  mpm skill save --file <path> [--name <name>] [--version <version>] [--force]
+
+Required schema fields (the markdown frontmatter MUST define both):
+  name:    skill name (matches the file's first # heading if --name omitted)
+  version: skill version, e.g. "1.0.0" (no version → save fails with
+           "skill version must not be empty"; --version or frontmatter
+           version: key supplies it)
+
+Other frontmatter keys (description, when_to_use, inputs, outputs) are
+optional. See 'mpm docs skill' or the canonical SKILL.md template.
+
+Examples:
+  mpm save-skill --file ./SKILL.md                  # uses frontmatter name+version
+  mpm save-skill --file ./SKILL.md --version 2.0.0  # CLI overrides frontmatter
+  mpm save-skill --file ./SKILL.md --name different --version 0.1.0  # rename via CLI`)
 	return 0
 }
 

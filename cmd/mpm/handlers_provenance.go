@@ -14,17 +14,57 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 // handleProvenance is the entry point for `mpm provenance <id>`.
 // Returns the artifact_provenance row for the given artifact, or
 // a "no provenance" message if none exists.
+//
+// Round 9 T66: --framework <name> is now a documented filter. Pre-fix
+// the CLI silently absorbed any `--flag` as the artifact id, so
+// `mpm provenance --framework openclaw mem-1` reported "no provenance
+// for artifact --framework" instead of "unknown flag". The fix
+// recognizes the supported flags up front, surfaces unknown ones with
+// a usage hint, and lets --framework NAME filter provenance rows
+// by framework_name (a real filter — many artifacts share an
+// artifact_id across framework changes, and operators want to see
+// "all provenance for artifact X under framework Y").
 func handleProvenance(args []string) int {
 	if len(args) < 1 {
-		return respond("", "Usage: mpm provenance <artifact_id>\n", 1)
+		return respond("", "Usage: mpm provenance <artifact_id> [--framework <name>] [--json]\n", 1)
 	}
-	artifactID := args[0]
+
+	// Round 9 T66: parse supported flags up front. Anything that
+	// doesn't match is an explicit error — `--framework foo mem-1`
+	// was previously treated as `artifact_id="--framework"`, which
+	// confused the operator's intent.
+	var frameworkFilter string
+	positional := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--json" || a == "-j":
+			continue
+		case a == "--framework":
+			if i+1 >= len(args) {
+				return respond("", "--framework requires a value\n", 1)
+			}
+			i++
+			frameworkFilter = args[i]
+		case strings.HasPrefix(a, "--framework="):
+			frameworkFilter = strings.TrimPrefix(a, "--framework=")
+		case strings.HasPrefix(a, "--"):
+			return respond("", fmt.Sprintf("unknown flag %q (supported: --framework, --json)\n", a), 1)
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) < 1 {
+		return respond("", "Usage: mpm provenance <artifact_id> [--framework <name>] [--json]\n", 1)
+	}
+	artifactID := positional[0]
 	asJSON := hasFlag(args, "--json")
 
 	dm := getDB()
@@ -32,7 +72,7 @@ func handleProvenance(args []string) int {
 		return respond("", "database unavailable\n", 1)
 	}
 
-	row, err := dm.SQLDB().Query(`
+	query := `
 		SELECT actor_kind, actor_id, framework_name, framework_version,
 		       framework_adapter, provider_name, model_name, model_revision,
 		       api_endpoint, temperature, max_tokens, reasoning_mode,
@@ -40,8 +80,15 @@ func handleProvenance(args []string) int {
 		       thinking_visible, session_id, invocation_id, parent_artifact_id,
 		       provider_metadata, schema_version, created_at
 		FROM artifact_provenance
-		WHERE artifact_id = ?
-		LIMIT 1`, artifactID)
+		WHERE artifact_id = ?`
+	args2 := []interface{}{artifactID}
+	if frameworkFilter != "" {
+		query += " AND framework_name = ?"
+		args2 = append(args2, frameworkFilter)
+	}
+	query += " ORDER BY created_at DESC LIMIT 1"
+
+	row, err := dm.SQLDB().Query(query, args2...)
 	if err != nil {
 		return respond("", fmt.Sprintf("query: %v\n", err), 1)
 	}
